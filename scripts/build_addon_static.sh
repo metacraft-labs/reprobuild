@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the statically linked add-on `repro` and write its SHA-256.
 #
-#   scripts/build_addon_static.sh [--mutation NAME] [--out DIR] ARCH...
+#   scripts/build_addon_static.sh [--mutation NAME] [--test-seams] [--out DIR] ARCH...
 #
 # ARCH is one of x86_64 / amd64, aarch64 / arm64, armv7l / armhf. Each
 # artefact lands at <out>/<debian-arch>/repro (default out: build/addon),
@@ -28,6 +28,12 @@
 # falsifying run (see libs/repro_addon/src/repro_addon/mutations.nim). It
 # goes to build/addon-mutations/NAME/<arch>/ and is never published.
 #
+# --test-seams builds the variant with the switch's pause points compiled
+# in (libs/repro_addon/src/repro_addon/seams.nim), for the gates that stop a
+# switch at a step to reset the guest or change the host under it. It goes
+# to build/addon-seams/<arch>/ (build/addon-seams-mutations/NAME/<arch>/
+# together with --mutation) and is never published either.
+#
 # VERIFICATION. Every artefact is checked to be statically linked before
 # its digest is written: `file` must say "statically linked", the ELF must
 # have no PT_INTERP program header, and `ldd` must refuse it. A failure
@@ -37,12 +43,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 mutation=""
+seams=""
 out=""
 arches=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --mutation) mutation="$2"; shift 2 ;;
     --mutation=*) mutation="${1#--mutation=}"; shift ;;
+    --test-seams) seams=1; shift ;;
     --out) out="$2"; shift 2 ;;
     --out=*) out="${1#--out=}"; shift ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -55,7 +63,10 @@ if [ ${#arches[@]} -eq 0 ]; then
   exit 2
 fi
 if [ -z "$out" ]; then
-  if [ -n "$mutation" ]; then out="build/addon-mutations/$mutation"; else out="build/addon"; fi
+  if [ -n "$seams" ] && [ -n "$mutation" ]; then out="build/addon-seams-mutations/$mutation"
+  elif [ -n "$seams" ]; then out="build/addon-seams"
+  elif [ -n "$mutation" ]; then out="build/addon-mutations/$mutation"
+  else out="build/addon"; fi
 fi
 command -v nim >/dev/null || {
   echo "build_addon_static: nim is not on PATH; run inside the reprobuild dev shell (nix develop)" >&2
@@ -104,6 +115,7 @@ for raw in "${arches[@]}"; do
   rm -f "$dest/repro" "$dest/repro.sha256"
   defines=()
   [ -n "$mutation" ] && defines+=("--define:reproAddonMutation=$mutation")
+  [ -n "$seams" ] && defines+=("--define:reproAddonTestSeams")
   echo "build_addon_static: $arch with $cc${mutation:+ (mutation $mutation)}"
   (
     # The dev shell's link flags name glibc libraries; the system hash
@@ -118,7 +130,7 @@ for raw in "${arches[@]}"; do
       --define:release --opt:size --stackTrace:off --lineTrace:off \
       --passL:-static --passL:-s \
       ${defines[@]+"${defines[@]}"} \
-      --nimcache:"build/nimcache/repro-addon-static-$arch${mutation:+-$mutation}" \
+      --nimcache:"build/nimcache/repro-addon-static-$arch${mutation:+-$mutation}${seams:+-seams}" \
       --out:"$dest/repro.tmp" \
       apps/repro-addon/repro_addon_main.nim
   )

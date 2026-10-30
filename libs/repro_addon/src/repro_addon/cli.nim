@@ -8,6 +8,10 @@
 ##                                [--cache-publishers F [--cache-url U]]
 ##   repro system addon uninstall [--keep-store]
 ##   repro system addon verify [--boot | --after-dpkg]
+##   repro system addon reassert [--boot]
+##   repro system addon recover
+##   repro system addon probe <healthCheck>
+##   repro system rollback [<generation>] [--reconcile-drift]
 ##   repro system addon fingerprint [--root R] [--no-live] [--out F]
 ##   repro system addon fingerprint diff <before> <after>
 ##                                [--except <component>:<key glob>]...
@@ -39,13 +43,16 @@ import repro_elevation/posix_system_driver
 import repro_local_store/store as local_store
 
 import ./addon_apply
+import ./addon_rollback
 import ./bootstrap
 import ./collision
 import ./fingerprint
 import ./generation0
 import ./ledger
 import ./linux_fs
+import ./health
 import ./preflight
+import ./reassert
 import ./static_tree
 import ./store_root
 import ./switch
@@ -64,6 +71,16 @@ commands:
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only).
+  reassert [--boot]
+      Finish or revert an interrupted switch, check the current generation
+      (static tree, store objects, ledger digests) and report ok, drift or
+      degraded; never re-applies on drift. --boot (the re-assert unit):
+      always exits 0.
+  recover
+      The same, for an operator: exits 1 unless the host ends ok or drift.
+  probe <healthCheck>
+      Run one tcp: or http:// health check here (the confirm step runs it
+      in the host's namespaces); exits 0 when it passes.
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -302,6 +319,34 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonVerify()
       stdout.write(renderVerify(r))
       return (if r.status == "ok": 0 else: 1)
+    of "reassert", "recover":
+      var atBoot = false
+      for a in rest:
+        if a == "--boot" and cmd == "reassert": atBoot = true
+        else: raise newException(ValueError, "unknown option " & a)
+      if atBoot:
+        # The boot unit: never fails the boot transaction, whatever it finds.
+        try:
+          stdout.write(renderReassert(runAddonReassert(DefaultStateDir,
+            atBoot = true)))
+        except CatchableError as e:
+          stdout.write("repro-addon reassert: degraded\n  " & e.msg & "\n")
+        return 0
+      let r = runAddonReassert(DefaultStateDir, atBoot = false)
+      stdout.write(renderReassert(r))
+      return (if r.status in ["ok", "drift"]: 0 else: 1)
+    of "probe":
+      if rest.len != 1:
+        raise newException(ValueError, "probe needs one healthCheck value")
+      let spec = parseHealthCheck(rest[0])
+      if spec.kind notin {hcTcp, hcHttp}:
+        raise newException(ValueError, "probe runs tcp: and http:// checks only")
+      let why = runProbe(spec)
+      if why.len == 0:
+        stdout.write("probe " & rest[0] & ": ok\n")
+        return 0
+      stdout.write("probe " & rest[0] & ": " & why & "\n")
+      return 1
     of "expected-delta":
       if rest.len != 2:
         raise newException(ValueError, "expected-delta needs two ledgers")
@@ -545,6 +590,33 @@ proc runAddonInfraPlanCli*(args: seq[string]): int =
   ## ``repro infra plan --profile <canonical text>`` on an add-on host:
   ## the ledger diff and the collision report, nothing written.
   runAddonGeneration("repro infra plan", args, planOnly = true)
+
+proc runAddonRollbackCli*(args: seq[string]): int =
+  ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
+  ## add-on host: re-apply a retained generation through the switch.
+  var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
+                                  hostIdentity: readHostname())
+  for a in args:
+    if a == "--reconcile-drift": opts.reconcileDrift = true
+    elif a.startsWith("-"):
+      stderr.write("repro system rollback: unknown option " & a & "\n")
+      return 2
+    elif opts.target.len == 0: opts.target = a
+    else:
+      stderr.write("repro system rollback: unexpected argument " & a & "\n")
+      return 2
+  try:
+    let r = runAddonRollback(opts)
+    stdout.write("rolled back from " & r.fromGeneration & " to " &
+      r.toGeneration & " (applied as generation " & r.apply.generationId &
+      ")\n")
+    0
+  except AddonApplyError as e:
+    stderr.write("repro system rollback: " & e.msg & "\n")
+    1
+  except CatchableError as e:
+    stderr.write("repro system rollback: " & e.msg & "\n")
+    1
 
 proc runAddonAdoptCli*(args: seq[string]): int =
   ## ``repro system adopt <address> --profile <file>`` (spec §11.2 step

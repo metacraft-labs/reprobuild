@@ -12,9 +12,10 @@
 ##   itself, so no process on the host can write the store through the
 ##   ordinary mount namespace (the apply process gets a private writable
 ##   view; see ``store_root.withWritableStore``);
-## - ``repro-addon-reassert.service``: the boot-time report that every
-##   ledger object still matches its digest. It only reports; it never
-##   re-applies, and it has no network;
+## - ``repro-addon-reassert.service``: at boot, finishes or reverts an
+##   interrupted switch and reports whether every ledger object still
+##   matches its digest. It never re-applies on drift, and it has no
+##   network;
 ## - the apt hook ``/etc/apt/apt.conf.d/90repro-addon``: a report-only
 ##   ``DPkg::Post-Invoke`` that can never fail a dpkg run, even when the
 ##   binary it names is missing;
@@ -40,6 +41,7 @@
 import std/[algorithm, strutils]
 
 import ./fingerprint
+import ./mutations
 
 type
   OwnObjectKind* = enum
@@ -114,26 +116,48 @@ WantedBy=repro-addon.target
 """
 
 proc reassertUnit(reproExe: string): string =
-  # Report-only: ``verify --boot`` exits 0 whatever it finds and writes
-  # nothing; its findings go to the journal. Ordered before the add-on's
-  # target and wanted only by it, never by multi-user.target, so it cannot
-  # delay the base's boot. No network: it needs none.
+  # Boot-time re-assertion (§7.7): finishes or reverts an interrupted
+  # switch, checks the current generation and reports ok / drift /
+  # degraded. It never re-applies on drift.
+  #
+  # It must not be able to hold up the base's boot: it is wanted only by
+  # the add-on's target, never by multi-user.target, and it is only
+  # ORDERED after the store mount (`After=`), never `Requires=` it -- a
+  # missing store must still let it run and report `degraded`. For the
+  # same reason the binary, which lives in the store, is tested before it
+  # is executed: with the store gone the shell reports `degraded` itself
+  # instead of the unit failing silently with ENOENT. `reassert --boot`
+  # always exits 0. No network: it needs none, and its health probes run
+  # in the host's namespaces through PID 1.
+  when mutated("reassert-required-by-boot"):
+    # The falsifying mutation: in the base's boot path, and requiring the
+    # store mount, so a missing store fails the unit before it can report.
+    let unitDeps = "Requires=repro-store.mount\n" &
+                   "After=local-fs.target repro-store.mount\n"
+    let wantedBy = "multi-user.target"
+  else:
+    let unitDeps = "After=local-fs.target repro-store.mount\n" &
+                   "Before=repro-addon.target\n"
+    let wantedBy = "repro-addon.target"
   "[Unit]\n" &
-  "Description=Reprobuild add-on boot-time re-assertion (report only)\n" &
-  "After=local-fs.target repro-store.mount\n" &
-  "Before=repro-addon.target\n" &
+  "Description=Reprobuild add-on boot-time re-assertion\n" &
+  unitDeps &
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
   "RemainAfterExit=yes\n" &
-  "ExecStart=" & reproExe & " system addon verify --boot\n" &
+  "TimeoutStartSec=15min\n" &
+  "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " & reproExe &
+    " system addon reassert --boot; else echo repro-addon reassert: " &
+    "degraded: the add-on binary " & reproExe & " is unavailable, the " &
+    "store is missing or unreadable; fi'\n" &
   "PrivateNetwork=yes\n" &
   "NoNewPrivileges=yes\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
   "\n" &
   "[Install]\n" &
-  "WantedBy=repro-addon.target\n"
+  "WantedBy=" & wantedBy & "\n"
 
 proc aptHook(reproExe: string): string =
   # Report-only by construction: the whole hook is one shell command that

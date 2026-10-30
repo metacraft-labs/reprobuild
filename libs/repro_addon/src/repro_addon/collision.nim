@@ -685,6 +685,9 @@ type
       ## tkUnit: where systemd loaded the unit from at plan time; a unit
       ## masked, or moved to a transient or package fragment, since then
       ## refuses the write (a drop-in's unit included).
+    replay*: bool
+      ## The plan is an interrupted switch's, replayed (spec §7.7): the
+      ## switch may already have written this target before it stopped.
 
 proc plannedTarget*(address: string; inp: DecisionInputs; path: string;
                     dec: CollisionDecision; o: TargetObservation):
@@ -705,6 +708,13 @@ proc preWriteRefusal*(d: CollisionDriver; t: PlannedTarget): string =
     return "refusing " & t.address & " at write time: " & o.linkComponent &
       " is now a symbolic link on " & t.path
   let kind = if t.kind == tkDiversion: tkFile else: t.kind
+  if t.replay and t.kind != tkDiversion and o.exists and
+      o.sha256 == t.desiredSha256 and o.ownership.package.len == 0 and
+      not o.diversion.present:
+    # The interrupted switch already wrote exactly the planned bytes here
+    # (a copy, or the add-on's own link reading through the new tree), on
+    # a path no package claims: its own work, not a change under the plan.
+    return ""
   let obsNow = observationText(o, kind)
   if obsNow != t.observation:
     return "refusing " & t.address & " at write time: the ownership " &

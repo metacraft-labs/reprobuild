@@ -147,6 +147,13 @@ suite "generation 0":
         check "WantedBy=repro-addon.target" in o.content
         check "multi-user.target" notin o.content
         check "PrivateNetwork=yes" in o.content
+        # Ordered after the store, never requiring it: a missing store
+        # must still let it run and report `degraded` (§7.6, §7.7).
+        check "After=local-fs.target repro-store.mount" in o.content
+        check "Requires=" notin o.content
+        check "system addon reassert --boot" in o.content
+        check "if [ -x " in o.content and "degraded" in o.content
+        assertInlineSafe("unit " & o.unit, o.content)
 
   test "the rendered profile parses, and refuses what it cannot carry":
     let text = renderOwnProfile(objs, "/repro/store/prefixes/repro-addon-files/x")

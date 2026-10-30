@@ -158,9 +158,16 @@ proc recordsDir*(): string =
 
 proc mutation*(): string = getEnv("REPRO_ADDON_MUTATION")
 
+proc testSeams*(): bool =
+  ## The gate runs the build with the switch's pause points
+  ## (``repro_addon/seams``, ``scripts/build_addon_static.sh --test-seams``).
+  getEnv("REPRO_ADDON_TEST_SEAMS") == "1"
+
 proc artefactDir*(): string =
   let m = mutation()
-  if m.len > 0: reproRoot() / "build" / "addon-mutations" / m
+  if testSeams() and m.len > 0: reproRoot() / "build" / "addon-seams-mutations" / m
+  elif testSeams(): reproRoot() / "build" / "addon-seams"
+  elif m.len > 0: reproRoot() / "build" / "addon-mutations" / m
   else: reproRoot() / "build" / "addon"
 
 proc artefact*(debArch: string): tuple[path, sha256: string] =
@@ -174,6 +181,7 @@ proc artefact*(debArch: string): tuple[path, sha256: string] =
     raise newException(TestBedError, "no add-on artefact at " & path &
       "; build it with scripts/build_addon_static.sh" &
       (if mutation().len > 0: " --mutation " & mutation() else: "") &
+      (if testSeams(): " --test-seams" else: "") &
       " " & debArch)
   let published = readFile(sumFile).splitWhitespace()[0]
   var ctx: sha256
@@ -707,3 +715,82 @@ proc buildEquivsPackage*(g: Guest; pkg, version: string;
   script.add("equivs-build control >/dev/null 2>&1 || equivs-build control\n")
   script.add("ls " & dir & "/" & pkg & "_" & version & "_all.deb\n")
   g.run(script, timeoutSec = 900).strip()
+
+# ---------------------------------------------------------------------------
+# Hard resets and paused switches (milestone A5's crash-consistency gates).
+# ---------------------------------------------------------------------------
+
+const
+  SeamDir* = "/var/lib/repro/system/addon"
+    ## Where the seam build's pause control files live (``seams.nim``).
+
+proc hardReset*(g: Guest) =
+  ## QEMU ``system_reset`` through the guest's QMP socket: no shutdown, no
+  ## sync, guest RAM lost. Under ``-no-reboot`` QEMU exits on it; the disk
+  ## (this run's overlay) keeps exactly what reached it, and ``boot``
+  ## starts the same disk again.
+  when defined(gostiAvailable):
+    if g.kind != gkQemu:
+      raise newException(TestBedError, "a hard reset needs a QEMU guest")
+    let r = g.qemu.systemReset(g.vm)
+    if not r.ok:
+      raise newException(TestBedError, "system_reset failed: " & r.detail)
+    g.note("system_reset sent")
+    if not g.waitPoweredOff(120):
+      raise newException(TestBedError, "QEMU did not exit after system_reset")
+
+proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
+                          timeoutSec = 900): ExecOut =
+  ## Start ``repro infra apply --profile <text>`` in the background with the
+  ## seam build's pause at ``point``, and wait until the switch reports it
+  ## has stopped there. Returns the paused-at check (exit 0 when reached);
+  ## a switch that ended without reaching the point is a non-zero result
+  ## carrying its log.
+  if not testSeams():
+    raise newException(TestBedError, "a paused switch needs the seam build " &
+      "(REPRO_ADDON_TEST_SEAMS=1)")
+  let p = g.putProfile(name, text)
+  discard g.run("rm -f " & SeamDir & "/test-paused-at " & SeamDir &
+    "/test-resume /root/addon/bg-apply.log /root/addon/bg-apply.rc; printf '%s\\n' " &
+    point & " > " & SeamDir & "/test-pause-at; sync")
+  discard g.run("setsid nohup sh -c '" & repro & " infra apply --profile " & p &
+    " > /root/addon/bg-apply.log 2>&1; echo $? > /root/addon/bg-apply.rc' " &
+    "> /dev/null 2>&1 < /dev/null &")
+  let deadline = epochTime() + timeoutSec.float
+  while epochTime() < deadline:
+    let r = g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null; " &
+                   "cat /root/addon/bg-apply.rc 2>/dev/null")
+    if r.stdout.strip() == point:
+      return ExecOut(exitCode: 0, stdout: point)
+    if r.stdout.strip().len > 0 and r.stdout.strip() != point:
+      # The apply ended (its exit code is there) without pausing.
+      return ExecOut(exitCode: 1, stdout: r.stdout,
+        stderr: g.exec("cat /root/addon/bg-apply.log").stdout)
+    sleep(500)
+  ExecOut(exitCode: 1, stderr: "the switch did not reach " & point &
+    " within " & $timeoutSec & " s: " &
+    g.exec("cat /root/addon/bg-apply.log").stdout)
+
+proc resumeSwitch*(g: Guest; timeoutSec = 900): ExecOut =
+  ## Let a paused switch continue and wait for it to end; its exit code and
+  ## output are returned.
+  discard g.run("touch " & SeamDir & "/test-resume")
+  let deadline = epochTime() + timeoutSec.float
+  while epochTime() < deadline:
+    let rc = g.exec("cat /root/addon/bg-apply.rc 2>/dev/null").stdout.strip()
+    if rc.len > 0:
+      return ExecOut(exitCode: (try: parseInt(rc) except ValueError: 255),
+        stdout: g.exec("cat /root/addon/bg-apply.log").stdout)
+    sleep(500)
+  ExecOut(exitCode: 255, stderr: "the resumed switch did not end in time")
+
+proc waitReasserted*(g: Guest; timeoutSec = 900): string =
+  ## After a boot: wait until the re-assert unit has run, and return its
+  ## journal for this boot.
+  let deadline = epochTime() + timeoutSec.float
+  while epochTime() < deadline:
+    let st = g.exec("systemctl show -p ActiveState --value " &
+                    "repro-addon-reassert.service").stdout.strip()
+    if st in ["active", "failed"]: break
+    sleep(1000)
+  g.exec("journalctl -b -o cat --no-pager -u repro-addon-reassert.service").stdout

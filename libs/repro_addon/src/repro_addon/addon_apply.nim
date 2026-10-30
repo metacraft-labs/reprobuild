@@ -75,8 +75,11 @@ import ./etc_write
 import ./fingerprint
 import ./generation0
 import ./host_exec
+import ./health
 import ./ledger
 import ./mutations
+import ./pending_plan
+import ./seams
 import ./static_tree
 import ./store_root
 import ./switch
@@ -87,9 +90,15 @@ export AddonDriftError, AddonCollisionError, EAddOnExclusiveOverlap
 export transitions.Transition, transitions.TransitionVerb,
   transitions.renderTransitions, transitions.parseTransitions
 export switch.RetentionPolicy, switch.DefaultRetention
+export health.ConfirmOutcome
 
 type
   AddonApplyError* = object of CatchableError
+  AddonRolledBack* = object of AddonApplyError
+    ## The switch did not complete -- a health check failed within
+    ## ``confirmTimeout``, a write was refused, a step failed -- and it was
+    ## reverted: the host is back in the generation ``current`` names
+    ## (§7.5). The attempt's apply log records ``rolled-back``.
 
   AddonPaths* = object
     stateDir*: string
@@ -127,6 +136,22 @@ type
       ## (``planIdOf``). The apply recomputes it from what it observes now
       ## and refuses with ``EPlanStale`` before anything is written when
       ## the two differ (spec §7.1). Empty: no pin.
+    purpose*: string
+      ## ``apply`` (default), ``rollback``, ``revert`` (the switch's own
+      ## undo of a failed attempt) or ``replay`` (recovery of an
+      ## interrupted switch). Recorded in the pending marker.
+    replay*: bool
+      ## Re-run the interrupted switch whose write-ahead plan
+      ## (``pending_plan``) is on disk, with the observations and decisions
+      ## it made before its first write, instead of observing the host
+      ## anew (spec §7.7). The profile texts come from the plan.
+    assumeActive*: seq[string]
+      ## Units to treat as running when planning transitions: what an
+      ## interrupted or failed switch had stopped, so its replay or revert
+      ## starts them again (a restart applies only to an active unit).
+    reproExe*: string
+      ## The binary that runs the TCP and HTTP health probes in the host's
+      ## namespaces; "" means this process's own executable.
 
   AddonApplyResult* = object
     generationId*: string
@@ -151,6 +176,8 @@ type
     planId*: string                ## the add-on plan id (spec §7.1): the
                                    ## digest of everything the plan was
                                    ## computed from (``planIdOf``)
+    confirm*: ConfirmOutcome       ## step 8 (§7.5): the health checks
+    healthChecks*: seq[UnitHealthCheck]
 
 const
   DefaultStateDir* = "/var/lib/repro/system"
@@ -357,6 +384,91 @@ type
                                 ## own bytes (sysctl, sysusers): the infra
                                 ## apply does not get it, so nothing of it is
                                 ## written, applied or re-run this generation
+
+# ---------------------------------------------------------------------------
+# The write-ahead plan (``pending_plan``): what the collision pass observed
+# and decided, saved before the first write and reused by a replay.
+# ---------------------------------------------------------------------------
+
+proc toSaved(p: ResourcePlan; dec: CollisionDecision;
+             target: PlannedTarget): SavedPlan =
+  SavedPlan(address: p.r.address, targetPath: p.targetPath,
+    diversion: target.diversion, unitClass: $target.unitClass,
+    replaced: p.replaced, newDirs: p.newDirs, preLinks: p.preLinks,
+    baseUnitState: p.baseUnitState, baseActiveState: p.baseActiveState,
+    observation: dec.observation, observedSha256: dec.observedSha256,
+    reason: dec.reason, verdict: $dec.verdict, collision: p.collision,
+    preserved: p.preserved, form: p.form, sysctlBefore: p.sysctlBefore,
+    accountKey: p.accountKey, accountBefore: p.accountBefore,
+    groupBefore: p.groupBefore)
+
+proc overlaySaved(p: var ResourcePlan; s: SavedPlan) =
+  ## Replace what ``preObserve`` just saw with what the interrupted switch
+  ## saw before it changed anything: the host now shows the switch's own
+  ## partial work, which is not "what was there before the add-on".
+  p.targetPath = s.targetPath
+  p.replaced = s.replaced
+  p.newDirs = s.newDirs
+  p.preLinks = s.preLinks
+  p.baseUnitState = s.baseUnitState
+  p.baseActiveState = s.baseActiveState
+  p.sysctlBefore = s.sysctlBefore
+  p.accountKey = s.accountKey
+  p.accountBefore = s.accountBefore
+  p.groupBefore = s.groupBefore
+
+proc savedDecision(s: SavedPlan): CollisionDecision =
+  ## The interrupted switch's decision, as it made it. The bytes an
+  ## adoption or reconciliation displaced were preserved at plan time.
+  var found = false
+  for v in CollisionVerdict:
+    if $v == s.verdict:
+      result.verdict = v
+      found = true
+  if not found:
+    raise newException(AddonApplyError, "the pending plan names an unknown " &
+      "collision verdict '" & s.verdict & "' for " & s.address)
+  result.observation = s.observation
+  result.observedSha256 = s.observedSha256
+  result.reason = s.reason & " (replayed)"
+  if result.verdict in {cvAdopt, cvReconcile}:
+    if s.preserved.len == 0 or not fileExists(s.preserved):
+      raise newException(AddonApplyError, "the pending plan's preserved " &
+        "bytes for " & s.address & " are missing (" & s.preserved & ")")
+    result.preWriteBytes = readFile(s.preserved)
+
+proc targetFor(address: string; inp: DecisionInputs; path: string;
+               dec: CollisionDecision; obs: TargetObservation;
+               saved: tuple[found: bool; plan: SavedPlan]): PlannedTarget =
+  ## The pre-write guard's record of one decision. A replay rebuilds it
+  ## from the interrupted switch's plan-time observation (the diversion and
+  ## where systemd loaded the unit from), never from the host now.
+  if not saved.found:
+    return plannedTarget(address, inp, path, dec, obs)
+  var cls = ucNone
+  for c in UnitClass:
+    if $c == saved.plan.unitClass: cls = c
+  PlannedTarget(address: address, path: path, kind: inp.kind,
+    unit: inp.unit, observation: dec.observation,
+    observedSha256: dec.observedSha256, desiredSha256: inp.desiredSha256,
+    verdict: dec.verdict, diversion: saved.plan.diversion, unitClass: cls,
+    replay: true)
+
+proc alreadyRestored(e: LedgerEntry): bool =
+  ## A replay finds the removals the interrupted switch already made:
+  ## an object that had preserved bytes now carries exactly them (its
+  ## restore ran), or is gone when it was the add-on's creation.
+  if e.preserved.len == 0: return false
+  if e.replaced.len == 0:
+    return not fileExists(e.path) and not symlinkExists(e.path)
+  fileExists(e.path) and not symlinkExists(e.path) and
+    sha256OfFile(e.path) == extractFilename(e.preserved)
+
+proc replayTolerates(e: LedgerEntry; drift: string): bool =
+  ## Differences a replay expects to find, because the interrupted switch
+  ## caused them: the flip left a removed link-form object's link
+  ## dangling, or a removal's restore already ran.
+  (e.isLink and drift.startsWith("dangling")) or alreadyRestored(e)
 
 proc accountFingerprintValue*(kind, name: string): string =
   ## The ``accounts`` fingerprint value of an account or group now, "" when
@@ -980,6 +1092,71 @@ proc planIdOf*(inputs: openArray[string]): string =
   ## plan's observation records, one per line.
   sha256Hex(inputs.join("\n") & "\n")[0 ..< 32]
 
+const
+  AddonOwnProfileName* = "addon-own.profile"
+  AddonUserProfileName* = "addon-user.profile"
+    ## Under ``generations/<id>/``: what that generation applied.
+
+proc generationProfiles*(stateDir, generationId: string):
+    tuple[found: bool; own, user: string] =
+  ## The own and user profile texts a generation applied, when it was
+  ## applied by a release that records them.
+  let gd = generationDir(stateDir, generationId)
+  if fileExists(gd / AddonOwnProfileName) and
+      fileExists(gd / AddonUserProfileName):
+    (true, readFile(gd / AddonOwnProfileName),
+     readFile(gd / AddonUserProfileName))
+  else:
+    (false, "", "")
+
+proc revertProfiles(stateDir, committed, fallbackOwn,
+                    fallbackUser: string): tuple[own, user: string] =
+  ## What a failed switch goes back to: the committed generation's own
+  ## copies, or -- for a generation applied before they were kept -- the
+  ## stored profile the switch began from.
+  let g = generationProfiles(stateDir, committed)
+  if g.found: (g.own, g.user) else: (fallbackOwn, fallbackUser)
+
+proc undoPreStop(m: PendingMarker): seq[string] =
+  ## Put back what step 2 did before a refusal stopped the switch ahead of
+  ## the flip: re-enable what it disabled, start what it stopped.
+  for u in m.disabled:
+    try:
+      let r = runSystemctl(["enable", "--", u])
+      if r.exitCode != 0: result.add("enable " & u & ": " & r.output.strip())
+    except CatchableError as e:
+      result.add("enable " & u & ": " & e.msg)
+  for u in m.stopped:
+    try: startUnit(u)
+    except CatchableError as e: result.add(e.msg)
+
+proc recordRolledBack(stateDir, attempt, backTo, asGeneration, why: string;
+                      healthFailed: bool) =
+  ## The attempt's apply log records the outcome (§7.5: "records the
+  ## apply as rolled-back"), so `repro system audit` and the evidence
+  ## trail show it under the id the attempt would have had.
+  if attempt.len == 0: return
+  appendAuditRecord(applyLogPath(stateDir, attempt), AuditRecord(
+    timestamp: getTime().toUnix(), operationKind: "addon.switch",
+    resourceAddress: "generation:" & attempt, outcome: "rolled-back",
+    diagnostic: (if healthFailed: "confirm failed: " else: "") & why &
+      " -> back to " & backTo & " as " & asGeneration,
+    recordClass: AuditClassLiveState))
+
+proc seamedGuard(stateDir: string; inner: PreWriteGuard): PreWriteGuard =
+  ## The pre-write guard, with the two write-time test seams in front of
+  ## it (a no-op outside a ``-d:reproAddonTestSeams`` build).
+  when AddonTestSeams:
+    var calls = 0
+    result = proc(op: PrivilegedOperation): string {.gcsafe.} =
+      {.cast(gcsafe).}:
+        inc calls
+        if calls == 1: seamPause(stateDir, "pre-write")
+        elif calls == 2: seamPause(stateDir, "mid-write")
+        inner(op)
+  else:
+    inner
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -1013,13 +1190,31 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   defer:
     if ownLock: releaseApplyLock(stateDir)
 
+  let purpose = if opts.purpose.len > 0: opts.purpose
+                elif opts.replay: "replay"
+                else: "apply"
+  # An interrupted or failed switch must be finished or undone before
+  # another one starts: its marker and write-ahead plan are the only
+  # record of what it changed. Its own replay and revert are the
+  # exceptions, and so is a plan, which writes nothing.
+  if not opts.planOnly and purpose notin ["replay", "revert"] and
+      hasPendingMarker(stateDir):
+    raise newException(AddonApplyError, "an interrupted switch is pending " &
+      "(" & pendingMarkerPath(stateDir) & "); run `repro system addon " &
+      "recover` to finish or revert it first")
+  var replayPlan: PendingPlan
+  if opts.replay:
+    replayPlan = readPendingPlan(stateDir)
+  let replaying = opts.replay
   let ownText =
-    if opts.ownProfileText.len > 0: opts.ownProfileText
+    if replaying: replayPlan.targetOwnText
+    elif opts.ownProfileText.len > 0: opts.ownProfileText
     elif fileExists(ownProfilePath(stateDir)): readFile(ownProfilePath(stateDir))
     else: raise newException(AddonApplyError,
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
   let previous =
-    if fileExists(ledgerCopyPath(stateDir)): readLedger(ledgerCopyPath(stateDir))
+    if replaying: parseLedger(replayPlan.fromLedgerText)
+    elif fileExists(ledgerCopyPath(stateDir)): readLedger(ledgerCopyPath(stateDir))
     else: Ledger()
   result.previousLedger = previous
   # The generation `current` names, not the ledger copy's: a switch that
@@ -1029,15 +1224,22 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   let committedPrevious = readCurrentGenerationId(stateDir)
   result.previousGenerationId = committedPrevious
   let previousUserText =
-    if fileExists(userProfilePath(stateDir)): readFile(userProfilePath(stateDir))
+    if replaying: replayPlan.fromUserText
+    elif fileExists(userProfilePath(stateDir)): readFile(userProfilePath(stateDir))
     else: ""
+  let targetUserText = if replaying: replayPlan.targetUserText
+                       else: opts.userProfileText
+  let reconcileDrift = if replaying: replayPlan.reconcileDrift
+                       else: opts.reconcileDrift
+  let adoptAddresses = if replaying: replayPlan.adopt else: opts.adoptAddresses
+  var decisions = initTable[string, CollisionDecision]()
 
   let own = parseSystemProfile(ownText)
   let user =
-    if opts.adoptAddresses.len > 0:
-      scopedAdoptProfile(parseSystemProfile(opts.userProfileText),
-                         previousUserText, opts.adoptAddresses)
-    else: parseSystemProfile(opts.userProfileText)
+    if adoptAddresses.len > 0:
+      scopedAdoptProfile(parseSystemProfile(targetUserText),
+                         previousUserText, adoptAddresses)
+    else: parseSystemProfile(targetUserText)
   checkScope(user)
   var ownAddresses = initHashSet[string]()
   for r in own.resources: ownAddresses.incl(r.address)
@@ -1045,7 +1247,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if r.address in ownAddresses:
       raise newException(AddonApplyError, "the profile declares " &
         r.address & ", which is one of the add-on's own objects")
-  for a in opts.adoptAddresses:
+  for a in adoptAddresses:
     var declared = false
     for r in user.resources:
       if r.address == a: declared = true
@@ -1108,9 +1310,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for r in own.resources:
     var p = ResourcePlan(r: r, own: true, form: "copy")
     preObserve(p, driver)
+    let saved = if replaying: replayPlan.savedPlanFor(r.address)
+                else: (found: false, plan: SavedPlan())
+    if saved.found: overlaySaved(p, saved.plan)
     p.content = desiredBytes(r)
     var inp = DecisionInputs(address: r.address,
-      reconcileDrift: opts.reconcileDrift, desiredContent: p.content)
+      reconcileDrift: reconcileDrift, desiredContent: p.content)
     case r.kind
     of srkFsSystemFile:
       inp.kind = tkFile
@@ -1122,7 +1327,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     inp.desiredSha256 = sha256Hex(inp.desiredContent)
     inp.ledgerOwns = p.targetPath in prevOwned
     inp.ledgerSha256 = prevSha.getOrDefault(p.targetPath)
-    let (dec, obs) = decide(driver, inp, p.targetPath)
+    var dec: CollisionDecision
+    var obs: TargetObservation
+    if saved.found: dec = savedDecision(saved.plan)
+    else: (dec, obs) = decide(driver, inp, p.targetPath)
+    decisions[r.address] = dec
     p.observation = dec.observation
     p.verdict = $dec.verdict
     if dec.verdict == cvReconcile:
@@ -1134,13 +1343,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     verdictByAddress[r.address] = dec.verdict
     result.collisions.add(CollisionLine(address: r.address, target: p.targetPath,
       observation: dec.observation, verdict: $dec.verdict, reason: dec.reason))
-    targets.add(plannedTarget(r.address, inp, p.targetPath, dec, obs))
+    targets.add(targetFor(r.address, inp, p.targetPath, dec, obs, saved))
     plans.add(p)
   for i in 0 ..< userResources.len:
     var r = userResources[i]
     var p = ResourcePlan(r: r)
     preObserve(p, driver)
-    if r.kind == srkSystemdSystemDropIn:
+    let saved = if replaying: replayPlan.savedPlanFor(r.address)
+                else: (found: false, plan: SavedPlan())
+    if saved.found: overlaySaved(p, saved.plan)
+    if r.kind == srkSystemdSystemDropIn and not saved.found:
       # The unit a drop-in modifies must be provided by something; the
       # unit rows decide that (a package unit, or a hand-written one), the
       # file rows the drop-in file itself.
@@ -1162,8 +1374,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       plans.add(p)
       continue
     var inp = DecisionInputs(address: r.address,
-      reconcileDrift: opts.reconcileDrift,
-      adopt: r.address in opts.adoptAddresses)
+      reconcileDrift: reconcileDrift,
+      adopt: r.address in adoptAddresses)
     var path = p.targetPath
     case r.kind
     of srkFsSystemFile:
@@ -1195,7 +1407,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                       else: path in prevOwned)
     inp.ledgerOwnsDiversion = ("diversion:" & path) in prevOwned
     inp.ledgerSha256 = prevSha.getOrDefault(path)
-    let (dec, obs) = decide(driver, inp, path)
+    var dec: CollisionDecision
+    var obs: TargetObservation
+    if saved.found: dec = savedDecision(saved.plan)
+    else: (dec, obs) = decide(driver, inp, path)
+    decisions[r.address] = dec
     if r.kind == srkLinuxSysusersEntry and p.accountBefore.len > 0 and
         not inp.ledgerOwns:
       # Spec §4.1: an existing account of the same name with a different
@@ -1276,7 +1492,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                else: dec.reason)))
     if dec.verdict != cvNoOp and not held:
       result.ledgerDiff.add($dec.verdict & "\t" & path & "\t" & r.address)
-    targets.add(plannedTarget(r.address, inp, path, dec, obs))
+    targets.add(targetFor(r.address, inp, path, dec, obs, saved))
     plans.add(p)
 
   # `repro system adopt`: the addressed resource must actually be claimed
@@ -1390,9 +1606,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     for e in entries:
       let d = observeDrift(e)
       planDrift[entryKeyOf(e)] = d
-      if d.len > 0 and not d.startsWith("missing"):
+      if d.len > 0 and not d.startsWith("missing") and
+          not (replaying and replayTolerates(e, d)):
         drifted.add(e.path & ": " & d)
-    if drifted.len > 0 and not opts.reconcileDrift:
+    if drifted.len > 0 and not reconcileDrift:
       for d in drifted: result.drift.add(d & " (left in place; " &
         "--reconcile-drift removes it)")
       keptEntries.add(entries)
@@ -1471,6 +1688,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var addressByKey = initTable[string, string]()
   for r in composed.resources:
     addressByKey[resourceKindTag(r) & ":" & resourceName(r)] = r.address
+  # Units an interrupted or failed switch had running at its plan time
+  # (its step 2 may have stopped them): planned as running, so they are
+  # (re)started rather than left down.
+  var assumeActive = initHashSet[string]()
+  for u in opts.assumeActive: assumeActive.incl(u)
+  if replaying:
+    for u in replayPlan.activeUnits: assumeActive.incl(u)
   var facts: seq[UnitFacts]
   var unitDeps = initTable[string, seq[string]]()
   var factUnits = initHashSet[string]()
@@ -1480,7 +1704,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## population (§7.3: "confirmed exited" is the group, not the state).
     ## Both are pinned by the plan id.
     f.activeState = readUnitProvision(f.unit).activeState
-    f.active = f.activeState == "active"
+    # A unit an interrupted or failed switch had running is planned as
+    # running, so its replay or revert starts it again (step 2 may have
+    # stopped it; a restart applies only to an active unit).
+    f.active = f.activeState == "active" or
+      (not f.removed and f.unit in assumeActive)
     f.alive = if f.exclusive: unitAliveness(f.unit) else: uaEmpty
   for r in removedUnits:
     var f = UnitFacts(unit: r.suName, address: r.address, owned: true,
@@ -1634,7 +1862,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # The tree goes into the store and is verified; the units' closures are
   # realised too, so no base path is touched before everything the
   # generation runs from exists. The apply lock is held throughout.
-  let previousStatic = readStaticTarget()
+  var priorMarker: PendingMarker
+  if replaying and hasPendingMarker(stateDir):
+    priorMarker = readPendingMarker(stateDir)
+  let previousStatic =
+    if replaying and priorMarker.previousStatic.len > 0: priorMarker.previousStatic
+    else: readStaticTarget()
   let (treePath, treePrefixId) = realiseStaticTree(treeFiles)
   var closurePaths: seq[string]
   for p in plans:
@@ -1642,10 +1875,66 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       closurePaths.add(realiseAptClosure(
         parseAptClosureLock(p.r.suAptClosureLock), AddOnSystemStoreRoot,
         AddOnAptDebCacheDir))
+  # The whole closure is rooted from here on, not only the tree: a
+  # `repro store gc` between this step and the commit -- or after a crash,
+  # before recovery -- must not collect what the switch is about to run.
+  block:
+    var closurePrefixes: seq[PrefixIdBytes]
+    enterWritableStoreView()
+    var st = openStore(StoreRoot)
+    for path in closurePaths:
+      let found = st.lookupPrefixByRealizedPath(path)
+      if found.found: closurePrefixes.add(found.row.prefixId)
+    st.close()
+    holdOnPendingRoot(closurePrefixes)
+
+  # The confirm step's checks (§7.5): every unit's declared healthCheck.
+  var healthChecks: seq[UnitHealthCheck]
+  for r in composed.resources:
+    if r.kind == srkSystemdSystemUnit and r.suHealthCheck.len > 0:
+      healthChecks.add(UnitHealthCheck(unit: r.suName, address: r.address,
+        raw: r.suHealthCheck, spec: parseHealthCheck(r.suHealthCheck)))
+  result.healthChecks = healthChecks
+  let confirmTimeout = if user.addOn.confirmTimeoutSec > 0:
+                         user.addOn.confirmTimeoutSec
+                       else: DefaultConfirmTimeoutSec
+  let probeExe = if opts.reproExe.len > 0: opts.reproExe
+                 else: getAppFilename()
+
+  # The write-ahead plan, BEFORE the marker that makes it meaningful and
+  # before anything on the base changes. A replay keeps the plan of the
+  # switch it replays: only that one recorded the host as it was.
+  var activeAtPlan: seq[string]
+  if replaying:
+    activeAtPlan = replayPlan.activeUnits
+  else:
+    for p in plans:
+      if p.r.kind == srkSystemdSystemUnit and p.baseActiveState == "active":
+        activeAtPlan.add(p.r.suName)
+    for u in opts.assumeActive:
+      if u notin activeAtPlan: activeAtPlan.add(u)
+    var saved: seq[SavedPlan]
+    var targetByAddress = initTable[string, PlannedTarget]()
+    for t in targets: targetByAddress[t.address] = t
+    for p in plans:
+      let dec = if p.r.address in decisions: decisions[p.r.address]
+                else: CollisionDecision(verdict: cvNoOp,
+                                        observation: p.observation)
+      saved.add(toSaved(p, dec, targetByAddress.getOrDefault(p.r.address)))
+    writePendingPlan(stateDir, PendingPlan(targetOwnText: ownText,
+      targetUserText: targetUserText, fromUserText: previousUserText,
+      fromLedgerText: previous.render(), reconcileDrift: reconcileDrift,
+      adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved))
   var marker = PendingMarker(fromGeneration: committedPrevious,
     newStatic: treePath, previousStatic: previousStatic, step: ssRealise,
-    status: "in-progress")
+    status: "in-progress", purpose: purpose)
+  if replaying:
+    # What the interrupted switch stopped and disabled stays on record
+    # until this one finishes.
+    marker.stopped = priorMarker.stopped
+    marker.disabled = priorMarker.disabled
   writePendingMarker(stateDir, marker)
+  seamPause(stateDir, "step-1")
 
   # The drivers' materialisation policy: a link target for every
   # link-form object, and the switch orchestrates every transition.
@@ -1716,6 +2005,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var hookSysctl: seq[tuple[key, value: string]]
   var hookGeneration = ""
   var paused: seq[string]      # triggers step 2 stopped; step 7 restarts
+  var hookConfirm: ConfirmOutcome
+  var hookHealthFailed = false
 
   proc beforeSet(planId: string) {.gcsafe.} =
     ## Steps 2 and 3: pre-stop, then flip. A refusal here (an exclusive
@@ -1723,14 +2014,28 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     {.cast(gcsafe).}:
       marker.planId = planId
       writePendingMarker(stateDir, marker)
-      let pre = runPreStop(transitions, disableOnRemoval)
+      # Each unit is on record BEFORE it is stopped, paused or disabled,
+      # so a crash or a refusal in the middle of step 2 loses none of them.
+      let onStop: PreStopObserver = proc(u: string) =
+        if u.startsWith("disable:"):
+          let name = u["disable:".len .. ^1]
+          if name notin marker.disabled: marker.disabled.add(name)
+        else:
+          let name = if u.startsWith("trigger:"): u["trigger:".len .. ^1]
+                     else: u
+          if name notin marker.stopped: marker.stopped.add(name)
+        writePendingMarker(stateDir, marker)
+      let pre = runPreStop(transitions, disableOnRemoval, onStop)
       paused = pre.paused
-      marker.stopped = pre.paused & pre.stopped
       marker.step = ssPreStop
       writePendingMarker(stateDir, marker)
+      seamPause(stateDir, "step-2")
+      # The flip is durable (its directory is synced) before the marker
+      # says it happened; recovery never trusts the step anyway.
       flipStatic(treePath)
       marker.step = ssFlip
       writePendingMarker(stateDir, marker)
+      seamPause(stateDir, "step-3")
 
   proc afterSet(generationId: string; clean: bool): seq[string] {.gcsafe.} =
     ## Steps 4 and 5 were the drivers'; now 6 (fragment tools), 7 (start)
@@ -1739,8 +2044,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     {.cast(gcsafe).}:
       var problems: seq[string]
       hookGeneration = generationId
+      # Steps 4 and 5 are the drivers' writes, in the profile's apply
+      # order (links and copies interleave); both are complete here.
+      marker.attempt = generationId
+      marker.step = ssReconcileLinks
+      writePendingMarker(stateDir, marker)
+      seamPause(stateDir, "step-4")
       marker.step = ssCopies
       writePendingMarker(stateDir, marker)
+      seamPause(stateDir, "step-5")
       # --- Step 6: the fragment tools. The sysusers and tmpfiles tools
       # ran per changed fragment inside their drivers; what is left is
       # the daemon reload, sysctl through the host's own service, and
@@ -1757,6 +2069,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         problems.add("step 6 (fragment tools): " & ex.msg)
       marker.step = ssFragmentTools
       writePendingMarker(stateDir, marker)
+      seamPause(stateDir, "step-6")
       # --- Step 7: start. Only after a clean step 4-6: a half-written
       # generation is not started.
       if clean and problems.len == 0:
@@ -1766,8 +2079,19 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           problems.add("step 7 (start): " & ex.msg)
       marker.step = ssStart
       writePendingMarker(stateDir, marker)
-      # --- Step 8: confirm. No health checks in this release (A5): the
-      # confirmation is that every step above reported no problem.
+      seamPause(stateDir, "step-7")
+      # --- Step 8: confirm (§7.5). Every step above reported no problem,
+      # and every declared health check passed within confirmTimeout,
+      # counted from the end of step 7. A failure withholds the commit,
+      # and the switch reverts below.
+      if clean and problems.len == 0 and healthChecks.len > 0:
+        hookConfirm = confirm(healthChecks, confirmTimeout,
+                              hostNamespaceProbe(probeExe))
+        if not hookConfirm.passed:
+          hookHealthFailed = true
+          problems.add("step 8 (confirm): " & $hookConfirm.failures.len &
+            " health check(s) did not pass within confirmTimeout (" &
+            $confirmTimeout & " s): " & hookConfirm.failures.join("; "))
       marker.step = ssConfirm
       writePendingMarker(stateDir, marker)
       # Objects a removed resource adopted or replaced go back to what they
@@ -1780,6 +2104,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         # new generation no longer carries, so the add-on's own link now
         # dangles; that is the removal in progress, and the restore (or
         # the deletion) replaces the link.
+        if replaying and alreadyRestored(e):
+          hookRestored.add(e.path)
+          continue
         let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
         if d.len > 0:
           hookKept.incl(e.resource)
@@ -1892,6 +2219,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           storedNow.resources.add(r)
       writeFileAtomic(userProfilePath(stateDir), renderProfileText(storedNow),
                       0o600)
+      # The generation's own copies of what it applied: `repro system
+      # rollback` re-applies a retained generation from them (§7.5).
+      if generationId.len > 0:
+        let gd = generationDir(stateDir, generationId)
+        createDir(gd)
+        writeFileAtomic(gd / AddonOwnProfileName, ownText, 0o600)
+        writeFileAtomic(gd / AddonUserProfileName,
+                        renderProfileText(storedNow), 0o600)
+      seamPause(stateDir, "step-8")
       problems
 
   var infraError = ""
@@ -1900,7 +2236,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
       noPreview: true, elevationMode: emBroker,
       extraDestroyResources: destroy,
-      preWriteGuard: makePreWriteGuard(newDriver, targets, destroyCheck),
+      preWriteGuard: seamedGuard(stateDir,
+        makePreWriteGuard(newDriver, targets, destroyCheck)),
       addOnDispatch: policy,
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
                               afterPrivilegedSet: afterSet,
@@ -1910,11 +2247,20 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         " error(s) and " & $result.infra.driftCount & " drift finding(s):\n  " &
         result.infra.diagnostics.join("\n  ")
   except EAddOn as e:
-    # A refusal decided before anything was switched (an exclusive unit
-    # that would overlap): the old generation stands, the marker goes.
-    clearPendingMarker(stateDir)
-    releasePendingRoot()
-    raise e
+    if marker.step < ssFlip:
+      # A refusal decided before the flip (an exclusive unit that would
+      # overlap): nothing was switched, but step 2 may already have
+      # stopped or disabled units. They are put back -- the marker named
+      # each before it was touched -- and the old generation stands.
+      let undoProblems = undoPreStop(marker)
+      clearPendingMarker(stateDir)
+      clearPendingPlan(stateDir)
+      releasePendingRoot()
+      if undoProblems.len > 0:
+        raise newException(AddonApplyError, e.msg & "\nputting back what " &
+          "step 2 stopped failed: " & undoProblems.join("; "))
+      raise e
+    infraError = "repro infra apply failed: " & e.msg
   except CatchableError as e:
     infraError = "repro infra apply failed: " & e.msg
   result.generationId = hookGeneration
@@ -1928,36 +2274,61 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     result.removed = still
   result.sysctlObserved = hookSysctl
 
-  if not result.infra.committed:
-    # Not a generation: `current` names the previous one, the marker
-    # records how far the switch got and why it stopped, for the operator
-    # and the re-assert unit. The ledger copy already describes what is
-    # on the host.
-    marker.status = "failed"
-    marker.detail = infraError
-    writePendingMarker(stateDir, marker)
-    raise newException(AddonApplyError,
-      (if infraError.len > 0: infraError else: "the switch did not " &
-       "complete cleanly") & "\nthe generation was not committed; " &
-      "`current` still names " & committedPrevious &
-      " and the pending marker at " & pendingMarkerPath(stateDir) &
-      " records the step reached")
+  result.confirm = hookConfirm
 
-  # --- Step 9: committed by the infra apply; register the roots, apply
-  # the retention policy, and clear the marker. ---
+  if not result.infra.committed:
+    # Not a generation: `current` still names the one the switch began
+    # from. The marker records how far the switch got and why it stopped.
+    let why = if infraError.len > 0: infraError
+              else: "the switch did not complete cleanly"
+    marker.status = "failed"
+    marker.detail = why
+    writePendingMarker(stateDir, marker)
+    if purpose == "revert" or committedPrevious.len == 0:
+      # A revert that fails, or a first switch (bootstrap) with nothing to
+      # go back to: the marker stays for `repro system addon recover` and
+      # the re-assert unit.
+      raise newException(AddonApplyError, why &
+        "\nthe generation was not committed; `current` still names " &
+        (if committedPrevious.len > 0: committedPrevious else: "no generation") &
+        " and the pending marker at " & pendingMarkerPath(stateDir) &
+        " records the step reached")
+    # §7.5, and §7.2's "old or new, never a mixture": the switch goes back
+    # to the generation `current` names, through the same switch, with
+    # everything step 2 stopped or that was running at plan time started
+    # again.
+    var assume = marker.stopped
+    for u in activeAtPlan:
+      if u notin assume: assume.add(u)
+    let back = revertProfiles(stateDir, committedPrevious, ownText,
+                              previousUserText)
+    var reverted: AddonApplyResult
+    try:
+      reverted = runAddonApply(AddonApplyOptions(stateDir: stateDir,
+        hostIdentity: opts.hostIdentity, ownProfileText: back.own,
+        userProfileText: back.user, driver: opts.driver, purpose: "revert",
+        assumeActive: assume, retention: opts.retention,
+        reproExe: opts.reproExe))
+    except CatchableError as e:
+      raise newException(AddonApplyError, why & "\nthe switch could not " &
+        "be rolled back to " & committedPrevious & " either: " & e.msg &
+        "\nthe pending marker at " & pendingMarkerPath(stateDir) &
+        " records it; run `repro system addon recover`")
+    recordRolledBack(stateDir, hookGeneration, committedPrevious,
+                     reverted.generationId, why, hookHealthFailed)
+    var err = newException(AddonRolledBack, "the switch was rolled back to " &
+      committedPrevious & " (re-applied as generation " &
+      reverted.generationId & "): " & why)
+    raise err
+
+  # --- Step 9: committed by the infra apply; the generation's root takes
+  # over everything the pending root held, the retention policy runs, and
+  # the marker goes. ---
   var prefixIds: seq[PrefixIdBytes]
   for e in newLedger.entries:
     if e.class == lcStorePrefix:
       prefixIds.add(parsePrefixIdHex(e.sha256))
-  block:
-    enterWritableStoreView()
-    var s = openStore(StoreRoot)
-    defer: s.close()
-    for path in closurePaths:
-      let found = s.lookupPrefixByRealizedPath(path)
-      if found.found: prefixIds.add(found.row.prefixId)
-  registerGenerationRoot(result.generationId, prefixIds)
-  releasePendingRoot()
+  promotePendingRoot(result.generationId, prefixIds)
   # The current generation is this one; the previous is what `current`
   # named before (never an uncommitted attempt's id); and a generation a
   # running managed unit may still run from is kept too (spec §5.2).
@@ -1967,7 +2338,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     lookup = generationUnitLookup(stateDir))
   marker.step = ssCommit
   writePendingMarker(stateDir, marker)
+  seamPause(stateDir, "step-9")
   clearPendingMarker(stateDir)
+  clearPendingPlan(stateDir)
 
 proc renderLedgerDiff*(r: AddonApplyResult): string =
   ## The plan's ledger diff section (spec §7.1).

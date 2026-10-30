@@ -129,6 +129,12 @@ const
     # configuration. They are the only sysctl values excluded.
     "kernel.random.uuid",            # a fresh random UUID on every read
     "kernel.random.boot_id",         # differs per boot by definition
+    "net.ipv4.tcp_fastopen_key",     # a random key the kernel draws at
+                                     # every boot (measured: differs across
+                                     # every reboot of the A5 reset gate)
+    "vm.user_reserve_kbytes",        # sized from the free memory at boot
+                                     # (mm/util.c init_user_reserve), so it
+                                     # moves with what booting allocated
     "kernel.random.entropy_avail",   # entropy pool fill level
     "kernel.ns_last_pid",            # last PID allocated
     "kernel.pty.nr",                 # number of open ptys (each SSH session)

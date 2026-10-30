@@ -215,8 +215,15 @@ type
     paused*: seq[string]    ## triggers of stop-start units step 2 stopped;
                             ## step 7 starts them again
 
-proc runPreStop*(ts: seq[Transition]; disable: openArray[string]):
-    PreStopResult =
+type
+  PreStopObserver* = proc(unit: string) {.closure.}
+    ## Told about each unit step 2 is ABOUT to stop (``unit``), each trigger
+    ## it is about to pause (``"trigger:" & unit``) and each unit it is about
+    ## to disable (``"disable:" & unit``), before it acts, so the pending
+    ## marker never misses one that a crash or a refusal interrupts.
+
+proc runPreStop*(ts: seq[Transition]; disable: openArray[string];
+                 onStop: PreStopObserver = nil): PreStopResult =
   ## Step 2: the transition list's stops, exclusive ones first and
   ## confirmed, then ``disable`` for the units this generation removes
   ## (their files are about to go, so their [Install] links go with them
@@ -225,6 +232,8 @@ proc runPreStop*(ts: seq[Transition]; disable: openArray[string]):
   ## cannot start its old definition again before step 7. Last, every
   ## exclusive unit step 7 will start is checked with its predecessors,
   ## so a refusal happens here, before the flip.
+  template note(u: string) =
+    if onStop != nil: onStop(u)
   when mutated("exclusive-as-plain-restart"):
     # The falsifying mutation: an exclusive unit gets no special step.
     # Its old instance is stopped AFTER the successor starts (`runStart`
@@ -233,6 +242,7 @@ proc runPreStop*(ts: seq[Transition]; disable: openArray[string]):
     # lifetime log catches. Nothing is confirmed exited either.
     for t in preStopEntries(ts):
       if t.exclusive: continue
+      note(t.unit)
       stopUnit(t.unit)
       result.stopped.add(t.unit)
   else:
@@ -240,8 +250,10 @@ proc runPreStop*(ts: seq[Transition]; disable: openArray[string]):
       if t.verb == tvStopStart:
         for trig in t.triggers:
           if unitIsActive(trig) and trig notin result.paused:
+            note("trigger:" & trig)
             stopUnit(trig)
             result.paused.add(trig)
+      note(t.unit)
       if t.exclusive:
         stopExclusive(t.unit)
       else:
@@ -251,6 +263,7 @@ proc runPreStop*(ts: seq[Transition]; disable: openArray[string]):
       if t.exclusive and t.verb in {tvStart, tvStopStart}:
         confirmExited(@[t.unit] & t.predecessors, t.unit)
   for u in disable:
+    note("disable:" & u)
     try: disableUnit(u)
     except SwitchError: discard   # already disabled, or static
 

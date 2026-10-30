@@ -15,9 +15,14 @@ objects its ownership ledger lists, and can remove every one of them again.
 | `repro_addon/ledger` | The ownership ledger (v2: with the plan-time observation, how a collision was resolved, the preserved pre-write bytes and the base's unit state), its drift check, and the fingerprint delta two ledgers account for. |
 | `repro_addon/collision` | The collision observer behind a per-distribution driver interface (the dpkg driver: `info/*.list`, `*.conffiles`, the diversion database, `systemctl show`), the decision table, the plan-time symlink refusal and the before-each-write re-check. |
 | `repro_addon/etc_write` | Writing a file as root without ever following a symbolic link (`openat`/`O_NOFOLLOW`/`renameat`). |
-| `repro_addon/generation0` | The add-on's own objects (target, read-only store mount, report-only re-assert unit, apt hook, trust anchors). |
+| `repro_addon/generation0` | The add-on's own objects (target, read-only store mount, boot-time re-assert unit, apt hook, trust anchors). |
 | `repro_addon/store_root` | `/repro/store` (a btrfs subvolume on btrfs roots), the add-on's prefixes, generation GC roots, the private writable store view. |
 | `repro_addon/addon_apply` | The add-on layer over `repro infra apply`: scope (`managedEtcPrefixes`), the collision pass and its opt-ins (`collision = divert | dropIn | replace`, `--reconcile-drift`, `repro system adopt`), composition, removal by ledger with restoration from preserved bytes, side-effect objects. |
+| `repro_addon/static_tree` / `pending_plan` | The switch's static tree, its pending marker and its write-ahead plan: what an interrupted switch is finished or reverted from. |
+| `repro_addon/health` | Health checks (`active`, loopback TCP and HTTP, a command in the store) and the confirm step's wait. |
+| `repro_addon/reassert` | Boot-time re-assertion: recover an interrupted switch, check the current generation, report `ok` / `drift` / `degraded`. |
+| `repro_addon/addon_rollback` | `repro system rollback` on an add-on host. |
+| `repro_addon/seams` | Pause points compiled only into a test build, for the crash gates. |
 | `repro_addon/bootstrap` / `uninstall` / `verify` | The `repro system addon` verbs. |
 | `repro_addon/cli` | Command-line surface shared by the engine and the static binary. |
 | `repro_addon/mutations` | Compile-time falsifying mutations for the acceptance gates. |
@@ -50,7 +55,36 @@ diversion outside them is refused:
 ```
 addOn {
   managedEtcPrefixes = ["/etc/app/", "/etc/issue.net"]
+  confirmTimeout = 60
 }
+```
+
+## Crash consistency, health checks and rollback
+
+Every apply is a switch that writes down what it decided before it changes
+anything. If the host loses power or resets in the middle, the boot-time
+`repro-addon-reassert.service` finishes the switch from that record, or
+returns the host to the previous generation; the host is never left
+between the two. A switch that fails -- a refused write, a failed step, a
+health check that does not pass -- returns to the previous generation by
+itself and reports it.
+
+A unit may declare one health check, which must pass within the profile's
+`confirmTimeout` (seconds, default 60) after the switch starts its units:
+
+```
+systemd.systemUnit {
+  name = "app.service"
+  content = "..."
+  healthCheck = "http://127.0.0.1:8000/alive"   # or active, tcp:127.0.0.1:8000,
+                                                # exec:/repro/store/.../bin/check
+}
+```
+
+```sh
+sudo repro system rollback [<generation>]    # re-apply a previous generation
+sudo repro system addon recover              # finish or revert an interrupted switch now
+sudo repro system addon reassert             # check the current generation (report only)
 ```
 
 ## Tests

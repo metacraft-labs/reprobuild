@@ -1389,7 +1389,13 @@ proc runSystemCommand*(args: seq[string]): int =
     of "why": return runSystemWhy(rest)
     of "sync": return runSystemSync(rest)
     of "history": return runSystemHistory(rest)
-    of "rollback": return runSystemRollbackCmd(rest)
+    of "rollback":
+      # An add-on host rolls back through the add-on switch (ReproOS
+      # Add-On Mode §7.5): its generations are the add-on's own objects
+      # plus the operator's profile, not a whole-system profile.
+      if addon_apply.isAddonHost(resolveSystemStateDir()):
+        return addon_cli.runAddonRollbackCli(rest)
+      return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
     of "addon":
       when defined(linux):

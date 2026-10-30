@@ -70,6 +70,16 @@
 ##                                            state, so a pinned apply does
 ##                                            not see a unit that crashed
 ##                                            since the plan
+## ``reassert-required-by-boot``              the re-assert unit is wanted
+##                                            by multi-user.target and
+##                                            ``Requires=`` the store
+##                                            mount, so a missing store
+##                                            fails it before it reports
+## ``reassert-skips-recovery``                the re-assert unit leaves an
+##                                            interrupted switch as it
+##                                            finds it (a negative control
+##                                            of the hard-reset gate: the
+##                                            resets must leave mixtures)
 ## ``path-based-write-follows-links``         the drivers write managed
 ##                                            files with a path-based
 ##                                            ``open``, following any link
@@ -96,7 +106,9 @@ const
                           "exclusive-exited-by-top-level-procs",
                           "plan-id-omits-unit-state",
                           "path-based-write-follows-links",
-                          "scope-accepts-unnormalised-paths"]
+                          "scope-accepts-unnormalised-paths",
+                          "reassert-required-by-boot",
+                          "reassert-skips-recovery"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}
