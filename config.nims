@@ -805,8 +805,77 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # missing nim-shm-gset, which is exactly the version skew that breaks the build.
 # These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
+proc pinnedSiblingRevision(sibling: string): string =
+  ## The revision `.github/sibling-repos` pins for `sibling` (a `name=<sha>` or
+  ## `name!=<sha>` line keyed by the sibling directory's name), or "" when the
+  ## file does not pin it. Comments and bare names resolve to "".
+  let name = sibling.parentDir().extractFilename()   # ../nim-shm-gset/src -> nim-shm-gset
+  let pinsPath = repoPath(".github" / "sibling-repos")
+  if not fileExists(pinsPath): return ""
+  for raw in readFile(pinsPath).splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line[0] == '#': continue
+    for sep in ["!=", "="]:
+      let at = line.find(sep)
+      if at > 0 and line[0 ..< at] == name:
+        return line[at + sep.len .. ^1].strip()
+  return ""
+
+proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: int] =
+  ## `gorgeEx` runs relative to the script's directory, not the process's, so
+  ## the sibling's checkout is named absolutely.
+  gorgeEx("git -C " & quoteShell(repoPath(sibling.parentDir())) & " " & args)
+
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
+  ## Sibling-first, but never silently against an explicit pin.
+  ##
+  ## A workspace checkout at `../<name>/src` is what a developer edits, so it
+  ## wins -- EXCEPT when `$<envName>` names another tree and the sibling is
+  ## BEHIND the revision this repository pins for it in `.github/sibling-repos`
+  ## (neither at that revision, nor ahead of it, nor carrying local changes).
+  ## Such a sibling is stale, not a work in progress, and letting it win
+  ## discards the pin without a trace: at b761df51f a cross build whose
+  ## `SHM_GSET_SRC` named the pinned nim-shm-gset 6333cc9 compiled the engine
+  ## against the sibling at fb981c7 instead, so the installed engine lacked the
+  ## fix the pin carried and still died with SIGBUS on a full tmpfs. The shim,
+  ## whose builder honours the variable, had it. The two images disagreed about
+  ## which nim-shm-gset they were, and nothing said so.
+  ##
+  ## So: sibling at/ahead-of/dirty-against the pin -> sibling (the developer's
+  ## intent); sibling behind the pin while an env pin is set -> the env pin,
+  ## announced; no pin known or no git -> sibling, as before.
+  ## `REPRO_SIBLING_POLICY=sibling|pin` forces either choice.
   if repoFileExists(sibling / marker):
+    let envPath = getEnv(envName)
+    let policy = getEnv("REPRO_SIBLING_POLICY")
+    if policy != "sibling" and envPath.len > 0 and
+        repoFileExists(envPath / marker) and
+        absolutePath(envPath) != absolutePath(sibling):
+      var preferPin = policy == "pin"
+      var why = "REPRO_SIBLING_POLICY=pin"
+      if not preferPin:
+        let pin = pinnedSiblingRevision(sibling)
+        if pin.len > 0:
+          let head = siblingGit(sibling, "rev-parse HEAD")
+          let dirty = siblingGit(sibling, "status --porcelain --untracked-files=no")
+          # `nim check` (and nimsuggest) do not run `gorgeEx`: it answers
+          # ("", 0) there, which this reads as "cannot tell" and keeps the
+          # sibling, as before. Only a real compile can refuse a stale one.
+          let headRev = head.output.strip()
+          if head.exitCode == 0 and dirty.exitCode == 0 and headRev.len >= 12:
+            let atOrAhead = siblingGit(sibling,
+              "merge-base --is-ancestor " & pin & " HEAD").exitCode == 0
+            if not atOrAhead and dirty.output.strip().len == 0:
+              preferPin = true
+              why = "the sibling is at " & headRev[0 ..< 12] &
+                ", which is not at or ahead of the pinned " & pin[0 ..< 12] &
+                " in .github/sibling-repos, and carries no local changes"
+      if preferPin:
+        echo "config.nims: using $" & envName & "=" & envPath &
+          " instead of the sibling " & sibling & " (" & why &
+          "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
+        switch("path", envPath)
+        return
     switch("path", sibling)
     return
   addPackagePath(envName, [], marker, useDevShellFallback = true)

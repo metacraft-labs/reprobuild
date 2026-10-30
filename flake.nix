@@ -312,7 +312,11 @@
       # mcComplete where it graded mcIncomplete on two unsupported-architecture
       # losses (rpi2). io-mon's own pins of nim-shm-gset/-queue move to the
       # preallocating revisions below.
-      url = "github:metacraft-labs/io-mon/e0fe6b4461f0555a7b44d57f42d1dbc6e07d1255";
+      # Bumped e0fe6b44 -> 7a3e4c89 (2026-10-30, review fixes): a Thumb-capable
+      # image the ARM scanner cannot cover is recorded as a loss (mcIncomplete)
+      # instead of graded complete; 32-bit ARM links libatomic; the trap
+      # handler's non-site fallback notes the signal.
+      url = "github:metacraft-labs/io-mon/7a3e4c891b63ca844319a0df74ed03c6767a8983";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -471,7 +475,10 @@
       # Bumped 059c549 -> 3af8a4e (2026-10-30, `agents`): the 32-bit ARM (armhf)
       # raw-syscall substrate (glibc `syscall` body patch, svc->udf inline trap on
       # SIGILL, ucontext capture/replay, Elf32 vDSO) io-mon e0fe6b44 compiles against.
-      url = "github:metacraft-labs/nim-stackable-hooks/3af8a4e937dcf68666d1e47e4191cad496c6d793";
+      # Bumped 3af8a4e -> 7533478 (2026-10-30, review fixes): the ARM body patch
+      # writes its target word first; the ARM restore is idempotent; the armhf
+      # test preserves r7.
+      url = "github:metacraft-labs/nim-stackable-hooks/75334780682e70b1adb58bf813d869e7f5df63f5";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

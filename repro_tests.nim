@@ -21717,6 +21717,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_run_tests_strips_foreign_preload.nim",
+    binary: "build/test-bin/t_run_tests_strips_foreign_preload",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/integration/t_runner_cpu_progress_liveness.nim",
     binary: "build/test-bin/t_runner_cpu_progress_liveness",
     defines: @[],

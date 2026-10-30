@@ -109,6 +109,12 @@ echo "run_tests.sh: home fence REPRO_TEST_HOME_FENCE=${REPRO_TEST_HOME_FENCE:-<n
 # Print the mapping: a numeric slot is not self-describing, and a developer
 # looking for a run's scratch should not have to re-derive the checksum.
 echo "run_tests.sh: scratch TMPDIR=${test_tmp_root} (checkout ${repo_root})"
+# A preload that is not our monitor shim turns every monitored edge into a
+# monitor loss and the whole suite into a silent red; see the lib for the
+# measurement. Removed here, before anything is built or run.
+# shellcheck source=scripts/lib/foreign_preload.sh
+source scripts/lib/foreign_preload.sh
+foreign_preload_guard "$@"
 
 if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" != "1" ]]; then
   rm -rf build/test-bin
