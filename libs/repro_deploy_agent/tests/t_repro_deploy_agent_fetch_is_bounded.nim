@@ -20,22 +20,41 @@
 ## `defaultHttpGet` is the production fetch, called through the production
 ## `AgentDeps` default.
 
-import std/[net, os, osproc, streams, strutils, unittest]
+import std/[net, os, osproc, streams, strutils, times, unittest]
 
 import repro_deploy_agent
 import repro_test_support/reasoned_skip
 
 const ServerScript = """
-import http.server, sys, socketserver
+import http.server, sys, socketserver, time
 PROGRESS = sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
     def do_GET(self):
         # /chunked/<mib> streams <mib> MiB with no Content-Length;
-        # /sized/<mib> declares Content-Length and streams the same.
-        kind, mib = self.path.strip("/").split("/")
-        total = int(mib) * 1024 * 1024
+        # /sized/<mib> declares Content-Length and streams the same;
+        # /trickle/<n> sends <n> one-byte chunks 400 ms apart, each well
+        # inside a per-chunk timeout, for as long as the client stays.
+        kind, arg = self.path.strip("/").split("/")
+        if kind == "trickle":
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            sent = 0
+            try:
+                for _ in range(int(arg)):
+                    self.wfile.write(b"1\r\nt\r\n"); self.wfile.flush()
+                    sent += 1
+                    time.sleep(0.4)
+                self.wfile.write(b"0\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                with open(PROGRESS, "w") as fh:
+                    fh.write(str(sent))
+            return
+        total = int(arg) * 1024 * 1024
         self.send_response(200)
         if kind == "sized":
             self.send_header("Content-Length", str(total))
@@ -137,3 +156,44 @@ suite "deploy agent: the manifest fetch is bounded while streaming":
       check small.ok
       check small.body.len == 2 * 1024 * 1024
       check small.body[0] == byte('m') and small.body[^1] == byte('m')
+
+  test "a trickling source is cut by the whole-fetch deadline":
+    when not defined(linux):
+      skip("the fixture server is Python's http.server from the dev shell; " &
+        "the Linux leg is the one that measures the rpi2 constraint")
+    else:
+      # The production deadline is never under a minute
+      # (`fetchDeadlineMs`); the bounded core takes it as a parameter so
+      # this measures the mechanism in seconds.
+      check fetchDeadlineMs(2_000) == 60_000
+      check fetchDeadlineMs(30_000) == 120_000
+      check fetchDeadlineMs(0) == 60_000
+      let dir = getTempDir() / "t_deploy_agent_trickle_" & $getCurrentProcessId()
+      createDir(dir)
+      defer: removeDir(dir)
+      let script = dir / "server.py"
+      let progress = dir / "progress"
+      writeFile(script, ServerScript)
+      let port = freePort()
+      let srv = startProcess(findExe("python3"),
+        args = @["-I", script, $port, progress], options = {poStdErrToStdOut})
+      defer:
+        srv.kill()
+        discard srv.waitForExit()
+        srv.close()
+      check srv.outputStream.readLine() == "READY"
+      # 50 chunks × 400 ms = 20 s if the client stayed; the per-chunk
+      # timeout (2 s) is never tripped. A 3 s whole-fetch deadline ends it.
+      let t0 = epochTime()
+      let r = httpGetBounded("http://127.0.0.1:" & $port & "/trickle/50",
+        timeoutMs = 2_000, deadlineMs = 3_000)
+      let elapsed = epochTime() - t0
+      checkpoint "trickle fetch ended after " & $elapsed & " s: " & r.error
+      check not r.ok
+      check "deadline" in r.error
+      check elapsed < 8.0
+      # Positive control: the same source under the deadline completes.
+      let ok = httpGetBounded("http://127.0.0.1:" & $port & "/trickle/3",
+        timeoutMs = 2_000, deadlineMs = 10_000)
+      check ok.ok
+      check ok.body.len == 3
