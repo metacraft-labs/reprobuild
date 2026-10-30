@@ -2494,7 +2494,7 @@ tests/unit/test_test_group_fallback.py	python	6
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	8
-tools/catalog-harvester/tests/test_harvester_emits_contributions.nim	nim	7
+tools/catalog-harvester/tests/test_harvester_emits_contributions.nim	nim	8
 tools/catalog-harvester/tests/test_harvester_history.nim	nim	3
 tools/catalog-harvester/tests/test_harvester_history_walk.nim	nim	2
 tools/catalog-harvester/tests/test_harvester_idempotent.nim	nim	5

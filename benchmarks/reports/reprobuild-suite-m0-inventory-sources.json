@@ -52531,7 +52531,7 @@
       "requiresReproBinary": false,
       "source": "tools/catalog-harvester/tests/test_harvester_emits_contributions.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

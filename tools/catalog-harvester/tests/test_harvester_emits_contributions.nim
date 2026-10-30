@@ -313,6 +313,20 @@ suite "GM4b — emitted contributions compile and round-trip":
     check "\nimport repro_project_dsl\nimport repro_dsl_stdlib/packages_schema\n" in src
     check "VersionedProvisioning" notin src
 
+  test "an armv7 arm is emitted with the cpu token the schema reads back":
+    # `PlatformCpu` gained `pcArmv7` with the 32-bit ARM cross-build; the
+    # emitter's exhaustive `case` had no arm for it and the harvester (and
+    # with it the `.#apps` collection) stopped compiling. The token must be
+    # the schema's own spelling, so a harvested module parses back to the
+    # same CPU.
+    let vp = everyField()
+    let pb = initPlatformBinary(cpu = pcArmv7, os = poLinux,
+      url = "https://example.test/every-2.0.0-armv7.tar.zst",
+      sha1 = "ef".repeat(20))
+    let stmt = tarballStatement("every", vp, pb)
+    check "cpu = \"armv7\"" in stmt
+    check parsePlatformCpuToken("armv7") == (true, pcArmv7)
+
   test "a 32-bit x86 arm is refused, not emitted":
     var vp = parsed("multitool", MultitoolJson)
     vp.platforms[0].cpu = pcX86
