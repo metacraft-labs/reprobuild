@@ -630,6 +630,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
 
     # --- Rows: sysctl and sysusers fragments (adopt, reconcile, restore). ---
     let swappiness = g.run("sysctl -n vm.swappiness").strip()
+    # The cloud images ship no /etc/sysusers.d; the hand-written fragment
+    # needs it, and the clean-up removes it again when it made it.
+    let hadSysusersDir = g.exec("test -d /etc/sysusers.d").exitCode == 0
+    discard g.run("mkdir -p /etc/sysusers.d /etc/sysctl.d")
     discard g.run("printf '%s' '" & SysctlHand & "' > " & SysctlPath &
       " && printf '%s' '" & SysusersHand & "' > " & SysusersPath &
       " && sysctl -q -w vm.swappiness=61")
@@ -685,6 +689,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("sysctl -n vm.swappiness").strip() == "61", "")
     discard g.exec("rm -f " & SysctlPath & " " & SysusersPath &
                    " && sysctl -q -w vm.swappiness=" & swappiness)
+    if not hadSysusersDir:
+      discard g.exec("rmdir /etc/sysusers.d")
     f = g.takeFingerprint(repro)
 
     # --- Rows: non-canonical paths and prefixes (threat model G8). ---
