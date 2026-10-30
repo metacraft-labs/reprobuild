@@ -121,9 +121,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          listed(l3, Dir & "/b.conf").len == 1,
          "exit " & $a3.exitCode & "\n" & a3.stdout & a3.stderr)
     block:
+      # The apply went on with the rest and committed a generation, so
+      # the static tree link moved (A4, spec §7.2); nothing else may have.
       let after = g.takeFingerprint(repro)
-      let same = identityReport(f, after)
-      step("gen3: nothing changed on the host", same.ok, same.text)
+      let same = identityReport(f, after, ["etc:/etc/repro/static"])
+      step("gen3: nothing changed on the host (but the static tree link)", same.ok, same.text)
 
     # --reconcile-drift authorises the removal and preserves the bytes.
     let a4 = g.applyProfile(repro, "gen4", Prefix, " --reconcile-drift")

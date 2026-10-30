@@ -190,7 +190,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # The stubborn instance is identified by its own process, not by the
     # unit's MainPID: after a stop that timed out under SendSIGKILL=no the
     # unit is `failed` and reports MainPID=0 while the process lives on.
-    let pidBefore = g.run("pgrep -f 'repro-fixture-stubborn d1' | sort").strip()
+    let pidBefore = g.run("pgrep -f '^/bin/sh /usr/local/bin/repro-fixture-stubborn d1$' | sort").strip()
     # Generation 6: change it; the old instance will not die.
     let changed = exclusiveUnit("d2", "/usr/local/bin/repro-fixture-stubborn",
                                 "TimeoutStopSec=3\nSendSIGKILL=no\n")
@@ -202,12 +202,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "repro-fixture-excl-d.service" in r6.stderr, "exit " & $r6.exitCode & "\n" & r6.stdout & r6.stderr)
     step("g6: the old instance is still the only one (same process), the successor never started",
          pidBefore.len > 0 and
-         g.run("pgrep -f 'repro-fixture-stubborn d1' | sort").strip() == pidBefore and
-         g.exec("pgrep -f 'repro-fixture-stubborn d2'").exitCode != 0 and
+         g.run("pgrep -f '^/bin/sh /usr/local/bin/repro-fixture-stubborn d1$' | sort").strip() == pidBefore and
+         g.exec("pgrep -f '^/bin/sh /usr/local/bin/repro-fixture-stubborn d2$'").exitCode != 0 and
          "d2" notin g.run("cat " & LogPath) and
          "d2" notin g.run("systemctl show -p ExecStart --value repro-fixture-excl-d.service"),
          "pids before [" & pidBefore & "] now [" &
-         g.run("pgrep -f 'repro-fixture-stubborn' | sort").strip() & "]\n" & g.run("cat " & LogPath))
+         g.run("pgrep -f '^/bin/sh /usr/local/bin/repro-fixture-stubborn' | sort").strip() & "]\n" & g.run("cat " & LogPath))
     step("g6: current and the static tree are unchanged, no pending marker",
          g.run(repro & " system addon status") == currentBefore and
          g.run("readlink /etc/repro/static").strip() == staticBefore and

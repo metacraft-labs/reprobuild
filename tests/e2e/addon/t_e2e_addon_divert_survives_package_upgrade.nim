@@ -127,9 +127,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         if e.component == fcEtc and (e.key == Path or e.key == Path & ".distrib"):
           continue
         if e.component == fcDiversions and e.key == Path: continue
+        # A committed generation moves the static tree link (A4, §7.2).
+        if e.component == fcEtc and e.key == "/etc/repro/static": continue
         unexpected.add(renderDiff(@[e]))
-      step("remove: nothing but the diverted path changed", unexpected.len == 0,
-           unexpected.join(""))
+      step("remove: nothing but the diverted path (and the static tree link) changed",
+           unexpected.len == 0, unexpected.join(""))
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
