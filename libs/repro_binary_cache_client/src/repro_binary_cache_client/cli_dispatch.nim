@@ -311,7 +311,10 @@ proc cmdSubstitute(args: seq[string]): int =
   # rejected as hostile into a successful substitution with partial output.
   try:
     inProcessArchive.extractPrefixInto(asBytes, outDir)
-  except IOError as e:
+  except CatchableError as e:
+    # IOError is the documented refusal; an OSError from the filesystem
+    # (a link at the output path, a full disk) is the same outcome to the
+    # caller: nothing was substituted.
     stderr.writeLine("substitute: refusing entry " & hex & ": " & e.msg)
     return 1
   echo "hit ", hex, " -> ", outDir

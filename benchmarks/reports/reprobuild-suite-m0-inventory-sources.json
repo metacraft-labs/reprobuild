@@ -1399,9 +1399,9 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1356,
-      "platform/destructive": 150,
+      "platform/destructive": 151,
       "pure unit": 689,
-      "unclassified": 267
+      "unclassified": 266
     },
     "graphOwnedTestArtifacts": [
       {
@@ -8422,8 +8422,8 @@
     },
     {
       "binary": "build/test-bin/t_archive_extract_refuses_writing_through_symlinks",
-      "class": "unclassified",
-      "classificationReason": "imports `dynlib`, which grants out-of-process reach (through `libs/repro_binary_cache_client/src/repro_binary_cache_client/compress.nim`)",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -8433,7 +8433,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_binary_cache_client/tests/t_archive_extract_refuses_writing_through_symlinks.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17297,6 +17297,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_hash",
         "repro_local_store",
         "repro_peer_cache"
       ],
@@ -18034,14 +18035,15 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_binary_cache_client",
         "repro_profile",
         "repro_profile_compile"
       ],
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

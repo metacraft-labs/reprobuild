@@ -144,6 +144,35 @@ suite "all-or-nothing extraction for the substitute command":
     check readFile(t.outDir / "existing") == "keep\n"
     check not fileExists(t.outDir / "new.txt")
 
+  test "a link planted at a predictable staging name is never followed or removed":
+    # An earlier version staged under `.<out>.repro-extract-<pid>` and began
+    # by removing that path; removeDir follows a link, so a planted link made
+    # the (privileged) caller empty the link's target.
+    let t = freshTree("planted-staging")
+    defer: removeDir(t.root)
+    let target = t.root / "out2"
+    writeFile(t.outside / "keep", "precious\n")
+    createSymlink(t.outside, t.root / (".out2.repro-extract-" & $getCurrentProcessId()))
+    let bytes = archive([
+      (path: "f.txt", kind: KindFile, mode: 0o644'u32, body: "x")])
+    extractPrefixInto(bytes, target)
+    check readFile(t.outside / "keep") == "precious\n"
+    check readFile(target / "f.txt") == "x"
+
+  test "an output path that is a link is refused and no staging is left behind":
+    let t = freshTree("link-outdir")
+    defer: removeDir(t.root)
+    createDir(t.outside / "empty")
+    let target = t.root / "linked"
+    createSymlink(t.outside / "empty", target)
+    let bytes = archive([
+      (path: "f.txt", kind: KindFile, mode: 0o644'u32, body: "x")])
+    expect IOError:
+      extractPrefixInto(bytes, target)
+    check entriesUnder(t.outside / "empty").len == 0
+    for kind, p in walkDir(t.root):
+      check ".repro-extract-" notin p
+
   test "positive control: an honest archive lands complete":
     let t = freshTree("atomic-ok")
     defer: removeDir(t.root)
