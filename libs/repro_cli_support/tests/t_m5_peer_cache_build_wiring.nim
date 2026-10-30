@@ -41,6 +41,15 @@
 ## `ffpChecksum` (it was an input-less `ffpTimestamp` record, which the
 ## engine now keeps local), and "a timestamp-policy record is not offered to
 ## the publisher" pins the refusal on this seam.
+##
+## Owner decision 2026-10-29 (Edge-Derived-Identities.md §3.4 item 1 rider):
+## only a monitored or builtin record crosses hosts, so the shell action of
+## "peer bundles restore conditional presence ..." is a MONITORED edge. Its
+## monitor evidence is an io-mon capture the test writes (in io-mon's own
+## encoding, with the backend profile io-mon writes first) and hands the
+## action as a prewired `monitorDepfile`, the seam a direct engine caller
+## uses, so the case runs wherever this file does; until then the edge was
+## evidenced by a make depfile it wrote, which the engine now keeps local.
 
 import std/[options, os, strutils, tables, unittest]
 
@@ -49,6 +58,7 @@ import repro_cas_store
 import repro_hash
 import repro_local_store
 import repro_peer_cache
+import io_mon/[capabilities, types, writer]
 from repro_test_support import testCaseScratchSlug
 
 let TmpDir = "build/test-tmp/t_m5_peer_cache_build_wiring" /
@@ -194,15 +204,25 @@ suite "LDRV-M5 peer-cache action-bundle build wiring":
     for present in [false, true]:
       let mode = if present: "exported" else: "no-exports"
       let peer: PeerTable = newTable[string, seq[byte]]()
-      let command = "cat input.txt > out/module.dll; " &
-        (if present: "cp out/module.dll out/module.lib; " else: "") &
-        "printf 'out/module.dll: input.txt\\n' > artifact.d"
-      let link = action("conditional-" & mode, @[sh, "-c", command],
+      let command = "cat input.txt > out/module.dll" &
+        (if present: "; cp out/module.dll out/module.lib" else: "")
+      var link = action("conditional-" & mode, @[sh, "-c", command],
         cwd = work, inputs = @["input.txt"], outputs = @["out/module.dll"],
-        optionalOutputs = @["out/module.lib"], depfile = "artifact.d",
+        optionalOutputs = @["out/module.lib"],
         cacheable = true, actionCachePolicy = ffpHybrid,
         weakFingerprint = fingerprintForPayload(mode),
         governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      # The monitor's account of the run: it read its input.
+      let capture = TmpDir / ("capture-" & mode & ".iomon")
+      let raw = encodeCanonical(profileRecords(defaultHooksMonitorProfile()) &
+        @[MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+          osPid: 4242, threadId: 4242, path: work / "input.txt",
+          detail: "")])
+      var text = newString(raw.len)
+      if raw.len > 0:
+        copyMem(addr text[0], unsafeAddr raw[0], raw.len)
+      writeFile(capture, text)
+      link.monitorDepfile = capture
       var sourceConfig = producerConfig(TmpDir / ("source-" & mode), peer)
       sourceConfig.bypassRunQuota = true
       sourceConfig.enableCachedOutputRestore()

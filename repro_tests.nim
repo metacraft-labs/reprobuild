@@ -1158,6 +1158,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_published_record_states_evidence_source.nim",
+    binary: "build/test-bin/t_published_record_states_evidence_source",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim",
     binary: "build/test-bin/t_publishers_refuse_level1_records",
     defines: @[],

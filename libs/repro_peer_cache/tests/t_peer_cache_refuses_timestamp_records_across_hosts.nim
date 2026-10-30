@@ -470,6 +470,34 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     expect PeerMemoStoreError:
       discard encodeMemoEntry(sourceOnly)
 
+  test "a builtin's record is published; a depfile- or converter-evidenced one is not":
+    # Owner decision 2026-10-29 (Edge-Derived-Identities.md §3.4 item 1 rider,
+    # §10 decision 23): "builtins yes, depfiles no". Falsifiers: a rule that
+    # passes `format:` sources publishes the depfile cases; one that refuses
+    # every non-monitored source refuses the builtin.
+    let ws = newWorkspace("sources")
+    let cacheRoot = TmpDir / "sources" / "cache"
+    let record = producerRecord(ws, cacheRoot, ffpChecksum)
+    let ctx = contextFor(ws)
+    var cas = openCasStore(cacheRoot)
+    defer: cas.close()
+    let refusedStore = openPeerMemoStore(TmpDir / "sources" / "refused")
+    for source in [formatEvidence("make-depfile"),
+                   formatEvidence("msvc-includes"),
+                   convertedEvidence("repro-path-set")]:
+      let outcome = publishTwoPhase(refusedStore, cas, record, ctx,
+        attestor(), elComplete, source)
+      checkpoint($source & ": " & outcome.reason)
+      check not outcome.published
+      check source.format in outcome.reason
+    check refusedStore.weakFingerprints().len == 0
+    let store = openPeerMemoStore(TmpDir / "sources" / "memo")
+    let builtin = publishTwoPhase(store, cas, record, ctx, attestor(),
+      elComplete, BuiltinEvidence)
+    checkpoint(builtin.reason)
+    check builtin.published
+    check builtin.entry.evidenceSource == BuiltinEvidence
+
   test "the producer does not serve a non-conforming entry already in its memo store":
     # Found by the independent verification of M17 chunk 1. A memo store
     # outlives the build that wrote it: entries a pre-M17 build of this host
@@ -511,6 +539,8 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     let legacyTimestamp = stored(tsRecord, elUnstated, stale)
     let legacyChecksum = stored(csRecord, elUnstated, stale)
     let level1 = stored(csRecord, elKnownScopeLoss, stale)
+    let depfile = stored(csRecord, elComplete, stale,
+      formatEvidence("make-depfile"))
     let conforming = stored(csRecord, elComplete, stale)
     let node = PeerCacheHost(
       config: PeerCacheConfig(trustMode: tmTls, trustProfile: tpHardened),
@@ -519,7 +549,8 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     let reader = entryReaderFor(node)
     for (label, entry) in [("legacy timestamp entry", legacyTimestamp),
                            ("legacy entry stating no level", legacyChecksum),
-                           ("Level-1 entry", level1)]:
+                           ("Level-1 entry", level1),
+                           ("make-depfile entry", depfile)]:
       checkpoint(label)
       check reader(entry.weakFingerprint, entry.strongFingerprint).isNone
       # Not re-attested either: the stored entry keeps its old signature.
@@ -561,7 +592,12 @@ suite "M17: the peer-cache CONSUMER refuses records that may not cross hosts":
       ("Level-1 record", csRecord, csCache, elKnownScopeLoss,
        BuiltinEvidence, "Level 1"),
       ("legacy entry stating no level", csRecord, csCache, elUnstated,
-       UnstatedEvidence, "version 2")]
+       UnstatedEvidence, "version 2"),
+      # Owner decision 2026-10-29: a record evidenced by a depfile stays on
+      # its host; an older or non-conforming producer that publishes one is
+      # refused here.
+      ("make-depfile record", csRecord, csCache, elComplete,
+       formatEvidence("make-depfile"), "make-depfile")]
     for i, (label, record, producerCache, level, source, named) in cases:
       let consumerCache = TmpDir / "install" / ("consumer-" & $i)
       var cas = openCasStore(consumerCache)
@@ -754,6 +790,8 @@ suite "M17: the LOOKUP refuses records that may not cross hosts, over real TLS":
         if entry.endsWith("main.c"): ReadOfDirectory else: here)
     let declaredCtx = inject(csRecord, csCache, elComplete, "declared",
       declared = @[mainC])
+    let depfileCtx = inject(csRecord, csCache, elComplete, "depfile",
+      source = formatEvidence("make-depfile"))
     var hostB = startPeerCacheHost(
       tlsConfig(nodeB, seeds = @[initEndpoint("127.0.0.1", hostA.actualPort)]),
       nodeB.identity.hostId, cacheRoot = cacheB)
@@ -833,4 +871,13 @@ suite "M17: the LOOKUP refuses records that may not cross hosts, over real TLS":
     check DeclaredReadEntryTag & mainC in
       decodePeerPathSet(agrees.bundle.pathSetBytes)
     check hostB.client.suspectMarks == 0
+    # Owner decision 2026-10-29 ("builtins yes, depfiles no"): an entry whose
+    # signed evidence source is a depfile is refused as a miss, before any
+    # output blob is fetched; the builtin entries above were served.
+    let depfile = waitFor fetchTwoPhase(hostB.client, depfileCtx,
+      localReaderFor(@[storageB]))
+    checkpoint("make-depfile entry: " & depfile.reason)
+    check not depfile.hit
+    check depfile.publicationRuleMisses == 1
+    check "make-depfile" in depfile.reason
     check hostB.client.suspectMarks == 0

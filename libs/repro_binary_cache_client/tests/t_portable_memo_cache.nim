@@ -457,6 +457,19 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     checkpoint(src.reason)
     check src.hit.isNone
     check "evidence source" in src.reason
+    # And one whose evidence is a depfile, not the monitor or a builtin
+    # (owner decision 2026-10-29, "builtins yes, depfiles no"): refused by
+    # the consumer whatever its signer. Falsifier: a rule that passes
+    # `format:` sources takes it.
+    var depfile = honest
+    depfile.evidenceSource = formatEvidence("make-depfile")
+    let depStage = TmpDir / "legacy-stage-depfile"
+    stageMemoRecord(depfile, depStage)
+    publishStaged(depStage)
+    let dep = lookupRemoteMemo(remote("legacy-c5"), rootsOf(consumer), weak)
+    checkpoint(dep.reason)
+    check dep.hit.isNone
+    check "make-depfile" in dep.reason
     # Control: the honest (monitored) record, republished, is used.
     let honestStage = TmpDir / "legacy-stage-honest"
     stageMemoRecord(honest, honestStage)

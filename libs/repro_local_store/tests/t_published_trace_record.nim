@@ -399,6 +399,29 @@ suite "M17 chunk 2: the published-trace record rbpm-v2":
     check "names no observed input" in portableRecordRefusal(empty)
     empty.fixedOutput = true
     check portableRecordRefusal(empty) == ""
+    # Owner decision 2026-10-29 ("builtins yes, depfiles no"): a monitored
+    # or builtin record publishes; a record evidenced by a dependency report
+    # does not, whichever format or converter reported it, except a format
+    # EDI assigns to an edge kind (`nix-pure-flake`). Falsifiers: letting
+    # `nonMonitoredSourceRefusal` pass a `format:` source publishes the
+    # depfile record; refusing every non-monitored source refuses the
+    # builtin.
+    for source in [MonitoredEvidence, BuiltinEvidence,
+                   formatEvidence("nix-pure-flake")]:
+      record.evidenceSource = source
+      checkpoint($source)
+      check portableRecordRefusal(record) == ""
+    for source in [formatEvidence("make-depfile"),
+                   formatEvidence("msvc-includes"),
+                   formatEvidence("iomon"),
+                   formatEvidence("make-depfile+nix-pure-flake"),
+                   convertedEvidence("repro-path-set"),
+                   convertedEvidence("nix-pure-flake")]:
+      record.evidenceSource = source
+      checkpoint($source)
+      let refused = portableRecordRefusal(record)
+      check refused.len > 0
+      check source.format in refused
     record.evidenceSource = MonitoredEvidence
     # The text form parses back and rejects what no writer produces.
     var parsed: EvidenceSource

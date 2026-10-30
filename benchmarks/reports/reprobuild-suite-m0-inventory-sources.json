@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2460,
+    "nimTestBinaries": 2461,
     "pureUnitConsolidationGroups": 71,
     "pureUnitTests": 696,
-    "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2500
+    "staticallyDetectedRuntimeCompilerFlowTests": 132,
+    "testEntries": 2501
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1432,7 +1432,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1361,
+      "integration": 1362,
       "platform/destructive": 154,
       "pure unit": 696,
       "unclassified": 271
@@ -1643,9 +1643,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2460,
+    "nimTestBinaryCount": 2461,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2500
+    "testEntryCount": 2501
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2018,6 +2018,33 @@
         }
       ],
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cacheA",
+            "logA",
+            "output",
+            "readyFile",
+            "stateA",
+            "stopFile",
+            "wsA",
+            "wsB"
+          ],
+          "line": 196,
+          "path": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "result = execCmd(quoteShellCommand([cc, \"-O1\", \"-MD\", \"-MF\", \"out/hello.d\","
+        }
+      ],
+      "source": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim"
     },
     {
       "class": "graph-fixture",
@@ -9665,6 +9692,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_published_record_states_evidence_source",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_published_record_states_evidence_source.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_publishers_refuse_level1_records",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -11384,6 +11432,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "io_mon",
         "repro_build_engine",
         "repro_cas_store",
         "repro_hash",
@@ -11543,7 +11592,8 @@
         "repro_cli_support",
         "repro_hash",
         "repro_local_store",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
@@ -17649,7 +17699,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18040,14 +18090,15 @@
         "repro_cli_support",
         "repro_hash",
         "repro_local_store",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_peer_cache",
       "requiresReproBinary": true,
       "source": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -18061,7 +18112,8 @@
         "repro_cli_support",
         "repro_hash",
         "repro_local_store",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_peer_cache",
       "requiresReproBinary": true,

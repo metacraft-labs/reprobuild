@@ -31,11 +31,12 @@
 ## Where io-mon cannot prove detached-descendant quiescence
 ## (`NoTreeLifetimeGuard`: macOS; Windows too before io-mon 4d468bc), every
 ## monitored capture fails closed and the engine never publishes a monitored
-## edge (io-mon's normative platform limitation, upstream `7c606dbb2`).
-## There the action gathers its evidence from a make depfile it writes
-## instead — still a real, read-back report of what it consumed — so the
-## publish, the daemon-hosted serving and the remote hit are exercised on
-## every OS. On Linux it stays a monitored edge,
+## edge (io-mon's normative platform limitation, upstream `7c606dbb2`). The
+## action used to gather its evidence from a make depfile there instead; since
+## the owner decision of 2026-10-29 (Edge-Derived-Identities.md §3.4 item 1
+## rider, "builtins yes, depfiles no") a depfile-evidenced record does not
+## cross hosts, so on such a platform this edge has nothing to publish and the
+## gate is skipped with that reason. Everywhere else it is a monitored edge,
 ## which also covers the `mkdir -p build` probe described below.
 ##
 ## Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.6): the action is
@@ -58,6 +59,7 @@ import std/[json, os, osproc, streams, strtabs, strutils, tables, tempfiles,
 
 import repro_test_support
 import repro_test_support/descendant_guard_expectations
+import repro_test_support/reasoned_skip
 
 import ../../libs/repro_peer_cache/tests/m7_test_pki
 import repro_local_store
@@ -110,18 +112,9 @@ proc writeProject(projectRoot: string) =
   ## 2026-10-16-action-created-directories-recorded-as-post-run-inputs);
   ## the consumer checkout here has no `build/` until the hit restores it.
   ##
-  ## Without a tree-lifetime guard (see the module doc) the action also
-  ## writes a make depfile naming its input, named as its depfile, so its
-  ## evidence is that report rather than a capture that always fails closed.
   createDir(projectRoot)
   writeFile(projectRoot / "input.txt", InputText)
-  let script = "set -eu\nmkdir -p build\ncat input.txt > build/artifact.txt\n" &
-    (if NoTreeLifetimeGuard:
-       "printf 'build/artifact.txt: input.txt\\n' > build/artifact.d\n"
-     else: "")
-  let depfileArg =
-    if NoTreeLifetimeGuard: "        depfile = \"build/artifact.d\",\n"
-    else: ""
+  let script = "set -eu\nmkdir -p build\ncat input.txt > build/artifact.txt\n"
   writeFile(projectRoot / "reprobuild.nim",
     "import repro_project_dsl\n\n" &
     "package daemonPeerCacheM0:\n" &
@@ -139,7 +132,6 @@ proc writeProject(projectRoot: string) =
       "]),\n" &
     "        inputs = @[\"input.txt\"],\n" &
     "        outputs = @[\"build/artifact.txt\"],\n" &
-    depfileArg &
     "        cacheable = true,\n" &
     "        actionCachePolicy = acfpChecksum)\n" &
     "      defaultBuildAction(action)\n")
@@ -293,88 +285,100 @@ proc memoEntries(cacheRoot: string): seq[string] =
     if path.endsWith(".rpme"):
       result.add(path.extractFilename)
 
+proc runDaemonRoundTrip() =
+  ## The gate (see the module doc).
+  let base = createTempDir("repro-m0-daemon-pc-", "")
+  var nodeA = newNode(base, "a")
+  var nodeB = newNode(base, "b")
+  let wsA = base / "ws-a"
+  let wsB = base / "ws-b"
+  writeProject(wsA)
+  writeProject(wsB)
+  mutualTrust([nodeA.pki, nodeB.pki])
+  defer:
+    stopDaemon(nodeB)
+    stopDaemon(nodeA)
+    removeDir(base)
+
+  # 1. Daemon A, peer cache on, no seeds.
+  startDaemon(nodeA, "lan://127.0.0.0/8?multicast=0&tls=1")
+  let portA = nodeA.peerCachePort()
+  check portA > 0
+  # The declared interface — loopback — and never a wildcard.
+  check readFile(nodeA.stateDir / "peer-cache-endpoint").startsWith(
+    "127.0.0.1:")
+
+  # 2. The producer build runs through daemon A, then its CLI exits.
+  let producer = buildThroughDaemon(nodeA, wsA)
+  checkpoint("producer build:\n" & producer.output)
+  if producer.code != 0:
+    checkpoint("daemon A log:\n" & nodeA.daemonLog())
+  ensure producer.code == 0
+  check readFile(wsA / "build" / "artifact.txt") == InputText
+  let producerAction = actionReport(producer.output)
+  ensure not producerAction.isNil
+  check producerAction{"launched"}.getBool()
+  # The worker published into ws-a's action-cache root.
+  let publishedA = memoEntries(nodeA.cacheRoot)
+  check publishedA.len >= 1
+  # M17: what crosses hosts is a checksum (or hybrid) Level-0 record.
+  for published in memoEntryRecords(nodeA.cacheRoot):
+    check published.level == elComplete
+    check published.policy in {ffpChecksum, ffpHybrid}
+  # The producer CLI has exited (runShell waited for it); daemon A has not.
+  check nodeA.process.running
+
+  # 3. Daemon B, seeded with A.
+  startDaemon(nodeB,
+    "lan://127.0.0.0/8?multicast=0&tls=1&seeds=127.0.0.1:" & $portA)
+  let connectDeadline = epochTime() + 30.0
+  while nodeB.statusInt("peers_connected") < 1 and
+      epochTime() < connectDeadline:
+    sleep(50)
+  check nodeB.statusInt("peers_connected") >= 1
+  let servedBefore = nodeA.statusInt("memo_requests_served")
+  let fetchedBefore = nodeA.statusInt("fetch_hits_served")
+
+  # 4. The consumer build through daemon B is served by daemon A.
+  let consumer = buildThroughDaemon(nodeB, wsB)
+  checkpoint("consumer build:\n" & consumer.output)
+  if consumer.code != 0:
+    checkpoint("daemon B log:\n" & nodeB.daemonLog())
+  ensure consumer.code == 0
+  check readFile(wsB / "build" / "artifact.txt") == InputText
+  let consumerAction = actionReport(consumer.output)
+  ensure not consumerAction.isNil
+  check not consumerAction{"launched"}.getBool()
+  check consumerAction{"cacheDecision"}.getStr() in ["hit", "cdHit"]
+  check consumer.output.contains("hits=1")
+
+  # Daemon A — not any CLI — answered the two-phase lookup.
+  var servedAfter = nodeA.statusInt("memo_requests_served")
+  var fetchedAfter = nodeA.statusInt("fetch_hits_served")
+  let statusDeadline = epochTime() + 10.0
+  while (servedAfter < servedBefore + 2 or fetchedAfter < fetchedBefore + 2) and
+      epochTime() < statusDeadline:
+    sleep(50)
+    servedAfter = nodeA.statusInt("memo_requests_served")
+    fetchedAfter = nodeA.statusInt("fetch_hits_served")
+  checkpoint("daemon A status: " & $nodeA.status())
+  check servedAfter >= servedBefore + 2   # selectors + memo entry
+  check fetchedAfter >= fetchedBefore + 2 # PathSet blob + artifact blob
+  # B keeps serving what it fetched: A's selector is now in B's store too.
+  for entry in publishedA:
+    check entry in memoEntries(nodeB.cacheRoot)
+  check nodeA.process.running
+  check nodeB.process.running
+
 suite "Distributed-Execution M0: daemon-hosted peer cache":
 
   test "t_daemon_peer_cache_survives_cli_exit":
-    let base = createTempDir("repro-m0-daemon-pc-", "")
-    var nodeA = newNode(base, "a")
-    var nodeB = newNode(base, "b")
-    let wsA = base / "ws-a"
-    let wsB = base / "ws-b"
-    writeProject(wsA)
-    writeProject(wsB)
-    mutualTrust([nodeA.pki, nodeB.pki])
-    defer:
-      stopDaemon(nodeB)
-      stopDaemon(nodeA)
-      removeDir(base)
-
-    # 1. Daemon A, peer cache on, no seeds.
-    startDaemon(nodeA, "lan://127.0.0.0/8?multicast=0&tls=1")
-    let portA = nodeA.peerCachePort()
-    check portA > 0
-    # The declared interface — loopback — and never a wildcard.
-    check readFile(nodeA.stateDir / "peer-cache-endpoint").startsWith(
-      "127.0.0.1:")
-
-    # 2. The producer build runs through daemon A, then its CLI exits.
-    let producer = buildThroughDaemon(nodeA, wsA)
-    checkpoint("producer build:\n" & producer.output)
-    if producer.code != 0:
-      checkpoint("daemon A log:\n" & nodeA.daemonLog())
-    ensure producer.code == 0
-    check readFile(wsA / "build" / "artifact.txt") == InputText
-    let producerAction = actionReport(producer.output)
-    ensure not producerAction.isNil
-    check producerAction{"launched"}.getBool()
-    # The worker published into ws-a's action-cache root.
-    let publishedA = memoEntries(nodeA.cacheRoot)
-    check publishedA.len >= 1
-    # M17: what crosses hosts is a checksum (or hybrid) Level-0 record.
-    for published in memoEntryRecords(nodeA.cacheRoot):
-      check published.level == elComplete
-      check published.policy in {ffpChecksum, ffpHybrid}
-    # The producer CLI has exited (runShell waited for it); daemon A has not.
-    check nodeA.process.running
-
-    # 3. Daemon B, seeded with A.
-    startDaemon(nodeB,
-      "lan://127.0.0.0/8?multicast=0&tls=1&seeds=127.0.0.1:" & $portA)
-    let connectDeadline = epochTime() + 30.0
-    while nodeB.statusInt("peers_connected") < 1 and
-        epochTime() < connectDeadline:
-      sleep(50)
-    check nodeB.statusInt("peers_connected") >= 1
-    let servedBefore = nodeA.statusInt("memo_requests_served")
-    let fetchedBefore = nodeA.statusInt("fetch_hits_served")
-
-    # 4. The consumer build through daemon B is served by daemon A.
-    let consumer = buildThroughDaemon(nodeB, wsB)
-    checkpoint("consumer build:\n" & consumer.output)
-    if consumer.code != 0:
-      checkpoint("daemon B log:\n" & nodeB.daemonLog())
-    ensure consumer.code == 0
-    check readFile(wsB / "build" / "artifact.txt") == InputText
-    let consumerAction = actionReport(consumer.output)
-    ensure not consumerAction.isNil
-    check not consumerAction{"launched"}.getBool()
-    check consumerAction{"cacheDecision"}.getStr() in ["hit", "cdHit"]
-    check consumer.output.contains("hits=1")
-
-    # Daemon A — not any CLI — answered the two-phase lookup.
-    var servedAfter = nodeA.statusInt("memo_requests_served")
-    var fetchedAfter = nodeA.statusInt("fetch_hits_served")
-    let statusDeadline = epochTime() + 10.0
-    while (servedAfter < servedBefore + 2 or fetchedAfter < fetchedBefore + 2) and
-        epochTime() < statusDeadline:
-      sleep(50)
-      servedAfter = nodeA.statusInt("memo_requests_served")
-      fetchedAfter = nodeA.statusInt("fetch_hits_served")
-    checkpoint("daemon A status: " & $nodeA.status())
-    check servedAfter >= servedBefore + 2   # selectors + memo entry
-    check fetchedAfter >= fetchedBefore + 2 # PathSet blob + artifact blob
-    # B keeps serving what it fetched: A's selector is now in B's store too.
-    for entry in publishedA:
-      check entry in memoEntries(nodeB.cacheRoot)
-    check nodeA.process.running
-    check nodeB.process.running
+    if NoTreeLifetimeGuard:
+      skip("io-mon cannot prove detached-descendant quiescence on this " &
+        "platform, so every monitored capture fails closed and no monitored " &
+        "edge is published; since the owner decision of 2026-10-29 a " &
+        "depfile-evidenced edge does not cross hosts either " &
+        "(Edge-Derived-Identities.md §3.4 item 1 rider), so daemon A has " &
+        "nothing to serve")
+    else:
+      runDaemonRoundTrip()
