@@ -944,6 +944,51 @@ const LibSubdirs = [
   "lib/aarch64-linux-gnu",
 ]
 
+proc archiveObjectHeader(archive: string): string =
+  ## The first member of the ar(5) archive `archive` whose data opens with an
+  ## object header (ELF, thin or universal Mach-O), or "" when none does.
+  ## NimScript mirror of `archiveMatchesHostArch` in
+  ## `repro_interface_artifacts`; keep the two in step. Members follow the
+  ## common layout (https://man.freebsd.org/cgi/man.cgi?query=ar&sektion=5):
+  ## a 60-byte header after the 8-byte magic, name in bytes 0..15, decimal
+  ## size in 48..57, data padded to an even offset. The GNU `/` and `//`
+  ## tables and the BSD `__.SYMDEF` are skipped because their data is no
+  ## object header; a BSD `#1/N` name prefixes the data with N name bytes. A
+  ## malformed header, or more than `MaxMembers`, yields "" (accepted).
+  const MaxMembers = 4096
+  proc isObjectHeader(at: int): bool =
+    if at + 4 > archive.len:
+      return false
+    let m = archive[at .. at + 3]
+    m == "\x7FELF" or m == "\xCF\xFA\xED\xFE" or m == "\xCE\xFA\xED\xFE" or
+      m == "\xCA\xFE\xBA\xBE"
+  var pos = 8
+  for _ in 0 ..< MaxMembers:
+    if pos + 60 > archive.len:
+      return ""
+    let name = archive[pos .. pos + 15]
+    var memberSize: int
+    try:
+      memberSize = parseInt(archive[pos + 48 .. pos + 57].strip())
+    except ValueError:
+      return ""
+    if memberSize < 0:
+      return ""
+    var dataPos = pos + 60
+    var dataLen = memberSize
+    if name.startsWith("#1/"):
+      var nameLen: int
+      try:
+        nameLen = parseInt(name[3 .. ^1].strip())
+      except ValueError:
+        return ""
+      dataPos += nameLen
+      dataLen -= nameLen
+    if dataLen >= 8 and isObjectHeader(dataPos):
+      return archive[dataPos ..< min(archive.len, dataPos + 512)]
+    pos = pos + 60 + memberSize + (memberSize and 1)
+  ""
+
 proc libMatchesTargetArch(libFile: string): bool =
   ## NimScript mirror of `soMatchesHostArch` in
   ## `libs/repro_interface_artifacts/src/repro_interface_artifacts.nim`:
@@ -969,14 +1014,24 @@ proc libMatchesTargetArch(libFile: string): bool =
   ## (`EI_DATA`, byte 5) and `e_machine` (bytes 18-19); a thin Mach-O its
   ## word size and `cputype`; a universal Mach-O must carry a slice for the
   ## target `cputype`. An ELF never matches a Darwin target, a Mach-O never
-  ## a non-Darwin one. Anything unclassified -- a static archive, a linker
-  ## script, a short file, an unknown target machine -- is accepted and left
-  ## to the linker, as before this filter existed.
+  ## a non-Darwin one. A static archive is judged by its first member that
+  ## carries an object header (`archiveObjectHeader`): a cross-build leaves
+  ## `sqlite-static-aarch64-unknown-linux-musl` in the store with only a
+  ## `libsqlite3.a`, and an unclassified archive let the glob below hand an
+  ## x86-64 link that directory (`ld: skipping incompatible … libsqlite3.a`,
+  ## `cannot find -lsqlite3`; measured 2026-10-30). Anything else
+  ## unclassified -- a linker script, a short file, an unknown target
+  ## machine -- is accepted and left to the linker, as before this filter
+  ## existed.
   if not repoFileExists(libFile):
     return true
-  let hdr = readFile(repoPath(libFile))
+  var hdr = readFile(repoPath(libFile))
   if hdr.len < 8:
     return true
+  if hdr.startsWith("!<arch>\n"):
+    hdr = archiveObjectHeader(hdr)
+    if hdr.len < 8:
+      return true
   proc b(at: int): uint32 = uint32(ord(hdr[at]))
   proc le32(at: int): uint32 =
     b(at) or (b(at + 1) shl 8) or (b(at + 2) shl 16) or (b(at + 3) shl 24)

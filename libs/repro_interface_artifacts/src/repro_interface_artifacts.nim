@@ -6080,6 +6080,17 @@ proc nixLibFile(prefix, libraryName: string): string =
         return path
   ""
 
+const
+  # The size of the largest object-header prefix `soMatchesHostArch` reads: a
+  # fat header plus the slice table of any realistic universal binary (each
+  # ``fat_arch`` is 20 bytes).
+  HeaderBytes = 512
+  ArMagic = [byte('!'), byte('<'), byte('a'), byte('r'), byte('c'),
+             byte('h'), byte('>'), byte('\n')]
+
+proc objectHeaderMatchesHostArch(hdr: seq[byte]): bool
+proc archiveMatchesHostArch(f: File): bool
+
 proc soMatchesHostArch(libFile: string): bool =
   ## Guard the ``/nix/store`` globs (``nixPrefix``, ``nixLibDirIn``) and the
   ## other fallback candidates against picking a library this host's loader
@@ -6112,19 +6123,34 @@ proc soMatchesHostArch(libFile: string): bool =
   ## (https://www.sco.com/developers/gabi/latest/ch4.eheader.html) and
   ## ``<mach-o/loader.h>`` / ``<mach-o/fat.h>`` / ``<mach/machine.h>``.
   ##
-  ## Anything the header does not identify — a static archive (``.a``), a
-  ## linker script (glibc's ``libc.so`` is one), an unreadable or short file,
-  ## or a host machine absent from the tables below — is treated as a match:
-  ## the linker or loader decides, as it did before this guard existed.
-  # The size of the largest prefix this reads: a fat header plus the slice
-  # table of any realistic universal binary (each ``fat_arch`` is 20 bytes).
-  const HeaderBytes = 512
+  ## A static archive (``.a``) is judged by its first member that carries an
+  ## object header (see ``archiveMatchesHostArch``): a cross-build leaves
+  ## ``sqlite-static-aarch64-unknown-linux-musl`` in the store with only a
+  ## ``libsqlite3.a``, and an unclassified archive let ``nixLibDirIn`` hand an
+  ## x86-64 link that directory (``ld: skipping incompatible … libsqlite3.a``,
+  ## ``cannot find -lsqlite3``; measured 2026-10-30).
+  ##
+  ## Anything else the header does not identify — a linker script (glibc's
+  ## ``libc.so`` is one), an unreadable or short file, or a host machine
+  ## absent from the tables below — is treated as a match: the linker or
+  ## loader decides, as it did before this guard existed.
   var f: File
   if not open(f, extendedPath(libFile)):
     return true
   defer: close(f)
   var hdr: array[HeaderBytes, byte]
   let got = readBytes(f, hdr, 0, HeaderBytes)
+  if got < 8:
+    return true
+  if hdr[0 ..< ArMagic.len] == ArMagic:
+    return archiveMatchesHostArch(f)
+  objectHeaderMatchesHostArch(hdr[0 ..< got])
+
+proc objectHeaderMatchesHostArch(hdr: seq[byte]): bool =
+  ## The header test of ``soMatchesHostArch`` over bytes already read:
+  ## ``hdr`` is a file's (or an archive member's) first ``HeaderBytes`` at
+  ## most.
+  let got = hdr.len
   if got < 8:
     return true
   proc le32(at: int): uint32 =
@@ -6202,6 +6228,71 @@ proc soMatchesHostArch(libFile: string): bool =
       if be32(8 + i * 20) == hostCpuType:
         return true
     false
+
+proc isObjectHeader(hdr: openArray[byte]): bool =
+  ## Whether ``hdr`` opens with a magic ``objectHeaderMatchesHostArch``
+  ## classifies: ELF, or a thin or universal Mach-O.
+  if hdr.len < 4:
+    return false
+  (hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and hdr[2] == byte('L') and
+   hdr[3] == byte('F')) or
+  (hdr[0] in [0xCF'u8, 0xCE'u8] and hdr[1] == 0xFA'u8 and
+   hdr[2] == 0xED'u8 and hdr[3] == 0xFE'u8) or
+  (hdr[0] == 0xCA'u8 and hdr[1] == 0xFE'u8 and hdr[2] == 0xBA'u8 and
+   hdr[3] == 0xBE'u8)
+
+proc archiveMatchesHostArch(f: File): bool =
+  ## Classify a static archive by the first member whose data opens with an
+  ## object header; the archive's own header says nothing about the
+  ## architecture. ``f`` is positioned anywhere; the walk starts after the
+  ## 8-byte global header. Members follow the common ar(5) layout
+  ## (https://man.freebsd.org/cgi/man.cgi?query=ar&sektion=5): a 60-byte
+  ## header whose name is bytes 0..15 and whose decimal size is bytes 48..57,
+  ## data padded to an even offset. The GNU symbol table (``/``) and long-name
+  ## table (``//``) and the BSD ``__.SYMDEF`` are skipped because their data
+  ## is no object header; a BSD ``#1/N`` long name prefixes the data with N
+  ## bytes of name. An archive with no classifiable member (empty, or a
+  ## symbol table only), a malformed header or an over-long walk is accepted
+  ## and left to the linker, as the unclassified case always was.
+  const MaxMembers = 4096
+  let total = getFileSize(f)
+  var pos = int64(ArMagic.len)
+  for _ in 0 ..< MaxMembers:
+    if pos + 60 > total:
+      return true
+    setFilePos(f, pos)
+    var mh: array[60, byte]
+    if readBytes(f, mh, 0, 60) < 60:
+      return true
+    var name = ""
+    for i in 0 ..< 16: name.add(char(mh[i]))
+    var sizeText = ""
+    for i in 48 ..< 58: sizeText.add(char(mh[i]))
+    var memberSize: int64
+    try:
+      memberSize = parseBiggestInt(sizeText.strip())
+    except ValueError:
+      return true
+    if memberSize < 0:
+      return true
+    var dataPos = pos + 60
+    var dataLen = memberSize
+    if name.startsWith("#1/"):
+      var nameLen: int
+      try:
+        nameLen = parseInt(name[3 .. ^1].strip())
+      except ValueError:
+        return true
+      dataPos += nameLen
+      dataLen -= nameLen
+    if dataLen >= 8:
+      setFilePos(f, dataPos)
+      var hdr: array[HeaderBytes, byte]
+      let got = readBytes(f, hdr, 0, min(HeaderBytes, int(dataLen)))
+      if isObjectHeader(hdr.toOpenArray(0, got - 1)):
+        return objectHeaderMatchesHostArch(hdr[0 ..< got])
+    pos = pos + 60 + memberSize + (memberSize and 1)
+  true
 
 proc nixPrefix(namePattern, header: string;
                libraryNames: openArray[string]): string =
