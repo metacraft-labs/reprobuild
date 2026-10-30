@@ -3,20 +3,36 @@
 ##
 ## M3b did the client-seed analog (substitute-first / build-from-source
 ## on miss) for the Windows client bootstrap. M4 is the apply-time
-## analog: when `repro infra apply` runs a profile that carries
-## build-action edges (extract this zip, run this config script, ...),
-## and a binary cache is configured (`REPRO_BINARY_CACHE_URL` set), the
-## apply PREFERS fetching each edge's OUTPUTS from the cache
-## (`bakBinaryCacheSubstitute`) instead of building them locally. On a
-## cache MISS (or when no cache is configured) it falls back to the
-## existing local build, then publishes the freshly-built outputs back
-## under the same content-addressable key so a subsequent fresh apply
-## hits.
+## analog: when `repro infra apply` (or `repro deploy-agent`, which runs
+## the same apply) runs a profile that carries build-action edges
+## (extract this zip, run this config script, ...), and a binary cache is
+## configured, the apply PREFERS fetching each edge's OUTPUTS from the
+## cache (`bakBinaryCacheSubstitute`) instead of building them locally.
+## On a cache MISS (or when no cache is configured) it falls back to the
+## existing local build.
 ##
-## Off-by-default: when `REPRO_BINARY_CACHE_URL` is unset,
-## `resolveBuildActionCacheConfig` returns `configured = false` and the
-## dispatcher takes the unchanged local-build path — behaviour is
-## byte-identical to pre-M4 `repro infra apply`.
+## Trust (Reprobuild-Binary-Cache-Fleet R1; Binary-Caches.md "Apply-time
+## substitution and publishing"). The configuration is the shared
+## `caches_config.resolveTrustedCacheConfig`, the same one the
+## provider-compile cache and `repro cache substitute` use:
+##
+##   * Substitution reads the caches in `caches.conf`
+##     (`/etc/repro/caches.conf`, then the per-user file, or only
+##     `REPRO_CACHES_CONFIG`), plus the back-compat `REPRO_BINARY_CACHE_URL`
+##     cache. Every endpoint enforces its `trusted-public-keys`: an entry
+##     signed by any other key is a MISS, and a cache with no trusted key
+##     is never substituted from. This path once built its endpoint by hand
+##     with an empty signer list and no trust enforcement, which accepted an
+##     entry signed by whatever key the manifest itself carried.
+##   * Publish-on-miss happens only on a host the operator made a
+##     publisher, by pointing `REPRO_BINARY_CACHE_KEY_PATH` and
+##     `REPRO_BINARY_CACHE_CERT_PATH` at an existing keypair. A host that
+##     was not given a key never generates one and never publishes. This
+##     path once auto-generated a producer key and published every local
+##     build, which made every applying host a publisher.
+##
+## Off-by-default: with no cache configured the dispatcher takes the
+## unchanged local-build path.
 ##
 ## Content-addressable key: the cache identity for a build-action edge
 ## folds the action's weak fingerprint (id + argv + cwd + outputs +
@@ -31,7 +47,6 @@
 import std/[os, strutils]
 
 import repro_binary_cache_client
-import repro_binary_cache_client/engine_publisher as bcEnginePublisher
 import repro_build_engine
 import repro_hash
 
@@ -41,21 +56,11 @@ import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types as
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 type
-  BuildActionCacheConfig* = object
-    ## Resolved binary-cache configuration for the action-edge half of
-    ## an apply. `configured = false` (the default when
-    ## `REPRO_BINARY_CACHE_URL` is unset) turns the whole M4 path off:
-    ## the dispatcher builds locally, exactly as before.
-    configured*: bool
-    endpoint*: string
-    keyPath*: string
-    certPath*: string
-    keypairOk*: bool
-      ## True when an operator-provisioned signing keypair
-      ## (`REPRO_BINARY_CACHE_KEY_PATH` + `REPRO_BINARY_CACHE_CERT_PATH`,
-      ## both present) is available. Publish-on-miss needs it; a false
-      ## value means we can still SUBSTITUTE but do not PUBLISH — a cache
-      ## miss then builds locally without re-populating the cache.
+  BuildActionCacheConfig* = TrustedCacheConfig
+    ## Resolved binary-cache configuration for the action-edge half of an
+    ## apply. `configured = false` turns the whole M4 path off: the
+    ## dispatcher builds locally, exactly as before. `keypairOk` gates
+    ## publish-on-miss and is true only for an operator-supplied keypair.
 
   SubstituteAttempt* = object
     ## Result of one `trySubstituteBuildAction` call.
@@ -64,36 +69,16 @@ type
     bytesFetched*: int64
 
 proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
-  ## Read `REPRO_BINARY_CACHE_URL` (+ key/cert paths). When the URL is
-  ## unset the cache is NOT configured and the result's other fields are
-  ## empty — the dispatcher's local-build path is unchanged.
-  ##
-  ## Publishing needs an operator-provisioned keypair. This path used to
-  ## mint one on the fly (as the engine's `BinaryCachePublisher` does for
-  ## developer builds), which made every host that ran an apply a cache
-  ## publisher under a key it invented. An apply runs privileged and its
-  ## outputs are consumed by other hosts' applies, so an invented key is
-  ## either useless (nobody trusts it) or dangerous (a consumer that
-  ## trusts unanchored keys accepts anything it signs). Only a keypair
-  ## somebody deliberately provisioned is used; without one, a miss
-  ## builds locally and publishes nothing.
-  let url = getEnv("REPRO_BINARY_CACHE_URL", "")
-  if url.len == 0:
-    result.configured = false
-    return
-  result.configured = true
-  result.endpoint = url
-  let env = bcEnginePublisher.readPublisherEnv()
-  var keyPath = env.keyPath
-  var certPath = env.certPath
-  let envPathsUsable = keyPath.len > 0 and certPath.len > 0 and
-    fileExists(keyPath) and fileExists(certPath)
-  if envPathsUsable:
-    result.keyPath = keyPath
-    result.certPath = certPath
-    result.keypairOk = true
-  else:
-    result.keypairOk = false
+  ## Resolve substitution trust and publish credentials once per dispatch.
+  ## See the module header: endpoints come from `caches.conf` with their
+  ## trust anchors enforced, and a publish keypair is never generated.
+  resolveTrustedCacheConfig()
+
+proc shouldPublishBuildActionOutputs*(cfg: BuildActionCacheConfig): bool =
+  ## Whether a freshly built edge's outputs are published back. Only a host
+  ## configured as a publisher (cache configured AND an operator-supplied
+  ## keypair present) publishes; every other host is a pure consumer.
+  cfg.configured and cfg.keypairOk and cfg.publishEndpoint.len > 0
 
 # ---------------------------------------------------------------------------
 # Content-addressable cache identity for a build-action edge.
@@ -285,20 +270,11 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
   let extractDir = scratchRoot / "extract"
   try:
     createDir(store)
-    # The SAME trust-enforcing endpoint list the `substitute` CLI uses:
-    # every configured cache with its trusted producer keys, plus the
-    # `REPRO_BINARY_CACHE_URL` back-compat cache, which trusts only the
-    # producer cert at `REPRO_BINARY_CACHE_CERT_PATH` when one is
-    # provisioned. A cache with no trusted key is never substituted from
-    # (default-untrusted). Building the endpoint by hand with an empty key
-    # list, as this path once did, accepted an entry signed by ANY key --
-    # including one an attacker minted -- and materialised its outputs
-    # into a privileged apply.
-    let endpoints = loadEndpoints()
-    if endpoints.len == 0:
-      result.reason = "no binary cache endpoint is configured"
-      return
-    let res = substituteInProcess(entryHex, store, endpoints)
+    # The configured endpoints, NOT one built here: each carries its
+    # `caches.conf` trust anchors with `enforceTrust` set, so an entry
+    # signed by an unanchored key (or served by a cache with no anchors)
+    # is rejected before any payload byte is fetched and reads as a miss.
+    let res = substituteInProcess(entryHex, store, cfg.endpoints)
     if not res.ok or res.outcomes.len == 0:
       result.reason = "cache miss for " & entryHex &
         (if res.reason.len > 0: ": " & res.reason else: "")
@@ -334,12 +310,15 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
   ## Publish a freshly-built edge's OUTPUTS to the binary cache under
   ## the same content-addressable key `trySubstituteBuildAction` reads.
   ## Best-effort: any failure returns `ok = false` with a reason but
-  ## MUST NOT abort the apply — the box already converged locally. When
-  ## no signing keypair is available (`cfg.keypairOk == false`) we skip
-  ## publishing entirely.
-  if not cfg.configured or not cfg.keypairOk:
+  ## MUST NOT abort the apply — the box already converged locally. A host
+  ## that is not configured as a publisher (no operator-supplied keypair,
+  ## see `shouldPublishBuildActionOutputs`) publishes nothing, and no key
+  ## is ever generated here.
+  if not shouldPublishBuildActionOutputs(cfg):
     return (ok: false,
-            reason: "publish skipped (no cache / no signing keypair)")
+            reason: "publish skipped: this host is not configured as a " &
+              "cache publisher (REPRO_BINARY_CACHE_KEY_PATH / " &
+              "REPRO_BINARY_CACHE_CERT_PATH)")
   let stageDir = scratchRoot / "publish-stage"
   try:
     removeDir(stageDir)
@@ -348,12 +327,19 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
               reason: "no publishable outputs staged for " & action.id)
     let idy = buildActionCacheIdentity(action, scratchRoot)
     let entryHex = deriveCacheEntryKeyHex(idy)
+    # `loadOrGenerateKeypair` GENERATES when a file is missing. The resolver
+    # saw both files, but re-check here so a key removed since then is a
+    # skipped publish rather than a freshly minted producer identity.
+    if not (fileExists(cfg.keyPath) and fileExists(cfg.certPath)):
+      return (ok: false,
+              reason: "publish skipped: the configured publisher keypair " &
+                "is no longer present")
     let keypair = peerAuth.loadOrGenerateKeypair(cfg.certPath, cfg.keyPath)
     let pubReq = PublishInProcessRequest(
       entryKeyHex: entryHex,
       prefixDir: stageDir,
       identity: idy,
-      endpoint: cfg.endpoint,
+      endpoint: cfg.publishEndpoint,
       keypair: keypair)
     let pubRes = publishInProcess(pubReq)
     if pubRes.ok:
