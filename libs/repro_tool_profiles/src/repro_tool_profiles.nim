@@ -481,7 +481,11 @@ proc splitPathList(pathValue: string): seq[string] =
 
 proc configuredProbes*(packageSelector, executableName: string): seq[
     ToolProbeSpec] =
-  discard packageSelector
+  if (packageSelector == "7zip" or packageSelector.startsWith("7zip@")) and
+      executableName.toLowerAscii() in ["7z", "7z.exe"]:
+    # 7-Zip has no --version switch; `i` prints the version banner and
+    # supported formats without opening or modifying an archive.
+    return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["i"])]
   if executableName == "tmux":
     return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["-V"])]
   if executableName == "sddm":
