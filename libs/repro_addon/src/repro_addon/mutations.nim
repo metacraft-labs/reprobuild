@@ -75,6 +75,23 @@
 ##                                            ``PartOf=``/``BindsTo=``
 ##                                            implicit (no confirmed
 ##                                            stop-start of a dependent)
+## ``trigger-not-paused``                     a stop-start unit's active
+##                                            sockets/timers/paths are not
+##                                            paused across the switch
+## ``idle-unit-triggers-left-paused``         the triggers of a stop-start
+##                                            unit that ended before step 2
+##                                            are not started again
+## ``removed-exclusive-stop-unconfirmed``     a removed exclusive unit is
+##                                            stopped without confirming
+##                                            its control group is empty
+## ``unmanaged-predecessor-not-refused``      an unmanaged predecessor that
+##                                            runs, is enabled or can be
+##                                            triggered does not refuse the
+##                                            plan
+## ``exclusive-planned-by-active-state``      exclusive units are planned by
+##                                            ``ActiveState`` alone and no
+##                                            group is confirmed empty before
+##                                            a start (the pre-round-2 rule)
 ## ``reassert-required-by-boot``              the re-assert unit is wanted
 ##                                            by multi-user.target and
 ##                                            ``Requires=`` the store
@@ -142,6 +159,11 @@ const
                           "exclusive-exited-by-top-level-procs",
                           "plan-id-omits-unit-state",
                           "partof-not-propagated",
+                          "trigger-not-paused",
+                          "idle-unit-triggers-left-paused",
+                          "removed-exclusive-stop-unconfirmed",
+                          "unmanaged-predecessor-not-refused",
+                          "exclusive-planned-by-active-state",
                           "path-based-write-follows-links",
                           "scope-accepts-unnormalised-paths",
                           "reassert-required-by-boot",

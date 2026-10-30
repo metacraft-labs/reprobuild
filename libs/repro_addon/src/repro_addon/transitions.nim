@@ -96,10 +96,17 @@ type
     triggers*: seq[string] ## active units that can activate it (TriggeredBy)
     dependents*: seq[string]
                           ## the units a stop or restart of this one
-                          ## propagates to: systemd's ``ConsistsOf=`` (the
-                          ## units with ``PartOf=`` it) and ``BoundBy=``
-                          ## (``BindsTo=`` it). Each must have facts of its
+                          ## propagates to as a stop or restart: systemd's
+                          ## ``RequiredBy=``, ``RequisiteOf=``, ``BoundBy=``
+                          ## and ``ConsistsOf=``. Each must have facts of its
                           ## own in the same list.
+    stopDependents*: seq[string]
+                          ## the units a stop (or restart) of this one stops:
+                          ## its ``PropagatesStopTo=``
+    reloadDependents*: seq[string]
+                          ## its ``PropagatesReloadTo=``: a reload of this
+                          ## unit reloads them (no instance starts; named in
+                          ## the reason, not planned)
 
 proc running*(f: UnitFacts): bool =
   ## Is an instance of the unit alive? For an exclusive unit the control
@@ -107,7 +114,10 @@ proc running*(f: UnitFacts): bool =
   ## ``SendSIGKILL=no`` leaves its unit ``failed`` and its process alive,
   ## and planning a plain ``start`` (or skipping a removed unit) would run
   ## the successor beside it. An unknown population counts as alive.
-  f.active or (f.exclusive and f.alive != uaEmpty)
+  when mutated("exclusive-planned-by-active-state"):
+    f.active
+  else:
+    f.active or (f.exclusive and f.alive != uaEmpty)
 
 type ConflictsParseError* = object of ValueError
   ## A ``Conflicts=`` value the parser cannot resolve on its own (a
@@ -203,23 +213,37 @@ proc startEntries*(ts: seq[Transition]): seq[Transition] =
   for t in ts:
     if t.verb in {tvStart, tvRestart, tvReload, tvStopStart}: result.add(t)
 
+proc isProcessUnit*(unit: string): bool =
+  ## A unit that runs processes of its own and so can overlap: a service
+  ## or a scope. Targets, sockets, timers, paths, mounts and devices carry a
+  ## propagation on to their own dependents but are not themselves planned.
+  unit.endsWith(".service") or unit.endsWith(".scope")
+
 proc propagateStops*(ts: seq[Transition]; facts: seq[UnitFacts]):
     seq[Transition] =
-  ## systemd carries a stop of a unit to every unit with ``PartOf=`` or
-  ## ``BindsTo=`` it, and a restart as a restart of those units
-  ## (systemd.unit(5), ``PartOf=``, ``BindsTo=``); a start is not carried.
-  ## Left implicit, an exclusive dependent would be stopped and restarted
-  ## by systemd with nothing confirming that its old instance exited, and
-  ## a dependent of a ``stop-start`` unit would be stopped in step 2 and
-  ## never started again. So every running dependent of an entry that
-  ## stops (``stop``) or restarts (``restart``, ``stop-start``) a unit gets
-  ## an entry of its own, transitively: ``stop`` when the cause stops,
+  ## systemd carries an explicit stop or restart of a unit along its
+  ## propagating dependencies (systemd.unit(5); the atoms of
+  ## ``src/core/unit-dependency-atom.c``, systemd 252-260):
+  ##
+  ## - ``RequiredBy=`` (``Requires=`` it), ``RequisiteOf=`` (``Requisite=``
+  ##   it), ``BoundBy=`` (``BindsTo=`` it) and ``ConsistsOf=`` (``PartOf=``
+  ##   it): a stop as a stop, a restart as a restart (``dependents``);
+  ## - ``PropagatesStopTo=`` (systemd 249+): a stop, and the stop half of a
+  ##   restart, as a stop (``stopDependents``);
+  ##
+  ## and a start is carried along none of them. Left implicit, an exclusive
+  ## dependent would be stopped and restarted by systemd with nothing
+  ## confirming that its old instance exited, and a dependent of a
+  ## ``stop-start`` unit would be stopped in step 2 and never started
+  ## again. So the propagation is computed here, transitively, through
+  ## units of every type, and every running service or scope it reaches
+  ## gets an entry of its own: ``stop`` when what reaches it stops,
   ## ``stop-start`` when it restarts -- stopped (and, if exclusive,
-  ## confirmed) in step 2 and started in step 7 after its cause. A
+  ## confirmed exited) in step 2 and started in step 7 after its cause. A
   ## dependent's own ``restart``, ``reload``, ``start`` or ``leave`` (a
   ## ``restartIfChanged = false`` hold cannot hold a restart systemd
-  ## propagates) is replaced; a ``stop`` or ``stop-start`` already planned
-  ## stays.
+  ## propagates) is replaced; a planned ``stop`` stays, and a stop
+  ## reaching a planned ``stop-start`` makes it a ``stop``.
   result = ts
   var byUnit = initTable[string, int]()
   for i, f in facts: byUnit[f.unit] = i
@@ -227,38 +251,51 @@ proc propagateStops*(ts: seq[Transition]; facts: seq[UnitFacts]):
     for i, t in r:
       if t.unit == unit: return i
     -1
-  var work: seq[string]
+  # The work list carries what reaches a unit: whether it restarts, the
+  # entry the propagation started from (step 7 orders a dependent after
+  # it), and the chain for the reason.
+  var work: seq[tuple[unit: string; restarts: bool; anchor, chain: string]]
   for t in result:
-    if t.verb in {tvStop, tvRestart, tvStopStart}: work.add(t.unit)
+    if t.verb in {tvStop, tvRestart, tvStopStart}:
+      work.add((t.unit, t.verb in {tvRestart, tvStopStart}, t.unit, t.unit))
+  var seen = initTable[string, bool]()   # unit -> restarts, as visited
   var guard = 0
-  while work.len > 0 and guard < 10_000:
+  while work.len > 0 and guard < 100_000:
     inc guard
-    let cause = work.pop()
-    let ci = result.indexOf(cause)
-    if ci < 0 or cause notin byUnit: continue
-    let restarts = result[ci].verb in {tvRestart, tvStopStart}
-    for d in facts[byUnit[cause]].dependents:
+    let (cause, restarts, anchor, chain) = work.pop()
+    if cause notin byUnit: continue
+    let cf = facts[byUnit[cause]]
+    var edges: seq[tuple[unit: string; restarts: bool]]
+    for d in cf.dependents: edges.add((d, restarts))
+    for d in cf.stopDependents: edges.add((d, false))
+    for (d, r) in edges:
       if d notin byUnit or d == cause: continue
       let df = facts[byUnit[d]]
       if df.removed or not df.running: continue
-      let di = result.indexOf(d)
-      if di >= 0 and result[di].verb == tvStop: continue
-      if di >= 0 and result[di].verb == tvStopStart and restarts: continue
-      let why = (if restarts: "restarted with " else: "stopped with ") &
-        cause & " (PartOf=/BindsTo=)" &
-        (if df.exclusive: "; exclusive: confirmed exited in step 2" else: "")
-      var entry = Transition(unit: d, verb: (if restarts: tvStopStart else: tvStop),
-        reason: why, exclusive: df.exclusive,
-        predecessors: (if di >= 0: result[di].predecessors else: @[]),
-        triggers: (if restarts: df.triggers else: @[]))
-      if di >= 0:
-        if result[di].verb == tvStart and not restarts:
-          continue                 # not running yet: nothing to stop
-        result.delete(di)
-      # After its cause, so step 7 starts it after the unit it is part of.
-      let at = result.indexOf(cause)
-      result.insert(entry, at + 1)
-      work.add(d)
+      # Visit each unit once per kind; a stop dominates a restart.
+      if d in seen and (seen[d] == r or not seen[d]): continue
+      seen[d] = r
+      let link = chain & " -> " & d
+      if isProcessUnit(d):
+        let di = result.indexOf(d)
+        if di >= 0 and result[di].verb == tvStop:
+          discard                  # already stopped: stays stopped
+        elif di >= 0 and result[di].verb == tvStopStart and r:
+          discard                  # already a confirmed stop-start
+        elif not (di >= 0 and result[di].verb == tvStart):
+          let why = (if r: "restarted along " else: "stopped along ") &
+            link & " (propagating dependency)" &
+            (if df.exclusive: "; exclusive: confirmed exited in step 2" else: "")
+          let entry = Transition(unit: d, verb: (if r: tvStopStart else: tvStop),
+            reason: why, exclusive: df.exclusive,
+            predecessors: (if di >= 0: result[di].predecessors else: @[]),
+            triggers: (if r: df.triggers else: @[]))
+          if di >= 0: result.delete(di)
+          # After the entry the propagation started from, so step 7 starts
+          # it after that unit.
+          let at = result.indexOf(anchor)
+          result.insert(entry, at + 1)
+      work.add((d, r, (if isProcessUnit(d): d else: anchor), link))
 
 proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
   ## The §7.3 table over every unit, in the order of ``facts``. Stops of
@@ -342,7 +379,9 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
         triggers: f.triggers))
     elif f.reloadIfChanged and not f.fileChanged and not f.dropInsChanged:
       starts.add(Transition(unit: f.unit, verb: tvReload,
-        reason: why & " (reloadIfChanged)"))
+        reason: why & " (reloadIfChanged)" &
+          (if f.reloadDependents.len > 0: "; systemd also reloads " &
+             f.reloadDependents.join(", ") & " (PropagatesReloadTo=)" else: "")))
     else:
       starts.add(Transition(unit: f.unit, verb: tvRestart, reason: why))
   when mutated("partof-not-propagated"):

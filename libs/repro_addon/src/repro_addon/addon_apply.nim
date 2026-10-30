@@ -258,7 +258,7 @@ proc heldGenerations*(stateDir: string; ledger: Ledger; current: string):
   ## the invocation table the switches keep -- no clock involved.
   generationsHeldBy(runningManagedUnits(ledger),
     readInvocationTable(invocationTablePath(stateDir)), current,
-    generationUnitLookup(stateDir))
+    generationUnitLookup(stateDir), retained = generationRoots())
 
 proc isAddonHost*(stateDir = DefaultStateDir): bool =
   ## An add-on host is one whose state directory holds the ledger copy.
@@ -1585,7 +1585,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       let networkdInUse = nd.activeState == "active" or
         nd.unitFileState in ["enabled", "enabled-runtime", "linked",
                              "linked-runtime", "alias"]
-      let nwd = networkdForwardingRefusal(r.sysctlKey, networkdInUse)
+      let nwd = networkdRefusal(r.sysctlKey, r.sysctlValue, networkdInUse)
       if nwd.len > 0:
         raise newException(AddonCollisionError, "refusing " & r.address &
           ": " & nwd)
@@ -2125,7 +2125,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                  "alias"]:
               liveTriggers.add(t & " (" & tv.activeState & ", " &
                                tv.unitFileState & ")")
-          when not mutated("exclusive-as-plain-restart"):
+          when not mutated("unmanaged-predecessor-not-refused"):
             if pv.activeState == "active" or alive != uaEmpty or
                 pv.unitFileState in ["enabled", "enabled-runtime", "linked",
                                      "linked-runtime", "alias"] or
@@ -2173,16 +2173,20 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       observed(f)
       facts.add(f)
       factUnits.incl(r.diUnit)
-  # The units a stop or restart propagates to (PartOf=, BindsTo=), with
-  # facts of their own, transitively, so the plan can carry the stops and
-  # restarts systemd would otherwise make unannounced (§7.3).
+  # The units a stop or restart propagates to (RequiredBy=, RequisiteOf=,
+  # BoundBy=, ConsistsOf=, PropagatesStopTo=), with facts of their own,
+  # transitively through units of every type, so the plan can carry the
+  # stops and restarts systemd would otherwise make unannounced (§7.3).
   block:
     var i = 0
     while i < facts.len:
       if facts[i].activeState notin ["", "inactive"] or facts[i].removed or
           facts[i].alive != uaEmpty:
         facts[i].dependents = unitDependents(facts[i].unit)
-        for d in facts[i].dependents:
+        facts[i].stopDependents = unitStopDependents(facts[i].unit)
+        facts[i].reloadDependents = unitListProperty(facts[i].unit,
+                                                     "PropagatesReloadTo")
+        for d in facts[i].dependents & facts[i].stopDependents:
           if d in factUnits: continue
           let frag = unitProperty(d, "FragmentPath")
           var dExclusive = false
@@ -2227,7 +2231,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         inputs.add("unit\t" & f.unit)
       else:
         inputs.add("unit\t" & f.unit & "\t" & f.activeState & "\t" & $f.alive &
-          "\t" & f.triggers.join(",") & "\t" & f.dependents.join(","))
+          "\t" & f.triggers.join(",") & "\t" & f.dependents.join(",") &
+          "\t" & f.stopDependents.join(","))
         for pred in f.predecessors:
           inputs.add("predecessor\t" & pred & "\t" &
             readUnitProvision(pred).activeState & "\t" & $unitAliveness(pred))
@@ -2254,11 +2259,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   if opts.planOnly:
     return
 
-  # The invocation id every running managed unit has before the switch:
-  # one that differs at the commit was started by this switch (§5.2).
+  # The invocation id every running managed unit has just before step 2
+  # (taken in `beforeSet`, under the apply lock, after realise): one that
+  # differs at the commit was started during the switch (§5.2).
   var invocationsBefore = initTable[string, string]()
-  for u in runningManagedUnits(previous):
-    invocationsBefore[u.unit] = u.invocationId
+  # The units the switch itself starts or restarts in step 7.
+  var startedBySwitch = initHashSet[string]()
+  for t in result.transitions:
+    if t.verb in {tvStart, tvRestart, tvStopStart}: startedBySwitch.incl(t.unit)
 
   # Every resource is decided and nothing refused: the bytes adoptions and
   # reconciliations displace are kept now, before the first write.
@@ -2440,6 +2448,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         testSeamPause()
       marker.planId = planId
       writePendingMarker(stateDir, marker)
+      for u in runningManagedUnits(previous):
+        invocationsBefore[u.unit] = u.invocationId
       # Each unit is on record BEFORE it is stopped, paused or disabled,
       # so a crash or a refusal in the middle of step 2 loses none of them.
       let onStop: PreStopObserver = proc(u: string) =
@@ -2865,10 +2875,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # this switch (its invocation id changed) -- this one; otherwise what
     # the table said.
     let running = runningManagedUnits(newLedger)
-    let table = invocationsAfterSwitch(
-      readInvocationTable(invocationTablePath(stateDir)), running,
-      invocationsBefore, result.generationId, committedPrevious)
-    writeInvocationTable(invocationTablePath(stateDir), table)
+    let tablePath = invocationTablePath(stateDir)
+    let table = invocationsAfterSwitch(readInvocationTable(tablePath),
+      running, invocationsBefore, startedBySwitch, result.generationId,
+      committedPrevious, tableExisted = fileExists(tablePath))
+    writeInvocationTable(tablePath, table)
   result.retentionDropped = pruneGenerationRoots(result.generationId,
     committedPrevious, opts.retention.get(DefaultRetention),
     held = heldGenerations(stateDir, newLedger, result.generationId))

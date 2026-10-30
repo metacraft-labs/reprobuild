@@ -147,17 +147,24 @@ const
     ## whenever it configures a link. (``IPMasquerade=`` implies
     ## forwarding.)
 
-proc isForwardingKey*(key: string): bool =
-  ## ``net/ipv4/ip_forward`` and the per-interface ``forwarding`` knobs of
-  ## IPv4 and IPv6 -- what networkd's forwarding settings write.
+proc forwardingFamily*(key: string): string =
+  ## "ipv4" or "ipv6" for a forwarding knob (``net/ipv4/ip_forward``, the
+  ## per-interface ``forwarding`` of either family), "" otherwise.
   let k = sysctlNormalize(key)
-  k == "net/ipv4/ip_forward" or
-    (k.startsWith("net/ipv4/conf/") and k.endsWith("/forwarding")) or
-    (k.startsWith("net/ipv6/conf/") and k.endsWith("/forwarding"))
+  if k == "net/ipv4/ip_forward" or
+      (k.startsWith("net/ipv4/conf/") and k.endsWith("/forwarding")):
+    "ipv4"
+  elif k.startsWith("net/ipv6/conf/") and k.endsWith("/forwarding"):
+    "ipv6"
+  else: ""
+
+proc isForwardingKey*(key: string): bool =
+  forwardingFamily(key).len > 0
 
 const NetworkdLinkState* = "/run/systemd/netif/links"
-  ## networkd's runtime state, one file per link it manages, naming the
-  ## ``.network`` file applied to it (``NETWORK_FILE=``).
+  ## networkd's runtime state, one file per link it manages (named by the
+  ## link's ifindex), naming the ``.network`` file applied to it
+  ## (``NETWORK_FILE=``).
 
 proc networkFilesInUse*(root = "/"): seq[string] =
   ## The ``.network`` files networkd has applied to a link now. A file
@@ -173,6 +180,70 @@ proc networkFilesInUse*(root = "/"): seq[string] =
       if line.startsWith("NETWORK_FILE="):
         let f = line["NETWORK_FILE=".len .. ^1].strip()
         if f.len > 0 and f notin result: result.add(f)
+
+proc networkdManagedLinks*(root = "/"): seq[string] =
+  ## The interface names of the links networkd manages now: its runtime
+  ## state names them by ifindex, ``/sys/class/net/<name>/ifindex`` maps
+  ## the index to the name.
+  let base = if root == "/": "" else: root
+  let dir = base & NetworkdLinkState
+  if not dirExists(dir): return
+  var managed: seq[string]
+  for kind, path in walkDir(dir):
+    var text: string
+    try: text = readFile(path)
+    except IOError, OSError: continue
+    if "NETWORK_FILE=" in text and "NETWORK_FILE=\n" notin text:
+      managed.add(extractFilename(path))
+  let net = base & "/sys/class/net"
+  if not dirExists(net): return
+  for kind, path in walkDir(net):
+    var idx: string
+    try: idx = readFile(path / "ifindex").strip()
+    except IOError, OSError: continue
+    if idx in managed: result.add(extractFilename(path))
+
+proc boolSetting(v: string): string =
+  ## networkd's boolean spelling as a sysctl value, "" when it is not one.
+  case v.strip().toLowerAscii()
+  of "yes", "true", "1", "on": "1"
+  of "no", "false", "0", "off": "0"
+  else: ""
+
+proc networkdForwardingValues*(settings: seq[string]):
+    seq[tuple[family, value, source: string]] =
+  ## What networkd's forwarding settings (``<file>: <Key>=<value>`` lines,
+  ## ``networkdForwardingSettings``) write, per family: ``IPForward=``
+  ## (``yes``/``no``/``ipv4``/``ipv6``), ``IPv4Forwarding=`` /
+  ## ``IPv6Forwarding=`` (booleans) and ``IPMasquerade=``
+  ## (``ipv4``/``ipv6``/``both``/``yes``, which turns forwarding on).
+  for line in settings:
+    let colon = line.find(": ")
+    let assign = if colon >= 0: line[colon + 2 .. ^1] else: line
+    let eq = assign.find('=')
+    if eq <= 0: continue
+    let k = assign[0 ..< eq].strip()
+    let v = assign[eq + 1 .. ^1].strip().toLowerAscii()
+    case k
+    of "IPForward":
+      case v
+      of "ipv4": result.add(("ipv4", "1", line))
+      of "ipv6": result.add(("ipv6", "1", line))
+      else:
+        let b = boolSetting(v)
+        if b.len > 0:
+          result.add(("ipv4", b, line))
+          result.add(("ipv6", b, line))
+    of "IPv4Forwarding":
+      let b = boolSetting(v)
+      if b.len > 0: result.add(("ipv4", b, line))
+    of "IPv6Forwarding":
+      let b = boolSetting(v)
+      if b.len > 0: result.add(("ipv6", b, line))
+    of "IPMasquerade":
+      if v in ["ipv4", "both", "yes", "true", "on", "1"]: result.add(("ipv4", "1", line))
+      if v in ["ipv6", "both"]: result.add(("ipv6", "1", line))
+    else: discard
 
 proc networkdForwardingSettings*(root = "/"): seq[string] =
   ## Every ``[Network]`` forwarding setting networkd applies now: in a
@@ -205,15 +276,41 @@ proc networkdForwardingSettings*(root = "/"): seq[string] =
       for kind, path in walkDir(dropDir):
         if path.endsWith(".conf"): scan(path, result)
 
-proc networkdForwardingRefusal*(key: string; networkdInUse: bool;
-                                root = "/"): string =
-  ## "" unless ``key`` is a forwarding knob and an enabled or running
-  ## systemd-networkd is configured to write forwarding itself: then why
-  ## the resource is refused -- networkd would overwrite the ledger's value
-  ## at runtime, whenever it (re)configures a link (spec §7.2 step 6).
-  if not networkdInUse or not isForwardingKey(key): return ""
-  let settings = networkdForwardingSettings(root)
-  if settings.len == 0: return ""
-  "systemd-networkd writes " & key & " itself at runtime (" &
-    settings.join("; ") & "); the ledger's value would not hold. Drop " &
-    "the networkd setting or leave the key to networkd"
+proc networkdRefusal*(key, value: string; networkdInUse: bool;
+                      root = "/"): string =
+  ## "" unless an enabled or running systemd-networkd would overwrite the
+  ## add-on's value of ``key`` at runtime, whenever it configures a link
+  ## (spec §7.2 step 6):
+  ##
+  ## - a per-interface key (``net/ipv4/conf/<link>/...``,
+  ##   ``net/ipv6/conf/<link>/...``) of a link networkd manages now: it
+  ##   writes the link's settings (forwarding, ``accept_ra``, reverse-path
+  ##   filtering, proxy ARP, ...) each time it configures it;
+  ## - a forwarding key whose family networkd's configuration sets to
+  ##   another value (``IPForward=``, ``IPv4Forwarding=``,
+  ##   ``IPv6Forwarding=``, ``IPMasquerade=``) -- the same value is no
+  ##   conflict.
+  ##
+  ## *Known limit:* a ``.network`` file that matches a link only later (a
+  ## device plugged in, a VPN brought up) is not seen until it does.
+  if not networkdInUse: return ""
+  let k = sysctlNormalize(key)
+  let parts = k.split('/')
+  if parts.len >= 5 and parts[0] == "net" and parts[1] in ["ipv4", "ipv6"] and
+      parts[2] == "conf" and parts[3] notin ["all", "default"]:
+    if parts[3] in networkdManagedLinks(root):
+      return "systemd-networkd manages " & parts[3] & " and writes its " &
+        "per-link settings (" & key & " among them) whenever it configures " &
+        "it; the ledger's value would not hold. Leave the key to networkd " &
+        "or stop networkd managing " & parts[3]
+  let fam = forwardingFamily(key)
+  if fam.len == 0: return ""
+  let want = value.strip()
+  var clashes: seq[string]
+  for (f, v, src) in networkdForwardingValues(networkdForwardingSettings(root)):
+    if f == fam and v != want: clashes.add(src)
+  if clashes.len == 0: return ""
+  "systemd-networkd writes " & key & " itself at runtime with another " &
+    "value (" & clashes.join("; ") & "); the ledger's value " & want &
+    " would not hold. Drop or change the networkd setting, or leave the " &
+    "key to networkd"

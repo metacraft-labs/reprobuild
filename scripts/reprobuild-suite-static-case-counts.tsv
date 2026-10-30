@@ -33,7 +33,7 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	45
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	1
-libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	29
+libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	32
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	26
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7
