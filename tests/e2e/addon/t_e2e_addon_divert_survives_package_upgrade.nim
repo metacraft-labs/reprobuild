@@ -26,9 +26,18 @@
 ## ucf honours dpkg's diversion (``dpkg-divert --truename``): it works on
 ## ``<path>.distrib``, keeps it, and leaves the new maintainer version beside
 ## it as ``<path>.distrib.ucf-dist``; the add-on's copy at the path is never
-## looked at. Measured 2026-10-30 on Debian 13 and Ubuntu 24.04. The gate
-## records exactly that: the add-on's copy untouched, no prompt, exit 0,
-## where the new maintainer bytes landed, and what removal leaves.
+## looked at. Measured 2026-10-30 on Debian 13 and Ubuntu 24.04. ucf found no
+## record of ``<path>.distrib`` in its hashfile (its record is of the path),
+## so it could not tell the copy there was unmodified -- had the path not
+## been diverted, it would have replaced it silently. Removing the resource
+## therefore finishes that: after ``dpkg-divert --rename --remove`` puts v1
+## back, the add-on installs the withheld v2 at the path (v1 was
+## unmodified: its md5sum is ucf's record of the path), removes
+## ``.distrib.ucf-dist``, and moves ucf's hashfile record and cache entry
+## from the diverted name to the path. The gate asserts the maintainer's
+## current version (v2) at the path, no ``.distrib``, ``.distrib.ucf-dist``
+## or ``.ucf-dist`` left, ucf's hashfile naming the path with v2's md5sum
+## and nothing under the diverted name, and only those paths changed.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_divert_survives_package_upgrade``).
 ##
@@ -225,17 +234,55 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "ucf-dist " & ucfDist & "\n" & g.run("ls -la /etc/repro-fixture; cat /var/lib/ucf/hashfile 2>/dev/null; true"))
     let uver = g.exec(repro & " system addon verify")
     step("ucf upgrade: verify reports ok", uver.exitCode == 0, uver.stdout & uver.stderr)
+    let fUcfUp = g.takeFingerprint(repro)
     let urm = g.applyProfile(repro, "ucf-remove", Empty)
-    step("ucf-remove: applied; the diversion gone; what dpkg put back is v1 (ucf's v2 stays in .distrib.ucf-dist)",
+    let v2md5 = g.run("printf 'v2\\n' | md5sum | cut -d' ' -f1").strip()
+    let hashfile = g.run("cat /var/lib/ucf/hashfile")
+    step("ucf-remove: applied; the diversion gone; the maintainer's current version (v2) is at the path",
          urm.exitCode == 0 and g.run("dpkg-divert --list " & UPath).strip().len == 0 and
-         g.run("cat " & UPath) == "v1\n" and g.sha256InGuest(UPath & ".distrib") == "absent",
+         g.run("cat " & UPath) == "v2\n" and
+         g.sha256InGuest(UPath & ".distrib") == "absent" and
+         g.sha256InGuest(UPath & ".distrib.ucf-dist") == "absent" and
+         g.sha256InGuest(UPath & ".ucf-dist") == "absent",
          urm.stdout & urm.stderr & "\n" & g.run("ls -la /etc/repro-fixture"))
+    step("ucf-remove: ucf's record names the path with v2's md5sum, nothing under the diverted name",
+         (v2md5 & "  " & UPath) in hashfile and (UPath & ".distrib") notin hashfile and
+         g.exec("test -f /var/lib/ucf/cache/" & UPath.replace("/", ":") &
+                " && test ! -e /var/lib/ucf/cache/" & (UPath & ".distrib").replace("/", ":")).exitCode == 0,
+         hashfile)
+    block:
+      # Nothing else changed: the path (v1 -> v2 by the hand-back), the
+      # diverted name and ucf's withheld copy (gone), dpkg's diversion
+      # record, and the static tree link a committed generation moves.
+      let d = diff(parseFingerprint(fUcfUp), parseFingerprint(g.takeFingerprint(repro)))
+      var unexpected: seq[string]
+      for e in d:
+        if e.component == fcEtc and e.key in [UPath, UPath & ".distrib",
+                                              UPath & ".distrib.ucf-dist"]:
+          continue
+        if e.component == fcDiversions and e.key == UPath: continue
+        if e.component == fcEtc and e.key == "/etc/repro/static": continue
+        unexpected.add(renderDiff(@[e]))
+      step("ucf-remove: nothing but the diverted path, its .distrib and the withheld copy changed",
+           unexpected.len == 0, unexpected.join(""))
+    # A later upgrade of the package is ucf's ordinary business again: an
+    # unmodified v2 (ucf's record) is replaced by v3 with no prompt.
+    let u3 = g.buildUcfPackage("3.0", "v3\n")
+    let uup3 = g.exec("export DEBIAN_FRONTEND=noninteractive; dpkg -i " & u3 &
+                      " < /dev/null 2>&1", timeoutSec = 300)
+    step("ucf-remove: the next upgrade replaces the unmodified file as ucf always would",
+         uup3.exitCode == 0 and g.run("cat " & UPath) == "v3\n" and
+         g.sha256InGuest(UPath & ".ucf-dist") == "absent",
+         "exit " & $uup3.exitCode & "\n" & uup3.stdout & uup3.stderr)
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
+    # The upgrades changed the two packages' status and the two files'
+    # content; nothing else may differ -- in particular no `.distrib`,
+    # `.distrib.ucf-dist` or `.ucf-dist` beside either file.
     let ident = identityReport(fBase, g.takeFingerprint(repro),
       ["dpkg-status:repro-fixture-conf*", "etc:" & Path,
-       "dpkg-status:repro-fixture-ucf*", "etc:" & UPath & "*"])
+       "dpkg-status:repro-fixture-ucf*", "etc:" & UPath])
     step("base fingerprint after uninstall == before bootstrap (apart from the upgrade)",
          ident.ok, ident.text)
     step("the upgraded conffile is the maintainer's v2", g.run("cat " & Path) == "v2\n", "")

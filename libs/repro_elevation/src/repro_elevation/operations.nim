@@ -2631,6 +2631,13 @@ proc operationValidationError*(op: PrivilegedOperation): string =
         op.ddPath.endsWith("/..") or op.ddPath.endsWith("/"):
       return "linux.dpkgDiversion path '" & op.ddPath &
         "' must be an absolute file path without '..' segments"
+    # Canonical as well: dpkg's diversion database and the add-on's
+    # ownership lookups compare the path text, so `/etc//x` would divert a
+    # name no package lists while the kernel resolves it to the package's
+    # file.
+    let canon = nonCanonicalPathError("linux.dpkgDiversion path", op.ddPath)
+    if canon.len > 0:
+      return canon
     if not (op.ddPath.startsWith("/etc/") or
             op.ddPath.startsWith("/usr/local/etc/")):
       return "linux.dpkgDiversion path '" & op.ddPath &

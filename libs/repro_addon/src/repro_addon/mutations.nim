@@ -63,6 +63,12 @@
 ##                                            files with a path-based
 ##                                            ``open``, following any link
 ##                                            on the path
+## ``scope-accepts-unnormalised-paths``       a target path or managed
+##                                            prefix with a ``//``, ``.``
+##                                            or ``..`` segment is not
+##                                            refused (the parser's and
+##                                            the scope check's canonical
+##                                            form check is compiled out)
 ## =========================================  ==============================
 
 const
@@ -76,7 +82,8 @@ const
                           "observer-checks-path-text-only",
                           "exclusive-as-plain-restart",
                           "sysctl-in-apply-namespace",
-                          "path-based-write-follows-links"]
+                          "path-based-write-follows-links",
+                          "scope-accepts-unnormalised-paths"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

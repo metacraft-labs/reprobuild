@@ -483,15 +483,6 @@ proc runAddonGeneration(verb: string; args: seq[string];
     if r.retentionDropped.len > 0:
       stdout.write("retention released the store roots of: " &
         r.retentionDropped.join(", ") & "\n")
-    for a in adopt:
-      var found = false
-      for c in r.collisions:
-        if c.address == a and c.verdict in ["adopt", "no-op", "update"]:
-          found = true
-      if not found:
-        stderr.write(verb & ": " & a & " was not adopted (see the " &
-          "collision report)\n")
-        return 1
     if r.drift.len > 0:
       stderr.write(verb & ": " & $r.drift.len & " object(s) left in " &
         "place as actionable drift\n")
@@ -507,6 +498,11 @@ proc runAddonGeneration(verb: string; args: seq[string];
     stderr.write(verb & ": " & e.msg & "\n")
     2
   except AddonDriftError as e:
+    stderr.write(verb & ": " & e.msg & "\n")
+    2
+  except ESystemProfileInvalid as e:
+    # The profile was refused as written (a non-canonical path, a bad
+    # prefix, a malformed stanza) before anything was observed or written.
     stderr.write(verb & ": " & e.msg & "\n")
     2
   except CatchableError as e:
@@ -527,7 +523,11 @@ proc runAddonAdoptCli*(args: seq[string]): int =
   ## ``repro system adopt <address> --profile <file>`` (spec §11.2 step
   ## 3): the object the resource targets is claimed as it is -- its bytes
   ## become the add-on's, nothing is written to it -- and the generation
-  ## that results owns it.
+  ## that results owns it. Only that resource is taken from the profile;
+  ## the generation is otherwise the current one, so no pending change
+  ## of the profile is applied on the way (``scopedAdoptProfile``). An
+  ## object that cannot be adopted as it is refuses before anything is
+  ## written or committed (exit 2).
   var address = ""
   var rest: seq[string]
   var i = 0

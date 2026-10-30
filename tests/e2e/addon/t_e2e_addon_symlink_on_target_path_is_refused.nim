@@ -12,14 +12,19 @@
 ## - the distribution's own ``/etc/os-release -> ../usr/lib/os-release``,
 ##   declared as a resource.
 ##
-## Each is refused with the link named; the fingerprint is unchanged and the
-## link targets are byte-identical afterwards.
+## Each is refused with the link named, by ``repro infra plan`` (exit 2,
+## nothing written) and by ``repro infra apply``; the fingerprint is
+## unchanged and the link targets are byte-identical afterwards.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=observer-checks-path-text-only``):
-## an observer that looks at the path's text only. The first fixture is then
-## let through, the apply writes ``/usr/lib/repro-fixture-target/x.conf``
-## through the link, and the gate goes red; the second is refused for the
-## wrong reason (package ownership), red too.
+## an observer that looks at the path's text only. The plan of the first
+## fixture is then let through (exit 0: red), and so is its apply's
+## collision pass; what stops the write there is the drivers' own
+## no-follow writer (threat model C39, since A4), which refuses the link as
+## a failed operation (exit 1, not the plan-time refusal: red). The second
+## fixture, at plan and at apply, is refused for another reason (the
+## observer then sees a path that "is not a regular file"), with no link
+## named: red too.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_symlink_on_target_path_is_refused``).
 ##
@@ -89,9 +94,19 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("ls -A /usr/lib/repro-fixture-target").strip().len == 0 and
          identityReport(f, g.takeFingerprint(repro)).ok and g.ledgerOf() == l, "")
     let p1 = g.planProfile(repro, "linked-dir-plan", LinkedDir)
-    step("the plan refuses it the same way", p1.exitCode == 2 and
-         "symbolic link" in p1.stderr, p1.stdout & p1.stderr)
+    step("the plan refuses it the same way, writing nothing", p1.exitCode == 2 and
+         "symbolic link" in p1.stderr and
+         g.run("ls -A /usr/lib/repro-fixture-target").strip().len == 0 and
+         identityReport(f, g.takeFingerprint(repro)).ok and g.ledgerOf() == l,
+         p1.stdout & p1.stderr)
 
+    let p2 = g.planProfile(repro, "os-release-plan", OsRelease)
+    step("the plan refuses /etc/os-release the same way, naming the link, writing nothing",
+         p2.exitCode == 2 and "/etc/os-release" in p2.stderr and
+         "symbolic link" in p2.stderr and
+         g.sha256InGuest("/usr/lib/os-release") == osReleaseBefore and
+         identityReport(f, g.takeFingerprint(repro)).ok and g.ledgerOf() == l,
+         "exit " & $p2.exitCode & "\n" & p2.stdout & p2.stderr)
     let a2 = g.applyProfile(repro, "os-release", OsRelease)
     step("/etc/os-release (a link) is refused, naming the link",
          a2.exitCode == 2 and "/etc/os-release" in a2.stderr and

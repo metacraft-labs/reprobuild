@@ -13,6 +13,10 @@
 ##   errors and the ledger has no entry for it), then hand-written; when the
 ##   resource leaves the profile the file stays and the apply names it as
 ##   unlisted. Uninstall leaves it too.
+## - a copy-form object (a tmpfiles fragment) that an operator replaced
+##   with a symbolic link of their own is drift, not a missing object: when
+##   it leaves the profile the link is left in place (exit 1, the ledger
+##   keeps the entry) and its target is untouched.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_removal_respects_ledger``).
 ##
@@ -54,6 +58,17 @@ fs.systemFile {
 fs.systemFile {
   path = "/etc/repro-fixture/b.conf"
   content = "b
+"
+}
+"""
+
+const
+  Frag = "/etc/tmpfiles.d/repro-fx.conf"
+  FragBytes = "d /run/repro-fx 0755 root root -\n"
+  WithFrag = Prefix & """
+linux.tmpfilesRule {
+  name = "repro-fx.conf"
+  content = "d /run/repro-fx 0755 root root -
 "
 }
 """
@@ -136,6 +151,31 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("test -f /var/lib/repro/system/addon/preserved/" & sha256Hex("b-modified\n")).exitCode == 0,
          "exit " & $a4.exitCode & "\n" & a4.stdout & a4.stderr)
     step("gen4: the unlisted c is still there", g.run("cat " & Dir & "/c.conf") == "foreign\n", "")
+
+    # A copy replaced by an operator's link: drift, the link is theirs.
+    let a5 = g.applyProfile(repro, "gen5", WithFrag)
+    step("gen5: the tmpfiles fragment is written as a copy",
+         a5.exitCode == 0 and g.run("cat " & Frag) == FragBytes and
+         g.sha256InGuest(Frag) != "link", "exit " & $a5.exitCode & "\n" & a5.stdout & a5.stderr)
+    discard g.run("printf '%s' '" & FragBytes & "' > /etc/repro-fx-operator.conf && " &
+                  "rm " & Frag & " && ln -s /etc/repro-fx-operator.conf " & Frag)
+    let a6 = g.applyProfile(repro, "gen6", Prefix)
+    let l6 = g.ledgerOf()
+    step("gen6: the operator's link is left in place as drift, exit 1, ledger keeps the entry",
+         a6.exitCode == 1 and "drift" in (a6.stdout & a6.stderr) and
+         g.sha256InGuest(Frag) == "link" and
+         g.run("readlink " & Frag).strip() == "/etc/repro-fx-operator.conf" and
+         g.run("cat /etc/repro-fx-operator.conf") == FragBytes and
+         listed(l6, Frag).len == 1,
+         "exit " & $a6.exitCode & "\n" & a6.stdout & a6.stderr)
+    # The operator puts the add-on's copy back; the removal then proceeds.
+    discard g.run("rm " & Frag & " /etc/repro-fx-operator.conf && printf '%s' '" &
+                  FragBytes & "' > " & Frag & " && chmod 0644 " & Frag)
+    let a7 = g.applyProfile(repro, "gen7", Prefix)
+    step("gen7: restored by hand, the fragment is removed as the ledger's",
+         a7.exitCode == 0 and g.sha256InGuest(Frag) == "absent" and
+         listed(g.ledgerOf(), Frag).len == 0,
+         "exit " & $a7.exitCode & "\n" & a7.stdout & a7.stderr)
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)

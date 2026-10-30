@@ -888,6 +888,13 @@ proc managedPrefixError*(prefix: string): string =
   ## Why `prefix` cannot be a managed `/etc` prefix, or "" when it can.
   ## A prefix is written as the add-on reads it: `/etc/name/` for a
   ## subtree, `/etc/name` for that exact path (or the subtree below it).
+  ## It must be canonical (`nonCanonicalPathError`): `isUnderManagedPrefix`
+  ## and the class-directory check below compare text, so `/etc//ssh/` or
+  ## `/etc/./systemd/system/` would match nothing they should.
+  let canon = nonCanonicalPathError("managed prefix", prefix,
+                                    allowTrailingSlash = true)
+  if canon.len > 0:
+    return canon
   if not prefix.startsWith("/etc/") and not prefix.startsWith("/usr/local/etc/"):
     return "managed prefix '" & prefix & "' is not below /etc/ or /usr/local/etc/"
   if prefix == "/etc/" or prefix == "/usr/local/etc/":
@@ -1408,6 +1415,15 @@ proc parseSystemProfile*(text: string): SystemProfile =
             fields["runAtLoad"]) else: true)
     of srkFsSystemFile:
       let sfPath = need("path")
+      # A POSIX path must be canonical: the drivers' allowlist and the
+      # add-on's scope and ownership checks compare its text, and a
+      # `//` or `.` segment would let it name a file those checks never
+      # see (`nonCanonicalPathError`). A Windows `${PROGRAMDATA}` path is
+      # not POSIX-absolute and is checked by its driver.
+      if sfPath.startsWith("/"):
+        let canon = nonCanonicalPathError("fs.systemFile path", sfPath)
+        if canon.len > 0:
+          raiseSystemProfileInvalid(canon)
       let sfContent =
         if "content" in fields: fields["content"] else: ""
       let sfSourceUrl =

@@ -375,6 +375,59 @@ proc isAllowedSystemFilePath*(path: string; programDataRoot = ""): bool =
       return true
   return false
 
+const NonCanonicalPathMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation selector (``repro_addon/mutations``).
+  ## ``scope-accepts-unnormalised-paths`` compiles the check below out, so
+  ## the add-on's collision gate can show it is what refuses
+  ## ``/etc/ssh//sshd_config``. A build without the define has no switch.
+
+proc nonCanonicalPathError*(field, path: string;
+                            allowTrailingSlash = false): string =
+  ## "" when ``path`` is an absolute POSIX path in canonical form, else a
+  ## diagnostic naming ``field``. Canonical means: starts with ``/``, has
+  ## no empty segment (``//``), no ``.`` or ``..`` segment, no leading or
+  ## trailing whitespace, no control character, and ends with ``/`` only
+  ## when ``allowTrailingSlash`` (a directory prefix such as a managed
+  ## ``/etc`` prefix) and is then more than ``/``.
+  ##
+  ## Why refuse rather than canonicalise: every consumer of these paths
+  ## compares their TEXT -- dpkg's file lists, its diversion database and
+  ## ucf's registry hold canonical paths, and the scope checks are prefix
+  ## compares -- so ``/etc/ssh//sshd_config`` reads as "no package owns
+  ## it" and ``/etc/./systemd/system/x.service`` as "not under the unit
+  ## directory" while the kernel resolves both to the package's file. A
+  ## silently canonicalised path would also leave the profile and the
+  ## ledger naming different strings for one object. Refusing makes the
+  ## canonical form the only spelling, so every text compare downstream is
+  ## a compare of what the kernel resolves (threat model G8, T9).
+  when NonCanonicalPathMutation == "scope-accepts-unnormalised-paths":
+    return ""
+  else:
+    if path.len == 0:
+      return field & " is empty"
+    if path != path.strip():
+      return field & " '" & path & "' has leading or trailing whitespace"
+    for c in path:
+      if ord(c) < 32 or ord(c) == 127:
+        return field & " '" & path.escape() & "' contains a control character"
+    if path[0] != '/':
+      return field & " '" & path & "' is not an absolute path"
+    if path.endsWith("/") and not allowTrailingSlash:
+      return field & " '" & path & "' ends with '/'; a file path names " &
+        "the file itself"
+    let body = if path.endsWith("/"): path[1 ..< path.len - 1]
+               else: path[1 .. ^1]
+    if body.len == 0:
+      return field & " '" & path & "' names the root directory"
+    for seg in body.split('/'):
+      if seg.len == 0:
+        return field & " '" & path & "' has an empty segment ('//'); " &
+          "write the path in canonical form"
+      if seg == "." or seg == "..":
+        return field & " '" & path & "' has a '" & seg & "' segment; " &
+          "write the path in canonical form"
+    ""
+
 proc systemFileScopeError*(path: string; programDataRoot = ""): string =
   ## Returns "" when the path is in-scope, otherwise a human
   ## diagnostic naming the allowlist. Pure — the driver turns a

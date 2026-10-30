@@ -17,6 +17,10 @@ import std/[os, posix, strutils, tables, unittest]
 import repro_elevation
 import repro_infra/addon_diagnostics
 import repro_addon/[collision, etc_write, fingerprint]
+import repro_elevation/posix_system_driver
+{.push warning[Deprecated]: off.}
+import std/md5
+{.pop.}
 
 let root = getTempDir() / ("repro-addon-collision-" & $getCurrentProcessId())
 removeDir(root)
@@ -54,7 +58,7 @@ writeFile(root / "var/lib/dpkg/diversions",
           at("/etc/foreign") & "\n" & at("/etc/foreign.other") & "\nsomepkg\n" &
           at("/etc/mine") & "\n" & at("/etc/mine.distrib") & "\n:\n")
 
-let units = {
+var units = {
   "cron.service": UnitProvision(loadState: "loaded",
     fragmentPath: "/usr/lib/systemd/system/cron.service",
     unitFileState: "enabled", activeState: "active"),
@@ -298,6 +302,9 @@ suite "symbolic links on the target path":
     check symlinkComponent(at("/etc/app/linked/x/y")) == at("/etc/app/linked")
     check symlinkComponent(at("/etc/app/none/x")) == ""
 
+let sameDriver: DriverFactory = proc(): CollisionDriver {.gcsafe.} =
+  {.cast(gcsafe).}: d
+
 suite "the before-each-write re-check":
   test "the plan's decision stands while the host still matches":
     writeFile(at("/etc/app/guarded.conf"), "g\n")
@@ -315,9 +322,10 @@ suite "the before-each-write re-check":
 
   test "a package that appeared since the plan refuses the write, through the guard the apply uses":
     writeFile(at("/etc/app/late.conf"), "l\n")
-    # The guard takes the SAME factory the apply does and makes a fresh
-    # driver per operation: the plan-time driver's cached package index
-    # must not be what decides a write.
+    # The guard takes the SAME factory the apply does. The apply hands it
+    # the one driver it planned with, so the index that driver read at
+    # plan time must not be what decides a write: it is re-read once the
+    # package database changed (`indexStamp`).
     let factory: DriverFactory = proc(): CollisionDriver {.gcsafe.} =
       {.cast(gcsafe).}: newDpkgDriver(root, provision)
     let planDriver = factory()
@@ -330,10 +338,121 @@ suite "the before-each-write re-check":
     let op = PrivilegedOperation(kind: pokFsSystemFile, address: t.address,
       sfPath: at("/etc/app/late.conf"), sfContent: "l\n")
     check guard(op) == ""
+    let stampBefore = indexStamp(root)
     writeFile(root / "var/lib/dpkg/info/late.list", listing("/etc/app/late.conf"))
+    check indexStamp(root) != stampBefore
     check "ownership observation changed" in guard(op)
-    # The plan-time driver alone would not have seen it.
-    check preWriteRefusal(planDriver, t) == ""
+    # The plan-time driver sees it as well: its index was read again.
+    check "ownership observation changed" in preWriteRefusal(planDriver, t)
+    removeFile(root / "var/lib/dpkg/info/late.list")
+
+  test "a local diversion made between the plan and the write refuses it":
+    # The ledger's observation text leaves local diversions out (the
+    # add-on's own must not change how its file is recorded), so the guard
+    # compares the diversion itself.
+    writeFile(at("/etc/app/div.conf"), "d\n")
+    let inp = fileInputs("f", "d\n")
+    let (dec, obs) = d.decide(inp, at("/etc/app/div.conf"))
+    let t = plannedTarget("f", inp, at("/etc/app/div.conf"), dec, obs)
+    check preWriteRefusal(d, t) == ""
+    let db = root / "var/lib/dpkg/diversions"
+    let saved = readFile(db)
+    writeFile(db, saved & at("/etc/app/div.conf") & "\n" &
+              at("/etc/app/div.conf.distrib") & "\n:\n")
+    check "the diversion of" in preWriteRefusal(d, t)
+    writeFile(db, saved)
+    check preWriteRefusal(d, t) == ""
+
+  test "a divert verdict needs exactly the add-on's own diversion, made by the apply":
+    # Plan: the ucf-managed sshd_config, absent diversion, divert opt-in.
+    writeFile(at("/etc/ssh/sshd_config"), "pkg\n")
+    let inp = fileInputs("sshd", "Port 22\n", collision = "divert")
+    let (dec, obs) = d.decide(inp, at("/etc/ssh/sshd_config"))
+    check dec.verdict == cvDivert
+    let t = plannedTarget("sshd", inp, at("/etc/ssh/sshd_config"), dec, obs)
+    # Before the diversion operation ran: the write is refused.
+    check "is not in place" in preWriteRefusal(d, t)
+    # The diversion operation ran: dpkg moved the package's copy aside.
+    let db = root / "var/lib/dpkg/diversions"
+    let saved = readFile(db)
+    moveFile(at("/etc/ssh/sshd_config"), at("/etc/ssh/sshd_config.distrib"))
+    writeFile(db, saved & at("/etc/ssh/sshd_config") & "\n" &
+              at("/etc/ssh/sshd_config.distrib") & "\n:\n")
+    check preWriteRefusal(d, t) == ""
+    # A package's diversion (or a local one elsewhere) is not the add-on's.
+    writeFile(db, saved & at("/etc/ssh/sshd_config") & "\n" &
+              at("/etc/ssh/sshd_config.other") & "\n:\n")
+    check "the diversion of" in preWriteRefusal(d, t)
+    writeFile(db, saved)
+    moveFile(at("/etc/ssh/sshd_config.distrib"), at("/etc/ssh/sshd_config"))
+    removeFile(at("/etc/ssh/sshd_config"))
+
+  test "the unit behind a drop-in is re-checked before the drop-in is written":
+    let unitInp = DecisionInputs(address: "dropIn:cron", kind: tkUnit,
+      unit: "cron.service", collision: "dropIn")
+    let (udec, uobs) = d.decide(unitInp, at("/etc/systemd/system/cron.service"))
+    check udec.verdict == cvDropIn
+    let fileInp = fileInputs("dropIn:cron", "[Service]\nNice=5\n")
+    let dpath = at("/etc/systemd/system/cron.service.d/50-repro-addon.conf")
+    let (fdec, fobs) = d.decide(fileInp, dpath)
+    let guard = makePreWriteGuard(sameDriver,
+      @[plannedTarget("dropIn:cron", unitInp, at("/etc/systemd/system/cron.service"), udec, uobs),
+        plannedTarget("dropIn:cron", fileInp, dpath, fdec, fobs)])
+    let op = PrivilegedOperation(kind: pokSystemdSystemDropIn,
+      address: "dropIn:cron", diUnit: "cron.service", diName: "addon",
+      diContent: "[Service]\nNice=5\n")
+    check guard(op) == ""
+    let saved = units["cron.service"]
+    # Masked at runtime: the fragment systemd names is still the
+    # package's, so the ownership text alone would not change.
+    units["cron.service"] = UnitProvision(loadState: "masked-runtime",
+      fragmentPath: "/usr/lib/systemd/system/cron.service",
+      unitFileState: "masked-runtime", activeState: "inactive")
+    check "cron.service is now masked" in guard(op)
+    units["cron.service"] = saved
+    check guard(op) == ""
+
+  test "a destroy is re-observed: an object changed since the plan is kept, not removed":
+    var changed = false
+    let destroyCheck: DestroyCheck = proc(op: PrivilegedOperation): string =
+      {.cast(gcsafe).}:
+        (if changed: "changed since the plan" else: "")
+    let guard = makePreWriteGuard(sameDriver, @[], destroyCheck)
+    let op = PrivilegedOperation(kind: pokFsSystemFile, address: "f",
+      sfPath: at("/etc/app/x"), sfDestroy: true)
+    check guard(op) == ""
+    changed = true
+    let answer = guard(op)
+    check answer.startsWith(PreWriteKeepPrefix) and "changed since the plan" in answer
+    # Without a check a destroy goes through, as before.
+    check makePreWriteGuard(sameDriver, @[])(op) == ""
+
+  test "a foreign diversion of an /etc unit path refuses it even when no file is there":
+    let db = root / "var/lib/dpkg/diversions"
+    let saved = readFile(db)
+    writeFile(db, saved & at("/etc/systemd/system/new.service") & "\n" &
+              at("/etc/systemd/system/new.service.x") & "\nsomepkg\n")
+    try:
+      discard d.decide(DecisionInputs(address: "u", kind: tkUnit,
+        unit: "new.service", desiredContent: "[Unit]\n",
+        desiredSha256: sha256Hex("[Unit]\n")),
+        at("/etc/systemd/system/new.service"))
+      check false
+    except AddonCollisionError as e:
+      check "already diverted" in e.msg
+    writeFile(db, saved)
+
+  test "a missing dpkg info directory fails closed":
+    let r2 = getTempDir() / ("repro-addon-noinfo-" & $getCurrentProcessId())
+    removeDir(r2)
+    createDir(r2 / "var/lib/dpkg")
+    writeFile(r2 / "var/lib/dpkg/status", "Package: x\n")
+    expect AddonCollisionError:
+      discard detectCollisionDriver(r2)
+    let d2 = newDpkgDriver(r2, provision)
+    expect AddonCollisionError:
+      discard d2.packageOwner(r2 / "etc/x")
+    removeDir(r2)
 
   test "an operation the plan did not decide on is refused by the guard":
     let factory: DriverFactory = proc(): CollisionDriver {.gcsafe.} =
@@ -344,3 +463,67 @@ suite "the before-each-write re-check":
     check "decided nothing" in guard(op)
 
 removeDir(root)
+
+suite "ucf after a diversion is removed":
+  # ucf follows dpkg's diversions: with the path diverted it works on
+  # `<path>.distrib`, finds no record of it in its hashfile, keeps it and
+  # leaves the new maintainer version as `<path>.distrib.ucf-dist`
+  # (ucf 3.0043/3.0052 source). These fixtures are the files ucf leaves in
+  # exactly that state; `handBackUcfAfterDiversion` runs after
+  # `dpkg-divert --rename --remove` moved `.distrib` back.
+  proc md5Of(s: string): string = getMD5(s)
+  let r = getTempDir() / ("repro-addon-ucf-" & $getCurrentProcessId())
+  const P = "/etc/fx/u.conf"
+  proc setup(current: string) =
+    removeDir(r)
+    createDir(r / "etc/fx")
+    createDir(r / "var/lib/ucf/cache")
+    writeFile(r & P, current)                       # dpkg moved .distrib back
+    writeFile(r & P & ".distrib.ucf-dist", "v2\n")  # what ucf withheld
+    writeFile(r / "var/lib/ucf/hashfile",
+      md5Of("other\n") & "  /etc/other.conf\n" &
+      md5Of("v1\n") & "  " & P & "\n" &
+      md5Of("v2\n") & "  " & P & ".distrib\n")
+    writeFile(r / "var/lib/ucf/cache" / ucfCachedName(P & ".distrib"), "v2\n")
+
+  test "an unmodified maintainer copy is replaced by the withheld version":
+    setup("v1\n")
+    let hb = handBackUcfAfterDiversion(P, r)
+    check hb.withheld and hb.replaced and hb.keptLocal == ""
+    check readFile(r & P) == "v2\n"
+    check not fileExists(r & P & ".distrib.ucf-dist")
+    check not fileExists(r & P & ".ucf-dist")
+    let rows = parseUcfHashfile(readFile(r / "var/lib/ucf/hashfile"))
+    check rows == @[(sum: md5Of("other\n"), path: "/etc/other.conf"),
+                    (sum: md5Of("v2\n"), path: P)]
+    check readFile(r / "var/lib/ucf/cache" / ucfCachedName(P)) == "v2\n"
+    check not fileExists(r / "var/lib/ucf/cache" / ucfCachedName(P & ".distrib"))
+
+  test "a locally modified copy is kept and the withheld version goes beside it":
+    setup("local edit\n")
+    let hb = handBackUcfAfterDiversion(P, r)
+    check hb.withheld and not hb.replaced and hb.keptLocal == r & P & ".ucf-dist"
+    check readFile(r & P) == "local edit\n"
+    check readFile(r & P & ".ucf-dist") == "v2\n"
+    check not fileExists(r & P & ".distrib.ucf-dist")
+    let rows = parseUcfHashfile(readFile(r / "var/lib/ucf/hashfile"))
+    check (sum: md5Of("v2\n"), path: P) in rows and rows.len == 2
+
+  test "no withheld version: the path is left as dpkg put it back":
+    setup("v1\n")
+    removeFile(r & P & ".distrib.ucf-dist")
+    writeFile(r / "var/lib/ucf/hashfile", md5Of("v1\n") & "  " & P & "\n")
+    let before = readFile(r / "var/lib/ucf/hashfile")
+    let hb = handBackUcfAfterDiversion(P, r)
+    check not hb.withheld and readFile(r & P) == "v1\n"
+    check readFile(r / "var/lib/ucf/hashfile") == before
+
+  test "never through a link planted on the withheld name":
+    setup("v1\n")
+    removeFile(r & P & ".distrib.ucf-dist")
+    writeFile(r / "secret", "s\n")
+    createSymlink(r / "secret", r & P & ".distrib.ucf-dist")
+    let hb = handBackUcfAfterDiversion(P, r)
+    check not hb.withheld and readFile(r & P) == "v1\n"
+    check readFile(r / "secret") == "s\n"
+    removeDir(r)

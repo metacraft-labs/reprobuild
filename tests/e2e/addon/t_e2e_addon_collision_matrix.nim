@@ -41,6 +41,27 @@
 ## - **drop-in for a unit nothing provides**: refused.
 ## - **out of scope**: a path outside the declared managed prefixes is
 ##   ``EAddOnOutOfScope``.
+## - **non-canonical paths** (threat model G8): ``/etc/ssh//sshd_config``
+##   (which dpkg's and ucf's records, being text, would read as nobody's)
+##   and a managed prefix ``/etc/./systemd/system/`` with a file below it
+##   (which would shadow ``cron.service`` past the class-directory check)
+##   are refused when the profile is parsed, naming the field.
+## - **a refusal after an earlier resource was decided**: a reconcile
+##   decided for one file, then a package-owned file refused, keeps no
+##   preserved bytes (every ``refused`` row also checks
+##   ``/var/lib/repro/system/addon/preserved`` is unchanged).
+## - **sysctl and sysusers fragments** (``/etc/sysctl.d/90-repro-fx.conf``,
+##   ``/etc/sysusers.d/repro-fxgrp.conf``, hand-written): ``EDrift``;
+##   ``repro system adopt`` claims each as it is with no write at all (the
+##   fingerprint is unchanged but for the static tree link: no fragment
+##   rewritten, no ``systemd-sysctl`` or ``systemd-sysusers`` run); removal
+##   leaves them as they were; ``--reconcile-drift`` replaces them, keeping
+##   their bytes; removal restores the hand-written bytes and the kernel
+##   value.
+## - **adopt is scoped**: ``repro system adopt`` applies the addressed
+##   resource only (a pending resource in the same profile is not
+##   written), and an address whose target cannot be adopted as it is
+##   (absent) refuses with nothing written and no generation committed.
 ## - **uninstall with a replaced and an adopted unit still in the profile**
 ##   (``cron.service`` replaced; ``fixture-base.service``, a
 ##   hand-written unit the base had enabled and active, adopted): both are
@@ -49,11 +70,20 @@
 ## - **create / no-op**: an absent unowned path is created, and re-applying
 ##   is a no-op.
 ##
-## Falsifying mutation (``REPRO_ADDON_MUTATION=observer-never-package-owned``):
-## an observer that reports no package provenance. The conffile row then
-## refuses for the wrong reason (``EDrift``, red), and the package-unit row
-## is let through: the apply writes ``/etc/systemd/system/cron.service`` and
-## the gate goes red on the refusal and on the fingerprint.
+## Falsifying mutations:
+##
+## - ``REPRO_ADDON_MUTATION=observer-never-package-owned``: an observer that
+##   reports no package provenance. The conffile row then refuses for the
+##   wrong reason (``EDrift``, red), and the package-unit row is let
+##   through: the apply writes ``/etc/systemd/system/cron.service`` and the
+##   gate goes red on the refusal and on the fingerprint.
+## - ``REPRO_ADDON_MUTATION=scope-accepts-unnormalised-paths``: the
+##   canonical-form check compiled out of the parser and the scope check.
+##   ``/etc/ssh//sshd_config`` then reads as unowned (``EDrift`` instead of
+##   the canonical-form refusal, red), and the ``/etc/./systemd/system/``
+##   prefix and file are let through: the apply writes
+##   ``/etc/systemd/system/cron.service`` and shadows the package's unit
+##   (exit 0, red).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_collision_matrix``).
 ## Bases: ``REPRO_ADDON_BASES`` (default here: debian-13-amd64,ubuntu-24.04-amd64).
@@ -235,6 +265,77 @@ Nice=5
 "
 }
 """
+  NonCanonicalPath = """addOn {
+  managedEtcPrefixes = ["/etc/ssh/"]
+}
+
+fs.systemFile {
+  path = "/etc/ssh//sshd_config"
+  content = "$1"
+}
+"""
+  NonCanonicalPrefix = """addOn {
+  managedEtcPrefixes = ["/etc/./systemd/system/"]
+}
+
+fs.systemFile {
+  path = "/etc/./systemd/system/cron.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+"""
+  ReconcileThenRefused = """addOn {
+  managedEtcPrefixes = ["/etc/repro-fixture/", "/etc/ssh/"]
+}
+
+fs.systemFile {
+  path = "/etc/repro-fixture/h.conf"
+  content = "theirs
+"
+}
+
+fs.systemFile {
+  path = "/etc/repro-fixture/r.conf"
+  content = "ours2
+"
+}
+
+fs.systemFile {
+  path = "/etc/ssh/ssh_config"
+  content = "x
+"
+}
+"""
+  FileHPending = FileH & """
+fs.systemFile {
+  path = "/etc/repro-fixture/pending.conf"
+  content = "pending
+"
+}
+"""
+  FileAbsent = FilesPrefix & """
+fs.systemFile {
+  path = "/etc/repro-fixture/none.conf"
+  content = "none
+"
+}
+"""
+  SysctlPath = "/etc/sysctl.d/90-repro-fx.conf"
+  SysusersPath = "/etc/sysusers.d/repro-fxgrp.conf"
+  SysctlHand = "# hand-written\nvm.swappiness=61\n"
+  SysusersHand = "# hand-written\ng fxgrp -\n"
+  Fragments = """linux.sysctl {
+  key = "vm.swappiness"
+  value = "$1"
+  filename = "90-repro-fx.conf"
+}
+
+linux.sysusersEntry {
+  name = "fxgrp"
+  kind = "group"
+}
+"""
   Create = """addOn {
   managedEtcPrefixes = ["/etc/repro-fixture/"]
 }
@@ -274,6 +375,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     g.copyTo(g.runDir / "base.unit", "/etc/systemd/system/fixture-base.service")
     discard g.run("chmod 0644 /etc/systemd/system/fixture-base.service && " &
       "systemctl daemon-reload && systemctl enable --now fixture-base.service")
+    # The group the sysusers rows' fragment describes, part of the base:
+    # adopting and reconciling the fragment must then create nothing.
+    discard g.run("groupadd --system fxgrp")
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     let fBase = g.takeFingerprint(repro)
@@ -285,9 +389,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     var f = g.takeFingerprint(repro)
     var l = g.ledgerOf()
 
+    proc preservedListing(): string =
+      g.run("ls -A /var/lib/repro/system/addon/preserved 2>/dev/null; true")
+
     proc refused(name, profile, diagnostic, mustName: string; flags = "") =
-      ## A default refusal: exit 2, the diagnostic, nothing written.
+      ## A default refusal: exit 2, the diagnostic, nothing written -- not
+      ## even the bytes an earlier resource's decision would preserve.
+      let pres = preservedListing()
       let r = g.applyProfile(repro, name, profile, flags)
+      step(name & ": the refused apply kept no preserved bytes",
+           preservedListing() == pres, pres & " -> " & preservedListing())
       step(name & ": refused with " & diagnostic,
            r.exitCode == 2 and diagnostic in r.stderr and mustName in r.stderr,
            "exit " & $r.exitCode & "\n" & r.stdout & r.stderr)
@@ -463,10 +574,29 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     discard g.run("mkdir -p /etc/repro-fixture && printf 'theirs\n' > /etc/repro-fixture/h.conf")
     f = g.takeFingerprint(repro)
     refused("file-drift", FileH % ["ours\n"], "EDrift", "/etc/repro-fixture/h.conf")
-    let fa = g.adoptResource(repro, "file-adopt", FileH % ["ours\n"],
+    block:
+      # An address whose target cannot be adopted as it is (nothing is
+      # there) refuses before anything is written or committed.
+      let gen = g.run("readlink /var/lib/repro/system/current; true")
+      let pres = preservedListing()
+      let na = g.adoptResource(repro, "adopt-absent", FileAbsent,
+                               "systemFile:/etc/repro-fixture/none.conf")
+      step("adopt-absent: refused, exit 2, nothing written, no generation",
+           na.exitCode == 2 and "refusing to adopt" in na.stderr and
+           g.sha256InGuest("/etc/repro-fixture/none.conf") == "absent" and
+           g.run("readlink /var/lib/repro/system/current; true") == gen and
+           g.ledgerOf() == l and preservedListing() == pres and
+           identityReport(f, g.takeFingerprint(repro)).ok,
+           "exit " & $na.exitCode & "\n" & na.stdout & na.stderr)
+    # The adopt's profile carries a pending resource as well: an adopt
+    # applies the addressed resource only.
+    let fa = g.adoptResource(repro, "file-adopt", FileHPending % ["ours\n"],
                              "systemFile:/etc/repro-fixture/h.conf")
     step("file-adopt: adopted as it is, nothing written", fa.exitCode == 0 and
          g.run("cat /etc/repro-fixture/h.conf") == "theirs\n", fa.stdout & fa.stderr)
+    step("file-adopt: the pending resource of the same profile was not applied",
+         g.sha256InGuest("/etc/repro-fixture/pending.conf") == "absent" and
+         entriesFor(g.ledgerOf(), "systemFile:/etc/repro-fixture/pending.conf").len == 0, "")
     block:
       let after = g.takeFingerprint(repro)
       let l2 = g.ledgerOf()
@@ -480,6 +610,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     discard g.run("printf 'theirs2\n' > /etc/repro-fixture/r.conf")
     f = g.takeFingerprint(repro)
     refused("file-r-drift", FilesHR % ["theirs\n", "ours2\n"], "EDrift", "/etc/repro-fixture/r.conf")
+    # r.conf is decided as a reconcile (its bytes would be preserved), then
+    # ssh_config is refused: nothing of the decision may stay behind.
+    refused("reconcile-then-refusal", ReconcileThenRefused, "EAddOnPackageOwned",
+            "openssh-client", " --reconcile-drift")
+    step("reconcile-then-refusal: r.conf's bytes were not preserved",
+         g.exec("test -e /var/lib/repro/system/addon/preserved/" &
+                sha256Hex("theirs2\n")).exitCode != 0, "")
     discard applied("file-reconcile", FilesHR % ["theirs\n", "ours2\n"], " --reconcile-drift")
     step("file-reconcile: replaced, old bytes preserved",
          g.run("cat /etc/repro-fixture/r.conf") == "ours2\n" and
@@ -490,6 +627,79 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("cat /etc/repro-fixture/r.conf") == "theirs2\n", "")
     discard g.exec("rm -r /etc/repro-fixture")
     f = g.takeFingerprint(repro)
+
+    # --- Rows: sysctl and sysusers fragments (adopt, reconcile, restore). ---
+    let swappiness = g.run("sysctl -n vm.swappiness").strip()
+    discard g.run("printf '%s' '" & SysctlHand & "' > " & SysctlPath &
+      " && printf '%s' '" & SysusersHand & "' > " & SysusersPath &
+      " && sysctl -q -w vm.swappiness=61")
+    f = g.takeFingerprint(repro)
+    let fFragments = f
+    refused("fragments-drift", Fragments % ["61"], "EDrift", SysctlPath)
+    for (address, path) in [("sysctl:vm.swappiness", SysctlPath),
+                            ("sysusersEntry:fxgrp", SysusersPath)]:
+      let tag = "fragments-adopt " & address
+      let ad = g.adoptResource(repro, address.replace(":", "-"),
+                               Fragments % ["61"], address)
+      step(tag & ": adopted", ad.exitCode == 0, ad.stdout & ad.stderr)
+      let after = g.takeFingerprint(repro)
+      let l2 = g.ledgerOf()
+      let d = deltaReport(f, after, l, l2)
+      step(tag & ": fingerprint diff == ledger delta", d.ok, d.text)
+      let he = entriesFor(l2, address)
+      var fileEntryOk = false
+      for e in he:
+        if e.path == path and e.collision == "adopt" and e.preserved.len > 0:
+          fileEntryOk = true
+      step(tag & ": the ledger owns the fragment with its bytes preserved",
+           fileEntryOk, $he.len)
+      f = after
+      l = l2
+    block:
+      # Zero writes: nothing changed since the fragments were written by
+      # hand but the static tree link the two committed generations moved.
+      let same = identityReport(fFragments, f, ["etc:/etc/repro/static"])
+      step("fragments-adopt: no write at all (fingerprint unchanged)", same.ok, same.text)
+      step("fragments-adopt: the fragments are the hand-written bytes, the key unchanged",
+           g.run("cat " & SysctlPath) == SysctlHand and
+           g.run("cat " & SysusersPath) == SysusersHand and
+           g.run("sysctl -n vm.swappiness").strip() == "61", "")
+    discard applied("fragments-adopt-remove", Empty)
+    step("fragments-adopt-remove: the adopted fragments are left as they were",
+         g.run("cat " & SysctlPath) == SysctlHand and
+         g.run("cat " & SysusersPath) == SysusersHand and
+         g.run("sysctl -n vm.swappiness").strip() == "61", "")
+    discard applied("fragments-reconcile", Fragments % ["62"], " --reconcile-drift")
+    step("fragments-reconcile: replaced, the hand-written bytes preserved, the key set",
+         g.run("cat " & SysctlPath) == "vm.swappiness = 62\n" and
+         g.run("cat " & SysusersPath) == "g fxgrp -\n" and
+         g.run("sysctl -n vm.swappiness").strip() == "62" and
+         g.exec("test -f /var/lib/repro/system/addon/preserved/" &
+                sha256Hex(SysctlHand) &
+                " && test -f /var/lib/repro/system/addon/preserved/" &
+                sha256Hex(SysusersHand)).exitCode == 0, "")
+    discard applied("fragments-reconcile-remove", Empty)
+    step("fragments-reconcile-remove: the hand-written fragments and the key's value are restored",
+         g.sha256InGuest(SysctlPath) == sha256Hex(SysctlHand) and
+         g.sha256InGuest(SysusersPath) == sha256Hex(SysusersHand) and
+         g.run("sysctl -n vm.swappiness").strip() == "61", "")
+    discard g.exec("rm -f " & SysctlPath & " " & SysusersPath &
+                   " && sysctl -q -w vm.swappiness=" & swappiness)
+    f = g.takeFingerprint(repro)
+
+    # --- Rows: non-canonical paths and prefixes (threat model G8). ---
+    let sshdBefore = g.sha256InGuest("/etc/ssh/sshd_config")
+    refused("noncanonical-path", NonCanonicalPath % [SshdContent],
+            "empty segment", "/etc/ssh//sshd_config")
+    step("noncanonical-path: sshd_config is untouched",
+         g.sha256InGuest("/etc/ssh/sshd_config") == sshdBefore, "")
+    refused("noncanonical-prefix", NonCanonicalPrefix, "'.' segment",
+            "/etc/./systemd/system/")
+    step("noncanonical-prefix: cron.service is still the package's",
+         g.sha256InGuest("/etc/systemd/system/cron.service") == "absent" and
+         "systemd/system/cron.service" in
+           g.run("systemctl show -p FragmentPath cron.service") and
+         not g.run("systemctl show -p FragmentPath cron.service").contains("/etc/"), "")
 
     # --- Row: a foreign LOCAL diversion to the name the add-on would use. ---
     discard g.run("dpkg-divert --local --rename --divert /etc/issue.distrib --add /etc/issue")

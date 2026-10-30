@@ -37,6 +37,8 @@
 
 import std/[algorithm, os, posix, sets, strutils]
 
+import repro_elevation/posix_system_driver
+
 import ./addon_apply
 import ./collision
 import ./etc_write
@@ -86,7 +88,9 @@ proc removeOwned(e: LedgerEntry; r: var UninstallResult) =
     if restorePreserved(e):
       r.removed.add(e.path & " (restored)")
     else:
-      removeFile(e.path)
+      # Unlinked relative to its parent's descriptor: never through a link
+      # planted on the path since it was observed (threat model G29).
+      discard removeLeafNoFollow(e.path)
       r.removed.add(e.path)
     r.undone.incl(entryKey(e))
   except CatchableError as ex:
@@ -237,17 +241,19 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
           "the one the ledger recorded (it drifted, or is not the add-on's); " &
           "the diversion is left in place until the path is free")
         continue
-      let exe = resolveHostTool(DpkgDivertCandidates)
-      if exe.len == 0:
-        result.errors.add(dv.path & ": dpkg-divert is not installed")
-        continue
-      let res = runHostTool([exe, "--local", "--rename", "--remove", dv.path])
-      if res.exitCode != 0:
-        result.errors.add("dpkg-divert --remove " & dv.path & ": " &
-                          res.output.strip())
-      else:
-        result.removed.add("diversion " & dv.path)
+      # The same removal the apply's destroy runs: `dpkg-divert --local
+      # --rename --remove`, then the ucf hand-back, so a ucf-managed file
+      # gets the maintainer version ucf withheld while it was diverted.
+      try:
+        let hb = removeLocalDpkgDiversion(dv.path)
+        result.removed.add("diversion " & dv.path &
+          (if hb.replaced: " (ucf's withheld maintainer version installed)"
+           elif hb.keptLocal.len > 0: " (ucf's withheld maintainer version at " &
+             hb.keptLocal & ")"
+           else: ""))
         result.undone.incl(entryKey(dv))
+      except CatchableError as ex:
+        result.errors.add("dpkg-divert --remove " & dv.path & ": " & ex.msg)
 
   # 4. /etc files (those a diversion step did not already take), then the
   #    directories the add-on created, deepest first; the kernel values

@@ -8062,8 +8062,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_collision.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 29,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 39,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8116,8 +8116,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
-      "sourceSuiteCount": 9,
-      "staticCaseCount": 30,
+      "sourceSuiteCount": 13,
+      "staticCaseCount": 37,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

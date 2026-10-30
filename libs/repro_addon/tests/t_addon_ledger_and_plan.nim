@@ -10,6 +10,7 @@
 import std/[json, os, posix, strutils, tables, unittest]
 
 import repro_infra
+import repro_infra/addon_diagnostics
 import repro_profile
 import repro_addon/[addon_apply, fingerprint, generation0, ledger, preflight, store_root]
 import repro_binary_cache_client/caches_config
@@ -315,3 +316,122 @@ suite "base matrix, managed kinds and ephemeral sockets":
     check parseProcNet(udp, "udp", 32768, 60999) == @[(key: "udp 10.0.2.15:68", value: "x1")]
     # Without a range every bound unconnected socket is recorded.
     check parseProcNet(udp, "udp").len == 2
+
+suite "drift on a copy":
+  test "a link where the add-on's copy was is drift, never a missing object":
+    # Removal deletes a "missing" object's leftovers; an operator's link
+    # put where the add-on's copy was is theirs and must be left.
+    let dir = getTempDir() / ("repro-addon-copy-drift-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeFile(dir / "c.conf", "c\n")
+    let e = LedgerEntry(class: lcEtcFile, path: dir / "c.conf", form: "copy",
+      sha256: sha256Hex("c\n"))
+    check observeDrift(e) == ""
+    removeFile(dir / "c.conf")
+    writeFile(dir / "elsewhere", "c\n")
+    createSymlink(dir / "elsewhere", dir / "c.conf")
+    let d = observeDrift(e)
+    check d.len > 0 and not d.startsWith("missing")
+    check "symbolic link" in d and (dir / "elsewhere") in d
+    removeFile(dir / "c.conf")
+    createDir(dir / "c.conf")
+    check observeDrift(e).startsWith("replaced by a directory")
+    removeDir(dir / "c.conf")
+    check observeDrift(e).startsWith("missing")
+
+suite "ledger versions":
+  test "a v1 ledger (A2's bootstrap, thirteen fields) is read":
+    let v1 = "# repro-addon-ledger v1\n" &
+      "generation\tg0\n" &
+      "root\t/repro\t\t\t0755\t0:0\t\tdir\t0\t0\t0\t\t\n" &
+      "unit\t/etc/systemd/system/repro-addon.target\trepro-addon.target\taa\t" &
+        "0644\t0:0\t\t\t1\t1\t1\t\tsystemUnit:repro-addon.target\n" &
+      "key\t/var/lib/repro/keys/x\t\tbb\t0600\t0:0\t\t\t0\t0\t0\t\t\n"
+    let l = parseLedger(v1)
+    check l.generation == "g0" and l.entries.len == 3
+    check l.entries[0].class == lcRoot and l.entries[0].kindHint == "dir"
+    check l.entries[1].enabled and l.entries[1].started and l.entries[1].hasInstall
+    check l.entries[1].resource == "systemUnit:repro-addon.target"
+    check l.entries[1].observation == "" and l.entries[1].form == ""
+    check not l.entries[1].isLink
+    check l.entries[2].class == lcKey and l.entries[2].sha256 == "bb"
+    # The upgrade writes the current version, and that reads back the same.
+    let again = parseLedger(render(l))
+    check again.entries.len == 3 and again.entries[1] == l.entries[1]
+    # A v1 line with the wrong field count is malformed, not guessed at.
+    expect LedgerError:
+      discard parseLedger("# repro-addon-ledger v1\ngeneration\tg0\nroot\t/repro\n")
+
+suite "canonical target paths and prefixes (threat model G8)":
+  test "a non-canonical fs.systemFile path is refused when the profile is parsed":
+    for bad in ["/etc/ssh//sshd_config", "/etc/./ssh/sshd_config",
+                "/etc/ssh/sshd_config/", "/etc/ssh/./sshd_config"]:
+      try:
+        discard parseSystemProfile("fs.systemFile {\n  path = \"" & bad &
+          "\"\n  content = \"x\"\n}\n")
+        check false
+      except ESystemProfileInvalid as e:
+        check "fs.systemFile path" in e.msg and bad in e.msg
+
+  test "a non-canonical managed prefix is refused when the profile is parsed":
+    for bad in ["/etc/./systemd/system/", "/etc//ssh/", "/etc/ssh//",
+                "/etc/app/./"]:
+      try:
+        discard parseSystemProfile("addOn {\n  managedEtcPrefixes = [\"" &
+          bad & "\"]\n}\n")
+        check false
+      except ESystemProfileInvalid as e:
+        check "managed prefix" in e.msg and bad in e.msg
+    # The canonical spellings still parse.
+    let ok = parseSystemProfile("addOn {\n  managedEtcPrefixes = " &
+      "[\"/etc/ssh/\", \"/etc/issue.net\"]\n}\n")
+    check ok.addOn.managedEtcPrefixes == @["/etc/ssh/", "/etc/issue.net"]
+
+  test "a non-canonical diversion path is refused when the profile is parsed":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("linux.dpkgDiversion {\n  path = " &
+        "\"/etc/ssh//sshd_config\"\n}\n")
+
+  test "the scope check refuses a non-canonical path in a profile built in memory":
+    # The parser is not the only producer of a profile: the scope check
+    # repeats the canonical-form refusal on whatever reaches the apply.
+    let p = SystemProfile(addOn: AddOnSettings(declared: true,
+      managedEtcPrefixes: @["/etc/ssh/"]),
+      resources: @[SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:/etc/ssh//sshd_config",
+        sfPath: "/etc/ssh//sshd_config", sfContent: "x")])
+    try:
+      checkScope(p)
+      check false
+    except EAddOnOutOfScope as e:
+      check "/etc/ssh//sshd_config" in e.msg and "empty segment" in e.msg
+    # A class directory written without its trailing slash is still one.
+    let q = SystemProfile(addOn: AddOnSettings(declared: true,
+      managedEtcPrefixes: @["/etc/app/"]),
+      resources: @[SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:/etc/systemd/system",
+        sfPath: "/etc/systemd/system", sfContent: "x")])
+    expect EAddOnOutOfScope:
+      checkScope(q)
+
+suite "repro system adopt is scoped to the addressed resource":
+  test "only the addressed resource is taken from the given profile":
+    let current = "addOn {\n  managedEtcPrefixes = [\"/etc/app/\"]\n}\n\n" &
+      "fs.systemFile {\n  path = \"/etc/app/a.conf\"\n  content = \"a1\"\n}\n"
+    let given = parseSystemProfile("addOn {\n  managedEtcPrefixes = " &
+      "[\"/etc/hand/\"]\n}\n\n" &
+      "fs.systemFile {\n  path = \"/etc/app/a.conf\"\n  content = \"a2\"\n}\n\n" &
+      "fs.systemFile {\n  path = \"/etc/app/b.conf\"\n  content = \"b\"\n}\n\n" &
+      "fs.systemFile {\n  path = \"/etc/hand/h.conf\"\n  content = \"h\"\n}\n")
+    let p = scopedAdoptProfile(given, current, ["systemFile:/etc/hand/h.conf"])
+    var byAddress = initTable[string, string]()
+    for r in p.resources: byAddress[r.address] = r.sfContent
+    # a.conf keeps the current generation's content (a2 is a pending
+    # change the adopt must not apply); b.conf is not added.
+    check byAddress.len == 2
+    check byAddress["systemFile:/etc/app/a.conf"] == "a1"
+    check byAddress["systemFile:/etc/hand/h.conf"] == "h"
+    check p.addOn.managedEtcPrefixes == @["/etc/app/", "/etc/hand/"]
+    expect AddonApplyError:
+      discard scopedAdoptProfile(given, current, ["systemFile:/etc/nowhere"])
