@@ -5207,9 +5207,9 @@ const
   BootstrapNimPackageId = "nim@" & BootstrapNimVersion
   BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
-    "https://nim-lang.org/download/nim-2.2.10_x64.zip"
+    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip"
   BootstrapNimTarballSha256 =
-    "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
+    "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b"
   # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
   # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
   # x86_64: unsigned), so the monitor shim loads into it like into any other
