@@ -54,6 +54,36 @@ proc activeTargetTripleTag*(): string =
       return ""
   ""
 
+var installMirrorTargetOverride {.threadvar.}: tuple[active: bool,
+                                                        triple: string]
+  ## ``withInstallMirrorTarget``'s state: while active, the mirror is keyed
+  ## by ``triple`` ("" = native) instead of the build's target.
+
+proc installMirrorSubpathFor*(triple: string): string =
+  ## The install mirror subpath of a build for ``triple``; "" is native.
+  if triple.len == 0: LegacyInstallSubpath
+  else: LegacyInstallSubpath & InstallMirrorTargetSeparator & triple
+
+proc effectiveInstallMirrorTarget*(): string =
+  ## The triple the mirror is keyed by right now: an override in effect,
+  ## else the build's target.
+  if installMirrorTargetOverride.active: installMirrorTargetOverride.triple
+  else: activeTargetTripleTag()
+
+template withInstallMirrorTarget*(targetTriple: string; body: untyped) =
+  ## Run ``body`` with the install mirror keyed by ``targetTriple``
+  ## ("" = native) whatever the build's target. The host/target split at
+  ## the mirror: a ``nativeBuildDeps:`` entry runs on the build host, so a
+  ## consumer resolving one under ``--target`` reads the sibling's NATIVE
+  ## mirror, while its ``buildDeps:`` / ``runtimeDeps:`` read the target's.
+  let saved = installMirrorTargetOverride
+  installMirrorTargetOverride.active = true
+  installMirrorTargetOverride.triple = targetTriple
+  try:
+    body
+  finally:
+    installMirrorTargetOverride = saved
+
 proc installMirrorSubpath*(): string =
   ## Where a recipe's install mirror lives under the recipe directory:
   ## ``.repro/output/install`` for a native build and
@@ -65,9 +95,7 @@ proc installMirrorSubpath*(): string =
   ## of one recipe coexist and a ``buildDeps:`` of a cross build resolves to
   ## the target build of the same recipe -- the thing a target-suffixed
   ## package name used to stand in for.
-  let triple = activeTargetTripleTag()
-  if triple.len == 0: LegacyInstallSubpath
-  else: LegacyInstallSubpath & InstallMirrorTargetSeparator & triple
+  installMirrorSubpathFor(effectiveInstallMirrorTarget())
 const InstallMirrorPublishToolName* = "repro-install-mirror-publish"
 const InstallMirrorCoreToolNames* = ["sh", "rm", "mkdir", "cp", "touch"]
   ## External commands emitted by every install-mirror shell action. Keep
@@ -124,7 +152,7 @@ proc currentRealizationPlatformTag*(): string =
   # A target build's realization is not the host's: the sidecar of a cross
   # build names the target, so a hashed-store lookup made for the host
   # never follows a cross build's sidecar and vice versa.
-  let triple = activeTargetTripleTag()
+  let triple = effectiveInstallMirrorTarget()
   if triple.len > 0:
     result.add(InstallMirrorTargetSeparator & triple)
 

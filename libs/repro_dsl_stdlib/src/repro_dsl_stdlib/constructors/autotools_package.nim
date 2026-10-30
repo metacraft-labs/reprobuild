@@ -93,6 +93,7 @@ import ../packages/libacl as libacl_module
 # declared" on ``nativeBuildDeps: "gcc"``.
 import ../packages/gcc as gcc_module
 import ../packages/pkg_config as pkg_config_module
+import ../active_context
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4)
@@ -320,6 +321,7 @@ proc autotools_package*(srcDir: string;
   # the parameter open). Empty string drops the prefix arg entirely
   # (recipes that don't honour ``--prefix=`` opt out by setting
   # ``prefixFlagFormat = ""``).
+  requireCrossTargetConsulted("autotools_package")
   var configureArgs: seq[string] = @[]
   if prefixFlagFormat.len > 0:
     configureArgs.add(prefixFlagFormat & prefix)

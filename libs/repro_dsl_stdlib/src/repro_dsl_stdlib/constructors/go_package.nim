@@ -45,6 +45,7 @@ import std/[options, os, strutils]
 import repro_project_dsl
 
 import ../types/package_result
+import ../active_context
 
 const
   FetchScratchSubdir = ".repro/fetch"
@@ -159,6 +160,7 @@ proc go_package*(binaryName: string;
   ## CGO-enabled build would silently acquire a dependency on whatever C
   ## toolchain and system headers the host happens to have — which is a
   ## dependency the recipe has not declared.
+  requireCrossTargetConsulted("go_package")
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
 

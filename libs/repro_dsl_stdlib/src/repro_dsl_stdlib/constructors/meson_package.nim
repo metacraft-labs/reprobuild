@@ -43,6 +43,7 @@ import ../packages/gcc as gcc_module
 import ../packages/ninja as ninja_module
 import ../packages/make as make_module
 import ../packages/pkg_config as pkg_config_module
+import ../active_context
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4) — shared shape with ``autotools_package``.
@@ -211,6 +212,7 @@ proc meson_package*(srcDir: string;
   ## ``extraEnv`` applies per-edge environment overrides to setup,
   ## compile, and install. This matches ``cmake_package`` and keeps
   ## package-specific process controls scoped to the recipe pipeline.
+  requireCrossTargetConsulted("meson_package")
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   var effectiveConfigureOptions = configureOptions

@@ -21,6 +21,7 @@ import repro_project_dsl
 import ../types/package_result
 import ../packages/cmake as cmake_module
 import ../packages/sh as sh_module
+import ../active_context
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4) — shared shape with ``autotools_package`` /
@@ -265,6 +266,7 @@ proc cmake_package*(srcDir: string;
   ## srcDir), depends on the fetch action's stamp, and writes its own
   ## stamp under ``.repro/build/cmake-patch.stamp`` so the engine's
   ## action-cache fingerprint stays stable across rebuilds.
+  requireCrossTargetConsulted("cmake_package")
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let effectiveDestRoot =

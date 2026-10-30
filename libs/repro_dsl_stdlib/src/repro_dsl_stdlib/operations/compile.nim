@@ -13,9 +13,11 @@ import ./toolchain
 import ../types/options
 import ../packages/gcc as gcc_module
 import ../packages/clang as clang_module
+import ../active_context
 
 proc compile*(opts: CompileOptions): BuildActionDef =
   ## Dispatch on ``currentCompiler()``.
+  requireCrossTargetConsulted("compile")
   case currentCompiler()
   of cfGcc:   gcc_module.gccCompile(opts)
   of cfClang: clang_module.clangCompile(opts)

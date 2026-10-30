@@ -707,7 +707,7 @@ libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emi
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5
 libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	3
 libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim	nim	2
-libs/repro_project_dsl/tests/t_install_mirror_target_root.nim	nim	4
+libs/repro_project_dsl/tests/t_install_mirror_target_root.nim	nim	5
 libs/repro_project_dsl/tests/t_l5_environment_reaches_the_service_argv.nim	nim	21
 libs/repro_project_dsl/tests/t_l8_contribution_operation_is_a_second_axis.nim	nim	35
 libs/repro_project_dsl/tests/t_l8_typed_service_facts_reach_the_dev_env_artifact.nim	nim	7
@@ -833,6 +833,7 @@ libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim	nim	4
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
 libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim	nim	8
 libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	27
+libs/repro_tool_profiles/tests/t_sibling_resolves_for_its_side_of_the_split.nim	nim	4
 libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim	nim	3
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
 libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	19

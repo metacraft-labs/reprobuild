@@ -45,6 +45,7 @@ import repro_project_dsl
 import repro_project_dsl/hackage_vendor
 
 import ../types/package_result
+import ../active_context
 
 const
   FetchScratchSubdir = ".repro/fetch"
@@ -147,6 +148,7 @@ proc cabal_package*(target: string;
   ##
   ## `patches` are recipe-relative `-p1` unified diffs applied in order to
   ## the build's copy of the source (see the module docstring).
+  requireCrossTargetConsulted("cabal_package")
   if target.len == 0 or not target.startsWith("exe:") or target.len <= 4:
     raise newException(ValueError,
       "cabal_package: `target` must name an executable as `exe:<name>`, " &

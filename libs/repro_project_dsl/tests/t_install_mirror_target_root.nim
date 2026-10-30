@@ -66,3 +66,18 @@ suite "install mirror root keyed by the target":
       cross = packageInstallMirrorRoot(Root, "openssl"))
     check native != cross
     check cross.startsWith(native & "@")
+
+  test "a native-side read under a cross build reads the native root":
+    withVariants("targetTriple=" & Triple, proc() =
+      check installMirrorSubpath() == ".repro/output/install@" & Triple
+      withInstallMirrorTarget(""):
+        check installMirrorSubpath() == ".repro/output/install"
+        check packageInstallMirrorRoot(Root, "cmake") ==
+          "/recipes/cmake/.repro/output/install"
+        check not currentRealizationPlatformTag().contains("@")
+      # Restored after the block, even for the target it was already keyed by.
+      check installMirrorSubpath() == ".repro/output/install@" & Triple
+      withInstallMirrorTarget("aarch64-unknown-linux-musl"):
+        check installMirrorSubpath() == ".repro/output/install@aarch64-unknown-linux-musl"
+      check installMirrorSubpathFor("") == ".repro/output/install"
+      check installMirrorSubpathFor(Triple) == ".repro/output/install@" & Triple)

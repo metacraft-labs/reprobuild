@@ -188,6 +188,7 @@ proc toolchain*(ctx: BuildContext): Toolchain =
 proc crossTarget*(ctx: BuildContext): CrossTarget =
   if crossTargetSlotIsStale(ctx.state):
     fillCrossTargetSlot(ctx.state)
+  ctx.state.crossTargetConsulted = true
   cast[CrossTarget](ctx.state.crossTargetSlot)
 
 proc activeCrossTarget*(): CrossTarget =
@@ -202,6 +203,8 @@ proc activeCrossTarget*(): CrossTarget =
   ## `currentBuildContext()` so they answer the same way in both settings
   ## instead of raising in the second.
   if tryCurrentBuildState() != nil:
+    let state = tryCurrentBuildState()
+    state.crossTargetConsulted = true
     return currentBuildContext().crossTarget
   resolveCrossTarget()
 
@@ -235,6 +238,30 @@ proc setCrossTarget*(ctx: BuildContext; ct: CrossTarget) =
 proc setFeatureSet*(ctx: BuildContext; fs: FeatureSet) =
   validate(fs)
   ctx.state.featureSetSlot = fs
+
+proc requireCrossTargetConsulted*(caller: string) =
+  ## A15 fail-closed guard. When `--target` is active (a non-native
+  ## triple), every build action emitter must have read `activeCrossTarget()`
+  ## before emitting edges, so it can thread the target's flags, sysroot,
+  ## and compiler wrappers into the action. A constructor that never reads
+  ## the cross target produces a HOST binary under a TARGET cache key —
+  ## silently wrong. This guard is called by `compile()`, `link()`,
+  ## `nim.c()`, and `cmake_package`'s build edges; `cargo_package` passes
+  ## because it already calls `activeCrossTarget()`.
+  let triple = activeTargetTriple()
+  if triple.len == 0:
+    return
+  let state = tryCurrentBuildState()
+  if state == nil:
+    return
+  if not state.crossTargetConsulted:
+    raise newException(ValueError,
+      caller & ": a non-native --target '" & triple & "' is active but " &
+      "this constructor never consulted activeCrossTarget(). Under " &
+      "--target every typed-tool call must read the CrossTarget slot " &
+      "to thread --target=/--sysroot=/CC_<triple> flags; without it " &
+      "the action produces a host binary under a target cache key. " &
+      "Add activeCrossTarget() handling or build without --target.")
 
 # ---------------------------------------------------------------------------
 # Named-Lock-Files NLF-M7 (§4.4) — the fifth slot

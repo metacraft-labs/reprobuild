@@ -41,6 +41,7 @@ import repro_dsl_stdlib/openssl_layout
 
 # Hand-authored builds use the same pending identity as source conventions.
 import repro_project_dsl/source_cache_identity
+import repro_dsl_stdlib/active_context
 
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
@@ -684,6 +685,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## so a hand-authored recipe's public-interface binaries publish with
   ## no extra ceremony.
   discard imports
+  requireCrossTargetConsulted("nim.c")
   # Windows: nim appends `.exe` to an executable regardless of what `--out:`
   # says, so a recipe that writes `binary = "build/bin/foo"` produces
   # `build/bin/foo.exe`. The `output` flag is `role = output` and is what

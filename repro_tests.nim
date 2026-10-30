@@ -9089,6 +9089,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let linux = realizationTargetFor(pcX86_64, poLinux, mlX86_64..."),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_sibling_resolves_for_its_side_of_the_split.nim",
+    binary: "build/test-bin/t_sibling_resolves_for_its_side_of_the_split",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let tmp = getTempDir() / (\"t_sibling_split_\" & $getCurrentPr..."),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim",
     binary: "build/test-bin/t_tar_listing_ignores_tar_warnings",
     defines: @[],

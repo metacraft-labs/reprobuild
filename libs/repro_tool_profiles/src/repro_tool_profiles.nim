@@ -7879,6 +7879,15 @@ proc fromSourceRecipeRoot*(workspaceRoot = ""): string =
   let inTree = root / "recipes" / "packages" / "source"
   if dirExists(inTree):
     return inTree
+  # A checkout of the catalog itself (reprobuild-packages: `packages/source`
+  # at its root) is its own recipes root. Before the federated sibling, or a
+  # build run from one worktree of the catalog walked ANOTHER checkout's
+  # siblings (`../reprobuild-packages`), whose mirrors and revisions are
+  # not this build's (reprobuild-pm issue 2026-10-30-sibling-source-recipes-
+  # resolve-only-for-non-native-deps-in-two-modes).
+  let ownCatalog = root / "packages" / "source"
+  if dirExists(ownCatalog):
+    return ownCatalog
   let federated = parentDir(root) / "reprobuild-packages" /
     "packages" / "source"
   if dirExists(federated):
@@ -8706,8 +8715,8 @@ proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
     practicalHardening: phNone)
   refreshProfileIdentity(result)
 
-proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
-                               recipeRoot = ""): FromSourceResolveResult =
+proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
+                                  recipeRoot: string): FromSourceResolveResult =
   ## DSL-port M9.R.9 — non-raising variant of ``resolveFromSourceTool``.
   ## Returns a discriminated outcome the caller pattern-matches on:
   ##
@@ -9017,6 +9026,25 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   refreshProfileIdentity(profile)
   FromSourceResolveResult(kind: rrResolved, profile: profile)
 
+proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
+                               recipeRoot = "";
+                               hostSide = false): FromSourceResolveResult =
+  ## Resolve `useDef` to a sibling source recipe's realized artefact.
+  ##
+  ## ReproOS-Add-On-Mode A15: the sibling's install mirror is keyed by the
+  ## target the build compiles for (`installMirrorSubpath`), and WHICH
+  ## side of the host/target split a dependency is on decides which mirror
+  ## is read. `hostSide` is for a `nativeBuildDeps:` entry -- a tool that
+  ## runs on the build host -- and reads the sibling's native mirror even
+  ## under `--target`; a `buildDeps:` / `runtimeDeps:` entry reads the
+  ## target's (From-Source-Build-Recipes.md §"Package-level dependency
+  ## declarations").
+  if hostSide:
+    withInstallMirrorTarget(""):
+      result = tryResolveFromSourceToolImpl(useDef, recipeRoot)
+  else:
+    result = tryResolveFromSourceToolImpl(useDef, recipeRoot)
+
 proc resolveFromSourceTool*(useDef: InterfaceToolUse;
                             recipeRoot = ""): PathOnlyToolProfile =
   ## M9.Q resolver entry point. ``useDef.executableName`` drives the
@@ -9219,9 +9247,28 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # fallback is silent when no tarball metadata exists — the path
     # resolver's original "not found in PATH" diagnostic propagates
     # unchanged.
+    # ReproOS-Add-On-Mode A15: a library a cross build's output links
+    # (`buildDeps:` / `runtimeDeps:`) comes from the sibling source
+    # recipe's build FOR THE TARGET when that build exists -- the
+    # target-keyed install mirror -- ahead of whatever PATH holds, which
+    # can only be a host build. A tool (`nativeBuildDeps:`) stays
+    # PATH-first; its sibling's NATIVE mirror is consulted when PATH has
+    # nothing, before the tarball and nix arms. Neither builds a sibling:
+    # the sibling is realized by its own `repro build` (path mode never
+    # auto-recurses), and an unbuilt sibling is what PATH or an arm
+    # answers for.
+    let libraryDep = useDef.depKind in ["build", "runtime"]
+    if libraryDep and activeTargetTripleTag().len > 0:
+      let sibling = tryResolveFromSourceTool(useDef)
+      if sibling.kind == rrResolved:
+        return sibling.profile
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:
+      let sibling = tryResolveFromSourceTool(useDef,
+        hostSide = useDef.depKind == "native")
+      if sibling.kind == rrResolved:
+        return sibling.profile
       if hasHostTarballProvisioning(useDef):
         try:
           result = resolveTarballTool(useDef, storeRoot)
