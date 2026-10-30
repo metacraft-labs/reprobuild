@@ -1247,17 +1247,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792938305,
-        "narHash": "sha256-icTohrpTUcX6H+AHQlcC2uB6nAMJs0dTAwIi/Uaxc5E=",
+        "lastModified": 1793336420,
+        "narHash": "sha256-XYm8K+HTfDAF9zQp7QRM3pnsXk5+PSLM0Ia7CYUy4YU=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f",
+        "rev": "b46797064a419d031234b9b685f7dcbbdf1eeafe",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f",
+        "rev": "b46797064a419d031234b9b685f7dcbbdf1eeafe",
         "type": "github"
       }
     },
@@ -1349,17 +1349,17 @@
     "nim-fork-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792872207,
-        "narHash": "sha256-lsMOcRzeRb7QvCdFneGXR97F9zT+jDVSIjgH3P9olKo=",
+        "lastModified": 1793333758,
+        "narHash": "sha256-RLYXg/JHHKKi4CDfefgHO0RUnkNJP4pL5msoISPadys=",
         "ref": "codetracer",
-        "rev": "cdb6fd1483fcdc570f306ccfee8865f2214f46f7",
-        "revCount": 23142,
+        "rev": "22d525d83ff061f5912121f3519418cda806d36c",
+        "revCount": 23153,
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       },
       "original": {
         "ref": "codetracer",
-        "rev": "cdb6fd1483fcdc570f306ccfee8865f2214f46f7",
+        "rev": "22d525d83ff061f5912121f3519418cda806d36c",
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       }

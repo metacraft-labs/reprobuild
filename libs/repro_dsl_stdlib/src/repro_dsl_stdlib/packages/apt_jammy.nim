@@ -377,7 +377,7 @@ proc walkStoreRelFiles(root: string): seq[string] =
 
 proc tarExtractDataMember(debPath, debBytes, memberName: string;
                           memberOffset, memberSize: int;
-                          outDir: string; noSameOwner = false) =
+                          outDir: string) =
   ## Write the ``data.tar.*`` payload to a temp file then invoke ``tar``
   ## to extract it into ``outDir``. Raises ``AptExtractError`` if tar
   ## fails.
@@ -452,14 +452,16 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   # and no reader of this code could tell. ``resolveHostTar`` reproduces that
   # order explicitly so the binary that runs is named, without changing WHICH
   # binary runs; see ``repro_core/host_tar``.
-  # ``noSameOwner``: extract as the invoking user even when that is root,
-  # instead of restoring the archive's owners (whose ids need not mean the
-  # same on this host). GNU tar then also drops setuid/setgid, because it
-  # never restores those bits on a file whose owner it did not restore.
-  # bsdtar accepts the same flag.
-  let ownerArgs = if noSameOwner: @["--no-same-owner"] else: @[]
-  let tailArgs = ownerArgs & @[flag, tarOperand(tarInput), "-C",
-    tarOperand(outDir)]
+  # Modes and owners are whatever tar restores. As root, GNU tar restores
+  # the archive's owners AND its setuid/setgid bits (``--preserve-permissions``
+  # is the default for root; measured 2026-10-30 on Raspberry Pi OS trixie:
+  # ``sudo tar --no-same-owner -xf`` still produced a 4755 root-owned
+  # ``usr/bin/su``). So this path is for build-time extraction into a
+  # store that nothing runs as a privileged service. The Add-On closure
+  # realiser (``apt_closure.nim``) does not use it: it takes the plain tar
+  # from ``extractDebDataMemberToTar`` and unpacks it in-process with its
+  # own policy on names, link targets, entry kinds and modes.
+  let tailArgs = [flag, tarOperand(tarInput), "-C", tarOperand(outDir)]
   let hostTar = resolveHostTar()
   if hostTar.exe.len == 0:
     var e = newException(AptExtractError,
@@ -499,28 +501,81 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
     e.stderrText = res.output
     raise e
 
-proc extractDebDataInto*(debPath: string; outDir: string;
-                         noSameOwner = false) =
-  ## Unpack the ``data.tar.*`` member of the ``.deb`` at ``debPath`` into
-  ## the EXISTING directory ``outDir``, through the same ``ar`` parser and
-  ## ``tar`` invocation ``extractAptDeb`` uses. Nothing is verified here and
-  ## nothing outside ``outDir`` is written by this proc; the caller owns
-  ## digest verification and the destination's lifecycle.
+proc extractDebDataMemberToTar*(debPath: string; outTarPath: string) =
+  ## Write the ``data.tar.*`` member of the ``.deb`` at ``debPath`` to
+  ## ``outTarPath`` as a PLAIN (decompressed) tar stream, through the same
+  ## ``ar`` parser ``extractAptDeb`` uses and the host ``xz``, ``gzip`` or
+  ## ``zstd`` for the compression the member carries. Nothing is unpacked
+  ## and nothing is verified here: the caller owns digest verification, the
+  ## destination directory, and the policy with which the tar is unpacked.
   ##
-  ## This is the archive-level primitive shared by every ``.deb``
-  ## consumer, independent of suite, architecture or archive: the
-  ## Add-On ``package(apt, ...)`` closure realiser
-  ## (``apt_closure.realiseAptClosure``) unpacks armhf trixie ``.deb``s
-  ## with it exactly as this module unpacks amd64 jammy ones. Raises
-  ## ``AptExtractError`` when the archive has no data member or ``tar``
-  ## fails.
-  if not dirExists(outDir):
-    raise newException(IOError, "extraction directory missing: " & outDir)
+  ## This is the archive-level primitive the Add-On ``package(apt, ...)``
+  ## closure realiser (``apt_closure.realiseAptClosure``) builds on,
+  ## independent of suite, architecture or archive: it reads armhf trixie
+  ## ``.deb``s exactly as this module reads amd64 jammy ones. Raises
+  ## ``AptExtractError`` when the archive has no data member, carries a
+  ## compression no host tool can decode, or the decompressor fails.
   let debBytes = readFile(debPath)
   let members = parseDebMembers(debBytes)
   let (memName, memOff, memSize) = locateDataMember(debBytes, members)
-  tarExtractDataMember(debPath, debBytes, memName, memOff, memSize, outDir,
-    noSameOwner)
+  if memOff < 0:
+    var e = newException(AptExtractError, "no data.tar.* member in " & debPath)
+    e.debPath = debPath
+    raise e
+  let outDir = parentDir(outTarPath)
+  if not dirExists(outDir):
+    raise newException(IOError, "directory missing: " & outDir)
+  if fileExists(outTarPath): removeFile(outTarPath)
+  template fail(msg: string; cmd = ""; code = 0; text = "") =
+    var e = newException(AptExtractError, msg)
+    e.debPath = debPath
+    e.command = cmd
+    e.exitCode = code
+    e.stderrText = text
+    raise e
+  template writeMember(path: string) =
+    let f = open(path, fmWrite)
+    try:
+      if memSize > 0:
+        discard f.writeBuffer(
+          cast[ptr UncheckedArray[byte]](debBytes[memOff].unsafeAddr), memSize)
+    finally:
+      f.close()
+  case memName
+  of "data.tar":
+    writeMember(outTarPath)
+  of "data.tar.zst":
+    let packed = outTarPath & ".zst"
+    writeMember(packed)
+    defer:
+      try: removeFile(packed)
+      except OSError: discard
+    let res = decompressZstdToFile(packed, outTarPath)
+    if not res.ok:
+      fail("zstd decompression failed (exit " & $res.exitCode & "): " &
+        res.output, res.command, res.exitCode, res.output)
+  of "data.tar.xz", "data.tar.gz", "data.tar.bz2":
+    # ``<tool> -d <file.ext>`` replaces the file with its decompression,
+    # so the member is written under the name the tool expects and the
+    # output lands at ``outTarPath``.
+    let (tool, ext) =
+      if memName == "data.tar.xz": ("xz", ".xz")
+      elif memName == "data.tar.gz": ("gzip", ".gz")
+      else: ("bzip2", ".bz2")
+    let exe = findExe(tool)
+    if exe.len == 0:
+      fail("no '" & tool & "' on PATH to decompress " & memName)
+    let packed = outTarPath & ext
+    writeMember(packed)
+    let cmd = quoteShell(exe) & " -d -q -f " & quoteShell(packed)
+    let res = execCmdEx(cmd)
+    if res.exitCode != 0 or not fileExists(outTarPath):
+      try: removeFile(packed)
+      except OSError: discard
+      fail(tool & " decompression failed (exit " & $res.exitCode & "): " &
+        res.output, cmd, res.exitCode, res.output)
+  else:
+    fail("unsupported data.tar variant: " & memName)
 
 proc extractAptDeb*(debPath: string;
                     sha256: string;

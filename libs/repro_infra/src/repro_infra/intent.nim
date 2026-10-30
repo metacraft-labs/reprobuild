@@ -406,6 +406,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
   of srkMacosDarwinSystemModule:
     result.add("  name = " & renderScalar(r.darwinModuleName))
     result.add("  content = " & renderScalar(r.darwinModuleContent))
+  of srkLinuxDpkgDiversion:
+    result.add("  path = " & renderScalar(r.ddPath))
   of srkSystemdUnitState:
     result.add("  name = " & renderScalar(r.usName))
     if not r.usEnabled:

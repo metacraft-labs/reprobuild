@@ -336,6 +336,12 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       # breaking the top-down resolution order; the formula is short
       # enough to repeat.
       posixDigestHexOfText(op.sysctlKey & " = " & op.sysctlValue & "\n")
+  of pokLinuxDpkgDiversion:
+    if op.ddDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText("divert " & op.ddPath & " to " & op.ddPath &
+        ".distrib by :")
   of pokLinuxUdevRule:
     if op.udevDestroy:
       ZeroDigestHex
@@ -3774,3 +3780,109 @@ proc applyLinuxFhsSandbox*(op: PrivilegedOperation):
     result.digestHex = posixSystemDesiredDigestHex(op)
   else:
     raiseNotImplementedPlatform("linux.fhsSandbox apply")
+
+# ===========================================================================
+# linux.dpkgDiversion — a local dpkg diversion of a package-owned path.
+#
+# `dpkg-divert --local --rename --divert <path>.distrib --add <path>` moves
+# the package's copy aside and records the diversion in
+# `/var/lib/dpkg/diversions`, so every later unpack of that package writes
+# its version to `<path>.distrib` instead. The removal moves it back. The
+# observation is read from dpkg's own database rather than inferred from
+# which files exist: a diversion is dpkg state, not a file. See
+# dpkg-divert(1).
+# ===========================================================================
+
+const DpkgDiversionsDb* = "/var/lib/dpkg/diversions"
+  ## dpkg's diversion database: line triples of path, diverted-to path and
+  ## the diverting package (`:` for a local diversion).
+
+proc dpkgDiversionTarget*(path: string): string =
+  ## Where a `linux.dpkgDiversion` sends the package's copy.
+  path & ".distrib"
+
+proc readDpkgDiversion*(dbText, path: string):
+    tuple[present: bool; divertTo, package: string] =
+  ## The diversion of `path` recorded in `dbText` (the database's
+  ## contents), if any. A database whose line count is not a multiple of
+  ## three is corrupt and raises rather than being half-read.
+  var lines: seq[string]
+  for l in dbText.splitLines():
+    if l.len > 0: lines.add(l)
+  if lines.len mod 3 != 0:
+    raiseProtocol("linux.dpkgDiversion: " & DpkgDiversionsDb &
+      " is malformed (" & $lines.len & " lines, not a multiple of 3)")
+  var i = 0
+  while i < lines.len:
+    if lines[i] == path:
+      return (true, lines[i + 1], lines[i + 2])
+    i += 3
+  (false, "", "")
+
+proc observeLinuxDpkgDiversion*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Present when dpkg records a diversion of `ddPath`. The digest covers
+  ## the recorded target and diverting package, so a diversion by someone
+  ## else (another target or a package) never digests equal to ours.
+  when defined(linux):
+    let db = if fileExists(DpkgDiversionsDb): readFile(DpkgDiversionsDb)
+             else: ""
+    let d = readDpkgDiversion(db, op.ddPath)
+    if not d.present:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    result.present = true
+    result.digestHex = posixDigestHexOfText("divert " & op.ddPath & " to " &
+      d.divertTo & " by " & d.package)
+  else:
+    raiseNotImplementedPlatform("linux.dpkgDiversion observe")
+
+proc applyLinuxDpkgDiversion*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Add (or, for the destroy direction, remove) the local diversion.
+  ## Refuses a host without dpkg, and never replaces a diversion it did
+  ## not make: `dpkg-divert --add` itself refuses a path already diverted
+  ## elsewhere, and that refusal is surfaced as the apply's error.
+  when defined(linux):
+    let scopeErr = operationValidationError(op)
+    if scopeErr.len > 0:
+      raiseProtocol(scopeErr)
+    if not fileExists("/usr/bin/dpkg-divert"):
+      raiseProtocol("linux.dpkgDiversion of " & op.ddPath &
+        " refused: /usr/bin/dpkg-divert is absent (not a dpkg host)")
+    let target = dpkgDiversionTarget(op.ddPath)
+    if op.ddDestroy:
+      let before = observeLinuxDpkgDiversion(op)
+      if before.present:
+        # `--rename` moves `<path>.distrib` back to `<path>`; dpkg refuses
+        # when `<path>` still exists, so the file the profile put there must
+        # already have been removed (the caller orders that first).
+        let (o, c) = execCmdEx("/usr/bin/dpkg-divert --local --rename " &
+          "--remove " & quoteShell(op.ddPath))
+        if c != 0:
+          raiseProtocol("linux.dpkgDiversion remove of " & op.ddPath &
+            " failed: " & o.strip())
+      let post = observeLinuxDpkgDiversion(op)
+      if post.present:
+        raiseProtocol("linux.dpkgDiversion remove of " & op.ddPath &
+          " left the diversion recorded")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let current = observeLinuxDpkgDiversion(op)
+    if not current.present:
+      let (o, c) = execCmdEx("/usr/bin/dpkg-divert --local --rename " &
+        "--divert " & quoteShell(target) & " --add " & quoteShell(op.ddPath))
+      if c != 0:
+        raiseProtocol("linux.dpkgDiversion of " & op.ddPath & " failed: " &
+          o.strip())
+    let post = observeLinuxDpkgDiversion(op)
+    let desiredHex = posixSystemDesiredDigestHex(op)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.dpkgDiversion " & op.ddPath &
+        " post-apply observation disagrees with desired state: the " &
+        "diversion dpkg records is not a local one to " & target)
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.dpkgDiversion apply")

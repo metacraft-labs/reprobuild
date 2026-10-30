@@ -454,6 +454,37 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
     return
   extractPrefixRaw(archive, outDir)
 
+proc refuseWriteThroughSymlink*(outDir, rel: string) =
+  ## Raise unless writing the entry ``rel`` under ``outDir`` stays inside
+  ## ``outDir``.
+  ##
+  ## Rejecting absolute paths and ``..`` components (done by the caller) only
+  ## constrains the entry's *text*. ``rbcarc-v2`` also carries symbolic links,
+  ## and every primitive used below (``createDir``, ``writeFile``,
+  ## ``createSymlink`` into a parent) follows a link already on the path. An
+  ## archive holding ``d -> /etc`` and then ``d/cron.d/job`` would therefore
+  ## write ``/etc/cron.d/job``; one holding ``f -> /etc/passwd`` and then a
+  ## file ``f`` would overwrite ``/etc/passwd``. Prefixes are materialised by
+  ## privileged applies, so either is a write anywhere as root.
+  ##
+  ## The rule: no component of the entry's path that already exists may be a
+  ## symbolic link, the entry itself included. Links the archive creates are
+  ## still extracted -- real prefixes carry ``libfoo.so -> libfoo.so.1`` --
+  ## but nothing is ever written *through* one. The extraction directory is
+  ## private to the extracting process, so nothing else can add a link
+  ## between this check and the write.
+  ##
+  ## Exported so every consumer that copies substituted bytes onward (the
+  ## build-action apply path writes them into an action's working
+  ## directory) applies the same rule to its own destination.
+  var cur = outDir
+  for part in rel.split('/'):
+    cur = cur / part
+    if symlinkExists(cur):
+      raise newException(IOError,
+        "rbcarc rejected entry written through a symbolic link: " & rel &
+        " (" & cur & " is a link)")
+
 proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
   if archive.len < 4 + 4 + 4:
     raise newException(IOError, "rbcarc too short: " & $archive.len)
@@ -496,6 +527,7 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
       raise newException(IOError,
         "rbcarc truncated reading file body for " & rel)
     let absOut = outDir / rel
+    refuseWriteThroughSymlink(outDir, normalizedRel)
     # Same MAX_PATH argument as the walk on the publish side: a tree deep
     # enough to archive is deep enough to fail to restore.
     createDir(extendedPath(parentDir(absOut)))
@@ -524,6 +556,34 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
       for i in countdown(directoryModes.high, 0):
         setFilePermissions(
           directoryModes[i][0], modeFilePermissions(directoryModes[i][1]))
+
+proc extractPrefixInto*(archive: openArray[byte]; outDir: string) =
+  ## Extract into ``outDir`` all or nothing. The archive is extracted into a
+  ## fresh sibling directory first and moved into place only when every entry
+  ## was accepted, so a refused or malformed archive (including one
+  ## ``refuseWriteThroughSymlink`` rejects) leaves no partial tree behind.
+  ## ``outDir`` must be absent or empty: extracting over existing content
+  ## would mix the cache's bytes with whatever was there. Raises ``IOError``.
+  if dirExists(outDir):
+    for _ in walkDir(outDir):
+      raise newException(IOError,
+        "substitute output directory is not empty: " & outDir)
+  elif fileExists(outDir) or symlinkExists(outDir):
+    raise newException(IOError,
+      "substitute output path exists and is not a directory: " & outDir)
+  let parent = parentDir(absolutePath(outDir))
+  createDir(parent)
+  let tmp = parent / ("." & extractFilename(outDir) & ".repro-extract-" &
+                      $getCurrentProcessId())
+  removeDir(tmp)
+  try:
+    extractPrefix(archive, tmp)
+  except CatchableError as e:
+    try: removeDir(tmp) except CatchableError: discard
+    raise newException(IOError, e.msg)
+  if dirExists(outDir):
+    removeDir(outDir)
+  moveDir(tmp, outDir)
 
 # ---------------------------------------------------------------------------
 # Multipart body builder.

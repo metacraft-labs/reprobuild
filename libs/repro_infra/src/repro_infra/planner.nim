@@ -161,7 +161,8 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule,
      pokLinuxNixosSystemModule, pokMacosDarwinSystemModule,
-     pokLinuxFhsSandbox, pokSystemdUnitState, pokLinuxAddOnTool:
+     pokLinuxFhsSandbox, pokLinuxDpkgDiversion, pokSystemdUnitState,
+     pokLinuxAddOnTool:
     # The M2 (Dotfiles-Migration-Completion) NixOS + nix-darwin
     # escape-hatch drivers are POSIX-side; their digest lives in
     # posix_system_driver alongside the other Phase-C kinds.
@@ -247,6 +248,8 @@ proc observeResource*(r: SystemResource): ResourceObservation =
         observeLinuxAddOnTool(op)
       of srkLinuxFhsSandbox:
         observeLinuxFhsSandbox(op)
+      of srkLinuxDpkgDiversion:
+        observeLinuxDpkgDiversion(op)
   except ENotImplementedPlatform:
     obs.present = false
     obs.digestHex = ZeroDigestHex
@@ -374,6 +377,8 @@ proc summaryLine(r: SystemResource; action: string): string =
   of srkMacosDarwinSystemModule:
     action & " darwin-module " & r.darwinModuleName &
       " (" & $r.darwinModuleContent.len & " bytes)"
+  of srkLinuxDpkgDiversion:
+    action & " dpkg-diversion " & r.ddPath & " -> " & r.ddPath & ".distrib"
   of srkSystemdUnitState:
     action & " unit-state " & r.usName &
       (if r.usEnabled: " (enable)" else: " (disable)") &

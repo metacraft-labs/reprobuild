@@ -160,13 +160,6 @@ type
     options: seq[(string, string)]
 
 # ---------------------------------------------------------------------------
-# Archive extraction
-# ---------------------------------------------------------------------------
-
-proc extractPrefix(archive: openArray[byte]; outDir: string) =
-  inProcessArchive.extractPrefix(archive, outDir)
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -311,15 +304,16 @@ proc cmdSubstitute(args: seq[string]): int =
   var asBytes = newSeq[byte](archiveBytes.len)
   for i, ch in archiveBytes:
     asBytes[i] = byte(ch)
-  createDir(outDir)
+  # Every published prefix is an rbcarc archive (a single file is packed as
+  # a one-entry archive), so an entry that does not extract is a refusal, not
+  # a format to guess at. Writing the raw bytes out under a fixed name and
+  # reporting a hit, as this once did, turned an archive the extractor
+  # rejected as hostile into a successful substitution with partial output.
   try:
-    extractPrefix(asBytes, outDir)
+    inProcessArchive.extractPrefixInto(asBytes, outDir)
   except IOError as e:
-    # Not an archive: fall back to single-file extraction (the build
-    # script's prefix was a single file like hex0).
-    stderr.writeLine("substitute: archive parse failed (" & e.msg &
-                     "); writing CAS blob verbatim to " & outDir)
-    writeFile(outDir / "blob", archiveBytes)
+    stderr.writeLine("substitute: refusing entry " & hex & ": " & e.msg)
+    return 1
   echo "hit ", hex, " -> ", outDir
   return 0
 

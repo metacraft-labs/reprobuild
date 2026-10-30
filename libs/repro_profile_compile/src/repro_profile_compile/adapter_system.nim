@@ -1039,6 +1039,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkMacosDarwinSystemModule:
       pairs.add(("name", quoteSystemValue(r.darwinModuleName)))
       pairs.add(("content", quoteSystemValue(r.darwinModuleContent)))
+    of srkLinuxDpkgDiversion:
+      pairs.add(("path", quoteSystemValue(r.ddPath)))
     of srkSystemdUnitState:
       pairs.add(("name", quoteSystemValue(r.usName)))
       pairs.add(("enabled", (if r.usEnabled: "true" else: "false")))

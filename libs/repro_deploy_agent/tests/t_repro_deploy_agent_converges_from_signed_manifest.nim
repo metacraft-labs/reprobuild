@@ -25,6 +25,10 @@
 ## ``substitutedFromCacheCount == 1`` — but the gate does not require a
 ## cache to be configured for convergence (off-by-default), so we assert
 ## convergence via the filesystem effect, which is the honest signal.
+## The cache case also checks the trust anchors at the agent level: the
+## publisher is the only host with a keypair, a consumer generates none, and
+## a consumer whose ``caches.conf`` anchors a different key builds locally
+## instead of substituting (``substituted-from-cache 0``).
 
 import std/[os, osproc, net, random, strutils, tempfiles, unittest]
 
@@ -224,10 +228,38 @@ suite "M5 — deploy agent converges from a signed manifest":
       doAssert waitForListener(port),
         "cache server did not start on 127.0.0.1:" & $port
       let url = "http://127.0.0.1:" & $port
-      putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", tmpRoot / "cred")
+      # Apply 1 runs on a PUBLISHER (operator-supplied keypair); applies 2
+      # and 3 on consumers. The apply path substitutes only entries signed by
+      # a key the consumer's caches.conf anchors, and publishes only with a
+      # configured keypair. REPRO_CACHES_CONFIG pins the trust config to this
+      # test so the host's own /etc/repro/caches.conf cannot leak in.
+      let autoCredDir = tmpRoot / "cred"
+      putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", autoCredDir)
       defer: delEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR")
       putEnv("REPRO_BINARY_CACHE_URL", url)
       defer: delEnv("REPRO_BINARY_CACHE_URL")
+      proc producerKeypair(dir: string): string =
+        ## Writes a keypair under ``dir``; returns the public-key hex.
+        createDir(dir)
+        discard peerAuth.loadOrGenerateKeypair(dir / "cert", dir / "key")
+        readFile(dir / "cert").strip()
+      let publisherPub = producerKeypair(tmpRoot / "publisher")
+      let strangerPub = producerKeypair(tmpRoot / "stranger")
+      proc anchorConf(path, pubHex: string): string =
+        writeFile(path, "[fleet]\nurl = \"" & url & "\"\n" &
+          "trusted-public-keys = \"" & pubHex & "\"\n")
+        path
+      let trustsPublisher = anchorConf(tmpRoot / "trusts-publisher.conf",
+                                       publisherPub)
+      let trustsStranger = anchorConf(tmpRoot / "trusts-stranger.conf",
+                                      strangerPub)
+      putEnv("REPRO_CACHES_CONFIG", trustsPublisher)
+      defer: delEnv("REPRO_CACHES_CONFIG")
+      putEnv("REPRO_BINARY_CACHE_KEY_PATH", tmpRoot / "publisher" / "key")
+      putEnv("REPRO_BINARY_CACHE_CERT_PATH", tmpRoot / "publisher" / "cert")
+      defer:
+        delEnv("REPRO_BINARY_CACHE_KEY_PATH")
+        delEnv("REPRO_BINARY_CACHE_CERT_PATH")
 
       let signer = peerAuth.generateKeypair()
       let anchors = anchorsFromKeypairs(@[signer.publicKey])
@@ -275,7 +307,10 @@ suite "M5 — deploy agent converges from a signed manifest":
       # --- apply 2: FRESH state/cwd/cacheRoot, cache now populated -------
       # A fresh agent state (last-applied floor = 0) + fresh engine cache
       # root means the ONLY way the output appears is a cache SUBSTITUTE of
-      # the content-addressable key run 1 published.
+      # the content-addressable key run 1 published. This host is a consumer:
+      # no keypair, and its caches.conf anchors the publisher's key.
+      delEnv("REPRO_BINARY_CACHE_KEY_PATH")
+      delEnv("REPRO_BINARY_CACHE_CERT_PATH")
       let agentState2 = tmpRoot / "agent2"
       let applyState2 = tmpRoot / "apply2"
       let cacheRoot2 = tmpRoot / "cache2"
@@ -294,3 +329,26 @@ suite "M5 — deploy agent converges from a signed manifest":
       check readFile(cwd2 / OutRel) == Expected
       # THE M4-hardening ASSERTION: the output was served from the cache.
       check "substituted-from-cache 1" in a2.message
+      # A consumer generates no publisher key of its own.
+      check not dirExists(autoCredDir)
+
+      # --- apply 3: a consumer that anchors a DIFFERENT key ----------------
+      # The cache holds the same validly signed entry, but this host's
+      # caches.conf anchors only a stranger's key. The deploy agent must build
+      # locally rather than run outputs signed by a key it does not trust.
+      putEnv("REPRO_CACHES_CONFIG", trustsStranger)
+      let agentState3 = tmpRoot / "agent3"
+      let applyState3 = tmpRoot / "apply3"
+      let cacheRoot3 = tmpRoot / "cache3"
+      let cwd3 = tmpRoot / "cwd3"
+      for d in [agentState3, applyState3, cacheRoot3, cwd3]: createDir(d)
+      let mp3 = tmpRoot / "m3.rdm"
+      writeManifestFile(mp3, cacheManifest(1, "cache-1", cwd3))
+      let cfg3 = AgentConfig(target: Target, sources: @[mp3], anchors: anchors,
+        stateDir: agentState3, fetchTimeoutMs: 5000)
+      let deps3 = AgentDeps(apply: mkRunInfraApplyHook(applyState3, cacheRoot3,
+        hostIdentity = "m5-cache-host", reproExe = "/usr/bin/false"))
+      let a3 = runAgentTick(cfg3, deps3)
+      check a3.kind == aoApplied
+      check readFile(cwd3 / OutRel) == Expected
+      check "substituted-from-cache 0" in a3.message

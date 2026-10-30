@@ -193,7 +193,7 @@ reprobuild-packages=7cbfee303fa2ae433b46c2a6151abd6f50ca7c29
 # Moved to 6fc4ba9 (2026-10-22), io-mon's `agents` tip, with `io-mon-src` in
 # flake.nix and flake.lock; 06ee30a is an ancestor.
 # Raw renameat2 capture; matches io-mon-src in flake.nix and flake.lock.
-io-mon=6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f
+io-mon=b46797064a419d031234b9b685f7dcbbdf1eeafe
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood

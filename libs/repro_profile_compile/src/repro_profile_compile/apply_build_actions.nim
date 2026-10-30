@@ -333,15 +333,18 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
           onProgress()
 
       # ---- M4: binary-cache substitute-first / publish-on-miss. ----
-      # When ``REPRO_BINARY_CACHE_URL`` is set we PREFER fetching each
-      # edge's outputs from the cache instead of building locally. Edges
-      # substituted from the cache are removed from the engine's
+      # When a binary cache is configured (``caches.conf`` or
+      # ``REPRO_BINARY_CACHE_URL``) we PREFER fetching each edge's outputs
+      # from the cache instead of building locally; only entries signed by
+      # a key the cache's ``trusted-public-keys`` anchor are accepted.
+      # Edges substituted from the cache are removed from the engine's
       # build-graph; only the misses (and edges with no substitutable
-      # outputs) go through ``runBuild``. On a successful local build we
-      # publish the freshly-built outputs back so a later fresh apply
-      # hits. Off-by-default: an unset URL yields ``configured = false``
-      # and the whole block is a no-op — the local-build path below is
-      # byte-identical to pre-M4 behaviour.
+      # outputs) go through ``runBuild``. On a successful local build a
+      # host configured as a PUBLISHER (operator-supplied keypair) publishes
+      # the freshly-built outputs back so a later fresh apply hits; any
+      # other host publishes nothing. Off-by-default: no configured cache
+      # yields ``configured = false`` and the whole block is a no-op — the
+      # local-build path below is byte-identical to pre-M4 behaviour.
       let cacheCfg = resolveBuildActionCacheConfig()
       # The M4 CAS + scratch lives beside the engine's action-cache
       # under the same apply-scoped cache root so a cache sweep of the
@@ -462,7 +465,8 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
             # HIT from the engine's OWN action-cache (asCacheHit /
             # asUpToDate) is NOT re-published: the bytes are unchanged
             # and were published on the run that produced them.
-            if cacheCfg.configured and outcome.ok and not outcome.cacheHit:
+            if shouldPublishBuildActionOutputs(cacheCfg) and outcome.ok and
+                not outcome.cacheHit:
               discard publishBuildActionOutputs(
                 a, cacheCfg, m4ScratchRoot / sanitizeForPath(a.id))
             matched = true

@@ -333,6 +333,15 @@ type
       ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
       ## mount-namespace bubblewrap creates are MECHANISM (the privilege
       ## needed to bind-mount without root), not an isolation policy.
+    pokLinuxDpkgDiversion = "linux.dpkgDiversion"
+      ## A local dpkg diversion of a package-owned path (ReproOS add-on
+      ## mode): `dpkg-divert --local --rename --divert <path>.distrib
+      ## --add <path>` moves the package's file aside, so dpkg installs
+      ## every later version of it at `<path>.distrib` and the path itself
+      ## is free for a file the profile owns. The destroy direction is
+      ## `dpkg-divert --local --rename --remove <path>`, which moves the
+      ## package's file back. Debian and Ubuntu only (refused where dpkg is
+      ## absent). See dpkg-divert(1).
     pokSystemdUnitState = "systemd.unitState"
       ## Enable/disable and start/stop a unit the add-on does not own, and
       ## nothing else about it (ReproOS Add-On Mode §4.1, `unitState`).
@@ -765,6 +774,11 @@ type
       darwinModuleName*: string
       darwinModuleContent*: string
       darwinModuleDestroy*: bool
+    of pokLinuxDpkgDiversion:
+      ## Divert `ddPath` (absolute, below `/etc/` or `/usr/local/etc/`)
+      ## to `ddPath & ".distrib"`. `ddDestroy` selects the removal.
+      ddPath*: string
+      ddDestroy*: bool
     of pokSystemdUnitState:
       ## Converge only `systemctl enable|disable` and `start|stop` of
       ## `usName`, a unit the add-on does not own. `usDestroy` forgets the
@@ -1103,6 +1117,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
+  of pokLinuxDpkgDiversion: true
   of pokSystemdUnitState: true
   of pokLinuxAddOnTool: true
   of pokInlineExecCall: true
@@ -1147,6 +1162,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
+  of $pokLinuxDpkgDiversion: pokLinuxDpkgDiversion
   of $pokSystemdUnitState: pokSystemdUnitState
   of $pokLinuxAddOnTool: pokLinuxAddOnTool
   of $pokInlineExecCall: pokInlineExecCall
@@ -2299,18 +2315,16 @@ proc operationValidationError*(op: PrivilegedOperation): string =
         "' is not a safe single-segment unit file name"
     if op.suAptClosureLock.len > 0 and not op.suDestroy:
       # The broker realises whatever the lock pins, as root, so the lock
-      # must parse and the unit must bind exactly the prefix it pins: a
-      # frame whose content and lock disagree is refused before any write.
+      # must parse and the unit must pass every refusal of the renderer
+      # (``checkUnitForAptClosure``) with the closure's lines present and
+      # binding exactly the prefix the lock pins: a frame whose content and
+      # lock disagree is refused before any write.
       try:
-        let lock = parseAptClosureLock(op.suAptClosureLock)
-        let bindLine = aptClosureUnitDirectives(
-          aptClosurePrefixPath(AddOnSystemStoreRoot, lock))[0]
-        if bindLine notin op.suContent.splitLines():
-          return "systemd.systemUnit '" & op.suName &
-            "' content does not carry its closure binding '" &
-            bindLine & "'"
-      except EAptClosureLock as ex:
-        return "systemd.systemUnit '" & op.suName & "': " & ex.msg
+        checkUnitForAptClosureLock(op.suContent, op.suAptClosureLock,
+          unitName = op.suName)
+      except EAptClosureLock, EAptClosureUnit:
+        return "systemd.systemUnit '" & op.suName & "': " &
+          getCurrentExceptionMsg()
   of pokLaunchdSystemDaemon:
     if not isSafeDaemonLabel(op.sdaLabel):
       return "launchd.systemDaemon label '" & op.sdaLabel &
@@ -2582,6 +2596,21 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.darwinModuleName.endsWith(".nix"):
       return "macos.darwinSystemModule name '" & op.darwinModuleName &
         "' must end with '.nix' (Nix module convention)"
+  of pokLinuxDpkgDiversion:
+    # A diversion is limited to the same roots `fs.systemFile` may write:
+    # the file the profile puts at the diverted path is an `fs.systemFile`,
+    # so a diversion anywhere else would be a diversion nothing may fill.
+    if not op.ddPath.startsWith("/") or "/../" in op.ddPath or
+        op.ddPath.endsWith("/..") or op.ddPath.endsWith("/"):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' must be an absolute file path without '..' segments"
+    if not (op.ddPath.startsWith("/etc/") or
+            op.ddPath.startsWith("/usr/local/etc/")):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' is outside /etc/ and /usr/local/etc/"
+    for c in op.ddPath:
+      if c in {'\0', '\n', '\r'}:
+        return "linux.dpkgDiversion path contains a control character"
   of pokSystemdUnitState:
     if not isSafeUnitName(op.usName) or not hasKnownUnitSuffix(op.usName):
       return "systemd.unitState name '" & op.usName &

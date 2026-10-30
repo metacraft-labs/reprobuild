@@ -155,6 +155,25 @@ when hostCPU in ["arm64", "amd64"]:
       discard addPrefix(storeRoot, "1111-openssl-3.6.1", foreign64Header())
       check nixLibDirIn(storeRoot, "*-openssl-*", sslNames) == ""
 
+    test "an archive does not vouch for a foreign shared library beside it":
+      # SQLite's store prefixes ship `libsqlite3.a` next to `libsqlite3.so`.
+      # The archive's header cannot be classified, but the linker prefers the
+      # shared object, so the directory is as foreign as its `.so`. Judged
+      # name by name, the archive alone used to select the directory: an
+      # armhf cross-compile on an x86-64 Nix host linked the store's x86-64
+      # SQLite (`libsqlite3.so is incompatible with elf32-littlearm`).
+      let storeRoot = createTempDir("repro-nix-libdir-", "")
+      defer: removeDir(storeRoot)
+      let foreignDir = storeRoot / "0000-sqlite-3.51.2" / "lib"
+      createDir(foreignDir)
+      writeFile(foreignDir / "libsqlite3.so", foreign64Header())
+      writeFile(foreignDir / "libsqlite3.a", "!<arch>\n")
+      let nativeDir = storeRoot / "1111-sqlite-3.51.1" / "lib"
+      createDir(nativeDir)
+      writeFile(nativeDir / "libsqlite3.so", nativeHeader())
+      writeFile(nativeDir / "libsqlite3.a", "!<arch>\n")
+      check nixLibDirIn(storeRoot, "*-sqlite-*", SqliteLibraryNames) == nativeDir
+
     test "a header the selector cannot classify is left to the linker":
       # A static archive or a linker script (glibc's libc.so is one) is not an
       # object header; rejecting it would break hosts whose layout is fine.

@@ -506,6 +506,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n       " &
           programName &
+      " deploy-agent keygen --secrets-key <FILE>\n       " &
+          programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
       " attest expect --image PATH [--out PATH | --check PATH]\n       " &

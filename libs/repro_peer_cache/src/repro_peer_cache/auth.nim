@@ -123,6 +123,11 @@ proc toHexN(buf: openArray[byte]): string =
 proc toHex32(buf: array[P256PrivLen, byte]): string = toHexN(buf)
 proc toHex65(buf: array[P256PubLen, byte]): string = toHexN(buf)
 
+proc publicKeyHex*(pub: PublicKeyBytes): string =
+  ## The 130-char lower-case hex of the uncompressed point: the one-key-per-
+  ## line form trust-anchor, allowed-signers and recipient-pubkey files hold.
+  toHex65(pub)
+
 proc parseHexBuf(hex: string; expectedBytes: int; what: string):
     seq[byte] =
   if hex.len != expectedBytes * 2:
@@ -298,13 +303,20 @@ proc verifySignature*(anchors: TrustAnchors;
 # Key file I/O.
 # ---------------------------------------------------------------------------
 
+proc privateKeyFileText*(priv: PrivateKeyBytes): string =
+  ## The exact contents of an `ecdsa-p256:<hex>` private-key file — what
+  ## `loadPrivateKeyFile` reads. For callers that must create the file
+  ## themselves (exclusively, with a restrictive mode) instead of through
+  ## `loadOrGenerateKeypair`.
+  KeyFilePrefix & toHex32(priv) & "\n"
+
 proc writeKeyFile(path: string; priv: PrivateKeyBytes) =
   ## Persists the private scalar to `path` as `ecdsa-p256:<hex>` so the
   ## file is unambiguously an ECDSA-P256 key, not an M3 stand-in seed.
   let parent = parentDir(path)
   if parent.len > 0 and not dirExists(parent):
     createDir(parent)
-  writeFile(path, KeyFilePrefix & toHex32(priv) & "\n")
+  writeFile(path, privateKeyFileText(priv))
 
 proc writeCertFile(path: string; pub: PublicKeyBytes) =
   ## Persists the public key to `path` as a single 130-char hex line.
