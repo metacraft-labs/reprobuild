@@ -150,7 +150,7 @@ proc encodeResource(r: ResourceIntent): string =
 proc encodeStringArray(items: seq[string]): string
 
 proc encodeHostSystems(t: Table[string, HostSystemDecl]): string =
-  ## `{"<host>": {"mode": "managedElsewhere" | "addOn", "managedBy":
+  ## `{"<host>": {"mode": "managedElsewhere" | "addOn" | "full", "managedBy":
   ## "<pointer>" | null, "activities": [...]}, ...}`, hosts sorted so the
   ## bytes are stable. Every key is always present (`managedBy` null and
   ## `activities` empty where the mode has none), so a consumer never reads
@@ -350,7 +350,7 @@ proc decodeHostSystemsJson*(node: JsonNode): Table[string, HostSystemDecl] =
       "(host -> {mode, managedBy, activities})")
   for host, v in node:
     let shapeError = "hostSystems." & host & " must be an object with " &
-      "`mode` (\"managedElsewhere\" or \"addOn\"), `managedBy` (a string " &
+      "`mode` (\"managedElsewhere\", \"addOn\" or \"full\"), `managedBy` (a string " &
       "or null) and `activities` (an array of strings)"
     if v.kind != JObject or not v.hasKey("mode") or
         v["mode"].kind != JString or not v.hasKey("managedBy") or
@@ -361,6 +361,7 @@ proc decodeHostSystemsJson*(node: JsonNode): Table[string, HostSystemDecl] =
     case v["mode"].getStr()
     of $hsmManagedElsewhere: decl.mode = hsmManagedElsewhere
     of $hsmAddOn: decl.mode = hsmAddOn
+    of $hsmFull: decl.mode = hsmFull
     else:
       raise newException(ValueError, "hostSystems." & host &
         ": unknown mode `" & v["mode"].getStr() & "`")

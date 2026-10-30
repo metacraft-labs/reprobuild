@@ -135,9 +135,10 @@ proc checkHostSystemMode*(v: HostRegistryVerdict; base: HostBase) =
   ## * the registry says `addOn` and the base is not a distribution host
   ##   (ReproOS, NixOS, not Linux, or an unreadable `os-release`): add-on
   ##   mode manages objects on top of a distribution, and there is none;
-  ## * the registry declares the host without a `system:` key and the base
-  ##   is a distribution host: writing system objects on a distribution host
-  ##   must be declared (`addOn` or `managedElsewhere`), never inferred.
+  ## * the registry declares the host as fully managed -- no `system:` key,
+  ##   or `system: full` / its block form -- and the base is a distribution
+  ##   host: writing system objects on a distribution host must be declared
+  ##   `addOn` or `managedElsewhere`, never inferred and never `full`.
   ##
   ## A host the registry does not declare (or no registry at all) keeps the
   ## behaviour it had before add-on mode existed; the report's `registry:`
@@ -169,16 +170,22 @@ proc checkHostSystemMode*(v: HostRegistryVerdict; base: HostBase) =
         "`hosts:` entry. Nothing was planned or changed.")
   of mmFull:
     if base.kind == hbkDistribution:
+      let said =
+        if v.management.spelled:
+          "declares it `system: " & FullKeyword & "` (the whole system " &
+            "managed by this configuration), which a distribution host " &
+            "cannot be"
+        else:
+          "declares it without saying how its system is managed"
       raise newAddOnModeMismatch(v.host, $mmFull, describeHostBase(base),
         "host " & v.host & " runs " & describeHostBase(base) & ", a " &
         "distribution-managed system, and the host registry " &
-        v.registryPath & " declares it without saying how its system is " &
-        "managed. Writing system objects on a distribution host must be " &
-        "declared: add `system: " & AddOnKeyword & "` to its `hosts:` " &
-        "entry to manage declared services, files and accounts on top of " &
-        "the distribution, or `system: " & ManagedElsewhereKeyword &
-        "(\"<what manages it>\")` if something else does. Nothing was " &
-        "planned or changed.")
+        v.registryPath & " " & said & ". Writing system objects on a " &
+        "distribution host must be declared: use `system: " & AddOnKeyword &
+        "` in its `hosts:` entry to manage declared services, files and " &
+        "accounts on top of the distribution, or `system: " &
+        ManagedElsewhereKeyword & "(\"<what manages it>\")` if something " &
+        "else does. Nothing was planned or changed.")
 
 proc realisationFor*(v: HostRegistryVerdict; base: HostBase):
     SystemRealisation =

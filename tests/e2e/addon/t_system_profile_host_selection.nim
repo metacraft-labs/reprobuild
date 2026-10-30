@@ -60,6 +60,8 @@ profile "a6selRegistry":
       system: {mode: addOn, activities: [backup]}
     "a6sel-short":
       system: addOn
+    "a6sel-fullweb":
+      system: {mode: full, activities: [web]}
     "a6sel-unknown":
       system: {mode: addOn, activities: [nosuchactivity]}
 """
@@ -138,6 +140,19 @@ suite "ReproOS add-on mode: system-scope host selection":
     check planLines(short.stdout) == @["* " & BaseFile & "  [create]"]
     check "system  : activities default; realised add-on-debian" in
       short.stdout
+
+    # The `full` block form (decision 17) selects the same way on a fully
+    # managed host: web + base, realised in full, on a ReproOS base.
+    let fullWeb = sb.runRepro(["infra", "plan", "--state-dir", stateDir,
+      "--profile", systemPath, "--host", "a6sel-fullweb"], host = "",
+      extraEnv = [baseEnv("reproos"),
+        ("REPROBUILD_ACTION_CACHE_ROOT", sb.root / "action-cache")])
+    checkpoint "a6sel-fullweb: " & fullWeb.stdout & fullWeb.stderr
+    require fullWeb.exitCode == 0
+    check planLines(fullWeb.stdout).len == 2
+    for line in [WebFile, BaseFile]:
+      check ("* " & line & "  [create]") in planLines(fullWeb.stdout)
+    check "system  : activities default, web; realised full" in fullWeb.stdout
 
     # Vacuity: the three plans differ pairwise.
     check planLines(web.stdout) != planLines(backup.stdout)

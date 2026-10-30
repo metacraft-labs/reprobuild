@@ -29,8 +29,8 @@ from repro_profile/concerns import concernListProblem
 # structural editor, so all three agree on which names cannot be bare.
 from repro_project_dsl/selector_names import isNimKeyword
 from repro_profile/host_system import HostSystemKey, ManagedElsewhereKeyword,
-  AddOnKeyword, SystemModeKey, SystemActivitiesKey, systemPointerProblem,
-  systemBlockProblem
+  AddOnKeyword, FullKeyword, SystemModeKey, SystemActivitiesKey,
+  systemPointerProblem, systemBlockProblem
 
 import ./errors
 import ./model
@@ -1129,8 +1129,9 @@ proc gatherHostList(ctx: ParseCtx; idx: int; first: string;
 
 const SystemValueExpected = "`" & ManagedElsewhereKeyword & "`, `" &
   ManagedElsewhereKeyword & "(\"<managing repository>\")`, `" & AddOnKeyword &
-  "` or the block form (`" & SystemModeKey & ": " & AddOnKeyword & "` and `" &
-  SystemActivitiesKey & ": [...]`)"
+  "`, `" & FullKeyword & "` or the block form (`" & SystemModeKey & ": " &
+  AddOnKeyword & " | " & FullKeyword & "` and `" & SystemActivitiesKey &
+  ": [...]`)"
   ## What a `system:` value may be, for diagnostics.
 
 proc finishSystemBlock(ctx: ParseCtx; idx, col: int; hostName: string;
@@ -1142,9 +1143,10 @@ proc finishSystemBlock(ctx: ParseCtx; idx, col: int; hostName: string;
   if problem.len > 0:
     raiseUnstructured(ctx.profilePath, idx + 1, col + 1,
       "system: " & problem & " in hosts entry \"" & hostName & "\"",
-      "`" & SystemModeKey & ": " & AddOnKeyword & "` and a non-empty `" &
-      SystemActivitiesKey & ": [...]`")
-  HostSystemDecl(mode: hsmAddOn, activities: activities)
+      "`" & SystemModeKey & ": " & AddOnKeyword & " | " & FullKeyword &
+      "` and a non-empty `" & SystemActivitiesKey & ": [...]`")
+  HostSystemDecl(mode: (if mode == FullKeyword: hsmFull else: hsmAddOn),
+    activities: activities)
 
 proc readSystemBlockPair(ctx: ParseCtx; idx, col: int; hostName: string;
                          key, value: string; seen: var seq[string];
@@ -1163,7 +1165,8 @@ proc readSystemBlockPair(ctx: ParseCtx; idx, col: int; hostName: string;
     if mode.len == 0 or not mode.allCharsInSet(IdentChars):
       raiseUnstructured(ctx.profilePath, idx + 1, col + 1,
         "'" & value.strip() & "' as the `system: " & SystemModeKey &
-        ":` of hosts entry \"" & hostName & "\"", "`" & AddOnKeyword & "`")
+        ":` of hosts entry \"" & hostName & "\"", "`" & AddOnKeyword & "` or `" &
+        FullKeyword & "`")
   of SystemActivitiesKey:
     hasActivities = true
     activities = splitHostList(ctx, idx, value, col)
@@ -1297,6 +1300,8 @@ proc parseHostSystemValue(ctx: ParseCtx; idx: int; raw: string;
   let word = stripInlineComment(value).strip()
   if word == AddOnKeyword:
     return (HostSystemDecl(mode: hsmAddOn), idx)
+  if word == FullKeyword:
+    return (HostSystemDecl(mode: hsmFull), idx)
   if not value.startsWith(ManagedElsewhereKeyword):
     raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
       "'" & value & "' as the `system:` value of hosts entry \"" & hostName &

@@ -13,7 +13,9 @@ Each case is a profile (`<case>/profile/`) and what Reprobuild says about it:
   evaluator (`nix/lib/intent.nix`) must reproduce from `export.json` alone.
 
 Hosts evaluated: `m1`, `home-pc`, `server` (declared, declared, undeclared),
-plus, in `neutral`, the add-on hosts `rpi` and `validator`.
+plus, in `neutral`, the add-on hosts `rpi` and `validator` and the fully
+managed `pc-full`, which selects a system activity through
+`system: {mode: full, activities: [web]}`.
 The undeclared host is refused on every system, by `repro home export` and by
 the Nix evaluator alike (`{ "undeclaredHost": true }`): a profile with a
 `hosts:` registry declares every host it may be applied to (reprobuild-pm

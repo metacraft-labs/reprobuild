@@ -79,9 +79,11 @@
 #     [ ]; }` for `system: managedElsewhere[(...)]`, `{ managed = "here";
 #     managedBy = null; mode = "addOn"; activities = [ "default" ... ]; }`
 #     for `system: addOn` (the add-on host's base is its distribution's:
-#     only `mode = "full"` lets a system switch take the whole system), and
+#     only `mode = "full"` lets a system switch take the whole system),
 #     `{ managed = "here"; managedBy = null; mode = "full"; activities = [
-#     "default" ]; }` otherwise. Always present (`systemManagementOf`, also
+#     "default" ... ]; }` for `system: {mode: full, activities: [...]}` (a
+#     fully managed host selecting system activities), and the same with
+#     `[ "default" ]` otherwise. Always present (`systemManagementOf`, also
 #     exposed as `reprobuild.lib.hostSystemManagement`, which needs no
 #     target system). A malformed entry, or one for a host the registry does
 #     not declare, is refused, never read as "here".
@@ -184,7 +186,7 @@ let
             && (v.managedBy == null || builtins.match ".*[\n\r].*" v.managedBy == null)
           )
           || (
-            v.mode == "addOn"
+            (v.mode == "addOn" || v.mode == "full")
             && v.managedBy == null
             && !(builtins.elem "default" v.activities)
             && builtins.length v.activities == builtins.length (
@@ -206,7 +208,7 @@ let
     if !(builtins.isAttrs table) then
       throw "reprobuild.lib: the document's intent.hostSystems is not an object (host -> { mode, managedBy, activities })"
     else if bad != [ ] then
-      throw "reprobuild.lib: intent.hostSystems entries ${toJSON bad} are malformed: each must be { mode = \"managedElsewhere\"; managedBy = <non-empty string> | null; activities = [ ]; } or { mode = \"addOn\"; managedBy = null; activities = [ <activity>, ... ]; } (no `default`, no repeats)"
+      throw "reprobuild.lib: intent.hostSystems entries ${toJSON bad} are malformed: each must be { mode = \"managedElsewhere\"; managedBy = <non-empty string> | null; activities = [ ]; } or { mode = \"addOn\" | \"full\"; managedBy = null; activities = [ <activity>, ... ]; } (no `default`, no repeats)"
     else if undeclared != [ ] then
       throw "reprobuild.lib: intent.hostSystems names host(s) ${toJSON undeclared}, which the profile's hosts: registry does not declare"
     else if entry == null then
@@ -216,11 +218,11 @@ let
         mode = "full";
         activities = [ "default" ];
       }
-    else if entry.mode == "addOn" then
+    else if entry.mode == "addOn" || entry.mode == "full" then
       {
         managed = "here";
         managedBy = null;
-        mode = "addOn";
+        mode = entry.mode;
         activities = [ "default" ] ++ entry.activities;
       }
     else
@@ -232,7 +234,9 @@ let
       };
 
   # `reprobuild.lib.hostSystemManagement { host, snapshot ? null, document ? null }`
-  # -> `{ host, managed, managedBy }`: who manages `host`'s system scope,
+  # -> `{ host, managed, managedBy, mode, activities }`: who manages `host`'s
+  # system scope and how (`systemManagementOf`: `mode` is what a system
+  # switch branches on, `activities` the system-activity selection),
   # without evaluating any target system (a system switch asks this before it
   # knows or cares which packages the host gets). Refuses a document of
   # another format or schema version and a host the registry does not

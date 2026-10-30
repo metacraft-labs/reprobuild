@@ -394,6 +394,7 @@ suite "ProfileIntent CBOR body round-trip":
     p.hosts["home-pc"] = @["default"]
     p.hosts["rpi"] = @["default"]
     p.hosts["validator"] = @["default"]
+    p.hosts["pc"] = @["default"]
     let plain = encodeProfileIntentToBytes(p)
     var plainText = ""
     for b in plain: plainText.add char(b)
@@ -406,6 +407,7 @@ suite "ProfileIntent CBOR body round-trip":
     p.hostSystems["rpi"] = HostSystemDecl(mode: hsmAddOn)
     p.hostSystems["validator"] = HostSystemDecl(mode: hsmAddOn,
       activities: @["ethereum_validator", "host_baseline"])
+    p.hostSystems["pc"] = HostSystemDecl(mode: hsmFull, activities: @["web"])
     let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
     check q.hostSystems == p.hostSystems
     check not q.hostSystems.hasKey("home-pc")
@@ -413,7 +415,8 @@ suite "ProfileIntent CBOR body round-trip":
     check js.contains("\"hostSystems\":{\"distro-host\":" &
       "{\"mode\":\"managedElsewhere\",\"managedBy\":null,\"activities\":[]}," &
       "\"infra-host\":{\"mode\":\"managedElsewhere\",\"managedBy\":" &
-      "\"example-org/infra\",\"activities\":[]},\"rpi\":{\"mode\":\"addOn\"," &
+      "\"example-org/infra\",\"activities\":[]},\"pc\":{\"mode\":\"full\"," &
+      "\"managedBy\":null,\"activities\":[\"web\"]},\"rpi\":{\"mode\":\"addOn\"," &
       "\"managedBy\":null,\"activities\":[]},\"validator\":{\"mode\":" &
       "\"addOn\",\"managedBy\":null,\"activities\":[\"ethereum_validator\"," &
       "\"host_baseline\"]}}")
@@ -436,6 +439,10 @@ suite "ProfileIntent CBOR body round-trip":
       "host_baseline"]
     check enabledSystemActivities(v) == toHashSet(["default",
       "ethereum_validator", "host_baseline"])
+    let pc = systemManagementFor(r, "pc")
+    check pc.mode == mmFull and pc.spelled and not pc.isAddOn
+    check enabledSystemActivities(pc) == toHashSet(["default", "web"])
+    check not h.spelled
     check not systemManagementFor(r, "nowhere").declared
     check systemManagementFor(r, "nowhere").mode == mmFull
     # A malformed JSON entry is refused, never read as "managed here".
@@ -446,6 +453,8 @@ suite "ProfileIntent CBOR body round-trip":
                 "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\",\"managedBy\":\"r\",\"activities\":[]}}}",
                 "{\"hostSystems\":{\"x\":{\"mode\":\"managedElsewhere\",\"managedBy\":null,\"activities\":[\"a\"]}}}",
                 "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\",\"managedBy\":null,\"activities\":[\"default\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"full\",\"managedBy\":\"r\",\"activities\":[\"web\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"full\",\"managedBy\":null,\"activities\":[\"default\"]}}}",
                 "{\"hostSystems\":{\"x\":{\"mode\":\"managedElsewhere\",\"managedBy\":1,\"activities\":[]}}}",
                 "{\"hostSystems\":[]}"]:
       let doc = js[0 ..< js.len - 1] & "," & bad[1 ..< bad.len - 1] & "}"
@@ -454,6 +463,7 @@ suite "ProfileIntent CBOR body round-trip":
     # The RBPI reader refuses the same impossible declarations as corrupt
     # (the encoder writes whatever it is handed, so it can produce them).
     for impossible in [HostSystemDecl(mode: hsmAddOn, managedBy: "r"),
+                       HostSystemDecl(mode: hsmFull, managedBy: "r"),
                        HostSystemDecl(mode: hsmAddOn, activities: @["default"]),
                        HostSystemDecl(mode: hsmManagedElsewhere,
                          activities: @["a"])]:

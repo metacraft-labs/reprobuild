@@ -8,11 +8,13 @@
 ## The home profile's `hosts:` registry declares one host per value of
 ## `system:` -- absent (`rt-full`), `managedElsewhere("example-org/rt")`
 ## (`rt-elsewhere`), `managedElsewhere` without a pointer (`rt-nopointer`),
-## `addOn` (`rt-addon`), the indented block form (`rt-block`) and the inline
-## block form (`rt-inline`).
+## `addOn` (`rt-addon`), the indented block form (`rt-block`), the inline
+## block form (`rt-inline`), the spelled `full` (`rt-fullshort`, the same as
+## absent) and the `full` block form selecting a system activity
+## (`rt-fullblock`, spec §13 decision 17).
 ##
 ## 1. Macro -> export: `repro home export` writes schema 5, and
-##    `intent.hostSystems` carries exactly the five declarations, each with
+##    `intent.hostSystems` carries exactly the seven declarations, each with
 ##    `mode`, `managedBy` and `activities`; `--target` reports
 ##    `evaluation.system` for every host (`full` / `managedElsewhere` /
 ##    `addOn`, with the system activities). `--check` sees an edit of an
@@ -28,8 +30,10 @@
 ## 4. A schema-4 export is refused by the Nix reader (`hostSystemManagement`
 ##    and `readIntent`), both in its own shape (`systemManagedElsewhere`) and
 ##    as this document relabelled 4 -- it can never be read as "here".
-## 5. The macro and the text parser refuse the same malformed values,
-##    naming the host: an empty or `default`-listing activity list, a block
+## 5. The macro (`repro home export`) and the text parser behind the
+##    structural editor (`repro home set ... --no-apply`, which loads the
+##    profile with `repro_home_intent/parser`) refuse the same malformed
+##    values, each naming the host and the reason: an empty or `default`-listing activity list, a block
 ##    without `mode:`, an unknown mode, `managedElsewhere` with activities,
 ##    `addOn("x")`.
 ##
@@ -74,6 +78,11 @@ const Registry = """
       activities: [default]
     "rt-inline":
       system: {mode: addOn, activities: [monitoring]}
+    "rt-fullshort":
+      system: full
+    "rt-fullblock":
+      activities: [default]
+      system: {mode: full, activities: [web]}
 """
 
 proc homeProfile(hostsBlock: string): string =
@@ -110,13 +119,16 @@ profile "a6rtSystem":
 
 const
   Hosts = ["rt-full", "rt-elsewhere", "rt-nopointer", "rt-addon",
-           "rt-block", "rt-inline"]
+           "rt-block", "rt-inline", "rt-fullshort", "rt-fullblock"]
   ExpectedHostSystems = """{
     "rt-addon": {"mode": "addOn", "managedBy": null, "activities": []},
     "rt-block": {"mode": "addOn", "managedBy": null,
                  "activities": ["web", "backup"]},
     "rt-elsewhere": {"mode": "managedElsewhere",
                      "managedBy": "example-org/rt", "activities": []},
+    "rt-fullblock": {"mode": "full", "managedBy": null,
+                     "activities": ["web"]},
+    "rt-fullshort": {"mode": "full", "managedBy": null, "activities": []},
     "rt-inline": {"mode": "addOn", "managedBy": null,
                   "activities": ["monitoring"]},
     "rt-nopointer": {"mode": "managedElsewhere", "managedBy": null,
@@ -142,6 +154,12 @@ proc expectedSystem(host: string): JsonNode =
   of "rt-inline":
     %*{"managed": "here", "managedBy": nil, "mode": "addOn",
        "activities": ["default", "monitoring"]}
+  of "rt-fullshort":
+    %*{"managed": "here", "managedBy": nil, "mode": "full",
+       "activities": ["default"]}
+  of "rt-fullblock":
+    %*{"managed": "here", "managedBy": nil, "mode": "full",
+       "activities": ["default", "web"]}
   else:
     raise newException(ValueError, "no expectation for " & host)
 
@@ -213,6 +231,18 @@ when defined(linux) or defined(macosx):
         check plan.exitCode == 1
         check ("refusing host " & host & ": its system is managed " &
           "elsewhere") in plan.stderr
+      # The `full` block form plans its selection on a ReproOS base, in full
+      # (and is a mode mismatch on Debian: `t_addon_mode_mismatch_is_refused`).
+      block:
+        let plan = sb.runRepro(["infra", "plan", "--state-dir", stateDir,
+          "--profile", sb.profileDir / "system.nim", "--host", "rt-fullblock"],
+          host = "", extraEnv = [baseEnv("reproos"),
+            ("REPROBUILD_ACTION_CACHE_ROOT", sb.root / "action-cache")])
+        checkpoint "rt-fullblock: " & plan.stdout & plan.stderr
+        check plan.exitCode == 0
+        check "host rt-fullblock: system managed here (system activities: " &
+          "default, web)" in plan.stdout
+        check "system  : activities default, web; realised full" in plan.stdout
 
       # 3. Export -> Nix reader, from the export alone.
       let nixAnswers = nixEvalJson("""
@@ -242,6 +272,8 @@ when defined(linux) or defined(macosx):
       schema4Shape["intent"]["systemManagedElsewhere"] = %*{
         "rt-elsewhere": {"managedBy": "example-org/rt"},
         "rt-nopointer": {"managedBy": nil}}
+      schema4Shape["intent"]["hosts"].delete("rt-fullblock")
+      schema4Shape["intent"]["hosts"].delete("rt-fullshort")
       var relabelled = doc.copy()
       relabelled["schemaVersion"] = %4
       for (name, bad) in [("schema4-shape", schema4Shape),
@@ -271,37 +303,49 @@ when defined(linux) or defined(macosx):
           check r["read"].getBool == false
 
       # 5. Malformed values are refused at compile time, naming the host.
-      for (bad, expected) in [
+      for (bad, expected, parserPhrase) in [
           ("""
     "rt-bad":
       system: {mode: addOn, activities: []}
-""", "the activity list is empty"),
+""", "the activity list is empty", "the activity list is empty"),
           ("""
     "rt-bad":
       system: {mode: addOn, activities: [default]}
-""", "`default` is always enabled"),
+""", "`default` is always enabled", "`default` is always enabled"),
           ("""
     "rt-bad":
       system: {activities: [web]}
-""", "the block form needs `mode: addOn`"),
+""", "the block form needs `mode: addOn`", "the block form needs `mode: addOn`"),
           ("""
     "rt-bad":
       system:
         mode: nixos
         activities: [web]
-""", "unknown mode `nixos`"),
+""", "unknown mode `nixos`", "unknown mode `nixos`"),
           ("""
     "rt-bad":
       system: {mode: managedElsewhere, activities: [web]}
-""", "`managedElsewhere` selects no system activities"),
+""", "`managedElsewhere` selects no system activities",
+     "`managedElsewhere` selects no system activities"),
           ("""
     "rt-bad":
       system: {mode: addOn}
-""", "the block form needs `activities: [...]`"),
+""", "the block form needs `activities: [...]`",
+     "the block form needs `activities: [...]`"),
+          ("""
+    "rt-bad":
+      system: {mode: full, activities: []}
+""", "the activity list is empty", "the activity list is empty"),
+          ("""
+    "rt-bad":
+      system: {mode: full}
+""", "the block form needs `activities: [...]`",
+     "the block form needs `activities: [...]`"),
           ("""
     "rt-bad":
       system: addOn("x")
-""", "unknown `system:` value")]:
+""", "unknown `system:` value",
+     "as the `system:` value of hosts entry \"rt-bad\"")]:
         sb.writeProfileFile("home.nim", homeProfile(bad))
         let r = sb.runRepro(["home", "export", "--format", "json"],
           host = "rt-bad")
@@ -309,8 +353,11 @@ when defined(linux) or defined(macosx):
         check r.exitCode != 0
         check expected in (r.stdout & r.stderr)
         check "rt-bad" in (r.stdout & r.stderr)
-        # The text parser (`repro home list`) refuses it too.
-        let listed = sb.runRepro(["home", "list"], host = "rt-bad")
-        checkpoint "home list: " & listed.stdout & listed.stderr
-        check listed.exitCode != 0
-        check "rt-bad" in (listed.stdout & listed.stderr)
+        # The text parser refuses it too, with the same reason (the shared
+        # `host_system` vocabulary), through the structural editor's load.
+        let edited = sb.runRepro(["home", "set", "a6rtnosuchpackage.key",
+          "v", "--no-apply"], host = "rt-bad")
+        checkpoint "home set: " & edited.stdout & edited.stderr
+        check edited.exitCode != 0
+        check parserPhrase in (edited.stdout & edited.stderr)
+        check "rt-bad" in (edited.stdout & edited.stderr)

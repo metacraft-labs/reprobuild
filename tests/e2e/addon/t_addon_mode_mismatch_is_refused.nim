@@ -10,14 +10,15 @@
 ## `os-release` fixtures:
 ##
 ## 1. `system: addOn` on a ReproOS base and on a NixOS base: `repro infra
-##    plan`, `repro infra apply --no-preview` and `repro system sync` each
-##    exit 1 with `EAddOnModeMismatch`, naming the host, the registry and
+##    plan`, `repro infra apply --no-preview`, `repro system sync` and
+##    `repro system rollback` (every call site of the gate) each exit 1 with `EAddOnModeMismatch`, naming the host, the registry and
 ##    the observed base, and the state directory is unchanged (no plan,
 ##    generation, lock or pointer).
 ## 2. A host the registry declares WITHOUT `system:` on a Debian base is
-##    refused the same way, the diagnostic asking for `addOn` or
-##    `managedElsewhere`. Negative controls: the same host on a ReproOS base
-##    plans; a host the registry does not declare plans on Debian as before,
+##    refused the same way by all four commands, the diagnostic asking for `addOn` or
+##    `managedElsewhere`; so is a spelled `system: {mode: full, ...}` entry
+##    (decision 17). Negative controls: the same host on a ReproOS base
+##    plans, and the `full` block form plans its activities there; a host the registry does not declare plans on Debian as before,
 ##    and the report says it is not declared.
 ## 3. `system: addOn` on Ubuntu 24.04 and on Raspberry Pi OS 13 (`ID_LIKE=
 ##    debian`) plans through `add-on-debian`; on Arch it is
@@ -68,6 +69,8 @@ profile "a6mmRegistry":
       system: {mode: addOn, activities: [machine]}
     "mm-fw":
       system: {mode: addOn, activities: [fw]}
+    "mm-fullblock":
+      system: {mode: full, activities: [fw]}
 """
 
 const SystemProfile = """
@@ -121,7 +124,7 @@ suite "ReproOS add-on mode: mode mismatch and out-of-scope refusals":
     # 1. addOn on a base that is not a distribution host.
     for base in ["reproos", "nixos"]:
       for cmd in [@["infra", "plan"], @["infra", "apply", "--no-preview"],
-                  @["system", "sync"]]:
+                  @["system", "sync"], @["system", "rollback"]]:
         let before = stateFingerprint(stateDir)
         let r = run(cmd, "mm-addon", base)
         check r.exitCode == 1
@@ -132,14 +135,30 @@ suite "ReproOS add-on mode: mode mismatch and out-of-scope refusals":
         check stateFingerprint(stateDir) == before
 
     # 2. A declared host without `system:` on a distribution base.
-    for cmd in [@["infra", "plan"], @["infra", "apply", "--no-preview"]]:
+    for cmd in [@["infra", "plan"], @["infra", "apply", "--no-preview"],
+                @["system", "sync"], @["system", "rollback"]]:
       let before = stateFingerprint(stateDir)
       let r = run(cmd, "mm-full", "debian-13")
       check r.exitCode == 1
       check "EAddOnModeMismatch: host mm-full runs debian 13" in r.stderr
-      check "add `system: addOn` to its `hosts:` entry" in r.stderr
+      check "use `system: addOn` in its `hosts:` entry" in r.stderr
       check "`system: managedElsewhere(" in r.stderr
       check stateFingerprint(stateDir) == before
+    # A spelled `full` (block form) on a distribution host is refused too:
+    # `full` is still not a mode a distribution host can be, and the
+    # diagnostic says the entry claims it.
+    block:
+      let before = stateFingerprint(stateDir)
+      let r = run(["infra", "plan"], "mm-fullblock", "debian-13")
+      check r.exitCode == 1
+      check "EAddOnModeMismatch: host mm-fullblock runs debian 13" in r.stderr
+      check "declares it `system: full`" in r.stderr
+      check stateFingerprint(stateDir) == before
+    # And on a ReproOS base the same entry plans its selection in full.
+    block:
+      let r = run(["infra", "plan"], "mm-fullblock", "reproos")
+      check r.exitCode == 0
+      check "system  : activities default, fw; realised full" in r.stdout
     let undeclared = run(["infra", "plan"], "mm-undeclared", "debian-13")
     check undeclared.exitCode == 0
     check "host mm-undeclared not declared; system managed here" in

@@ -165,6 +165,8 @@ reprobuild.lib.hostSystemManagement {
 #      activities = [ "default" ]; }
 # => { host = "rpi"; managed = "here"; managedBy = null; mode = "addOn";
 #      activities = [ "default" "monitoring" ]; }
+# => { host = "reproos-box"; managed = "here"; managedBy = null; mode = "full";
+#      activities = [ "default" "host_baseline" ]; }
 ```
 
 Reads the host's `system:` attribute

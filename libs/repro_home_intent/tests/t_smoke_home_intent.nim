@@ -79,7 +79,11 @@ suite "Home-intent smoke":
       "                     host_baseline]  # spans lines\n" &
       "      activities: [default]\n" &
       "    \"inline\":\n" &
-      "      system: {mode: addOn, activities: [a, b]} # inline\n"))
+      "      system: {mode: addOn, activities: [a, b]} # inline\n" &
+      "    \"fullshort\":\n" &
+      "      system: full\n" &
+      "    \"fullblock\":\n" &
+      "      system: {mode: full, activities: [web]}\n"))
     let hostsOpt = findHostsBlock(loadProfile(path))
     require hostsOpt.isSome
     var seen: Table[string, (bool, HostSystemDecl)]
@@ -97,6 +101,9 @@ suite "Home-intent smoke":
     check acts["validator"] == @["default"]
     check seen["inline"] == (true, HostSystemDecl(mode: hsmAddOn,
       activities: @["a", "b"]))
+    check seen["fullshort"] == (true, HostSystemDecl(mode: hsmFull))
+    check seen["fullblock"] == (true, HostSystemDecl(mode: hsmFull,
+      activities: @["web"]))
     for bad in [
         "    \"h\":\n      system: managedSomewhere\n",
         "    \"h\":\n      system: managedElsewhere(infra)\n",
@@ -111,6 +118,9 @@ suite "Home-intent smoke":
         "    \"h\":\n      system: {mode: addOn, activities: [a, a]}\n",
         "    \"h\":\n      system: {mode: managedElsewhere, activities: [a]}\n",
         "    \"h\":\n      system: {mode: nixos, activities: [a]}\n",
+        "    \"h\":\n      system: {mode: full, activities: []}\n",
+        "    \"h\":\n      system: {mode: full, activities: [default]}\n",
+        "    \"h\":\n      system: full(\"x\")\n",
         "    \"h\":\n      system: {activities: [a]}\n",
         "    \"h\":\n      system: {mode: addOn, activities: [a]\n",
         "    \"h\":\n      system: {mode: addOn, activities: [a], extra: 1}\n",
