@@ -64,6 +64,7 @@ type
     srkLinuxNixosSystemModule = "linux.nixosSystemModule"
     srkMacosDarwinSystemModule = "macos.darwinSystemModule"
     srkLinuxFhsSandbox = "linux.fhsSandbox"
+    srkLinuxDpkgDiversion = "linux.dpkgDiversion"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -268,6 +269,8 @@ type
       fsbBinPath*: string                 ## absolute path inside the FHS view
       fsbFhsTreeRoots*: seq[string]       ## realized prefixes composed into /
       fsbArgv*: seq[string]               ## additional argv after fsbBinPath
+    of srkLinuxDpkgDiversion:
+      ddPath*: string                     ## the package-owned path diverted
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -336,6 +339,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "darwinSystemModule:" & r.darwinModuleName
   of srkLinuxFhsSandbox:
     "fhsSandbox:" & r.fsbBinPath
+  of srkLinuxDpkgDiversion:
+    "dpkgDiversion:" & r.ddPath
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -384,6 +389,7 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxNixosSystemModule: r.nixosModuleName
   of srkMacosDarwinSystemModule: r.darwinModuleName
   of srkLinuxFhsSandbox: r.fsbBinPath
+  of srkLinuxDpkgDiversion: r.ddPath
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -614,6 +620,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxNixosSystemModule: srk = srkLinuxNixosSystemModule
     of $srkMacosDarwinSystemModule: srk = srkMacosDarwinSystemModule
     of $srkLinuxFhsSandbox: srk = srkLinuxFhsSandbox
+    of $srkLinuxDpkgDiversion: srk = srkLinuxDpkgDiversion
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -1308,6 +1315,17 @@ proc parseSystemProfile*(text: string): SystemProfile =
             "argv element)")
       res = SystemResource(kind: srkLinuxFhsSandbox,
         fsbBinPath: binPath, fsbFhsTreeRoots: fhsTrees, fsbArgv: argv)
+    of srkLinuxDpkgDiversion:
+      # The diversion's own validation (absolute, below /etc/ or
+      # /usr/local/etc/, no '..') is the operation's, so a hand-written
+      # profile and the broker refuse the same paths.
+      let p = need("path")
+      let op = PrivilegedOperation(kind: pokLinuxDpkgDiversion,
+        address: "dpkgDiversion:" & p, ddPath: p)
+      let err = operationValidationError(op)
+      if err.len > 0:
+        raiseSystemProfileInvalid(err)
+      res = SystemResource(kind: srkLinuxDpkgDiversion, ddPath: p)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -1523,6 +1541,10 @@ proc toPrivilegedOperation*(r: SystemResource;
       fsbFhsTreeRoots: r.fsbFhsTreeRoots,
       fsbArgv: r.fsbArgv,
       fsbDestroy: destroy)
+  of srkLinuxDpkgDiversion:
+    PrivilegedOperation(kind: pokLinuxDpkgDiversion, address: r.address,
+      ddPath: r.ddPath,
+      ddDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

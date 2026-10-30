@@ -333,6 +333,15 @@ type
       ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
       ## mount-namespace bubblewrap creates are MECHANISM (the privilege
       ## needed to bind-mount without root), not an isolation policy.
+    pokLinuxDpkgDiversion = "linux.dpkgDiversion"
+      ## A local dpkg diversion of a package-owned path (ReproOS add-on
+      ## mode): `dpkg-divert --local --rename --divert <path>.distrib
+      ## --add <path>` moves the package's file aside, so dpkg installs
+      ## every later version of it at `<path>.distrib` and the path itself
+      ## is free for a file the profile owns. The destroy direction is
+      ## `dpkg-divert --local --rename --remove <path>`, which moves the
+      ## package's file back. Debian and Ubuntu only (refused where dpkg is
+      ## absent). See dpkg-divert(1).
     pokInlineExecCall = "reprobuild.inlineExecCall"
       ## Windows-System-Resources Phase E: the cross-cutting privileged
       ## execution of an `inlineExecCall(...)` build-graph edge tagged
@@ -749,6 +758,11 @@ type
       darwinModuleName*: string
       darwinModuleContent*: string
       darwinModuleDestroy*: bool
+    of pokLinuxDpkgDiversion:
+      ## Divert `ddPath` (absolute, below `/etc/` or `/usr/local/etc/`)
+      ## to `ddPath & ".distrib"`. `ddDestroy` selects the removal.
+      ddPath*: string
+      ddDestroy*: bool
     of pokLinuxFhsSandbox:
       ## Launch `fsbBinPath` under bubblewrap with the M0-locked
       ## transparency-posture invocation shape:
@@ -1071,6 +1085,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
+  of pokLinuxDpkgDiversion: true
   of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1128,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
+  of $pokLinuxDpkgDiversion: pokLinuxDpkgDiversion
   of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
@@ -2546,6 +2562,21 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.darwinModuleName.endsWith(".nix"):
       return "macos.darwinSystemModule name '" & op.darwinModuleName &
         "' must end with '.nix' (Nix module convention)"
+  of pokLinuxDpkgDiversion:
+    # A diversion is limited to the same roots `fs.systemFile` may write:
+    # the file the profile puts at the diverted path is an `fs.systemFile`,
+    # so a diversion anywhere else would be a diversion nothing may fill.
+    if not op.ddPath.startsWith("/") or "/../" in op.ddPath or
+        op.ddPath.endsWith("/..") or op.ddPath.endsWith("/"):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' must be an absolute file path without '..' segments"
+    if not (op.ddPath.startsWith("/etc/") or
+            op.ddPath.startsWith("/usr/local/etc/")):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' is outside /etc/ and /usr/local/etc/"
+    for c in op.ddPath:
+      if c in {'\0', '\n', '\r'}:
+        return "linux.dpkgDiversion path contains a control character"
   of pokLinuxFhsSandbox:
     # `fsbBinPath` must be a POSIX absolute path (leading `/`). The
     # driver does NOT canonicalize — `..` collapse / symlink resolve
