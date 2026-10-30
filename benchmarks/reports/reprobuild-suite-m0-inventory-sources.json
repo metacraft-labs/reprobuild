@@ -38033,7 +38033,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_health_reports_certificate_propagation_config.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

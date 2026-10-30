@@ -1,9 +1,9 @@
 ## ``repro health``'s ``certificate-propagation`` row reports what in a
 ## repository's git configuration keeps its certificates from reaching a
 ## gateway. The hook body is linked, so the row does not ask whether a tool is
-## present. It measures the two values a push would otherwise report only in its
-## own output: an invalid scope declaration, which stops propagation (Tooling
-## §3.1), and a notes ref the gateway does not read.
+## present. It measures the values a push would otherwise report only in its own
+## output: an invalid scope declaration, which stops propagation (Tooling §3.1),
+## a notes ref the gateway does not read, and an opt-out left in the environment.
 ##
 ## Each case is a real workspace and a real clone whose real git configuration
 ## differs in one value, read back from a real ``repro health --json``. No mocks.
@@ -15,9 +15,10 @@ import std/unittest
 
 include certificate_push_fixture
 
-proc propagationRow(fx: StoreFixture): JsonNode =
+proc propagationRow(fx: StoreFixture;
+                    env: seq[tuple[name, value: string]] = @[]): JsonNode =
   let res = runArgv(@[fx.reproBin, "health", "--json",
-    "--workspace-root=" & fx.workspaceRoot])
+    "--workspace-root=" & fx.workspaceRoot], env = env)
   checkpoint("health exit=" & $res.code & "\n" & res.output)
   for entry in parseJson(res.output)["checks"]:
     if entry["name"].getStr() == "certificate-propagation":
@@ -50,3 +51,12 @@ suite "repro health reports the configuration propagation reads":
     check "lib-a" in row["detail"].getStr()
     check "refs/notes/elsewhere" in row["detail"].getStr()
     check "testCertificates.notesRef" in row["remedy"].getStr()
+
+  test "an opt-out left set in the environment is a warning naming it":
+    let fx = setupStoreFixture("", "prop-health-off")
+    defer: removeDir(fx.scratch)
+    let row = propagationRow(fx,
+      env = @[(name: "TEST_CERTIFICATES_HOOK", value: "off")])
+    check row["status"].getStr() == "warn"
+    check "TEST_CERTIFICATES_HOOK=off" in row["detail"].getStr()
+    check "TEST_CERTIFICATES_HOOK" in row["remedy"].getStr()

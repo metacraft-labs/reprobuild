@@ -316,9 +316,10 @@ refuses a push whose tree has no note, and says the note is missing rather than
 asking you to certify again. A later ordinary push of the same commit carries it.
 
 `repro health` reports problems in that configuration in its
-`certificate-propagation` row: an invalid scope declaration, or a
+`certificate-propagation` row: an invalid scope declaration, a
 `testCertificates.notesRef` other than the default, which sends notes to a ref
-gateways do not read.
+gateways do not read, `TEST_CERTIFICATES_HOOK=off` left set in the environment,
+or a certificate store with no root it can resolve.
 
 ### Refreshing hooks after a protocol mismatch
 

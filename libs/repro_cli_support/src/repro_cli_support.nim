@@ -74990,7 +74990,7 @@ proc certificatePropagationCheck(workspaceRoot: string): HealthCheck =
   ## and a push reports that only in output nobody may be reading.
   const name = "certificate-propagation"
   let enumerated = enumerateParticipatingRepos(workspaceRoot)
-  var findings: seq[string]
+  var findings = certificatePropagationEnvironmentFindings()
   var inspected = 0
   for repo in enumerated.repos:
     if gitTopLevel(repo.repoPath).len == 0: continue
@@ -75007,8 +75007,9 @@ proc certificatePropagationCheck(workspaceRoot: string): HealthCheck =
       "from reaching a gateway; pushes still go through: " &
       findings.join("; "),
     remedy: "fix or remove the named value: git -C <repo> config --unset-all " &
-      "testCertificates.notesRef, or git -C <repo> config --remove-section " &
-      "testCertificatesScope.<name>",
+      "testCertificates.notesRef, git -C <repo> config --remove-section " &
+      "testCertificatesScope.<name>, or unset " &
+      CertificateHookSwitchVariable,
     fixKind: hfNone)
 
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):

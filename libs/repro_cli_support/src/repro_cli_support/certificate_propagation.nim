@@ -39,6 +39,10 @@ type
     cpOptedOut       ## ``TEST_CERTIFICATES_HOOK`` asked for no propagation.
     cpNotPropagated  ## Something could not be carried, and was reported.
 
+proc switchedOff(): bool =
+  getEnv(CertificateHookSwitchVariable).strip().toLowerAscii() in
+    ["off", "0", "false", "no"]
+
 proc hookOptions(report: proc (line: string)): tchook.HookOptions =
   ## The defaults (hooks off, the library's finite budget), with the user's
   ## budget when it is a valid one. Any other value is reported and ignored:
@@ -64,8 +68,7 @@ proc propagateCertificates*(repoRoot, remoteName, remoteLocation,
   ## git's two hook arguments and ``pushedRefs`` its standard input. Never
   ## raises, a defect in the library included: a push must not fail on this.
   try:
-    let switch = getEnv(CertificateHookSwitchVariable).strip().toLowerAscii()
-    if switch in ["off", "0", "false", "no"]:
+    if switchedOff():
       report(ReportPrefix & CertificateHookSwitchVariable & "=" &
         getEnv(CertificateHookSwitchVariable) &
         ": not propagated with this push")
@@ -105,6 +108,19 @@ proc propagateCertificates*(repoRoot, remoteName, remoteLocation,
     except Exception:
       discard
   cpNotPropagated
+
+proc certificatePropagationEnvironmentFindings*(): seq[string] =
+  ## What in this process's environment would stop every push made from it. An
+  ## opt-out meant for one push that stayed exported in a shell is otherwise
+  ## visible only in the output of each push it silently emptied.
+  if switchedOff():
+    result.add(CertificateHookSwitchVariable & "=" &
+      getEnv(CertificateHookSwitchVariable) &
+      " is set here, so pushes from this environment propagate nothing")
+  let roots = tcroots.nativeRoots()
+  if roots.user.len == 0 and roots.system.len == 0:
+    result.add("neither certificate store root could be resolved: " &
+      roots.problems.join("; "))
 
 proc certificatePropagationFindings*(repoRoot: string): seq[string] =
   ## What in ``repoRoot``'s git configuration stands between its certificates
