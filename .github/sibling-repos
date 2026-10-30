@@ -109,7 +109,7 @@ reprobuild-ct-test-runner=dev
 # flake input: no Nix-sandboxed
 # build here compiles a recipe, and $REPROBUILD_PACKAGES_ROOT in the dev shell
 # would replace the fixture catalog the lookup test walks to.
-reprobuild-packages=d7fb71a54c3ee46dd40948508bc3a5e8b04215dd
+reprobuild-packages=0b10d26cd8d8cb37b45d5da40a886ebb078bd8ec
 
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim

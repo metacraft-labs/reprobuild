@@ -43653,7 +43653,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
