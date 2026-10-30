@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2425,
+    "nimTestBinaries": 2426,
     "pureUnitConsolidationGroups": 69,
     "pureUnitTests": 690,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2465
+    "testEntries": 2466
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1401,7 +1401,7 @@
       "integration": 1349,
       "platform/destructive": 146,
       "pure unit": 690,
-      "unclassified": 262
+      "unclassified": 263
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1609,9 +1609,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2425,
+    "nimTestBinaryCount": 2426,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2465
+    "testEntryCount": 2466
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12468,6 +12468,24 @@
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_deploy_agent_manifest_v3_profile_files",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_deploy_agent",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_deploy_agent",
+      "requiresReproBinary": false,
+      "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

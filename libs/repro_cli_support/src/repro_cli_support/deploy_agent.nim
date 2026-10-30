@@ -205,21 +205,21 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # `repro_cli_support` already depends on `repro_deploy_agent` — importing
   # upward from the hook would close a cycle.
   #
-  # The compiler needs a FILE, so the text is staged under the state dir. It is
-  # written on every tick and deliberately not cached on content: the compile
-  # step downstream keys its own cache on the profile's sources, so a repeat
-  # tick with an unchanged profile still short-circuits there.
+  # The compiler needs FILES, so the text and the manifest's profile bundle
+  # (RDMF v3 `profileFiles`, the files the profile `staticRead`s) are staged
+  # under the state dir by `stageProfileSources`, which rebuilds the tree on
+  # every tick. Deliberately not cached on content: the compile step
+  # downstream keys its own cache on the profile's sources, so a repeat tick
+  # with an unchanged profile still short-circuits there.
   let capturedStateDir = flags.stateDir
-  let resolver: ProfileResolver = proc(profileText: string; outText: var string;
+  let resolver: ProfileResolver = proc(profileText: string;
+                                       profileFiles: seq[ProfileFile];
+                                       outText: var string;
                                        outBuildActions: var seq[ProfileBuildAction]):
                                     bool {.gcsafe.} =
     {.cast(gcsafe).}:
-      let scratch = capturedStateDir / "deploy-agent"
-      createDir(scratch)
-      # Must be `.nim` and a valid Nim module name — the compiler rejects a
-      # hyphenated stem outright.
-      let profilePath = scratch / "manifest_profile.nim"
-      writeFile(profilePath, profileText)
+      let profilePath = stageProfileSources(
+        capturedStateDir / "deploy-agent", profileText, profileFiles)
       result = resolveSystemProfileText(profilePath, profileText,
         capturedStateDir, "repro deploy-agent", outText,
         planCommand = "repro infra plan",
