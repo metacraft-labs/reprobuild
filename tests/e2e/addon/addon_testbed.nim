@@ -838,7 +838,21 @@ proc waitReasserted*(g: Guest; timeoutSec = 900): string =
                     "repro-addon-reassert.service").stdout.strip()
     if st in ["active", "failed"]: break
     sleep(1000)
-  g.exec("journalctl -b -o cat --no-pager -u repro-addon-reassert.service").stdout
+  result = g.exec("journalctl -b -o cat --no-pager -u " &
+                  "repro-addon-reassert.service").stdout
+  if testSeams():
+    # A hard reset can bring back a seam control file the paused switch had
+    # already consumed: its unlink is not fsynced (the seam must not sync,
+    # see seams.nim), and a reset that lands before the journal commits it
+    # resurrects ``test-pause-at``. The recovery ignores it (its points are
+    # ``replay:``-prefixed), but the next forward switch would match it and
+    # wait for a resume nobody sends. Measured on ubuntu-24.04-amd64: the
+    # ``back to A`` apply after the ``step-1`` reset paused at ``step-1``.
+    # The controls belong to the gate, so the gate clears them once the
+    # boot's recovery is over.
+    discard g.run("rm -f " & SeamDir & "/test-pause-at " & SeamDir &
+      "/test-paused-at " & SeamDir & "/test-resume " & SeamDir &
+      "/test-pause-recovery; sync")
 
 proc hardResetAfterSettle*(g: Guest; settleSec = 8) =
   ## Hard-reset a guest whose switch is paused, after ``settleSec``: long
