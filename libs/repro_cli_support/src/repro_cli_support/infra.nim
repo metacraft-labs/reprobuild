@@ -19,7 +19,7 @@
 ## `repro system add/remove/list/...` profile-editing family is
 ## deferred to a later phase.
 
-import std/[os, strutils, times]
+import std/[options, os, strutils, times]
 
 import repro_elevation
 import repro_infra
@@ -283,6 +283,11 @@ type
       ## Default: the `home.nim` beside the system profile.
     planId: string
     generationId: string
+    keepGenerations, keepDays: int
+    keepGenerationsGiven, keepDaysGiven: bool
+      ## `--keep-generations N` / `--keep-days D` on `repro infra apply`:
+      ## an add-on host's generation retention (ReproOS Add-On Mode §5.2);
+      ## refused on any other host, where they mean nothing.
     noElevate: bool
     noPreview: bool
     acceptFeatureDestroy: bool
@@ -353,6 +358,16 @@ proc resolveProfilePath(flags: InfraCliFlags; stateDir: string): string =
     return flags.profilePath
   systemProfilePath(stateDir)
 
+proc parseRetentionBound(flag, value: string): int =
+  ## A retention bound: a non-negative integer (0 keeps only what is
+  ## always kept).
+  try:
+    result = parseInt(value)
+  except ValueError:
+    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
+  if result < 0:
+    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
+
 proc parseInfraFlags(args: openArray[string]):
     tuple[flags: InfraCliFlags; positional: seq[string]] =
   var i = 0
@@ -402,6 +417,16 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--plan": result.flags.planId = valueOf()
     elif a.startsWith("--plan="):
       result.flags.planId = a["--plan=".len .. ^1]
+    elif a == "--keep-generations" or a.startsWith("--keep-generations="):
+      let v = if a.startsWith("--keep-generations="): a["--keep-generations=".len .. ^1]
+              else: valueOf()
+      result.flags.keepGenerations = parseRetentionBound(a, v)
+      result.flags.keepGenerationsGiven = true
+    elif a == "--keep-days" or a.startsWith("--keep-days="):
+      let v = if a.startsWith("--keep-days="): a["--keep-days=".len .. ^1]
+              else: valueOf()
+      result.flags.keepDays = parseRetentionBound(a, v)
+      result.flags.keepDaysGiven = true
     elif a == "--generation": result.flags.generationId = valueOf()
     elif a.startsWith("--generation="):
       result.flags.generationId = a["--generation=".len .. ^1]
@@ -725,6 +750,15 @@ proc runInfraApply(args: openArray[string]): int =
   let stateDir = (if flags.stateDir.len > 0: flags.stateDir
                   else: resolveSystemStateDir())
   setStateDirOverride(stateDir)
+  if flags.keepGenerationsGiven or flags.keepDaysGiven:
+    var addOnHost = false
+    when defined(linux):
+      addOnHost = addon_apply.isAddonHost(stateDir)
+    if not addOnHost:
+      stderr.writeLine("repro infra apply: --keep-generations and " &
+        "--keep-days set an add-on host's generation retention; this host " &
+        "is not an add-on host")
+      return 2
   let profilePath = resolveProfilePath(flags, stateDir)
   if not fileExists(profilePath):
     stderr.writeLine("repro infra apply: no system profile at " &
@@ -773,13 +807,22 @@ proc runInfraApply(args: openArray[string]): int =
           "add-on generations do not carry build actions yet; the profile " &
           "declares " & $profileBuildActions.len)
         return 2
+      # The generation retention policy (§5.2): only what was given
+      # overrides the default; nothing given keeps the default.
+      var retention = none(addon_apply.RetentionPolicy)
+      if flags.keepGenerationsGiven or flags.keepDaysGiven:
+        var p = addon_apply.DefaultRetention
+        if flags.keepGenerationsGiven: p.keepGenerations = flags.keepGenerations
+        if flags.keepDaysGiven: p.keepDays = flags.keepDays
+        retention = some(p)
       try:
         # `--plan` on an add-on host pins the add-on plan id the plan
         # printed ("add-on plan-id"); the apply refuses with EPlanStale
         # when what it observes now gives another (spec §7.1).
         let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
           stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
-          reconcileDrift: flags.reconcileDrift, planId: planId))
+          reconcileDrift: flags.reconcileDrift, planId: planId,
+          retention: retention))
         stdout.write(addon_cli.renderAddonSections(r))
         echo "repro infra apply (add-on): generation " & r.generationId &
           " (previous " & r.previousGenerationId & "), applied " &
@@ -1323,8 +1366,11 @@ const InfraSubcommandUsage = [
   ("apply", "repro infra apply [--profile FILE] [--state-dir DIR] " &
     "[--home-profile-dir DIR] [--host NAME] --plan ID [--no-elevate | " &
     "--elevate] [--no-preview] [--accept-feature-destroy] " &
-    "[--accept-passwd-destroy] [--force-unlock] [--reconcile-drift]\n  " &
-    "Apply the plan `repro infra plan` printed, as a new system generation."),
+    "[--accept-passwd-destroy] [--force-unlock] [--reconcile-drift] " &
+    "[--keep-generations N] [--keep-days D]\n  " &
+    "Apply the plan `repro infra plan` printed, as a new system generation. " &
+    "On an add-on host --plan takes the add-on plan id, and " &
+    "--keep-generations/--keep-days set the generation retention."),
   ("cache-keys", "repro infra cache-keys [--profile FILE] [--state-dir DIR] " &
     "[--host NAME] [--platform-cpu CPU] [--platform-os OS] " &
     "[--platform-abi ABI] [--platform-libc LIBC]\n  Print, for every " &

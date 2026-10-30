@@ -85,6 +85,42 @@ proc parseShowProperties(text: string): Table[string, string] =
     let eq = line.find('=')
     if eq > 0: result[line[0 ..< eq]] = line[eq + 1 .. ^1].strip()
 
+proc alivenessFrom*(unit: string; props: Table[string, string];
+                    cgroupRoot: string): UnitAliveness =
+  ## The decision of ``unitAliveness`` over what systemd reported
+  ## (``ControlGroup``, ``Slice``, ``LoadState``) and the hierarchy at
+  ## ``cgroupRoot``; pure apart from reading that tree, for the tests.
+  ##
+  ## - no unified (v2) hierarchy, or no ``LoadState`` reported: unknown;
+  ## - systemd names a group whose directory is missing: unknown -- the
+  ##   group may have been moved or the hierarchy remounted, and "missing"
+  ##   is not evidence that nothing runs (fail closed);
+  ## - systemd names no group (a unit with nothing running): the group it
+  ##   would use (its slice plus its name) is checked, in case one
+  ##   outlived the unit's state; that one missing means empty;
+  ## - otherwise ``cgroup.events`` ``populated``; anything else unknown.
+  if not fileExists(cgroupRoot / "cgroup.controllers"):
+    return uaUnknown
+  if "LoadState" notin props: return uaUnknown
+  let named = props.getOrDefault("ControlGroup").strip(chars = {'/'})
+  var rel = named
+  if rel.len == 0:
+    let slice = props.getOrDefault("Slice")
+    rel = sliceCgroupPath(if slice.len > 0: slice else: "system.slice")
+    rel = (if rel.len > 0: rel & "/" else: "") & unit
+  let dir = cgroupRoot / rel
+  if not dirExists(dir):
+    return (if named.len > 0: uaUnknown else: uaEmpty)
+  try:
+    for line in readFile(dir / "cgroup.events").splitLines():
+      let f = line.splitWhitespace()
+      if f.len == 2 and f[0] == "populated":
+        return (if f[1] == "0": uaEmpty elif f[1] == "1": uaPopulated
+                else: uaUnknown)
+  except IOError, OSError:
+    discard
+  uaUnknown
+
 proc unitAliveness*(unit: string): UnitAliveness =
   ## Does the unit's control group, or any group below it, hold a process?
   ## Fails closed: every error and every hierarchy this cannot read is
@@ -102,8 +138,6 @@ proc unitAliveness*(unit: string): UnitAliveness =
     except IOError, OSError:
       discard
     return uaEmpty
-  if not fileExists(CgroupRoot / "cgroup.controllers"):
-    return uaUnknown                  # not a unified (v2) hierarchy
   var props: Table[string, string]
   try:
     let r = runSystemctl(["show", "-p", "ControlGroup", "-p", "Slice",
@@ -112,25 +146,7 @@ proc unitAliveness*(unit: string): UnitAliveness =
     props = parseShowProperties(r.output)
   except CatchableError:
     return uaUnknown
-  if "LoadState" notin props: return uaUnknown
-  var rel = props.getOrDefault("ControlGroup").strip(chars = {'/'})
-  if rel.len == 0:
-    # systemd reports no group for a unit with nothing running; the group
-    # it would use is still checked, in case it outlived the unit's state.
-    let slice = props.getOrDefault("Slice")
-    rel = sliceCgroupPath(if slice.len > 0: slice else: "system.slice")
-    rel = (if rel.len > 0: rel & "/" else: "") & unit
-  let dir = CgroupRoot / rel
-  if not dirExists(dir): return uaEmpty     # no group: nothing alive
-  try:
-    for line in readFile(dir / "cgroup.events").splitLines():
-      let f = line.splitWhitespace()
-      if f.len == 2 and f[0] == "populated":
-        return (if f[1] == "0": uaEmpty elif f[1] == "1": uaPopulated
-                else: uaUnknown)
-  except IOError, OSError:
-    discard
-  uaUnknown
+  alivenessFrom(unit, props, CgroupRoot)
 
 proc cgroupProcs*(unit: string): seq[string] =
   ## The PIDs in the unit's control group and every group below it, for
@@ -147,6 +163,77 @@ proc cgroupProcs*(unit: string): seq[string] =
   except IOError, OSError:
     discard
 
+proc unitListProperty*(unit, property: string): seq[string] =
+  ## A space-separated list property (``ConsistsOf``, ``BoundBy``,
+  ## ``TriggeredBy``, ``Conflicts``) as systemd reports it for the loaded
+  ## unit, drop-ins included. Empty for a unit systemd does not know.
+  unitProperty(unit, property).splitWhitespace()
+
+proc unitDependents*(unit: string): seq[string] =
+  ## The units a stop or restart of ``unit`` propagates to: those with
+  ## ``PartOf=`` it (systemd reports them as its ``ConsistsOf=``) and
+  ## those with ``BindsTo=`` it (``BoundBy=``).
+  for p in ["ConsistsOf", "BoundBy"]:
+    for d in unitListProperty(unit, p):
+      if d notin result: result.add(d)
+
+proc resolveUnitName*(name: string): string =
+  ## The unit an alias names (``systemctl show -p Id``); the name itself
+  ## for a unit systemd does not know. Raises ``SwitchError`` when systemd
+  ## cannot be asked: a predecessor that cannot be resolved is not
+  ## assumed to be something else.
+  let r = runSystemctl(["show", "-p", "Id", "--value", "--", name])
+  if r.exitCode != 0:
+    raise newException(SwitchError, "cannot resolve unit " & name & ": " &
+      r.output.strip())
+  let id = r.output.strip()
+  if id.len == 0: name else: id
+
+const UnitDropInDirs* = ["/etc/systemd/system", "/run/systemd/system",
+                         "/usr/local/lib/systemd/system",
+                         "/usr/lib/systemd/system", "/lib/systemd/system"]
+
+proc dropInTextsOnDisk*(unit: string): seq[string] =
+  ## The ``<unit>.d/*.conf`` drop-ins on disk, in systemd's order (by file
+  ## name; a name in an earlier directory hides the same name later). A
+  ## template instance also reads its template's drop-ins.
+  var names: seq[(string, string)]
+  var seen: seq[string]
+  var units = @[unit]
+  let at = unit.find('@')
+  let dot = unit.rfind('.')
+  if at > 0 and dot > at + 1:
+    units.add(unit[0 .. at] & unit[dot .. ^1])
+  for u in units:
+    for d in UnitDropInDirs:
+      let dir = d / (u & ".d")
+      if not dirExists(dir): continue
+      for kind, path in walkDir(dir):
+        let n = extractFilename(path)
+        if not n.endsWith(".conf") or n in seen: continue
+        seen.add(n)
+        names.add((n, path))
+  names.sort(proc(a, b: (string, string)): int = cmp(a[0], b[0]))
+  for (_, path) in names:
+    try: result.add(readFile(path))
+    except IOError, OSError: discard
+
+proc predecessorsOf*(unit, content: string; extraDropIns: openArray[string]):
+    seq[string] =
+  ## An exclusive unit's predecessors (spec §7.3): the ``.service`` units
+  ## its ``Conflicts=`` names -- read from the content the generation
+  ## writes and the drop-ins (on disk and in the profile) with systemd's
+  ## syntax, and, for a unit systemd has loaded, from ``systemctl show -p
+  ## Conflicts`` -- each resolved to the unit an alias names. Raises when a
+  ## name cannot be resolved (``ConflictsParseError``, ``SwitchError``).
+  var names = conflictsServices(content, unit, dropInTextsOnDisk(unit) &
+                                @extraDropIns)
+  for n in unitListProperty(unit, "Conflicts"):
+    if n.endsWith(".service") and n notin names: names.add(n)
+  for n in names:
+    let id = resolveUnitName(n)
+    if id != unit and id notin result: result.add(id)
+
 proc systemctlVerb(verb, unit: string) =
   let r = if unit.len > 0: runSystemctl([verb, "--", unit])
           else: runSystemctl([verb])
@@ -157,6 +244,9 @@ proc systemctlVerb(verb, unit: string) =
 proc stopUnit*(unit: string) = systemctlVerb("stop", unit)
 proc startUnit*(unit: string) = systemctlVerb("start", unit)
 proc restartUnit*(unit: string) = systemctlVerb("restart", unit)
+proc tryRestartUnit*(unit: string) = systemctlVerb("try-restart", unit)
+  ## Restart only if active (§7.3: "a restart applies only to a unit that
+  ## is active when the apply reaches it").
 proc reloadUnit*(unit: string) = systemctlVerb("reload", unit)
 proc disableUnit*(unit: string) = systemctlVerb("disable", unit)
 
@@ -214,6 +304,10 @@ type
     stopped*: seq[string]   ## the units step 2 stopped, in order
     paused*: seq[string]    ## triggers of stop-start units step 2 stopped;
                             ## step 7 starts them again
+    notRunning*: seq[string]
+                            ## stop-start units step 2 found not running
+                            ## (they ended since the plan): step 7 does not
+                            ## start them, as a restart would not have
 
 type
   PreStopObserver* = proc(unit: string) {.closure.}
@@ -253,6 +347,9 @@ proc runPreStop*(ts: seq[Transition]; disable: openArray[string];
             note("trigger:" & trig)
             stopUnit(trig)
             result.paused.add(trig)
+      if t.verb == tvStopStart and not unitIsActive(t.unit) and
+          unitAliveness(t.unit) == uaEmpty:
+        result.notRunning.add(t.unit)
       note(t.unit)
       if t.exclusive:
         stopExclusive(t.unit)
@@ -267,7 +364,8 @@ proc runPreStop*(ts: seq[Transition]; disable: openArray[string];
     try: disableUnit(u)
     except SwitchError: discard   # already disabled, or static
 
-proc runStart*(ts: seq[Transition]; paused: openArray[string] = []) =
+proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
+               notRunning: openArray[string] = []) =
   ## Step 7: start, restart or reload in the order given. A
   ## ``stop-start`` unit was stopped in step 2 and is started here. Every
   ## start of an exclusive unit first confirms the unit and its
@@ -278,6 +376,8 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = []) =
   for t in startEntries(ts):
     case t.verb
     of tvStart, tvStopStart:
+      if t.verb == tvStopStart and t.unit in notRunning:
+        continue          # ended before step 2: a restart would not start it
       when mutated("exclusive-as-plain-restart"):
         if t.verb == tvStopStart: restartUnit(t.unit)   # a plain restart
         else: startUnit(t.unit)
@@ -294,7 +394,7 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = []) =
           if trig in paused and unitProperty(trig, "LoadState") == "loaded":
             startUnit(trig)
         startUnit(t.unit)
-    of tvRestart: restartUnit(t.unit)
+    of tvRestart: tryRestartUnit(t.unit)
     of tvReload: reloadUnit(t.unit)
     else: discard
   when mutated("exclusive-as-plain-restart"):
@@ -361,114 +461,133 @@ type
 
 const DefaultRetention* = RetentionPolicy(keepGenerations: 5, keepDays: 30)
 
-proc unitStartTimes(unit: string): seq[int64] =
-  ## When the unit's running instance was started (``ActiveEnterTimestamp``
-  ## and ``ExecMainStartTimestamp``, Unix seconds). Raises when systemd
-  ## does not say: retention then keeps everything rather than guess.
-  let r = runSystemctl(["show", "--timestamp=unix", "-p",
-    "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "--", unit])
-  if r.exitCode != 0:
-    raise newException(SwitchError, "systemctl show " & unit & ": " &
-      r.output.strip())
-  for k, v in parseShowProperties(r.output):
-    if v.startsWith("@"):
-      try: result.add(parseBiggestInt(v[1 .. ^1]).int64)
-      except ValueError:
-        raise newException(SwitchError, "unreadable " & k & " of " & unit &
-          ": " & v)
-  if result.len == 0:
-    raise newException(SwitchError, "systemd reports no start time for " &
-      "the running unit " & unit)
-
 type
   RunningUnit* = object
-    ## A unit the add-on manages that is running now (§5.2 retention).
+    ## A unit whose definition the add-on manages (its unit file, or a
+    ## drop-in of a distribution unit) that is running now (§5.2).
     unit*: string
-    sha256*: string          ## its definition in the current ledger; ""
-                             ## for an instance a removal left running
-    startedAt*: seq[int64]   ## Unix seconds; empty: systemd did not say
+    definition*: string      ## its definition in the current ledger
+                             ## (``unitDefinition``); "" for an instance a
+                             ## removal left running
+    invocationId*: string    ## systemd's ``InvocationID`` of the running
+                             ## instance; "" when systemd did not say
 
   GenerationUnitLookup* = proc(generationId, unit: string):
-      tuple[ledgerFound, unitFound: bool; sha256: string] {.closure.}
-    ## The unit's definition in a generation's own ledger.
+      tuple[ledgerFound, unitFound: bool; definition: string] {.closure.}
+    ## The unit's definition (``unitDefinition``) in a generation's own
+    ## ledger.
+
+  InvocationTable* = Table[string, string]
+    ## ``InvocationID`` -> the generation whose definition that instance
+    ## of its unit runs. systemd gives every start of a unit a new
+    ## invocation id (systemd.exec(5) ``$INVOCATION_ID``), so the record
+    ## is exact and needs no clock: a host without a real-time clock (a
+    ## Raspberry Pi before NTP) can register generations with timestamps
+    ## that go backwards, which a time comparison would misread.
+
+proc unitDefinition*(l: Ledger; unit: string): string =
+  ## What defines ``unit`` in ledger ``l``: its unit file's digest and
+  ## every drop-in's path and digest, in a canonical order. "" when the
+  ## ledger has neither.
+  var parts: seq[string]
+  for e in l.entries:
+    if e.unit != unit and not (e.class == lcUnit and e.path.endsWith("/" & unit)):
+      continue
+    if e.class == lcUnit and e.resource.len > 0:
+      parts.add("unit " & e.sha256)
+    elif e.class == lcDropIn and e.resource.len > 0:
+      parts.add("dropIn " & e.path & " " & e.sha256)
+  parts.sort()
+  parts.join("\n")
 
 proc runningManagedUnits*(l: Ledger): seq[RunningUnit] =
-  ## Every unit the add-on manages that is running now: the ledger's
-  ## units, and the instances a removal left running (``stopOnRemoval =
-  ## false``, a resource-less state entry), with when they started.
+  ## Every unit the ledger defines -- a unit file, or a drop-in of a
+  ## distribution unit (a drop-in held by ``restartIfChanged = false``
+  ## leaves its unit running the older drop-in) -- and every instance a
+  ## removal left running (``stopOnRemoval = false``, a resource-less state
+  ## entry), that is running now, with its invocation id.
   var seen = initHashSet[string]()
   for e in l.entries:
-    let managed = (e.class == lcUnit and e.resource.len > 0) or
+    let managed = ((e.class == lcUnit or e.class == lcDropIn) and
+                   e.resource.len > 0) or
       (e.class == lcUnitState and e.resource.len == 0 and e.started and
        e.unitState.len == 0)
     if not managed or e.unit.len == 0 or e.unit in seen: continue
     seen.incl(e.unit)
     let running = unitIsActive(e.unit) or unitAliveness(e.unit) != uaEmpty
     if not running: continue
-    var ru = RunningUnit(unit: e.unit,
-                         sha256: (if e.class == lcUnit: e.sha256 else: ""))
-    try:
-      ru.startedAt = unitStartTimes(e.unit)
-    except CatchableError:
-      ru.startedAt = @[]
-    result.add(ru)
+    result.add(RunningUnit(unit: e.unit,
+      definition: (if e.class == lcUnitState: "" else: unitDefinition(l, e.unit)),
+      invocationId: unitProperty(e.unit, "InvocationID")))
 
-proc generationsUsedAt*(rows: seq[RootRow]; startedAt: int64): seq[string] =
-  ## The generations a unit started at ``startedAt`` may run from: the
-  ## last one committed at or before that moment (a start by the operator,
-  ## a boot or a later apply that did not touch it loads the committed
-  ## definition) and the first one committed at or after it (step 7 of a
-  ## generation starts its units before step 9 commits it). Both are kept:
-  ## which of the two it was is not recorded, and keeping one too many
-  ## costs disk while keeping one too few breaks the service's next start.
-  var before, after: RootRow
-  var haveBefore, haveAfter = false
-  for r in rows:
-    if r.createdAtUnix <= startedAt and
-        (not haveBefore or r.createdAtUnix > before.createdAtUnix):
-      before = r
-      haveBefore = true
-    if r.createdAtUnix >= startedAt and
-        (not haveAfter or r.createdAtUnix < after.createdAtUnix):
-      after = r
-      haveAfter = true
-  if haveBefore: result.add(before.rootId[RootIdPrefix.len .. ^1])
-  if haveAfter: result.add(after.rootId[RootIdPrefix.len .. ^1])
+proc invocationsAfterSwitch*(table: InvocationTable;
+                             running: seq[RunningUnit];
+                             before: Table[string, string];
+                             newGeneration, previousGeneration: string):
+    InvocationTable =
+  ## The invocation table after a switch committed ``newGeneration``.
+  ## ``before`` maps each managed unit to the invocation id it had before
+  ## step 2. An instance started during the switch (its id changed) runs
+  ## the new generation's definition; one that kept its id keeps what the
+  ## table said, or -- started outside any switch since the last one --
+  ## the previous committed generation's, which was on disk then. Entries
+  ## of instances no longer running are dropped.
+  for u in running:
+    if u.invocationId.len == 0: continue
+    if before.getOrDefault(u.unit) != u.invocationId:
+      result[u.invocationId] = newGeneration
+    elif u.invocationId in table:
+      result[u.invocationId] = table[u.invocationId]
+    elif previousGeneration.len > 0:
+      result[u.invocationId] = previousGeneration
 
-proc generationsHeldBy*(rows: seq[RootRow]; units: seq[RunningUnit];
-                        lookup: GenerationUnitLookup): HashSet[string] =
-  ## The generations whose roots running units still need: for each
-  ## running unit, the generations it may run from (``generationsUsedAt``)
-  ## whose own ledger gives it a definition other than the current one --
-  ## a unit held by ``restartIfChanged = false`` or left running by
-  ## ``stopOnRemoval = false`` runs from such a generation's closure. A
-  ## generation that carried the same definition (or none: it did not
-  ## start the unit) holds nothing the current one does not. A unit whose
-  ## start time is unknown, or a generation whose ledger is missing, keeps
-  ## the generation (every one, for an unknown start).
+proc readInvocationTable*(path: string): InvocationTable =
+  ## ``<invocation id>\t<generation id>`` lines; a missing file is empty.
+  if not fileExists(path): return
+  for line in readFile(path).splitLines():
+    let f = line.split('\t')
+    if f.len == 2 and f[0].len > 0 and f[1].len > 0:
+      result[f[0]] = f[1]
+
+proc writeInvocationTable*(path: string; t: InvocationTable) =
+  var keys: seq[string]
+  for k in t.keys: keys.add(k)
+  keys.sort()
+  var text = ""
+  for k in keys: text.add(k & "\t" & t[k] & "\n")
+  createDir(parentDir(path))
+  let tmp = path & ".tmp"
+  writeFile(tmp, text)
+  moveFile(tmp, path)
+
+proc generationsHeldBy*(units: seq[RunningUnit]; table: InvocationTable;
+                        current: string; lookup: GenerationUnitLookup):
+    HashSet[string] =
+  ## The generations whose roots running units still need: the generation
+  ## an instance runs (``table``), when it is not the current one and its
+  ## own ledger gives the unit another definition (or is missing). An
+  ## instance the table does not know started after the last switch, from
+  ## the definition on disk: the current one, which needs nothing extra.
   for u in units:
-    if u.startedAt.len == 0:
-      for r in rows: result.incl(r.rootId[RootIdPrefix.len .. ^1])
-      continue
-    for t in u.startedAt:
-      for id in generationsUsedAt(rows, t):
-        let found = lookup(id, u.unit)
-        if not found.ledgerFound or
-            (found.unitFound and found.sha256 != u.sha256):
-          result.incl(id)
+    let g = table.getOrDefault(u.invocationId)
+    if g.len == 0 or g == current: continue
+    let found = if lookup != nil: lookup(g, u.unit)
+                else: (ledgerFound: false, unitFound: false, definition: "")
+    if not found.ledgerFound or found.definition != u.definition:
+      result.incl(g)
 
 proc pruneGenerationRoots*(current, previous: string;
                            policy = DefaultRetention;
                            now = getTime().toUnix();
-                           running: seq[RunningUnit] = @[];
-                           lookup: GenerationUnitLookup = nil): seq[string] =
+                           held: HashSet[string] = initHashSet[string]()):
+    seq[string] =
   ## Drop the ``profile`` store roots of add-on generations outside the
   ## policy, so ``repro store gc`` can collect what only they held. Never
   ## the current or the previous generation (spec §5.2: collecting what
-  ## they hold would turn the next reboot into an outage), and never a
-  ## generation a running managed unit may still run from
-  ## (``generationsHeldBy`` over ``running``, from ``runningManagedUnits``).
-  ## Returns the generation ids whose roots were dropped.
+  ## they hold would turn the next reboot into an outage), and never one in
+  ## ``held`` -- the generations running managed units still run from
+  ## (``generationsHeldBy``). Returns the generation ids whose roots were
+  ## dropped.
   if not dirExists(StoreRoot): return
   enterWritableStoreView()
   var s = openStore(StoreRoot)
@@ -477,18 +596,19 @@ proc pruneGenerationRoots*(current, previous: string;
   for r in s.listRoots():
     if r.rootId.startsWith(RootIdPrefix) and r.kind == $rkProfile:
       rows.add(r)
-  let inUse = if running.len > 0 and lookup != nil:
-                generationsHeldBy(rows, running, lookup)
-              elif running.len > 0:
-                # No way to read the generations' ledgers: keep them all.
-                generationsHeldBy(rows, @[RunningUnit()], nil)
-              else: initHashSet[string]()
+  let inUse = held
   # Newest first by registration time.
   rows.sort(proc(a, b: RootRow): int = cmp(b.createdAtUnix, a.createdAtUnix))
   var kept = 0
   for r in rows:
     let id = r.rootId[RootIdPrefix.len .. ^1]
-    let young = now - r.createdAtUnix < int64(max(policy.keepDays, 0)) * 86400
+    # By age only when an age was asked for: `--keep-days 0` keeps nothing
+    # by age, even a generation whose registration time lies in the
+    # future of a clock that stepped back (a host without a real-time
+    # clock). With a positive age such a generation counts as young --
+    # erring towards keeping.
+    let young = policy.keepDays > 0 and
+      now - r.createdAtUnix < int64(policy.keepDays) * 86400
     if id == current or id == previous or kept < max(policy.keepGenerations, 0) or
         young or id in inUse:
       inc kept

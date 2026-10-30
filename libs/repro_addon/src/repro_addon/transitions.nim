@@ -92,6 +92,12 @@ type
                           ## exclusive units: the `.service` units the
                           ## unit's own `Conflicts=` names
     triggers*: seq[string] ## active units that can activate it (TriggeredBy)
+    dependents*: seq[string]
+                          ## the units a stop or restart of this one
+                          ## propagates to: systemd's ``ConsistsOf=`` (the
+                          ## units with ``PartOf=`` it) and ``BoundBy=``
+                          ## (``BindsTo=`` it). Each must have facts of its
+                          ## own in the same list.
 
 proc running*(f: UnitFacts): bool =
   ## Is an instance of the unit alive? For an exclusive unit the control
@@ -101,24 +107,82 @@ proc running*(f: UnitFacts): bool =
   ## the successor beside it. An unknown population counts as alive.
   f.active or (f.exclusive and f.alive != uaEmpty)
 
-proc conflictsServices*(content: string): seq[string] =
-  ## The ``.service`` units a unit file's ``[Unit]`` section names in
-  ## ``Conflicts=`` (space-separated, repeatable): an exclusive unit's
-  ## declared predecessors (spec §7.3). Implicit conflicts systemd adds
-  ## (``shutdown.target``) are not in the file and not services.
-  var inUnit = false
-  for raw in content.splitLines():
-    let line = raw.strip()
-    if line.startsWith("["):
-      inUnit = line == "[Unit]"
-      continue
-    if not inUnit or line.len == 0 or line[0] in {'#', ';'}:
-      continue
-    let eq = line.find('=')
-    if eq < 0 or line[0 ..< eq].strip() != "Conflicts": continue
-    for name in line[eq + 1 .. ^1].splitWhitespace():
-      if name.endsWith(".service") and name notin result:
-        result.add(name)
+type ConflictsParseError* = object of ValueError
+  ## A ``Conflicts=`` value the parser cannot resolve on its own (a
+  ## specifier it does not expand): the caller refuses rather than guess.
+
+proc expandUnitSpecifiers*(value, unitName: string): string =
+  ## The unit-name specifiers of systemd.unit(5) "Specifiers" that a
+  ## ``Conflicts=`` list can sensibly use -- ``%n`` (full name), ``%N``
+  ## (name without type suffix), ``%p`` (prefix), ``%i`` / ``%I``
+  ## (instance; unescaped is the same for the plain names this accepts),
+  ## ``%j`` / ``%J`` (final dash component of the prefix) and ``%%``.
+  ## Any other specifier raises ``ConflictsParseError``.
+  let dot = unitName.rfind('.')
+  let stem = if dot > 0: unitName[0 ..< dot] else: unitName
+  let at = stem.find('@')
+  let prefix = if at >= 0: stem[0 ..< at] else: stem
+  let instance = if at >= 0: stem[at + 1 .. ^1] else: ""
+  let dash = prefix.rfind('-')
+  let lastDash = if dash >= 0: prefix[dash + 1 .. ^1] else: prefix
+  var i = 0
+  while i < value.len:
+    if value[i] == '%' and i + 1 < value.len:
+      case value[i + 1]
+      of 'n': result.add(unitName)
+      of 'N': result.add(stem)
+      of 'p': result.add(prefix)
+      of 'i', 'I': result.add(instance)
+      of 'j', 'J': result.add(lastDash)
+      of '%': result.add('%')
+      else:
+        raise newException(ConflictsParseError, "unsupported specifier %" &
+          value[i + 1] & " in Conflicts= of " & unitName)
+      i += 2
+    else:
+      result.add(value[i])
+      inc i
+
+proc conflictsServices*(content, unitName: string;
+                        dropIns: openArray[string] = []): seq[string] =
+  ## The ``.service`` units a unit's ``[Unit]`` section names in
+  ## ``Conflicts=`` across the unit file and then its drop-ins, in the
+  ## order systemd reads them: an exclusive unit's declared predecessors
+  ## (spec §7.3). Follows systemd's syntax -- a trailing backslash
+  ## continues a line, an empty assignment resets the list, ``%``
+  ## specifiers are expanded against ``unitName`` -- and raises
+  ## ``ConflictsParseError`` on a specifier it cannot expand. Implicit
+  ## conflicts systemd adds (``shutdown.target``) are not in the files and
+  ## not services. The caller also asks systemd (``systemctl show -p
+  ## Conflicts``) for a unit it has loaded, and resolves aliases.
+  proc scan(text: string; acc: var seq[string]) =
+    var inUnit = false
+    var pending = ""
+    for raw in text.splitLines():
+      var line = raw.strip(leading = false)
+      if pending.len > 0:
+        line = pending & " " & line.strip()
+        pending = ""
+      let t = line.strip()
+      if t.endsWith("\\"):
+        pending = t[0 ..< t.len - 1]
+        continue
+      if t.startsWith("["):
+        inUnit = t == "[Unit]"
+        continue
+      if not inUnit or t.len == 0 or t[0] in {'#', ';'}:
+        continue
+      let eq = t.find('=')
+      if eq < 0 or t[0 ..< eq].strip() != "Conflicts": continue
+      let value = t[eq + 1 .. ^1].strip()
+      if value.len == 0:
+        acc.setLen(0)            # an empty assignment resets the list
+        continue
+      for name in expandUnitSpecifiers(value, unitName).splitWhitespace():
+        if name.endsWith(".service") and name notin acc:
+          acc.add(name)
+  scan(content, result)
+  for d in dropIns: scan(d, result)
 
 proc isEffective*(t: Transition): bool =
   ## Does the switch act on it (every verb but `leave`)?
@@ -136,6 +200,63 @@ proc startEntries*(ts: seq[Transition]): seq[Transition] =
   ## What step 7 runs, in the order given (dependency order).
   for t in ts:
     if t.verb in {tvStart, tvRestart, tvReload, tvStopStart}: result.add(t)
+
+proc propagateStops*(ts: seq[Transition]; facts: seq[UnitFacts]):
+    seq[Transition] =
+  ## systemd carries a stop of a unit to every unit with ``PartOf=`` or
+  ## ``BindsTo=`` it, and a restart as a restart of those units
+  ## (systemd.unit(5), ``PartOf=``, ``BindsTo=``); a start is not carried.
+  ## Left implicit, an exclusive dependent would be stopped and restarted
+  ## by systemd with nothing confirming that its old instance exited, and
+  ## a dependent of a ``stop-start`` unit would be stopped in step 2 and
+  ## never started again. So every running dependent of an entry that
+  ## stops (``stop``) or restarts (``restart``, ``stop-start``) a unit gets
+  ## an entry of its own, transitively: ``stop`` when the cause stops,
+  ## ``stop-start`` when it restarts -- stopped (and, if exclusive,
+  ## confirmed) in step 2 and started in step 7 after its cause. A
+  ## dependent's own ``restart``, ``reload``, ``start`` or ``leave`` (a
+  ## ``restartIfChanged = false`` hold cannot hold a restart systemd
+  ## propagates) is replaced; a ``stop`` or ``stop-start`` already planned
+  ## stays.
+  result = ts
+  var byUnit = initTable[string, int]()
+  for i, f in facts: byUnit[f.unit] = i
+  proc indexOf(r: seq[Transition]; unit: string): int =
+    for i, t in r:
+      if t.unit == unit: return i
+    -1
+  var work: seq[string]
+  for t in result:
+    if t.verb in {tvStop, tvRestart, tvStopStart}: work.add(t.unit)
+  var guard = 0
+  while work.len > 0 and guard < 10_000:
+    inc guard
+    let cause = work.pop()
+    let ci = result.indexOf(cause)
+    if ci < 0 or cause notin byUnit: continue
+    let restarts = result[ci].verb in {tvRestart, tvStopStart}
+    for d in facts[byUnit[cause]].dependents:
+      if d notin byUnit or d == cause: continue
+      let df = facts[byUnit[d]]
+      if df.removed or not df.running: continue
+      let di = result.indexOf(d)
+      if di >= 0 and result[di].verb == tvStop: continue
+      if di >= 0 and result[di].verb == tvStopStart and restarts: continue
+      let why = (if restarts: "restarted with " else: "stopped with ") &
+        cause & " (PartOf=/BindsTo=)" &
+        (if df.exclusive: "; exclusive: confirmed exited in step 2" else: "")
+      var entry = Transition(unit: d, verb: (if restarts: tvStopStart else: tvStop),
+        reason: why, exclusive: df.exclusive,
+        predecessors: (if di >= 0: result[di].predecessors else: @[]),
+        triggers: (if restarts: df.triggers else: @[]))
+      if di >= 0:
+        if result[di].verb == tvStart and not restarts:
+          continue                 # not running yet: nothing to stop
+        result.delete(di)
+      # After its cause, so step 7 starts it after the unit it is part of.
+      let at = result.indexOf(cause)
+      result.insert(entry, at + 1)
+      work.add(d)
 
 proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
   ## The §7.3 table over every unit, in the order of ``facts``. Stops of
@@ -222,7 +343,7 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
         reason: why & " (reloadIfChanged)"))
     else:
       starts.add(Transition(unit: f.unit, verb: tvRestart, reason: why))
-  stops & starts
+  propagateStops(stops & starts, facts)
 
 proc propagateDependencyChanges*(facts: var seq[UnitFacts];
                                  dependsOn: Table[string, seq[string]]) =

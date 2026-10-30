@@ -16,7 +16,10 @@
 ## sorts after the add-on's ``90-repro-*`` (here ``99-zz-repro-fixture.conf``)
 ## or ``/etc/sysctl.conf`` assigning one of the keys another value would
 ## put that value back at every boot; the plan refuses the resource
-## (exit 2), naming the file, and nothing is written.
+## (exit 2), naming the file, and nothing is written. So is a forwarding
+## key while systemd-networkd is in use and configured (here globally, in
+## ``networkd.conf.d``) to write forwarding itself; the record notes
+## whether the base runs networkd.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=sysctl-in-apply-namespace``):
 ## the switch runs ``systemd-sysctl`` on the fragments in the apply's own
@@ -133,6 +136,25 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "net.ipv4.ip_forward" in conf.stderr, "exit " & $conf.exitCode & "\n" & conf.stdout & conf.stderr)
     discard g.run("if [ -e /root/sysctl.conf.repro-bak ]; then mv /root/sysctl.conf.repro-bak /etc/sysctl.conf; " &
       "else rm -f /etc/sysctl.conf; fi")
+    # A runtime writer: networkd configured (globally, networkd.conf.d) to
+    # set forwarding itself. Refused while networkd is enabled or running;
+    # on a base without networkd the setting configures nothing and the
+    # plan is not refused (the record says which).
+    let networkdInUse = g.exec("systemctl is-active --quiet systemd-networkd.service || " &
+      "systemctl is-enabled --quiet systemd-networkd.service").exitCode == 0
+    record["networkdInUse"] = %networkdInUse
+    discard g.run("mkdir -p /etc/systemd/networkd.conf.d && printf '[Network]\\nIPv4Forwarding=no\\n' " &
+      "> /etc/systemd/networkd.conf.d/99-repro-fixture.conf")
+    let nwd = g.planProfile(repro, "sysctl-networkd", Profile)
+    if networkdInUse:
+      step("networkd configured to write forwarding refuses the forwarding key (exit 2), naming the setting",
+           nwd.exitCode == 2 and "IPv4Forwarding=no" in nwd.stderr and
+           "net.ipv4.ip_forward" in nwd.stderr, "exit " & $nwd.exitCode & "\n" & nwd.stdout & nwd.stderr)
+    else:
+      step("without networkd in use its configuration refuses nothing",
+           nwd.exitCode == 0, "exit " & $nwd.exitCode & "\n" & nwd.stdout & nwd.stderr)
+    discard g.run("rm -rf /etc/systemd/networkd.conf.d/99-repro-fixture.conf; " &
+      "rmdir /etc/systemd/networkd.conf.d 2>/dev/null; true")
     let ib = identityReport(fb, g.takeFingerprint(repro))
     step("the refused plans wrote nothing", ib.ok, ib.text)
     step("the host's values are still the base's",

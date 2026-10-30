@@ -2082,6 +2082,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_infra_apply_retention_flags.nim",
+    binary: "build/test-bin/t_infra_apply_retention_flags",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_infra_cache_keys.nim",
     binary: "build/test-bin/t_infra_cache_keys",
     defines: @[],
