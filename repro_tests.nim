@@ -6207,6 +6207,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_profile_compile_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim",
+    binary: "build/test-bin/t_system_profile_text_quoting",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_profile_compile_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim",
     binary: "build/test-bin/t_template_in_template_named_args",
     defines: @[],

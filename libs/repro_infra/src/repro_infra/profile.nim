@@ -389,21 +389,74 @@ proc resourceName*(r: SystemResource): string =
 # The declarative-format parser. Pure — no filesystem access.
 # ---------------------------------------------------------------------------
 
-proc stripComment(line: string): string =
-  ## Drop a `#`-comment, but not a `#` inside a quoted value.
+# ---------------------------------------------------------------------------
+# Quoting. A field value is a double-quoted string whose only escape is a
+# DOUBLED quote: `""` inside the quotes stands for one `"` character, as in
+# a Nim raw string literal (`r"a""b"` is `a"b`;
+# https://nim-lang.org/docs/manual.html#lexical-analysis-raw-string-literals).
+# Nothing else is decoded: a backslash, a `#`, a `{` / `}` and a newline are
+# all literal, so a Windows path (`HKLM\SOFTWARE\...`), a unit file and a
+# shell script are written verbatim.
+#
+# Why this escape and not `\"`: the format has always been written with
+# single, undecoded backslashes, and every stored generation embeds its
+# profile text (`GenerationEnvelope.profileText`, which `repro system
+# rollback` re-parses). A backslash escape would change the meaning of text
+# already on disk (`"\\server\share"`). No value could contain a `"` before
+# this rule existed, so a doubled quote never occurred inside a value and
+# every existing text parses to exactly what it did. The scanners that track
+# quote state (`stripComments`, the brace walk, the assignment splitter and
+# `parseListLiteral`) toggle once per `"`, so a doubled quote leaves their
+# state unchanged and needs no special case; only `unquote` decodes it.
+# ---------------------------------------------------------------------------
+
+proc quoteSystemValue*(value: string): string =
+  ## Render `value` as a quoted field value of the `system.nim` text form.
+  ## Every byte string round-trips: `unquote(quoteSystemValue(v)) == v`.
+  ## This is the ONE encoder: the editor (`intent.renderStanza`) and the
+  ## compiled-profile renderer (`renderSystemProfileToText`) both call it.
+  "\"" & value.replace("\"", "\"\"") & "\""
+
+proc stripComments(text: string): string =
+  ## Blank out every `#`-comment in `text`, carrying the quote state across
+  ## newlines, so a `#` inside a quoted value — on its first line or any
+  ## later one — is value text, not a comment.
+  ##
+  ## A comment's characters are replaced by spaces rather than removed, so
+  ## an offset into the result is an offset into `text`; the editor maps
+  ## stanza bounds back to lines through `systemProfileStanzaLineSpans`.
+  ##
+  ## This replaces a per-line pass that restarted with `inQuote = false` on
+  ## every line. It dropped `#` lines from a multi-line value and cut a
+  ## value at an in-value `#` (`ExecStart=/bin/echo a#b` became
+  ## `ExecStart=/bin/echo a`), and reported nothing (reprobuild-pm issue
+  ## 2026-10-30-system-profile-text-parser-drops-hash-text-inside-multi-line-quoted-values).
+  result = newString(text.len)
   var inQuote = false
-  for i in 0 ..< line.len:
-    let c = line[i]
-    if c == '"':
+  var inComment = false
+  for i, c in text:
+    if inComment:
+      if c in {'\n', '\r'}:
+        inComment = false
+        result[i] = c
+      else:
+        result[i] = ' '
+    elif c == '"':
       inQuote = not inQuote
+      result[i] = c
     elif c == '#' and not inQuote:
-      return line[0 ..< i]
-  return line
+      inComment = true
+      result[i] = ' '
+    else:
+      result[i] = c
 
 proc unquote(v: string): string =
+  ## The value a field's raw text denotes. A quoted value loses its
+  ## surrounding quotes and has each doubled quote decoded (see
+  ## `quoteSystemValue`); a bare token (`true`, a list) is returned stripped.
   let t = v.strip()
   if t.len >= 2 and t[0] == '"' and t[^1] == '"':
-    return t[1 ..< t.len - 1]
+    return t[1 ..< t.len - 1].replace("\"\"", "\"")
   return t
 
 proc parseBoolField(name, raw: string): bool =
@@ -558,16 +611,15 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
       getCurrentExceptionMsg())
 
-proc parseSystemProfile*(text: string): SystemProfile =
-  ## Parse the declarative `system.nim` text into a `SystemProfile`.
-  ## Raises `ESystemProfileInvalid` on any structural error or an
-  ## unknown / deferred resource kind. Brace-aware: a stanza body may
-  ## be on one line (`kind { k = v }`) or spread across many.
-  # Strip comments globally, then walk by `{` / `}` braces.
-  var clean = ""
-  for line in text.splitLines():
-    clean.add(stripComment(line))
-    clean.add('\n')
+proc stanzaBounds(clean: string):
+    seq[tuple[head, brace, close: int]] =
+  ## The stanzas of comment-stripped text, as offsets: where the kind tag
+  ## starts, its `{`, and the matching `}`. There is no nesting in this
+  ## format. A `}` inside a double-quoted value is skipped — required for
+  ## kinds whose content carries JS / shell bodies (`linux.polkitRule
+  ## content = "polkit.addRule(function() { ... });"`) and for any
+  ## multi-line value. Raises `ESystemProfileInvalid` on a head with no
+  ## `{` or a block with no `}`.
   var pos = 0
   while pos < clean.len:
     # Skip whitespace to the next stanza head.
@@ -582,7 +634,57 @@ proc parseSystemProfile*(text: string): SystemProfile =
         raiseSystemProfileInvalid("resource '" & trailing &
           "' must be followed by a '{' block")
       break
-    let kindTag = clean[pos ..< braceIdx].strip()
+    var closeIdx = -1
+    var i = braceIdx + 1
+    var inQuote = false
+    while i < clean.len:
+      let c = clean[i]
+      if c == '"':
+        inQuote = not inQuote
+      elif not inQuote and c == '}':
+        closeIdx = i
+        break
+      inc i
+    if closeIdx < 0:
+      raiseSystemProfileInvalid("resource '" &
+        clean[pos ..< braceIdx].strip() & "' block is not closed with '}'")
+    result.add((head: pos, brace: braceIdx, close: closeIdx))
+    pos = closeIdx + 1
+
+proc systemProfileStanzaLineSpans*(text: string):
+    seq[tuple[startLine, endLine: int]] =
+  ## The 0-based line of each stanza's kind tag and of its closing `}`, in
+  ## file order, found by the SAME quote-aware walk `parseSystemProfile`
+  ## uses. The text editor (`intent.stanzaSpans`) pairs these with the
+  ## parsed resources, so a value holding a `{`, a `}`, a `#` or a blank
+  ## line cannot make the editor and the parser disagree on where a stanza
+  ## ends. Lines are counted by `\n`.
+  let clean = stripComments(text)
+  var line = 0
+  var at = 0
+  proc lineOf(offset: int): int =
+    while at < offset:
+      if clean[at] == '\n': inc line
+      inc at
+    line
+  for span in stanzaBounds(clean):
+    let s = lineOf(span.head)
+    let e = lineOf(span.close)
+    result.add((startLine: s, endLine: e))
+
+proc parseSystemProfile*(text: string): SystemProfile =
+  ## Parse the declarative `system.nim` text into a `SystemProfile`.
+  ## Raises `ESystemProfileInvalid` on any structural error or an
+  ## unknown / deferred resource kind. Brace-aware: a stanza body may
+  ## be on one line (`kind { k = v }`) or spread across many.
+  # Strip comments globally (quote state carried across lines), then walk
+  # by `{` / `}` braces. The bytes of a quoted value reach `unquote`
+  # unchanged: no line splitting, so a `\r` inside a value survives too.
+  let clean = stripComments(text)
+  for span in stanzaBounds(clean):
+    let braceIdx = span.brace
+    let closeIdx = span.close
+    let kindTag = clean[span.head ..< braceIdx].strip()
     var srk: SystemResourceKind
     case kindTag
     of $srkWindowsRegistryValue: srk = srkWindowsRegistryValue
@@ -617,27 +719,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
-    # Find the matching `}` (no nesting in this format). A `}` inside
-    # a double-quoted string is skipped — required for kinds whose
-    # content field carries JS / shell bodies (e.g.
-    # `linux.polkitRule content = "polkit.addRule(function() { ... });"`).
-    var closeIdx = -1
-    block:
-      var i = braceIdx + 1
-      var inQuote = false
-      while i < clean.len:
-        let c = clean[i]
-        if c == '"':
-          inQuote = not inQuote
-        elif not inQuote and c == '}':
-          closeIdx = i
-          break
-        inc i
-    if closeIdx < 0:
-      raiseSystemProfileInvalid("resource '" & kindTag &
-        "' block is not closed with '}'")
     let bodyText = clean[braceIdx + 1 ..< closeIdx]
-    pos = closeIdx + 1
     # Collect `key = value` assignments. The RAW value (before
     # `unquote`) is kept so a `[...]` list field can be parsed with
     # `parseListLiteral`; a scalar field uses the unquoted form.

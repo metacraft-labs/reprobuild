@@ -1323,13 +1323,9 @@ template linuxNixosSystemModule*(targetResources: var seq[ResourceIntent];
   ## re-reads on each invocation" model: the file is the source of
   ## truth; the realization step is downstream.
   ##
-  ## TEXT-FORMAT CONSTRAINT: the M69 system-profile text round-tripper
-  ## quotes each field with simple `"..."` literals and the parser's
-  ## `unquote` strips ONE surrounding pair without escapes; the
-  ## `content` value therefore MUST NOT contain a double-quote
-  ## character. Use Nix's `''...''` URL-string form (which the Nix
-  ## parser treats verbatim, no `"` needed) or pre-bind quoted
-  ## strings to `let` variables in an upstream module.
+  ## `content` may hold any text, double quotes included: the system
+  ## profile text form encodes a `"` as `""` (`repro_infra`
+  ## `quoteSystemValue`) and decodes it on parse.
   ##
   ## Address default: `linux.nixosSystemModule:<name>`.
   block:

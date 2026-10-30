@@ -779,20 +779,12 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
 # whitespace are not preserved (they have no semantic meaning).
 # ---------------------------------------------------------------------------
 
-proc quoteSystemValue(s: string): string =
-  ## Quote a string for the system-profile text format. The parser
-  ## reads `"..."` literals; backslashes and embedded quotes are
-  ## NOT escaped by the M69 parser (`unquote` strips one surrounding
-  ## pair and stops), so we reject embedded quotes outright — the
-  ## adapter is fed by `ProfileIntent` values whose strings would be
-  ## authored at Nim source level, where embedded quotes already need
-  ## explicit escaping, so this is a structural invariant rather than
-  ## an arbitrary restriction.
-  if '"' in s:
-    raise newException(ValueError,
-      "system-profile string value contains an embedded double quote; " &
-      "the M69 text format cannot represent this verbatim")
-  "\"" & s & "\""
+# Values are quoted with `repro_infra`'s `quoteSystemValue`, the format's
+# one encoder: verbatim, with a `"` doubled. Every string a profile can hold
+# round-trips through it, so YAML, udev rules, unit files with quoted
+# `Environment=` values and shell scripts can be declared inline. (It used
+# to raise on any embedded `"`, which forced such content out of the
+# profile and onto a side channel.)
 
 proc renderListLiteral(items: openArray[string]): string =
   result = "["
