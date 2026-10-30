@@ -224,11 +224,18 @@ proc indexStamp*(root: string): string =
   ## entries and so its modification and status-change times
   ## (rename(2), unlink(2)). ucf's ``ucfr`` replaces its registry by
   ## writing a temporary file and renaming it, which changes the
-  ## registry's inode. A hand edit in place of a list would not be seen
-  ## here; it would not be seen by dpkg's own queries either. The
-  ## diversion database is not part of the index: it is re-read on every
-  ## query.
-  statStamp(root / DpkgInfoDir) & "|" & statStamp(root / UcfRegistry)
+  ## registry's inode. dpkg's ``status`` file (rewritten by rename on
+  ## every package state change) and the diversion database are stamped
+  ## too, so a package operation is seen even where a filesystem's
+  ## coarse timestamps (one-second or worse) could leave the directory's
+  ## times unchanged across two renames within the same tick: the status
+  ## file's inode changes with every rewrite. Known limit (spec §4.3): an
+  ## in-place edit of a ``*.list`` file that changes neither its inode,
+  ## its size nor any of the stamped times is not seen until the next
+  ## change of one of them; dpkg never edits a list in place.
+  statStamp(root / DpkgInfoDir) & "|" & statStamp(root / UcfRegistry) &
+    "|" & statStamp(root / "/var/lib/dpkg/status") & "|" &
+    statStamp(root / DpkgDiversionsDb)
 
 proc loadDpkgIndex(root: string; idx: DpkgIndex) =
   ## Every installed package's file list. The lists name the paths as
@@ -291,15 +298,28 @@ proc unitProvisionFromShow*(text: string): UnitProvision =
   result.activeState = kv.getOrDefault("ActiveState")
 
 proc readUnitProvision*(unit: string): UnitProvision =
-  ## ``systemctl show`` for one unit. A host without systemctl reports an
-  ## empty provision (the preflight already refused such a host).
+  ## ``systemctl show`` for one unit. Fails closed: a missing systemctl,
+  ## a non-zero exit (no bus, systemd not answering) or an answer without
+  ## ``LoadState`` raises ``AddonCollisionError`` instead of reading as
+  ## "no unit of that name" -- which the decision table would take for
+  ## permission to create an /etc unit over whatever really provides it.
+  ## (A unit that does not exist is not an error: systemctl answers 0
+  ## with ``LoadState=not-found``.)
+  var r: HostToolResult
   try:
-    let r = runSystemctl(["show", "-p",
+    r = runSystemctl(["show", "-p",
       "LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState",
       "--", unit])
-    unitProvisionFromShow(r.output)
-  except HostToolMissing:
-    UnitProvision()
+  except HostToolMissing as e:
+    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+      ": " & e.msg)
+  if r.exitCode != 0:
+    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+      ": systemctl show exited " & $r.exitCode & ": " & r.output.strip())
+  result = unitProvisionFromShow(r.output)
+  if result.loadState.len == 0:
+    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+      ": systemctl show reported no LoadState: " & r.output.strip())
 
 proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
                     UnitProvision {.gcsafe.} = nil): CollisionDriver =
@@ -471,6 +491,28 @@ proc refuseForeignDiversion(o: TargetObservation; address: string;
      else: "package " & o.diversion.package) &
     "; an existing diversion by someone else has no opt-in")
 
+proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
+                     address: string) =
+  ## A file a package manages through ucf cannot be diverted (owner
+  ## decision 2026-10-30). ucf follows dpkg's diversions but keys its own
+  ## records by the original path, so on the package's next upgrade it
+  ## cannot tell the diverted copy is unmodified and withholds the new
+  ## maintainer version as `<path>.distrib.ucf-dist`; undoing that on
+  ## removal would mean writing ucf's private state (its hashfile and
+  ## cache), which the add-on does not do. The plan refuses instead and
+  ## names what does work: the program's drop-in directory when it reads
+  ## one.
+  if not o.ownership.viaUcf: return
+  let hint = d.dropInHint(o.path)
+  raise newException(AddonCollisionError, "refusing " & address & ": " &
+    o.path & " is managed by package " & o.ownership.package &
+    " through ucf (/var/lib/ucf/registry), and a ucf-managed file cannot " &
+    "be diverted: ucf would withhold the package's next version of it " &
+    "and the add-on does not write ucf's records to undo that. " &
+    (if hint.len > 0: "Put the change in a drop-in under " & hint & " instead."
+     else: "Change it through a drop-in or configuration directory the " &
+           "program reads, or leave it to the package."))
+
 proc decideFile(d: CollisionDriver; o: TargetObservation;
                 inp: DecisionInputs): CollisionDecision =
   ## The file rows of the table, shared by ``etcFile`` targets and the
@@ -515,6 +557,7 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
         ": " & o.path & " is owned by package " & o.ownership.package &
         " and the " & d.name & " base has no diversions; `collision = " &
         "\"divert\"` is unavailable here")
+    refuseUcfDivert(d, o, inp.address)
     result.verdict = cvDivert
     result.reason = "owned by package " & o.ownership.package &
       (if o.ownership.conffile: " (conffile)" else: "") &
@@ -572,6 +615,7 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
       raise newException(AddonCollisionError, "refusing " & inp.address &
         ": no installed package owns " & path & "; a diversion is only " &
         "for a package-owned path (declare the file as an fs.systemFile)")
+    refuseUcfDivert(d, o, inp.address)
     if o.diversion.present:
       # Only reachable when the ledger owns it (a foreign one was refused).
       dec.verdict = cvNoOp

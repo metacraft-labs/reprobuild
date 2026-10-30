@@ -14,8 +14,18 @@
 ##   ``ucf``, so it is in no dpkg record and the observer's fourth record,
 ##   ucf's registry, is what owns it) and ``/etc/ssh/ssh_config`` (a plain
 ##   dpkg conffile of openssh-client): ``EAddOnPackageOwned`` naming the
-##   package; ``collision = divert`` moves the package's copy to ``.distrib``
-##   and records the diversion; removal puts it back.
+##   package. For ``ssh_config``, ``collision = divert`` moves the package's
+##   copy to ``.distrib`` and records the diversion; removal puts it back.
+##   For the ucf-managed ``sshd_config`` the divert opt-in is refused too,
+##   naming ucf and ``sshd_config.d/`` (owner decision 2026-10-30: the
+##   add-on does not write ucf's private records), with nothing written.
+## - **unit names as written**: ``" cron.service"`` (as a unit and as the
+##   unit of a drop-in) is refused when the profile is parsed, naming the
+##   field: the driver and the observer derive the unit file's path from
+##   the same text, and systemd would not load such a name.
+## - **unit search directories**: a managed prefix over
+##   ``/etc/systemd/system.control/`` (where a file shadows a unit past the
+##   unit class) is refused.
 ## - **package unit** (``cron.service``; the ``cron`` package is installed
 ##   before the baseline, Debian 13's cloud image ships none): ``EAddOnUnitShadows`` naming the
 ##   package's fragment; ``collision = dropIn`` writes a drop-in systemd
@@ -307,7 +317,8 @@ fs.systemFile {
 "
 }
 """
-  FileHPending = FileH & """
+  FileHPending = FileH.replace("[\"/etc/repro-fixture/\"]",
+    "[\"/etc/repro-fixture-unrelated/\", \"/etc/repro-fixture/\"]") & """
 fs.systemFile {
   path = "/etc/repro-fixture/pending.conf"
   content = "pending
@@ -334,6 +345,32 @@ fs.systemFile {
 linux.sysusersEntry {
   name = "fxgrp"
   kind = "group"
+}
+"""
+  UnitNameSpace = """systemd.systemUnit {
+  name = " cron.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+"""
+  DropInUnitSpace = """systemd.systemDropIn {
+  unit = " cron.service"
+  name = "x"
+  content = "[Service]
+Nice=5
+"
+}
+"""
+  UnitSearchPrefix = """addOn {
+  managedEtcPrefixes = ["/etc/systemd/system.control/"]
+}
+
+fs.systemFile {
+  path = "/etc/systemd/system.control/cron.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
 }
 """
   Create = """addOn {
@@ -421,7 +458,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       r.stdout
 
     # --- Rows: package-owned conffiles (a dpkg conffile, a ucf-managed file). ---
-    proc conffileRows(path, pkg, content, observation, guard: string) =
+    proc conffileRows(path, pkg, content, observation, guard: string;
+                      viaUcf = false) =
       let before = g.sha256InGuest(path)
       let tag = extractFilename(path)
       step("vacuity guard: " & pkg & " owns " & path & " (" & observation & ")",
@@ -432,6 +470,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step(tag & "-conffile: the plan refuses the same way and writes nothing",
            planR.exitCode == 2 and "EAddOnPackageOwned" in planR.stderr and
            identityReport(f, g.takeFingerprint(repro)).ok, planR.stdout & planR.stderr)
+      if viaUcf:
+        # A ucf-managed file cannot be diverted: refused, naming ucf and the
+        # program's drop-in directory, with nothing written.
+        refused(tag & "-conffile-divert-ucf", ConffileDiverted % [path, content],
+                "through ucf", path & ".d/")
+        step(tag & "-conffile-divert-ucf: the package's file is untouched, nothing diverted",
+             g.sha256InGuest(path) == before and
+             g.sha256InGuest(path & ".distrib") == "absent" and
+             g.run("dpkg-divert --list " & path).strip().len == 0, "")
+        return
       discard applied(tag & "-conffile-divert", ConffileDiverted % [path, content])
       let distrib = g.sha256InGuest(path & ".distrib")
       step(tag & "-conffile-divert: the package's copy is at .distrib, untouched",
@@ -462,7 +510,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "ucf:openssh-server",
       "grep -Eq 'openssh-server[[:space:]]+/etc/ssh/sshd_config$' /var/lib/ucf/registry && " &
       "! grep -rqx /etc/ssh/sshd_config /var/lib/dpkg/info/openssh-server.list " &
-      "/var/lib/dpkg/info/openssh-server.conffiles")
+      "/var/lib/dpkg/info/openssh-server.conffiles", viaUcf = true)
 
     # --- Row: package unit. ---
     step("vacuity guard: a package provides cron.service",
@@ -594,6 +642,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                              "systemFile:/etc/repro-fixture/h.conf")
     step("file-adopt: adopted as it is, nothing written", fa.exitCode == 0 and
          g.run("cat /etc/repro-fixture/h.conf") == "theirs\n", fa.stdout & fa.stderr)
+    step("file-adopt: only the prefix the adopted path needs was added",
+         "/etc/repro-fixture/" in g.run("cat /var/lib/repro/system/addon/user.profile") and
+         "/etc/repro-fixture-unrelated/" notin g.run("cat /var/lib/repro/system/addon/user.profile"), "")
     step("file-adopt: the pending resource of the same profile was not applied",
          g.sha256InGuest("/etc/repro-fixture/pending.conf") == "absent" and
          entriesFor(g.ledgerOf(), "systemFile:/etc/repro-fixture/pending.conf").len == 0, "")
@@ -706,6 +757,18 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "systemd/system/cron.service" in
            g.run("systemctl show -p FragmentPath cron.service") and
          not g.run("systemctl show -p FragmentPath cron.service").contains("/etc/"), "")
+
+    # --- Rows: unit names exactly as written; unit search directories. ---
+    refused("unit-name-whitespace", UnitNameSpace, "systemd.systemUnit name",
+            "cron.service")
+    refused("dropin-unit-name-whitespace", DropInUnitSpace,
+            "systemd.systemDropIn unit", "cron.service")
+    step("unit names: cron.service is still the package's, nothing named ' cron.service'",
+         g.exec("test ! -e '/etc/systemd/system/ cron.service' && " &
+                "test ! -e /etc/systemd/system/cron.service").exitCode == 0 and
+         not g.run("systemctl show -p FragmentPath cron.service").contains("/etc/"), "")
+    refused("unit-search-prefix", UnitSearchPrefix, "systemd loads units",
+            "/etc/systemd/system.control/")
 
     # --- Row: a foreign LOCAL diversion to the name the add-on would use. ---
     discard g.run("dpkg-divert --local --rename --divert /etc/issue.distrib --add /etc/issue")

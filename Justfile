@@ -104,6 +104,13 @@ e2e_addon_removal_respects_ledger:
 e2e_addon_symlink_on_target_path_is_refused:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_symlink_on_target_path_is_refused
 
+# The write-time re-check, made deterministic by a test-only pause seam:
+# the default run uses the `pause-before-write` build (the seam is the
+# gate's instrument); REPRO_ADDON_MUTATION=pause-before-write-no-recheck is
+# its falsifying run.
+e2e_addon_write_time_recheck:
+    REPRO_ADDON_MUTATION="${REPRO_ADDON_MUTATION:-pause-before-write}" REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_write_time_recheck
+
 # A4: the add-on switch and service transitions (Debian 13 and Ubuntu 24.04
 # by default). Falsifying mutations: REPRO_ADDON_MUTATION=exclusive-as-plain-restart
 # (exclusive_never_overlaps), sysctl-in-apply-namespace

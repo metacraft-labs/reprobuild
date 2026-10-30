@@ -241,16 +241,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
           "the one the ledger recorded (it drifted, or is not the add-on's); " &
           "the diversion is left in place until the path is free")
         continue
-      # The same removal the apply's destroy runs: `dpkg-divert --local
-      # --rename --remove`, then the ucf hand-back, so a ucf-managed file
-      # gets the maintainer version ucf withheld while it was diverted.
+      # The same removal the apply's destroy runs.
       try:
-        let hb = removeLocalDpkgDiversion(dv.path)
-        result.removed.add("diversion " & dv.path &
-          (if hb.replaced: " (ucf's withheld maintainer version installed)"
-           elif hb.keptLocal.len > 0: " (ucf's withheld maintainer version at " &
-             hb.keptLocal & ")"
-           else: ""))
+        removeLocalDpkgDiversion(dv.path)
+        result.removed.add("diversion " & dv.path)
         result.undone.incl(entryKey(dv))
       except CatchableError as ex:
         result.errors.add("dpkg-divert --remove " & dv.path & ": " & ex.msg)

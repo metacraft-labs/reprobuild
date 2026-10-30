@@ -4162,153 +4162,19 @@ proc readDpkgDiversion*(dbText, path: string):
     i += 3
   (false, "", "")
 
-# ---------------------------------------------------------------------------
-# ucf and a diverted path.
-#
-# A file a package's maintainer scripts manage with ucf(1) is in no dpkg
-# record; ucf keeps its own: `/var/lib/ucf/hashfile` holds, per managed
-# path, the md5sum of the maintainer version last installed there (lines
-# `<md5>  <path>`, md5sum(1) output), and `/var/lib/ucf/cache/<path with
-# '/' as ':'>` a copy of it for three-way merges. ucf follows dpkg's
-# diversions: with `<path>` diverted it works on `dpkg-divert --truename`,
-# i.e. `<path>.distrib` (ucf 3.0043 and 3.0052, `dest_file=$(dpkg-divert
-# --truename "$dest_file")`). Its hashfile has no record under that name,
-# so on the package's next upgrade it cannot tell the copy there is
-# unmodified, keeps it, records the new version's md5sum under the
-# diverted name and leaves the new maintainer version beside it as
-# `<path>.distrib.ucf-dist` (its `keep_current` branch:
-# `cp -pf "$orig_new_file" "$dest_file.ucf-dist"`).
-#
-# When the diversion is removed, `dpkg-divert --rename --remove` moves
-# `<path>.distrib` back, and that is the maintainer version as it was when
-# the diversion was made -- not the current one, which ucf withheld. The
-# hand-back below finishes what ucf would have done had the path never
-# been diverted: an unmodified copy (its md5sum is the one ucf recorded
-# for the path) is replaced by the withheld version; a locally modified
-# one is kept and the withheld version goes beside it as
-# `<path>.ucf-dist`, ucf's own name for that case. Either way ucf's record
-# for the path becomes the withheld version's md5sum (ucf records the new
-# version's sum in both branches), the record under the diverted name is
-# dropped, and the cached copy moves back to the path's name.
-# ---------------------------------------------------------------------------
-
-{.push warning[Deprecated]: off.}
-import std/md5
-{.pop.}
-when defined(linux) or defined(macosx):
-  import std/posix
-
-const
-  UcfStateDir* = "/var/lib/ucf"
-  UcfDistSuffix* = ".ucf-dist"
-
-proc ucfCachedName*(path: string): string =
-  ## ucf's cache file name for ``path`` (``tr / :``).
-  path.replace('/', ':')
-
-proc parseUcfHashfile*(text: string): seq[tuple[sum, path: string]] =
-  ## ``<md5>  <path>`` lines; anything else is skipped.
-  for line in text.splitLines():
-    let t = line.strip(leading = false)
-    let sp = t.find(' ')
-    if sp != 32: continue
-    let path = t[sp .. ^1].strip()
-    if path.len > 0 and path[0] == '/':
-      result.add((sum: t[0 ..< 32], path: path))
-
-proc renderUcfHashfile*(rows: seq[tuple[sum, path: string]]): string =
-  for r in rows: result.add(r.sum & "  " & r.path & "\n")
-
-type
-  UcfHandBack* = object
-    ## What `handBackUcfAfterDiversion` did, for the caller's report.
-    withheld*: bool        ## ucf had withheld a newer maintainer version
-    replaced*: bool        ## ... and it now is at the path
-    keptLocal*: string     ## ... or it is here, beside a modified copy
-
-when defined(linux) or defined(macosx):
-  proc handBackUcfAfterDiversion*(path: string; root = ""): UcfHandBack =
-    ## Run after the diversion of ``path`` was removed (see the section
-    ## comment). ``root`` relocates every path for a fixture tree. A path
-    ## ucf does not manage, or one no upgrade ran on while it was diverted,
-    ## is left exactly as dpkg put it back. Never writes through a link.
-    let p = root & path
-    let distrib = root & dpkgDiversionTarget(path)
-    let withheld = distrib & UcfDistSuffix
-    let hashfile = root & UcfStateDir & "/hashfile"
-    var rows: seq[tuple[sum, path: string]]
-    let haveHashfile = leafNoFollow(hashfile).kind == lkFile
-    if haveHashfile:
-      rows = parseUcfHashfile(readFile(hashfile))
-    var changed = false
-    if leafNoFollow(withheld).kind == lkFile:
-      result.withheld = true
-      let newBytes = readFile(withheld)
-      let newSum = getMD5(newBytes)
-      var lastSum = ""
-      for r in rows:
-        if r.path == path: lastSum = r.sum
-      let leaf = leafNoFollow(p)
-      let curSum = if leaf.kind == lkFile: getMD5(readFile(p)) else: ""
-      if leaf.kind == lkFile and lastSum.len > 0 and curSum == lastSum:
-        # Unmodified since ucf installed it: ucf would have replaced it.
-        var st: Stat
-        discard lstat(p.cstring, st)
-        writeFileNoFollow(p, newBytes, int(st.st_mode) and 0o7777,
-                          int(st.st_uid), int(st.st_gid))
-        discard removeLeafNoFollow(withheld)
-        result.replaced = true
-      else:
-        # Locally modified (or gone): kept, and the new version beside it
-        # under ucf's own name for that case.
-        var st: Stat
-        discard lstat(withheld.cstring, st)
-        writeFileNoFollow(p & UcfDistSuffix, newBytes,
-                          int(st.st_mode) and 0o7777, int(st.st_uid),
-                          int(st.st_gid))
-        discard removeLeafNoFollow(withheld)
-        result.keptLocal = p & UcfDistSuffix
-      var found = false
-      for r in rows.mitems:
-        if r.path == path:
-          r.sum = newSum
-          found = true
-      if not found: rows.add((sum: newSum, path: path))
-      changed = true
-    # ucf's record under the diverted name belongs to no file now.
-    let before = rows.len
-    var kept: seq[tuple[sum, path: string]]
-    for r in rows:
-      if r.path != dpkgDiversionTarget(path): kept.add(r)
-    rows = kept
-    if rows.len != before: changed = true
-    if haveHashfile and changed:
-      var st: Stat
-      discard lstat(hashfile.cstring, st)
-      writeFileNoFollow(hashfile, renderUcfHashfile(rows),
-                        int(st.st_mode) and 0o7777, int(st.st_uid), int(st.st_gid))
-    let cacheDir = root & UcfStateDir & "/cache/"
-    let cachedDiverted = cacheDir & ucfCachedName(dpkgDiversionTarget(path))
-    if leafNoFollow(cachedDiverted).kind == lkFile:
-      var st: Stat
-      discard lstat(cachedDiverted.cstring, st)
-      writeFileNoFollow(cacheDir & ucfCachedName(path), readFile(cachedDiverted),
-                        int(st.st_mode) and 0o7777, int(st.st_uid), int(st.st_gid))
-      discard removeLeafNoFollow(cachedDiverted)
-
-proc removeLocalDpkgDiversion*(path: string): UcfHandBack =
+proc removeLocalDpkgDiversion*(path: string) =
   ## ``dpkg-divert --local --rename --remove <path>``, which moves the
-  ## package's copy back from ``<path>.distrib``, then the ucf hand-back
-  ## (``handBackUcfAfterDiversion``). The path must be free: dpkg refuses
-  ## to rename over a file, so the caller removes the add-on's copy first.
-  ## Shared by the driver's destroy and the add-on's uninstall.
+  ## package's copy back from ``<path>.distrib``. The path must be free:
+  ## dpkg refuses to rename over a file, so the caller removes the
+  ## add-on's copy first. Shared by the driver's destroy and the add-on's
+  ## uninstall. (A ucf-managed path is never diverted: the add-on refuses
+  ## that at plan time, so no ucf state needs handing back here.)
   when defined(linux):
     let (o, c) = execCmdEx("/usr/bin/dpkg-divert --local --rename " &
       "--remove " & quoteShell(path))
     if c != 0:
       raiseProtocol("linux.dpkgDiversion remove of " & path &
         " failed: " & o.strip())
-    handBackUcfAfterDiversion(path)
   else:
     raiseNotImplementedPlatform("linux.dpkgDiversion remove")
 
@@ -4351,7 +4217,7 @@ proc applyLinuxDpkgDiversion*(op: PrivilegedOperation):
         # `--rename` moves `<path>.distrib` back to `<path>`; dpkg refuses
         # when `<path>` still exists, so the file the profile put there must
         # already have been removed (the caller orders that first).
-        discard removeLocalDpkgDiversion(op.ddPath)
+        removeLocalDpkgDiversion(op.ddPath)
       let post = observeLinuxDpkgDiversion(op)
       if post.present:
         raiseProtocol("linux.dpkgDiversion remove of " & op.ddPath &

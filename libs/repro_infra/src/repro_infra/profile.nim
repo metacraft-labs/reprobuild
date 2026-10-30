@@ -872,6 +872,21 @@ const
     ## Directories reached through their own add-on classes (units,
     ## sysusers, tmpfiles, sysctl). They are never managed prefixes, and
     ## an `fs.systemFile` below them is out of scope.
+  UnitSearchDirectories* = ["/etc/systemd/system.control/",
+                            "/etc/systemd/system.attached/",
+                            "/etc/systemd/user/", "/etc/systemd/user.control/",
+                            "/etc/xdg/systemd/user/",
+                            "/etc/systemd/system-generators/",
+                            "/etc/systemd/user-generators/",
+                            "/etc/systemd/system-preset/",
+                            "/etc/systemd/user-preset/"]
+    ## Directories below /etc that systemd reads units, generators or
+    ## presets from (systemd.unit(5) "Unit File Load Path" for the system
+    ## and user managers, systemd.generator(7), systemd.preset(5)) other
+    ## than /etc/systemd/system, which is a class directory. A file there
+    ## defines, shadows or enables a unit (or runs as a generator at boot)
+    ## past the unit and drop-in classes' collision rules, so none of them
+    ## may be a managed prefix or contain one.
   AlwaysManagedEtcPrefix* = "/etc/repro/"
     ## The add-on's own directory: managed without being declared.
 
@@ -1010,6 +1025,11 @@ proc managedPrefixError*(prefix: string): string =
       return "managed prefix '" & prefix & "' overlaps " & d &
         ", which is reached through its own class and is never a " &
         "managed prefix"
+  for d in UnitSearchDirectories:
+    if asDir == d or asDir.startsWith(d) or d.startsWith(asDir):
+      return "managed prefix '" & prefix & "' overlaps " & d &
+        ", a directory systemd loads units, generators or presets from; " &
+        "units are reached only through the unit and drop-in classes"
   ""
 
 proc parseAddOnStanza*(body: string): AddOnSettings =
@@ -1470,6 +1490,13 @@ proc parseSystemProfile*(text: string): SystemProfile =
         sdRestartTarget: (if "restartTarget" in fields:
           fields["restartTarget"] else: ""))
     of srkSystemdSystemUnit:
+      # A name systemd accepts, exactly as written: the unit file's path is
+      # derived from its text, so `" cron.service"` would be a different
+      # file from the one every observer of `cron.service` looks at.
+      let unitNameErr = systemdUnitNameError("systemd.systemUnit name",
+                                             need("name"))
+      if unitNameErr.len > 0:
+        raiseSystemProfileInvalid(unitNameErr)
       res = SystemResource(kind: srkSystemdSystemUnit,
         suName: need("name"),
         suContent: need("content"),

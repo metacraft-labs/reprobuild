@@ -17,10 +17,6 @@ import std/[os, posix, strutils, tables, unittest]
 import repro_elevation
 import repro_infra/addon_diagnostics
 import repro_addon/[collision, etc_write, fingerprint]
-import repro_elevation/posix_system_driver
-{.push warning[Deprecated]: off.}
-import std/md5
-{.pop.}
 
 let root = getTempDir() / ("repro-addon-collision-" & $getCurrentProcessId())
 removeDir(root)
@@ -181,19 +177,29 @@ suite "the decision table, file rows":
       check e.path == at("/etc/ssh/sshd_config")
       check e.dropInHint == at("/etc/ssh/sshd_config") & ".d/"
 
-  test "a ucf-managed file is package-owned: refused by default, diverted by opt-in":
+  test "a ucf-managed file is package-owned and cannot be diverted, naming ucf and the drop-in":
     try:
       discard d.decide(fileInputs("sshd", "Port 22\n"), at("/etc/ssh/sshd_config"))
       check false
     except EAddOnPackageOwned as e:
       check e.package == "openssh-server" and e.conffile
-    let (dv, _) = d.decide(fileInputs("sshd", "Port 22\n", collision = "divert"), at("/etc/ssh/sshd_config"))
-    check dv.verdict == cvDivert and dv.observation == "ucf:openssh-server"
+    for inp in [fileInputs("sshd", "Port 22\n", collision = "divert"),
+                fileInputs("sshd", "Port 22\n", diverted = true)]:
+      try:
+        discard d.decide(inp, at("/etc/ssh/sshd_config"))
+        check false
+      except AddonCollisionError as e:
+        check "through ucf" in e.msg and "cannot be diverted" in e.msg
+        check (at("/etc/ssh/sshd_config") & ".d/") in e.msg
+    # The diversion itself is refused the same way.
+    expect AddonCollisionError:
+      discard d.decide(DecisionInputs(address: "dv", kind: tkDiversion),
+                       at("/etc/ssh/sshd_config"))
 
   test "package-owned with the divert opt-in (field or declared diversion): divert":
-    let (a, _) = d.decide(fileInputs("sshd", "Port 22\n", collision = "divert"), at("/etc/ssh/sshd_config"))
-    check a.verdict == cvDivert and a.observation == "ucf:openssh-server"
-    let (b, _) = d.decide(fileInputs("sshd", "Port 22\n", diverted = true), at("/etc/ssh/sshd_config"))
+    let (a, _) = d.decide(fileInputs("ssh", "Host *\n", collision = "divert"), at("/etc/ssh/ssh_config"))
+    check a.verdict == cvDivert and a.observation == "conffile:openssh-client"
+    let (b, _) = d.decide(fileInputs("ssh", "Host *\n", diverted = true), at("/etc/ssh/ssh_config"))
     check b.verdict == cvDivert
 
   test "a foreign diversion is refused, opt-in or not":
@@ -222,7 +228,7 @@ suite "the decision table, file rows":
   test "a diversion of an unowned path is refused; of an owned one, created":
     expect AddonCollisionError:
       discard d.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/app/new.conf"))
-    let (c, _) = d.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/ssh/sshd_config"))
+    let (c, _) = d.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/ssh/ssh_config"))
     check c.verdict == cvCreate
 
 suite "the decision table, unit rows":
@@ -364,28 +370,28 @@ suite "the before-each-write re-check":
     check preWriteRefusal(d, t) == ""
 
   test "a divert verdict needs exactly the add-on's own diversion, made by the apply":
-    # Plan: the ucf-managed sshd_config, absent diversion, divert opt-in.
-    writeFile(at("/etc/ssh/sshd_config"), "pkg\n")
-    let inp = fileInputs("sshd", "Port 22\n", collision = "divert")
-    let (dec, obs) = d.decide(inp, at("/etc/ssh/sshd_config"))
+    # Plan: the dpkg conffile ssh_config, absent diversion, divert opt-in.
+    writeFile(at("/etc/ssh/ssh_config"), "pkg\n")
+    let inp = fileInputs("ssh", "Host *\n", collision = "divert")
+    let (dec, obs) = d.decide(inp, at("/etc/ssh/ssh_config"))
     check dec.verdict == cvDivert
-    let t = plannedTarget("sshd", inp, at("/etc/ssh/sshd_config"), dec, obs)
+    let t = plannedTarget("ssh", inp, at("/etc/ssh/ssh_config"), dec, obs)
     # Before the diversion operation ran: the write is refused.
     check "is not in place" in preWriteRefusal(d, t)
     # The diversion operation ran: dpkg moved the package's copy aside.
     let db = root / "var/lib/dpkg/diversions"
     let saved = readFile(db)
-    moveFile(at("/etc/ssh/sshd_config"), at("/etc/ssh/sshd_config.distrib"))
-    writeFile(db, saved & at("/etc/ssh/sshd_config") & "\n" &
-              at("/etc/ssh/sshd_config.distrib") & "\n:\n")
+    moveFile(at("/etc/ssh/ssh_config"), at("/etc/ssh/ssh_config.distrib"))
+    writeFile(db, saved & at("/etc/ssh/ssh_config") & "\n" &
+              at("/etc/ssh/ssh_config.distrib") & "\n:\n")
     check preWriteRefusal(d, t) == ""
     # A package's diversion (or a local one elsewhere) is not the add-on's.
-    writeFile(db, saved & at("/etc/ssh/sshd_config") & "\n" &
-              at("/etc/ssh/sshd_config.other") & "\n:\n")
+    writeFile(db, saved & at("/etc/ssh/ssh_config") & "\n" &
+              at("/etc/ssh/ssh_config.other") & "\n:\n")
     check "the diversion of" in preWriteRefusal(d, t)
     writeFile(db, saved)
-    moveFile(at("/etc/ssh/sshd_config.distrib"), at("/etc/ssh/sshd_config"))
-    removeFile(at("/etc/ssh/sshd_config"))
+    moveFile(at("/etc/ssh/ssh_config.distrib"), at("/etc/ssh/ssh_config"))
+    removeFile(at("/etc/ssh/ssh_config"))
 
   test "the unit behind a drop-in is re-checked before the drop-in is written":
     let unitInp = DecisionInputs(address: "dropIn:cron", kind: tkUnit,
@@ -463,67 +469,3 @@ suite "the before-each-write re-check":
     check "decided nothing" in guard(op)
 
 removeDir(root)
-
-suite "ucf after a diversion is removed":
-  # ucf follows dpkg's diversions: with the path diverted it works on
-  # `<path>.distrib`, finds no record of it in its hashfile, keeps it and
-  # leaves the new maintainer version as `<path>.distrib.ucf-dist`
-  # (ucf 3.0043/3.0052 source). These fixtures are the files ucf leaves in
-  # exactly that state; `handBackUcfAfterDiversion` runs after
-  # `dpkg-divert --rename --remove` moved `.distrib` back.
-  proc md5Of(s: string): string = getMD5(s)
-  let r = getTempDir() / ("repro-addon-ucf-" & $getCurrentProcessId())
-  const P = "/etc/fx/u.conf"
-  proc setup(current: string) =
-    removeDir(r)
-    createDir(r / "etc/fx")
-    createDir(r / "var/lib/ucf/cache")
-    writeFile(r & P, current)                       # dpkg moved .distrib back
-    writeFile(r & P & ".distrib.ucf-dist", "v2\n")  # what ucf withheld
-    writeFile(r / "var/lib/ucf/hashfile",
-      md5Of("other\n") & "  /etc/other.conf\n" &
-      md5Of("v1\n") & "  " & P & "\n" &
-      md5Of("v2\n") & "  " & P & ".distrib\n")
-    writeFile(r / "var/lib/ucf/cache" / ucfCachedName(P & ".distrib"), "v2\n")
-
-  test "an unmodified maintainer copy is replaced by the withheld version":
-    setup("v1\n")
-    let hb = handBackUcfAfterDiversion(P, r)
-    check hb.withheld and hb.replaced and hb.keptLocal == ""
-    check readFile(r & P) == "v2\n"
-    check not fileExists(r & P & ".distrib.ucf-dist")
-    check not fileExists(r & P & ".ucf-dist")
-    let rows = parseUcfHashfile(readFile(r / "var/lib/ucf/hashfile"))
-    check rows == @[(sum: md5Of("other\n"), path: "/etc/other.conf"),
-                    (sum: md5Of("v2\n"), path: P)]
-    check readFile(r / "var/lib/ucf/cache" / ucfCachedName(P)) == "v2\n"
-    check not fileExists(r / "var/lib/ucf/cache" / ucfCachedName(P & ".distrib"))
-
-  test "a locally modified copy is kept and the withheld version goes beside it":
-    setup("local edit\n")
-    let hb = handBackUcfAfterDiversion(P, r)
-    check hb.withheld and not hb.replaced and hb.keptLocal == r & P & ".ucf-dist"
-    check readFile(r & P) == "local edit\n"
-    check readFile(r & P & ".ucf-dist") == "v2\n"
-    check not fileExists(r & P & ".distrib.ucf-dist")
-    let rows = parseUcfHashfile(readFile(r / "var/lib/ucf/hashfile"))
-    check (sum: md5Of("v2\n"), path: P) in rows and rows.len == 2
-
-  test "no withheld version: the path is left as dpkg put it back":
-    setup("v1\n")
-    removeFile(r & P & ".distrib.ucf-dist")
-    writeFile(r / "var/lib/ucf/hashfile", md5Of("v1\n") & "  " & P & "\n")
-    let before = readFile(r / "var/lib/ucf/hashfile")
-    let hb = handBackUcfAfterDiversion(P, r)
-    check not hb.withheld and readFile(r & P) == "v1\n"
-    check readFile(r / "var/lib/ucf/hashfile") == before
-
-  test "never through a link planted on the withheld name":
-    setup("v1\n")
-    removeFile(r & P & ".distrib.ucf-dist")
-    writeFile(r / "secret", "s\n")
-    createSymlink(r / "secret", r & P & ".distrib.ucf-dist")
-    let hb = handBackUcfAfterDiversion(P, r)
-    check not hb.withheld and readFile(r & P) == "v1\n"
-    check readFile(r / "secret") == "s\n"
-    removeDir(r)

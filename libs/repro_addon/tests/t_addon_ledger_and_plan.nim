@@ -13,6 +13,7 @@ import repro_infra
 import repro_infra/addon_diagnostics
 import repro_profile
 import repro_addon/[addon_apply, fingerprint, generation0, ledger, preflight, store_root]
+import repro_elevation/posix_system_parse
 import repro_binary_cache_client/caches_config
 
 proc sampleLedger(): Ledger =
@@ -422,15 +423,61 @@ suite "canonical target paths and prefixes (threat model G8)":
     expect EAddOnOutOfScope:
       checkScope(q)
 
+suite "names are valid exactly as written (no stripping)":
+  test "a unit name with whitespace or outside systemd's rules is refused at parse":
+    for bad in [" cron.service", "cron.service ", "cron service.service",
+                "cron", ".service", "a@b@c.service", "cr\ton.service"]:
+      try:
+        discard parseSystemProfile("systemd.systemUnit {\n  name = \"" &
+          bad & "\"\n  content = \"[Unit]\n\"\n}\n")
+        check false
+      except ESystemProfileInvalid as e:
+        check "systemd.systemUnit name" in e.msg
+    check systemdUnitNameError("u", "getty@tty1.service") == ""
+    check systemdUnitNameError("u", "getty@.service") == ""
+    check systemdUnitNameError("u", "sys-kernel-debug.mount") == ""
+
+  test "drop-in, fragment, sysctl and account names are not stripped either":
+    for text in [
+        "systemd.systemDropIn {\n  unit = \" cron.service\"\n  name = \"x\"\n  content = \"\"\n}\n",
+        "linux.tmpfilesRule {\n  name = \" repro-x.conf\"\n  content = \"\"\n}\n",
+        "linux.sysctl {\n  key = \" vm.swappiness\"\n  value = \"1\"\n}\n",
+        "linux.sysctl {\n  key = \"vm.swappiness\"\n  value = \"1\"\n  filename = \"90-repro-x.conf \"\n}\n",
+        "linux.sysusersEntry {\n  name = \" fx\"\n  kind = \"group\"\n}\n"]:
+      expect ESystemProfileInvalid:
+        discard parseSystemProfile(text)
+
+  test "the scope check refuses a non-canonical name in a profile built in memory":
+    let p = SystemProfile(resources: @[SystemResource(kind: srkSystemdSystemUnit,
+      address: "systemUnit: cron.service", suName: " cron.service",
+      suContent: "[Unit]\n")])
+    try:
+      checkScope(p)
+      check false
+    except EAddOnOutOfScope as e:
+      check "systemd.systemUnit name" in e.msg
+    # The path the add-on observes is the driver's, character for character.
+    check unitPath("cron.service") == "/etc/systemd/system/cron.service"
+    check unitPath(" cron.service") == systemUnitPath(" cron.service")
+
+  test "a managed prefix over a systemd unit, generator or preset directory is refused":
+    for bad in ["/etc/systemd/system.control/", "/etc/systemd/system.attached/",
+                "/etc/systemd/user/", "/etc/xdg/systemd/user/", "/etc/xdg/",
+                "/etc/systemd/system-generators/", "/etc/systemd/",
+                "/etc/systemd/system-preset/x.preset"]:
+      check managedPrefixError(bad).len > 0
+    check managedPrefixError("/etc/systemd/journald.conf.d/") == ""
+
 suite "repro system adopt is scoped to the addressed resource":
   test "only the addressed resource is taken from the given profile":
     let current = "addOn {\n  managedEtcPrefixes = [\"/etc/app/\"]\n}\n\n" &
       "fs.systemFile {\n  path = \"/etc/app/a.conf\"\n  content = \"a1\"\n}\n"
     let given = parseSystemProfile("addOn {\n  managedEtcPrefixes = " &
-      "[\"/etc/hand/\"]\n}\n\n" &
+      "[\"/etc/hand/\", \"/etc/hand/sub/\", \"/etc/other/\"]\n}\n\n" &
       "fs.systemFile {\n  path = \"/etc/app/a.conf\"\n  content = \"a2\"\n}\n\n" &
       "fs.systemFile {\n  path = \"/etc/app/b.conf\"\n  content = \"b\"\n}\n\n" &
-      "fs.systemFile {\n  path = \"/etc/hand/h.conf\"\n  content = \"h\"\n}\n")
+      "fs.systemFile {\n  path = \"/etc/hand/h.conf\"\n  content = \"h\"\n}\n\n" &
+      "fs.systemFile {\n  path = \"/etc/hand/sub/s.conf\"\n  content = \"s\"\n}\n")
     let p = scopedAdoptProfile(given, current, ["systemFile:/etc/hand/h.conf"])
     var byAddress = initTable[string, string]()
     for r in p.resources: byAddress[r.address] = r.sfContent
@@ -439,6 +486,13 @@ suite "repro system adopt is scoped to the addressed resource":
     check byAddress.len == 2
     check byAddress["systemFile:/etc/app/a.conf"] == "a1"
     check byAddress["systemFile:/etc/hand/h.conf"] == "h"
+    # Only the prefix the adopted path needs, not the given profile's others.
     check p.addOn.managedEtcPrefixes == @["/etc/app/", "/etc/hand/"]
+    # The narrowest declared prefix covering the target wins.
+    let q = scopedAdoptProfile(given, current, ["systemFile:/etc/hand/sub/s.conf"])
+    check q.addOn.managedEtcPrefixes == @["/etc/app/", "/etc/hand/sub/"]
+    # A path the current prefixes already cover adds none.
+    let r2 = scopedAdoptProfile(given, current, ["systemFile:/etc/app/b.conf"])
+    check r2.addOn.managedEtcPrefixes == @["/etc/app/"]
     expect AddonApplyError:
       discard scopedAdoptProfile(given, current, ["systemFile:/etc/nowhere"])

@@ -40,6 +40,8 @@
 
 import std/[algorithm, strutils]
 
+import repro_elevation/posix_system_parse
+
 import ./fingerprint
 import ./mutations
 
@@ -75,7 +77,11 @@ const
     ## each cache with the only producer keys trusted for it.
   StoreRoot* = "/repro/store"
 
-proc unitPath*(name: string): string = SystemdUnitDir & "/" & name
+proc unitPath*(name: string): string =
+  ## The unit file the driver writes for ``name``: the driver's own
+  ## derivation (``systemUnitPath``), so what the collision pass observes
+  ## and what the write lands on are one string by construction.
+  systemUnitPath(name)
 
 proc assertInlineSafe*(what, text: string) =
   ## The canonical profile text has no escapes: a double quote ends the

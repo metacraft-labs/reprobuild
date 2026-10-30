@@ -263,6 +263,49 @@ proc unmanagedKindReason*(r: SystemResource): string =
   else: "resource kind " & $r.kind & " is not managed by the add-on in " &
         "this release (" & r.address & "); nothing was applied"
 
+proc addOnNameError*(r: SystemResource): string =
+  ## "" when every name of ``r`` that becomes part of a path or an argv
+  ## (a unit name, a drop-in's unit and name, a fragment name, a sysctl
+  ## key and file name, an account name) is valid exactly as written,
+  ## else why not. The parser refuses these already; the scope check
+  ## repeats it for a profile built in memory, because the add-on derives
+  ## the path it observes from the same text the driver derives the path
+  ## it writes from, and the two only agree when nothing is stripped.
+  when mutated("scope-accepts-unnormalised-paths"):
+    return ""
+  else:
+    case r.kind
+    of srkSystemdSystemUnit:
+      result = systemdUnitNameError("systemd.systemUnit name", r.suName)
+      if result.len == 0 and r.suDropInName.len > 0 and
+          not isSafeDropInName(r.suDropInName):
+        result = "systemd.systemUnit dropInName '" & r.suDropInName.escape() &
+          "' is not one path segment of [A-Za-z0-9._-]"
+    of srkSystemdSystemDropIn:
+      result = systemdUnitNameError("systemd.systemDropIn unit", r.diUnit)
+      if result.len == 0 and not isSafeFragmentName(r.diName):
+        result = "systemd.systemDropIn name '" & r.diName.escape() &
+          "' is not one path segment of [A-Za-z0-9._-]"
+    of srkSystemdUnitState:
+      result = systemdUnitNameError("systemd.unitState name", r.usName)
+    of srkLinuxTmpfilesRule:
+      if not isSafeDropInBasename(r.tmpfilesName):
+        result = "linux.tmpfilesRule name '" & r.tmpfilesName.escape() &
+          "' is not a single-segment basename of [A-Za-z0-9._-]"
+    of srkLinuxSysctl:
+      if not isSafeSysctlKey(r.sysctlKey):
+        result = "linux.sysctl key '" & r.sysctlKey.escape() &
+          "' is not in the sysctl-key charset [A-Za-z0-9._/-]"
+      elif r.sysctlFilename.len > 0 and not isSafeDropInBasename(r.sysctlFilename):
+        result = "linux.sysctl filename '" & r.sysctlFilename.escape() &
+          "' is not a single-segment basename of [A-Za-z0-9._-]"
+    of srkLinuxSysusersEntry:
+      if not isSafePosixUserOrGroupName(r.seName):
+        result = "linux.sysusersEntry name '" & r.seName.escape() &
+          "' is not an account name of [A-Za-z0-9._-]"
+    else:
+      discard
+
 proc checkScope*(user: SystemProfile) =
   ## Refuse, with ``EAddOnOutOfScope``, what an add-on generation may not
   ## carry: a kind outside the add-on's classes, and an ``/etc`` path
@@ -272,11 +315,21 @@ proc checkScope*(user: SystemProfile) =
   ## be applied by the infra layer and then fail when the ledger is built
   ## (which would leave an unledgered object behind for uninstall to miss).
   let prefixes = managedPrefixes(user)
+  # The prefixes themselves, as the parser checks them, for a profile
+  # built in memory (a non-canonical one, a class or unit directory).
+  for pfx in user.addOn.managedEtcPrefixes:
+    when not mutated("scope-accepts-unnormalised-paths"):
+      let why = managedPrefixError(pfx)
+      if why.len > 0:
+        raise newAddOnOutOfScope("addOn.managedEtcPrefixes", "", "addOn", why)
   for r in user.resources:
     when not mutated("apply-skips-kind-check"):
       let why = unmanagedKindReason(r)
       if why.len > 0:
         raise newAddOnOutOfScope($r.kind, "", r.address, why)
+    let badName = addOnNameError(r)
+    if badName.len > 0:
+      raise newAddOnOutOfScope($r.kind & ".name", "", r.address, badName)
     case r.kind
     of srkLinuxTmpfilesRule:
       # Spec §4.1: the tmpfiles class lives at /etc/tmpfiles.d/repro-<name>.conf.
@@ -1062,16 +1115,14 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   ## the current generation's resource of that address. Every other
   ## resource of ``given`` is ignored, so an adopt never writes a pending
   ## change the operator has not applied. The managed prefixes are the
-  ## current ones plus ``given``'s (the adopted path must be in scope; a
-  ## prefix only widens what a later plan may touch, and it is in the
-  ## stored profile every plan shows). Raises when ``given`` does not
-  ## declare an addressed resource.
+  ## current ones plus, for an adopted path they do not cover, the
+  ## narrowest prefix ``given`` declares that covers it (owner decision
+  ## 2026-10-30): an adopt widens the scope by exactly what the adopted
+  ## object needs. Raises when ``given`` does not declare an addressed
+  ## resource.
   let current = if currentText.len > 0: parseSystemProfile(currentText)
                 else: SystemProfile()
   result.addOn = current.addOn
-  for pfx in given.addOn.managedEtcPrefixes:
-    if pfx notin result.addOn.managedEtcPrefixes:
-      result.addOn.managedEtcPrefixes.add(pfx)
   result.addOn.declared = current.addOn.declared or given.addOn.declared
   var wanted = initHashSet[string]()
   for a in addresses: wanted.incl(a)
@@ -1080,12 +1131,43 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   for a in addresses:
     var found = false
     for r in given.resources:
-      if r.address == a:
-        result.resources.add(r)
-        found = true
+      if r.address != a: continue
+      result.resources.add(r)
+      found = true
+      let path = case r.kind
+        of srkFsSystemFile: r.sfPath
+        of srkLinuxDpkgDiversion: r.ddPath
+        else: ""
+      if path.len == 0 or
+          isManagedPath(path, managedPrefixes(result)):
+        continue
+      var narrowest = ""
+      for pfx in given.addOn.managedEtcPrefixes:
+        if isUnderManagedPrefix(path, pfx) and pfx.len > narrowest.len:
+          narrowest = pfx
+      if narrowest.len > 0:
+        result.addOn.managedEtcPrefixes.add(narrowest)
     if not found:
       raise newException(AddonApplyError, "cannot adopt " & a &
         ": the profile declares no resource with that address")
+
+when TestPauseSeam:
+  import std/posix as seamPosix
+
+  proc testSeamPause() =
+    ## The write-time re-check gate's seam (test-only builds): when the
+    ## gate has created the FIFO ``/run/repro-addon-test-seam/continue``,
+    ## announce the pause with ``paused`` and block until the gate writes
+    ## to the FIFO -- after the plan and its observations, before the
+    ## first write. Without the FIFO the apply does not pause.
+    const dir = "/run/repro-addon-test-seam"
+    var st: seamPosix.Stat
+    if seamPosix.stat(cstring(dir & "/continue"), st) != 0 or
+        not seamPosix.S_ISFIFO(st.st_mode):
+      return
+    writeFile(dir & "/paused", $getCurrentProcessId() & "\n")
+    discard readFile(dir & "/continue")
+    removeFile(dir & "/paused")
 
 proc planIdOf*(inputs: openArray[string]): string =
   ## The add-on plan id: the first 32 hex digits of the SHA-256 of the
@@ -2012,6 +2094,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## Steps 2 and 3: pre-stop, then flip. A refusal here (an exclusive
     ## unit that will not die) leaves the host in the old generation.
     {.cast(gcsafe).}:
+      when TestPauseSeam:
+        testSeamPause()
       marker.planId = planId
       writePendingMarker(stateDir, marker)
       # Each unit is on record BEFORE it is stopped, paused or disabled,
@@ -2237,7 +2321,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       noPreview: true, elevationMode: emBroker,
       extraDestroyResources: destroy,
       preWriteGuard: seamedGuard(stateDir,
-        makePreWriteGuard(newDriver, targets, destroyCheck)),
+        (when mutated("pause-before-write-no-recheck"):
+           # Falsifying build of the write-time re-check gate: every
+           # operation is let through unchecked.
+           PreWriteGuard(proc(op: PrivilegedOperation): string {.gcsafe.} = "")
+         else: makePreWriteGuard(newDriver, targets, destroyCheck))),
       addOnDispatch: policy,
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
                               afterPrivilegedSet: afterSet,

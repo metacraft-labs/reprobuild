@@ -90,6 +90,19 @@
 ##                                            refused (the parser's and
 ##                                            the scope check's canonical
 ##                                            form check is compiled out)
+## ``pause-before-write``                     NOT a breakage: the test seam
+##                                            of the write-time re-check
+##                                            gate. The apply pauses after
+##                                            planning, before the first
+##                                            write, while the FIFO
+##                                            ``/run/repro-addon-test-seam/
+##                                            continue`` exists, so the
+##                                            gate can change the host
+##                                            deterministically in between
+## ``pause-before-write-no-recheck``          the same seam, and the
+##                                            write-time re-check (the
+##                                            ``PreWriteGuard``, destroys
+##                                            included) is not installed
 ## =========================================  ==============================
 
 const
@@ -108,7 +121,9 @@ const
                           "path-based-write-follows-links",
                           "scope-accepts-unnormalised-paths",
                           "reassert-required-by-boot",
-                          "reassert-skips-recovery"]
+                          "reassert-skips-recovery",
+                          "pause-before-write",
+                          "pause-before-write-no-recheck"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}
@@ -118,3 +133,8 @@ template mutated*(name: static string): bool =
   static:
     doAssert name in KnownAddonMutations, "unknown add-on mutation " & name
   AddonMutation == name
+
+const TestPauseSeam* = AddonMutation in ["pause-before-write",
+                                         "pause-before-write-no-recheck"]
+  ## The write-time re-check gate's pause seam is compiled in (a test-only
+  ## build; see the table above). False in every product build.
