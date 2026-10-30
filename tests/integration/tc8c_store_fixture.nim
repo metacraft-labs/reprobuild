@@ -118,9 +118,14 @@ proc committedLockBody*(revision: string): string =
       integrity: "git-sha1:" & revision,
       visibility: "public")]))
 
-proc setupStoreFixture(policySnapshot: string; slug: string;
-                       recordStore = true;
-                       committedLock = false): StoreFixture =
+proc setupStoreFixture*(policySnapshot: string; slug: string;
+                        recordStore = true;
+                        committedLock = false): StoreFixture =
+  ## Exported although every user ``include``s this file: the test-edge
+  ## generator's reachability analysis (``scripts/repro_binary_reachability.nim``)
+  ## follows only exported symbols across files, and this is the symbol that
+  ## tells it an including test runs the built ``repro``. Without that, the
+  ## test's execute edge does not declare the binary it exercises.
   ## ``policySnapshot``: a ``[certificate_policy]`` snapshot (``requiredPolicy``)
   ## the seed commit records in lib-a's ``repro.lock`` -- the only place a
   ## gate reads a policy from since TC-9d, a record-store project included

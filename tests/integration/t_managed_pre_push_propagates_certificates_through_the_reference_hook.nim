@@ -14,10 +14,17 @@
 ##
 ##   * PROPAGATES. Two commits, each certified, one push: the note for each
 ##     commit's tree is on the remote (Tooling §4.2: every commit the push
-##     introduces, not only the tip), and the commit before them has none.
+##     introduces, not only the tip). The commit before them is certified in
+##     the store too and gets no note: the remote already has it.
 ##   * DECLARED SCOPES (§3.1). A certificate for a declared scope is noted on
 ##     the scoped tree, not on the commit's tree.
-##   * A LINKED WORKTREE. The hook propagates from the worktree's own state.
+##   * A LINKED WORKTREE, pushing a new branch. The hook propagates from the
+##     worktree's own state, and the remote-tracking refs bound what a new
+##     branch introduces (§4.2), so the certified seed commit gets no note.
+##   * BEFORE THE GATE. A push the publication gate refuses has already carried
+##     its notes, and when they arrive the gate has not yet left its report.
+##   * A NOTES PUSH (§4.1). Pushing only the notes ref introduces nothing, so a
+##     stored certificate is not published from inside it.
 ##   * NOTHING TO CARRY. No certificate means no notes ref on the remote, and a
 ##     line saying so (§4.3: no network operation).
 ##   * A REMOTE THAT REFUSES the notes ref: reported, the branch still lands.
@@ -54,6 +61,7 @@ suite "the managed pre-push hook propagates through the reference library":
     installHooks(fx)
     let first = newCommit(fx, "first.txt", "first\n")
     let second = newCommit(fx, "second.txt", "second\n")
+    storeCertificateFor(fx, fx.seedSha)
     storeCertificateFor(fx, first)
     storeCertificateFor(fx, second)
     check not remoteHasNotes(fx.upstreamBare)
@@ -115,6 +123,7 @@ suite "the managed pre-push hook propagates through the reference library":
     discard gitOut(wt, "commit", "-m", "side")
     let commit = gitOut(wt, "rev-parse", "HEAD")
     storeCertificateFor(fx, commit)
+    storeCertificateFor(fx, fx.seedSha)
 
     let pushed = runArgv(@["git", "-C", wt, "push", "origin", "side"],
       env = @[(name: "PATH", value: pathWithoutTool()),
@@ -123,6 +132,55 @@ suite "the managed pre-push hook propagates through the reference library":
     check pushed.code == 0
     let tree = gitOut(wt, "rev-parse", "HEAD^{tree}")
     check ("git-tree-sha1:" & tree) in noteOnRemote(fx.upstreamBare, tree)
+    let seedTree = gitOut(wt, "rev-parse", fx.seedSha & "^{tree}")
+    check noteOnRemote(fx.upstreamBare, seedTree) == ""
+
+  test "a push the gate refuses has already carried its notes":
+    let fx = setupStoreFixture("", "prop-order")
+    defer: removeDir(fx.scratch)
+    installHooks(fx)
+    let commit = newCommit(fx, "order.txt", "order\n")
+    storeCertificateFor(fx, commit)
+    # An uncommitted change to a tracked file: the publication gate refuses it.
+    writeFile(fx.libAPath / "order.txt", "changed and not committed\n")
+    # The gate leaves a report when it finishes. What the receiving side finds
+    # when the notes arrive tells the order apart; the order of output lines
+    # cannot, because the gate's stdout is flushed only when the process ends.
+    let reports = fx.workspaceRoot / ".repro" / "build" / "reports"
+    let seenByRemote = fx.scratch / "reports-when-notes-arrived"
+    installRemoteHook(fx, "if grep -q refs/notes/; then ls " &
+      quoteShell(reports) & " > " & quoteShell(seenByRemote) &
+      " 2>/dev/null; fi\nexit 0\n")
+
+    let pushed = plainPush(fx)
+    checkpoint(pushed.output)
+    check pushed.code != 0
+    check upstreamTip(fx) == fx.seedSha
+    let tree = gitOut(fx.libAPath, "rev-parse", commit & "^{tree}")
+    check ("git-tree-sha1:" & tree) in noteOnRemote(fx.upstreamBare, tree)
+    check "1 certified tree(s)" in pushed.output
+    check "uncommitted" in pushed.output
+    check fileExists(seenByRemote)
+    check "check-" notin readFile(seenByRemote)
+    # The control: the gate did leave its report, so its absence above is real.
+    check fileExists(reports / "check-failure-report.json") or
+      fileExists(reports / "check-report.json")
+
+  test "pushing only the notes ref publishes nothing from inside its hook":
+    let fx = setupStoreFixture("", "prop-notes-only")
+    defer: removeDir(fx.scratch)
+    installHooks(fx)
+    let commit = newCommit(fx, "notes.txt", "notes\n")
+    storeCertificateFor(fx, commit)
+    let seedTree = gitOut(fx.libAPath, "rev-parse", fx.seedSha & "^{tree}")
+    discard gitOut(fx.libAPath, "notes", "--ref", certificateNotesRef, "add",
+      "-m", "by hand", seedTree)
+
+    let pushed = plainPush(fx, @[certificateNotesRef])
+    checkpoint(pushed.output)
+    check "certified tree(s)" notin pushed.output
+    let tree = gitOut(fx.libAPath, "rev-parse", commit & "^{tree}")
+    check noteOnRemote(fx.upstreamBare, tree) == ""
 
   test "with nothing to carry the remote gets no notes ref":
     let fx = setupStoreFixture("", "prop-none")

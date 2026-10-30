@@ -65,6 +65,8 @@ suite "a plain git push reaches the gateway with its certificates":
     check "managed pre-push hook" in skipped.output
     check "--no-verify" in skipped.output
     check "repro certify" notin skipped.output
+    # What is unmet is still named, or the operator cannot tell what was asked.
+    check "'t-unit'" in skipped.output
     check upstreamTip(fx) == covered
 
     # ---- the opt-out: refused the same way ---------------------------------
