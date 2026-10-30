@@ -3641,6 +3641,8 @@ proc normalizeWriteRoot(p: string): string =
 
 proc canonicalPolicyPath(path: string): string
 
+proc removalParentOf(spelling: string): string
+
 proc outputRemovalLocation(root, path: string): string =
   ## Resolve the directory entry cleanup will remove. Ancestor symlinks and
   ## parent walks affect its location, but the final symlink is itself the
@@ -3652,8 +3654,29 @@ proc outputRemovalLocation(root, path: string): string =
     else: root / path
   if not physical.isAbsolute:
     physical = getCurrentDir() & "/" & physical
-  let parent = canonicalPolicyPath(parentDir(physical))
-  result = normalizeWriteRoot(os.normalizedPath(parent / extractFilename(physical)))
+  # Split the last component off WITHOUT `parentDir`: the stdlib collapses a
+  # parent walk lexically ("<dir>/link/tmp/../.." -> the parent of <dir>),
+  # which drops a symlinked ancestor before anything resolves it. A link to
+  # `/` deep in a scratch tree then named a removal location as deep as the
+  # tree, and the root-proximity guard in `removeBeforeRunProblem` never
+  # fired (`t_declared_output_not_produced_fails_the_action`, "optional
+  # outputs obey the destructive-path safety guard", red under the suite's
+  # deep TMPDIR and green only under a shallow one). The parent spelling is
+  # resolved through its longest EXISTING prefix, symlinks included, and
+  # only what does not exist is collapsed lexically (`removalParentOf`). A
+  # last component that is itself a parent walk or `.` names an existing
+  # directory, never a link to remove, so the whole path is resolved.
+  let spelling = physical.replace('\\', '/')
+  let slash = spelling.rfind('/')
+  let name = if slash < 0: spelling else: spelling[slash + 1 .. ^1]
+  if name.len == 0 or name == "." or name == "..":
+    result = removalParentOf(spelling)
+  else:
+    let parentSpelling =
+      if slash <= 0: "/"
+      else: spelling[0 ..< slash]
+    result = normalizeWriteRoot(os.normalizedPath(
+      removalParentOf(parentSpelling) / name))
   when defined(windows):
     result = result.toLowerAscii()
 
@@ -3687,6 +3710,37 @@ proc existingContainmentPath(path: string): string =
   if resolved.status != prsResolved:
     raise newException(OSError, resolved.reason)
   resolved.path
+
+proc removalParentOf(spelling: string): string =
+  ## Where a removal's PARENT directory is: the spelling resolved through its
+  ## longest existing prefix (`resolveExistingTraversal`, which follows a
+  ## symlinked ancestor and applies a parent walk to the physical directory),
+  ## with whatever does not exist appended and collapsed lexically. Unlike
+  ## `canonicalPolicyPath`, an unresolvable parent walk is not kept intact:
+  ## the question here is not containment but how close to a filesystem root
+  ## a removal would land, and a walk through an absent directory lands where
+  ## its lexical collapse says.
+  ##
+  ## The fallback is taken on ANY failure to resolve, permission denied
+  ## included, so an ancestor the build cannot read that hides a link to `/`
+  ## is collapsed lexically and can slip past the root-proximity guard. This
+  ## is accepted: an action's outputs live under directories the build can
+  ## traverse (it is about to remove them), the suite does not construct
+  ## such a tree, and before this resolution existed no ancestor was resolved
+  ## at all. Refusing instead would turn every unreadable ancestor into a
+  ## refusal to run the action.
+  var ancestor = spelling
+  var suffix = ""
+  while true:
+    try:
+      return normalizeWriteRoot(os.normalizedPath(
+        existingContainmentPath(ancestor) & suffix))
+    except CatchableError:
+      let slash = ancestor.rfind('/')
+      if slash <= 0:
+        return normalizeWriteRoot(os.normalizedPath(spelling))
+      suffix = ancestor.substr(slash) & suffix
+      ancestor = ancestor[0 ..< slash]
 
 proc containmentLocation(path: string; parentEnd: int): Option[string] =
   ## A parent walk must be resolved by the filesystem THROUGH the last `..`.

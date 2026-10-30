@@ -32,7 +32,7 @@
 ## ``runInfraApply``. This mirrors the Linux agent's ``DeployAgentDependencies``
 ## seam (fetch/run/query process runners injected for tests).
 
-import std/[algorithm, httpclient, os, strutils, uri]
+import std/[algorithm, asyncdispatch, asyncfutures, httpclient, os, strutils, uri]
 
 when defined(ssl):
   import std/net
@@ -215,38 +215,78 @@ proc fileUrlToPath(source: string): string =
     if result.len >= 3 and result[0] == '/' and result[2] == ':':
       result = result[1 .. ^1]
 
-proc defaultHttpGet(url: string; timeoutMs: int):
+template awaitWithin(fut: untyped; timeoutMs: int; what: string): untyped =
+  ## `waitFor` with the agent's fetch timeout applied to ONE step: the
+  ## headers, then each body chunk. A source that stalls mid-body is an
+  ## error, not a hang.
+  block:
+    let f = fut
+    if timeoutMs > 0 and not waitFor withTimeout(f, timeoutMs):
+      raise newException(IOError, what & " timed out after " &
+        $timeoutMs & " ms")
+    waitFor f
+
+proc defaultHttpGet*(url: string; timeoutMs: int):
     tuple[ok: bool; missing: bool; body: seq[byte]; error: string] {.gcsafe.} =
-  let isHttps = url.toLowerAscii().startsWith("https://")
-  when defined(ssl):
-    var client =
+  ## Fetch a manifest source over HTTP(S) with the body bounded by
+  ## ``MaxDeployManifestBytes`` WHILE it arrives (Deploy-Agent.md
+  ## §Strictness). The synchronous ``HttpClient`` cannot do that: its
+  ## ``request`` has parsed the whole body into memory before it returns, so
+  ## a cap checked afterwards bounds nothing. The async client hands back
+  ## the response after the headers and streams the body through
+  ## ``bodyStream`` as this proc polls for it; stopping at the cap and
+  ## closing the client closes the connection, so what is ever held is the
+  ## cap plus the chunks already in flight. ``Content-Length``, when sent,
+  ## refuses an oversized body before a byte of it is read.
+  {.cast(gcsafe).}:
+    let isHttps = url.toLowerAscii().startsWith("https://")
+    when defined(ssl):
+      var client =
+        if isHttps: newAsyncHttpClient(sslContext = agentTlsContext())
+        else: newAsyncHttpClient()
+    else:
       if isHttps:
-        newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1),
-                      sslContext = agentTlsContext())
-      else:
-        newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
-  else:
-    if isHttps:
-      return (ok: false, missing: false, body: @[],
-              error: "https:// manifest source requires a build with -d:ssl; " &
-                     "this binary is HTTP-only")
-    var client = newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
-  try:
-    let resp = client.get(url)
-    if resp.code == Http404:
-      return (ok: false, missing: true, body: @[], error: "404")
-    if not resp.code.is2xx:
-      return (ok: false, missing: false, body: @[],
-              error: "HTTP " & $resp.code)
-    let bodyStr = resp.body
-    var bytes = newSeq[byte](bodyStr.len)
-    for i, ch in bodyStr:
-      bytes[i] = byte(ch)
-    return (ok: true, missing: false, body: bytes, error: "")
-  except CatchableError as e:
-    return (ok: false, missing: false, body: @[], error: e.msg)
-  finally:
-    try: client.close() except CatchableError: discard
+        return (ok: false, missing: false, body: @[],
+                error: "https:// manifest source requires a build with -d:ssl; " &
+                       "this binary is HTTP-only")
+      var client = newAsyncHttpClient()
+    try:
+      let resp = awaitWithin(client.request(url, HttpGet), timeoutMs,
+        "fetching " & url)
+      if resp.code == Http404:
+        return (ok: false, missing: true, body: @[], error: "404")
+      if not resp.code.is2xx:
+        return (ok: false, missing: false, body: @[],
+                error: "HTTP " & $resp.code)
+      if resp.headers.hasKey("Content-Length"):
+        var declared = 0
+        try:
+          declared = parseInt(resp.headers["Content-Length"])
+        except ValueError:
+          return (ok: false, missing: false, body: @[],
+                  error: "unparseable Content-Length header")
+        if declared > MaxDeployManifestBytes:
+          return (ok: false, missing: false, body: @[],
+                  error: "manifest body of " & $declared & " bytes exceeds " &
+                    "the " & $MaxDeployManifestBytes & "-byte cap")
+      var bytes: seq[byte]
+      while true:
+        let (more, chunk) = awaitWithin(resp.bodyStream.read(), timeoutMs,
+          "reading the manifest body from " & url)
+        if not more: break
+        if bytes.len + chunk.len > MaxDeployManifestBytes:
+          return (ok: false, missing: false, body: @[],
+                  error: "manifest body exceeds the " &
+                    $MaxDeployManifestBytes & "-byte cap")
+        let at = bytes.len
+        bytes.setLen(at + chunk.len)
+        for i, ch in chunk:
+          bytes[at + i] = byte(ch)
+      return (ok: true, missing: false, body: bytes, error: "")
+    except CatchableError as e:
+      return (ok: false, missing: false, body: @[], error: e.msg)
+    finally:
+      try: client.close() except CatchableError: discard
 
 proc readSource(cfg: AgentConfig; deps: AgentDeps; source: string):
     tuple[ok: bool; missing: bool; body: seq[byte]; error: string] =

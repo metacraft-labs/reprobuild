@@ -13,11 +13,11 @@
 ## operation -> RBEB frame path for the new field; the pure transition
 ## decision the driver applies (`systemdUnitTransition`); and the apply
 ## step's promotion of a no-op unit whose dependency changed
-## (`unitsWithChangedDependencies`, `plannedOperationsFor`) against a plan
-## envelope built the way the planner builds it. The `systemctl restart`
+## (`markDependencyRestarts`, to a fixpoint, and `plannedOperationsFor`)
+## against plan records built the way the planner builds them. The `systemctl restart`
 ## itself needs root and systemd and is driven on the dogfood host.
 
-import std/[sets, strutils, unittest]
+import std/[strutils, tables, unittest]
 
 import repro_elevation
 import repro_infra
@@ -84,17 +84,26 @@ suite "systemd.systemUnit: restart on change (Add-On §7.3)":
     check systemdUnitTransition(false, true, true, false) == sutNone
     check systemdUnitTransition(false, true, false, true) == sutNone
 
-  test "a no-op unit whose depends_on resource changes is promoted to a restart":
+  test "the plan marks a no-op unit whose depends_on resource changes as restart":
     let sp = profileWith(restartIfChanged = true)
     let fileAddr = "fs.systemFile:/etc/x/x.conf"
     let xAddr = "systemd.systemUnit:x.service"
     let yAddr = "systemd.systemUnit:y.service"
     # The file is updated; both units are unchanged by digest.
-    let env = envelope([(fileAddr, "update"), (xAddr, "no-op"), (yAddr, "no-op")])
-    check unitsWithChangedDependencies(sp, env) == toHashSet([xAddr])
-    let text = renderSystemProfileToText(sp)
-    let (planned, promoted) = plannedOperationsFor(text, env)
-    check promoted == toHashSet([xAddr])
+    var env = envelope([(fileAddr, "update"), (xAddr, "no-op"), (yAddr, "no-op")])
+    markDependencyRestarts(sp, env.operations)
+    var byAddr = initTable[string, PlannedOperationRecord]()
+    for rec in env.operations: byAddr[rec.address] = rec
+    check byAddr[xAddr].action == DependencyRestartAction
+    check byAddr[xAddr].summary ==
+      "restart system-unit x.service (depends_on changed: " & fileAddr & ")"
+    # y declares no dependency on the file: it stays a no-op even though
+    # another resource changed.
+    check byAddr[yAddr].action == "no-op"
+    check byAddr[fileAddr].action == "update"
+    # The apply dispatches the marked unit with the restart request, and
+    # only it.
+    let planned = plannedOperationsFor(renderSystemProfileToText(sp), env)
     var sawFile, sawX, sawY = false
     for p in planned:
       if p.operation.address == fileAddr: sawFile = true
@@ -103,23 +112,46 @@ suite "systemd.systemUnit: restart on change (Add-On §7.3)":
         check p.operation.suRestartRequested
       elif p.operation.address == yAddr: sawY = true
     check sawFile and sawX
-    # y declares no dependency on the file: it stays a no-op even though
-    # another resource changed.
     check not sawY
+
+  test "the marking is transitive: a unit depending on a restarted unit restarts":
+    var intent = ProfileIntent(name: "chain")
+    fsSystemFile(intent.resources, path = "/etc/x/x.conf", content = "a=1\n")
+    systemdSystemUnit(intent.resources, name = "x.service", content = Unit,
+      dependsOn = @["fs.systemFile:/etc/x/x.conf"])
+    systemdSystemUnit(intent.resources, name = "z.service", content = Unit,
+      dependsOn = @["systemd.systemUnit:x.service"])
+    systemdSystemUnit(intent.resources, name = "w.service", content = Unit,
+      dependsOn = @["systemd.systemUnit:z.service"])
+    let sp = profileIntentToSystemProfile(intent)
+    # Records in an order where the dependent comes BEFORE its dependency,
+    # so a single pass would miss it; the fixpoint does not.
+    var env = envelope([
+      ("systemd.systemUnit:w.service", "no-op"),
+      ("systemd.systemUnit:z.service", "no-op"),
+      ("systemd.systemUnit:x.service", "no-op"),
+      ("fs.systemFile:/etc/x/x.conf", "update")])
+    markDependencyRestarts(sp, env.operations)
+    for rec in env.operations:
+      if rec.address == "fs.systemFile:/etc/x/x.conf":
+        check rec.action == "update"
+      else:
+        check rec.action == DependencyRestartAction
 
   test "negative controls: nothing changed, or the unit's own file changed":
     let sp = profileWith(restartIfChanged = true)
     let fileAddr = "fs.systemFile:/etc/x/x.conf"
     let xAddr = "systemd.systemUnit:x.service"
-    check unitsWithChangedDependencies(sp,
-      envelope([(fileAddr, "no-op"), (xAddr, "no-op")])).len == 0
+    var quiet = envelope([(fileAddr, "no-op"), (xAddr, "no-op")])
+    markDependencyRestarts(sp, quiet.operations)
+    for rec in quiet.operations:
+      check rec.action == "no-op"
     # A unit that is itself an update is dispatched as an update, not
-    # promoted: the driver sees the file change and restarts on that.
-    let env = envelope([(fileAddr, "update"), (xAddr, "update")])
-    check unitsWithChangedDependencies(sp, env).len == 0
-    let (planned, promoted) = plannedOperationsFor(
-      renderSystemProfileToText(sp), env)
-    check promoted.len == 0
-    for p in planned:
+    # marked: the driver sees the file change and restarts on that.
+    var env = envelope([(fileAddr, "update"), (xAddr, "update")])
+    markDependencyRestarts(sp, env.operations)
+    for rec in env.operations:
+      check rec.action == "update"
+    for p in plannedOperationsFor(renderSystemProfileToText(sp), env):
       if p.operation.kind == pokSystemdSystemUnit:
         check not p.operation.suRestartRequested

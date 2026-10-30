@@ -242,6 +242,9 @@ proc encodeBuildAction(b: ProfileBuildAction): string =
     (if b.cacheable: "true" else: "false")
   result.add ",\"rebootRequired\":" &
     (if b.rebootRequired: "true" else: "false")
+  result.add ",\"substituteOnly\":" &
+    (if b.substituteOnly: "true" else: "false")
+  result.add ",\"expectedOutputDigest\":" & encodeStr(b.expectedOutputDigest)
   result.add "}"
 
 proc emitProfileIntentJson*(p: ProfileIntent): string =
@@ -297,6 +300,12 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # unchanged.
   if p.catalogImports.len > 0:
     result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
+  # ReproOS add-on mode: the profile-wide `addOn:` section, only when the
+  # profile declares it, so the key set of a profile without one is
+  # unchanged.
+  if p.addOn.declared:
+    result.add ",\"addOn\":{\"managedEtcPrefixes\":" &
+      encodeStringArray(p.addOn.managedEtcPrefixes) & "}"
   # The concerns Reprobuild applies per host (`applies:` in a block-form
   # `hosts:` entry), only when some host declares them, so the key set of a
   # profile without a declaration is unchanged
@@ -483,7 +492,14 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         # decodes with ``false``, which is the pre-existing behaviour
         # exactly -- no envelope had a reboot to report.
         rebootRequired: (if b.hasKey("rebootRequired"):
-                           b["rebootRequired"].getBool() else: false))
+                           b["rebootRequired"].getBool() else: false),
+        # Optional for the same reason: an envelope written before the
+        # substitute-only edge existed has neither, and decodes as an
+        # ordinary buildable edge, which is what it was.
+        substituteOnly: (if b.hasKey("substituteOnly"):
+                           b["substituteOnly"].getBool() else: false),
+        expectedOutputDigest: (if b.hasKey("expectedOutputDigest"):
+                                 b["expectedOutputDigest"].getStr() else: ""))
       for it in b["argv"]:
         ba.argv.add it.getStr()
       for it in b["deps"]:
@@ -512,6 +528,21 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
   if root.hasKey("catalogImports"):
     for it in root["catalogImports"]:
       result.catalogImports.add it.getStr()
+  # Optional; absent when the profile has no `addOn:` section. A malformed
+  # section is refused, never dropped (dropping it would lift the managed
+  # prefixes and let every /etc path through).
+  if root.hasKey("addOn"):
+    let a = root["addOn"]
+    if a.kind != JObject or not a.hasKey("managedEtcPrefixes") or
+        a["managedEtcPrefixes"].kind != JArray:
+      raise newException(ValueError,
+        "addOn must be an object with a `managedEtcPrefixes` array")
+    result.addOn.declared = true
+    for it in a["managedEtcPrefixes"]:
+      if it.kind != JString:
+        raise newException(ValueError,
+          "addOn.managedEtcPrefixes must be an array of strings")
+      result.addOn.managedEtcPrefixes.add it.getStr()
   # Optional; absent when no host declares the concerns Reprobuild applies.
   if root.hasKey("hostApplies"):
     for k, v in root["hostApplies"]:

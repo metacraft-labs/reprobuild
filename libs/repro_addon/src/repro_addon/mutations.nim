@@ -40,6 +40,14 @@
 ##                                            key group- and world-readable
 ## ``provisions-publisher-key``               bootstrap also leaves a binary
 ##                                            cache publisher keypair
+## ``observer-never-package-owned``           the collision observer reports
+##                                            no package provenance: no
+##                                            path is package-owned and no
+##                                            unit is provided by a package
+## ``observer-checks-path-text-only``         the collision observer never
+##                                            ``lstat``s the components of
+##                                            a target path (a link on it
+##                                            goes unnoticed)
 ## =========================================  ==============================
 
 const
@@ -48,7 +56,9 @@ const
                           "bootstrap-installs-jq", "preflight-writes",
                           "recipient-key-0644", "provisions-publisher-key",
                           "apply-skips-kind-check",
-                          "uninstall-discards-state-on-drift"]
+                          "uninstall-discards-state-on-drift",
+                          "observer-never-package-owned",
+                          "observer-checks-path-text-only"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

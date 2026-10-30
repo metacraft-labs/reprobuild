@@ -364,7 +364,12 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
       var substituted = initTable[string, BuildActionApplyOutcome]()
       var toBuild: seq[ProfileBuildAction] = @[]
       for a in actions:
-        if cacheCfg.configured:
+        # A substitute-only edge, or one that pins its output digest, is
+        # consulted even with no cache configured: its present outputs may
+        # verify against the pin, and a substitute-only edge that nothing
+        # verifies FAILS below rather than builds.
+        if cacheCfg.configured or a.substituteOnly or
+            a.expectedOutputDigest.len > 0:
           let attempt = trySubstituteBuildAction(
             a, cacheCfg, m4ScratchRoot / sanitizeForPath(a.id))
           # Beat on the ATTEMPT, not just on the hit. A substitution
@@ -389,8 +394,25 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
               ok: true,
               requiresElevation: a.requiresElevation,
               cacheHit: true,
-              substitutedFromCache: true,
+              # Outputs already present and verified against the pinned
+              # digest are a cache hit that fetched nothing; they are
+              # not counted as substituted.
+              substitutedFromCache: not attempt.verifiedPresent,
               fingerprintHex: buildActionFingerprintHex(a))
+            continue
+          if a.substituteOnly:
+            # Never a local build: the host cannot finish one, and the
+            # edge said so. The diagnostic names the remedy.
+            substituted[a.id] = BuildActionApplyOutcome(
+              id: a.id,
+              address: a.id,
+              ok: false,
+              requiresElevation: a.requiresElevation,
+              fingerprintHex: buildActionFingerprintHex(a),
+              diagnostic: "substitute-only edge " & a.id &
+                " could not be substituted: " & attempt.reason &
+                " (publish its outputs under the key `repro infra " &
+                "cache-keys` prints for this host's platform)")
             continue
         toBuild.add(a)
 

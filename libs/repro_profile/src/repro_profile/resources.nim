@@ -769,9 +769,19 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             enabled: bool = true;
                             aptClosureLock: string = "";
                             restartIfChanged: bool = true;
+                            collision: string = "";
+                            dropInName: string = "";
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
+  ##
+  ## `collision` is add-on mode's opt-in when a distribution package
+  ## already provides a unit of this name (ReproOS Add-On Mode spec §4.3):
+  ## `"dropIn"` writes `content` as a drop-in of the package's unit
+  ## (`/etc/systemd/system/<name>.d/50-repro-<dropInName>.conf`,
+  ## `dropInName` defaulting to `addon`), `"replace"` lets this unit
+  ## shadow the package's. Without it such a unit is refused
+  ## (`EAddOnUnitShadows`). Outside add-on mode the field is ignored.
   ##
   ## A unit that is active when the apply reaches it is RESTARTED when its
   ## file, its closure, or a resource it `dependsOn` (its configuration
@@ -797,6 +807,10 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
     if aptClosureLock.len > 0:
       fields["aptClosureLock"] = strField(aptClosureLock)
     fields["restartIfChanged"] = boolField(restartIfChanged)
+    if collision.len > 0:
+      fields["collision"] = strField(collision)
+    if dropInName.len > 0:
+      fields["dropInName"] = strField(dropInName)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,
@@ -883,7 +897,7 @@ template addOnToolPath*(targetResources: var seq[ResourceIntent];
   # the identifier appears, including a named argument's NAME, so
   # `address = address` would expand to `"" = ""`.
   fsSystemFile(targetResources, "/etc/profile.d/repro-addon.sh",
-    AddOnToolPathScript, "", "", "", "0644", address, dependsOn)
+    AddOnToolPathScript, "", "", "", "0644", "", address, dependsOn)
 
 template launchdSystemDaemon*(targetResources: var seq[ResourceIntent];
                               label: string;
@@ -906,6 +920,7 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
                        sha256: string = "";
                        sourceLocal: string = "";
                        mode: string = "0644";
+                       collision: string = "";
                        address: string = "";
                        dependsOn: seq[string] = @[]) =
   ## A managed system-scope file. The file's content is supplied by
@@ -964,6 +979,11 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
       fields["sha256"] = strField(sha256)
     if sourceLocal.len > 0:
       fields["sourceLocal"] = strField(sourceLocal)
+    # Add-on mode's opt-in when a package owns `path` (ReproOS Add-On Mode
+    # spec §4.3): `"divert"` moves the package's copy to `<path>.distrib`
+    # through a local dpkg diversion first. Ignored outside add-on mode.
+    if collision.len > 0:
+      fields["collision"] = strField(collision)
     let addr0 = if address.len > 0: address
                 else: autoAddress("fs.systemFile", path)
     pushResource(targetResources, "fs.systemFile", addr0, fields,

@@ -178,6 +178,17 @@ type
       suAptClosureLock*: string        ## a `package(apt)` closure lock, or ""
                                        ## (Add-On spec §8.3; `apt_closure`)
       suRestartHeld*: bool             ## `restartIfChanged = false` (§7.3)
+      suCollision*: string
+        ## Add-on mode's opt-in when a package already provides the unit
+        ## (ReproOS-Add-On-Mode §4.3): "" (refuse), `dropIn` (write the
+        ## content as a drop-in of the package's unit, so the package's
+        ## unit stays visible) or `replace` (an /etc unit of the same name
+        ## shadows the package's; recorded in the ledger). Outside add-on
+        ## mode the field is carried and ignored.
+      suDropInName*: string
+        ## With `collision = dropIn`: the drop-in is
+        ## `/etc/systemd/system/<unit>.d/50-repro-<dropInName>.conf`.
+        ## Defaults to `addon`. One path segment of `[A-Za-z0-9._-]`.
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -206,6 +217,12 @@ type
         ## `sfContent` / `sfSourceUrl` / `sfSourceLocal` may be
         ## non-empty. The validator rejects an over-specified profile
         ## with `ESystemProfileInvalid`.
+      sfCollision*: string
+        ## Add-on mode's opt-in when a package owns the path
+        ## (ReproOS-Add-On-Mode §4.3): "" (refuse) or `divert` (a local
+        ## dpkg diversion sends the package's copy to `<path>.distrib`
+        ## first, recorded and undone on removal). Outside add-on mode the
+        ## field is carried and ignored.
     of srkFsSystemDirectory:
       dirPath*: string
       dirAclPresent*: bool                ## false => ACL is unmanaged
@@ -283,10 +300,24 @@ type
       atAptClosureLock*: string           ## the closure the command runs from
       atProgram*: string                  ## FHS path inside the closure
 
+  AddOnSettings* = object
+    ## The profile-wide `addOn { ... }` stanza of ReproOS add-on mode
+    ## (ReproOS-Add-On-Mode §4.4). It is not a resource: it declares what
+    ## the profile's resources may touch, and every plan shows it.
+    declared*: bool
+      ## True when the profile carries an `addOn` stanza at all.
+    managedEtcPrefixes*: seq[string]
+      ## The `/etc` prefixes the profile intends to own, as written
+      ## (`/etc/vaultwarden/` for a subtree, `/etc/issue.net` for one
+      ## file). `/etc/repro/` is always managed and never needs listing.
+      ## `fs.systemFile` and `linux.dpkgDiversion` paths outside them are
+      ## refused in add-on mode with `EAddOnOutOfScope`.
+
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
     ## order is the apply order.
     resources*: seq[SystemResource]
+    addOn*: AddOnSettings
 
 proc realWorldIdentity*(r: SystemResource): string =
   ## Stable identity of the real-world object the resource targets.
@@ -440,7 +471,7 @@ proc quoteSystemValue*(value: string): string =
   ## compiled-profile renderer (`renderSystemProfileToText`) both call it.
   "\"" & value.replace("\"", "\"\"") & "\""
 
-proc stripComments(text: string): string =
+proc stripComments*(text: string): string =
   ## Blank out every `#`-comment in `text`, carrying the quote state across
   ## newlines, so a `#` inside a quoted value — on its first line or any
   ## later one — is value text, not a comment.
@@ -664,6 +695,119 @@ proc checkAddOnToolResource*(r: SystemResource) =
     raiseSystemProfileInvalid("linux.addOnTool '" & r.atCommand & "': " &
       getCurrentExceptionMsg())
 
+proc checkUnitStateConflicts*(resources: openArray[SystemResource]) =
+  ## A unit name may not be declared both as a `systemd.unitState` (a unit
+  ## the add-on does NOT own) and as a `systemd.systemUnit` (one it writes):
+  ## the two would converge the same unit from opposite ownership stances
+  ## (ReproOS Add-On Mode §4.1). Both profile paths call this once the
+  ## resource list is complete.
+  var owned: seq[string]
+  for r in resources:
+    if r.kind == srkSystemdSystemUnit:
+      owned.add(r.suName)
+  for r in resources:
+    if r.kind == srkSystemdUnitState and r.usName in owned:
+      raiseSystemProfileInvalid("unit '" & r.usName & "' is declared both " &
+        "as systemd.unitState (not owned) and as systemd.systemUnit " &
+        "(owned); drop the systemd.unitState resource — a unit the " &
+        "profile writes is enabled through its own `enabled` field")
+
+
+# ---------------------------------------------------------------------------
+# ReproOS add-on mode's profile surface (ReproOS-Add-On-Mode §4.3, §4.4):
+# the per-resource `collision` opt-in and the profile-wide `addOn` stanza.
+# They are parsed here, with the rest of the format, so a hand-written
+# profile and one the add-on composes are read by the same code; the
+# add-on layer (`repro_addon`) gives them their meaning.
+# ---------------------------------------------------------------------------
+
+const
+  AddOnStanzaTag* = "addOn"
+  UnitCollisionOptIns* = ["dropIn", "replace"]
+    ## `collision` values a `systemd.systemUnit` may declare.
+  FileCollisionOptIns* = ["divert"]
+    ## `collision` values an `fs.systemFile` may declare.
+  AddOnClassDirectories* = ["/etc/systemd/system/", "/etc/sysusers.d/",
+                            "/etc/tmpfiles.d/", "/etc/sysctl.d/"]
+    ## Directories reached through their own add-on classes (units,
+    ## sysusers, tmpfiles, sysctl). They are never managed prefixes, and
+    ## an `fs.systemFile` below them is out of scope.
+  AlwaysManagedEtcPrefix* = "/etc/repro/"
+    ## The add-on's own directory: managed without being declared.
+
+proc parseCollisionField*(kindTag, value: string;
+                          allowed: openArray[string]): string =
+  ## The `collision` field of a stanza: "" when absent, else one of the
+  ## opt-ins the kind allows. Any other value is refused at parse time,
+  ## so a misspelt opt-in cannot silently fall back to the default
+  ## refusal (or, worse, to an overwrite).
+  if value.len == 0:
+    return ""
+  if value notin allowed:
+    raiseSystemProfileInvalid(kindTag & " collision '" & value &
+      "' is not one of " & allowed.join(" / "))
+  value
+
+proc isSafeDropInName*(name: string): bool =
+  ## One path segment of `[A-Za-z0-9._-]`, not `.` or `..`.
+  if name.len == 0 or name == "." or name == "..":
+    return false
+  for c in name:
+    if c notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      return false
+  true
+
+proc managedPrefixError*(prefix: string): string =
+  ## Why `prefix` cannot be a managed `/etc` prefix, or "" when it can.
+  ## A prefix is written as the add-on reads it: `/etc/name/` for a
+  ## subtree, `/etc/name` for that exact path (or the subtree below it).
+  if not prefix.startsWith("/etc/") and not prefix.startsWith("/usr/local/etc/"):
+    return "managed prefix '" & prefix & "' is not below /etc/ or /usr/local/etc/"
+  if prefix == "/etc/" or prefix == "/usr/local/etc/":
+    return "managed prefix '" & prefix & "' would claim the whole directory"
+  for seg in prefix.split('/'):
+    if seg == "..":
+      return "managed prefix '" & prefix & "' contains a '..' segment"
+  for c in prefix:
+    if ord(c) < 32 or c == '\\':
+      return "managed prefix '" & prefix & "' contains a control character"
+  let asDir = if prefix.endsWith("/"): prefix else: prefix & "/"
+  for d in AddOnClassDirectories:
+    if asDir == d or asDir.startsWith(d) or d.startsWith(asDir):
+      return "managed prefix '" & prefix & "' overlaps " & d &
+        ", which is reached through its own class and is never a " &
+        "managed prefix"
+  ""
+
+proc parseAddOnStanza*(body: string): AddOnSettings =
+  ## The `addOn { managedEtcPrefixes = [...] }` stanza.
+  result.declared = true
+  for assignment in splitFieldAssignments(body):
+    let eq = assignment.find('=')
+    if eq < 0:
+      raiseSystemProfileInvalid("expected 'key = value' in '" &
+        AddOnStanzaTag & "', got: '" & assignment & "'")
+    let key = assignment[0 ..< eq].strip()
+    let rawValue = assignment[eq + 1 .. ^1].strip()
+    case key
+    of "managedEtcPrefixes":
+      for p in parseListLiteral(rawValue):
+        let err = managedPrefixError(p)
+        if err.len > 0:
+          raiseSystemProfileInvalid(err)
+        if p notin result.managedEtcPrefixes:
+          result.managedEtcPrefixes.add(p)
+    else:
+      raiseSystemProfileInvalid("'" & AddOnStanzaTag &
+        "' has no field '" & key & "' (known: managedEtcPrefixes)")
+
+proc isUnderManagedPrefix*(path, prefix: string): bool =
+  ## Does `prefix` (as declared, see `managedPrefixError`) cover `path`?
+  if prefix.endsWith("/"):
+    path.startsWith(prefix)
+  else:
+    path == prefix or path.startsWith(prefix & "/")
+
 proc stanzaBounds(clean: string):
     seq[tuple[head, brace, close: int]] =
   ## The stanzas of comment-stripped text, as offsets: where the kind tag
@@ -704,23 +848,34 @@ proc stanzaBounds(clean: string):
     result.add((head: pos, brace: braceIdx, close: closeIdx))
     pos = closeIdx + 1
 
-proc systemProfileStanzaLineSpans*(text: string):
+proc systemProfileStanzaLineSpans*(text: string;
+                                   lineEnding = "\n"):
     seq[tuple[startLine, endLine: int]] =
   ## The 0-based line of each stanza's kind tag and of its closing `}`, in
   ## file order, found by the SAME quote-aware walk `parseSystemProfile`
   ## uses. The text editor (`intent.stanzaSpans`) pairs these with the
   ## parsed resources, so a value holding a `{`, a `}`, a `#` or a blank
   ## line cannot make the editor and the parser disagree on where a stanza
-  ## ends. Lines are counted by `\n`.
+  ## ends. Lines are counted by `lineEnding` exactly — the ending the
+  ## editor split the file on — so a value holding the OTHER ending (a
+  ## `\r\n` inside an LF profile, a bare `\n` inside a CRLF one) does not
+  ## count as a line to one side and not the other.
+  doAssert lineEnding in ["\n", "\r\n"]
   let clean = stripComments(text)
   var line = 0
   var at = 0
   proc lineOf(offset: int): int =
     while at < offset:
-      if clean[at] == '\n': inc line
+      if clean[at] == '\n' and
+          (lineEnding == "\n" or (at > 0 and clean[at - 1] == '\r')):
+        inc line
       inc at
     line
   for span in stanzaBounds(clean):
+    # The `addOn` stanza is not a resource: the editor pairs spans with
+    # parsed resources by ordinal, so it is left out here as it is there.
+    if clean[span.head ..< span.brace].strip() == AddOnStanzaTag:
+      continue
     let s = lineOf(span.head)
     let e = lineOf(span.close)
     result.add((startLine: s, endLine: e))
@@ -738,6 +893,14 @@ proc parseSystemProfile*(text: string): SystemProfile =
     let braceIdx = span.brace
     let closeIdx = span.close
     let kindTag = clean[span.head ..< braceIdx].strip()
+    if kindTag == AddOnStanzaTag:
+      # The add-on's profile-wide declaration: parsed by its own routine
+      # because it is not a resource and has no address.
+      if result.addOn.declared:
+        raiseSystemProfileInvalid("a profile may carry one '" &
+          AddOnStanzaTag & "' stanza, not two")
+      result.addOn = parseAddOnStanza(clean[braceIdx + 1 ..< closeIdx])
+      continue
     var srk: SystemResourceKind
     case kindTag
     of $srkWindowsRegistryValue: srk = srkWindowsRegistryValue
@@ -1071,7 +1234,19 @@ proc parseSystemProfile*(text: string): SystemProfile =
         suRestartHeld:
           if "restartIfChanged" in fields:
             not parseBoolField("restartIfChanged", fields["restartIfChanged"])
-          else: false)
+          else: false,
+        suCollision: parseCollisionField(kindTag,
+          (if "collision" in fields: fields["collision"] else: ""),
+          UnitCollisionOptIns),
+        suDropInName:
+          if "dropInName" in fields: fields["dropInName"] else: "")
+      if res.suDropInName.len > 0 and res.suCollision != "dropIn":
+        raiseSystemProfileInvalid("systemd.systemUnit '" & res.suName &
+          "' sets dropInName without `collision = \"dropIn\"`")
+      if res.suDropInName.len > 0 and not isSafeDropInName(res.suDropInName):
+        raiseSystemProfileInvalid("systemd.systemUnit '" & res.suName &
+          "' dropInName '" & res.suDropInName & "' must be one path " &
+          "segment of letters, digits, '.', '-' or '_'")
       # Refuse an unbindable unit or a malformed lock at parse time, not
       # at apply time on the host.
       discard renderedSystemUnitContent(res)
@@ -1127,7 +1302,10 @@ proc parseSystemProfile*(text: string): SystemProfile =
         sfContent: sfContent,
         sfSourceUrl: sfSourceUrl,
         sfSha256: sfSha256,
-        sfSourceLocal: sfSourceLocal)
+        sfSourceLocal: sfSourceLocal,
+        sfCollision: parseCollisionField(kindTag,
+          (if "collision" in fields: fields["collision"] else: ""),
+          FileCollisionOptIns))
     of srkFsSystemDirectory:
       let dirPath = need("path")
       # ACL is optional: a stanza without aclEntries leaves ACL
@@ -1495,6 +1673,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     if "depends_on" in rawFields:
       res.dependsOn = parseDependsOn(kindTag, rawFields["depends_on"])
     result.resources.add(res)
+  checkUnitStateConflicts(result.resources)
 
 # ---------------------------------------------------------------------------
 # SystemResource -> typed PrivilegedOperation. A `destroy` flag flips

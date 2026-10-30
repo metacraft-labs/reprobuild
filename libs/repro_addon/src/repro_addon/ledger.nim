@@ -27,6 +27,7 @@
 
 import std/[algorithm, os, posix, sets, strutils, tables]
 
+import ./etc_write
 import ./fingerprint
 
 type
@@ -44,6 +45,10 @@ type
       ## existed before the add-on touched it.
     lcUnit = "unit"
       ## A unit file under ``/etc/systemd/system``.
+    lcDropIn = "dropIn"
+      ## A drop-in of a distribution unit,
+      ## ``/etc/systemd/system/<unit>.d/50-repro-<name>.conf``; ``unit``
+      ## names the unit it modifies.
     lcInstallLink = "installLink"
       ## A symlink ``systemctl enable`` created from a unit's
       ## ``[Install]`` section. ``linkTarget`` is what it points at.
@@ -72,6 +77,23 @@ type
     replaced*: string      ## fingerprint ``etc`` value the path had before
                            ## the add-on wrote it; "" when it was absent
     resource*: string      ## infra resource address that produced it
+    observation*: string   ## the package-ownership observation made at
+                           ## plan time (``absent``, ``unowned``,
+                           ## ``package:<pkg>``, ``conffile:<pkg>``,
+                           ## ``unit:<fragmentPath>``); "" for objects
+                           ## the observer does not cover
+    collision*: string     ## how a collision was resolved: "" (none),
+                           ## ``adopt``, ``divert``, ``dropIn``,
+                           ## ``replace``, ``reconcile``
+    preserved*: string     ## where the pre-write bytes of an adopted,
+                           ## replaced or reconciled file are kept
+                           ## (``<state>/addon/preserved/<sha256>``), or ""
+    unitState*: string     ## unit only: UnitFileState observed after the
+                           ## apply ("" when not observed)
+    activeState*: string   ## unit only: ActiveState observed after the apply
+    baseUnitState*: string ## unit only: UnitFileState before the add-on
+                           ## first touched the unit name ("" when none)
+    baseActiveState*: string ## unit only: ActiveState before, likewise
 
   Ledger* = object
     generation*: string
@@ -80,8 +102,8 @@ type
   LedgerError* = object of CatchableError
 
 const
-  LedgerHeader* = "# repro-addon-ledger v1"
-  LedgerFields = 13
+  LedgerHeader* = "# repro-addon-ledger v2"
+  LedgerFields = 20
 
 proc flag(b: bool): string = (if b: "1" else: "0")
 
@@ -93,7 +115,9 @@ proc render*(l: Ledger): string =
   for e in l.entries:
     let fields = [$e.class, e.path, e.unit, e.sha256, e.mode, e.owner,
                   e.linkTarget, e.kindHint, flag(e.enabled), flag(e.started),
-                  flag(e.hasInstall), e.replaced, e.resource]
+                  flag(e.hasInstall), e.replaced, e.resource, e.observation,
+                  e.collision, e.preserved, e.unitState, e.activeState,
+                  e.baseUnitState, e.baseActiveState]
     var line = ""
     for i, f in fields:
       if i > 0: line.add('\t')
@@ -124,41 +148,21 @@ proc parseLedger*(text: string): Ledger =
     result.entries.add(LedgerEntry(class: classFromString(u[0]), path: u[1],
       unit: u[2], sha256: u[3], mode: u[4], owner: u[5], linkTarget: u[6],
       kindHint: u[7], enabled: u[8] == "1", started: u[9] == "1",
-      hasInstall: u[10] == "1", replaced: u[11], resource: u[12]))
+      hasInstall: u[10] == "1", replaced: u[11], resource: u[12],
+      observation: u[13], collision: u[14], preserved: u[15],
+      unitState: u[16], activeState: u[17], baseUnitState: u[18],
+      baseActiveState: u[19]))
 
 proc readLedger*(path: string): Ledger =
   if not fileExists(path):
     raise newException(LedgerError, "no add-on ledger at " & path)
   parseLedger(readFile(path))
 
-proc c_rename(oldpath, newpath: cstring): cint {.importc: "rename", header: "<stdio.h>".}
-
 proc writeFileAtomic*(path, content: string; mode = 0o644) =
   ## Write to a temporary file in the same directory, fsync, then rename:
-  ## a crash leaves either the old or the new file, never a torn one.
-  let dir = parentDir(path)
-  let tmp = dir / ("." & extractFilename(path) & ".tmp-" & $getCurrentProcessId())
-  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_TRUNC or O_CLOEXEC,
-                      Mode(mode))
-  if fd < 0:
-    raiseOSError(osLastError(), "open " & tmp)
-  var off = 0
-  try:
-    while off < content.len:
-      let n = posix.write(fd, unsafeAddr content[off], content.len - off)
-      if n < 0:
-        raiseOSError(osLastError(), "write " & tmp)
-      off += n
-    if fsync(fd) != 0:
-      raiseOSError(osLastError(), "fsync " & tmp)
-  finally:
-    discard posix.close(fd)
-  if posix.chmod(tmp.cstring, Mode(mode)) != 0:
-    raiseOSError(osLastError(), "chmod " & tmp)
-  if c_rename(tmp.cstring, path.cstring) != 0:
-    let e = osLastError()
-    discard unlink(tmp.cstring)
-    raiseOSError(e, "rename " & tmp & " -> " & path)
+  ## a crash leaves either the old or the new file, never a torn one. The
+  ## write never follows a link on the path (``etc_write``).
+  writeFileNoFollow(path, content, mode)
 
 proc writeLedger*(path: string; l: Ledger) =
   writeFileAtomic(path, l.render(), 0o600)
@@ -179,7 +183,7 @@ proc observeDrift*(e: LedgerEntry): string =
   ## by ``verify``. Classes whose state is not a file (mounts, diversions,
   ## store prefixes) are checked by their own owners and report "" here.
   case e.class
-  of lcEtcFile, lcUnit, lcKey:
+  of lcEtcFile, lcUnit, lcDropIn, lcKey:
     if not fileExists(e.path) or symlinkExists(e.path):
       return "missing (or no longer a regular file)"
     let digest = sha256OfFile(e.path)
@@ -217,6 +221,9 @@ proc fileValue(e: LedgerEntry): string =
 
 proc isEtcPath(p: string): bool = p == "/etc" or p.startsWith("/etc/")
 
+proc isLiveState(s: string): bool = s == "active" or s == "failed"
+  ## The ``active-units`` component records units in these states.
+
 proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
   ## The fingerprint records the ledger's objects account for.
   var etcFiles = initHashSet[string]()
@@ -236,20 +243,32 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
       if isEtcPath(e.path):
         result.add(ExpectedRecord(component: fcEtc, key: e.path,
           value: "d " & e.mode & " " & e.owner))
-    of lcEtcFile:
+    of lcEtcFile, lcDropIn:
       result.add(ExpectedRecord(component: fcEtc, key: e.path,
         value: fileValue(e), baseValue: e.replaced))
     of lcUnit:
       result.add(ExpectedRecord(component: fcEtc, key: e.path,
-        value: fileValue(e)))
-      let state = if e.enabled: "enabled"
-                  elif e.hasInstall: "disabled"
-                  else: "static"
+        value: fileValue(e), baseValue: e.replaced))
+      # Unit states are what systemd reported after the apply, when the
+      # apply recorded them; a ledger written without that observation
+      # (generation 0 of an older binary) derives them from the flags.
+      let state =
+        if e.unitState.len > 0: e.unitState
+        elif e.enabled: "enabled"
+        elif e.hasInstall: "disabled"
+        else: "static"
       result.add(ExpectedRecord(component: fcUnitFiles, key: e.unit,
-        value: state))
-      if e.started:
+        value: state, baseValue: e.baseUnitState))
+      let live =
+        if e.activeState.len > 0: (if isLiveState(e.activeState): e.activeState
+                                   else: "")
+        elif e.started: "active"
+        else: ""
+      let baseLive = if isLiveState(e.baseActiveState): e.baseActiveState
+                     else: ""
+      if live.len > 0 or baseLive.len > 0:
         result.add(ExpectedRecord(component: fcActiveUnits, key: e.unit,
-          value: "active"))
+          value: live, baseValue: baseLive))
     of lcInstallLink:
       result.add(ExpectedRecord(component: fcEtc, key: e.path,
         value: "l 0777 0:0 -> " & e.linkTarget))

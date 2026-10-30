@@ -17,11 +17,6 @@ import std/os
 
 import ./manifest
 
-const
-  StagedProfileModule* = "manifest_profile.nim"
-    ## Must be a valid Nim module name: the compiler rejects a hyphenated
-    ## stem outright.
-
 proc stageProfileSources*(dir: string; profileText: string;
                           profileFiles: openArray[ProfileFile]): string =
   ## Write `profileText` as `dir/manifest_profile.nim` and every bundle

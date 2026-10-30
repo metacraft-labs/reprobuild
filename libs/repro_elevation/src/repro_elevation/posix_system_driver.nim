@@ -163,29 +163,48 @@ proc unitStateDigestText*(enabled, active: bool): string =
   ## facts `systemd.unitState` converges.
   "enabled=" & $enabled & "\nactive=" & $active & "\n"
 
+const UnitStateShowProperties* =
+  "LoadState,ActiveState,UnitFileState,Type,RemainAfterExit"
+  ## What `systemd.unitState` asks `systemctl show -p` for.
+
 proc parseUnitStateShow*(output: string):
-    tuple[loaded, enabled, active: bool] =
-  ## Read `systemctl show -p LoadState,ActiveState,UnitFileState <unit>`.
+    tuple[loaded, enabled, active, fixedEnablement, transientOneshot: bool] =
+  ## Read `systemctl show -p UnitStateShowProperties <unit>`.
   ## `loaded` is false for `not-found` and `masked` (nothing the add-on may
   ## enable). `enabled` is true for every `UnitFileState` that is enabled
   ## or cannot be toggled (`static`, `alias`, `indirect`, `generated`,
-  ## `enabled-runtime`, `transient`): the requirement "this unit must be
-  ## enabled" is met by all of them, and `systemctl enable` on a static
-  ## unit only prints a warning. `active` is `ActiveState=active` only.
+  ## `transient`): the requirement "this unit must be enabled" is met by
+  ## all of them, and `systemctl enable` on a static unit only prints a
+  ## warning. `fixedEnablement` names that second group, which cannot be
+  ## DISABLED either, so `enabled = false` on one is refused rather than
+  ## converged by a `systemctl disable` that changes nothing.
+  ## `active` is `ActiveState=active` only. `transientOneshot` is a
+  ## `Type=oneshot` service without `RemainAfterExit=yes`: it is never
+  ## `active` for longer than its run, so `state = Running` on it would be
+  ## started on every apply and still observed inactive; refused.
+  # Collect every property first, decide after: `transientOneshot` depends
+  # on two of them, and `systemctl show` makes no promise about the order
+  # it prints them in.
+  var loadState, unitFileState, activeState, unitType, remainAfterExit: string
   for line in output.splitLines():
     let eq = line.find('=')
     if eq < 0: continue
     let key = line[0 ..< eq].strip()
     let value = line[eq + 1 .. ^1].strip()
     case key
-    of "LoadState":
-      result.loaded = value == "loaded"
-    of "UnitFileState":
-      result.enabled = value in ["enabled", "enabled-runtime", "static",
-        "alias", "indirect", "generated", "transient"]
-    of "ActiveState":
-      result.active = value == "active"
+    of "LoadState": loadState = value
+    of "UnitFileState": unitFileState = value
+    of "ActiveState": activeState = value
+    of "Type": unitType = value
+    of "RemainAfterExit": remainAfterExit = value
     else: discard
+  result.loaded = loadState == "loaded"
+  result.fixedEnablement = unitFileState in ["static", "alias", "indirect",
+    "generated", "transient"]
+  result.enabled = result.fixedEnablement or
+    unitFileState in ["enabled", "enabled-runtime"]
+  result.active = activeState == "active"
+  result.transientOneshot = unitType == "oneshot" and remainAfterExit != "yes"
 
 const
   AddOnToolDir* = "/etc/repro/bin"
@@ -193,6 +212,12 @@ const
     ## prefix (always a managed prefix, §4.4), put on `PATH` by
     ## `/etc/profile.d/repro-addon.sh` (`addOnToolPath()` in the DSL).
   AddOnToolLauncherName* = "reprobuild-sandbox-launcher"
+  AddOnToolLauncherLink* = AddOnToolDir & "/." & AddOnToolLauncherName
+    ## The wrapper execs the launcher through THIS link, which the apply
+    ## (root, the broker) points at the launcher installed beside the engine
+    ## it runs from. The link is converged on every apply and is NOT part of
+    ## the desired digest, so the plan, computed by whichever `repro` the
+    ## operator runs, never disagrees with the broker over an install path.
 
 proc addOnToolWrapperPath*(command: string): string =
   AddOnToolDir & "/" & command
@@ -201,12 +226,13 @@ proc addOnToolManifestPath*(command: string): string =
   AddOnToolDir & "/" & command & ".launcher.manifest"
 
 proc addOnToolLauncherPath*(): string =
-  ## The launcher is installed beside the engine (`apps/entrypoints.txt`
-  ## builds both into one `bin/`), so it is resolved from the running
-  ## image's directory, the same way the provider binaries are
-  ## (`siblingStandardProviderPath`). The path is baked into the wrapper,
-  ## so moving the install changes the wrapper's desired bytes and the next
-  ## apply rewrites it.
+  ## The launcher as installed beside the running image (the broker, at
+  ## apply time). It is plain C, built by
+  ## `apps/reprobuild-sandbox-launcher/build.sh`, which `scripts/build_apps.sh`
+  ## runs on Linux, so `just build` leaves it beside `repro` and the Nix package
+  ## (which installs every build/bin/* file) does too; the cross build (`scripts/cross/build_linux_cross.sh`) does
+  ## the same for the armhf bundle. Used only to point
+  ## `AddOnToolLauncherLink`; never baked into a wrapper or a digest.
   getAppDir() / AddOnToolLauncherName
 
 proc renderAddOnToolManifest*(closurePrefix, program: string): string =
@@ -221,26 +247,55 @@ proc renderAddOnToolManifest*(closurePrefix, program: string): string =
   closurePrefix & "/usr:/usr:rbind,ro\n" &
   "exec=" & program & "\n"
 
-proc renderAddOnToolWrapper*(launcher, manifestPath: string): string =
-  ## The `/etc/repro/bin/<command>` script. Single-quoted paths: both come
-  ## from the install location and a checked command name, neither from
-  ## the operator's argv, which is forwarded after `--` untouched.
+proc renderAddOnToolWrapper*(manifestPath: string): string =
+  ## The `/etc/repro/bin/<command>` script. It execs the launcher through
+  ## `AddOnToolLauncherLink`, so the wrapper's bytes depend on nothing but
+  ## the command name. Single-quoted paths: both are fixed by this module
+  ## and a checked command name, neither comes from the operator's argv,
+  ## which is forwarded after `--` untouched.
   "#!/bin/sh\n" &
   "# Written by reprobuild (linux.addOnTool); the next apply rewrites it.\n" &
-  "exec '" & launcher & "' --manifest='" & manifestPath & "' -- \"$@\"\n"
+  "exec '" & AddOnToolLauncherLink & "' --manifest='" & manifestPath &
+    "' -- \"$@\"\n"
 
 proc addOnToolDigestText*(wrapper, manifest: string): string =
   ## Both files in one digest, so a hand-edited wrapper, a changed closure
   ## (a different prefix in the manifest) or a moved launcher is drift.
   wrapper & "\n--\n" & manifest
 
+proc addOnToolObservedDigestText*(wrapper, manifest: string;
+                                  closureRealised, launcherLinkValid: bool):
+    string =
+  ## What `observeLinuxAddOnTool` digests. The desired text is
+  ## `addOnToolDigestText`; two host facts the files alone do not show are
+  ## prefixed as sentinels so the plan carries an update that repairs them:
+  ## a closure not realised in the store, and a launcher link
+  ## (`AddOnToolLauncherLink`) that is missing or points at nothing. The
+  ## link is converged by every `linux.addOnTool` apply, so without the
+  ## sentinel a tool whose files are already right would be a no-op while
+  ## its wrapper fails on first use. Both sentinels are path-free, so the
+  ## plan's digest does not depend on which install computed it.
+  result = ""
+  if not launcherLinkValid:
+    result.add("launcher-link-dangling\n")
+  if not closureRealised:
+    result.add("apt-closure-absent\n")
+  result.add(addOnToolDigestText(wrapper, manifest))
+
+proc addOnToolLauncherLinkValid*(): bool =
+  ## The link exists and names an existing file.
+  when defined(linux):
+    symlinkExists(AddOnToolLauncherLink) and
+      fileExists(expandSymlink(AddOnToolLauncherLink))
+  else:
+    false
+
 proc addOnToolDesiredDigestText*(op: PrivilegedOperation): string =
   doAssert op.kind == pokLinuxAddOnTool
   let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot,
     parseAptClosureLock(op.atAptClosureLock))
   addOnToolDigestText(
-    renderAddOnToolWrapper(addOnToolLauncherPath(),
-      addOnToolManifestPath(op.atCommand)),
+    renderAddOnToolWrapper(addOnToolManifestPath(op.atCommand)),
     renderAddOnToolManifest(prefix, op.atProgram))
 
 proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
@@ -769,7 +824,7 @@ proc observeSystemdUnitState*(op: PrivilegedOperation):
   ## two converged facts only, never the unit's bytes, which are not ours.
   when defined(linux):
     let (output, _) = execCmdEx("systemctl show " & quoteShell(op.usName) &
-      " --property=LoadState,ActiveState,UnitFileState")
+      " --property=" & UnitStateShowProperties)
     let st = parseUnitStateShow(output)
     if not st.loaded:
       result.present = false
@@ -798,13 +853,30 @@ proc applySystemdUnitState*(op: PrivilegedOperation):
       raiseProtocol("systemd.unitState '" & op.usName &
         "' refused on a non-systemd host")
     let (output, _) = execCmdEx("systemctl show " & quoteShell(op.usName) &
-      " --property=LoadState,ActiveState,UnitFileState")
+      " --property=" & UnitStateShowProperties)
     let st = parseUnitStateShow(output)
     if not st.loaded:
       raiseProtocol("systemd.unitState '" & op.usName & "' is not loaded " &
         "on this host (" & output.strip().replace("\n", ", ") & "). The " &
         "add-on does not install distribution units (Add-On spec §2.3): " &
         "install the package that provides it, or drop the resource.")
+    # Two requirements no `systemctl` verb can meet, refused with the
+    # reason rather than converged forever (Add-On spec §4.1, catalog entry
+    # for `systemd.unitState`).
+    if not op.usEnabled and st.fixedEnablement:
+      raiseProtocol("systemd.unitState '" & op.usName & "': enabled = " &
+        "false, but the unit's enablement is fixed by systemd (" &
+        output.strip().replace("\n", ", ") & "): a static, alias, " &
+        "indirect, generated or transient unit cannot be disabled. Drop " &
+        "`enabled = false` (keep `state = Stopped` if only its activity " &
+        "matters), or mask the unit outside the add-on.")
+    if op.usRunning and st.transientOneshot:
+      raiseProtocol("systemd.unitState '" & op.usName & "': state = " &
+        "Running, but the unit is a Type=oneshot service without " &
+        "RemainAfterExit=yes: it is active only while it runs, so the " &
+        "requirement would start it on every apply and never observe it " &
+        "met. Declare `state = Stopped` with `enabled = true` for a " &
+        "oneshot a timer or a target runs, or require the timer instead.")
     if st.enabled != op.usEnabled:
       let verb = if op.usEnabled: "enable" else: "disable"
       let (out1, code1) = execCmdEx("systemctl " & verb & " " &
@@ -854,13 +926,13 @@ proc observeLinuxAddOnTool*(op: PrivilegedOperation):
     let wrapper = readFile(wrapperPath)
     let manifest = if fileExists(manifestPath): readFile(manifestPath) else: ""
     result.present = true
-    var text = addOnToolDigestText(wrapper, manifest)
+    var closureRealised = true
     if not op.atDestroy:
-      let lock = parseAptClosureLock(op.atAptClosureLock)
-      if not aptClosureRealised(AddOnSystemStoreRoot, lock):
-        text = "apt-closure-absent:" &
-          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" & text
-    result.digestHex = posixDigestHexOfText(text)
+      closureRealised = aptClosureRealised(AddOnSystemStoreRoot,
+        parseAptClosureLock(op.atAptClosureLock))
+    result.digestHex = posixDigestHexOfText(addOnToolObservedDigestText(
+      wrapper, manifest, closureRealised,
+      launcherLinkValid = op.atDestroy or addOnToolLauncherLinkValid()))
   else:
     raiseNotImplementedPlatform("linux.addOnTool observe")
 
@@ -889,6 +961,19 @@ proc applyLinuxAddOnTool*(op: PrivilegedOperation): ObservedOperationState =
         "launcher is not installed at " & launcher & " (it is built " &
         "beside the engine; install the reprobuild bundle that carries " &
         "both). Refusing to write a wrapper that would fail on first use.")
+    createDir(AddOnToolDir)
+    # Point the shared link at THIS install's launcher. Converged on every
+    # apply, outside the digest (see `AddOnToolLauncherLink`).
+    if symlinkExists(AddOnToolLauncherLink):
+      if expandSymlink(AddOnToolLauncherLink) != launcher:
+        removeFile(AddOnToolLauncherLink)
+        createSymlink(launcher, AddOnToolLauncherLink)
+    elif fileExists(AddOnToolLauncherLink):
+      raiseProtocol("linux.addOnTool: " & AddOnToolLauncherLink &
+        " exists and is not a symlink; refusing to replace a file the " &
+        "add-on did not write")
+    else:
+      createSymlink(launcher, AddOnToolLauncherLink)
     let lock = parseAptClosureLock(op.atAptClosureLock)
     try:
       discard realiseAptClosure(lock, AddOnSystemStoreRoot,
@@ -901,7 +986,7 @@ proc applyLinuxAddOnTool*(op: PrivilegedOperation): ObservedOperationState =
       fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
     let manifest = renderAddOnToolManifest(
       aptClosurePrefixPath(AddOnSystemStoreRoot, lock), op.atProgram)
-    let wrapper = renderAddOnToolWrapper(launcher, manifestPath)
+    let wrapper = renderAddOnToolWrapper(manifestPath)
     writeFile(manifestPath, manifest)
     setFilePermissions(manifestPath, {fpUserWrite, fpUserRead, fpGroupRead,
       fpOthersRead})

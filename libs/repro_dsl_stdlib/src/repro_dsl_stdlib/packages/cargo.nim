@@ -129,7 +129,11 @@ package cargo:
       # resolved directories on every cargo edge's PATH. A name the recipe
       # does not declare is inert. Tools a crate's build script runs are
       # the recipe's to declare at the call site; they are not cargo's.
-      subTools "rustc", "gcc", "clang"
+      # ``zig`` is the cross C toolchain of a ``--target`` build
+      # (``adapters/cross_zig``); ``cmake``, ``perl`` and ``make`` are what
+      # the build scripts of the common ``*-sys`` crates run (``aws-lc-sys``
+      # configures with cmake, ``openssl-src`` with perl + make).
+      subTools "rustc", "gcc", "clang", "zig", "cmake", "perl", "make"
 
       # MR16: cargo + rustc emit one Make-format ``.d`` depfile per
       # crate under ``target/<profile>/deps/<crate>-<hash>.d`` (the
@@ -174,6 +178,13 @@ package cargo:
         # per-artifact edge) instead of building every member.
         flag package is string, alias = "--package"
         flag bin is string, alias = "--bin"
+        # ``--target <triple>``: build for another target. The compiled
+        # artefacts land under ``<target-dir>/<triple>/<profile>/``; cargo
+        # finds the target's standard library under rustc's sysroot
+        # (``lib/rustlib/<triple>/``) and the target's C toolchain through
+        # the ``CC_<triple>`` / ``CARGO_TARGET_<TRIPLE>_LINKER`` environment
+        # (``adapters/cross_zig`` renders both for a zig-driven cross build).
+        flag target is string, alias = "--target"
 
       subcmd "install":
         ## The canonical way to land a built binary in an FHS-shaped tree:
@@ -197,6 +208,10 @@ package cargo:
         flag root is string, alias = "--root"
         flag targetDir is string,
           alias = "--target-dir"
+        # The same ``--target`` as ``build``, so the install reuses the
+        # cross artefacts the build produced instead of compiling the host
+        # variant a second time.
+        flag target is string, alias = "--target"
 
       subcmd "test":
         ## `cargo test` orchestrates build + run in one verb. The

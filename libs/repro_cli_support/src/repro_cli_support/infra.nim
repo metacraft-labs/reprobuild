@@ -28,10 +28,12 @@ import repro_profile_intent
 import repro_profile_compile
 import repro_profile_compile/binary_cache_build_actions as bc_actions
 import repro_binary_cache_client
+import repro_dsl_stdlib/packages_schema
 import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
+import repro_infra/addon_diagnostics
 import repro_addon/addon_apply as addon_apply
 import repro_addon/cli as addon_cli
 import repro_infra/host_base
@@ -52,7 +54,8 @@ from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 # ---------------------------------------------------------------------------
 
 proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
-    target: SystemPlanTarget = defaultSystemPlanTarget()):
+    target: SystemPlanTarget = defaultSystemPlanTarget();
+    declaredInputs: seq[string] = @[]):
     tuple[compiled: bool; text: string; cached: bool; compileError: string;
           adaptError: string; buildActions: seq[ProfileBuildAction];
           projection: Projection] =
@@ -113,7 +116,8 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
     repoRoot: "",
     workDir: profilePath.parentDir,
     verbose: false,
-    forceRebuild: false)
+    forceRebuild: false,
+    declaredInputs: declaredInputs)
   var intent: ProfileIntent
   try:
     let artifact = compileProfileToRbpi(profilePath, opts)
@@ -141,6 +145,7 @@ proc resolveSystemProfileText*(profilePath: string;
                                planCommand = "";
                                outBuildActions: ptr seq[ProfileBuildAction] = nil;
                                target: SystemPlanTarget = defaultSystemPlanTarget();
+                               declaredInputs: seq[string] = @[];
                                outProjection: ptr Projection = nil):
     bool =
   ## Drive the Phase F3 compile path for a `system.nim`. Sets `outText`
@@ -170,7 +175,8 @@ proc resolveSystemProfileText*(profilePath: string;
   ## come from inferring failure from absent output instead of from an
   ## actual error.
   discard originalText  # retained for caller compatibility; see docstring
-  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target)
+  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target,
+    declaredInputs)
   if outcome.compiled:
     outText = outcome.text
     if outBuildActions != nil:
@@ -251,15 +257,19 @@ proc attachBuildActionDispatcher*(opts: var ApplyOptions;
 # ---------------------------------------------------------------------------
 
 type
-  InfraCliFlags = object
+  InfraCliFlags* = object
     stateDir: string
     profilePath: string
-    platformCpu, platformOs, platformAbi, platformLibc: string
+    platformCpu*, platformOs*, platformAbi*, platformLibc*: string
+    platformCpuGiven*, platformOsGiven*, platformAbiGiven*,
+      platformLibcGiven*: bool
       ## `repro infra cache-keys --platform-*`: the platform of the host
-      ## the keys are derived FOR. Each defaults to this host's value
-      ## (`localPlatformTriple`), so a bare `cache-keys` prints what an
-      ## apply here would look up, and a producer publishing ahead for
-      ## another host names that host's platform.
+      ## the keys are derived FOR. A flag that was not given keeps this
+      ## host's value (`localPlatformTriple`), so a bare `cache-keys`
+      ## prints what an apply here would look up; a flag that WAS given
+      ## is taken as given, including an empty value, because a musl or
+      ## unknown-libc host derives with `--platform-libc=` and nothing
+      ## else can clear a host default.
     host: string
     hostGiven: bool
       ## `--host` was passed (even as `--host=`), so an empty value is
@@ -357,18 +367,26 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--profile": result.flags.profilePath = valueOf()
     elif a.startsWith("--profile="):
       result.flags.profilePath = a["--profile=".len .. ^1]
-    elif a == "--platform-cpu": result.flags.platformCpu = valueOf()
+    elif a == "--platform-cpu":
+      result.flags.platformCpu = valueOf(); result.flags.platformCpuGiven = true
     elif a.startsWith("--platform-cpu="):
       result.flags.platformCpu = a["--platform-cpu=".len .. ^1]
-    elif a == "--platform-os": result.flags.platformOs = valueOf()
+      result.flags.platformCpuGiven = true
+    elif a == "--platform-os":
+      result.flags.platformOs = valueOf(); result.flags.platformOsGiven = true
     elif a.startsWith("--platform-os="):
       result.flags.platformOs = a["--platform-os=".len .. ^1]
-    elif a == "--platform-abi": result.flags.platformAbi = valueOf()
+      result.flags.platformOsGiven = true
+    elif a == "--platform-abi":
+      result.flags.platformAbi = valueOf(); result.flags.platformAbiGiven = true
     elif a.startsWith("--platform-abi="):
       result.flags.platformAbi = a["--platform-abi=".len .. ^1]
-    elif a == "--platform-libc": result.flags.platformLibc = valueOf()
+      result.flags.platformAbiGiven = true
+    elif a == "--platform-libc":
+      result.flags.platformLibc = valueOf(); result.flags.platformLibcGiven = true
     elif a.startsWith("--platform-libc="):
       result.flags.platformLibc = a["--platform-libc=".len .. ^1]
+      result.flags.platformLibcGiven = true
     elif a == "--home-profile-dir": result.flags.homeProfileDir = valueOf()
     elif a.startsWith("--home-profile-dir="):
       result.flags.homeProfileDir = a["--home-profile-dir=".len .. ^1]
@@ -489,6 +507,19 @@ proc runInfraPlan(args: openArray[string]): int =
       outProjection = addr projection):
     return 1
   ensureSystemStateDir(stateDir)
+  # ReproOS add-on mode: the add-on's plan is the collision pass over the
+  # operator's profile (spec §7.1); it writes nothing and prints the
+  # ledger diff and the collision report, then the plain plan follows.
+  if addon_apply.isAddonHost(stateDir):
+    try:
+      let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
+        stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
+        reconcileDrift: flags.reconcileDrift, planOnly: true))
+      echo "repro infra plan (add-on)"
+      stdout.write(addon_cli.renderAddonSections(r))
+    except CatchableError as e:
+      stderr.writeLine("repro infra plan: " & e.msg)
+      return 2
   # M82 Phase C: pass the state dir so the planner can read the
   # previously-applied generation's recorded `postWriteDigest` per
   # resource and surface external drift. The `--accept-drift` /
@@ -589,15 +620,37 @@ proc takeInfraApplyLock(stateDir, command: string;
     stderr.writeLine(command & ": reclaimed an unreadable apply lock.")
   true
 
+proc canonicalPlatformCpu*(token: string): string =
+  ## The cache's spelling of a CPU family: `armhf`, `armv7l` and `armv7h`
+  ## all mean `armv7`, `amd64` means `x86_64`, `arm64` means `aarch64`
+  ## (`packages_schema.parsePlatformCpuToken`). A token no host derives —
+  ## `unknown`, `any`, a typo — is refused by name: a key derived from it
+  ## would be one that no apply ever looks up, so the entry published under
+  ## it would be unreachable and the mistake invisible.
+  let parsed = parsePlatformCpuToken(token)
+  if not parsed.ok or parsed.cpu == pcAny:
+    raise newException(ValueError,
+      "--platform-cpu '" & token & "' names no CPU family the binary cache " &
+      "keys by (x86_64, aarch64, armv7, x86); an entry published under it " &
+      "could never be substituted")
+  $parsed.cpu
+
 proc cacheKeysPlatform*(flags: InfraCliFlags; stateDir: string):
     PlatformTriple =
   ## The platform `repro infra cache-keys` derives for: each `--platform-*`
-  ## flag that was given, and this host's value for the rest.
+  ## flag that was GIVEN (an empty value included), and this host's value
+  ## for the rest.
   result = bc_actions.localPlatformTriple(stateDir)
-  if flags.platformCpu.len > 0: result.cpu = flags.platformCpu
-  if flags.platformOs.len > 0: result.os = flags.platformOs
-  if flags.platformAbi.len > 0: result.abi = flags.platformAbi
-  if flags.platformLibc.len > 0: result.libcVariant = flags.platformLibc
+  if flags.platformCpuGiven:
+    result.cpu = canonicalPlatformCpu(flags.platformCpu)
+  if flags.platformOsGiven:
+    if flags.platformOs.len == 0 or flags.platformOs == "unknown":
+      raise newException(ValueError,
+        "--platform-os must name an OS a host derives (linux, darwin, " &
+        "windows); got '" & flags.platformOs & "'")
+    result.os = flags.platformOs
+  if flags.platformAbiGiven: result.abi = flags.platformAbi
+  if flags.platformLibcGiven: result.libcVariant = flags.platformLibc
 
 proc renderCacheKeys*(actions: seq[ProfileBuildAction];
                       platform: PlatformTriple): string =
@@ -616,6 +669,11 @@ proc renderCacheKeys*(actions: seq[ProfileBuildAction];
     result.add("  publish:   repro cache publish " &
       deriveCacheEntryKeyHex(idy) & " <prefix> " &
       bc_actions.publishIdentityFlags(idy).join(" ") & "\n")
+    if action.substituteOnly or action.expectedOutputDigest.len > 0:
+      result.add("  expectedOutputDigest: " &
+        (if action.expectedOutputDigest.len > 0: action.expectedOutputDigest
+         else: "(none; `repro cache publish` prints `output-digest blake3:…`" &
+               " to pin)") & "\n")
 
 proc runInfraCacheKeys(args: openArray[string]): int =
   ## `repro infra cache-keys [--profile P] [--state-dir D] [--platform-cpu C]
@@ -712,14 +770,27 @@ proc runInfraApply(args: openArray[string]): int =
       return 2
     try:
       let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
-        stateDir: stateDir, hostIdentity: host, userProfileText: profileText))
+        stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
+        reconcileDrift: flags.reconcileDrift))
+      stdout.write(addon_cli.renderAddonSections(r))
       echo "repro infra apply (add-on): generation " & r.generationId &
         " (previous " & r.previousGenerationId & "), applied " &
-        $r.infra.appliedCount & ", removed " & $r.removed.len
+        $r.infra.appliedCount & ", removed " & $r.removed.len &
+        ", restored " & $r.restored.len
+      if r.drift.len > 0:
+        stderr.writeLine("repro infra apply: " & $r.drift.len &
+          " object(s) left in place as actionable drift")
+        return 1
       return 0
+    except EAddOn as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
+    except addon_apply.AddonCollisionError as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
     except addon_apply.AddonDriftError as e:
       stderr.writeLine("repro infra apply: " & e.msg)
-      return 1
+      return 2
     except CatchableError as e:
       stderr.writeLine("repro infra apply: " & e.msg)
       return 1
@@ -1231,6 +1302,28 @@ proc runInfraInstallRootCli(args: seq[string]): int =
   echo "  grub-install exit: " & $outcome.grubInstallExit
   return 0
 
+const InfraSubcommandUsage = [
+  ("plan", "repro infra plan [--profile FILE] [--state-dir DIR] " &
+    "[--home-profile-dir DIR] [--host NAME] [--accept-drift | " &
+    "--reconcile-drift]\n  Compile the system profile and show what an " &
+    "apply would change; writes nothing but the plan."),
+  ("apply", "repro infra apply [--profile FILE] [--state-dir DIR] " &
+    "[--home-profile-dir DIR] [--host NAME] --plan ID [--no-elevate | " &
+    "--elevate] [--no-preview] [--accept-feature-destroy] " &
+    "[--accept-passwd-destroy] [--force-unlock] [--reconcile-drift]\n  " &
+    "Apply the plan `repro infra plan` printed, as a new system generation."),
+  ("cache-keys", "repro infra cache-keys [--profile FILE] [--state-dir DIR] " &
+    "[--host NAME] [--platform-cpu CPU] [--platform-os OS] " &
+    "[--platform-abi ABI] [--platform-libc LIBC]\n  Print, for every " &
+    "build-action edge of the profile, the binary-cache entry key an apply " &
+    "derives on the given platform (default: this host) and the `repro " &
+    "cache publish` flags that publish under it. Nothing is applied."),
+  ("install-root", "repro infra install-root ...\n  Install a built root " &
+    "image onto a target disk (see the ReproOS installer documentation)."),
+]
+  ## What `repro infra <sub> --help` prints. The flag lists are the ones
+  ## `parseInfraFlags` accepts; a flag not listed here is one it refuses.
+
 proc runInfraCommand*(args: seq[string]): int =
   ## `repro infra <subcommand>`.
   if args.len == 0:
@@ -1239,6 +1332,15 @@ proc runInfraCommand*(args: seq[string]): int =
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
+  # `--help` / `-h` answers for every subcommand before its flags are parsed,
+  # so it is never reported as an unknown flag.
+  if "--help" in rest or "-h" in rest:
+    for (name, usage) in InfraSubcommandUsage:
+      if name == sub:
+        echo "usage: " & usage
+        return 0
+    stderr.writeLine("repro infra: unknown subcommand: " & sub)
+    return 2
   try:
     case sub
     of "plan": return runInfraPlan(rest)
@@ -1277,6 +1379,14 @@ proc runSystemCommand*(args: seq[string]): int =
     of "rollback": return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
     of "addon": return addon_cli.runAddonCli(rest)
+    of "adopt":
+      # System-scope adoption exists for add-on hosts (spec §11.2 step 3);
+      # a full system profile has no unowned objects to claim.
+      if not addon_apply.isAddonHost(resolveSystemStateDir()):
+        stderr.writeLine("repro system adopt: only an add-on host has " &
+          "objects to adopt; this host carries no ownership ledger")
+        return 2
+      return addon_cli.runAddonAdoptCli(rest)
     else:
       stderr.writeLine("repro system: unknown subcommand: " & sub)
       return 2

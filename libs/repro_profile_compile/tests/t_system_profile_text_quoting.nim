@@ -132,9 +132,10 @@ suite "system.nim text form: quoting and comments":
     defer: removeDir(dir)
     let path = dir / "system.nim"
     writeFile(path, "")
-    # LF only: the editor picks ONE line ending for the whole file from the
-    # first CRLF it sees, so a CRLF inside a value is not an editor case.
-    let sp = compiledProfile(Unit.replace("\r\n", "\n"))
+    # `Unit` holds a CRLF line: the editor must keep it inside the value
+    # while the file itself is LF (the line ending is decided by the first
+    # line only).
+    let sp = compiledProfile()
     var doc = loadSystemIntent(path)
     for r in sp.resources:
       addResource(doc, r)
@@ -144,15 +145,18 @@ suite "system.nim text form: quoting and comments":
     check spans.len == sp.resources.len
     # Removing the unit (whose content holds `}` and blank lines) removes
     # exactly it; every other stanza still parses with its bytes intact.
-    # The editor renders no `address =` line, so a re-parsed stanza is
-    # addressed by the parser default, `realWorldIdentity`.
+    # The editor renders an `address =` line whenever a resource's address
+    # is not the parser default (`realWorldIdentity`), so a compiled
+    # profile's addresses (`systemd.systemUnit:...`) survive a round trip
+    # through the text form and a re-parsed stanza keeps its identity --
+    # the ledger of an add-on host names resources by it.
     var unitAddress, udevAddress, yamlAddress: string
     for r in sp.resources:
       case r.kind
-      of srkSystemdSystemUnit: unitAddress = realWorldIdentity(r)
-      of srkLinuxUdevRule: udevAddress = realWorldIdentity(r)
+      of srkSystemdSystemUnit: unitAddress = r.address
+      of srkLinuxUdevRule: udevAddress = r.address
       of srkFsSystemFile:
-        if r.sfPath == "/etc/q/blackbox.yml": yamlAddress = realWorldIdentity(r)
+        if r.sfPath == "/etc/q/blackbox.yml": yamlAddress = r.address
       else: discard
     check removeResource(doc, unitAddress)
     writeSystemIntent(doc)
@@ -164,5 +168,78 @@ suite "system.nim text form: quoting and comments":
       var a = ""
       for r in sp.resources:
         if r.kind == srkFsSystemFile and r.sfPath == "/etc/q/edge" & $i:
-          a = realWorldIdentity(r)
+          a = r.address
       check after.contentOf(a) == e
+
+  test "the editor on a CRLF file keeps a bare newline inside a value":
+    # The reverse of the case above: a CRLF profile whose value holds LF-only
+    # lines. `lines` is split on `\r\n` only, stanza bounds are counted the
+    # same way, and the bytes written back are the bytes read.
+    let dir = getTempDir() / "t_system_profile_text_quoting_crlf_" &
+      $getCurrentProcessId()
+    createDir(dir)
+    defer: removeDir(dir)
+    let path = dir / "system.nim"
+    let lfValue = "line1\nline2 \"q\"\n# not a comment\n"
+    let crlfText = "fs.systemFile {\r\n  path = \"/etc/q/first\"\r\n" &
+      "  content = " & quoteSystemValue(lfValue) & "\r\n}\r\n"
+    writeFile(path, crlfText)
+    var doc = loadSystemIntent(path)
+    check doc.lineEnding == "\r\n"
+    check doc.lines.len == 4
+    # Adding a resource whose value holds BOTH endings keeps each as written.
+    let mixed = "a\r\nb\nc"
+    var intent = ProfileIntent(name: "crlf")
+    fsSystemFile(intent.resources, path = "/etc/q/second", content = mixed)
+    let r = profileIntentToSystemProfile(intent).resources[0]
+    addResource(doc, r)
+    writeSystemIntent(doc)
+    let back = parseSystemProfile(readFile(path))
+    check back.resources.len == 2
+    check back.contentOf(realWorldIdentity(back.resources[0])) == lfValue
+    check back.contentOf(r.address) == mixed
+    check readFile(path).startsWith(crlfText)
+    # Removing the first stanza removes exactly it, by the parser's bounds.
+    doc = loadSystemIntent(path)
+    check stanzaSpans(doc).len == 2
+    check removeResource(doc, realWorldIdentity(back.resources[0]))
+    writeSystemIntent(doc)
+    let final = parseSystemProfile(readFile(path))
+    check final.resources.len == 1
+    check final.contentOf(r.address) == mixed
+
+  test "the editor appends after a comment-only header and leaves no leading blank":
+    let dir = getTempDir() / "t_system_profile_text_quoting_hdr_" &
+      $getCurrentProcessId()
+    createDir(dir)
+    defer: removeDir(dir)
+    let path = dir / "system.nim"
+    let header = "# rpi2 system profile\n# edited by repro system add\n"
+    writeFile(path, header)
+    var intent = ProfileIntent(name: "hdr")
+    fsSystemFile(intent.resources, path = "/etc/q/one", content = "1\n")
+    fsSystemFile(intent.resources, path = "/etc/q/two", content = "2\n")
+    let rs = profileIntentToSystemProfile(intent).resources
+    var doc = loadSystemIntent(path)
+    addResource(doc, rs[0])
+    writeSystemIntent(doc)
+    # The header stays first; the stanza follows it after one blank line.
+    check readFile(path).startsWith(header & "\nfs.systemFile {")
+    doc = loadSystemIntent(path)
+    addResource(doc, rs[1])
+    writeSystemIntent(doc)
+    check parseSystemProfile(readFile(path)).resources.len == 2
+    # Removing the first stanza of a header-less file leaves no blank line
+    # at the top.
+    writeFile(path, "")
+    doc = loadSystemIntent(path)
+    addResource(doc, rs[0])
+    addResource(doc, rs[1])
+    writeSystemIntent(doc)
+    doc = loadSystemIntent(path)
+    check removeResource(doc, rs[0].address)
+    writeSystemIntent(doc)
+    let text = readFile(path)
+    check text.startsWith("fs.systemFile {")
+    check parseSystemProfile(text).resources.len == 1
+    check parseSystemProfile(text).resources[0].sfContent == "2\n"

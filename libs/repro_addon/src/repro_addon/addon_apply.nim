@@ -2,18 +2,39 @@
 ##
 ## On an add-on host every generation is the add-on's own objects (its
 ## generation-0 set, kept in ``own.profile``) plus the operator's profile.
-## This module composes the two, works out what left the profile, applies
+## This module composes the two, decides for every target what the
+## distribution's records allow, works out what left the profile, applies
 ## the result through ``repro_infra.runInfraApply`` -- the same apply path
 ## every system-scope host uses -- and records the outcome in the ownership
 ## ledger.
 ##
 ## What the layer adds to a plain infra apply:
 ##
-## - **removal by ledger.** A resource that leaves the profile is removed
-##   (as an infra destroy) only when the ledger lists its objects and they
-##   still carry the recorded digests. A changed object makes the whole
-##   apply refuse before anything is written: it is drift for a human to
-##   review, not something to delete.
+## - **scope** (spec §4.1, §4.4): a resource kind the add-on does not
+##   manage, or an ``/etc`` path outside the profile's declared managed
+##   prefixes, is refused with ``EAddOnOutOfScope`` before anything is
+##   observed or written.
+## - **the collision pass** (spec §4.3): every target is observed through
+##   the distribution's collision driver and decided by the table in
+##   ``collision.nim``. A refusal (``EAddOnPackageOwned``,
+##   ``EAddOnUnitShadows``, ``EDrift``, a link on the path, a foreign
+##   diversion) ends the apply before anything is written. The opt-ins
+##   change the shape of what is applied: ``collision = divert`` adds the
+##   ``linux.dpkgDiversion`` the file depends on, ``collision = dropIn``
+##   turns the unit into a drop-in file of the package's unit,
+##   ``collision = replace`` lets the /etc unit shadow the package's, and
+##   an adoption (an identical unowned object, or ``repro system adopt``)
+##   makes the profile ask for exactly the bytes already there so nothing
+##   is written and the ledger owns them. The pass runs again before each
+##   write (``PreWriteGuard``).
+## - **removal by ledger** (spec §4.2). A resource that leaves the profile
+##   is removed only when the ledger lists its objects and they still
+##   carry the recorded digests. A changed object is left in place and
+##   reported as actionable drift (its ledger entry is kept, so the add-on
+##   still accounts for it); ``--reconcile-drift`` authorises removing it.
+##   An object the ledger does not list is never removed. An adopted,
+##   reconciled or replaced file is not deleted but restored from the
+##   bytes the ledger preserved.
 ## - **the objects an apply creates as a side effect**: the parent
 ##   directories a file needed, the ``.wants`` links and directories
 ##   ``systemctl enable`` made, the mount a ``.mount`` unit holds, and the
@@ -22,23 +43,30 @@
 ## - **the store roots**: after every apply the new generation is registered
 ##   as a ``profile`` root holding the add-on's prefixes, and the previous
 ##   generation's root stays registered.
+##
+## The plan's three add-on sections (spec §7.1) are in the result: the
+## ledger diff, the collision report, and (A4) the service transitions.
 
 import std/[algorithm, os, sets, strutils, tables]
 
+import repro_elevation
 import repro_infra
+import repro_infra/addon_diagnostics
 import repro_local_store/store
 
+import ./collision
+import ./etc_write
 import ./fingerprint
 import ./generation0
+import ./host_exec
 import ./ledger
 import ./mutations
 import ./store_root
 
+export AddonDriftError, AddonCollisionError
+
 type
   AddonApplyError* = object of CatchableError
-  AddonDriftError* = object of AddonApplyError
-    ## An object the ledger owns changed outside the add-on; nothing was
-    ## written.
 
   AddonPaths* = object
     stateDir*: string
@@ -53,6 +81,18 @@ type
     bootstrapEntries*: seq[LedgerEntry]
       ## Bootstrap-created roots, keys and store prefixes (generation 0
       ## only); carried forward unchanged by every later apply.
+    reconcileDrift*: bool
+      ## ``--reconcile-drift``: replace a differing unowned (or changed
+      ## owned) object, preserving its current bytes; remove a changed
+      ## object that left the profile.
+    adoptAddresses*: seq[string]
+      ## ``repro system adopt <address>``: claim these resources' targets
+      ## as they are, writing nothing.
+    planOnly*: bool
+      ## ``repro infra plan``: observe, decide and report; write nothing,
+      ## not even under the state directory.
+    driver*: CollisionDriver
+      ## The collision observer; ``nil`` selects the host's.
 
   AddonApplyResult* = object
     generationId*: string
@@ -61,14 +101,26 @@ type
     previousLedger*: Ledger
     removed*: seq[string]          ## resource addresses removed
     infra*: ApplyResult
+    collisions*: seq[CollisionLine]  ## the collision report (spec §7.1)
+    ledgerDiff*: seq[string]       ## ``<verb>\t<path>\t<address>`` lines
+    drift*: seq[string]            ## left in place as actionable drift
+    restored*: seq[string]         ## paths restored from preserved bytes
+    unlisted*: seq[string]         ## resources that left the profile but
+                                   ## had no ledger entry; never removed
 
 const
   DefaultStateDir* = "/var/lib/repro/system"
+  AddonManagedKinds* = {srkFsSystemFile, srkSystemdSystemUnit,
+                        srkLinuxDpkgDiversion}
+    ## The resource kinds an add-on generation may carry in this release
+    ## (the ``etcFile``, ``unit``, ``dropIn`` and ``diversion`` classes of
+    ## spec §4.1; the others arrive with A4 and A7).
 
 proc addonDir*(stateDir: string): string = stateDir / "addon"
 proc ledgerCopyPath*(stateDir: string): string = stateDir / "addon-ledger"
 proc ownProfilePath*(stateDir: string): string = addonDir(stateDir) / "own.profile"
 proc userProfilePath*(stateDir: string): string = addonDir(stateDir) / "user.profile"
+proc preservedDir*(stateDir: string): string = addonDir(stateDir) / "preserved"
 proc generationLedgerPath*(stateDir, generationId: string): string =
   stateDir / "generations" / generationId / "addon-ledger"
 
@@ -79,6 +131,60 @@ proc isAddonHost*(stateDir = DefaultStateDir): bool =
 proc readHostname*(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
+
+# ---------------------------------------------------------------------------
+# Scope (spec §4.1, §4.4; threat model G8).
+# ---------------------------------------------------------------------------
+
+proc managedPrefixes*(p: SystemProfile): seq[string] =
+  ## The prefixes the profile may write below: what it declared, plus the
+  ## add-on's own directory.
+  result = @[AlwaysManagedEtcPrefix]
+  for pfx in p.addOn.managedEtcPrefixes:
+    if pfx notin result: result.add(pfx)
+
+proc isManagedPath*(path: string; prefixes: openArray[string]): bool =
+  for pfx in prefixes:
+    if isUnderManagedPrefix(path, pfx): return true
+  false
+
+proc unmanagedKindReason*(r: SystemResource): string =
+  ## "" when the add-on manages ``r.kind``; otherwise the refusal text.
+  if r.kind in AddonManagedKinds: ""
+  else: "resource kind " & $r.kind & " is not managed by the add-on in " &
+        "this release (" & r.address & "); nothing was applied"
+
+proc checkScope*(user: SystemProfile) =
+  ## Refuse, with ``EAddOnOutOfScope``, what an add-on generation may not
+  ## carry: a kind outside the add-on's classes, and an ``/etc`` path
+  ## outside the declared managed prefixes or inside a directory a class
+  ## of its own reaches. Every resource is checked BEFORE anything is
+  ## observed or written: a refused kind must refuse the whole apply, not
+  ## be applied by the infra layer and then fail when the ledger is built
+  ## (which would leave an unledgered object behind for uninstall to miss).
+  let prefixes = managedPrefixes(user)
+  for r in user.resources:
+    when not mutated("apply-skips-kind-check"):
+      let why = unmanagedKindReason(r)
+      if why.len > 0:
+        raise newAddOnOutOfScope($r.kind, "", r.address, why)
+    let path = case r.kind
+      of srkFsSystemFile: r.sfPath
+      of srkLinuxDpkgDiversion: r.ddPath
+      else: ""
+    if path.len == 0:
+      continue
+    for d in AddOnClassDirectories:
+      if path.startsWith(d):
+        raise newAddOnOutOfScope($r.kind & ".path", "", r.address,
+          path & " is below " & d & ", which is reached through its own " &
+          "class (declare a systemd.systemUnit, or wait for the sysusers, " &
+          "tmpfiles and sysctl classes), never as a file")
+    if not isManagedPath(path, prefixes):
+      raise newAddOnOutOfScope($r.kind & ".path", "", r.address,
+        path & " is outside the profile's managed /etc prefixes (" &
+        prefixes.join(", ") & "); declare it in `addOn { " &
+        "managedEtcPrefixes = [...] }` (spec §4.4)")
 
 # ---------------------------------------------------------------------------
 # Observation before the apply.
@@ -115,25 +221,86 @@ proc installLinkPaths*(unit, content: string): seq[tuple[link, dir: string]] =
     else: discard
 
 type
-  PreState = object
-    replaced: string
+  ResourcePlan = object
+    ## One composed resource, what the apply will find, and what the
+    ## collision pass decided for it.
+    r: SystemResource
+    own: bool                   ## one of generation 0's objects
+    targetPath: string          ## the file the resource materialises
+    replaced: string            ## fingerprint value before the add-on
     newDirs: seq[string]
+    preLinks: seq[string]       ## install links that existed before (a
+                                ## package's own enablement): never ledgered
+    baseUnitState: string
+    baseActiveState: string
+    observation: string
+    collision: string           ## the ledger's `collision` value
+    preserved: string
+    verdict: string
 
-proc preObserve(r: SystemResource): PreState =
-  case r.kind
+proc preObserve(p: var ResourcePlan) =
+  case p.r.kind
   of srkFsSystemFile:
-    result.replaced = baseValue(r.sfPath)
-    result.newDirs = missingParents(r.sfPath)
+    p.targetPath = p.r.sfPath
+    p.replaced = baseValue(p.r.sfPath)
+    p.newDirs = missingParents(p.r.sfPath)
   of srkSystemdSystemUnit:
-    result.replaced = baseValue(unitPath(r.suName))
-    if r.suEnabled:
-      for l in installLinkPaths(r.suName, r.suContent):
-        if not dirExists(l.dir) and l.dir notin result.newDirs:
-          result.newDirs.add(l.dir)
+    p.targetPath = unitPath(p.r.suName)
+    p.replaced = baseValue(p.targetPath)
+    if p.r.suEnabled:
+      for l in installLinkPaths(p.r.suName, p.r.suContent):
+        if not dirExists(l.dir) and l.dir notin p.newDirs:
+          p.newDirs.add(l.dir)
+        if symlinkExists(l.link):
+          p.preLinks.add(l.link)
+    let u = readUnitProvision(p.r.suName)
+    p.baseUnitState = u.unitFileState
+    p.baseActiveState = u.activeState
   of srkLinuxDpkgDiversion:
-    result.replaced = baseValue(r.ddPath)
+    p.targetPath = p.r.ddPath
+    p.replaced = baseValue(p.r.ddPath)
   else:
     discard
+
+# ---------------------------------------------------------------------------
+# Preserved bytes: the content an adoption, reconciliation or replacement
+# displaces, kept content-addressed under the state directory so removal
+# and uninstall can put it back (spec §4.2, §6.4 step 2).
+# ---------------------------------------------------------------------------
+
+proc preservePath*(stateDir, content: string): string =
+  preservedDir(stateDir) / sha256Hex(content)
+
+proc preserveBytes*(stateDir, content: string): string =
+  ## Store ``content`` and return its path. Idempotent: the same bytes
+  ## always land at the same path.
+  let path = preservePath(stateDir, content)
+  if fileExists(path) and sha256OfFile(path) == sha256Hex(content):
+    return path
+  createDir(preservedDir(stateDir))
+  writeFileNoFollow(path, content, 0o600)
+  path
+
+proc parseEtcFileValue(value: string): tuple[mode, owner: string] =
+  ## ``f 0644 0:0 sha256:...`` -> mode and owner.
+  let parts = value.splitWhitespace()
+  if parts.len < 3 or parts[0] != "f":
+    raise newException(AddonApplyError, "not a file value: " & value)
+  (parts[1], parts[2])
+
+proc restorePreserved*(e: LedgerEntry): bool =
+  ## Put the bytes the ledger preserved for ``e`` back at its path, with
+  ## the mode and owner the path had. False when the entry preserved
+  ## nothing (a plain deletion is then the right undo).
+  if e.preserved.len == 0:
+    return false
+  if not fileExists(e.preserved):
+    raise newException(AddonApplyError, "preserved bytes for " & e.path &
+      " are missing at " & e.preserved)
+  let (mode, owner) = parseEtcFileValue(e.replaced)
+  let (uid, gid) = parseOwner(owner)
+  writeFileNoFollow(e.path, readFile(e.preserved), parseOctInt(mode), uid, gid)
+  true
 
 # ---------------------------------------------------------------------------
 # Ledger construction after the apply.
@@ -151,57 +318,84 @@ proc dirEntry(path, resource: string): LedgerEntry =
   LedgerEntry(class: lcDir, path: path, mode: st.mode, owner: st.owner,
               resource: resource)
 
-const AddonManagedKinds* = {srkFsSystemFile, srkSystemdSystemUnit,
-                            srkLinuxDpkgDiversion}
-  ## The resource kinds an add-on generation may declare in this release:
-  ## the ``etcFile``, ``unit`` and ``diversion`` ownership classes. The other
-  ## classes (drop-ins, sysusers, tmpfiles, sysctl, firewall, network) are
-  ## added by the milestones that implement their ledger semantics.
-
-proc unmanagedKindReason*(r: SystemResource): string =
-  ## "" when the add-on manages ``r.kind``; otherwise the refusal text.
-  if r.kind in AddonManagedKinds: ""
-  else: "resource kind " & $r.kind & " is not managed by the add-on in " &
-        "this release (" & r.address & "); nothing was applied"
-
-proc entriesFor(r: SystemResource; pre: PreState;
-                previous: seq[LedgerEntry]): seq[LedgerEntry] =
+proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry]): seq[LedgerEntry] =
   ## The ledger entries of one applied resource. Entries the previous
-  ## ledger already holds for the same resource keep what was recorded
-  ## when the add-on first touched the object (the replaced value, the
-  ## directories it created), because only that first observation saw the
-  ## base.
+  ## ledger already holds for the same resource and target keep what was
+  ## recorded when the add-on first touched the object (the replaced
+  ## value, the base unit states, the preserved bytes, the directories it
+  ## created), because only that first observation saw the base.
+  let r = p.r
   var prevDirs: seq[LedgerEntry]
-  var prevReplaced = ""
+  var prevMain: LedgerEntry
   var known = false
   for e in previous:
     if e.resource == r.address:
-      known = true
       if e.class == lcDir: prevDirs.add(e)
-      if e.class in {lcEtcFile, lcUnit, lcDiversion}: prevReplaced = e.replaced
-  let replaced = if known: prevReplaced else: pre.replaced
+      if e.class in {lcEtcFile, lcUnit, lcDropIn, lcDiversion} and
+          e.path == p.targetPath:
+        known = true
+        prevMain = e
+  let replaced = if known: prevMain.replaced else: p.replaced
+  let observation = if known and p.observation.len == 0: prevMain.observation
+                    else: p.observation
+  let collisionMode =
+    if known and prevMain.collision.len > 0 and p.collision.len == 0:
+      prevMain.collision
+    else: p.collision
+  let preserved = if known and prevMain.preserved.len > 0: prevMain.preserved
+                  else: p.preserved
   if known:
     for d in prevDirs:
       if dirExists(d.path): result.add(d)
   else:
-    for d in pre.newDirs:
+    for d in p.newDirs:
       if dirExists(d): result.add(dirEntry(d, r.address))
   case r.kind
   of srkFsSystemFile:
     if fileExists(r.sfPath):
-      result.add(fileEntry(lcEtcFile, r.sfPath, r.address, replaced))
+      var f = fileEntry(if collisionMode == "dropIn": lcDropIn else: lcEtcFile,
+                        r.sfPath, r.address, replaced)
+      f.observation = observation
+      f.collision = collisionMode
+      f.preserved = preserved
+      if collisionMode == "dropIn":
+        # /etc/systemd/system/<unit>.d/<file>: the unit is the directory's
+        # stem.
+        f.unit = extractFilename(parentDir(r.sfPath))
+        f.unit = f.unit[0 ..< f.unit.len - 2]
+      result.add(f)
   of srkSystemdSystemUnit:
-    let p = unitPath(r.suName)
-    if fileExists(p):
-      var u = fileEntry(lcUnit, p, r.address, replaced)
+    let path = unitPath(r.suName)
+    if fileExists(path):
+      var u = fileEntry(lcUnit, path, r.address, replaced)
       u.unit = r.suName
       u.enabled = r.suEnabled
       u.started = r.suEnabled
       u.hasInstall = hasInstallSection(r.suContent)
+      u.observation = observation
+      u.collision = collisionMode
+      u.preserved = preserved
+      let now = readUnitProvision(r.suName)
+      u.unitState = now.unitFileState
+      u.activeState = now.activeState
+      if known:
+        u.baseUnitState = prevMain.baseUnitState
+        u.baseActiveState = prevMain.baseActiveState
+      else:
+        u.baseUnitState = p.baseUnitState
+        u.baseActiveState = p.baseActiveState
       result.add(u)
       if r.suEnabled:
+        var prevLinks: seq[string]
+        for e in previous:
+          if e.resource == r.address and e.class == lcInstallLink:
+            prevLinks.add(e.path)
         for l in installLinkPaths(r.suName, r.suContent):
-          if symlinkExists(l.link):
+          # A link that existed before the add-on first touched the unit
+          # (a package's own enablement of a `replace`d unit) is the
+          # base's, never the ledger's.
+          if symlinkExists(l.link) and
+              (l.link in prevLinks or (not known and l.link notin p.preLinks)):
             result.add(LedgerEntry(class: lcInstallLink, path: l.link,
               unit: r.suName, linkTarget: expandSymlink(l.link),
               resource: r.address))
@@ -212,11 +406,59 @@ proc entriesFor(r: SystemResource; pre: PreState;
                                  resource: r.address))
   of srkLinuxDpkgDiversion:
     result.add(LedgerEntry(class: lcDiversion, path: r.ddPath,
-                           replaced: replaced, resource: r.address))
+                           replaced: replaced, resource: r.address,
+                           observation: observation, collision: collisionMode))
   else:
-    # Unreachable after the kind check above; kept so a future kind cannot
-    # be applied without a ledger entry.
-    raise newException(AddonApplyError, unmanagedKindReason(r))
+    # Unreachable after `checkScope`; kept so a future kind cannot be
+    # applied without a ledger entry.
+    raise newAddOnOutOfScope($r.kind, "", r.address, unmanagedKindReason(r))
+
+# ---------------------------------------------------------------------------
+# Composition: the operator's resources, reshaped by their opt-ins.
+# ---------------------------------------------------------------------------
+
+proc dropInUnitOf(path: string): string =
+  ## ``/etc/systemd/system/<unit>.d/<file>`` -> ``<unit>``.
+  let d = extractFilename(parentDir(path))
+  if d.endsWith(".d"): d[0 ..< d.len - 2] else: ""
+
+proc reshape(user: SystemProfile; dropIns: var HashSet[string]):
+    seq[SystemResource] =
+  ## The operator's resources as the apply carries them: a
+  ## ``collision = dropIn`` unit becomes the drop-in file it writes
+  ## (keeping the resource's address, which ``dropIns`` collects), and a
+  ## ``collision = divert`` file gains the ``linux.dpkgDiversion`` it
+  ## depends on unless the profile already declares one for the path.
+  var diverted = initHashSet[string]()
+  for r in user.resources:
+    if r.kind == srkLinuxDpkgDiversion: diverted.incl(r.ddPath)
+  for r in user.resources:
+    case r.kind
+    of srkSystemdSystemUnit:
+      if r.suCollision == "dropIn":
+        dropIns.incl(r.address)
+        result.add(SystemResource(kind: srkFsSystemFile, address: r.address,
+          sfPath: dropInPath(r.suName, r.suDropInName), sfContent: r.suContent,
+          dependsOn: r.dependsOn))
+      else:
+        result.add(r)
+    of srkFsSystemFile:
+      if r.sfCollision == "divert" and r.sfPath notin diverted:
+        result.add(SystemResource(kind: srkLinuxDpkgDiversion,
+          address: "dpkgDiversion:" & r.sfPath, ddPath: r.sfPath))
+        diverted.incl(r.sfPath)
+        var f = r
+        f.dependsOn.add((kind: $srkLinuxDpkgDiversion, name: r.sfPath))
+        result.add(f)
+      else:
+        result.add(r)
+    else:
+      result.add(r)
+
+proc hasDiversionFor(resources: seq[SystemResource]; path: string): bool =
+  for r in resources:
+    if r.kind == srkLinuxDpkgDiversion and r.ddPath == path: return true
+  false
 
 # ---------------------------------------------------------------------------
 # The apply.
@@ -231,6 +473,14 @@ proc removalRank(r: SystemResource): int =
   of srkFsSystemFile: 1
   of srkLinuxDpkgDiversion: 2
   else: 3
+
+proc removeOwnedUnitFile(e: LedgerEntry): bool =
+  ## Remove the file the ledger owns at ``e.path``; false when it is
+  ## already gone.
+  if not fileExists(e.path) or symlinkExists(e.path):
+    return false
+  removeFile(e.path)
+  true
 
 proc removeEmptyDirs*(entries: seq[LedgerEntry]) =
   ## ``rmdir`` the ledger's directories deepest first, leaving any that
@@ -248,20 +498,68 @@ proc removeEmptyDirs*(entries: seq[LedgerEntry]) =
       if empty:
         removeDir(d)
 
+proc daemonReload() =
+  try:
+    let r = runSystemctl(["daemon-reload"])
+    if r.exitCode != 0:
+      raise newException(AddonApplyError, "systemctl daemon-reload: " &
+        r.output.strip())
+  except HostToolMissing as e:
+    raise newException(AddonApplyError, e.msg)
+
+proc systemctlOrRaise(args: openArray[string]) =
+  try:
+    let r = runSystemctl(args)
+    if r.exitCode != 0:
+      raise newException(AddonApplyError, "systemctl " & args.join(" ") &
+        ": " & r.output.strip())
+  except HostToolMissing as e:
+    raise newException(AddonApplyError, e.msg)
+
+proc restoreUnitState*(e: LedgerEntry) =
+  ## After the add-on's unit file left (restored or removed), put the unit
+  ## back in the state the base had it: a `replace`d package unit that was
+  ## enabled and active stays so, now from the package's file; an adopted
+  ## hand-written unit the add-on enabled is disabled again. Runs after
+  ## `daemon-reload`.
+  let now = readUnitProvision(e.unit)
+  let nowEnabled = now.unitFileState in ["enabled", "enabled-runtime"]
+  if e.baseUnitState == "enabled" and not nowEnabled and
+      now.loadState == "loaded":
+    systemctlOrRaise(["enable", "--", e.unit])
+  elif e.baseUnitState != "enabled" and nowEnabled:
+    systemctlOrRaise(["disable", "--", e.unit])
+  if e.baseActiveState == "active" and now.loadState == "loaded":
+    # The running instance is the add-on's definition; restart it from
+    # the base's file.
+    systemctlOrRaise(["restart", "--", e.unit])
+  elif e.baseActiveState != "active" and now.activeState == "active":
+    systemctlOrRaise(["stop", "--", e.unit])
+
+proc inlineSafeOrRefuse(what, text: string) =
+  ## The canonical profile text cannot carry a double quote inside a
+  ## value (its parser strips the surrounding quotes and decodes no
+  ## escapes); such a unit cannot be adopted inline.
+  if text.contains('"'):
+    raise newException(AddonApplyError, what & " contains a double quote, " &
+      "which the canonical system-profile text cannot carry; it cannot be " &
+      "adopted as a unit resource")
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
-  ## Apply one add-on generation. Raises ``AddonDriftError`` (nothing
-  ## written) when a removal would delete a changed object, and
-  ## ``AddonApplyError`` when the infra apply reports an error -- after
-  ## recording, in the ledger, every object that apply did create, so
-  ## uninstall still finds them.
+  ## Apply one add-on generation (or, with ``planOnly``, decide and report
+  ## it). Raises a typed refusal with nothing written when the scope or
+  ## collision pass refuses, and ``AddonApplyError`` when the infra apply
+  ## reports an error -- after recording, in the ledger, every object that
+  ## apply did create, so uninstall still finds them.
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
-  enterWritableStoreView()
-  createDir(addonDir(stateDir))
+  if not opts.planOnly:
+    enterWritableStoreView()
+    createDir(addonDir(stateDir))
   # One apply at a time per state directory (the same lock `repro infra
   # apply` takes). A caller that already holds it -- the full engine's CLI
-  # -- is not asked to take it twice.
+  # -- is not asked to take it twice. A plan takes none: it writes nothing.
   var ownLock = false
-  if applyLockOwner(stateDir) != getCurrentProcessId():
+  if not opts.planOnly and applyLockOwner(stateDir) != getCurrentProcessId():
     let acq = tryAcquireApplyLock(stateDir)
     if not acq.acquired:
       raise newException(AddonApplyError, "another apply holds the lock: " &
@@ -286,58 +584,224 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
 
   let own = parseSystemProfile(ownText)
   let user = parseSystemProfile(opts.userProfileText)
+  checkScope(user)
   var ownAddresses = initHashSet[string]()
   for r in own.resources: ownAddresses.incl(r.address)
   for r in user.resources:
     if r.address in ownAddresses:
       raise newException(AddonApplyError, "the profile declares " &
         r.address & ", which is one of the add-on's own objects")
-  let composedText = ownText & "\n" & opts.userProfileText
-  let composed = parseSystemProfile(composedText)
-  # Every kind is checked BEFORE anything is observed or written: a kind the
-  # add-on does not manage must refuse the whole apply, not be applied by
-  # the infra layer and then fail when the ledger is built (which would
-  # leave an unledgered object behind for uninstall to miss).
-  when not mutated("apply-skips-kind-check"):
-    for r in composed.resources:
-      let why = unmanagedKindReason(r)
-      if why.len > 0:
-        raise newException(AddonApplyError, why)
+  for a in opts.adoptAddresses:
+    var declared = false
+    for r in user.resources:
+      if r.address == a: declared = true
+    if not declared:
+      raise newException(AddonApplyError, "cannot adopt " & a &
+        ": the profile declares no resource with that address")
+
+  let driver = if opts.driver != nil: opts.driver else: detectCollisionDriver()
+  var dropIns = initHashSet[string]()
+  var userResources = reshape(user, dropIns)
+  var prevSha = initTable[string, string]()   # target path -> ledger digest
+  var prevOwned = initHashSet[string]()
+  for e in previous.entries:
+    if e.class in {lcEtcFile, lcUnit, lcDropIn} and e.resource.len > 0:
+      prevSha[e.path] = e.sha256
+      prevOwned.incl(e.path)
+    elif e.class == lcDiversion:
+      prevOwned.incl("diversion:" & e.path)
+
+  # --- The collision pass (plan time). ---
+  var plans: seq[ResourcePlan]
+  var targets: seq[PlannedTarget]
+  for r in own.resources:
+    var p = ResourcePlan(r: r, own: true)
+    preObserve(p)
+    plans.add(p)
+  for i in 0 ..< userResources.len:
+    var r = userResources[i]
+    var p = ResourcePlan(r: r)
+    preObserve(p)
+    var inp = DecisionInputs(address: r.address,
+      reconcileDrift: opts.reconcileDrift,
+      adopt: r.address in opts.adoptAddresses)
+    var path = p.targetPath
+    case r.kind
+    of srkFsSystemFile:
+      inp.kind = tkFile
+      inp.collision = r.sfCollision
+      inp.divertedByProfile = hasDiversionFor(userResources, r.sfPath)
+      if r.sfSourceLocal.len > 0:
+        inp.desiredContent = readFile(r.sfSourceLocal)
+      else:
+        inp.desiredContent = r.sfContent
+    of srkSystemdSystemUnit:
+      inp.kind = tkUnit
+      inp.unit = r.suName
+      inp.collision = r.suCollision
+      inp.desiredContent = renderedSystemUnitContent(r)
+    of srkLinuxDpkgDiversion:
+      inp.kind = tkDiversion
+    else:
+      discard
+    inp.desiredSha256 = sha256Hex(inp.desiredContent)
+    inp.ledgerOwns = (if r.kind == srkLinuxDpkgDiversion:
+                        ("diversion:" & path) in prevOwned
+                      else: path in prevOwned)
+    inp.ledgerSha256 = prevSha.getOrDefault(path)
+    let (dec, _) = decide(driver, inp, path)
+    p.observation = dec.observation
+    p.verdict = $dec.verdict
+    case dec.verdict
+    of cvAdopt:
+      p.collision = "adopt"
+      if not opts.planOnly:
+        p.preserved = preserveBytes(stateDir, dec.preWriteBytes)
+      # Ask the apply for exactly the bytes that are there: nothing is
+      # written, and the ledger owns them.
+      if r.kind == srkFsSystemFile:
+        r.sfContent = ""
+        r.sfSourceLocal = if opts.planOnly: r.sfSourceLocal else: p.preserved
+        if opts.planOnly and r.sfSourceLocal.len == 0:
+          r.sfContent = dec.preWriteBytes
+      elif r.kind == srkSystemdSystemUnit:
+        inlineSafeOrRefuse("unit " & r.suName, dec.preWriteBytes)
+        r.suContent = dec.preWriteBytes
+      userResources[i] = r
+      p.r = r
+    of cvReconcile:
+      p.collision = "reconcile"
+      if not opts.planOnly:
+        p.preserved = preserveBytes(stateDir, dec.preWriteBytes)
+    of cvDivert:
+      p.collision = "divert"
+    of cvReplace:
+      p.collision = "replace"
+    of cvDropIn, cvCreate, cvUpdate, cvNoOp:
+      if r.address in dropIns:
+        p.collision = "dropIn"
+    result.collisions.add(CollisionLine(address: r.address, target: path,
+      observation: dec.observation, verdict: $dec.verdict, reason: dec.reason))
+    if dec.verdict != cvNoOp:
+      result.ledgerDiff.add($dec.verdict & "\t" & path & "\t" & r.address)
+    targets.add(PlannedTarget(address: r.address, path: path, kind: inp.kind,
+      unit: inp.unit, observation: dec.observation,
+      observedSha256: dec.observedSha256, verdict: dec.verdict))
+    plans.add(p)
+
+  let composed = SystemProfile(addOn: user.addOn,
+                               resources: own.resources & userResources)
+  let composedText = renderProfileText(composed)
   var wanted = initHashSet[string]()
   for r in composed.resources: wanted.incl(r.address)
 
-  # What left the profile, and may it be removed?
+  # --- What left the profile, and may it be removed? (spec §4.2) ---
+  # The stored profile is what the operator declared (plus what an earlier
+  # removal left as drift); it is reshaped the same way, so the addresses
+  # match the ledger's.
   var removed: seq[SystemResource]
+  var previousUser: SystemProfile
   if previousUserText.len > 0:
-    for r in parseSystemProfile(previousUserText).resources:
+    previousUser = parseSystemProfile(previousUserText)
+    var prevDropIns = initHashSet[string]()
+    for r in reshape(previousUser, prevDropIns):
       if r.address notin wanted:
         removed.add(r)
   removed.sort(proc(a, b: SystemResource): int =
     cmp(removalRank(a), removalRank(b)))
-  var drift: seq[string]
+  var destroy: seq[SystemResource]        # handed to infra as destroys
+  var restore: seq[LedgerEntry]           # put back from preserved bytes
+  var needReloadAfterRemoval = false      # a drop-in left: systemd must see it
+  var keptAddresses = initHashSet[string]()  # left as drift: still owned
+  var keptPaths = initHashSet[string]()
+  var keptEntries: seq[LedgerEntry]       # drifted: stay in the ledger
+  var removedEntries: seq[LedgerEntry]    # everything of a removed resource
   for r in removed:
+    # A diversion whose file is kept as drift stays with it: dpkg cannot
+    # move the package's copy back over a file that is still there.
+    if r.kind == srkLinuxDpkgDiversion and r.ddPath in keptPaths:
+      for e in previous.entries:
+        if e.resource == r.address: keptEntries.add(e)
+      keptAddresses.incl(r.address)
+      result.drift.add(r.ddPath & ": its diversion is kept with the " &
+        "drifted file")
+      continue
+    var entries: seq[LedgerEntry]
+    var primary = 0
     for e in previous.entries:
       if e.resource == r.address:
-        let d = observeDrift(e)
-        if d.len > 0:
-          drift.add(e.path & ": " & d)
-  if drift.len > 0:
-    raise newException(AddonDriftError,
-      "refusing to remove objects that changed since the add-on wrote them " &
-      "(actionable drift; nothing was written):\n  " & drift.join("\n  "))
-  for r in removed: result.removed.add(r.address)
+        entries.add(e)
+        # Directories are shared side effects (three files can have made
+        # the same parent); only the object itself says the ledger owns
+        # the resource. A resource whose apply failed before its object
+        # was written has directory entries and nothing else.
+        if e.class in {lcEtcFile, lcUnit, lcDropIn, lcDiversion,
+                       lcInstallLink, lcMount}:
+          inc primary
+    if primary == 0:
+      result.unlisted.add(r.address)
+      result.ledgerDiff.add("unlisted\t" & r.address & "\t" & r.address)
+      # Its directory entries go with it; a directory something else put a
+      # file in is kept, as below.
+      removedEntries.add(entries)
+      continue
+    var drifted: seq[string]
+    for e in entries:
+      let d = observeDrift(e)
+      if d.len > 0 and not d.startsWith("missing"):
+        drifted.add(e.path & ": " & d)
+    if drifted.len > 0 and not opts.reconcileDrift:
+      for d in drifted: result.drift.add(d & " (left in place; " &
+        "--reconcile-drift removes it)")
+      keptEntries.add(entries)
+      keptAddresses.incl(r.address)
+      for e in entries:
+        if e.class in {lcEtcFile, lcUnit, lcDropIn}: keptPaths.incl(e.path)
+      continue
+    if drifted.len > 0 and not opts.planOnly:
+      # Reconciled removal: what is there now is kept before it goes.
+      for e in entries:
+        if e.class in {lcEtcFile, lcUnit, lcDropIn} and fileExists(e.path):
+          discard preserveBytes(stateDir, readFile(e.path))
+    # Objects that go back to what they were rather than away: anything
+    # the ledger preserved bytes for (adopted, reconciled), and a
+    # `replace`d package unit, whose removal must not `disable --now` the
+    # package's unit the way the driver's destroy would.
+    var restoresInstead = false
+    for e in entries:
+      if e.class in {lcEtcFile, lcUnit, lcDropIn} and
+          (e.preserved.len > 0 or (e.class == lcUnit and e.collision == "replace")):
+        restore.add(e)
+        restoresInstead = true
+    if not restoresInstead:
+      destroy.add(r)
+    for e in entries:
+      if e.class == lcDropIn: needReloadAfterRemoval = true
+    result.removed.add(r.address)
+    result.ledgerDiff.add("remove\t" & (if entries.len > 0: entries[^1].path
+                                        else: "") & "\t" & r.address)
+    removedEntries.add(entries)
 
-  # Observe what each newly declared resource will displace or create.
-  var pre = initTable[string, PreState]()
-  for r in composed.resources:
-    pre[r.address] = preObserve(r)
+  # The profile to store: the operator's declaration, plus the resources an
+  # earlier generation declared that are still owned because their removal
+  # was left as drift. They leave the ledger when --reconcile-drift removes
+  # them.
+  var stored = SystemProfile(addOn: user.addOn, resources: user.resources)
+  for r in previousUser.resources:
+    if r.address in keptAddresses and r.address notin wanted:
+      stored.resources.add(r)
+  let userText = renderProfileText(stored)
+
+  if opts.planOnly:
+    return
 
   var infraError = ""
   try:
     result.infra = runInfraApply(composedText, ApplyOptions(
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
       noPreview: true, elevationMode: emBroker,
-      extraDestroyResources: removed))
+      extraDestroyResources: destroy,
+      preWriteGuard: makePreWriteGuard(driver, targets)))
     if result.infra.errorCount > 0 or result.infra.driftCount > 0:
       infraError = "repro infra apply reported " & $result.infra.errorCount &
         " error(s) and " & $result.infra.driftCount & " drift finding(s):\n  " &
@@ -346,12 +810,40 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     infraError = "repro infra apply failed: " & e.msg
   result.generationId = readCurrentGenerationId(stateDir)
 
+  # Objects a removed resource adopted or replaced go back to what they
+  # were; the rest were destroyed by the infra apply.
+  var needReload = needReloadAfterRemoval
+  var unitsToRestore: seq[LedgerEntry]
+  for e in restore:
+    if observeDrift(e).len > 0:
+      continue                 # changed meanwhile: left, as drift
+    try:
+      if restorePreserved(e):
+        result.restored.add(e.path)
+      elif e.class == lcUnit and e.collision == "replace":
+        # Nothing to put back: the package's file is below /usr; the
+        # shadowing copy goes away.
+        if removeOwnedUnitFile(e):
+          result.restored.add(e.path)
+      if e.class in {lcUnit, lcDropIn}:
+        needReload = true
+        if e.class == lcUnit: unitsToRestore.add(e)
+    except CatchableError as ex:
+      infraError.add((if infraError.len > 0: "\n" else: "") &
+        "restoring " & e.path & ": " & ex.msg)
+  for p in plans:
+    if p.collision == "dropIn" and p.verdict in ["create", "update", "reconcile"]:
+      needReload = true
+  if needReload:
+    try: daemonReload()
+    except CatchableError as ex:
+      infraError.add((if infraError.len > 0: "\n" else: "") & ex.msg)
+  for e in unitsToRestore:
+    try: restoreUnitState(e)
+    except CatchableError as ex:
+      infraError.add((if infraError.len > 0: "\n" else: "") & ex.msg)
+
   # Directories the removed resources had created.
-  var removedEntries: seq[LedgerEntry]
-  var removedSet = initHashSet[string]()
-  for a in result.removed: removedSet.incl(a)
-  for e in previous.entries:
-    if e.resource in removedSet: removedEntries.add(e)
   removeEmptyDirs(removedEntries)
 
   # The new ledger.
@@ -359,18 +851,35 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for e in previous.entries:
     if e.resource.len == 0: l.entries.add(e)
   for e in opts.bootstrapEntries: l.entries.add(e)
-  for r in composed.resources:
-    for e in entriesFor(r, pre.getOrDefault(r.address), previous.entries):
+  for p in plans:
+    for e in entriesFor(p, previous.entries):
       l.entries.add(e)
-  # A removed resource whose objects are still there (a destroy that
-  # failed) stays in the ledger, so nothing it created is orphaned.
-  for e in removedEntries:
+  # A removed resource whose objects are still there stays in the ledger,
+  # so nothing it created is orphaned and the add-on still accounts for
+  # it: an object left in place as drift (whatever its content now), and a
+  # destroy that failed -- recognised by the object still carrying the
+  # ledger's digest. An object at the path with other content is not the
+  # add-on's (the package's copy a removed diversion put back) and is not
+  # claimed.
+  for e in keptEntries:
     let stillThere = case e.class
-      of lcEtcFile, lcUnit: fileExists(e.path)
+      of lcEtcFile, lcUnit, lcDropIn: fileExists(e.path)
       of lcInstallLink: symlinkExists(e.path)
       of lcDir: dirExists(e.path)
       else: false
     if stillThere: l.entries.add(e)
+  for e in removedEntries:
+    if e.path in result.restored:
+      continue
+    let stillOurs = case e.class
+      of lcEtcFile, lcUnit, lcDropIn, lcInstallLink: observeDrift(e).len == 0
+      of lcDir: dirExists(e.path)
+      of lcDiversion:
+        # dpkg's record, not a file: a removal that failed leaves it.
+        fileExists(DpkgDiversionsDb) and
+          readDpkgDiversion(readFile(DpkgDiversionsDb), e.path).present
+      else: false
+    if stillOurs: l.entries.add(e)
   result.ledger = l
 
   if result.generationId.len > 0 and
@@ -379,7 +888,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     writeLedger(generationLedgerPath(stateDir, result.generationId), l)
   writeLedger(ledgerCopyPath(stateDir), l)
   writeFileAtomic(ownProfilePath(stateDir), ownText, 0o600)
-  writeFileAtomic(userProfilePath(stateDir), opts.userProfileText, 0o600)
+  writeFileAtomic(userProfilePath(stateDir), userText, 0o600)
 
   if infraError.len > 0:
     raise newException(AddonApplyError, infraError)
@@ -396,3 +905,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         id[i] = byte(parseHexInt(e.sha256[2 * i .. 2 * i + 1]))
       prefixIds.add(id)
   registerGenerationRoot(result.generationId, prefixIds)
+
+proc renderLedgerDiff*(r: AddonApplyResult): string =
+  ## The plan's ledger diff section (spec §7.1).
+  if r.ledgerDiff.len == 0:
+    return "ledger diff: no change\n"
+  result = "ledger diff:\n"
+  for line in r.ledgerDiff:
+    result.add("  " & line & "\n")
+  for u in r.unlisted:
+    result.add("  unlisted\t" & u & "\tleft the profile but the ledger " &
+               "does not list it; never removed\n")
+  for d in r.drift:
+    result.add("  drift\t" & d & "\n")

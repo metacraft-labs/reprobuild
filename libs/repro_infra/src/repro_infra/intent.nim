@@ -66,7 +66,14 @@ type
 # ---------------------------------------------------------------------------
 
 proc detectLineEnding(raw: string): string =
-  if raw.contains("\r\n"): "\r\n" else: "\n"
+  ## The document's line ending is decided by its FIRST line only. A value
+  ## may legitimately hold the other ending (a CRLF `caches.conf` in an LF
+  ## profile, or the reverse), and deciding from anywhere in the file made
+  ## `lines` split on an ending that occurs inside a value, so the editor's
+  ## line numbers no longer matched the parser's and an edit spliced the
+  ## wrong lines (or indexed past the end).
+  let nl = raw.find('\n')
+  if nl > 0 and raw[nl - 1] == '\r': "\r\n" else: "\n"
 
 proc loadSystemIntent*(path: string): SystemIntentDoc =
   ## Load `system.nim` into the editor document. Raises
@@ -136,7 +143,9 @@ proc stanzaSpans*(doc: SystemIntentDoc): seq[StanzaSpan] =
   # line-by-line search for `{` / `}` (what this used to do) ended a
   # stanza at the first `}` of a multi-line value, such as a unit file or
   # a polkit rule, and then removed or spliced the wrong lines.
-  let spans = systemProfileStanzaLineSpans(text)
+  # Lines are counted by the DOCUMENT's ending, the one `lines` was split
+  # on, so an ending of the other kind inside a value is value text to both.
+  let spans = systemProfileStanzaLineSpans(text, doc.lineEnding)
   for resIdx, span in spans:
     let headLine = span.startLine
     let closeLine = span.endLine
@@ -310,6 +319,10 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  aptClosureLock = " & renderScalar(r.suAptClosureLock))
     if r.suRestartHeld:
       result.add("  restartIfChanged = false")
+    if r.suCollision.len > 0:
+      result.add("  collision = " & renderScalar(r.suCollision))
+    if r.suDropInName.len > 0:
+      result.add("  dropInName = " & renderScalar(r.suDropInName))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))
@@ -328,6 +341,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  sha256 = " & renderScalar(r.sfSha256))
     if r.sfSourceLocal.len > 0:
       result.add("  sourceLocal = " & renderScalar(r.sfSourceLocal))
+    if r.sfCollision.len > 0:
+      result.add("  collision = " & renderScalar(r.sfCollision))
   of srkFsSystemDirectory:
     result.add("  path = " & renderScalar(r.dirPath))
     if r.dirAclPresent:
@@ -390,7 +405,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  content = " & renderScalar(r.stContent))
     if not r.stEnabled:
       result.add("  enabled = false")
-    result.add("  state = " & (if r.stRunning: "Running" else: "Stopped"))
+    result.add("  state = " &
+      renderScalar(if r.stRunning: "Running" else: "Stopped"))
   of srkLinuxFirewallRule:
     result.add("  chain = " & renderScalar(r.lfwChain))
     result.add("  name = " & renderScalar(r.lfwName))
@@ -412,7 +428,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  name = " & renderScalar(r.usName))
     if not r.usEnabled:
       result.add("  enabled = false")
-    result.add("  state = " & (if r.usRunning: "Running" else: "Stopped"))
+    result.add("  state = " &
+      renderScalar(if r.usRunning: "Running" else: "Stopped"))
   of srkLinuxAddOnTool:
     result.add("  command = " & renderScalar(r.atCommand))
     result.add("  aptClosureLock = " & renderScalar(r.atAptClosureLock))
@@ -432,7 +449,34 @@ proc renderStanza*(r: SystemResource): seq[string] =
     for dep in r.dependsOn:
       deps.add(dep.kind & ":" & dep.name)
     result.add("  depends_on = " & renderList(deps))
+  # An explicit address (one that is not the kind's default identity) is
+  # part of the resource: the ledger and `depends_on` edges name it, so a
+  # rendering that dropped it would change what the text means.
+  if r.address.len > 0 and r.address != realWorldIdentity(r):
+    result.add("  address = " & renderScalar(r.address))
   result.add("}")
+
+proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
+  ## The profile-wide `addOn { ... }` stanza (ReproOS-Add-On-Mode §4.4),
+  ## or nothing when the profile declares none.
+  if not settings.declared:
+    return @[]
+  result.add(AddOnStanzaTag & " {")
+  result.add("  managedEtcPrefixes = " & renderList(settings.managedEtcPrefixes))
+  result.add("}")
+
+proc renderProfileText*(p: SystemProfile): string =
+  ## A whole profile as canonical text: the `addOn` stanza first, then
+  ## every resource in apply order. `parseSystemProfile(renderProfileText(p))`
+  ## yields `p` again; the add-on composes the profile it applies this way
+  ## rather than by concatenating text.
+  var blocks: seq[string]
+  let addOn = renderAddOnStanza(p.addOn)
+  if addOn.len > 0:
+    blocks.add(addOn.join("\n"))
+  for r in p.resources:
+    blocks.add(renderStanza(r).join("\n"))
+  blocks.join("\n\n") & "\n"
 
 # ---------------------------------------------------------------------------
 # addResource / removeResource.
@@ -456,23 +500,26 @@ proc addResource*(doc: var SystemIntentDoc; r: SystemResource) =
   # carrying newlines, so split it here, or the editor's line numbers and
   # the serialized file's disagree and the next `stanzaSpans` indexes past
   # the end.
+  # Split on the document's own ending: a value holding the other kind of
+  # ending keeps it inside one element, and `serialize` writes it back
+  # byte for byte.
   var rendered: seq[string]
   for piece in renderStanza(r):
-    for ln in piece.split('\n'):
+    for ln in piece.split(doc.lineEnding):
       rendered.add(ln)
   # Insert position: after the last non-blank/non-comment line.
   var lastReal = -1
   for i in 0 ..< doc.lines.len:
     if not lineIsBlankOrComment(doc.lines[i]):
       lastReal = i
-  var insertAt = lastReal + 1
-  # If there is real content above, separate with one blank line —
-  # but only if the line just above the insertion point is not
-  # already blank.
+  # A file with no stanza yet (a comment-only header) takes the new stanza
+  # at its END, after the header, not in front of it.
+  var insertAt = if lastReal >= 0: lastReal + 1 else: doc.lines.len
+  # If there is content above, separate with one blank line — but only if
+  # the line just above the insertion point is not already blank.
   var prefix: seq[string]
-  if lastReal >= 0:
-    if insertAt > 0 and doc.lines[insertAt - 1].strip().len != 0:
-      prefix.add("")
+  if insertAt > 0 and doc.lines[insertAt - 1].strip().len != 0:
+    prefix.add("")
   var newLines = prefix & rendered
   # Splice.
   var rebuilt: seq[string]
@@ -511,5 +558,10 @@ proc removeResource*(doc: var SystemIntentDoc; address: string): bool =
     if i >= removeFrom and i <= removeTo:
       continue
     rebuilt.add(doc.lines[i])
+  # Removing the FIRST stanza leaves the blank line that separated it from
+  # its successor at the top of the file; a file does not start with one.
+  if removeFrom == 0:
+    while rebuilt.len > 0 and rebuilt[0].strip().len == 0:
+      rebuilt.delete(0)
   doc.lines = rebuilt
   return true

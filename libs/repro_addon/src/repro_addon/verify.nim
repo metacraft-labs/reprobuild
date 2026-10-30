@@ -16,6 +16,11 @@ type
   VerifyReport* = object
     status*: string            ## ok | drift | degraded
     findings*: seq[string]
+    notes*: seq[string]
+      ## Informational, never drift: units the add-on shadows with
+      ## ``collision = replace`` (spec §4.3 asks ``verify`` to report them
+      ## after each package upgrade, because the package's unit may have
+      ## changed underneath the add-on's copy).
 
 proc runAddonVerify*(stateDir = DefaultStateDir): VerifyReport =
   ## ``degraded`` when the ledger itself cannot be read; ``drift`` when any
@@ -33,6 +38,10 @@ proc runAddonVerify*(stateDir = DefaultStateDir): VerifyReport =
     let d = try: observeDrift(e) except CatchableError as ex: ex.msg
     if d.len > 0:
       result.findings.add($e.class & " " & e.path & ": " & d)
+    if e.class == lcUnit and e.collision == "replace":
+      result.notes.add(e.unit & ": the add-on's /etc unit shadows the " &
+        "package's (" & e.observation & "); check it after every upgrade " &
+        "of that package")
   if result.findings.len > 0:
     result.status = "drift"
 
@@ -40,3 +49,5 @@ proc renderVerify*(r: VerifyReport): string =
   result = "repro-addon verify: " & r.status & "\n"
   for f in r.findings:
     result.add("  " & f & "\n")
+  for n in r.notes:
+    result.add("  note: " & n & "\n")

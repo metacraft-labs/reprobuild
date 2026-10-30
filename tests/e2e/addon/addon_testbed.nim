@@ -624,3 +624,86 @@ proc installAnchors*(g: Guest; dir = "/root/addon"): Anchors =
   result.flags = " --deploy-signers " & dir & "/deploy-signers.anchors" &
                  " --cache-publishers " & dir & "/cache-publishers.anchors" &
                  " --cache-url " & TestCacheUrl
+
+# ---------------------------------------------------------------------------
+# Steps the A3 gates share: bootstrapping a guest, applying a profile, and
+# building an `equivs` fixture package inside the guest.
+# ---------------------------------------------------------------------------
+
+type
+  StepFn* = proc(name: string; ok: bool; detail: string)
+    ## A gate's step recorder (see each gate's ``runBase``).
+
+proc bootstrapAddon*(g: Guest; repro: string; step: StepFn): bool =
+  ## Preflight, then bootstrap with the acknowledged plan digest. False when
+  ## either failed (the step is recorded red).
+  let anchors = g.installAnchors()
+  let pre = g.exec(repro & " system addon preflight" & anchors.flags)
+  step("preflight is compatible", pre.exitCode == 0, pre.stdout & pre.stderr)
+  if pre.exitCode != 0: return false
+  let boot = g.exec(repro & " system addon bootstrap --plan " &
+                    planDigestOf(pre.stdout) & anchors.flags, timeoutSec = 1800)
+  step("bootstrap", boot.exitCode == 0, boot.stdout & boot.stderr)
+  boot.exitCode == 0
+
+proc putProfile*(g: Guest; name, text: string): string =
+  ## Write a profile into the guest; returns its guest path.
+  writeFile(g.runDir / (name & ".profile"), text)
+  result = "/root/addon/" & name & ".profile"
+  g.copyTo(g.runDir / (name & ".profile"), result)
+
+proc applyProfile*(g: Guest; repro, name, text: string; flags = ""): ExecOut =
+  ## ``repro infra apply --profile <text>`` in the guest.
+  let p = g.putProfile(name, text)
+  g.exec(repro & " infra apply --profile " & p & flags, timeoutSec = 1200)
+
+proc planProfile*(g: Guest; repro, name, text: string; flags = ""): ExecOut =
+  ## ``repro infra plan --profile <text>`` in the guest.
+  let p = g.putProfile(name, text)
+  g.exec(repro & " infra plan --profile " & p & flags)
+
+proc adoptResource*(g: Guest; repro, name, text, address: string): ExecOut =
+  ## ``repro system adopt <address> --profile <text>`` in the guest.
+  let p = g.putProfile(name, text)
+  g.exec(repro & " system adopt " & address & " --profile " & p,
+         timeoutSec = 1200)
+
+proc sha256InGuest*(g: Guest; path: string): string =
+  ## The SHA-256 of a guest file, or "absent" / "link" / "dir".
+  let r = g.exec("if [ -L " & path & " ]; then echo link; " &
+    "elif [ -d " & path & " ]; then echo dir; " &
+    "elif [ -f " & path & " ]; then sha256sum " & path & " | cut -d' ' -f1; " &
+    "else echo absent; fi")
+  r.stdout.strip()
+
+proc installEquivs*(g: Guest) =
+  ## ``equivs`` builds a real Debian package from a control file; it is how
+  ## the gates get a package that owns a conffile of their choosing.
+  discard g.run("export DEBIAN_FRONTEND=noninteractive; " &
+    "apt-get install -y -qq equivs >/dev/null", timeoutSec = 1800)
+
+proc buildEquivsPackage*(g: Guest; pkg, version: string;
+                         files: seq[tuple[name, content, destDir: string]]):
+    string =
+  ## Build ``<pkg>_<version>_all.deb`` in the guest with ``equivs-build``
+  ## and return its path. Each file is installed under ``destDir``;
+  ## debhelper marks every file under ``/etc`` a conffile, which is the
+  ## point: the package then owns a conffile the add-on collides with.
+  let dir = "/root/fixture/" & pkg & "-" & version
+  var script = "set -e\nmkdir -p " & dir & "\ncd " & dir & "\n"
+  var fileLines = ""
+  for f in files:
+    script.add("cat > " & f.name & " <<'REPRO_FIXTURE_EOF'\n" & f.content &
+               "REPRO_FIXTURE_EOF\n")
+    fileLines.add("Files: " & f.name & " " & f.destDir & "\n")
+  script.add("cat > control <<'REPRO_FIXTURE_EOF'\n" &
+    "Section: misc\nPriority: optional\nStandards-Version: 4.6.2\n" &
+    "Package: " & pkg & "\nVersion: " & version & "\n" &
+    "Maintainer: Reprobuild add-on test bed <addon@testbed.invalid>\n" &
+    "Architecture: all\n" & fileLines &
+    "Description: Reprobuild add-on test fixture package\n" &
+    " A package the add-on's collision gates collide with.\n" &
+    "REPRO_FIXTURE_EOF\n")
+  script.add("equivs-build control >/dev/null 2>&1 || equivs-build control\n")
+  script.add("ls " & dir & "/" & pkg & "_" & version & "_all.deb\n")
+  g.run(script, timeoutSec = 900).strip()

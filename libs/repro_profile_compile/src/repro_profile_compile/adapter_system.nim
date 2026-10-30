@@ -312,7 +312,17 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suContent: fieldString(r, "content"),
       suEnabled: fieldBool(r, "enabled", true),
       suAptClosureLock: fieldString(r, "aptClosureLock"),
-      suRestartHeld: not fieldBool(r, "restartIfChanged", true))
+      suRestartHeld: not fieldBool(r, "restartIfChanged", true),
+      suCollision: parseCollisionField("systemd.systemUnit",
+        fieldString(r, "collision"), UnitCollisionOptIns),
+      suDropInName: fieldString(r, "dropInName"))
+    if result.suDropInName.len > 0 and result.suCollision != "dropIn":
+      raise newException(ValueError, "systemd.systemUnit '" &
+        result.suName & "' sets dropInName without `collision = \"dropIn\"`")
+    if result.suDropInName.len > 0 and not isSafeDropInName(result.suDropInName):
+      raise newException(ValueError, "systemd.systemUnit '" &
+        result.suName & "' dropInName '" & result.suDropInName &
+        "' must be one path segment of letters, digits, '.', '-' or '_'")
     # Same parse-time refusal as the text path (`parseSystemProfile`).
     discard renderedSystemUnitContent(result)
   of "launchd.systemDaemon":
@@ -354,7 +364,9 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       sfContent: sfContent,
       sfSourceUrl: sfSourceUrl,
       sfSha256: sfSha256,
-      sfSourceLocal: sfSourceLocal)
+      sfSourceLocal: sfSourceLocal,
+      sfCollision: parseCollisionField("fs.systemFile",
+        fieldString(r, "collision"), FileCollisionOptIns))
   of "fs.systemDirectory":
     let dirPath = fieldString(r, "path")
     # ACL is optional. The fsSystemDirectory template emits the three
@@ -884,8 +896,21 @@ proc adaptSystemProfile*(p: ProfileIntent;
     discard
   of srAddOnDebian:
     result.projection = projectResources(addOnDebianProfile(), selected)
+  # The `addOn:` section is carried whatever the target: it is what the
+  # text form's `addOn { ... }` stanza renders, and the add-on apply is what
+  # gives it meaning. Each prefix is validated as the text parser would.
+  if p.addOn.declared:
+    result.profile.addOn.declared = true
+    for prefix in p.addOn.managedEtcPrefixes:
+      let problem = managedPrefixError(prefix)
+      if problem.len > 0:
+        raise newException(ValueError, "addOn: " & problem)
+      if prefix notin result.profile.addOn.managedEtcPrefixes:
+        result.profile.addOn.managedEtcPrefixes.add prefix
   for r in selected:
     result.profile.resources.add(buildSystemResource(r))
+  # Same cross-resource refusal as the text path (`parseSystemProfile`).
+  checkUnitStateConflicts(result.profile.resources)
 
 proc profileIntentToSystemProfile*(p: ProfileIntent;
                                    target: SystemPlanTarget): SystemProfile =
@@ -965,6 +990,11 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
   ## `repro infra apply` integration to feed the existing
   ## `runInfraApply(text, opts)` lib entry point with the
   ## compile-then-adapt output without restructuring the infra lib API.
+  # The profile-wide `addOn` stanza first, as `parseSystemProfile` reads it
+  # anywhere and the editor's renderer puts it first too.
+  if sp.addOn.declared:
+    result.add(AddOnStanzaTag & " {\n  managedEtcPrefixes = " &
+      renderListLiteral(sp.addOn.managedEtcPrefixes) & "\n}\n\n")
   for r in sp.resources:
     var pairs: seq[(string, string)] = @[]
     case r.kind
@@ -1064,6 +1094,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("aptClosureLock", quoteSystemValue(r.suAptClosureLock)))
       if r.suRestartHeld:
         pairs.add(("restartIfChanged", "false"))
+      if r.suCollision.len > 0:
+        pairs.add(("collision", quoteSystemValue(r.suCollision)))
+      if r.suDropInName.len > 0:
+        pairs.add(("dropInName", quoteSystemValue(r.suDropInName)))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))
@@ -1083,6 +1117,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("sha256", quoteSystemValue(r.sfSha256)))
       if r.sfSourceLocal.len > 0:
         pairs.add(("sourceLocal", quoteSystemValue(r.sfSourceLocal)))
+      if r.sfCollision.len > 0:
+        pairs.add(("collision", quoteSystemValue(r.sfCollision)))
     of srkFsSystemDirectory:
       pairs.add(("path", quoteSystemValue(r.dirPath)))
       if r.dirAclPresent:

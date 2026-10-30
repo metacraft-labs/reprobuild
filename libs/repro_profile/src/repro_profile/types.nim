@@ -65,12 +65,38 @@ type
     toolIdentityRefs*: seq[string]
     requiresElevation*: bool
     cacheable*: bool
+    substituteOnly*: bool
+      ## The edge is never built on this host: its outputs come from the
+      ## binary cache or the apply fails. For a host that cannot build
+      ## what it runs (a 32-bit ARM appliance), so a cache miss is a
+      ## refusal naming the edge instead of a compile the host cannot
+      ## finish. Requires ``expectedOutputDigest``: an edge whose bytes
+      ## only a publisher's signature vouches for is one every trusted
+      ## publisher could rewrite.
+    expectedOutputDigest*: string
+      ## ``blake3:<64 hex>`` of the edge's output archive (the raw
+      ## ``rbcarc`` the publisher packed, which is what the cache serves
+      ## and what the local outputs pack back to). When set, a
+      ## substitute is accepted only if the fetched archive hashes to it,
+      ## and outputs already present that hash to it are a hit without
+      ## any fetch. The profile that carries it is signed (the deploy
+      ## manifest), so the profile pins the bytes and the cache
+      ## publisher is transport, not authority. Empty: no pin (the
+      ## pre-existing behaviour for edges the host can build itself).
     rebootRequired*: bool
       ## Mirror of ``BuildActionDef.rebootRequired``: the edge's effect
       ## needs a restart before it takes hold. An edge that actually RAN
       ## this apply folds this into ``ApplyResult.restartNeeded``, which is
       ## what makes the apply's reboot notice reachable from a profile
       ## rather than only from the Windows resource drivers.
+
+  AddOnIntent* = object
+    ## What a profile's `addOn:` section declares (ReproOS-Add-On-Mode
+    ## §4.4). The text form's `addOn { managedEtcPrefixes = [...] }` stanza
+    ## is its rendering; the apply refuses an `/etc` path outside the
+    ## prefixes with `EAddOnOutOfScope`.
+    declared*: bool
+    managedEtcPrefixes*: seq[string]
 
   ProfileIntent* = object
     name*: string
@@ -94,6 +120,11 @@ type
       ## has its whole system managed here, the default (Gradual-Nix-To-
       ## Reprobuild-Migration.md §Hosts, feature 2; ReproOS add-on mode).
     resources*: seq[ResourceIntent]
+    addOn*: AddOnIntent
+      ## The profile-wide `addOn:` section of ReproOS add-on mode
+      ## (ReproOS-Add-On-Mode §4.4): the `/etc` prefixes the profile's
+      ## resources may own on an add-on host. `declared` is false for a
+      ## profile without the section.
     stowScopes*: seq[StowScope]
       ## GM11: the `stow/` packages an activity claims (a `stow:` block in
       ## `activity <name>:`), one record per claim. A package no record

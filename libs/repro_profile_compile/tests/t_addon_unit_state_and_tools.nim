@@ -21,7 +21,7 @@
 ## `systemctl show` output the unitState driver observes with. `systemctl`
 ## and the writes need root and are driven on the dogfood host.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
 import repro_elevation
 import repro_infra
@@ -95,9 +95,17 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
     # A unit that cannot be enabled or disabled counts as enabled: the
     # requirement "this must be enabled" is met, and `systemctl enable`
     # would only print a warning.
-    for s in ["static", "alias", "indirect", "generated", "enabled-runtime"]:
-      check parseUnitStateShow("LoadState=loaded\nActiveState=active\n" &
-        "UnitFileState=" & s & "\n").enabled
+    for s in ["static", "alias", "indirect", "generated", "transient"]:
+      let st = parseUnitStateShow("LoadState=loaded\nActiveState=active\n" &
+        "UnitFileState=" & s & "\n")
+      check st.enabled and st.fixedEnablement
+    check parseUnitStateShow("UnitFileState=enabled-runtime\n").enabled
+    check not parseUnitStateShow("UnitFileState=enabled\n").fixedEnablement
+    check not active.fixedEnablement
+    # A oneshot without RemainAfterExit is active only while it runs.
+    check parseUnitStateShow("Type=oneshot\nRemainAfterExit=no\n").transientOneshot
+    check not parseUnitStateShow("Type=oneshot\nRemainAfterExit=yes\n").transientOneshot
+    check not parseUnitStateShow("Type=simple\nRemainAfterExit=no\n").transientOneshot
     check not parseUnitStateShow(
       "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n").loaded
     check not parseUnitStateShow(
@@ -115,7 +123,7 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
     let back = parseSystemProfile(renderSystemProfileToText(sp))
     let ne2 = back.byAddress("linux.addOnTool:node_exporter")
     check ne2.atProgram == "/usr/bin/prometheus-node-exporter"
-    check ne2.atAptClosureLock.strip() == LockText.strip()
+    check ne2.atAptClosureLock == LockText
     let op = toPrivilegedOperation(ne2)
     check op.kind == pokLinuxAddOnTool
     check operationValidationError(op) == ""
@@ -123,7 +131,7 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
       WireOperation(operation: op, baselineDigestHex: ""))).body)
     check dec.operation.atCommand == "node_exporter"
     check dec.operation.atProgram == "/usr/bin/prometheus-node-exporter"
-    check dec.operation.atAptClosureLock.strip() == LockText.strip()
+    check dec.operation.atAptClosureLock == LockText
 
   test "linux.addOnTool: what lands on disk":
     let lock = parseAptClosureLock(LockText)
@@ -136,13 +144,16 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
     # path inside: the same view the unit binding gives a service.
     check (prefix & "/usr:/usr:rbind,ro") in manifest.splitLines()
     check "exec=/usr/bin/wakeonlan" in manifest.splitLines()
-    let wrapper = renderAddOnToolWrapper(
-      addOnToolLauncherPath(), addOnToolManifestPath("wakeonlan"))
+    let wrapper = renderAddOnToolWrapper(addOnToolManifestPath("wakeonlan"))
     check wrapper.startsWith("#!/bin/sh\n")
-    check addOnToolLauncherPath().endsWith("/reprobuild-sandbox-launcher")
-    check "exec '" & addOnToolLauncherPath() & "' " &
+    # The wrapper names the LINK, never an install directory: its bytes, and
+    # so the desired digest, are the same whichever `repro` computes them.
+    check AddOnToolLauncherLink == "/etc/repro/bin/.reprobuild-sandbox-launcher"
+    check "exec '/etc/repro/bin/.reprobuild-sandbox-launcher' " &
       "--manifest='/etc/repro/bin/wakeonlan.launcher.manifest' -- \"$@\"" in
       wrapper.splitLines()
+    check getAppDir() notin wrapper
+    check addOnToolLauncherPath().endsWith("/reprobuild-sandbox-launcher")
     # The desired digest covers both files, so a hand-edited wrapper or a
     # changed closure (a different prefix) is drift.
     let op = toPrivilegedOperation(compiled().byAddress("linux.addOnTool:wakeonlan"))
@@ -174,3 +185,48 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
     check hook.sfContent == AddOnToolPathScript
     check "/etc/repro/bin" in hook.sfContent
     check hook.sfContent.startsWith("#")
+
+  test "a unit declared as both unitState and systemUnit is refused on both paths":
+    var intent = ProfileIntent(name: "rpi2")
+    systemdUnitState(intent.resources, name = "x.service")
+    systemdSystemUnit(intent.resources, name = "x.service",
+      content = "[Service]\nExecStart=/usr/bin/true\n")
+    expect ESystemProfileInvalid:
+      discard profileIntentToSystemProfile(intent)
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile(
+        "systemd.unitState { name = \"x.service\" }\n" &
+        "systemd.systemUnit { name = \"x.service\" content = \"[Service]\" }\n")
+    # Different names are fine.
+    intent = ProfileIntent(name: "rpi2")
+    systemdUnitState(intent.resources, name = "x.service")
+    systemdSystemUnit(intent.resources, name = "y.service",
+      content = "[Service]\nExecStart=/usr/bin/true\n")
+    check profileIntentToSystemProfile(intent).resources.len == 2
+
+  test "linux.addOnTool: a missing launcher link is drift the plan repairs":
+    let lock = parseAptClosureLock(LockText)
+    let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+    let manifest = renderAddOnToolManifest(prefix, "/usr/bin/wakeonlan")
+    let wrapper = renderAddOnToolWrapper(addOnToolManifestPath("wakeonlan"))
+    let desired = addOnToolDigestText(wrapper, manifest)
+    # Files right, closure realised, link valid: the observed text IS the
+    # desired text, so the resource is a no-op.
+    check addOnToolObservedDigestText(wrapper, manifest, true, true) == desired
+    # The same files with the link missing or dangling differ from desired
+    # by a path-free sentinel, so the plan carries an update and the apply,
+    # which converges the link every time, repairs it.
+    let dangling = addOnToolObservedDigestText(wrapper, manifest, true, false)
+    check dangling != desired
+    check dangling.startsWith("launcher-link-dangling\n")
+    check "/" notin dangling.splitLines()[0]
+    check addOnToolObservedDigestText(wrapper, manifest, false, true).
+      startsWith("apt-closure-absent\n")
+    # The parser is order-independent: the same facts in any order.
+    let a = parseUnitStateShow("RemainAfterExit=no\nType=oneshot\n" &
+      "ActiveState=inactive\nLoadState=loaded\nUnitFileState=enabled\n")
+    let b = parseUnitStateShow("UnitFileState=enabled\nLoadState=loaded\n" &
+      "ActiveState=inactive\nType=oneshot\nRemainAfterExit=no\n")
+    check a == b
+    check a.transientOneshot and a.loaded and a.enabled and not a.active
+    check not parseUnitStateShow("RemainAfterExit=yes\nType=oneshot\n").transientOneshot
