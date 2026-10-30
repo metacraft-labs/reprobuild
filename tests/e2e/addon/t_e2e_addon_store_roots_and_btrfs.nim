@@ -98,7 +98,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "mount -o loop /var/tmp/repro-addon-btrfs.img /mnt/repro-addon-btrfs && " &
       "stat -f -c %T /mnt/repro-addon-btrfs", timeoutSec = 1200)
     step("a loop-backed btrfs filesystem is mounted",
-         mk.exitCode == 0 and mk.stdout.strip() == "btrfs", mk.stdout & mk.stderr)
+         mk.exitCode == 0 and mk.stdout.strip().endsWith("btrfs"), mk.stdout & mk.stderr)
     if mk.exitCode == 0:
       let sc = g.exec(repro & " system addon selfcheck-btrfs /mnt/repro-addon-btrfs")
       step("the store root's subvolume leg creates and deletes a subvolume",
