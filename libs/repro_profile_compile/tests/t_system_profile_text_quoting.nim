@@ -197,7 +197,7 @@ suite "system.nim text form: quoting and comments":
     let back = parseSystemProfile(readFile(path))
     check back.resources.len == 2
     check back.contentOf(realWorldIdentity(back.resources[0])) == lfValue
-    check back.contentOf(realWorldIdentity(r)) == mixed
+    check back.contentOf(r.address) == mixed
     check readFile(path).startsWith(crlfText)
     # Removing the first stanza removes exactly it, by the parser's bounds.
     doc = loadSystemIntent(path)
@@ -206,4 +206,4 @@ suite "system.nim text form: quoting and comments":
     writeSystemIntent(doc)
     let final = parseSystemProfile(readFile(path))
     check final.resources.len == 1
-    check final.contentOf(realWorldIdentity(r)) == mixed
+    check final.contentOf(r.address) == mixed
