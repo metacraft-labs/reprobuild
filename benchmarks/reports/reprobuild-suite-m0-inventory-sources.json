@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2478,
+    "nimTestBinaries": 2479,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 697,
-    "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2518
+    "staticallyDetectedRuntimeCompilerFlowTests": 132,
+    "testEntries": 2519
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1446,7 +1446,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1372,
+      "integration": 1373,
       "platform/destructive": 154,
       "pure unit": 697,
       "unclassified": 277
@@ -1657,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2478,
+    "nimTestBinaryCount": 2479,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2518
+    "testEntryCount": 2519
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7144,6 +7144,54 @@
         }
       ],
       "source": "tests/integration/t_runner_progress_visibility.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "command",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "command"
+          ],
+          "line": 45,
+          "path": "tests/integration/t_sdk_path_transport.nim",
+          "patterns": [
+            "nim-variable-argv"
+          ],
+          "snippet": "var command = @[nimCompiler, \"check\", \"--hints:off\", \"--skipUserCfg:on\"]"
+        },
+        {
+          "assignedCommandVariable": "command",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "command"
+          ],
+          "line": 85,
+          "path": "tests/integration/t_sdk_path_transport.nim",
+          "patterns": [
+            "nim-variable-argv"
+          ],
+          "snippet": "var command = @[nimCompiler, \"check\", \"--path:\" & sdk & \"<abs>/selected\","
+        },
+        {
+          "assignedCommandVariable": "command",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "command"
+          ],
+          "line": 136,
+          "path": "tests/integration/t_sdk_path_transport.nim",
+          "patterns": [
+            "nim-variable-argv"
+          ],
+          "snippet": "var command = @[nimCompiler, \"check\", \"--hints:off\", \"--skipUserCfg:on\","
+        }
+      ],
+      "source": "tests/integration/t_sdk_path_transport.nim"
     },
     {
       "class": "integration",
@@ -44287,6 +44335,24 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sdk_path_transport",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_sdk_path_transport.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

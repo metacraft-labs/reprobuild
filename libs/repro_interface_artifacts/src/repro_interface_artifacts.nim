@@ -83,6 +83,7 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+import repro_interface_artifacts/sdk_path_transport
 export file_lock.ReproFileLock
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
@@ -6724,7 +6725,7 @@ proc resolveSqliteLibDir*(explicitLibDir, explicitPrefix, builtPrefix,
   firstExistingLibDir(hostDirs, SqliteLibraryNames)
 
 proc protectSdkCompilePaths(command: var seq[string]; workDir, moduleArg: string;
-                            packageFlags: openArray[string]) =
+                            packageFlags: openArray[string]): OwnedSdkPathReset =
   ## Recipe/configuration paths remain usable, but may not replace the SDK's
   ## selected libraries or their bootstrap dependencies. Do not promote a
   ## consumer's other auto-discovered/declared package roots with the SDK.
@@ -6742,28 +6743,7 @@ proc protectSdkCompilePaths(command: var seq[string]; workDir, moduleArg: string
       if flag.startsWith("--path:"): protectedFlags.incl(flag)
   for flag in packageFlags:
     if flag.startsWith("--path:"): protectedFlags.incl(flag)
-  var selected: seq[string]
-  var remaining: seq[string]
-  var beforeModule = true
-  for arg in command:
-    if arg == moduleArg: beforeModule = false
-    if beforeModule and arg in protectedFlags:
-      if arg notin selected: selected.add(arg)
-    else:
-      remaining.add(arg)
-  if selected.len == 0:
-    return
-  # Nim parses CLI paths before configuration and then again afterwards;
-  # duplicate roots do not move. Reset only these selected SDK roots before
-  # re-adding them last. All non-SDK options/paths and their order are intact.
-  var priority: seq[string]
-  for flag in selected:
-    priority.add("--excludePath:" & flag["--path:".len .. ^1])
-  priority.add(selected)
-  let moduleAt = remaining.find(moduleArg)
-  doAssert moduleAt >= 0
-  remaining.insert(priority, moduleAt)
-  command = remaining
+  result = protectCompilerSdkPaths(command, moduleArg, protectedFlags)
 
 proc externalHashFlags(workDir = ""): seq[string] =
   # Generated helpers live outside config.nims. Replay its default portable
@@ -7866,7 +7846,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   if recipeConfigFlags.len > 0:
     let runnerAt = command.find(runnerPlaceholder)
     command.insert(recipeConfigFlags, runnerAt)
-  protectSdkCompilePaths(command, workDir, runnerPlaceholder, packageFlags)
+  let ownedSdkReset = protectSdkCompilePaths(command, workDir, runnerPlaceholder, packageFlags)
   # WHERE THE NIMCACHE AND THE RUNNER LIVE. By default: a slot of the
   # configuration-keyed pool under `interfaceExtractionNimcacheRoot()` (see
   # the block comment above `InterfaceNimcacheSlotCount` for why the key
@@ -7956,9 +7936,22 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     # missed on the second build. The compiler's private cwd is under the
     # edge's scratch, so its reads stay absolute and the edge's record names
     # them relative to the recipe.
-    compileExecution =
-      if perBinary: runInterfaceCompilerCommand(command, cwd = tempRoot)
-      else: runNimcacheCompilerCommandHeld(command, cwd = tempRoot)
+    # Cache identities above retain the complete logical compiler argv. Only
+    # the owned generated helper can use its private project configuration;
+    # provider commands name real consumer modules and remain unchanged.
+    when defined(windows):
+      let transport = planOwnedSdkPathTransport(command, runnerPath, tempRoot, ownedSdkReset)
+      var ownedConfig = stageOwnedSdkPathConfig(runnerPath, transport)
+      try:
+        compileExecution =
+          if perBinary: runInterfaceCompilerCommand(transport.command, cwd = tempRoot)
+          else: runNimcacheCompilerCommandHeld(transport.command, cwd = tempRoot)
+      finally:
+        releaseOwnedSdkPathConfig(ownedConfig)
+    else:
+      compileExecution =
+        if perBinary: runInterfaceCompilerCommand(command, cwd = tempRoot)
+        else: runNimcacheCompilerCommandHeld(command, cwd = tempRoot)
   finally:
     if not perBinary:
       releaseInterfaceNimcacheSlot(slot)
@@ -8887,7 +8880,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # Flags after the module argument are run arguments, so these go before it.
   for flag in extraFlags:
     result.insert(flag, result.len - 1)
-  protectSdkCompilePaths(result, workDir, modulePath, packageFlags)
+  discard protectSdkCompilePaths(result, workDir, modulePath, packageFlags)
   let nimcache =
     if providerNimcacheMode() == "per-binary":
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)

@@ -22201,6 +22201,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "program-wide pragma {.define"),
   TestSpec(
+    source: "tests/integration/t_sdk_path_transport.nim",
+    binary: "build/test-bin/t_sdk_path_transport",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let nimCompiler = findExe(\"nim\")"),
+  TestSpec(
     source: "tests/integration/t_seal_survives_reboot.nim",
     binary: "build/test-bin/t_seal_survives_reboot",
     defines: @[],

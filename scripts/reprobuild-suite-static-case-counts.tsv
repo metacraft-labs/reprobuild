@@ -2025,6 +2025,7 @@ tests/integration/t_sc_producer_source_change_invalidates_consumer.nim	nim	1
 tests/integration/t_sc_typed_cross_project_consumption_both_modes.nim	nim	1
 tests/integration/t_sc_uses_import_resolves_workspace_project_schema.nim	nim	1
 tests/integration/t_scanner_era_cache_entries_are_never_served.nim	nim	3
+tests/integration/t_sdk_path_transport.nim	nim	5
 tests/integration/t_seal_survives_reboot.nim	nim	6
 tests/integration/t_selectors_narrow_the_override_state_report.nim	nim	1
 tests/integration/t_settings_layers_apply_without_state_file.nim	nim	1
