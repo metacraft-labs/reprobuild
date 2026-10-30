@@ -45,6 +45,11 @@ type
     present*: bool
     digestHex*: string
     restartNeeded*: bool
+    serviceRestartPending*: bool
+      ## Set by the `systemd.systemUnit` driver when the unit changed while
+      ## active but its profile says `restartIfChanged = false`: the new
+      ## file is on disk and the running instance still uses the old one
+      ## (Add-On spec §7.3). Surfaced in the apply log, never acted on.
 
   FixtureContext* = object
     ## Per-apply context the broker hands every fixture driver call.

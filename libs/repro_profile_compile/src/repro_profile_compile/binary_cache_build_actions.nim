@@ -130,27 +130,74 @@ proc cacheFingerprintHex(action: ProfileBuildAction): string =
     parts.add("tool:" & t)
   contentDigestHex(weakFingerprintFromText(parts.join("\n")))
 
+const
+  BuildActionCachePackagePrefix* = "infra-apply-action."
+    ## `packageName` of every build-action cache entry: the prefix plus
+    ## the action id.
+  BuildActionCachePackageVersion* = "1"
+  BuildActionCacheToolchainName* = "infra-apply"
+  BuildActionCacheToolchainVersion* = "1"
+
 proc buildActionCacheIdentity*(action: ProfileBuildAction;
-                               storeRoot: string): CacheEntryIdentity =
+                               platform: PlatformTriple): CacheEntryIdentity =
   ## Derive the content-addressable `CacheEntryIdentity` for one
-  ## build-action edge. The platform is the LOCAL platform (so the
-  ## substitute compat-check passes on the host running the apply). The
-  ## cwd-independent `cacheFingerprintHex` is folded into BOTH the
-  ## provider-revision and the toolchain extra-fingerprint so the key is
-  ## a pure function of the action definition + host platform (NOT the
-  ## apply-scratch cwd — see `cacheFingerprintHex`).
-  let local = detectLocalPlatform(storeRoot)
-  let platform = PlatformTriple(cpu: local.cpu, os: local.os,
-                                abi: local.abi, libcVariant: local.libcVariant)
+  ## build-action edge on `platform`. The cwd-independent
+  ## `cacheFingerprintHex` is folded into BOTH the provider-revision and
+  ## the toolchain extra-fingerprint so the key is a pure function of the
+  ## action definition + platform (NOT the apply-scratch cwd — see
+  ## `cacheFingerprintHex`).
+  ##
+  ## The apply passes the host it runs on (the overload below). A
+  ## producer that builds an edge's outputs FOR another host — a build
+  ## box publishing ahead for a host that cannot build them itself, such
+  ## as a 32-bit ARM appliance — passes that host's platform, so the
+  ## entry carries the key the consuming apply derives and a platform
+  ## its compat check accepts. `repro infra cache-keys` prints both.
   let fpHex = cacheFingerprintHex(action)
   result = newCacheEntryIdentity(
-    packageName = "infra-apply-action." & action.id,
-    packageVersion = "1",
+    packageName = BuildActionCachePackagePrefix & action.id,
+    packageVersion = BuildActionCachePackageVersion,
     platform = platform,
-    toolchain = ToolchainIdentity(name: "infra-apply", version: "1",
+    toolchain = ToolchainIdentity(name: BuildActionCacheToolchainName,
+                                  version: BuildActionCacheToolchainVersion,
                                   hostLdSoAbi: "",
                                   extraFingerprint: fpHex),
     providerRevision = fpHex)
+
+proc localPlatformTriple*(storeRoot: string): PlatformTriple =
+  ## The platform the apply on THIS host keys its build-action entries by
+  ## (`detectLocalPlatform`, minus the store directory).
+  let local = detectLocalPlatform(storeRoot)
+  PlatformTriple(cpu: local.cpu, os: local.os,
+                 abi: local.abi, libcVariant: local.libcVariant)
+
+proc buildActionCacheIdentity*(action: ProfileBuildAction;
+                               storeRoot: string): CacheEntryIdentity =
+  ## The identity the apply on this host looks up: the action on the
+  ## LOCAL platform (so the substitute compat-check passes on the host
+  ## running the apply).
+  buildActionCacheIdentity(action, localPlatformTriple(storeRoot))
+
+proc publishIdentityFlags*(idy: CacheEntryIdentity): seq[string] =
+  ## The `repro cache publish` / `repro cache derive-key` identity flags
+  ## that reproduce `idy`, in the spelling `cli_dispatch` parses. A
+  ## producer publishing an edge's outputs by hand passes exactly these,
+  ## so the manifest records the platform the consumer's compat check
+  ## compares and `derive-key` on the same flags prints the same key.
+  ## Options and dependency keys are never part of a build-action
+  ## identity, so none are rendered.
+  result = @[
+    "--package-name=" & idy.packageName,
+    "--package-version=" & idy.packageVersion,
+    "--platform-cpu=" & idy.platform.cpu,
+    "--platform-os=" & idy.platform.os,
+    "--platform-abi=" & idy.platform.abi,
+    "--platform-libc=" & idy.platform.libcVariant,
+    "--toolchain-name=" & idy.toolchain.name,
+    "--toolchain-version=" & idy.toolchain.version,
+    "--toolchain-host-ldso=" & idy.toolchain.hostLdSoAbi,
+    "--toolchain-extra=" & idy.toolchain.extraFingerprint,
+    "--provider-revision=" & idy.providerRevision]
 
 # ---------------------------------------------------------------------------
 # Output-prefix <-> cwd mapping.
@@ -192,6 +239,12 @@ proc outputRelPaths(action: ProfileBuildAction): seq[string] =
     elif rel == ".." or rel.startsWith("../"):
       continue
     result.add(rel.strip(leading = false, chars = {'/'}))
+
+proc isSubstitutable*(action: ProfileBuildAction): bool =
+  ## Whether the apply would consult the binary cache for this edge at
+  ## all: only an edge with at least one declared output under its `cwd`
+  ## has a prefix to substitute (`outputRelPaths`).
+  outputRelPaths(action).len > 0
 
 proc collectFilesUnder(root, rel: string; acc: var seq[string]) =
   ## Append every regular file under `root/rel` as a `root`-relative

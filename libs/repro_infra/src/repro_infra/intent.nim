@@ -130,37 +130,16 @@ proc stanzaSpans*(doc: SystemIntentDoc): seq[StanzaSpan] =
   ## (the parser's `realWorldIdentity` default, or an explicit
   ## `address = "..."` field). A structurally-invalid file raises
   ## `ESystemProfileInvalid` via `parseSystemProfile`.
-  let profile = parseSystemProfile(serialize(doc))
-  # Re-walk the lines for brace bounds; pair each `{` head with the
-  # parsed resource at the same ordinal.
-  var resIdx = 0
-  var i = 0
-  while i < doc.lines.len:
-    let stripped = doc.lines[i].strip()
-    if stripped.len == 0 or stripped.startsWith("#"):
-      inc i
-      continue
-    # A stanza head is `<kindTag> {` (the `{` may be on a later line).
-    # Find the head: the line that introduces the kind tag.
-    let headLine = i
-    # Locate the `{` — on this line or a following one.
-    var braceLine = i
-    var foundBrace = false
-    while braceLine < doc.lines.len:
-      if doc.lines[braceLine].contains('{'):
-        foundBrace = true
-        break
-      inc braceLine
-    if not foundBrace:
-      break
-    # Locate the matching `}`.
-    var closeLine = braceLine
-    while closeLine < doc.lines.len:
-      if doc.lines[closeLine].contains('}'):
-        break
-      inc closeLine
-    if closeLine >= doc.lines.len:
-      break
+  let text = serialize(doc)
+  let profile = parseSystemProfile(text)
+  # Stanza bounds come from the parser's own quote-aware brace walk. A
+  # line-by-line search for `{` / `}` (what this used to do) ended a
+  # stanza at the first `}` of a multi-line value, such as a unit file or
+  # a polkit rule, and then removed or spliced the wrong lines.
+  let spans = systemProfileStanzaLineSpans(text)
+  for resIdx, span in spans:
+    let headLine = span.startLine
+    let closeLine = span.endLine
     # Count the leading blank/comment lines that belong to this stanza
     # (contiguous run directly above the head).
     var lead = 0
@@ -175,8 +154,6 @@ proc stanzaSpans*(doc: SystemIntentDoc): seq[StanzaSpan] =
         startLine: headLine,
         endLine: closeLine,
         leadingBlankComments: lead))
-    inc resIdx
-    i = closeLine + 1
 
 proc findStanza*(doc: SystemIntentDoc; address: string):
     int =
@@ -196,20 +173,13 @@ proc findStanza*(doc: SystemIntentDoc; address: string):
 
 proc renderScalar(value: string): string =
   ## Render a scalar field value. A bool literal passes through
-  ## unquoted; everything else is double-quoted VERBATIM — the Phase-A
-  ## `system.nim` parser's `unquote` only strips the surrounding
-  ## quotes (it does not decode `\`-escapes), so a Windows path like
-  ## `HKLM\SOFTWARE\...` must be written with single backslashes, not
-  ## escaped. A value that itself contains a `"` cannot be represented
-  ## in this quote-stripping format — the editor rejects it rather
-  ## than emit an unparseable file.
+  ## unquoted; everything else goes through the format's one encoder,
+  ## `profile.quoteSystemValue`: verbatim between double quotes, with a
+  ## `"` written as `""` and nothing else escaped (a Windows path like
+  ## `HKLM\SOFTWARE\...` keeps its single backslashes).
   case value.toLowerAscii()
   of "true", "false": value
-  else:
-    if value.contains('"'):
-      raiseSystemProfileInvalid("a system-resource field value may not " &
-        "contain a double-quote character: '" & value & "'")
-    "\"" & value & "\""
+  else: quoteSystemValue(value)
 
 proc renderList(items: seq[string]): string =
   ## Render a `[a, b]` list literal. Each element is quoted.
@@ -338,6 +308,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  enabled = false")
     if r.suAptClosureLock.len > 0:
       result.add("  aptClosureLock = " & renderScalar(r.suAptClosureLock))
+    if r.suRestartHeld:
+      result.add("  restartIfChanged = false")
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))
@@ -436,6 +408,15 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  content = " & renderScalar(r.darwinModuleContent))
   of srkLinuxDpkgDiversion:
     result.add("  path = " & renderScalar(r.ddPath))
+  of srkSystemdUnitState:
+    result.add("  name = " & renderScalar(r.usName))
+    if not r.usEnabled:
+      result.add("  enabled = false")
+    result.add("  state = " & (if r.usRunning: "Running" else: "Stopped"))
+  of srkLinuxAddOnTool:
+    result.add("  command = " & renderScalar(r.atCommand))
+    result.add("  aptClosureLock = " & renderScalar(r.atAptClosureLock))
+    result.add("  program = " & renderScalar(r.atProgram))
   of srkLinuxFhsSandbox:
     result.add("  binPath = " & renderScalar(r.fsbBinPath))
     result.add("  fhsTrees = " & renderList(r.fsbFhsTreeRoots))
@@ -470,7 +451,15 @@ proc addResource*(doc: var SystemIntentDoc; r: SystemResource) =
   if findStanza(doc, r.address) >= 0:
     raiseSystemProfileInvalid("a system resource with address '" &
       r.address & "' already exists; use `repro system remove` first")
-  let rendered = renderStanza(r)
+  # `doc.lines` holds one physical line per element: a multi-line value
+  # (a unit file, a udev rule) is rendered as one `key = "..."` element
+  # carrying newlines, so split it here, or the editor's line numbers and
+  # the serialized file's disagree and the next `stanzaSpans` indexes past
+  # the end.
+  var rendered: seq[string]
+  for piece in renderStanza(r):
+    for ln in piece.split('\n'):
+      rendered.add(ln)
   # Insert position: after the last non-blank/non-comment line.
   var lastReal = -1
   for i in 0 ..< doc.lines.len:

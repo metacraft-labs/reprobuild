@@ -109,6 +109,16 @@ proc detectLocalPlatform*(storeDir: string; microarch = ""): LocalPlatform =
     result.cpu = "x86_64"
   elif defined(arm64) or defined(aarch64):
     result.cpu = "aarch64"
+  elif defined(arm):
+    # 32-bit ARM. Every supported 32-bit ARM host is ARMv7 with the
+    # hard-float ABI (Debian/Raspbian ``armhf``, Arch ``armv7h``), and the
+    # cache names the family ``armv7`` (``packages_schema.PlatformCpu``),
+    # which is also what ``repro cache publish --platform-cpu`` takes for
+    # an entry built elsewhere for such a host. Before this arm existed an
+    # armhf client keyed every entry ``unknown``, so the compat gate
+    # compared ``unknown`` with ``unknown`` and would have accepted an
+    # entry published for any other platform that fell through here.
+    result.cpu = "armv7"
   else:
     result.cpu = "unknown"
   when defined(linux):

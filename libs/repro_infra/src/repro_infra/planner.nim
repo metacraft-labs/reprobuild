@@ -161,7 +161,8 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule,
      pokLinuxNixosSystemModule, pokMacosDarwinSystemModule,
-     pokLinuxFhsSandbox, pokLinuxDpkgDiversion:
+     pokLinuxFhsSandbox, pokLinuxDpkgDiversion, pokSystemdUnitState,
+     pokLinuxAddOnTool:
     # The M2 (Dotfiles-Migration-Completion) NixOS + nix-darwin
     # escape-hatch drivers are POSIX-side; their digest lives in
     # posix_system_driver alongside the other Phase-C kinds.
@@ -241,6 +242,10 @@ proc observeResource*(r: SystemResource): ResourceObservation =
         observeLinuxNixosSystemModule(op)
       of srkMacosDarwinSystemModule:
         observeMacosDarwinSystemModule(op)
+      of srkSystemdUnitState:
+        observeSystemdUnitState(op)
+      of srkLinuxAddOnTool:
+        observeLinuxAddOnTool(op)
       of srkLinuxFhsSandbox:
         observeLinuxFhsSandbox(op)
       of srkLinuxDpkgDiversion:
@@ -318,7 +323,8 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " system-default " & r.sdDomain & " " & r.sdKey
   of srkSystemdSystemUnit:
     action & " system-unit " & r.suName &
-      (if r.suEnabled: " (enable)" else: " (no-enable)")
+      (if r.suEnabled: " (enable)" else: " (no-enable)") &
+      (if r.suRestartHeld: " (restart held)" else: "")
   of srkLaunchdSystemDaemon:
     action & " system-daemon " & r.sdaLabel
   of srkFsSystemFile:
@@ -373,6 +379,12 @@ proc summaryLine(r: SystemResource; action: string): string =
       " (" & $r.darwinModuleContent.len & " bytes)"
   of srkLinuxDpkgDiversion:
     action & " dpkg-diversion " & r.ddPath & " -> " & r.ddPath & ".distrib"
+  of srkSystemdUnitState:
+    action & " unit-state " & r.usName &
+      (if r.usEnabled: " (enable)" else: " (disable)") &
+      " state=" & (if r.usRunning: "Running" else: "Stopped")
+  of srkLinuxAddOnTool:
+    action & " add-on-tool " & r.atCommand & " -> " & r.atProgram
   of srkLinuxFhsSandbox:
     action & " fhs-sandbox " & r.fsbBinPath &
       " (" & $r.fsbFhsTreeRoots.len & " tree-root" &

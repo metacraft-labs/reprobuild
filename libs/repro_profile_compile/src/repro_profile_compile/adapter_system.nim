@@ -311,7 +311,8 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suName: fieldString(r, "name"),
       suContent: fieldString(r, "content"),
       suEnabled: fieldBool(r, "enabled", true),
-      suAptClosureLock: fieldString(r, "aptClosureLock"))
+      suAptClosureLock: fieldString(r, "aptClosureLock"),
+      suRestartHeld: not fieldBool(r, "restartIfChanged", true))
     # Same parse-time refusal as the text path (`parseSystemProfile`).
     discard renderedSystemUnitContent(result)
   of "launchd.systemDaemon":
@@ -619,6 +620,25 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "' must end with '.nix'")
     result = SystemResource(kind: srkMacosDarwinSystemModule,
       darwinModuleName: n, darwinModuleContent: c)
+  of "systemd.unitState":
+    let stateStr = fieldString(r, "state", "Running").toLowerAscii()
+    if stateStr notin ["running", "stopped"]:
+      raise newException(ValueError,
+        "systemd.unitState state '" & stateStr &
+        "' is not one of Running / Stopped")
+    result = SystemResource(kind: srkSystemdUnitState,
+      usName: fieldString(r, "name"),
+      usEnabled: fieldBool(r, "enabled", true),
+      usRunning: stateStr == "running")
+    # Same parse-time refusals as the text path.
+    checkUnitStateResource(result)
+  of "linux.addOnTool":
+    let command = fieldString(r, "command")
+    result = SystemResource(kind: srkLinuxAddOnTool,
+      atCommand: command,
+      atAptClosureLock: fieldString(r, "aptClosureLock"),
+      atProgram: fieldString(r, "program", "/usr/bin/" & command))
+    checkAddOnToolResource(result)
   of "linux.fhsSandbox":
     # Linux-Third-Party-Sandbox-MVP M1. The closed-set / shape checks
     # mirror the `parseSystemProfile` arm in repro_infra/profile.nim
@@ -897,20 +917,12 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
 # whitespace are not preserved (they have no semantic meaning).
 # ---------------------------------------------------------------------------
 
-proc quoteSystemValue(s: string): string =
-  ## Quote a string for the system-profile text format. The parser
-  ## reads `"..."` literals; backslashes and embedded quotes are
-  ## NOT escaped by the M69 parser (`unquote` strips one surrounding
-  ## pair and stops), so we reject embedded quotes outright — the
-  ## adapter is fed by `ProfileIntent` values whose strings would be
-  ## authored at Nim source level, where embedded quotes already need
-  ## explicit escaping, so this is a structural invariant rather than
-  ## an arbitrary restriction.
-  if '"' in s:
-    raise newException(ValueError,
-      "system-profile string value contains an embedded double quote; " &
-      "the M69 text format cannot represent this verbatim")
-  "\"" & s & "\""
+# Values are quoted with `repro_infra`'s `quoteSystemValue`, the format's
+# one encoder: verbatim, with a `"` doubled. Every string a profile can hold
+# round-trips through it, so YAML, udev rules, unit files with quoted
+# `Environment=` values and shell scripts can be declared inline. (It used
+# to raise on any embedded `"`, which forced such content out of the
+# profile and onto a side channel.)
 
 proc renderListLiteral(items: openArray[string]): string =
   result = "["
@@ -1050,6 +1062,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("enabled", (if r.suEnabled: "true" else: "false")))
       if r.suAptClosureLock.len > 0:
         pairs.add(("aptClosureLock", quoteSystemValue(r.suAptClosureLock)))
+      if r.suRestartHeld:
+        pairs.add(("restartIfChanged", "false"))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))
@@ -1145,6 +1159,15 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("content", quoteSystemValue(r.darwinModuleContent)))
     of srkLinuxDpkgDiversion:
       pairs.add(("path", quoteSystemValue(r.ddPath)))
+    of srkSystemdUnitState:
+      pairs.add(("name", quoteSystemValue(r.usName)))
+      pairs.add(("enabled", (if r.usEnabled: "true" else: "false")))
+      pairs.add(("state",
+        quoteSystemValue(if r.usRunning: "Running" else: "Stopped")))
+    of srkLinuxAddOnTool:
+      pairs.add(("command", quoteSystemValue(r.atCommand)))
+      pairs.add(("aptClosureLock", quoteSystemValue(r.atAptClosureLock)))
+      pairs.add(("program", quoteSystemValue(r.atProgram)))
     of srkLinuxFhsSandbox:
       pairs.add(("binPath", quoteSystemValue(r.fsbBinPath)))
       pairs.add(("fhsTrees", renderListLiteral(r.fsbFhsTreeRoots)))
