@@ -299,7 +299,13 @@
       # are now graded as loss too.
       # Capture raw renameat2 through syscall() and trapped inline sites,
       # including both exchange paths, instead of reporting unknown loss.
-      url = "github:metacraft-labs/io-mon/6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f";
+      # Bumped to b4679706 (2026-10-30), io-mon's `agents` tip; 6fccd929 is an
+      # ancestor. The Linux shim now builds and runs on 32-bit ARM (armhf):
+      # the ILP32 large-file and 64-bit-time entry points of a 32-bit glibc
+      # are interposed separately, which is what `scripts/cross/
+      # build_linux_cross.sh` ships to an armhf add-on host. LP64 builds are
+      # unchanged.
+      url = "github:metacraft-labs/io-mon/b46797064a419d031234b9b685f7dcbbdf1eeafe";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -734,8 +740,19 @@
     # 2026-10-24-d-and-nim-mcr-streaming-flow-tests-fail-once-ct-mcr-is-built).
     # One commit, in compiler/cgen.nim plus its test; this repository builds no
     # source maps, so only consumers that debug Nim output see the change.
+    #
+    # Advanced from cdb6fd14 to 22d525d8 so the compiler builds for a 32-bit
+    # target: `newLineInfo` compared a line with `int high(uint32)`, which does
+    # not fit in a 32-bit `int`, and `scripts/cross/build_linux_cross.sh`
+    # could not build the `nim` an armhf host compiles its profiles
+    # with. Riding along (cdb6fd14..d4ed733d, the fork's `codetracer` tip):
+    # two compiler fixes (owning constructor temporaries under ARC; referent
+    # hooks prepared for canonical references), two `std/macros` additions
+    # (`getOwner`, completed copy-operation inspection) with their VM support,
+    # and lock, test and Nix-shell commits that touch no compiler or stdlib
+    # source.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=cdb6fd1483fcdc570f306ccfee8865f2214f46f7";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=22d525d83ff061f5912121f3519418cda806d36c";
       flake = false;
     };
     nim-csources-src = {
