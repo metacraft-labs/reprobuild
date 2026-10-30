@@ -49,6 +49,8 @@ import std/[strutils]
 
 import blake3
 
+import repro_dsl_stdlib/packages/apt_closure
+
 import ./errors
 import ./fixture_driver
 import ./operations
@@ -458,6 +460,14 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
     let content = readFile(path)
     result.present = true
     result.digestHex = posixDigestHexOfText(content)
+    # A unit whose `package(apt)` closure is missing from the store is not
+    # in its desired state even when the file bytes match: report a digest
+    # no desired state has, so the plan carries an update that realises it.
+    if op.suAptClosureLock.len > 0 and not op.suDestroy:
+      let lock = parseAptClosureLock(op.suAptClosureLock)
+      if not aptClosureRealised(AddOnSystemStoreRoot, lock):
+        result.digestHex = posixDigestHexOfText("apt-closure-absent:" &
+          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" & content)
     # `systemctl show` is queried for completeness; the exit code is
     # not an error (a disabled / inactive unit is a valid state).
     discard execCmdEx("systemctl show " & quoteShell(op.suName) &
@@ -521,6 +531,18 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
+    if op.suAptClosureLock.len > 0:
+      # Realise the closure the unit binds BEFORE the unit can start: a
+      # unit naming a missing `BindReadOnlyPaths=` source fails to start.
+      # `validateOperation` has already checked that `suContent` binds
+      # exactly this prefix. A destroy leaves the prefix to store GC
+      # (Add-On spec §5.2): the previous generation may still need it.
+      try:
+        discard realiseAptClosure(parseAptClosureLock(op.suAptClosureLock),
+          AddOnSystemStoreRoot, AddOnAptDebCacheDir)
+      except CatchableError as ex:
+        raiseProtocol("systemd.systemUnit '" & op.suName &
+          "': realising its package(apt) closure failed: " & ex.msg)
     createDir(SystemdSystemUnitDir)
     # Binary-mode write so the bytes on disk equal the operator's
     # `suContent` verbatim — drift detection compares BLAKE3 digests,

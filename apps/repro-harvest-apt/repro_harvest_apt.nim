@@ -32,6 +32,18 @@
 ##     --rate-ms   <int>            (per-host min delay; default 1000)
 ##     --signature-backend external-gpg | fingerprint-allowlist
 ##                                  (preferred verification backend)
+##     --archive   <url>            (archive base URL; required when the
+##                                   source names no snapshot, e.g.
+##                                   Raspbian)
+##     --keyring   <file>           (verify InRelease against this one
+##                                   keyring only — apt's Signed-By)
+##     --components <a,b>           (components to read; default
+##                                   --component)
+##     --emit-lock <path>           (write a package(apt) closure lock for
+##                                   an Add-On systemd unit instead of
+##                                   catalogs; see apt_closure.nim)
+##     --no-essential               (with --emit-lock: leave out the
+##                                   archive's Essential set)
 ##
 ## ## Exit codes
 ##
@@ -56,6 +68,7 @@ import blake3
 
 import repro_dsl_stdlib/packages/foreign_apt
 import repro_dsl_stdlib/packages/apt_index
+import repro_dsl_stdlib/packages/apt_closure
 import repro_system_apply/types as sysTypes
 import repro_binary_cache_server/types as bcsTypes
 
@@ -79,6 +92,11 @@ type
     arch: string
     rateMs: int
     signatureBackend: SignatureBackend
+    archive: string        ## --archive: base URL (no snapshot service)
+    keyring: string        ## --keyring: the ONE keyring for this archive
+    components: seq[string] ## --components a,b (default: --component)
+    emitLock: string       ## --emit-lock: write a closure lock here
+    noEssential: bool      ## --no-essential: omit the Essential set
 
   CliError = object of CatchableError
 
@@ -134,6 +152,17 @@ proc parseArgs(argv: seq[string] = commandLineParams()):
     of "insecure": result.insecure = true
     of "component":
       result.component = if hasInline: val else: nextValue(flag)
+    of "components":
+      let v = if hasInline: val else: nextValue(flag)
+      for c in v.split(','):
+        if c.strip().len > 0: result.components.add(c.strip())
+    of "archive":
+      result.archive = if hasInline: val else: nextValue(flag)
+    of "keyring":
+      result.keyring = if hasInline: val else: nextValue(flag)
+    of "emit-lock":
+      result.emitLock = if hasInline: val else: nextValue(flag)
+    of "no-essential": result.noEssential = true
     of "arch":
       result.arch = if hasInline: val else: nextValue(flag)
     of "rate-ms":
@@ -160,8 +189,11 @@ proc parseArgs(argv: seq[string] = commandLineParams()):
 
   if result.source.len == 0:
     raise newException(CliError, "--source is required")
-  if result.outputDir.len == 0:
-    raise newException(CliError, "--output-dir is required")
+  if result.outputDir.len == 0 and result.emitLock.len == 0:
+    raise newException(CliError,
+      "--output-dir (catalogs) or --emit-lock (closure lock) is required")
+  if result.components.len == 0:
+    result.components = @[result.component]
   if result.cacheDir.len == 0:
     result.cacheDir = defaultCacheDir()
 
@@ -237,67 +269,81 @@ proc parseSha256ForFile(payload: string; relPath: string): string =
         return parts[0].toLowerAscii()
   ""
 
+type
+  VerifiedIndexes* = object
+    ## Everything read under one verified ``InRelease``.
+    records*: seq[AptPackageRecord]
+    inReleaseSha256*: string
+    indexes*: seq[AptIndexDigest]
+
+proc fetchAndVerifyIndexes(client: FetchClient; spec: AptSourceSpec;
+                           keyBundleDir: string; keyring: string;
+                           preferredBackend: SignatureBackend;
+                           insecure: bool;
+                           components: seq[string]; arch: string):
+    VerifiedIndexes =
+  ## Fetch ``InRelease``, verify it (against ``keyring`` alone when given,
+  ## otherwise the key bundle), then fetch each component's ``Packages``
+  ## index and check it against the SHA-256 the signed payload lists.
+  stderr.writeLine "fetch: ", inReleaseUrl(spec)
+  let inRel = fetchUrl(client, inReleaseUrl(spec))
+  result.inReleaseSha256 = sha256HexStr(inRel.bytes)
+  var payload = ""
+  if insecure:
+    stderr.writeLine "WARNING: --insecure was passed; skipping " &
+      "InRelease GPG verification"
+    payload = extractClearsignedPayload(inRel.bytes).payload
+  else:
+    let verification =
+      if keyring.len > 0: verifyInReleaseWithKeyring(inRel.bytes, keyring)
+      else: verifyInRelease(inRel.bytes, keyBundleDir,
+                            preferredBackend = preferredBackend)
+    payload = verification.payload
+    stderr.writeLine "InRelease verified via " & $verification.backend &
+      " (signer=" & verification.signerKeyId & ")"
+
+  for component in components:
+    # Try xz first, fall back to gz, then plain uncompressed Packages.
+    # (Real archives carry xz + gz; the plain form is for the
+    # fixture-driven test path.)
+    var pkgRel = ""
+    var expectedSha = ""
+    for ext in ["Packages.xz", "Packages.gz", "Packages"]:
+      let rel = component & "/binary-" & arch & "/" & ext
+      let sha = parseSha256ForFile(payload, rel)
+      if sha.len > 0:
+        pkgRel = rel
+        expectedSha = sha
+        break
+    if expectedSha.len == 0:
+      if not insecure:
+        raise newException(SignatureVerificationError,
+          "InRelease has no SHA256 entry for " & component & "/binary-" &
+          arch & "/Packages{.xz,.gz,}; cannot verify the Packages index")
+      pkgRel = component & "/binary-" & arch & "/Packages.xz"
+    let pkgUrl = spec.suiteBaseUrl & "/" & pkgRel
+    stderr.writeLine "fetch: ", pkgUrl
+    let pkgFetch = fetchUrl(client, pkgUrl)
+    let actual = sha256HexStr(pkgFetch.bytes)
+    if expectedSha.len > 0 and actual != expectedSha:
+      raise newException(SignatureVerificationError,
+        "Packages index sha256 mismatch: expected " & expectedSha &
+        ", got " & actual & " (url=" & pkgUrl & ")")
+    result.indexes.add(AptIndexDigest(path: pkgRel, sha256: actual))
+    let decompressed = maybeDecompress(pkgFetch.bytes, pkgUrl)
+    let recs = parsePackagesIndex(decompressed)
+    stderr.writeLine "parsed ", recs.len, " package records from ", pkgRel
+    result.records.add(recs)
+
 proc fetchAndVerifyIndex(client: FetchClient; spec: AptSourceSpec;
                         keyBundleDir: string;
                         preferredBackend: SignatureBackend;
                         insecure: bool;
                         component: string; arch: string):
     seq[AptPackageRecord] =
-  ## Fetch InRelease + Packages.<compression>, verify signatures, return
-  ## the parsed records.
-  stderr.writeLine "fetch: ", inReleaseUrl(spec)
-  let inRel = fetchUrl(client, inReleaseUrl(spec))
-  var payload = ""
-  var sigBackend = sbExternalGpg
-  if insecure:
-    stderr.writeLine "WARNING: --insecure was passed; skipping " &
-      "InRelease GPG verification"
-    let parts = extractClearsignedPayload(inRel.bytes)
-    payload = parts.payload
-  else:
-    let verification = verifyInRelease(inRel.bytes, keyBundleDir,
-      preferredBackend = preferredBackend)
-    payload = verification.payload
-    sigBackend = verification.backend
-    stderr.writeLine "InRelease verified via " & $sigBackend &
-      " (signer=" & verification.signerKeyId & ")"
-
-  # Try xz first, fall back to gz, then plain uncompressed Packages.
-  # (Real snapshot.debian.org always carries xz + gz; the plain form is
-  # for the fixture-driven test path.)
-  let pkgPathXz = component & "/binary-" & arch & "/Packages.xz"
-  let pkgPathGz = component & "/binary-" & arch & "/Packages.gz"
-  let pkgPathPlain = component & "/binary-" & arch & "/Packages"
-  var pkgUrl = packagesIndexUrl(spec, component, arch, "xz")
-  var pkgRel = pkgPathXz
-  var expectedSha = parseSha256ForFile(payload, pkgRel)
-  if expectedSha.len == 0:
-    pkgUrl = packagesIndexUrl(spec, component, arch, "gz")
-    pkgRel = pkgPathGz
-    expectedSha = parseSha256ForFile(payload, pkgRel)
-  if expectedSha.len == 0:
-    pkgUrl = spec.suiteBaseUrl & "/" & pkgPathPlain
-    pkgRel = pkgPathPlain
-    expectedSha = parseSha256ForFile(payload, pkgRel)
-  if expectedSha.len == 0 and not insecure:
-    raise newException(SignatureVerificationError,
-      "InRelease has no SHA256 entry for " & pkgPathXz & ", " &
-      pkgPathGz & ", or " & pkgPathPlain &
-      "; cannot verify the Packages index")
-
-  stderr.writeLine "fetch: ", pkgUrl
-  let pkgFetch = fetchUrl(client, pkgUrl)
-  if expectedSha.len > 0:
-    let actual = sha256HexStr(pkgFetch.bytes)
-    if actual != expectedSha:
-      raise newException(SignatureVerificationError,
-        "Packages index sha256 mismatch: expected " & expectedSha &
-        ", got " & actual & " (url=" & pkgUrl & ")")
-
-  let decompressed = maybeDecompress(pkgFetch.bytes, pkgUrl)
-  result = parsePackagesIndex(decompressed)
-  stderr.writeLine "parsed ", result.len, " package records from ",
-    pkgRel
+  ## Single-component form used by catalog emission.
+  fetchAndVerifyIndexes(client, spec, keyBundleDir, "", preferredBackend,
+    insecure, @[component], arch).records
 
 # ---------------------------------------------------------------------------
 # Catalog emission
@@ -343,16 +389,49 @@ proc mkCatalogForRecord(spec: AptSourceSpec;
 # Main harvester driver
 # ---------------------------------------------------------------------------
 
-proc runHarvest*(args: HarvesterArgs) =
-  let spec = parseAptSourceSpec(args.source)
-  if spec.distro notin ["debian", "ubuntu"]:
+proc runEmitLock(args: HarvesterArgs; spec: AptSourceSpec;
+                 client: FetchClient; keyDir: string) =
+  ## ``--emit-lock``: resolve the closure of the requested roots (plus the
+  ## archive's Essential set unless ``--no-essential``) against the
+  ## verified indexes of every ``--components`` entry and write a
+  ## ``repro-apt-closure-lock v1`` (``apt_closure.nim``; spec
+  ## ``ReproOS-Add-On-Mode.md`` §8.3 items 1-3). No catalog is written.
+  if args.insecure:
     raise newException(CliError,
-      "C2 supports the 'debian' (and 'ubuntu') distros only; " &
-      "got '" & spec.distro & "'")
+      "--emit-lock refuses --insecure: a lock is a trust anchor")
+  let verified = fetchAndVerifyIndexes(client, spec, keyDir, args.keyring,
+    args.signatureBackend, insecure = false, args.components, args.arch)
+  let index = buildAptIndex(verified.records)
+  let members = resolveAptClosureRecords(index, spec.packages,
+    includeEssential = not args.noEssential)
+  let lock = buildAptClosureLock(snapshotBaseUrl(spec), spec.suite,
+    args.components, args.arch, spec.snapshot, verified.inReleaseSha256,
+    verified.indexes, spec.packages, members)
+  let parent = parentDir(args.emitLock)
+  if parent.len > 0: createDir(parent)
+  writeFile(args.emitLock, renderAptClosureLock(lock))
+  var total: int64 = 0
+  for d in lock.debs: total += d.size
+  stderr.writeLine "wrote ", args.emitLock, ": ", lock.debs.len,
+    " members, ", total, " bytes of .deb, closure ",
+    aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+
+proc runHarvest*(args: HarvesterArgs) =
+  var spec = parseAptSourceSpec(args.source)
+  spec.archive = args.archive
+  if args.emitLock.len == 0 and spec.distro notin ["debian", "ubuntu"]:
+    raise newException(CliError,
+      "catalog emission supports the 'debian' (and 'ubuntu') " &
+      "distros only; got '" & spec.distro & "' (--emit-lock takes any " &
+      "archive given with --archive)")
   let keyDir = resolveKeyBundleDir(args.gpgKeys)
 
   let client = newFetchClient(args.cacheDir,
     minIntervalMs = args.rateMs, offline = args.offline)
+
+  if args.emitLock.len > 0:
+    runEmitLock(args, spec, client, keyDir)
+    return
 
   let records = fetchAndVerifyIndex(client, spec, keyDir,
     args.signatureBackend, args.insecure, args.component, args.arch)
@@ -447,6 +526,11 @@ Usage:
     [--arch <name>]            default 'amd64'
     [--rate-ms <int>]          per-host min delay; default 1000
     [--signature-backend <external-gpg|fingerprint-allowlist>]
+    [--archive <url>]          archive base URL (no snapshot service)
+    [--keyring <file>]         verify against this keyring only
+    [--components <a,b>]       components to read (default --component)
+    [--emit-lock <path>]       write a package(apt) closure lock
+    [--no-essential]           with --emit-lock: omit the Essential set
 
 Examples:
   repro-harvest-apt --source apt:git@debian/bookworm:20260601T000000Z \
@@ -454,6 +538,11 @@ Examples:
   repro-harvest-apt --source apt:{git,vim,curl}@debian/bookworm:20260601T000000Z \
                     --output-dir recipes/catalog/foreign \
                     --offline
+  repro-harvest-apt --source apt:prometheus-node-exporter@raspbian/trixie \
+                    --archive http://raspbian.raspberrypi.com/raspbian \
+                    --keyring /usr/share/keyrings/raspbian-archive-keyring.gpg \
+                    --arch armhf --components main \
+                    --emit-lock apt-locks/prometheus-node-exporter.lock
 
 Exit codes:
   0   success
@@ -491,6 +580,12 @@ when isMainModule:
   except AptIndexParseError as ex:
     stderr.writeLine "index parse error: ", ex.msg
     quit(4)
+  except EAptClosureLock as ex:
+    stderr.writeLine "closure lock error: ", ex.msg
+    quit(4)
+  except SourceSpecError as ex:
+    stderr.writeLine "error: ", ex.msg
+    quit(1)
   except AptClosureError as ex:
     stderr.writeLine "closure resolution error: ", ex.msg, " (root=",
       ex.rootPackage, " missing=", ex.missingDep, ")"

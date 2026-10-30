@@ -29,6 +29,7 @@
 import std/[strutils, tables]
 
 import repro_elevation
+import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
 
@@ -171,6 +172,8 @@ type
       suName*: string                  ## unit file name, e.g. foo.service
       suContent*: string
       suEnabled*: bool                 ## desired: enabled --now (default true)
+      suAptClosureLock*: string        ## a `package(apt)` closure lock, or ""
+                                       ## (Add-On spec §8.3; `apt_closure`)
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -536,6 +539,24 @@ proc parseDependsOn(kindTag, raw: string): seq[ResourceDependency] =
         "' has a malformed 'depends_on' entry '" & t &
         "' — both kind and name must be non-empty")
     result.add((kind: depKind, name: depName))
+
+proc renderedSystemUnitContent*(r: SystemResource): string =
+  ## The unit-file bytes a `systemd.systemUnit` resource installs. Without
+  ## a closure lock that is `suContent` verbatim. With one, the unit's
+  ## `[Service]` section gains the closure's `BindReadOnlyPaths=` /
+  ## `InaccessiblePaths=` lines (Add-On spec §8.3 item 5), naming the
+  ## prefix the lock pins under the Add-On store root — the path the host's
+  ## driver realises before it writes the unit. A malformed lock or a unit
+  ## that cannot carry the binding is an `ESystemProfileInvalid`.
+  doAssert r.kind == srkSystemdSystemUnit
+  if r.suAptClosureLock.len == 0:
+    return r.suContent
+  try:
+    renderUnitForAptClosureLock(r.suContent, r.suAptClosureLock,
+      unitName = r.suName)
+  except EAptClosureLock, EAptClosureUnit:
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
+      getCurrentExceptionMsg())
 
 proc parseSystemProfile*(text: string): SystemProfile =
   ## Parse the declarative `system.nim` text into a `SystemProfile`.
@@ -906,7 +927,12 @@ proc parseSystemProfile*(text: string): SystemProfile =
         suContent: need("content"),
         suEnabled:
           if "enabled" in fields: parseBoolField("enabled",
-            fields["enabled"]) else: true)
+            fields["enabled"]) else: true,
+        suAptClosureLock:
+          if "aptClosureLock" in fields: fields["aptClosureLock"] else: "")
+      # Refuse an unbindable unit or a malformed lock at parse time, not
+      # at apply time on the host.
+      discard renderedSystemUnitContent(res)
     of srkLaunchdSystemDaemon:
       let programArgs =
         if "programArgs" in rawFields:
@@ -1381,8 +1407,9 @@ proc toPrivilegedOperation*(r: SystemResource;
   of srkSystemdSystemUnit:
     PrivilegedOperation(kind: pokSystemdSystemUnit, address: r.address,
       suName: r.suName,
-      suContent: r.suContent,
+      suContent: renderedSystemUnitContent(r),
       suEnabled: r.suEnabled,
+      suAptClosureLock: r.suAptClosureLock,
       suDestroy: destroy)
   of srkLaunchdSystemDaemon:
     PrivilegedOperation(kind: pokLaunchdSystemDaemon, address: r.address,

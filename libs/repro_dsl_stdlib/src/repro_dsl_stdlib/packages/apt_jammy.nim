@@ -377,7 +377,7 @@ proc walkStoreRelFiles(root: string): seq[string] =
 
 proc tarExtractDataMember(debPath, debBytes, memberName: string;
                           memberOffset, memberSize: int;
-                          outDir: string) =
+                          outDir: string; noSameOwner = false) =
   ## Write the ``data.tar.*`` payload to a temp file then invoke ``tar``
   ## to extract it into ``outDir``. Raises ``AptExtractError`` if tar
   ## fails.
@@ -452,7 +452,14 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   # and no reader of this code could tell. ``resolveHostTar`` reproduces that
   # order explicitly so the binary that runs is named, without changing WHICH
   # binary runs; see ``repro_core/host_tar``.
-  let tailArgs = [flag, tarOperand(tarInput), "-C", tarOperand(outDir)]
+  # ``noSameOwner``: extract as the invoking user even when that is root,
+  # instead of restoring the archive's owners (whose ids need not mean the
+  # same on this host). GNU tar then also drops setuid/setgid, because it
+  # never restores those bits on a file whose owner it did not restore.
+  # bsdtar accepts the same flag.
+  let ownerArgs = if noSameOwner: @["--no-same-owner"] else: @[]
+  let tailArgs = ownerArgs & @[flag, tarOperand(tarInput), "-C",
+    tarOperand(outDir)]
   let hostTar = resolveHostTar()
   if hostTar.exe.len == 0:
     var e = newException(AptExtractError,
@@ -491,6 +498,29 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
     e.exitCode = res.exitCode
     e.stderrText = res.output
     raise e
+
+proc extractDebDataInto*(debPath: string; outDir: string;
+                         noSameOwner = false) =
+  ## Unpack the ``data.tar.*`` member of the ``.deb`` at ``debPath`` into
+  ## the EXISTING directory ``outDir``, through the same ``ar`` parser and
+  ## ``tar`` invocation ``extractAptDeb`` uses. Nothing is verified here and
+  ## nothing outside ``outDir`` is written by this proc; the caller owns
+  ## digest verification and the destination's lifecycle.
+  ##
+  ## This is the archive-level primitive shared by every ``.deb``
+  ## consumer, independent of suite, architecture or archive: the
+  ## Add-On ``package(apt, ...)`` closure realiser
+  ## (``apt_closure.realiseAptClosure``) unpacks armhf trixie ``.deb``s
+  ## with it exactly as this module unpacks amd64 jammy ones. Raises
+  ## ``AptExtractError`` when the archive has no data member or ``tar``
+  ## fails.
+  if not dirExists(outDir):
+    raise newException(IOError, "extraction directory missing: " & outDir)
+  let debBytes = readFile(debPath)
+  let members = parseDebMembers(debBytes)
+  let (memName, memOff, memSize) = locateDataMember(debBytes, members)
+  tarExtractDataMember(debPath, debBytes, memName, memOff, memSize, outDir,
+    noSameOwner)
 
 proc extractAptDeb*(debPath: string;
                     sha256: string;

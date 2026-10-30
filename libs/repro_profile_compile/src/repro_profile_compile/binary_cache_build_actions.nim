@@ -51,11 +51,11 @@ type
     keyPath*: string
     certPath*: string
     keypairOk*: bool
-      ## True when a signing keypair (env-supplied or auto-generated)
-      ## is available. Publish-on-miss needs it; a false value means we
-      ## can still SUBSTITUTE (verification only needs the server's
-      ## signature) but cannot PUBLISH — a cache miss then builds
-      ## locally without re-populating the cache (loud, non-fatal).
+      ## True when an operator-provisioned signing keypair
+      ## (`REPRO_BINARY_CACHE_KEY_PATH` + `REPRO_BINARY_CACHE_CERT_PATH`,
+      ## both present) is available. Publish-on-miss needs it; a false
+      ## value means we can still SUBSTITUTE but do not PUBLISH — a cache
+      ## miss then builds locally without re-populating the cache.
 
   SubstituteAttempt* = object
     ## Result of one `trySubstituteBuildAction` call.
@@ -66,12 +66,17 @@ type
 proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
   ## Read `REPRO_BINARY_CACHE_URL` (+ key/cert paths). When the URL is
   ## unset the cache is NOT configured and the result's other fields are
-  ## empty — the dispatcher's local-build path is unchanged. When the
-  ## URL is set we resolve a signing keypair the same way the engine's
-  ## `BinaryCachePublisher` does: env-supplied key/cert if both exist,
-  ## otherwise an auto-generated ECDSA-P256 keypair under the per-OS
-  ## config dir. A keypair failure is non-fatal (substitute still works;
-  ## publish-on-miss is skipped).
+  ## empty — the dispatcher's local-build path is unchanged.
+  ##
+  ## Publishing needs an operator-provisioned keypair. This path used to
+  ## mint one on the fly (as the engine's `BinaryCachePublisher` does for
+  ## developer builds), which made every host that ran an apply a cache
+  ## publisher under a key it invented. An apply runs privileged and its
+  ## outputs are consumed by other hosts' applies, so an invented key is
+  ## either useless (nobody trusts it) or dangerous (a consumer that
+  ## trusts unanchored keys accepts anything it signs). Only a keypair
+  ## somebody deliberately provisioned is used; without one, a miss
+  ## builds locally and publishes nothing.
   let url = getEnv("REPRO_BINARY_CACHE_URL", "")
   if url.len == 0:
     result.configured = false
@@ -88,16 +93,7 @@ proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
     result.certPath = certPath
     result.keypairOk = true
   else:
-    let dir = bcEnginePublisher.defaultAutoCredentialDir()
-    var resolvedKey, resolvedCert: string
-    let outcome = bcEnginePublisher.ensureAutoProducerKeypair(
-      dir, resolvedKey, resolvedCert)
-    if outcome.ok:
-      result.keyPath = resolvedKey
-      result.certPath = resolvedCert
-      result.keypairOk = true
-    else:
-      result.keypairOk = false
+    result.keypairOk = false
 
 # ---------------------------------------------------------------------------
 # Content-addressable cache identity for a build-action edge.
@@ -289,9 +285,20 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
   let extractDir = scratchRoot / "extract"
   try:
     createDir(store)
-    let endpoint = SubstituteEndpoint(
-      baseUrl: cfg.endpoint, trustedSigners: @[], priority: 0)
-    let res = substituteInProcess(entryHex, store, @[endpoint])
+    # The SAME trust-enforcing endpoint list the `substitute` CLI uses:
+    # every configured cache with its trusted producer keys, plus the
+    # `REPRO_BINARY_CACHE_URL` back-compat cache, which trusts only the
+    # producer cert at `REPRO_BINARY_CACHE_CERT_PATH` when one is
+    # provisioned. A cache with no trusted key is never substituted from
+    # (default-untrusted). Building the endpoint by hand with an empty key
+    # list, as this path once did, accepted an entry signed by ANY key --
+    # including one an attacker minted -- and materialised its outputs
+    # into a privileged apply.
+    let endpoints = loadEndpoints()
+    if endpoints.len == 0:
+      result.reason = "no binary cache endpoint is configured"
+      return
+    let res = substituteInProcess(entryHex, store, endpoints)
     if not res.ok or res.outcomes.len == 0:
       result.reason = "cache miss for " & entryHex &
         (if res.reason.len > 0: ": " & res.reason else: "")

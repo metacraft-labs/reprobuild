@@ -20,6 +20,8 @@
 
 import std/[strutils]
 
+import repro_dsl_stdlib/packages/apt_closure
+
 import ./errors
 import ./os_system_parse
 import ./posix_system_parse
@@ -527,6 +529,11 @@ type
       suContent*: string
       suEnabled*: bool
       suDestroy*: bool
+      suAptClosureLock*: string
+        ## A `package(apt)` closure lock (`repro-apt-closure-lock v1`), or
+        ## "". When set, `suContent` is the RENDERED unit (it already binds
+        ## the closure prefix) and the driver realises the closure into
+        ## `/repro/store` before writing it. ReproOS Add-On Mode §8.3.
     of pokLaunchdSystemDaemon:
       ## Write `/Library/LaunchDaemons/<sdaLabel>.plist` and
       ## `launchctl bootstrap system`. `sdaProgramArgs` is the daemon
@@ -2254,6 +2261,20 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not isSafeUnitName(op.suName):
       return "systemd.systemUnit name '" & op.suName &
         "' is not a safe single-segment unit file name"
+    if op.suAptClosureLock.len > 0 and not op.suDestroy:
+      # The broker realises whatever the lock pins, as root, so the lock
+      # must parse and the unit must bind exactly the prefix it pins: a
+      # frame whose content and lock disagree is refused before any write.
+      try:
+        let lock = parseAptClosureLock(op.suAptClosureLock)
+        let bindLine = aptClosureUnitDirectives(
+          aptClosurePrefixPath(AddOnSystemStoreRoot, lock))[0]
+        if bindLine notin op.suContent.splitLines():
+          return "systemd.systemUnit '" & op.suName &
+            "' content does not carry its closure binding '" &
+            bindLine & "'"
+      except EAptClosureLock as ex:
+        return "systemd.systemUnit '" & op.suName & "': " & ex.msg
   of pokLaunchdSystemDaemon:
     if not isSafeDaemonLabel(op.sdaLabel):
       return "launchd.systemDaemon label '" & op.sdaLabel &
