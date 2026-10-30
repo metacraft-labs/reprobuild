@@ -257,9 +257,11 @@ suite "M5 — deploy agent converges from a signed manifest":
       defer: delEnv("REPRO_CACHES_CONFIG")
       putEnv("REPRO_BINARY_CACHE_KEY_PATH", tmpRoot / "publisher" / "key")
       putEnv("REPRO_BINARY_CACHE_CERT_PATH", tmpRoot / "publisher" / "cert")
+      putEnv("REPRO_APPLY_PUBLISH", "1")  # the apply-time publish opt-in
       defer:
         delEnv("REPRO_BINARY_CACHE_KEY_PATH")
         delEnv("REPRO_BINARY_CACHE_CERT_PATH")
+        delEnv("REPRO_APPLY_PUBLISH")
 
       let signer = peerAuth.generateKeypair()
       let anchors = anchorsFromKeypairs(@[signer.publicKey])
