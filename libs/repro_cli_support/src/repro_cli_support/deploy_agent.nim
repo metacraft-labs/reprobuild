@@ -45,6 +45,8 @@ import std/[os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
+import repro_deploy_agent/secrets
+import repro_peer_cache/auth as peerAuth
 import repro_home_intent/host_identity
 import repro_profile
 import ./infra
@@ -111,8 +113,56 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
         raise newException(ValueError, "unknown flag: " & a)
     inc i
 
+proc runDeployAgentKeygen(args: seq[string]): int =
+  ## ``repro deploy-agent keygen --secrets-key <FILE>`` — generate the
+  ## sealed-secrets recipient key ON THIS HOST (or read the one already
+  ## there) and print its public half, for the producer to seal to
+  ## (Deploy-Agent.md §Recipient key generation). The private key never
+  ## leaves the host.
+  ##
+  ## stdout carries exactly one line, the 130-char hex public key, so the
+  ## command composes (`... keygen --secrets-key K > recipient-pubkey.txt`);
+  ## what happened goes to stderr. Exit 0 on success, 1 when the key cannot
+  ## be created or the existing one is unusable, 2 on a usage error.
+  var keyPath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--secrets-key":
+      inc i
+      if i >= args.len:
+        stderr.writeLine("repro deploy-agent keygen: --secrets-key requires a value")
+        return 2
+      keyPath = args[i]
+    elif a.startsWith("--secrets-key="):
+      keyPath = a["--secrets-key=".len .. ^1]
+    else:
+      stderr.writeLine("repro deploy-agent keygen: unknown argument: " & a)
+      return 2
+    inc i
+  if keyPath.len == 0:
+    stderr.writeLine("repro deploy-agent keygen: --secrets-key <FILE> is required")
+    return 2
+  let key =
+    try:
+      ensureRecipientKeyFile(keyPath)
+    except CatchableError as e:
+      stderr.writeLine("repro deploy-agent keygen: " & e.msg)
+      return 1
+  if key.created:
+    stderr.writeLine("repro deploy-agent keygen: generated a new recipient key at " &
+      keyPath)
+  else:
+    stderr.writeLine("repro deploy-agent keygen: kept the existing recipient key at " &
+      keyPath)
+  echo peerAuth.publicKeyHex(key.publicKey)
+  0
+
 proc runDeployAgentCommand*(args: seq[string]): int =
-  ## ``repro deploy-agent`` entrypoint (one tick).
+  ## ``repro deploy-agent`` entrypoint (one tick), or ``repro deploy-agent
+  ## keygen`` (see `runDeployAgentKeygen`).
+  if args.len > 0 and args[0] == "keygen":
+    return runDeployAgentKeygen(args[1 .. ^1])
   var flags: DeployAgentFlags
   try:
     flags = parseFlags(args)

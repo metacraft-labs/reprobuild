@@ -2830,6 +2830,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_deploy_agent_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_recipient_keygen.nim",
+    binary: "build/test-bin/t_repro_deploy_agent_recipient_keygen",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_deploy_agent_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_history.nim",
     binary: "build/test-bin/t_repro_deploy_agent_records_tick_history",
     defines: @[],

@@ -399,3 +399,123 @@ proc materialiseSecrets*(files: seq[SecretFile]; destDir: string): seq[string] =
       setFilePermissions(staged, perms)
     moveFile(staged, dest)
     result.add(dest)
+
+# ---------------------------------------------------------------------------
+# The recipient key, generated on the host.
+#
+# Deploy-Agent.md §Sealed secrets (v2) / §Recipient key generation and
+# ReproOS-Add-On-Mode.md §6.2 step 3: the private half is GENERATED ON THE
+# TARGET and only its public half is printed, for the producer to seal to. The
+# key then never travels, which is why this lives in the agent rather than in
+# a producer-side tool.
+# ---------------------------------------------------------------------------
+
+type
+  RecipientKey* = object
+    publicKey*: peerAuth.PublicKeyBytes
+    created*: bool
+      ## True when this call generated the key; false when an existing key
+      ## file was read.
+
+when defined(posix):
+  import std/posix
+
+  proc posixFail(what, path: string): ref SecretsError =
+    newException(SecretsError, what & " " & path & ": " &
+      osErrorMsg(osLastError()))
+
+  proc writeAllFd(fd: cint; text: string; path: string) =
+    var off = 0
+    while off < text.len:
+      let n = posix.write(fd, unsafeAddr text[off], text.len - off)
+      if n < 0:
+        if errno == EINTR: continue
+        raise posixFail("cannot write", path)
+      off += n
+
+  proc createKeyFileExclusive(path, text: string) =
+    ## Publish `text` at `path` with mode 0400, never replacing anything.
+    ##
+    ## Written to a sibling temporary created 0400 from the start (so the
+    ## scalar is never on disk with a wider mode, whatever the umask), flushed,
+    ## and then HARD-LINKED onto `path`: `link(2)` fails with EEXIST rather
+    ## than overwrite, so a concurrent or repeated keygen cannot replace a key
+    ## a producer may already have sealed to, and a crash leaves either no key
+    ## or a complete one -- never a truncated file at the real name.
+    let tmp = path & ".keygen-" & $getpid()
+    let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or O_CLOEXEC,
+                        Mode(0o400))
+    if fd < 0:
+      raise posixFail("cannot create", tmp)
+    try:
+      writeAllFd(fd, text, tmp)
+      if fsync(fd) != 0:
+        raise posixFail("cannot flush", tmp)
+    except CatchableError:
+      discard posix.close(fd)
+      discard posix.unlink(tmp.cstring)
+      raise
+    if posix.close(fd) != 0:
+      discard posix.unlink(tmp.cstring)
+      raise posixFail("cannot close", tmp)
+    let linked = posix.link(tmp.cstring, path.cstring)
+    let linkErr = osLastError()
+    discard posix.unlink(tmp.cstring)
+    if linked != 0:
+      raise newException(SecretsError, "cannot publish recipient key at " &
+        path & ": " & osErrorMsg(linkErr))
+    let dirFd = posix.open(parentDir(path).cstring, O_RDONLY or O_CLOEXEC)
+    if dirFd >= 0:
+      discard fsync(dirFd)
+      discard posix.close(dirFd)
+
+proc ensureRecipientKeyFile*(path: string): RecipientKey =
+  ## The deploy agent's sealed-secrets recipient key at `path`: generated
+  ## when the file does not exist, read when it does. Never replaces a key.
+  ##
+  ## The file is the `ecdsa-p256:<hex>` form `--secrets-key` loads
+  ## (`peerAuth.loadPrivateKeyFile`). On POSIX it is created mode 0400, and a
+  ## missing parent directory is created 0700. Securing an EXISTING parent is
+  ## the deployment's job (Add-On bootstrap creates `/var/lib/repro/agent`
+  ## 0700 root), exactly as for the secrets directory.
+  ##
+  ## An existing key is only read, but it is refused when it does not parse
+  ## (rather than regenerated: a producer may already be sealing to it, and a
+  ## silent new key would make every later manifest undecryptable with no
+  ## reason given) and, on POSIX, when group or others can read it.
+  if path.len == 0:
+    raise newException(SecretsError, "recipient key path is empty")
+  if fileExists(path):
+    when defined(posix):
+      var st: Stat
+      if stat(path.cstring, st) != 0:
+        raise posixFail("cannot stat", path)
+      if (st.st_mode.int and 0o077) != 0:
+        raise newException(SecretsError, "recipient key " & path &
+          " is accessible to group or others (mode " &
+          toOct(st.st_mode.int and 0o777, 3) & "); the private key must " &
+          "be readable by its owner only -- chmod 0400 it, or rotate it " &
+          "if others may have read it")
+    let priv =
+      try:
+        peerAuth.loadPrivateKeyFile(path)
+      except CatchableError as e:
+        raise newException(SecretsError, "existing recipient key " & path &
+          " is not usable (" & e.msg & "); it is left untouched -- remove " &
+          "it explicitly to generate a new one")
+    return RecipientKey(publicKey: peerAuth.derivePublicKey(priv),
+                        created: false)
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+    when defined(posix):
+      setFilePermissions(parent, {fpUserRead, fpUserWrite, fpUserExec})
+  let kp = peerAuth.generateKeypair()
+  let text = peerAuth.privateKeyFileText(kp.privateKey)
+  when defined(posix):
+    createKeyFileExclusive(path, text)
+  else:
+    # Windows: the directory's DACL governs who may read the key (see
+    # `materialiseSecrets`); POSIX mode bits have no meaning here.
+    writeFile(path, text)
+  RecipientKey(publicKey: kp.publicKey, created: true)
