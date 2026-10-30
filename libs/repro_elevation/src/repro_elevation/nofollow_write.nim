@@ -30,6 +30,13 @@
 
 import std/[os, posix, strutils]
 
+const NoFollowMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's compile-time falsifying mutations (``repro_addon/
+  ## mutations``): ``nofollow-write-skips-fsync`` builds this writer
+  ## without its fsyncs, so the crash gate can show it detects their loss.
+const SkipsFsync = NoFollowMutation == "nofollow-write-skips-fsync"
+
+
 type
   NoFollowError* = object of CatchableError
   SymlinkOnPath* = object of NoFollowError
@@ -135,9 +142,16 @@ proc createDirsNoFollow*(path: string; mode = 0o755) =
         raiseSymlinkOnPath(cur)
       if err != OSErrorCode(ENOENT):
         raiseOSError(err, "open directory " & cur)
-      if c_mkdirat(fd, seg.cstring, Mode(mode)) != 0 and
-          osLastError() != OSErrorCode(EEXIST):
-        raiseOSError(osLastError(), "mkdir " & cur)
+      if c_mkdirat(fd, seg.cstring, Mode(mode)) != 0:
+        if osLastError() != OSErrorCode(EEXIST):
+          raiseOSError(osLastError(), "mkdir " & cur)
+      else:
+        # The new directory's entry is durable only once its parent is
+        # synced; a file later written inside it would otherwise survive a
+        # power cut in a directory that did not.
+        when not SkipsFsync:
+          if fsync(fd) != 0:
+            raiseOSError(osLastError(), "fsync the parent of " & cur)
       next = c_openat(fd, seg.cstring,
                       O_RDONLY or oDirectory or oNoFollow or oCloExec, Mode(0))
       if next < 0:
@@ -184,6 +198,7 @@ proc syncDir(dirfd: cint; what: string) =
   ## this they can disagree after a power cut. See fsync(2), "Calling
   ## fsync() does not necessarily ensure that the entry in the directory
   ## containing the file has also reached disk".
+  when SkipsFsync: return
   if fsync(dirfd) != 0:
     raiseOSError(osLastError(), "fsync directory of " & what)
 
@@ -231,8 +246,9 @@ proc writeFileNoFollow*(path, content: string; mode: int;
     if uid >= 0 or gid >= 0:
       if fchown(fd, Uid(uid), Gid(gid)) != 0:
         raiseOSError(osLastError(), "fchown " & path)
-    if fsync(fd) != 0:
-      raiseOSError(osLastError(), "fsync " & path)
+    when not SkipsFsync:
+      if fsync(fd) != 0:
+        raiseOSError(osLastError(), "fsync " & path)
   finally:
     discard posix.close(fd)
   if c_renameat(dirfd, tmp.cstring, dirfd, leaf.cstring) != 0:

@@ -13,7 +13,7 @@
 import std/[net, os, strutils, times, unittest]
 
 import repro_infra
-import repro_addon/[health, ledger, pending_plan, seams, static_tree]
+import repro_addon/[health, host_exec, ledger, pending_plan, seams, static_tree]
 
 let root = getTempDir() / ("repro-addon-recovery-" & $getCurrentProcessId())
 removeDir(root)
@@ -173,7 +173,7 @@ suite "confirm (§7.5)":
 
   test "passes as soon as every check has passed once":
     var rounds = 0
-    let runner: ProbeRunner = proc(c: UnitHealthCheck): string =
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =
       if c.unit == "a.service": inc rounds
       if rounds >= 3: "" else: "not yet"
     let o = confirm(checks, 10, runner, pollMs = 50)
@@ -182,7 +182,7 @@ suite "confirm (§7.5)":
     check o.waitedSec < 5
 
   test "fails at the timeout with each check's last reason":
-    let runner: ProbeRunner = proc(c: UnitHealthCheck): string =
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =
       if c.unit == "a.service": "" else: "connection refused"
     let start = epochTime()
     let o = confirm(checks, 1, runner, pollMs = 100)
@@ -191,9 +191,48 @@ suite "confirm (§7.5)":
     check o.failures == @["b.service tcp:127.0.0.1:1: connection refused"]
     check took >= 1.0 and took < 3.0
 
+  test "a probe gets the remaining budget and a hung one cannot extend the wait":
+    var budgets: seq[int]
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =
+      budgets.add(budgetSec)
+      sleep(budgetSec * 1000)       # a check that hangs for all it is given
+      "hung"
+    let start = epochTime()
+    let o = confirm(checks[0 .. 0], 2, runner, pollMs = 50)
+    check not o.passed
+    check epochTime() - start < 3.5
+    check budgets.len >= 1 and budgets[0] <= 2
+
+  test "the bounded host-tool runner kills at the deadline":
+    let start = epochTime()
+    let r = runHostTool(["/bin/sh", "-c", "while :; do :; done"], timeoutSec = 1)
+    check r.exitCode == 124
+    check epochTime() - start < 5
+
   test "no checks: confirmed at once":
-    let runner: ProbeRunner = proc(c: UnitHealthCheck): string = "never"
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string = "never"
     check confirm(@[], 60, runner).passed
+
+suite "the commit point (§7.2 step 9)":
+  test "current moves by one rename and leaves no temporary link":
+    let sd = root / "state"
+    createDir(sd / "generations" / "g1")
+    createDir(sd / "generations" / "g2")
+    writeCurrentGenerationId(sd, "g1")
+    check readCurrentGenerationId(sd) == "g1"
+    var points: seq[string]
+    writeCurrentGenerationId(sd, "g2", onPoint = proc(p: string) = points.add(p))
+    check readCurrentGenerationId(sd) == "g2"
+    check points.len == 0          # the product build has no window to name
+    for kind, path in walkDir(sd):
+      check "tmp" notin extractFilename(path)
+
+  test "the apply lock records the boot it was taken in":
+    let rec = ApplyLockRecord(pid: 42, acquiredAt: 1, heartbeatAt: 1,
+                              bootId: currentBootId())
+    check currentBootId().len > 0
+    check parseApplyLockRecord(renderApplyLockRecord(rec)).bootId == currentBootId()
+    check parseApplyLockRecord("pid=42\nacquired=1\n").bootId == ""
 
 suite "test seams":
   test "a product build has no pause point":

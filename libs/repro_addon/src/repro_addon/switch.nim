@@ -236,20 +236,31 @@ proc predecessorsOf*(unit, content: string; extraDropIns: openArray[string]):
     let id = resolveUnitName(n)
     if id != unit and id notin result: result.add(id)
 
-proc systemctlVerb(verb, unit: string) =
-  let r = if unit.len > 0: runSystemctl([verb, "--", unit])
-          else: runSystemctl([verb])
+proc systemctlVerb(verb, unit: string; noBlock = false) =
+  ## ``noBlock`` queues the job and returns (``--no-block``): a recovery at
+  ## boot must never wait on a job the boot transaction orders after
+  ## something else.
+  var args = @[verb]
+  if noBlock: args.add("--no-block")
+  if unit.len > 0:
+    args.add("--")
+    args.add(unit)
+  let r = runSystemctl(args)
   if r.exitCode != 0:
     raise newException(SwitchError, "systemctl " & verb & " " & unit & ": " &
       r.output.strip())
 
 proc stopUnit*(unit: string) = systemctlVerb("stop", unit)
-proc startUnit*(unit: string) = systemctlVerb("start", unit)
-proc restartUnit*(unit: string) = systemctlVerb("restart", unit)
-proc tryRestartUnit*(unit: string) = systemctlVerb("try-restart", unit)
+proc startUnit*(unit: string; noBlock = false) =
+  systemctlVerb("start", unit, noBlock)
+proc restartUnit*(unit: string; noBlock = false) =
+  systemctlVerb("restart", unit, noBlock)
+proc tryRestartUnit*(unit: string; noBlock = false) =
+  systemctlVerb("try-restart", unit, noBlock)
   ## Restart only if active (§7.3: "a restart applies only to a unit that
   ## is active when the apply reaches it").
-proc reloadUnit*(unit: string) = systemctlVerb("reload", unit)
+proc reloadUnit*(unit: string; noBlock = false) =
+  systemctlVerb("reload", unit, noBlock)
 proc disableUnit*(unit: string) = systemctlVerb("disable", unit)
 
 proc daemonReload*() = systemctlVerb("daemon-reload", "")
@@ -372,7 +383,7 @@ proc runPreStop*(ts: seq[Transition];
       except CatchableError: discard   # already gone, or not a leaf
 
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
-               notRunning: openArray[string] = []) =
+               notRunning: openArray[string] = []; noBlock = false) =
   ## Step 7: start, restart or reload in the order given. A
   ## ``stop-start`` unit was stopped in step 2 and is started here. Every
   ## start of an exclusive unit first confirms the unit and its
@@ -399,10 +410,10 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
         # activation from here on runs the new definition.
         for trig in t.triggers:
           if trig in paused and unitProperty(trig, "LoadState") == "loaded":
-            startUnit(trig)
-        startUnit(t.unit)
-    of tvRestart: tryRestartUnit(t.unit)
-    of tvReload: reloadUnit(t.unit)
+            startUnit(trig, noBlock)
+        startUnit(t.unit, noBlock)
+    of tvRestart: tryRestartUnit(t.unit, noBlock)
+    of tvReload: reloadUnit(t.unit, noBlock)
     else: discard
   when mutated("exclusive-as-plain-restart"):
     # The deferred stops of the exclusive units this generation removes:

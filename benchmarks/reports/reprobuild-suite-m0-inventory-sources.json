@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2492,
+    "nimTestBinaries": 2493,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 698,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2532
+    "testEntries": 2533
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1446,7 +1446,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1378,
+      "integration": 1379,
       "platform/destructive": 157,
       "pure unit": 698,
       "unclassified": 281
@@ -1657,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2492,
+    "nimTestBinaryCount": 2493,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2532
+    "testEntryCount": 2533
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8080,8 +8080,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_crash_recovery_records.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 16,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27277,6 +27277,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_recovery_never_holds_up_boot",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

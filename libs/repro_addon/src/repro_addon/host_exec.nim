@@ -17,7 +17,7 @@
 ## terminal, which is what keeps the fingerprint and the preflight plan
 ## deterministic.
 
-import std/[os, osproc, streams, strtabs, strutils]
+import std/[os, osproc, streams, strtabs, strutils, times]
 
 import repro_core/ambient_execution
 import repro_core/process_close
@@ -68,10 +68,14 @@ proc resolveHostTool*(candidates: openArray[string]): string =
   ""
 
 proc runHostTool*(argv: openArray[string]; mergeStderr = true;
-                  input = ""): HostToolResult =
+                  input = ""; timeoutSec = 0): HostToolResult =
   ## Run ``argv[0]`` (an absolute path) with ``argv[1..]`` and capture its
   ## output. Raises ``HostToolMissing`` when ``argv[0]`` does not exist,
   ## so a caller can tell "the tool said no" from "there is no tool".
+  ## ``timeoutSec > 0`` bounds the wall time: the process is killed at the
+  ## deadline and the result has exit code 124 (``timeout(1)``'s), with
+  ## whatever it printed. Its output must fit the pipe buffer while it
+  ## runs (the bounded callers -- health probes -- print a line).
   if argv.len == 0:
     raise newException(ValueError, "runHostTool: empty argv")
   if not argv[0].isAbsolute:
@@ -88,8 +92,24 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
     if input.len > 0:
       p.inputStream.write(input)
     p.inputStream.close()
-    result.output = p.outputStream.readAll()
-    result.exitCode = p.waitForExit()
+    if timeoutSec > 0:
+      let deadline = epochTime() + timeoutSec.float
+      var code = p.peekExitCode()
+      while code == -1 and epochTime() < deadline:
+        sleep(50)
+        code = p.peekExitCode()
+      if code == -1:
+        p.kill()
+        discard p.waitForExit()
+        result.output = p.outputStream.readAll() &
+          "\n(killed after " & $timeoutSec & " s)"
+        result.exitCode = 124
+        return
+      result.output = p.outputStream.readAll()
+      result.exitCode = code
+    else:
+      result.output = p.outputStream.readAll()
+      result.exitCode = p.waitForExit()
   finally:
     closeProcessOnce(p)
 
@@ -104,7 +124,8 @@ proc runSystemctl*(args: openArray[string]): HostToolResult =
   for a in args: argv.add(a)
   runHostTool(argv)
 
-proc runInHostNamespaces*(argv: openArray[string]): HostToolResult =
+proc runInHostNamespaces*(argv: openArray[string];
+                          timeoutSec = 0): HostToolResult =
   ## Run ``argv`` as a transient unit of the host's systemd and return its
   ## output: PID 1 spawns it in the host's namespaces whatever namespaces
   ## this process is confined to (the apply unit's ``PrivateNetwork=yes``,
@@ -116,9 +137,15 @@ proc runInHostNamespaces*(argv: openArray[string]): HostToolResult =
     raise newException(HostToolMissing, "systemd-run not found at " &
       SystemdRunCandidates.join(" or "))
   var full = @[exe, "--quiet", "--wait", "--pipe", "--collect",
-               "--service-type=exec", "--"]
+               "--service-type=exec"]
+  if timeoutSec > 0:
+    # Bounded twice: PID 1 stops the transient unit at its deadline, and
+    # this process stops waiting for systemd-run a second later in case
+    # PID 1 itself does not answer.
+    full.add("--property=RuntimeMaxSec=" & $timeoutSec)
+  full.add("--")
   for a in argv: full.add(a)
-  runHostTool(full)
+  runHostTool(full, timeoutSec = (if timeoutSec > 0: timeoutSec + 1 else: 0))
 
 proc sysctlNormalize*(key: string): string =
   ## systemd's normal form of a sysctl key (``sysctl_normalize``, see

@@ -153,6 +153,23 @@ type
     reproExe*: string
       ## The binary that runs the TCP and HTTP health probes in the host's
       ## namespaces; "" means this process's own executable.
+    revertOf*: string
+      ## A revert: the failed attempt's generation id, recorded in the
+      ## marker so a recovery that finishes the revert can record the
+      ## attempt as rolled back.
+    revertReason*: string
+    replayOf*: string
+      ## A replay: the purpose of the switch it replays (a replayed revert
+      ## is still a revert: it does not revert itself).
+    recordOnly*: bool
+      ## Replay a failed switch's writes only to bring its ledger up to
+      ## date with what it wrote, never starting or committing anything:
+      ## what a revert needs when the switch failed before it recorded
+      ## its ledger.
+    nonBlockingStarts*: bool
+      ## Queue step 7's jobs without waiting for them (``--no-block``): a
+      ## recovery at boot, which must never wait on the boot transaction.
+      ## The confirm step still waits for the health checks.
 
   AddonApplyResult* = object
     generationId*: string
@@ -524,6 +541,14 @@ proc alreadyRestored(e: LedgerEntry): bool =
   ## A replay finds the removals the interrupted switch already made:
   ## an object that had preserved bytes now carries exactly them (its
   ## restore ran), or is gone when it was the add-on's creation.
+  if e.class in {lcEtcFile, lcUnit, lcDropIn} and e.replaced.len > 0 and
+      fileExists(e.path) and not symlinkExists(e.path):
+    # The base's own file is back (a diversion's removal moved the
+    # package's copy back, or a restore ran): what the path held before the
+    # add-on, by the digest the ledger recorded.
+    let at = e.replaced.find("sha256:")
+    if at >= 0 and sha256OfFile(e.path) == e.replaced[at + 7 .. ^1].strip():
+      return true
   if e.preserved.len == 0: return false
   if e.replaced.len == 0:
     return not fileExists(e.path) and not symlinkExists(e.path)
@@ -1238,15 +1263,21 @@ proc undoPreStop(m: PendingMarker): seq[string] =
       startUnit(u)
     except CatchableError as e: result.add(e.msg)
 
-proc recordRolledBack(stateDir, attempt, backTo, asGeneration, why: string;
-                      healthFailed: bool) =
+proc recordRolledBack*(stateDir, attempt, backTo, asGeneration, why: string;
+                       healthFailed: bool) =
   ## The attempt's apply log records the outcome (§7.5: "records the
   ## apply as rolled-back"), so `repro system audit` and the evidence
   ## trail show it under the id the attempt would have had.
-  if attempt.len == 0: return
-  appendAuditRecord(applyLogPath(stateDir, attempt), AuditRecord(
+  ## An attempt that failed before it was allocated an id has no log of
+  ## its own: the record goes to the log of the generation the revert
+  ## committed instead, so it is never lost.
+  let logGen = if attempt.len > 0: attempt else: asGeneration
+  if logGen.len == 0: return
+  appendAuditRecord(applyLogPath(stateDir, logGen), AuditRecord(
     timestamp: getTime().toUnix(), operationKind: "addon.switch",
-    resourceAddress: "generation:" & attempt, outcome: "rolled-back",
+    resourceAddress: "generation:" &
+      (if attempt.len > 0: attempt else: "(an attempt with no id)"),
+    outcome: "rolled-back",
     diagnostic: (if healthFailed: "confirm failed: " else: "") & why &
       " -> back to " & backTo & " as " & asGeneration,
     recordClass: AuditClassLiveState))
@@ -1327,7 +1358,8 @@ proc recordingRefusals(inner: PreWriteGuard;
         sink[].incl(op.address)
     why
 
-proc seamedGuard(stateDir: string; inner: PreWriteGuard): PreWriteGuard =
+proc seamedGuard(stateDir, seamPrefix: string;
+                 inner: PreWriteGuard): PreWriteGuard =
   ## The pre-write guard, with the two write-time test seams in front of
   ## it (a no-op outside a ``-d:reproAddonTestSeams`` build).
   when AddonTestSeams:
@@ -1335,11 +1367,38 @@ proc seamedGuard(stateDir: string; inner: PreWriteGuard): PreWriteGuard =
     result = proc(op: PrivilegedOperation): string {.gcsafe.} =
       {.cast(gcsafe).}:
         inc calls
-        if calls == 1: seamPause(stateDir, "pre-write")
-        elif calls == 2: seamPause(stateDir, "mid-write")
+        if calls == 1: seamPause(stateDir, seamPrefix & "pre-write")
+        elif calls == 2: seamPause(stateDir, seamPrefix & "mid-write")
         inner(op)
   else:
     inner
+
+const
+  SysusersCandidates = ["/usr/bin/systemd-sysusers", "/bin/systemd-sysusers"]
+  TmpfilesCandidates = ["/usr/bin/systemd-tmpfiles", "/bin/systemd-tmpfiles"]
+
+proc rerunFragmentTool(candidates: openArray[string]; fragment: string;
+                       extra = "") =
+  ## Run the host's ``systemd-sysusers`` / ``systemd-tmpfiles`` on one
+  ## fragment (a replay's step 6; see there).
+  let exe = resolveHostTool(candidates)
+  if exe.len == 0:
+    raise newException(AddonApplyError, "no " & candidates[0] & " on this host")
+  var argv = @[exe]
+  if extra.len > 0: argv.add(extra)
+  argv.add(fragment)
+  let r = runHostTool(argv)
+  if r.exitCode != 0:
+    raise newException(AddonApplyError, argv.join(" ") & ": " & r.output.strip())
+
+proc seamCommitPoint(stateDir, seamPrefix: string): proc(point: string) {.gcsafe.} =
+  ## The infra commit's crash points, as seams (nil outside a seam build).
+  when AddonTestSeams:
+    result = proc(point: string) {.gcsafe.} =
+      {.cast(gcsafe).}:
+        seamPause(stateDir, seamPrefix & point)
+  else:
+    nil
 
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
@@ -1401,6 +1460,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   if opts.replay:
     replayPlan = readPendingPlan(stateDir)
   let replaying = opts.replay
+  # A revert's seam points are named apart, so a gate can stop the revert
+  # of a failed switch rather than the switch itself.
+  let seamPrefix = if purpose == "revert": "revert:" else: ""
   let ownText =
     if replaying: replayPlan.targetOwnText
     elif opts.ownProfileText.len > 0: opts.ownProfileText
@@ -1554,6 +1616,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for r in own.resources & userResources:
     if r.kind == srkSystemdSystemUnit and r.suEnabled:
       enabledUnits.incl(r.suName)
+  # Units the profile itself declares: a drop-in of one of them is checked
+  # through the unit's own target (its decision and its write-time
+  # re-check), not through a second target on the unit file the same
+  # switch is about to rewrite -- that one would refuse the drop-in for
+  # the switch's own write of its unit.
+  var declaredUnits = initHashSet[string]()
+  for r in own.resources:
+    if r.kind == srkSystemdSystemUnit: declaredUnits.incl(r.suName)
+  for r in userResources:
+    if r.kind == srkSystemdSystemUnit: declaredUnits.incl(r.suName)
   for i in 0 ..< userResources.len:
     var r = userResources[i]
     var p = ResourcePlan(r: r)
@@ -1561,7 +1633,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     let saved = if replaying: replayPlan.savedPlanFor(r.address)
                 else: (found: false, plan: SavedPlan())
     if saved.found: overlaySaved(p, saved.plan)
-    if r.kind == srkSystemdSystemDropIn and not saved.found:
+    if r.kind == srkSystemdSystemDropIn and not saved.found and
+        r.diUnit notin declaredUnits:
       # The unit a drop-in modifies must be provided by something; the
       # unit rows decide that (a package unit, or a hand-written one), the
       # file rows the drop-in file itself.
@@ -1849,7 +1922,26 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         restoresInstead = true
       if e.class == lcSysctl:
         removedSysctl.add(e)
-    if not restoresInstead:
+    # A replay finds a removal the interrupted switch already made: every
+    # file of the resource gone, or the base's own file back in its place.
+    # Its destroy is not dispatched again -- a destroy of the base's file
+    # would remove what the removal had just put back.
+    var alreadyRemoved = false
+    if replaying:
+      alreadyRemoved = true
+      for e in entries:
+        if e.class in {lcEtcFile, lcUnit, lcDropIn}:
+          let gone = not fileExists(e.path) and not symlinkExists(e.path)
+          if not gone and not alreadyRestored(e):
+            alreadyRemoved = false
+        elif e.class == lcDiversion:
+          if fileExists(DpkgDiversionsDb) and
+              readDpkgDiversion(readFile(DpkgDiversionsDb), e.path).present:
+            alreadyRemoved = false
+        elif e.class in {lcSysctl, lcInstallLink, lcMount}:
+          if e.class == lcInstallLink and symlinkExists(e.path):
+            alreadyRemoved = false
+    if not restoresInstead and not alreadyRemoved:
       destroy.add(r)
     if r.kind == srkSystemdSystemUnit and restoresInstead:
       # Handed back to the base (a `replace`d package unit, an adopted or
@@ -2197,14 +2289,21 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved))
   var marker = PendingMarker(fromGeneration: committedPrevious,
     newStatic: treePath, previousStatic: previousStatic, step: ssRealise,
-    status: "in-progress", purpose: purpose)
+    status: "in-progress", purpose: purpose, revertOf: opts.revertOf,
+    revertReason: opts.revertReason)
   if replaying:
     # What the interrupted switch stopped and disabled stays on record
     # until this one finishes.
     marker.stopped = priorMarker.stopped
     marker.disabled = priorMarker.disabled
+    # A replayed revert stays a revert, with what it reverts, so a crash
+    # during the replay is recovered as one too.
+    if priorMarker.purpose.len > 0: marker.purpose = priorMarker.purpose
+    if marker.revertOf.len == 0: marker.revertOf = priorMarker.revertOf
+    if marker.revertReason.len == 0:
+      marker.revertReason = priorMarker.revertReason
   writePendingMarker(stateDir, marker)
-  seamPause(stateDir, "step-1")
+  seamPause(stateDir, seamPrefix & "step-1")
 
   # The drivers' materialisation policy: a link target for every
   # link-form object, and the switch orchestrates every transition.
@@ -2310,13 +2409,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       notRunning = pre.notRunning
       marker.step = ssPreStop
       writePendingMarker(stateDir, marker)
-      seamPause(stateDir, "step-2")
+      seamPause(stateDir, seamPrefix & "step-2")
       # The flip is durable (its directory is synced) before the marker
       # says it happened; recovery never trusts the step anyway.
       flipStatic(treePath)
       marker.step = ssFlip
       writePendingMarker(stateDir, marker)
-      seamPause(stateDir, "step-3")
+      seamPause(stateDir, seamPrefix & "step-3")
 
   proc afterSet(generationId: string; clean: bool): seq[string] {.gcsafe.} =
     ## Steps 4 and 5 were the drivers'; now 6 (fragment tools), 7 (start)
@@ -2330,16 +2429,29 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       marker.attempt = generationId
       marker.step = ssReconcileLinks
       writePendingMarker(stateDir, marker)
-      seamPause(stateDir, "step-4")
+      seamPause(stateDir, seamPrefix & "step-4")
       marker.step = ssCopies
       writePendingMarker(stateDir, marker)
-      seamPause(stateDir, "step-5")
+      seamPause(stateDir, seamPrefix & "step-5")
       # --- Step 6: the fragment tools. The sysusers and tmpfiles tools
       # ran per changed fragment inside their drivers; what is left is
       # the daemon reload, sysctl through the host's own service, and
       # the kernel values a removed sysctl resource leaves behind.
       try:
-        if anyUnitChange: daemonReload()
+        if anyUnitChange or replaying: daemonReload()
+        if replaying:
+          # The interrupted switch may have written a sysusers or tmpfiles
+          # fragment and died before its tool ran; the replay finds the
+          # fragment already carrying the planned bytes, so its driver has
+          # nothing to write and would not run the tool. Both tools are
+          # idempotent: they run again for every such fragment.
+          for p in plans:
+            if p.targetPath.len == 0 or not fileExists(p.targetPath): continue
+            case p.r.kind
+            of srkLinuxSysusersEntry: rerunFragmentTool(SysusersCandidates, p.targetPath)
+            of srkLinuxTmpfilesRule:
+              rerunFragmentTool(TmpfilesCandidates, p.targetPath, "--create")
+            else: discard
         for e in removedSysctl:
           if readLiveSysctl(e.path) == e.value:
             restoreSysctlValue(e.path, e.replaced)
@@ -2350,17 +2462,34 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         problems.add("step 6 (fragment tools): " & ex.msg)
       marker.step = ssFragmentTools
       writePendingMarker(stateDir, marker)
-      seamPause(stateDir, "step-6")
+      seamPause(stateDir, seamPrefix & "step-6")
+      if opts.recordOnly:
+        # Only the record of what the failed switch wrote is wanted: no
+        # start, no confirm, no commit.
+        problems.add("replayed to record what the failed switch wrote; " &
+          "not committed")
       # --- Step 7: start. Only after a clean step 4-6: a half-written
       # generation is not started.
       if clean and problems.len == 0:
         try:
-          runStart(transitions, paused, notRunning)
+          runStart(transitions, paused, notRunning,
+                   noBlock = opts.nonBlockingStarts)
+          # A replay or a revert plans the units the interrupted switch had
+          # running as running, but `try-restart` leaves a unit the crash
+          # (or step 2) stopped stopped: start every such unit of this
+          # generation that is down -- never one whose control group is
+          # still populated (an exclusive instance that would not die).
+          if assumeActive.len > 0:
+            for r in composed.resources:
+              if r.kind == srkSystemdSystemUnit and r.suName in assumeActive and
+                  not unitIsActive(r.suName) and
+                  unitAliveness(r.suName) == uaEmpty:
+                startUnit(r.suName, opts.nonBlockingStarts)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
       marker.step = ssStart
       writePendingMarker(stateDir, marker)
-      seamPause(stateDir, "step-7")
+      seamPause(stateDir, seamPrefix & "step-7")
       # --- Step 8: confirm (§7.5). Every step above reported no problem,
       # and every declared health check passed within confirmTimeout,
       # counted from the end of step 7. A failure withholds the commit,
@@ -2516,7 +2645,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         writeFileAtomic(gd / AddonOwnProfileName, ownText, 0o600)
         writeFileAtomic(gd / AddonUserProfileName,
                         renderProfileText(storedNow), 0o600)
-      seamPause(stateDir, "step-8")
+      seamPause(stateDir, seamPrefix & "step-8")
       problems
 
   var infraError = ""
@@ -2524,8 +2653,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     result.infra = runInfraApply(composedText, ApplyOptions(
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
       noPreview: true, elevationMode: emBroker,
-      extraDestroyResources: destroy,
-      preWriteGuard: seamedGuard(stateDir,
+      extraDestroyResources: destroy, destroysFirst: true,
+      preWriteGuard: seamedGuard(stateDir, seamPrefix,
         (when mutated("pause-before-write-no-recheck"):
            # Falsifying build of the write-time re-check gate: every
            # operation is let through unchecked.
@@ -2536,7 +2665,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       addOnDispatch: policy,
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
                               afterPrivilegedSet: afterSet,
-                              commitOnlyWhenClean: true)))
+                              commitOnlyWhenClean: true,
+                              commitPoint: seamCommitPoint(stateDir,
+                                                           seamPrefix))))
     if result.infra.errorCount > 0 or result.infra.driftCount > 0:
       infraError = "repro infra apply reported " & $result.infra.errorCount &
         " error(s) and " & $result.infra.driftCount & " drift finding(s):\n  " &
@@ -2579,10 +2710,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     marker.status = "failed"
     marker.detail = why
     writePendingMarker(stateDir, marker)
-    if purpose == "revert" or committedPrevious.len == 0:
-      # A revert that fails, or a first switch (bootstrap) with nothing to
-      # go back to: the marker stays for `repro system addon recover` and
-      # the re-assert unit.
+    let isRevert = purpose == "revert" or opts.replayOf == "revert"
+    if isRevert or opts.recordOnly or committedPrevious.len == 0:
+      # A revert that fails, a record-only replay (its caller reverts), or
+      # a first switch (bootstrap) with nothing to go back to (owner
+      # decision 23): the marker stays for `repro system addon recover` and
+      # the re-assert unit, which reports `degraded`.
       raise newException(AddonApplyError, why &
         "\nthe generation was not committed; `current` still names " &
         (if committedPrevious.len > 0: committedPrevious else: "no generation") &
@@ -2598,12 +2731,28 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     let back = revertProfiles(stateDir, committedPrevious, ownText,
                               previousUserText)
     var reverted: AddonApplyResult
+    if hookGeneration.len == 0 and not replaying:
+      # The switch failed before it recorded what it wrote (an exception
+      # out of the infra apply ahead of the ledger): the ledger copy still
+      # describes the old generation while the host carries some of the
+      # new one's writes, and a revert planned from it could neither
+      # recognise them nor remove them. The failed switch is first replayed
+      # from its write-ahead plan -- its writes only, no start, no commit --
+      # which brings the ledger copy up to date with what it wrote; the
+      # revert then plans from that.
+      try:
+        discard runAddonApply(AddonApplyOptions(stateDir: stateDir,
+          hostIdentity: opts.hostIdentity, replay: true, recordOnly: true,
+          driver: opts.driver, reproExe: opts.reproExe))
+      except AddonApplyError:
+        discard        # the record-only replay always "fails" to commit
     try:
       reverted = runAddonApply(AddonApplyOptions(stateDir: stateDir,
         hostIdentity: opts.hostIdentity, ownProfileText: back.own,
         userProfileText: back.user, driver: opts.driver, purpose: "revert",
         assumeActive: assume, retention: opts.retention,
-        reproExe: opts.reproExe))
+        reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
+        nonBlockingStarts: opts.nonBlockingStarts))
     except CatchableError as e:
       raise newException(AddonApplyError, why & "\nthe switch could not " &
         "be rolled back to " & committedPrevious & " either: " & e.msg &
@@ -2641,7 +2790,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     held = heldGenerations(stateDir, newLedger, result.generationId))
   marker.step = ssCommit
   writePendingMarker(stateDir, marker)
-  seamPause(stateDir, "step-9")
+  seamPause(stateDir, seamPrefix & "step-9")
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
 

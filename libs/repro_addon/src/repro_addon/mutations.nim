@@ -85,6 +85,18 @@
 ##                                            finds it (a negative control
 ##                                            of the hard-reset gate: the
 ##                                            resets must leave mixtures)
+## ``addon-target-in-boot-order``             ``repro-addon.target`` keeps its
+##                                            default dependencies, so
+##                                            multi-user.target waits for
+##                                            it and for the recovery
+##                                            ordered before it
+## ``current-remove-then-create``             the commit removes `current`
+##                                            before creating the new link
+##                                            (``repro_infra/state_dir``)
+## ``nofollow-write-skips-fsync``             the no-follow writer neither
+##                                            fsyncs the file it writes nor
+##                                            its directory
+##                                            (``repro_elevation``)
 ## ``path-based-write-follows-links``         the drivers write managed
 ##                                            files with a path-based
 ##                                            ``open``, following any link
@@ -136,7 +148,10 @@ const
                           "reassert-skips-recovery",
                           "pause-before-write",
                           "pause-before-write-no-recheck",
-                          "install-targets-ignore-alias-also"]
+                          "install-targets-ignore-alias-also",
+                          "addon-target-in-boot-order",
+                          "current-remove-then-create",
+                          "nofollow-write-skips-fsync"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

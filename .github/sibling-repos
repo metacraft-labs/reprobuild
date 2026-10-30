@@ -297,3 +297,12 @@ metacraft-github-actions=dev
 # fetches exactly the pinned commit. scripts/check_workflows.sh refuses a
 # sibling pin that differs from the .pin file, so move both together.
 test-certificates-spec=9ebbcb3c9e539f294dbe125dea87c445b270523e
+
+# gosti (the VM lifecycle library; repository `gosti`, checked out in the
+# workspace as `gosti` or, before the rename, `vm-harness`). The add-on mode
+# VM gates (tests/e2e/addon/) drive QEMU and Incus guests through it, and
+# their crash gate needs the QMP hard reset it gained at this revision.
+# Pinned to the SAME 40-hex revision as tests/e2e/addon/gosti.pin, which
+# scripts/run_addon_gate.sh resolves and every gate record carries; move
+# both together.
+gosti=105a3ca36b6897b06040c1ec581fb39132b8cfa7

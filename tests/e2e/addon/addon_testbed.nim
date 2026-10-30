@@ -540,12 +540,26 @@ proc installArtefact*(g: Guest; dir = "/root/addon"): tuple[repro, sha: string] 
 proc takeFingerprint*(g: Guest; repro: string): string =
   g.run(repro & " system addon fingerprint")
 
+proc gostiHead*(): string
+
 proc writeRecord*(gate: string; data: JsonNode): string =
   ## Persist one gate run's record (what ran, against what, the verdict).
+  if not data.hasKey("gosti"): data["gosti"] = %gostiHead()
   let path = recordsDir() / (gate & "-" & now().format("yyyyMMdd'T'HHmmss") &
                              "-" & $getCurrentProcessId() & ".json")
   writeFile(path, pretty(data) & "\n")
   path
+
+proc gostiHead*(): string =
+  ## The gosti revision this gate compiled against (``GOSTI_SRC``'s
+  ## checkout), recorded with every gate run.
+  let src = getEnv("GOSTI_SRC")
+  if src.len == 0: return "unknown"
+  let (o, c) = execCmdEx("git -C " & quoteShell(src / "..") & " rev-parse HEAD")
+  result = if c == 0: o.strip() else: "unknown"
+  let (s, _) = execCmdEx("git -C " & quoteShell(src / "..") &
+                         " status --porcelain --untracked-files=no")
+  if s.strip().len > 0: result.add("-dirty")
 
 proc gitHead*(): string =
   let (o, c) = execCmdEx("git -C " & quoteShell(reproRoot()) &
@@ -799,3 +813,21 @@ proc waitReasserted*(g: Guest; timeoutSec = 900): string =
     if st in ["active", "failed"]: break
     sleep(1000)
   g.exec("journalctl -b -o cat --no-pager -u repro-addon-reassert.service").stdout
+
+proc hardResetAfterSettle*(g: Guest; settleSec = 8) =
+  ## Hard-reset a guest whose switch is paused, after ``settleSec``: long
+  ## enough for ext4's journal (committed every 5 s) to make the switch's
+  ## renames durable, too short for the kernel's writeback (dirty data
+  ## older than 30 s) to have written file contents nobody fsynced. A
+  ## missing fsync shows in exactly this window -- the file is renamed into
+  ## place on disk, its bytes are not -- which is why the gate waits for it
+  ## rather than resetting at once (when nothing at all has reached the
+  ## disk and a missing fsync would look like a clean earlier state).
+  sleep(settleSec * 1000)
+  g.hardReset()
+
+proc rolledBackRecords*(g: Guest): int =
+  ## How many `rolled-back` records the generations' apply logs hold.
+  let r = g.exec("cat /var/lib/repro/system/generations/*/log/apply.log " &
+                 "2>/dev/null | grep -a -o rolled-back | wc -l")
+  try: parseInt(r.stdout.strip()) except ValueError: -1

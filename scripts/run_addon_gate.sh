@@ -16,8 +16,9 @@
 #                         switch's pause points (seams.nim); the gates that
 #                         stop a switch mid-way set it themselves in
 #                         GatesNeedingSeams below
-#   GOSTI_SRC             gosti's src directory (default: ../gosti/src, else
-#                         ../vm-harness/src)
+#   GOSTI_SRC             a gosti checkout's src directory, at the pinned
+#                         revision (default: a detached worktree of the pin
+#                         from ../gosti or ../vm-harness, under build/)
 #
 # The static add-on binary for each base's architecture is (re)built first,
 # so a gate always runs the binary of the tree it was invoked from. Records
@@ -38,15 +39,34 @@ for b in "${base_list[@]}"; do
   case " ${arches[*]-} " in *" $a "*) ;; *) arches+=("$a") ;; esac
 done
 
-if [ -z "${GOSTI_SRC:-}" ]; then
-  for c in ../gosti/src ../vm-harness/src; do
-    if [ -f "$c/gosti.nim" ]; then GOSTI_SRC="$(cd "$c" && pwd)"; break; fi
+# gosti is pinned (tests/e2e/addon/gosti.pin, mirrored in
+# .github/sibling-repos): a gate runs against that revision and no other.
+# GOSTI_SRC may name a checkout's src directory, but only one at the pinned
+# revision; otherwise the pinned revision is checked out from a sibling
+# gosti (or vm-harness) clone into a detached worktree under build/, and
+# that is what the gate compiles against.
+gosti_pin="$(tr -d ' \n' < tests/e2e/addon/gosti.pin)"
+if [ -n "${GOSTI_SRC:-}" ]; then
+  have="$(git -C "$GOSTI_SRC/.." rev-parse HEAD 2>/dev/null || true)"
+  [ "$have" = "$gosti_pin" ] || {
+    echo "run_addon_gate: GOSTI_SRC is at ${have:-?}, not the pinned $gosti_pin (tests/e2e/addon/gosti.pin)" >&2
+    exit 2
+  }
+else
+  clone=""
+  for c in ../gosti ../vm-harness; do
+    if [ -d "$c/.git" ] || [ -f "$c/.git" ]; then clone="$(cd "$c" && pwd)"; break; fi
   done
+  [ -n "$clone" ] || { echo "run_addon_gate: no gosti clone beside reprobuild" >&2; exit 2; }
+  git -C "$clone" cat-file -e "$gosti_pin^{commit}" 2>/dev/null ||
+    git -C "$clone" fetch -q origin "$gosti_pin" || {
+      echo "run_addon_gate: $clone cannot provide the pinned gosti $gosti_pin" >&2; exit 2; }
+  wt="$(pwd)/build/gosti-$gosti_pin"
+  if [ ! -f "$wt/src/gosti.nim" ]; then
+    git -C "$clone" worktree add -q --detach "$wt" "$gosti_pin"
+  fi
+  GOSTI_SRC="$wt/src"
 fi
-[ -n "${GOSTI_SRC:-}" ] && [ -f "$GOSTI_SRC/gosti.nim" ] || {
-  echo "run_addon_gate: gosti not found; check it out beside reprobuild or set GOSTI_SRC" >&2
-  exit 2
-}
 export GOSTI_SRC
 if [ "${REPRO_ADDON_BACKEND:-}" != "incus" ]; then
   for tool in qemu-system-x86_64 qemu-img ssh ssh-keygen scp curl; do
@@ -61,7 +81,7 @@ mutation_args=()
 [ -n "${REPRO_ADDON_MUTATION:-}" ] && mutation_args=(--mutation "$REPRO_ADDON_MUTATION")
 # Gates that pause a switch at a step need the seam build.
 case "$test" in
-  t_e2e_addon_hard_reset_at_every_step)
+  t_e2e_addon_hard_reset_at_every_step|t_e2e_addon_recovery_never_holds_up_boot|t_e2e_addon_confirm_or_revert)
     export REPRO_ADDON_TEST_SEAMS=1 ;;
 esac
 [ "${REPRO_ADDON_TEST_SEAMS:-}" = "1" ] && mutation_args+=(--test-seams)

@@ -11751,6 +11751,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_addon_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim",
+    binary: "build/test-bin/t_e2e_addon_recovery_never_holds_up_boot",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim",
     binary: "build/test-bin/t_e2e_addon_removal_respects_ledger",
     defines: @[],

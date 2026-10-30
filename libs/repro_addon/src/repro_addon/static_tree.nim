@@ -19,7 +19,7 @@
 ## rewritten atomically at every step boundary; a host that reboots
 ## mid-switch finds exactly the last step completed.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, posix, strutils]
 
 import repro_core
 import repro_local_store/store
@@ -69,7 +69,10 @@ type
                               ## for this switch (known from step 4 on); the
                               ## switch committed iff `current` names it
     purpose*: string          ## apply | revert | rollback | replay: what
-                              ## started this switch (diagnostic only)
+                              ## started this switch
+    revertOf*: string         ## a revert: the failed attempt's generation id
+                              ## ("" when it failed before it had one)
+    revertReason*: string     ## a revert: why the attempt failed
 
 const
   StaticLinkPath* = "/etc/repro/static"
@@ -113,6 +116,39 @@ proc staticTreePath*(files: seq[StaticFile]): string =
     provenanceChecksum = "tree:" & sha256Hex(treeManifest(files)))
   StoreRoot / prefixRelativePath(StaticTreePackage, ReprobuildVersion, id)
 
+proc treeCarries(path: string; files: seq[StaticFile]): bool =
+  ## Every file of the tree at ``path`` carries its planned bytes.
+  for f in files:
+    let at = path / staticRelPath(f.path)
+    if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
+      return false
+  true
+
+proc fsyncPath(path: string) =
+  ## fsync one file or directory by path (opened read-only).
+  let fd = posix.open(path.cstring, O_RDONLY or O_CLOEXEC)
+  if fd < 0:
+    raiseOSError(osLastError(), "open " & path & " to sync it")
+  try:
+    if posix.fsync(fd) != 0:
+      raiseOSError(osLastError(), "fsync " & path)
+  finally:
+    discard posix.close(fd)
+
+proc syncTree*(root: string) =
+  ## Make a realised tree durable: every file and directory in it, and the
+  ## directories its name lives in. The store writes a prefix without
+  ## syncing it (a build cache can recompute what a crash loses), but the
+  ## static tree is what `/etc` reads through once the flip happens: a
+  ## power cut after the flip must not bring the tree back empty.
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+    fsyncPath(path)
+  var d = root
+  while d.len > StoreRoot.len and d.startsWith(StoreRoot):
+    fsyncPath(d)
+    d = parentDir(d)
+  fsyncPath(StoreRoot)
+
 proc realiseStaticTree*(files: seq[StaticFile]):
     tuple[path: string; prefixId: PrefixIdBytes] =
   ## Step 1 of the switch: put the tree into the store (an existing
@@ -121,6 +157,12 @@ proc realiseStaticTree*(files: seq[StaticFile]):
   ## the generation is committed. Every file is 0644; a secret never
   ## travels this way (the ``secret`` class is tmpfs-only, §10.3).
   enterWritableStoreView()
+  # A tree a crash tore (the store had indexed it, its files never reached
+  # the disk) is removed so the store re-materialises it: the store
+  # re-creates a prefix whose directory is gone.
+  let planned = staticTreePath(files)
+  if dirExists(planned) and not treeCarries(planned, files):
+    removeDir(planned)
   var s = openStore(StoreRoot)
   defer: s.close()
   let staging = StoreRoot / "tmp" / ("addon-etc-" & $getCurrentProcessId())
@@ -148,6 +190,7 @@ proc realiseStaticTree*(files: seq[StaticFile]):
     if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
       raise newException(StaticTreeError, "static tree file " & at &
         " does not carry the planned bytes")
+  syncTree(result.path)
   s.registerRoot(PendingRootId, rkProfile)
   s.attachPrefixToRoot(PendingRootId, result.prefixId)
 
@@ -235,6 +278,8 @@ proc render*(m: PendingMarker): string =
   result.add("disabled\t" & escapeField(m.disabled.join(" ")) & "\n")
   result.add("attempt\t" & escapeField(m.attempt) & "\n")
   result.add("purpose\t" & escapeField(m.purpose) & "\n")
+  result.add("revert-of\t" & escapeField(m.revertOf) & "\n")
+  result.add("revert-reason\t" & escapeField(m.revertReason) & "\n")
 
 proc parsePendingMarker*(text: string): PendingMarker =
   let lines = text.splitLines()
@@ -268,6 +313,8 @@ proc parsePendingMarker*(text: string): PendingMarker =
       if v.len > 0: result.disabled = v.split(' ')
     of "attempt": result.attempt = v
     of "purpose": result.purpose = v
+    of "revert-of": result.revertOf = v
+    of "revert-reason": result.revertReason = v
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
 

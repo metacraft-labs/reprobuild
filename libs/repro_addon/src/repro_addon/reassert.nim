@@ -40,11 +40,14 @@ import ./addon_apply
 import ./collision
 import ./generation0
 import ./host_exec
+import ./etc_write
 import ./ledger
 import ./mutations
 import ./pending_plan
 import ./static_tree
+import ./seams
 import ./switch
+import ./transitions
 
 type
   ReassertReport* = object
@@ -65,34 +68,55 @@ type
 proc reassertReportPath*(stateDir: string): string =
   stateDir / "addon" / "reassert-report"
 
-proc bootTimeUnix(): int64 =
-  ## The kernel's boot time (``btime`` in ``/proc/stat``), 0 if unknown.
-  try:
-    for line in readFile("/proc/stat").splitLines():
-      if line.startsWith("btime "):
-        return parseBiggestInt(line[6 .. ^1].strip())
-  except CatchableError:
-    discard
-  0
-
 proc takeLockForRecovery(stateDir: string; atBoot: bool):
     tuple[ok: bool; why: string] =
   ## The apply lock, so recovery never races a live switch. A lock taken
-  ## before this boot belongs to a switch the reset killed, whatever its
-  ## PID now names (PIDs are reused across boots): at boot it is taken
-  ## over. A lock held by a live switch of this boot is respected.
+  ## in a previous boot (its recorded boot id is not this boot's) belongs
+  ## to a switch the reset or power cut killed, whatever process its PID
+  ## now names, and is taken over. A lock of this boot is respected unless
+  ## its owner is dead; a lock that records no boot id (written by an
+  ## older release) is judged by its owner's liveness alone.
   if applyLockOwner(stateDir) == getCurrentProcessId():
     return (true, "")
   var policy = defaultApplyLockPolicy()
   let rec = readApplyLockRecord(stateDir)
-  if atBoot and rec.present and rec.acquiredAt > 0:
-    let bt = bootTimeUnix()
-    if bt > 0 and rec.acquiredAt < bt:
-      policy.forceUnlock = true
+  let boot = currentBootId()
+  if atBoot and rec.present and rec.bootId.len > 0 and boot.len > 0 and
+      rec.bootId != boot:
+    policy.forceUnlock = true
   let acq = tryAcquireApplyLock(stateDir, policy)
   if acq.acquired: (true, "")
   else: (false, "a switch is in progress (" &
          describeApplyLockHolder(stateDir, acq) & "); not touching it")
+
+proc removeTempLeftovers*(stateDir: string): seq[string] =
+  ## A writer the crash interrupted between creating its temporary file
+  ## and renaming it leaves ``.<leaf>.repro-tmp-<pid>`` (the no-follow
+  ## writer's naming) or ``current.tmp-<pid>`` behind. Recovery removes
+  ## exactly those names, without following anything, in the directories
+  ## the interrupted switch wrote to (its plan's targets), ``/etc/repro``
+  ## and the state directory.
+  var dirs = @["/etc/repro", stateDir, stateDir / "addon"]
+  if hasPendingPlan(stateDir):
+    try:
+      for sp in readPendingPlan(stateDir).plans:
+        if sp.targetPath.len > 0 and parentDir(sp.targetPath) notin dirs:
+          dirs.add(parentDir(sp.targetPath))
+    except CatchableError:
+      discard
+  for d in dirs:
+    if not dirExists(d) or symlinkExists(d): continue
+    for kind, path in walkDir(d):
+      if kind notin {pcFile, pcLinkToFile, pcLinkToDir}: continue
+      let name = extractFilename(path)
+      let ours = (name.startsWith(".") and ".repro-tmp-" in name and
+                  name.rsplit('-', 1)[^1].allCharsInSet(Digits)) or
+                 (d == stateDir and name.startsWith("current.tmp-"))
+      if ours:
+        try:
+          if removeLeafNoFollow(path): result.add(path)
+        except CatchableError:
+          discard
 
 proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   ## The switch committed (``current`` names its attempt) and died in
@@ -110,7 +134,18 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
     previous = readGenerationEnvelope(pointerPath(stateDir, current)).previousGenerationId
   except CatchableError:
     discard
-  discard pruneGenerationRoots(current, previous)
+  # The same derivation as every other retention run: a generation a
+  # running managed unit may still run from is held (spec §5.2). The
+  # invocation table was not updated by the interrupted commit, so it can
+  # only name an older generation for a unit -- which keeps more, never
+  # less.
+  let ledger = if fileExists(lp): readLedger(lp)
+               else: readLedger(ledgerCopyPath(stateDir))
+  discard pruneGenerationRoots(current, previous,
+    held = heldGenerations(stateDir, ledger, current))
+  if m.purpose == "revert":
+    recordRolledBack(stateDir, m.revertOf, m.fromGeneration, current,
+      m.revertReason & " (the revert was finished at boot)", false)
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
   @["the switch to " & current & " had committed (marker at step " &
@@ -144,6 +179,11 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   if not lock.ok:
     return RecoveryOutcome(resolved: false, lines: @[lock.why])
   defer: releaseApplyLock(stateDir)
+  seamPauseRecovery(stateDir)
+  let swept = removeTempLeftovers(stateDir)
+  if swept.len > 0:
+    result.lines.add("removed temporary files a crashed write left: " &
+      swept.join(", "))
   let header = "interrupted switch from " &
     (if m.fromGeneration.len > 0: m.fromGeneration else: "(no generation)") &
     " (" & (if m.purpose.len > 0: m.purpose else: "apply") & ", status " &
@@ -160,7 +200,14 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   try:
     let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
       hostIdentity: readHostname(), replay: true, purpose: "replay",
-      driver: driver))
+      driver: driver, nonBlockingStarts: atBoot,
+      revertOf: m.revertOf, revertReason: m.revertReason,
+      replayOf: m.purpose))
+    if m.purpose == "revert":
+      # The interrupted switch was itself the revert of a failed one: the
+      # failed attempt is recorded rolled-back now that the revert is done.
+      recordRolledBack(stateDir, m.revertOf, m.fromGeneration, r.generationId,
+        m.revertReason & " (the revert was finished at boot)", false)
     result.lines.add("replayed the switch to completion: generation " &
       r.generationId & " is current")
     result.resolved = true
@@ -184,7 +231,9 @@ proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
     if e.class != lcUnit or not e.started or e.unit.len == 0 or
         e.unit.endsWith(".target") or e.unit == ReassertUnit:
       continue
-    if not unitIsActive(e.unit):
+    # Never a second instance beside one that is still alive (an
+    # exclusive unit whose stop could not be confirmed, §7.3).
+    if not unitIsActive(e.unit) and unitAliveness(e.unit) == uaEmpty:
       let args = if noBlock: @["start", "--no-block", "--", e.unit]
                  else: @["start", "--", e.unit]
       let r = runSystemctl(args)

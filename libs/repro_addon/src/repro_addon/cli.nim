@@ -53,6 +53,7 @@ import ./linux_fs
 import ./health
 import ./preflight
 import ./reassert
+import ./seams
 import ./static_tree
 import ./store_root
 import ./switch
@@ -335,6 +336,10 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
       return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
+    of "test-sleep":
+      # Seam builds only (a hanging command in the store, for a gate);
+      # every other build answers with a usage error.
+      return seamSleepCommand(rest)
     of "probe":
       if rest.len != 1:
         raise newException(ValueError, "probe needs one healthCheck value")
@@ -365,6 +370,10 @@ proc runAddonCli*(args: seq[string]): int =
       # /repro is.
       let current = readCurrentGenerationId(DefaultStateDir)
       stdout.write("current generation: " & current & "\n")
+      # The generation `current` was switched from, as its envelope
+      # records: the history `repro system rollback` walks.
+      stdout.write("previous generation: " &
+        previousGenerationOf(DefaultStateDir, current) & "\n")
       stdout.write("static tree: " &
         (if readStaticTarget().len > 0: readStaticTarget() else: "none") & "\n")
       if hasPendingMarker(DefaultStateDir):

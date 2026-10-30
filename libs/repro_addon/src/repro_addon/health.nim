@@ -18,7 +18,7 @@
 ## in the host's namespaces, the way step 6 reads sysctl values. The TCP
 ## and HTTP probes are this binary's own ``repro system addon probe``.
 
-import std/[net, os, strutils, times]
+import std/[math, net, os, strutils, times]
 
 import repro_infra/profile
 
@@ -36,8 +36,10 @@ type
     failures*: seq[string]       ## "<unit> <check>: <last reason>"
     waitedSec*: float
 
-  ProbeRunner* = proc(c: UnitHealthCheck): string {.closure.}
-    ## "" when the check passes now, otherwise why not.
+  ProbeRunner* = proc(c: UnitHealthCheck; budgetSec: int): string {.closure.}
+    ## "" when the check passes now, otherwise why not. ``budgetSec`` is
+    ## what is left of ``confirmTimeout``: the probe must return within it
+    ## (a hung command is killed, never waited for).
 
 const
   ProbeConnectTimeoutMs* = 2000
@@ -100,7 +102,7 @@ proc runProbe*(spec: HealthCheckSpec): string =
 proc hostNamespaceProbe*(reproExe: string): ProbeRunner =
   ## The production runner: ``active`` asks systemd; the rest run as a
   ## transient unit in the host's namespaces.
-  result = proc(c: UnitHealthCheck): string =
+  result = proc(c: UnitHealthCheck; budgetSec: int): string =
     case c.spec.kind
     of hcActive:
       let st = unitActiveState(c.unit)
@@ -108,13 +110,13 @@ proc hostNamespaceProbe*(reproExe: string): ProbeRunner =
     of hcTcp, hcHttp:
       try:
         let r = runInHostNamespaces([reproExe, "system", "addon", "probe",
-                                     c.raw])
+                                     c.raw], timeoutSec = max(1, budgetSec))
         if r.exitCode == 0: "" else: r.output.strip()
       except CatchableError as e:
         "probe could not run: " & e.msg
     of hcExec:
       try:
-        let r = runInHostNamespaces(c.spec.argv)
+        let r = runInHostNamespaces(c.spec.argv, timeoutSec = max(1, budgetSec))
         if r.exitCode == 0: ""
         else: "exited " & $r.exitCode & ": " & r.output.strip()
       except CatchableError as e:
@@ -132,7 +134,12 @@ proc confirm*(checks: seq[UnitHealthCheck]; timeoutSec: int;
   while true:
     var still: seq[UnitHealthCheck]
     for c in pending:
-      let why = probe(c)
+      let remaining = deadline - epochTime()
+      let left = int(ceil(remaining))
+      if remaining <= 0:
+        still.add(c)
+        continue
+      let why = probe(c, left)
       if why.len > 0:
         still.add(c)
         for i, x in checks:
@@ -148,4 +155,6 @@ proc confirm*(checks: seq[UnitHealthCheck]; timeoutSec: int;
   for c in pending:
     for i, x in checks:
       if x.unit == c.unit and x.raw == c.raw:
-        result.failures.add(c.unit & " " & c.raw & ": " & lastWhy[i])
+        let why = if lastWhy[i].len > 0: lastWhy[i]
+                  else: "no answer within confirmTimeout"
+        result.failures.add(c.unit & " " & c.raw & ": " & why)

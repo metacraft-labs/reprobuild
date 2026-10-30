@@ -67,6 +67,8 @@ const
   AddonTarget* = "repro-addon.target"
   StoreMountUnit* = "repro-store.mount"
   ReassertUnit* = "repro-addon-reassert.service"
+  ReassertReportPath* = "/var/lib/repro/system/addon/reassert-report"
+    ## Where the re-assert unit's last report is kept (``reassert.nim``).
   AptHookPath* = "/etc/apt/apt.conf.d/90repro-addon"
   ProfileDPath* = "/etc/profile.d/repro-addon.sh"
   AnchorsDir* = "/etc/repro/anchors"
@@ -94,9 +96,30 @@ proc assertInlineSafe*(what, text: string) =
         "', which the canonical system-profile text cannot carry inline")
 
 proc targetUnit(): string =
-  """[Unit]
+  # Wanted by multi-user.target so the add-on's units come up at boot, but
+  # NOT ordered before it: a target complements every unit it wants with
+  # `After=` unless that unit sets `DefaultDependencies=no` (systemd.target(5),
+  # "Default Dependencies"). With the default, multi-user.target would wait
+  # for this target, which waits for the re-assert unit -- the add-on's
+  # recovery would hold up the base's boot. The shutdown ordering the
+  # default would have added is stated explicitly.
+  when mutated("addon-target-in-boot-order"):
+    # The falsifying mutation: the default dependencies, which put this
+    # target -- and the recovery ordered before it -- in multi-user's way.
+    """[Unit]
 Description=Reprobuild add-on services
 Documentation=man:systemd.special(7)
+
+[Install]
+WantedBy=multi-user.target
+"""
+  else:
+    """[Unit]
+Description=Reprobuild add-on services
+Documentation=man:systemd.special(7)
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
 
 [Install]
 WantedBy=multi-user.target
@@ -127,9 +150,13 @@ proc reassertUnit(reproExe: string): string =
   # degraded. It never re-applies on drift.
   #
   # It must not be able to hold up the base's boot: it is wanted only by
-  # the add-on's target, never by multi-user.target, and it is only
-  # ORDERED after the store mount (`After=`), never `Requires=` it -- a
-  # missing store must still let it run and report `degraded`. For the
+  # the add-on's target, never by multi-user.target, and that target is
+  # out of multi-user's ordering (see `targetUnit`), so ordering the target
+  # after recovery delays only the add-on's own target. It is only ORDERED
+  # after the store mount (`After=`), never `Requires=` it -- a missing
+  # store must still let it run and report `degraded`. A recovery may
+  # replay a switch with a confirmTimeout of up to an hour, hence the
+  # timeout; a recovery that is killed leaves its marker for the next boot. For the
   # same reason the binary, which lives in the store, is tested before it
   # is executed: with the store gone the shell reports `degraded` itself
   # instead of the unit failing silently with ENOENT. `reassert --boot`
@@ -152,11 +179,14 @@ proc reassertUnit(reproExe: string): string =
   "[Service]\n" &
   "Type=oneshot\n" &
   "RemainAfterExit=yes\n" &
-  "TimeoutStartSec=15min\n" &
+  "TimeoutStartSec=90min\n" &
+  # The fallback also rewrites the report, so a stale `ok` from an earlier
+  # boot is never what an operator reads.
   "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " & reproExe &
     " system addon reassert --boot; else echo repro-addon reassert: " &
     "degraded: the add-on binary " & reproExe & " is unavailable, the " &
-    "store is missing or unreadable; fi'\n" &
+    "store is missing or unreadable; echo repro-addon reassert: degraded, " &
+    "the store is missing or unreadable > " & ReassertReportPath & "; fi'\n" &
   "PrivateNetwork=yes\n" &
   "NoNewPrivileges=yes\n" &
   "ProtectHome=yes\n" &
