@@ -3720,6 +3720,15 @@ proc removalParentOf(spelling: string): string =
   ## the question here is not containment but how close to a filesystem root
   ## a removal would land, and a walk through an absent directory lands where
   ## its lexical collapse says.
+  ##
+  ## The fallback is taken on ANY failure to resolve, permission denied
+  ## included, so an ancestor the build cannot read that hides a link to `/`
+  ## is collapsed lexically and can slip past the root-proximity guard. This
+  ## is accepted: an action's outputs live under directories the build can
+  ## traverse (it is about to remove them), the suite does not construct
+  ## such a tree, and before this resolution existed no ancestor was resolved
+  ## at all. Refusing instead would turn every unreadable ancestor into a
+  ## refusal to run the action.
   var ancestor = spelling
   var suffix = ""
   while true:
