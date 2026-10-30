@@ -514,7 +514,12 @@ proc prepareBase*(g: Guest) =
     "motd-news.timer ua-timer.timer 2>/dev/null; " &
     "systemctl stop apt-daily.service apt-daily-upgrade.service " &
     "unattended-upgrades.service 2>/dev/null; " &
-    "systemctl mask --now unattended-upgrades.service 2>/dev/null; true")
+    "systemctl mask --now unattended-upgrades.service 2>/dev/null; " &
+    # fwupd is D-Bus activated at an unpredictable moment, and its first
+    # start rewrites /etc/fwupd/fwupd.conf to mode 0640 (Ubuntu 24.04,
+    # measured 2026-10-30 inside a collision-matrix run): base noise, not
+    # the add-on's doing. Masked before the baseline like the timers.
+    "systemctl mask --now fwupd.service 2>/dev/null; true")
   discard g.run("apt-get update -qq", timeoutSec = 1800)
   # Let anything first boot started settle.
   discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true",

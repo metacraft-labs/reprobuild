@@ -28,7 +28,8 @@
 ##   alias would be an /etc unit shadowing the package's); ``Also=`` naming
 ##   a unit the profile does not own (``fixture-off.service``, a base unit
 ##   left disabled) is refused; a unit with ``WantedBy``, ``UpheldBy`` and
-##   an alias of its own has all three links ledgered, and its removal
+##   an alias of its own has every link ``systemctl enable`` made ledgered
+##   (systemd 252 on Debian 12 makes none for ``UpheldBy``), and its removal
 ##   takes exactly those away -- cron and ``fixture-base.service`` stay
 ##   enabled, ``fixture-off.service`` stays disabled.
 ## - **unit search directories**: a managed prefix over
@@ -403,7 +404,7 @@ ExecStart=/bin/sleep infinity
 
 [Install]
 WantedBy=multi-user.target
-UpheldBy=repro-fx-none.target
+UpheldBy=rescue.target
 Alias=repro-fx-inst-alias.service
 "
 }
@@ -837,18 +838,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       var links: seq[string]
       for e in entriesFor(l, "systemUnit:repro-fx-inst.service"):
         if e.class == lcInstallLink: links.add(e.path)
-      let want = ["/etc/systemd/system/multi-user.target.wants/repro-fx-inst.service",
-                  "/etc/systemd/system/repro-fx-none.target.upholds/repro-fx-inst.service",
-                  "/etc/systemd/system/repro-fx-inst-alias.service"]
-      var all = true
-      for w in want:
-        if w notin links: all = false
-      step("install-own: the WantedBy, UpheldBy and Alias links are all ledgered",
-           all and links.len == 3, links.join(" "))
+      let wants = "/etc/systemd/system/multi-user.target.wants/repro-fx-inst.service"
+      let upholds = "/etc/systemd/system/rescue.target.upholds/repro-fx-inst.service"
+      let alias = "/etc/systemd/system/repro-fx-inst-alias.service"
+      # systemd 252 (Debian 12) creates no link for UpheldBy= (measured
+      # 2026-10-30); 257 and 255 do. Whatever systemctl created is ledgered,
+      # and nothing else is.
+      let upholdsMade = g.sha256InGuest(upholds) == "link"
+      step("install-own: the WantedBy, UpheldBy (where systemd makes it) and Alias links are ledgered",
+           wants in links and alias in links and
+           (upholds in links) == upholdsMade and
+           links.len == (if upholdsMade: 3 else: 2),
+           links.join(" ") & " (upholds link made: " & $upholdsMade & ")")
     discard applied("install-own-remove", Empty)
     step("install-own-remove: exactly the add-on's links are gone; base enablement unchanged",
          g.exec("test ! -e /etc/systemd/system/multi-user.target.wants/repro-fx-inst.service && " &
-                "test ! -e /etc/systemd/system/repro-fx-none.target.upholds/repro-fx-inst.service && " &
+                "test ! -e /etc/systemd/system/rescue.target.upholds/repro-fx-inst.service && " &
                 "test ! -L /etc/systemd/system/repro-fx-inst-alias.service").exitCode == 0 and
          g.exec("systemctl is-enabled cron.service fixture-base.service").stdout.splitLines()[0 .. 1] ==
            @["enabled", "enabled"] and
