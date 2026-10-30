@@ -23,7 +23,15 @@
 ##   * `writeCertAndKey` produces an owner-only key that `loadCertAndKey`
 ##     reads back, also when it replaces a file that had broader access;
 ##   * control: a file created the ordinary way in the same directory is NOT
-##     owner-only, so the check discriminates.
+##     owner-only, so the check discriminates;
+##   * Windows: the create refuses a DANGLING symbolic link planted at the
+##     path, as `open(O_CREAT|O_EXCL)` does on POSIX, and writes nothing
+##     where the link points. Added by the independent verification of M17
+##     chunk 2: `CreateFileW(CREATE_NEW)` alone follows such a link and
+##     creates its target (measured), so a link planted between the writer's
+##     removal of the old file and its create put the key at the link's
+##     target. Falsifier: dropping `FILE_FLAG_OPEN_REPARSE_POINT` from the
+##     create turns the case red.
 ##
 ## MOCK POLICY — none: real files, real ACLs / modes, real keys.
 
@@ -32,6 +40,7 @@ when defined(posix):
   import std/posix
 
 import repro_peer_cache
+import repro_test_support/reasoned_skip
 when defined(windows):
   import repro_peer_cache/owner_only_file
 
@@ -108,3 +117,40 @@ suite "M17 chunk 2: host-identity key files are owner-only on every platform":
       # Make the control independent of the umask.
       discard chmod(plain.cstring, Mode(0o644))
     check ownerOnlyViolation(plain) != ""
+
+  test "the create refuses a dangling symbolic link at the path":
+    when defined(windows):
+      let base = createTempDir("m17-keyfile-", "")
+      defer: removeDir(base)
+      let keyPath = base / "host-ca.key"
+      let target = base / "elsewhere" / "planted.key"
+      createDir(base / "elsewhere")
+      var linked = true
+      try:
+        createSymlink(target, keyPath)
+      except OSError:
+        linked = false
+      if not linked:
+        skip("this account may not create symbolic links (no developer " &
+          "mode or SeCreateSymbolicLinkPrivilege), so no link can be " &
+          "planted at the key path")
+      else:
+        require symlinkExists(keyPath)
+        require not fileExists(target)
+        # The window between the writer's removal of an old file and its
+        # create: something planted a link there. `createNewOwnerOnlyFile`
+        # is that create.
+        expect OwnerOnlyFileError:
+          createNewOwnerOnlyFile(keyPath, "ecdsa-p256:secret")
+        check not fileExists(target)
+        check symlinkExists(keyPath)
+        # The writer itself removes the link and writes a regular file.
+        createOwnerOnlyFile(keyPath, "ecdsa-p256:secret")
+        check not symlinkExists(keyPath)
+        check fileExists(keyPath)
+        check not fileExists(target)
+        check ownerOnlyViolation(keyPath) == ""
+    else:
+      skip("the POSIX writers create the key with open(O_CREAT|O_EXCL, " &
+        "0600), which fails with EEXIST on any link at the path and never " &
+        "follows it; the property is Windows' to prove")

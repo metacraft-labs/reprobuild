@@ -20,12 +20,23 @@
 ##   take ownership and rewrite the DACL, as root can `chmod` on POSIX; that
 ##   is the account boundary, not the file's.)
 ## * the descriptor is applied by `CreateFileW` itself, with `CREATE_NEW`
-##   (fails if the path exists: `O_EXCL`), after removing any previous file,
+##   and `FILE_FLAG_OPEN_REPARSE_POINT` (fails if anything is at the path,
+##   a symbolic link included: `O_EXCL`), after removing any previous file,
 ##   exactly as the POSIX path does. There is no window in which the file
 ##   exists with the inherited DACL, which is precisely the defect the old
 ##   Windows branch had (`writeFile` then `setFilePermissions`, and the
 ##   latter only toggles the read-only attribute on Windows, it never
 ##   touches the DACL).
+## * `CREATE_NEW` ALONE IS NOT `O_EXCL`. Measured on Windows 11 (NTFS):
+##   `CreateFileW(CREATE_NEW)` on a DANGLING symbolic link follows it and
+##   creates the link's target, where POSIX `open(O_CREAT|O_EXCL)` fails
+##   with `EEXIST` and never follows a link. So a link planted at the path
+##   between the removal and the create (the same window the POSIX path
+##   has) would have put the key wherever the link pointed, and left the
+##   link for every later read to follow. `FILE_FLAG_OPEN_REPARSE_POINT`
+##   makes the create see the link itself, so it fails as `O_EXCL` does
+##   (independent verification of campaign M17 chunk 2,
+##   `t_host_identity_key_file_is_owner_only`).
 ##
 ## Reading mirrors the POSIX reader: the bytes go into a caller-owned fixed
 ## buffer, never a heap string. The POSIX reader makes no mode check at read
@@ -79,6 +90,7 @@ when defined(windows):
     SE_FILE_OBJECT = 1'i32
     DACL_SECURITY_INFORMATION = 0x00000004'u32
     FILE_ATTRIBUTE_NORMAL_W = 0x80'i32
+    FILE_FLAG_OPEN_REPARSE_POINT_W = 0x00200000'i32
     ERROR_SUCCESS_W = 0'i32
 
   proc openProcessToken(process: Handle; access: uint32;
@@ -138,14 +150,12 @@ when defined(windows):
     result = newSeq[byte](sidLen)
     copyMem(addr result[0], sid, sidLen)
 
-  proc createOwnerOnlyFile*(path: string; data: openArray[char]) =
+  proc createNewOwnerOnlyFile*(path: string; data: openArray[char]) =
     ## Creates `path` holding `data`, readable and writable by the current
     ## user only (a protected one-entry DACL, applied at creation; see the
-    ## module doc). A previous file or link at `path` is removed first, and
-    ## the create fails if anything reappears there (`CREATE_NEW`). Raises
-    ## `OwnerOnlyFileError`.
-    if fileExists(path) or symlinkExists(path):
-      removeFile(path)
+    ## module doc). Fails if ANYTHING is at `path`, a dangling symbolic link
+    ## included (`CREATE_NEW` with `FILE_FLAG_OPEN_REPARSE_POINT`: the
+    ## `O_CREAT|O_EXCL` of the POSIX writers). Raises `OwnerOnlyFileError`.
     var sid = currentUserSid()
     # ACL header + one ACCESS_ALLOWED_ACE whose trailing SidStart DWORD is
     # replaced by the SID: sizeof(ACL) + sizeof(ACE) - sizeof(DWORD) + |SID|,
@@ -168,7 +178,8 @@ when defined(windows):
     var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
       lpSecurityDescriptor: addr sd[0], bInheritHandle: 0)
     let h = createFileW(newWideCString(path), GENERIC_WRITE, 0, addr sa,
-      CREATE_NEW, FILE_ATTRIBUTE_NORMAL_W, Handle(0))
+      CREATE_NEW, FILE_ATTRIBUTE_NORMAL_W or FILE_FLAG_OPEN_REPARSE_POINT_W,
+      Handle(0))
     if h == INVALID_HANDLE_VALUE:
       raise newException(OwnerOnlyFileError,
         "cannot create " & path & ": " & osErrorMsg(osLastError()))
@@ -183,6 +194,14 @@ when defined(windows):
         off += int(written)
     finally:
       discard closeHandle(h)
+
+  proc createOwnerOnlyFile*(path: string; data: openArray[char]) =
+    ## `createNewOwnerOnlyFile` after removing a previous file or link at
+    ## `path`, as the POSIX writers do; the create fails if anything
+    ## reappears there in between. Raises `OwnerOnlyFileError`.
+    if fileExists(path) or symlinkExists(path):
+      removeFile(path)
+    createNewOwnerOnlyFile(path, data)
 
   proc readOwnerFileInto*(path: string; buf: var openArray[char]): int =
     ## Reads at most `buf.len` bytes of `path` into `buf` (a caller-owned

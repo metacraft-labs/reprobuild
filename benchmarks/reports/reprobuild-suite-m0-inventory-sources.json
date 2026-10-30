@@ -17237,13 +17237,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_peer_cache",
       "requiresReproBinary": false,
       "source": "libs/repro_peer_cache/tests/t_host_identity_key_file_is_owner_only.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
