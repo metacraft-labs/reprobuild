@@ -17297,6 +17297,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_hash",
         "repro_local_store",
         "repro_peer_cache"
       ],
