@@ -795,8 +795,9 @@ verify_fresh_artifact \
 # explicitly. It ships beside `repro` because the `linux.addOnTool` driver
 # resolves it from the engine's own directory (`addOnToolLauncherPath` in
 # repro_elevation/posix_system_driver.nim) and refuses to write a wrapper
-# when it is absent; the Nix package installs every file under build/bin, so
-# this one step covers `just build`, the package and the release bundle. The
+# when it is absent; the Nix package installs every build/bin/* file, so this
+# one step puts it beside `repro` in `just build`'s tree, in the package and in
+# the release bundle. The
 # cross build for another Linux CPU (scripts/cross/build_linux_cross.sh)
 # builds it with the target's compiler. Linux only: the launcher's namespace
 # setup is Linux-specific and the Windows stub is exercised by its own tests.

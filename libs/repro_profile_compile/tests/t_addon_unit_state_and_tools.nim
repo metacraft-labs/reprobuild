@@ -203,3 +203,30 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
     systemdSystemUnit(intent.resources, name = "y.service",
       content = "[Service]\nExecStart=/usr/bin/true\n")
     check profileIntentToSystemProfile(intent).resources.len == 2
+
+  test "linux.addOnTool: a missing launcher link is drift the plan repairs":
+    let lock = parseAptClosureLock(LockText)
+    let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+    let manifest = renderAddOnToolManifest(prefix, "/usr/bin/wakeonlan")
+    let wrapper = renderAddOnToolWrapper(addOnToolManifestPath("wakeonlan"))
+    let desired = addOnToolDigestText(wrapper, manifest)
+    # Files right, closure realised, link valid: the observed text IS the
+    # desired text, so the resource is a no-op.
+    check addOnToolObservedDigestText(wrapper, manifest, true, true) == desired
+    # The same files with the link missing or dangling differ from desired
+    # by a path-free sentinel, so the plan carries an update and the apply,
+    # which converges the link every time, repairs it.
+    let dangling = addOnToolObservedDigestText(wrapper, manifest, true, false)
+    check dangling != desired
+    check dangling.startsWith("launcher-link-dangling\n")
+    check "/" notin dangling.splitLines()[0]
+    check addOnToolObservedDigestText(wrapper, manifest, false, true).
+      startsWith("apt-closure-absent\n")
+    # The parser is order-independent: the same facts in any order.
+    let a = parseUnitStateShow("RemainAfterExit=no\nType=oneshot\n" &
+      "ActiveState=inactive\nLoadState=loaded\nUnitFileState=enabled\n")
+    let b = parseUnitStateShow("UnitFileState=enabled\nLoadState=loaded\n" &
+      "ActiveState=inactive\nType=oneshot\nRemainAfterExit=no\n")
+    check a == b
+    check a.transientOneshot and a.loaded and a.enabled and not a.active
+    check not parseUnitStateShow("RemainAfterExit=yes\nType=oneshot\n").transientOneshot

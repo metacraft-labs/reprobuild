@@ -479,14 +479,14 @@ proc addResource*(doc: var SystemIntentDoc; r: SystemResource) =
   for i in 0 ..< doc.lines.len:
     if not lineIsBlankOrComment(doc.lines[i]):
       lastReal = i
-  var insertAt = lastReal + 1
-  # If there is real content above, separate with one blank line —
-  # but only if the line just above the insertion point is not
-  # already blank.
+  # A file with no stanza yet (a comment-only header) takes the new stanza
+  # at its END, after the header, not in front of it.
+  var insertAt = if lastReal >= 0: lastReal + 1 else: doc.lines.len
+  # If there is content above, separate with one blank line — but only if
+  # the line just above the insertion point is not already blank.
   var prefix: seq[string]
-  if lastReal >= 0:
-    if insertAt > 0 and doc.lines[insertAt - 1].strip().len != 0:
-      prefix.add("")
+  if insertAt > 0 and doc.lines[insertAt - 1].strip().len != 0:
+    prefix.add("")
   var newLines = prefix & rendered
   # Splice.
   var rebuilt: seq[string]
@@ -525,5 +525,10 @@ proc removeResource*(doc: var SystemIntentDoc; address: string): bool =
     if i >= removeFrom and i <= removeTo:
       continue
     rebuilt.add(doc.lines[i])
+  # Removing the FIRST stanza leaves the blank line that separated it from
+  # its successor at the top of the file; a file does not start with one.
+  if removeFrom == 0:
+    while rebuilt.len > 0 and rebuilt[0].strip().len == 0:
+      rebuilt.delete(0)
   doc.lines = rebuilt
   return true

@@ -182,26 +182,29 @@ proc parseUnitStateShow*(output: string):
   ## `Type=oneshot` service without `RemainAfterExit=yes`: it is never
   ## `active` for longer than its run, so `state = Running` on it would be
   ## started on every apply and still observed inactive; refused.
+  # Collect every property first, decide after: `transientOneshot` depends
+  # on two of them, and `systemctl show` makes no promise about the order
+  # it prints them in.
+  var loadState, unitFileState, activeState, unitType, remainAfterExit: string
   for line in output.splitLines():
     let eq = line.find('=')
     if eq < 0: continue
     let key = line[0 ..< eq].strip()
     let value = line[eq + 1 .. ^1].strip()
     case key
-    of "LoadState":
-      result.loaded = value == "loaded"
-    of "UnitFileState":
-      result.fixedEnablement = value in ["static", "alias", "indirect",
-        "generated", "transient"]
-      result.enabled = result.fixedEnablement or
-        value in ["enabled", "enabled-runtime"]
-    of "ActiveState":
-      result.active = value == "active"
-    of "Type":
-      if value == "oneshot": result.transientOneshot = true
-    of "RemainAfterExit":
-      if value == "yes": result.transientOneshot = false
+    of "LoadState": loadState = value
+    of "UnitFileState": unitFileState = value
+    of "ActiveState": activeState = value
+    of "Type": unitType = value
+    of "RemainAfterExit": remainAfterExit = value
     else: discard
+  result.loaded = loadState == "loaded"
+  result.fixedEnablement = unitFileState in ["static", "alias", "indirect",
+    "generated", "transient"]
+  result.enabled = result.fixedEnablement or
+    unitFileState in ["enabled", "enabled-runtime"]
+  result.active = activeState == "active"
+  result.transientOneshot = unitType == "oneshot" and remainAfterExit != "yes"
 
 const
   AddOnToolDir* = "/etc/repro/bin"
@@ -226,8 +229,8 @@ proc addOnToolLauncherPath*(): string =
   ## The launcher as installed beside the running image (the broker, at
   ## apply time). It is plain C, built by
   ## `apps/reprobuild-sandbox-launcher/build.sh`, which `scripts/build_apps.sh`
-  ## runs on Linux so `just build` and the Nix package ship it next to
-  ## `repro`; the cross build (`scripts/cross/build_linux_cross.sh`) does
+  ## runs on Linux, so `just build` leaves it beside `repro` and the Nix package
+  ## (which installs every build/bin/* file) does too; the cross build (`scripts/cross/build_linux_cross.sh`) does
   ## the same for the armhf bundle. Used only to point
   ## `AddOnToolLauncherLink`; never baked into a wrapper or a digest.
   getAppDir() / AddOnToolLauncherName
@@ -259,6 +262,33 @@ proc addOnToolDigestText*(wrapper, manifest: string): string =
   ## Both files in one digest, so a hand-edited wrapper, a changed closure
   ## (a different prefix in the manifest) or a moved launcher is drift.
   wrapper & "\n--\n" & manifest
+
+proc addOnToolObservedDigestText*(wrapper, manifest: string;
+                                  closureRealised, launcherLinkValid: bool):
+    string =
+  ## What `observeLinuxAddOnTool` digests. The desired text is
+  ## `addOnToolDigestText`; two host facts the files alone do not show are
+  ## prefixed as sentinels so the plan carries an update that repairs them:
+  ## a closure not realised in the store, and a launcher link
+  ## (`AddOnToolLauncherLink`) that is missing or points at nothing. The
+  ## link is converged by every `linux.addOnTool` apply, so without the
+  ## sentinel a tool whose files are already right would be a no-op while
+  ## its wrapper fails on first use. Both sentinels are path-free, so the
+  ## plan's digest does not depend on which install computed it.
+  result = ""
+  if not launcherLinkValid:
+    result.add("launcher-link-dangling\n")
+  if not closureRealised:
+    result.add("apt-closure-absent\n")
+  result.add(addOnToolDigestText(wrapper, manifest))
+
+proc addOnToolLauncherLinkValid*(): bool =
+  ## The link exists and names an existing file.
+  when defined(linux):
+    symlinkExists(AddOnToolLauncherLink) and
+      fileExists(expandSymlink(AddOnToolLauncherLink))
+  else:
+    false
 
 proc addOnToolDesiredDigestText*(op: PrivilegedOperation): string =
   doAssert op.kind == pokLinuxAddOnTool
@@ -896,13 +926,13 @@ proc observeLinuxAddOnTool*(op: PrivilegedOperation):
     let wrapper = readFile(wrapperPath)
     let manifest = if fileExists(manifestPath): readFile(manifestPath) else: ""
     result.present = true
-    var text = addOnToolDigestText(wrapper, manifest)
+    var closureRealised = true
     if not op.atDestroy:
-      let lock = parseAptClosureLock(op.atAptClosureLock)
-      if not aptClosureRealised(AddOnSystemStoreRoot, lock):
-        text = "apt-closure-absent:" &
-          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" & text
-    result.digestHex = posixDigestHexOfText(text)
+      closureRealised = aptClosureRealised(AddOnSystemStoreRoot,
+        parseAptClosureLock(op.atAptClosureLock))
+    result.digestHex = posixDigestHexOfText(addOnToolObservedDigestText(
+      wrapper, manifest, closureRealised,
+      launcherLinkValid = op.atDestroy or addOnToolLauncherLinkValid()))
   else:
     raiseNotImplementedPlatform("linux.addOnTool observe")
 

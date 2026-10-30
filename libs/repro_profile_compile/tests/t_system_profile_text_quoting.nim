@@ -204,3 +204,39 @@ suite "system.nim text form: quoting and comments":
     let final = parseSystemProfile(readFile(path))
     check final.resources.len == 1
     check final.contentOf(realWorldIdentity(r)) == mixed
+
+  test "the editor appends after a comment-only header and leaves no leading blank":
+    let dir = getTempDir() / "t_system_profile_text_quoting_hdr_" &
+      $getCurrentProcessId()
+    createDir(dir)
+    defer: removeDir(dir)
+    let path = dir / "system.nim"
+    let header = "# rpi2 system profile\n# edited by repro system add\n"
+    writeFile(path, header)
+    var intent = ProfileIntent(name: "hdr")
+    fsSystemFile(intent.resources, path = "/etc/q/one", content = "1\n")
+    fsSystemFile(intent.resources, path = "/etc/q/two", content = "2\n")
+    let rs = profileIntentToSystemProfile(intent).resources
+    var doc = loadSystemIntent(path)
+    addResource(doc, rs[0])
+    writeSystemIntent(doc)
+    # The header stays first; the stanza follows it after one blank line.
+    check readFile(path).startsWith(header & "\nfs.systemFile {")
+    doc = loadSystemIntent(path)
+    addResource(doc, rs[1])
+    writeSystemIntent(doc)
+    check parseSystemProfile(readFile(path)).resources.len == 2
+    # Removing the first stanza of a header-less file leaves no blank line
+    # at the top.
+    writeFile(path, "")
+    doc = loadSystemIntent(path)
+    addResource(doc, rs[0])
+    addResource(doc, rs[1])
+    writeSystemIntent(doc)
+    doc = loadSystemIntent(path)
+    check removeResource(doc, realWorldIdentity(rs[0]))
+    writeSystemIntent(doc)
+    let text = readFile(path)
+    check text.startsWith("fs.systemFile {")
+    check parseSystemProfile(text).resources.len == 1
+    check parseSystemProfile(text).resources[0].sfContent == "2\n"
