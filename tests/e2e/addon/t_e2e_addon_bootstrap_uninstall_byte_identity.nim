@@ -41,7 +41,11 @@ import repro_test_support/reasoned_skip
 
 import ./addon_testbed
 
-const Gen1Profile = """systemd.systemUnit {
+const Gen1Profile = """addOn {
+  managedEtcPrefixes = ["/etc/repro-addon-fixture/", "/etc/issue.net"]
+}
+
+systemd.systemUnit {
   name = "repro-addon-fixture.service"
   content = "[Unit]
 Description=Reprobuild add-on test fixture service
@@ -79,7 +83,11 @@ const UnmanagedKindProfile = """linux.sysctl {
 }
 """
 
-const Gen2Profile = """linux.dpkgDiversion {
+const Gen2Profile = """addOn {
+  managedEtcPrefixes = ["/etc/repro-addon-fixture/", "/etc/issue.net"]
+}
+
+linux.dpkgDiversion {
   path = "/etc/issue.net"
 }
 

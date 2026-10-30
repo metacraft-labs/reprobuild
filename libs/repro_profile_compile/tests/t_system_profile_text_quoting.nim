@@ -145,15 +145,18 @@ suite "system.nim text form: quoting and comments":
     check spans.len == sp.resources.len
     # Removing the unit (whose content holds `}` and blank lines) removes
     # exactly it; every other stanza still parses with its bytes intact.
-    # The editor renders no `address =` line, so a re-parsed stanza is
-    # addressed by the parser default, `realWorldIdentity`.
+    # The editor renders an `address =` line whenever a resource's address
+    # is not the parser default (`realWorldIdentity`), so a compiled
+    # profile's addresses (`systemd.systemUnit:...`) survive a round trip
+    # through the text form and a re-parsed stanza keeps its identity --
+    # the ledger of an add-on host names resources by it.
     var unitAddress, udevAddress, yamlAddress: string
     for r in sp.resources:
       case r.kind
-      of srkSystemdSystemUnit: unitAddress = realWorldIdentity(r)
-      of srkLinuxUdevRule: udevAddress = realWorldIdentity(r)
+      of srkSystemdSystemUnit: unitAddress = r.address
+      of srkLinuxUdevRule: udevAddress = r.address
       of srkFsSystemFile:
-        if r.sfPath == "/etc/q/blackbox.yml": yamlAddress = realWorldIdentity(r)
+        if r.sfPath == "/etc/q/blackbox.yml": yamlAddress = r.address
       else: discard
     check removeResource(doc, unitAddress)
     writeSystemIntent(doc)
@@ -165,7 +168,7 @@ suite "system.nim text form: quoting and comments":
       var a = ""
       for r in sp.resources:
         if r.kind == srkFsSystemFile and r.sfPath == "/etc/q/edge" & $i:
-          a = realWorldIdentity(r)
+          a = r.address
       check after.contentOf(a) == e
 
   test "the editor on a CRLF file keeps a bare newline inside a value":
@@ -194,7 +197,7 @@ suite "system.nim text form: quoting and comments":
     let back = parseSystemProfile(readFile(path))
     check back.resources.len == 2
     check back.contentOf(realWorldIdentity(back.resources[0])) == lfValue
-    check back.contentOf(realWorldIdentity(r)) == mixed
+    check back.contentOf(r.address) == mixed
     check readFile(path).startsWith(crlfText)
     # Removing the first stanza removes exactly it, by the parser's bounds.
     doc = loadSystemIntent(path)
@@ -203,7 +206,7 @@ suite "system.nim text form: quoting and comments":
     writeSystemIntent(doc)
     let final = parseSystemProfile(readFile(path))
     check final.resources.len == 1
-    check final.contentOf(realWorldIdentity(r)) == mixed
+    check final.contentOf(r.address) == mixed
 
   test "the editor appends after a comment-only header and leaves no leading blank":
     let dir = getTempDir() / "t_system_profile_text_quoting_hdr_" &
@@ -234,7 +237,7 @@ suite "system.nim text form: quoting and comments":
     addResource(doc, rs[1])
     writeSystemIntent(doc)
     doc = loadSystemIntent(path)
-    check removeResource(doc, realWorldIdentity(rs[0]))
+    check removeResource(doc, rs[0].address)
     writeSystemIntent(doc)
     let text = readFile(path)
     check text.startsWith("fs.systemFile {")

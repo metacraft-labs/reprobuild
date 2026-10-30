@@ -10,6 +10,8 @@
 ## system-scope apply path they run on, and nothing else:
 ##
 ##   repro system addon <command> …     (see repro_addon/cli)
+##   repro system adopt <address> --profile <file>
+##   repro infra plan --profile <file>  (the add-on's plan sections)
 ##   repro infra apply --profile <file> (an add-on generation)
 ##   repro --version
 ##
@@ -33,10 +35,15 @@ proc main(): int =
     return 0
   if args.len >= 2 and args[0] == "system" and args[1] == "addon":
     return runAddonCli(args[2 .. ^1])
+  if args.len >= 2 and args[0] == "system" and args[1] == "adopt":
+    return runAddonAdoptCli(args[2 .. ^1])
   if args.len >= 2 and args[0] == "infra" and args[1] == "apply":
     return runAddonInfraApplyCli(args[2 .. ^1])
+  if args.len >= 2 and args[0] == "infra" and args[1] == "plan":
+    return runAddonInfraPlanCli(args[2 .. ^1])
   stderr.write("usage: repro system addon <command> … | " &
-               "repro infra apply --profile <file> | repro --version\n\n")
+               "repro system adopt <address> --profile <file> | " &
+               "repro infra plan|apply --profile <file> | repro --version\n\n")
   stderr.write(AddonUsage)
   2
 

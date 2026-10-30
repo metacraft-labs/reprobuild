@@ -26,6 +26,8 @@ libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	ni
 libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
+libs/repro_addon/tests/t_addon_collision.nim	nim	23
+libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	23
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7
@@ -421,6 +423,7 @@ libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.ni
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
+libs/repro_infra/tests/t_system_profile_addon_fields.nim	nim	7
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
@@ -573,6 +576,7 @@ libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim
 libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim	7
 libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
+libs/repro_profile_compile/tests/t_addon_profile_collision_and_managed_prefixes.nim	nim	5
 libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	9
 libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
@@ -1043,8 +1047,12 @@ tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_uninstall_byte_identity.nim	nim	1
+tests/e2e/addon/t_e2e_addon_collision_matrix.nim	nim	1
+tests/e2e/addon/t_e2e_addon_divert_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
+tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
+tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	1
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
 tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim	nim	3

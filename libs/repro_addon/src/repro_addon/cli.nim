@@ -14,6 +14,9 @@
 ##                                [--expect <file>]
 ##   repro system addon expected-delta <before-ledger|-> <after-ledger>
 ##   repro system addon ledger
+##   repro system adopt <address> --profile <file>
+##   repro infra plan --profile <file>
+##   repro infra apply --profile <file> [--reconcile-drift]
 ##
 ## Exit status: 0 success; 1 failure, drift or a non-empty diff; 2 a usage
 ## error or a refusal decided before anything was written (an incompatible
@@ -25,8 +28,11 @@ import std/algorithm
 
 import repro_infra
 
+import repro_infra/addon_diagnostics
+
 import ./addon_apply
 import ./bootstrap
+import ./collision
 import ./fingerprint
 import ./ledger
 import ./linux_fs
@@ -60,6 +66,14 @@ commands:
   selfcheck-btrfs <mount point>
       Create and delete a btrfs subvolume under a btrfs mount the way the
       store root is created on a btrfs root (a test of that leg).
+
+related (add-on hosts):
+  repro system adopt <address> --profile <file>
+      Claim the object a declared resource targets as it is, writing nothing.
+  repro infra plan --profile <file>
+      The ledger diff and collision report of applying <file>; writes nothing.
+  repro infra apply --profile <file> [--reconcile-drift]
+      Apply an add-on generation.
 """
 
   FingerprintUsage* = """usage: repro-addon-fingerprint [--root R] [--no-live] [--out F]
@@ -270,17 +284,29 @@ proc runAddonCli*(args: seq[string]): int =
     stderr.write("repro system addon " & cmd & ": " & e.msg & "\n")
     return 1
 
-proc runAddonInfraApplyCli*(args: seq[string]): int =
-  ## ``repro infra apply --profile <canonical text>`` on an add-on host:
-  ## the profile is the operator's; the add-on's own objects are added and
-  ## the ledger is kept.
+proc renderAddonSections*(r: AddonApplyResult): string =
+  ## The add-on's plan sections (spec §7.1): the ledger diff and the
+  ## collision report. (The service transition list is A4's.)
+  renderLedgerDiff(r) & renderCollisionReport(r.collisions)
+
+proc runAddonGeneration(verb: string; args: seq[string];
+                        planOnly: bool; adopt: seq[string] = @[]): int =
+  ## The shared body of ``repro infra plan``, ``repro infra apply`` and
+  ## ``repro system adopt`` on an add-on host: the profile is the
+  ## operator's; the add-on's own objects are added and the ledger is
+  ## kept. Exit 2 for a usage error or a refusal decided before anything
+  ## was written (scope, a collision, a link on the path), 1 for an apply
+  ## that failed or left actionable drift, 0 otherwise.
   var profile = ""
+  var reconcile = false
   var i = 0
   try:
     while i < args.len:
       let a = args[i]
       if a == "--profile" or a.startsWith("--profile="):
         profile = takeValue(args, i, "--profile")
+      elif a == "--reconcile-drift" or a == "--accept-drift":
+        reconcile = true
       elif a == "--no-preview":
         discard          # an add-on apply always converges without preview
       else:
@@ -293,14 +319,80 @@ proc runAddonInfraApplyCli*(args: seq[string]): int =
         "this host is not an add-on host (no ownership ledger); run " &
         "`repro system addon bootstrap` first")
     let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
-      hostIdentity: readHostname(), userProfileText: readFile(profile)))
+      hostIdentity: readHostname(), userProfileText: readFile(profile),
+      reconcileDrift: reconcile, adoptAddresses: adopt, planOnly: planOnly))
+    stdout.write(renderAddonSections(r))
+    if planOnly:
+      stdout.write("plan only: nothing was written\n")
+      return 0
     stdout.write("generation " & r.generationId & " (previous " &
       r.previousGenerationId & "): applied " & $r.infra.appliedCount &
-      ", no-op " & $r.infra.noOpCount & ", removed " & $r.removed.len & "\n")
+      ", no-op " & $r.infra.noOpCount & ", removed " & $r.removed.len &
+      ", restored " & $r.restored.len & "\n")
+    for a in adopt:
+      var found = false
+      for c in r.collisions:
+        if c.address == a and c.verdict in ["adopt", "no-op", "update"]:
+          found = true
+      if not found:
+        stderr.write(verb & ": " & a & " was not adopted (see the " &
+          "collision report)\n")
+        return 1
+    if r.drift.len > 0:
+      stderr.write(verb & ": " & $r.drift.len & " object(s) left in " &
+        "place as actionable drift\n")
+      return 1
     0
   except ValueError as e:
-    stderr.write("repro infra apply: " & e.msg & "\n")
+    stderr.write(verb & ": " & e.msg & "\n")
+    2
+  except EAddOn as e:
+    stderr.write(verb & ": " & e.msg & "\n")
+    2
+  except AddonCollisionError as e:
+    stderr.write(verb & ": " & e.msg & "\n")
+    2
+  except AddonDriftError as e:
+    stderr.write(verb & ": " & e.msg & "\n")
     2
   except CatchableError as e:
-    stderr.write("repro infra apply: " & e.msg & "\n")
+    stderr.write(verb & ": " & e.msg & "\n")
     1
+
+proc runAddonInfraApplyCli*(args: seq[string]): int =
+  ## ``repro infra apply --profile <canonical text> [--reconcile-drift]``
+  ## on an add-on host.
+  runAddonGeneration("repro infra apply", args, planOnly = false)
+
+proc runAddonInfraPlanCli*(args: seq[string]): int =
+  ## ``repro infra plan --profile <canonical text>`` on an add-on host:
+  ## the ledger diff and the collision report, nothing written.
+  runAddonGeneration("repro infra plan", args, planOnly = true)
+
+proc runAddonAdoptCli*(args: seq[string]): int =
+  ## ``repro system adopt <address> --profile <file>`` (spec §11.2 step
+  ## 3): the object the resource targets is claimed as it is -- its bytes
+  ## become the add-on's, nothing is written to it -- and the generation
+  ## that results owns it.
+  var address = ""
+  var rest: seq[string]
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--profile":
+      # The option and its value go to the shared parser as a pair.
+      rest.add(a)
+      if i + 1 < args.len:
+        inc i
+        rest.add(args[i])
+    elif a.startsWith("-"): rest.add(a)
+    elif address.len == 0: address = a
+    else:
+      stderr.write("repro system adopt: unexpected argument " & a & "\n")
+      return 2
+    inc i
+  if address.len == 0:
+    stderr.write("repro system adopt: <address> is required\n")
+    return 2
+  runAddonGeneration("repro system adopt", rest, planOnly = false,
+                     adopt = @[address])

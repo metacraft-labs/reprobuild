@@ -319,6 +319,10 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  aptClosureLock = " & renderScalar(r.suAptClosureLock))
     if r.suRestartHeld:
       result.add("  restartIfChanged = false")
+    if r.suCollision.len > 0:
+      result.add("  collision = " & renderScalar(r.suCollision))
+    if r.suDropInName.len > 0:
+      result.add("  dropInName = " & renderScalar(r.suDropInName))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))
@@ -337,6 +341,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  sha256 = " & renderScalar(r.sfSha256))
     if r.sfSourceLocal.len > 0:
       result.add("  sourceLocal = " & renderScalar(r.sfSourceLocal))
+    if r.sfCollision.len > 0:
+      result.add("  collision = " & renderScalar(r.sfCollision))
   of srkFsSystemDirectory:
     result.add("  path = " & renderScalar(r.dirPath))
     if r.dirAclPresent:
@@ -443,7 +449,34 @@ proc renderStanza*(r: SystemResource): seq[string] =
     for dep in r.dependsOn:
       deps.add(dep.kind & ":" & dep.name)
     result.add("  depends_on = " & renderList(deps))
+  # An explicit address (one that is not the kind's default identity) is
+  # part of the resource: the ledger and `depends_on` edges name it, so a
+  # rendering that dropped it would change what the text means.
+  if r.address.len > 0 and r.address != realWorldIdentity(r):
+    result.add("  address = " & renderScalar(r.address))
   result.add("}")
+
+proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
+  ## The profile-wide `addOn { ... }` stanza (ReproOS-Add-On-Mode §4.4),
+  ## or nothing when the profile declares none.
+  if not settings.declared:
+    return @[]
+  result.add(AddOnStanzaTag & " {")
+  result.add("  managedEtcPrefixes = " & renderList(settings.managedEtcPrefixes))
+  result.add("}")
+
+proc renderProfileText*(p: SystemProfile): string =
+  ## A whole profile as canonical text: the `addOn` stanza first, then
+  ## every resource in apply order. `parseSystemProfile(renderProfileText(p))`
+  ## yields `p` again; the add-on composes the profile it applies this way
+  ## rather than by concatenating text.
+  var blocks: seq[string]
+  let addOn = renderAddOnStanza(p.addOn)
+  if addOn.len > 0:
+    blocks.add(addOn.join("\n"))
+  for r in p.resources:
+    blocks.add(renderStanza(r).join("\n"))
+  blocks.join("\n\n") & "\n"
 
 # ---------------------------------------------------------------------------
 # addResource / removeResource.

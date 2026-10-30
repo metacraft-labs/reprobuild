@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 11'u16           ## Current envelope schema version.
+  RbpiSchemaVersion* = 12'u16           ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -111,6 +111,12 @@ const
     ##     text, the system activities an add-on entry selects). Bumped
     ##     because a schema-10 reader would decode an add-on host as one whose
     ##     whole system is managed here, and plan or switch it as such.
+    ##  12 (ReproOS add-on mode, managed prefixes): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"addOn"`` map with a ``"managedEtcPrefixes"``
+    ##     array of text -- the profile's ``addOn:`` section. Bumped because
+    ##     a build that did not know the key would plan the profile without
+    ##     its managed prefixes and let every ``/etc`` path through the
+    ##     add-on's scope check.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

@@ -5,12 +5,15 @@
 ##
 ## 1. stop and disable the add-on's units (which removes their install
 ##    links and, for ``repro-store.mount``, unmounts the store);
-## 2. remove the units (and any install link ``disable`` left);
+## 2. remove the units and drop-ins (and any install link ``disable``
+##    left), restoring an adopted or replaced unit from the bytes the
+##    ledger preserved;
 ## 3. remove each diversion: the file a generation put at the diverted path
 ##    first, then ``dpkg-divert --local --rename --remove``, which moves the
 ##    package's file back;
-## 4. remove the ``/etc`` files and the directories the add-on created, then
-##    ``systemctl daemon-reload``;
+## 4. restore adopted, replaced and reconciled ``/etc`` files from the bytes
+##    the ledger preserved and remove the files the add-on created, then
+##    the directories it created, then ``systemctl daemon-reload``;
 ## 5. remove the add-on's state and keys, ``/etc/repro``, and the store
 ##    (unless ``--keep-store``).
 ##
@@ -58,10 +61,11 @@ proc ok*(r: UninstallResult): bool = r.drift.len == 0 and r.errors.len == 0
 proc entryKey(e: LedgerEntry): string = $e.class & " " & e.path
 
 proc removeOwned(e: LedgerEntry; r: var UninstallResult) =
-  ## Remove one file or link the ledger owns, if it is unchanged. An entry
-  ## whose object is removed here, or was already gone, is recorded in
-  ## ``r.undone`` so the kept ledger of an incomplete run no longer lists
-  ## it.
+  ## Undo one file or link the ledger owns, if it is unchanged: put back
+  ## the bytes the ledger preserved for an adopted, replaced or reconciled
+  ## object (spec §6.4 step 2), else remove it. An entry whose object is
+  ## undone here, or was already gone, is recorded in ``r.undone`` so the
+  ## kept ledger of an incomplete run no longer lists it.
   let d = observeDrift(e)
   if d.len > 0:
     if d.startsWith("missing"):
@@ -70,10 +74,13 @@ proc removeOwned(e: LedgerEntry; r: var UninstallResult) =
     r.drift.add(e.path & ": " & d)
     return
   try:
-    removeFile(e.path)
-    r.removed.add(e.path)
+    if restorePreserved(e):
+      r.removed.add(e.path & " (restored)")
+    else:
+      removeFile(e.path)
+      r.removed.add(e.path)
     r.undone.incl(entryKey(e))
-  except OSError as ex:
+  except CatchableError as ex:
     r.errors.add(e.path & ": " & ex.msg)
 
 proc systemctlOrRecord(args: openArray[string]; r: var UninstallResult) =
@@ -111,11 +118,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     if fileExists(u.path):
       systemctlOrRecord(["disable", "--now", u.unit], result)
 
-  # 2. Units, and any install link `disable` did not remove.
+  # 2. Units and drop-ins, and any install link `disable` did not remove.
   for li in byClass[lcInstallLink]:
     removeOwned(li, result)
   for u in byClass[lcUnit]:
     removeOwned(u, result)
+  for di in byClass[lcDropIn]:
+    removeOwned(di, result)
 
   # 3. Diversions: the profile's file at the path, then the diversion.
   var handled = initHashSet[string]()
@@ -147,14 +156,6 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   for f in byClass[lcEtcFile]:
     if f.path in handled:
       continue
-    if f.replaced.len > 0 and f.replaced.startsWith("f "):
-      var restoredByDiversion = false
-      for dv in byClass[lcDiversion]:
-        if dv.path == f.path: restoredByDiversion = true
-      if not restoredByDiversion:
-        result.drift.add(f.path & ": replaced a pre-existing file whose " &
-          "bytes this release does not preserve; left in place")
-        continue
     removeOwned(f, result)
   removeEmptyDirs(byClass[lcDir])
   systemctlOrRecord(["daemon-reload"], result)
