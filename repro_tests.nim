@@ -5129,6 +5129,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "slow module initialisation would be paid by every case of its group"),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_refresh_restored_outputs.nim",
+    binary: "build/test-bin/t_refresh_restored_outputs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_local_store_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_retention_gc.nim",
     binary: "build/test-bin/t_retention_gc",
     defines: @[],

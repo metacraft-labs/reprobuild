@@ -26,6 +26,7 @@
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 const
   Lib = "scripts/lib/foreign_preload.sh"
@@ -38,6 +39,20 @@ proc repoRoot(): string =
   result = getAppFilename().parentDir.parentDir.parentDir
   if not fileExists(result / Lib):
     result = getCurrentDir()
+
+proc findLoadableSharedObject(): string =
+  ## A real shared object the loader can preload into bash without
+  ## complaint: the C library this process has mapped. Read from
+  ## /proc/self/maps on Linux; elsewhere the kept-shim case is skipped by
+  ## the caller.
+  when defined(linux):
+    for line in lines("/proc/self/maps"):
+      let sp = line.rfind(' ')
+      if sp < 0: continue
+      let path = line[sp + 1 .. ^1]
+      if path.startsWith("/") and "libc.so" in path.extractFilename:
+        return path
+  ""
 
 proc preloadVar(): string =
   when defined(macosx): "DYLD_INSERT_LIBRARIES" else: "LD_PRELOAD"
@@ -113,6 +128,39 @@ suite "run_tests.sh strips a foreign preload":
     check "reexec=1 var=<unset> args=alpha beta" in res.output
     check Foreign in res.output
     check "Re-executing the suite" in res.output
+
+  test "the guard re-executes with our shim kept when it was preloaded beside a foreign one":
+    # The re-executed instance starts with exactly the kept entries: the
+    # foreign library is gone and the monitor shim is still preloaded.
+    let v = preloadVar()
+    let dir = createTempDir("t-fp-guard-kept-", "")
+    defer: removeDir(dir)
+    let script = dir / "suite.sh"
+    writeFile(script, "#!/usr/bin/env bash\n" &
+      "set -euo pipefail\n" &
+      "if [[ -z \"${REPRO_FOREIGN_PRELOAD_REEXEC:-}\" ]]; then export " & v &
+      "=\"$T_FP_INPUT\"; fi\n" &
+      "source " & repoRoot() / Lib & "\n" &
+      "foreign_preload_guard \"$@\"\n" &
+      "printf 'reexec=%s var=%s\\n' \"${REPRO_FOREIGN_PRELOAD_REEXEC:-0}\" " &
+      "\"${" & v & ":-<unset>}\"\n")
+    # The kept entry must be loadable, or the re-executed bash prints the
+    # loader's complaint for an absent file: it is a real shared object (the
+    # C library this process has mapped) under our shim's name. Skipped
+    # where no such object can be named.
+    let loadable = findLoadableSharedObject()
+    if loadable.len == 0:
+      skip("no mapped C library found in /proc/self/maps; this case needs " &
+        "a loadable shared object to stand in for the kept shim")
+      return
+    let kept = dir / "librepro_monitor_shim.so"
+    createSymlink(findLoadableSharedObject(), kept)
+    let res = runShell(shellCommand(["bash", script],
+      env = [("T_FP_INPUT", Foreign & ":" & kept)]), repoRoot())
+    checkpoint(res.output)
+    check res.code == 0
+    check "reexec=1 var=" & kept in res.output
+    check ("started with " & v & "=" & kept) in res.output
 
   test "the guard refuses when the variable is back after the re-exec":
     # The re-executed instance finds the foreign entry again (the interposer

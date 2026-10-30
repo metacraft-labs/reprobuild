@@ -5190,6 +5190,15 @@ proc refreshRestoredOutputs*(cache: var ActionCache;
     let live = fingerprintMetadata(source)
     if live.kind == ffkMissing:
       continue
+    # The refresh stamps the record with what the restore WROTE. A regular
+    # file whose size is not the recorded blob's was not written by this
+    # restore (a concurrent writer, a failed or partial materialization):
+    # its recorded state is kept, so the next consultation rejects the
+    # record on it instead of adopting a file the record does not describe.
+    if live.kind == ffkRegular and
+        record.outputPayloadKind == opkCasBlobs and
+        live.sizeBytes != result.outputs[i].blob.sizeBytes:
+      continue
     let observed = observeOutputWitness(source, live)
     result.outputs[i].metadata = live
     result.outputs[i].changeTimeNs = observed.changeTimeNs
