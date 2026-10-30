@@ -444,8 +444,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # stays listening). Step 2 pauses the socket, finds the unit not
     # running and step 7 does not start it -- and the socket must still be
     # listening afterwards.
+    # Fresh socket (no queued connections), then the service running, as
+    # the plan must see it.
     discard g.run("systemctl stop repro-fixture-excl-s.socket; " &
-      "systemctl stop repro-fixture-excl-s.service; systemctl start repro-fixture-excl-s.socket")
+      "systemctl stop repro-fixture-excl-s.service; systemctl start repro-fixture-excl-s.socket; " &
+      "systemctl start repro-fixture-excl-s.service")
     let p9d = profile([c1, ("repro-fixture-excl-s.service", exclusiveUnit("s3"))])
     let paused9d = g.startSwitchPausedAt(repro, "g9d-idle", p9d, "step-1")
     step("g9d: the switch paused after realise", paused9d.exitCode == 0,
@@ -455,7 +458,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("systemctl is-active repro-fixture-excl-s.service").stdout.strip() != "active" and
          g.run("systemctl is-active repro-fixture-excl-s.socket").strip() == "active", "")
     let r9d = g.resumeSwitch()
-    step("g9d: the switch completes", r9d.exitCode == 0, r9d.stdout & r9d.stderr)
+    step("g9d: the switch completes, having planned a stop-start that pauses the socket",
+         r9d.exitCode == 0 and "stop-start\trepro-fixture-excl-s.service" in r9d.stdout and
+         "pauses repro-fixture-excl-s.socket" in r9d.stdout, r9d.stdout & r9d.stderr)
     step("g9d: the socket step 2 paused is listening again, the idle unit not started",
          g.run("systemctl is-active repro-fixture-excl-s.socket").strip() == "active" and
          g.exec("systemctl is-active repro-fixture-excl-s.service").stdout.strip() != "active",
@@ -608,7 +613,6 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("g14b: refused with EAddOnExclusiveOverlap while the KillMode=process worker lives",
          r14.exitCode == 2 and "EAddOnExclusiveOverlap" in r14.stderr and
          "repro-fixture-excl-r.service" in r14.stderr, "exit " & $r14.exitCode & "\n" & r14.stdout & r14.stderr)
-    noOverlap("g14b-anchor-changes")
     step("g14b: no second instance was started",
          g.run("grep -c '^start r1 ' " & LogPath & "; true").strip() == "1", g.run("cat " & LogPath))
     discard g.run("systemctl kill -s KILL repro-fixture-excl-r.service; sleep 1; " &
@@ -639,7 +643,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "/etc/systemd/system/repro-fixture-excl-old.service " &
       "/etc/systemd/system/repro-fixture-excl-old2.service " &
       "/etc/systemd/system/repro-fixture-excl-old2.socket; systemctl daemon-reload; true")
-    discard g.run("pkill -f repro-fixture-withchild; true")
+    discard g.run("pkill -f '^/bin/sh /usr/local/bin/repro-fixture-withchild'; true")
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
   except CatchableError as e:
