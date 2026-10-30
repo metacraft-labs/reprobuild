@@ -247,7 +247,7 @@ proc addOnDebianProfile*(): RealisationProfile =
       reason: baseServices),
     FieldRule(field: "extraPackages", class: fcAddOnSpecific,
       reason: "realised as store paths, with commands put on PATH through " &
-        "the add-on's `/etc/profile.d/repro-addon.sh`, never installed " &
+        "the profile's `/etc/profile.d/repro-addon-tools.sh`, never installed " &
         "into `/usr`"),
     FieldRule(field: "bootloader", class: fcInvalid, reason: bootloader),
     FieldRule(field: "validateExprs", class: fcShared),

@@ -211,7 +211,7 @@ const
   AddOnToolDir* = "/etc/repro/bin"
     ## Where `linux.addOnTool` wrappers live: under the add-on's own `/etc`
     ## prefix (always a managed prefix, §4.4), put on `PATH` by
-    ## `/etc/profile.d/repro-addon.sh` (`addOnToolPath()` in the DSL).
+    ## `/etc/profile.d/repro-addon-tools.sh` (`addOnToolPath()` in the DSL).
   AddOnToolLauncherName* = "reprobuild-sandbox-launcher"
   AddOnToolLauncherLink* = AddOnToolDir & "/." & AddOnToolLauncherName
     ## The wrapper execs the launcher through THIS link, which the apply

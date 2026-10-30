@@ -928,11 +928,19 @@ template systemdUnitState*(targetResources: var seq[ResourceIntent];
       dependsOn)
 
 # `AddOnToolDir` is where `addOnTool` wrappers land, and `addOnToolPath()`
-# puts it on PATH. `AddOnToolPathScript` is `/etc/profile.d/repro-addon.sh`:
+# puts it on PATH. `AddOnToolPathScript` is the body of `AddOnToolPathFile`:
 # it prepends the wrapper directory once (login shells source
 # `/etc/profile.d/*.sh`; it is POSIX sh, as Debian's `/etc/profile` is).
+#
+# The file is the profile's own, never generation 0's
+# `/etc/profile.d/repro-addon.sh` (the add-on bootstrap's hook that appends
+# the store `repro`): two writers of one path would each rewrite the
+# other's content on every apply, and the boot-time verification would
+# report the file against whichever digest the ledger holds for the other
+# (ReproOS Add-On Mode spec §4.1, §13 decision 18).
 const
   AddOnToolDir* = "/etc/repro/bin"
+  AddOnToolPathFile* = "/etc/profile.d/repro-addon-tools.sh"
   AddOnToolPathScript* =
     "# Written by reprobuild (addOnToolPath): operator commands from the\n" &
     "# add-on's package(apt) closures live under " & AddOnToolDir & ".\n" &
@@ -973,15 +981,16 @@ template addOnTool*(targetResources: var seq[ResourceIntent];
 template addOnToolPath*(targetResources: var seq[ResourceIntent];
                         address: string = "";
                         dependsOn: seq[string] = @[]) =
-  ## The `fs.systemFile` `/etc/profile.d/repro-addon.sh` that puts
-  ## `/etc/repro/bin` (the `addOnTool` wrappers) on PATH for login shells.
+  ## The `fs.systemFile` `AddOnToolPathFile`
+  ## (`/etc/profile.d/repro-addon-tools.sh`) that puts `/etc/repro/bin`
+  ## (the `addOnTool` wrappers) on PATH for login shells.
   ## One per profile: it is an ordinary file resource with a fixed
   ## content, so two declarations would be the same address twice.
   ## ReproOS Add-On Mode spec §4.1.
   # Positional on purpose: a template substitutes its parameters wherever
   # the identifier appears, including a named argument's NAME, so
   # `address = address` would expand to `"" = ""`.
-  fsSystemFile(targetResources, "/etc/profile.d/repro-addon.sh",
+  fsSystemFile(targetResources, AddOnToolPathFile,
     AddOnToolPathScript, "", "", "", "0644", "", address, dependsOn)
 
 template launchdSystemDaemon*(targetResources: var seq[ResourceIntent];
