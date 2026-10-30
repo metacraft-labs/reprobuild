@@ -4157,11 +4157,12 @@
             "pathValue",
             "repoRoot",
             "reproBin",
+            "sevenZip",
             "shellCommand",
             "target",
             "tempRoot"
           ],
-          "line": 77,
+          "line": 97,
           "path": "tests/e2e/path-only/t_path_only_tool_interfaces.nim",
           "patterns": [
             "nim-argv"
