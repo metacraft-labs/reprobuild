@@ -10,6 +10,7 @@
 ##   repro system addon verify [--boot | --after-dpkg]
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
+##   repro system addon secrets [--boot]
 ##   repro system addon probe <healthCheck>
 ##   repro system addon secret put --service S --name N [--target T] < secret
 ##   repro system addon rotate-recipient-key
@@ -84,6 +85,10 @@ commands:
       always exits 0.
   recover
       The same, for an operator: exits 1 unless the host ends ok or drift.
+  secrets [--boot]
+      Re-materialise the current generation's secrets from the retained
+      envelope (the boot secrets unit; leaves them to an apply that holds
+      the host apply lock). --boot: always exits 0.
   probe <healthCheck>
       Run one tcp: or http:// health check here (the confirm step runs it
       in the host's namespaces); exits 0 when it passes.
@@ -353,6 +358,16 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
       return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
+    of "secrets":
+      # `repro system addon secrets [--boot]`: re-materialise the current
+      # generation's secrets (repro-addon-secrets.service at boot, §7.7).
+      var atBoot = false
+      for a in rest:
+        if a == "--boot": atBoot = true
+        else: raise newException(ValueError, "unknown option " & a)
+      let r = bootSecrets(DefaultStateDir)
+      stdout.write("repro-addon secrets: " & r.line & "\n")
+      return (if atBoot or r.ok: 0 else: 1)
     of "secret":
       return runSecretPutCli(rest)
     of "rotate-recipient-key":

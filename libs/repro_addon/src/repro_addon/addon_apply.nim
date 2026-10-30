@@ -180,6 +180,11 @@ type
       ## Queue step 7's jobs without waiting for them (``--no-block``): a
       ## recovery at boot, which must never wait on the boot transaction.
       ## The confirm step still waits for the health checks.
+    confirmCapSec*: int
+      ## When > 0, step 8 waits at most this long, whatever the profile's
+      ## ``confirmTimeout``: a recovery at boot runs a replay's confirm
+      ## and, if that fails, a revert's, inside the re-assert unit's start
+      ## timeout, so each is capped (``reassert``, ``BootConfirmCapSec``).
 
   AddonApplyResult* = object
     generationId*: string
@@ -1598,9 +1603,22 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # exceptions, and so is a plan, which writes nothing.
   if not opts.planOnly and purpose notin ["replay", "revert"] and
       hasPendingMarker(stateDir):
-    raise newException(AddonApplyError, "an interrupted switch is pending " &
-      "(" & pendingMarkerPath(stateDir) & "); run `repro system addon " &
-      "recover` to finish or revert it first")
+    # An apply recovers an interrupted switch first when that switch's
+    # owner is gone -- a previous boot's, or a killed process's -- under
+    # the host and state-directory locks it already holds (both are
+    # re-entrant within the process), so an apply that wins the race with
+    # the boot recovery does not leave the host half-switched until the
+    # next boot (§7.7). The add-on layer installs the guard for the
+    # default state directory; elsewhere, and when recovery does not
+    # resolve it, the apply refuses with nothing written.
+    var why = "run `repro system addon recover` to finish or revert it first"
+    if pendingSwitchGuard != nil and
+        normalizedPath(stateDir) == normalizedPath(DefaultStateDir):
+      let g = pendingSwitchGuard()
+      if not g.ok: why = "recovery did not resolve it: " & g.why
+    if hasPendingMarker(stateDir):
+      raise newException(AddonApplyError, "an interrupted switch is " &
+        "pending (" & pendingMarkerPath(stateDir) & "); " & why)
   var replayPlan: PendingPlan
   if opts.replay:
     replayPlan = readPendingPlan(stateDir)
@@ -2459,9 +2477,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       healthChecks.add(UnitHealthCheck(unit: r.suName, address: r.address,
         raw: r.suHealthCheck, spec: parseHealthCheck(r.suHealthCheck)))
   result.healthChecks = healthChecks
-  let confirmTimeout = if user.addOn.confirmTimeoutSec > 0:
-                         user.addOn.confirmTimeoutSec
-                       else: DefaultConfirmTimeoutSec
+  let declaredConfirm = if user.addOn.confirmTimeoutSec > 0:
+                          user.addOn.confirmTimeoutSec
+                        else: DefaultConfirmTimeoutSec
+  let confirmTimeout = if opts.confirmCapSec > 0:
+                         min(declaredConfirm, opts.confirmCapSec)
+                       else: declaredConfirm
   let probeExe = if opts.reproExe.len > 0: opts.reproExe
                  else: getAppFilename()
 
@@ -2950,7 +2971,19 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         " error(s) and " & $result.infra.driftCount & " drift finding(s):\n  " &
         result.infra.diagnostics.join("\n  ")
   except EAddOn as e:
-    if marker.step < ssFlip:
+    # ``marker`` is THIS run's: a replay or a revert writes a fresh one at
+    # step 1, so its step says nothing about how far the switch it
+    # recovers had got -- that one may well have flipped. Only a fresh
+    # switch refused before its own flip may be undone and forgotten; a
+    # refused replay or revert goes down the not-committed path below,
+    # which keeps the marker (a revert) or reverts (a replay).
+    let freshSwitch = not replaying and not opts.recordOnly and
+                      purpose notin ["replay", "revert"]
+    when mutated("refused-recovery-forgets-marker"):
+      let undoable = marker.step < ssFlip
+    else:
+      let undoable = freshSwitch and marker.step < ssFlip
+    if undoable:
       # A refusal decided before the flip (an exclusive unit that would
       # overlap): nothing was switched, but step 2 may already have
       # stopped or disabled units. They are put back -- the marker named
@@ -3029,7 +3062,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         userProfileText: back.user, driver: opts.driver, purpose: "revert",
         assumeActive: assume, retention: opts.retention,
         reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
-        nonBlockingStarts: opts.nonBlockingStarts))
+        nonBlockingStarts: opts.nonBlockingStarts,
+        confirmCapSec: opts.confirmCapSec))
     except CatchableError as e:
       raise newException(AddonApplyError, why & "\nthe switch could not " &
         "be rolled back to " & committedPrevious & " either: " & e.msg &
@@ -3083,6 +3117,113 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       recordClass: AuditClassLiveState))
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
+
+type
+  FailedReplayRevert* = object
+    reverted*: bool        ## the host is back in the generation the
+                           ## interrupted switch began from
+    generationId*: string  ## the revert's generation (when reverted)
+    why*: string           ## why no revert was possible (when not)
+
+proc ledgerRecordsAttempt(stateDir, fromGeneration: string): bool =
+  ## The ledger copy was rewritten since ``fromGeneration`` was committed:
+  ## only the interrupted switch (or a replay of it) writes it while
+  ## `current` still names ``fromGeneration``, and it does so after its
+  ## writes, so a revert planned from it can tell them apart.
+  let lp = ledgerCopyPath(stateDir)
+  if not fileExists(lp): return false
+  try: readLedger(lp).generation != fromGeneration
+  except CatchableError: false
+
+proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
+                              replayError: string;
+                              driver: CollisionDriver = nil;
+                              nonBlockingStarts = false;
+                              confirmCapSec = 0): FailedReplayRevert =
+  ## A recovery whose replay of an interrupted switch failed for any reason
+  ## other than rolling itself back (a plan that cannot be read or
+  ## planned, a refusal, a step that raised) reverts to the generation the
+  ## switch began from, through the same switch, whenever that is possible
+  ## (spec §7.2, decision 23). The revert re-applies that generation's own
+  ## stored profiles, so it needs nothing of the failed switch's plan --
+  ## only a record of what the switch wrote, so that it can remove it.
+  ## The marker is kept, with ``reverted`` false and the reason, exactly
+  ## when no revert is possible:
+  ##
+  ## - the switch being recovered is itself a revert (or the replay's own
+  ##   revert failed): a failed revert keeps its marker;
+  ## - a first switch (bootstrap's): there is no generation to go back to;
+  ## - ``current`` no longer names the generation the switch began from;
+  ## - the write-ahead record is unusable AND the switch may have written
+  ##   (it had passed step 2) without the ledger recording it: no revert
+  ##   can tell its writes apart. (Awaiting the owner's confirmation as a
+  ##   case of its own; see §7.2.)
+  ##
+  ## A revert that is attempted and fails raises, with its own marker
+  ## kept (the first case, at the next recovery).
+  var now = prior
+  try: now = readPendingMarker(stateDir)
+  except CatchableError: discard
+  if prior.purpose == "revert" or now.purpose == "revert":
+    return FailedReplayRevert(why: "the switch being recovered is a " &
+      "revert, and a revert that fails keeps its marker")
+  let fromGen = prior.fromGeneration
+  if fromGen.len == 0:
+    return FailedReplayRevert(why: "a first switch (bootstrap) has no " &
+      "generation to go back to")
+  let current = readCurrentGenerationId(stateDir)
+  if current != fromGen:
+    return FailedReplayRevert(why: "`current` names " &
+      (if current.len > 0: current else: "no generation") &
+      ", not " & fromGen & ", the generation the switch began from")
+  # Nothing but stops (and the flip of the static tree, which the revert's
+  # own flip undoes) happens before step 3's drivers write.
+  let wroteNothing = prior.step <= ssPreStop and now.step <= ssPreStop
+  var tracked = wroteNothing or ledgerRecordsAttempt(stateDir, fromGen)
+  var planUsable = false
+  var plan: PendingPlan
+  if hasPendingPlan(stateDir):
+    try:
+      plan = readPendingPlan(stateDir)
+      planUsable = true
+    except CatchableError:
+      discard
+  if not tracked and planUsable:
+    # The switch wrote but had not recorded it: replay its writes only,
+    # which records them in the ledger copy (see the not-committed path
+    # of `runAddonApply`).
+    try:
+      discard runAddonApply(AddonApplyOptions(stateDir: stateDir,
+        hostIdentity: readHostname(), replay: true, recordOnly: true,
+        driver: driver))
+    except CatchableError:
+      discard        # a record-only replay never commits
+    tracked = ledgerRecordsAttempt(stateDir, fromGen)
+  if not tracked:
+    return FailedReplayRevert(why: "the write-ahead record is " &
+      (if planUsable: "usable but its writes could not be recorded"
+       else: "unusable") & " and the switch had passed step 2 (" &
+      $prior.step & ") without the ledger recording what it wrote; no " &
+      "revert can tell those writes apart")
+  var assume = prior.stopped
+  if planUsable:
+    for u in plan.activeUnits:
+      if u notin assume: assume.add(u)
+  # The generation's own copies, never the stored profiles: the
+  # interrupted switch may already have replaced those with its own.
+  let back = generationProfiles(stateDir, fromGen)
+  if not back.found:
+    return FailedReplayRevert(why: "generation " & fromGen & " keeps no " &
+      "copy of its profiles to go back to")
+  let reason = "the replay of the interrupted switch failed: " & replayError
+  let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
+    hostIdentity: readHostname(), ownProfileText: back.own,
+    userProfileText: back.user, driver: driver, purpose: "revert",
+    assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
+    nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
+  recordRolledBack(stateDir, prior.attempt, fromGen, r.generationId, reason,
+                   false)
+  FailedReplayRevert(reverted: true, generationId: r.generationId)
 
 proc renderLedgerDiff*(r: AddonApplyResult): string =
   ## The plan's ledger diff section (spec §7.1).

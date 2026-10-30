@@ -78,7 +78,7 @@ proc reassertReportPath*(stateDir: string): string =
   stateDir / "addon" / "reassert-report"
 
 proc takeLockForRecovery(stateDir: string; atBoot: bool):
-    tuple[ok: bool; why: string] =
+    tuple[ok: bool; why: string; took: bool] =
   ## The apply lock, so recovery never races a live switch. A lock taken
   ## in a previous boot (its recorded boot id is not this boot's) belongs
   ## to a switch the reset or power cut killed, whatever process its PID
@@ -86,7 +86,9 @@ proc takeLockForRecovery(stateDir: string; atBoot: bool):
   ## its owner is dead; a lock that records no boot id (written by an
   ## older release) is judged by its owner's liveness alone.
   if applyLockOwner(stateDir) == getCurrentProcessId():
-    return (true, "")
+    # This process holds it already: an apply recovering first (see
+    # `installPendingSwitchGuard`). It is that apply's to release.
+    return (true, "", false)
   var policy = defaultApplyLockPolicy()
   let rec = readApplyLockRecord(stateDir)
   let boot = currentBootId()
@@ -94,9 +96,9 @@ proc takeLockForRecovery(stateDir: string; atBoot: bool):
       rec.bootId != boot:
     policy.forceUnlock = true
   let acq = tryAcquireApplyLock(stateDir, policy)
-  if acq.acquired: (true, "")
+  if acq.acquired: (true, "", true)
   else: (false, "a switch is in progress (" &
-         describeApplyLockHolder(stateDir, acq) & "); not touching it")
+         describeApplyLockHolder(stateDir, acq) & "); not touching it", false)
 
 proc removeTempLeftovers*(stateDir: string): seq[string] =
   ## A writer the crash interrupted between creating its temporary file
@@ -202,7 +204,8 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   let lock = takeLockForRecovery(stateDir, atBoot)
   if not lock.ok:
     return RecoveryOutcome(resolved: false, lines: @[lock.why])
-  defer: releaseApplyLock(stateDir)
+  defer:
+    if lock.took: releaseApplyLock(stateDir)
   seamPauseRecovery(stateDir)
   let swept = removeTempLeftovers(stateDir)
   if swept.len > 0:
@@ -221,12 +224,15 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
     except CatchableError as e:
       result.lines.add("finishing the committed switch failed: " & e.msg)
     return
+  # At boot the replay's confirm and, if it fails, its revert's run inside
+  # the re-assert unit's start timeout: each is capped (§7.7).
+  let cap = if atBoot: BootConfirmCapSec else: 0
   try:
     let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
       hostIdentity: readHostname(), replay: true, purpose: "replay",
       driver: driver, nonBlockingStarts: atBoot,
       revertOf: m.revertOf, revertReason: m.revertReason,
-      replayOf: m.purpose))
+      replayOf: m.purpose, confirmCapSec: cap))
     if m.purpose == "revert":
       # The interrupted switch was itself the revert of a failed one: the
       # failed attempt is recorded rolled-back now that the revert is done.
@@ -239,9 +245,26 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
     result.lines.add("the replay did not complete and was reverted: " & e.msg)
     result.resolved = true
   except CatchableError as e:
-    result.lines.add("the switch could be neither finished nor reverted; " &
-      "the marker stays for an operator (`repro system addon recover`): " &
-      e.msg)
+    # The replay failed without reverting itself. Revert from here
+    # whenever a revert is possible (spec §7.2); keep the marker only when
+    # it is not, or when the revert fails too.
+    let failed = e.msg
+    try:
+      let rv = revertAfterFailedReplay(stateDir, m, failed, driver,
+        nonBlockingStarts = atBoot, confirmCapSec = cap)
+      if rv.reverted:
+        result.lines.add("the replay failed (" & failed & "); reverted to " &
+          m.fromGeneration & " (re-applied as generation " &
+          rv.generationId & ")")
+        result.resolved = true
+      else:
+        result.lines.add("the switch could be neither finished nor " &
+          "reverted; the marker stays for an operator (`repro system " &
+          "addon recover`): " & failed & "; no revert: " & rv.why)
+    except CatchableError as e2:
+      result.lines.add("the switch could be neither finished nor " &
+        "reverted; the marker stays for an operator (`repro system addon " &
+        "recover`): " & failed & "; the revert failed too: " & e2.msg)
 
 proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## After a recovery: every unit the current generation started is

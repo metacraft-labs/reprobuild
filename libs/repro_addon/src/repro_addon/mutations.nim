@@ -116,6 +116,23 @@
 ##                                            fsyncs the file it writes nor
 ##                                            its directory
 ##                                            (``repro_elevation``)
+## ``refused-recovery-forgets-marker``        a refusal (an exclusive unit
+##                                            that will not stop) inside a
+##                                            replay or a revert is undone
+##                                            like a fresh switch's: the
+##                                            pending marker and plan are
+##                                            removed while the host is
+##                                            half-switched
+## ``secrets-after-recovery``                 the boot secrets unit is
+##                                            ordered after the boot
+##                                            recovery
+##                                            (``repro-addon-reassert``),
+##                                            so every unit that loads
+##                                            credentials -- ordered after
+##                                            it -- and multi-user.target
+##                                            wait for the recovery again
+##                                            (the ordering A7 first
+##                                            shipped)
 ## ``path-based-write-follows-links``         the drivers write managed
 ##                                            files with a path-based
 ##                                            ``open``, following any link
@@ -209,6 +226,8 @@ const
                           "addon-target-in-boot-order",
                           "current-remove-then-create",
                           "nofollow-write-skips-fsync",
+                          "refused-recovery-forgets-marker",
+                          "secrets-after-recovery",
                           "kept-units-still-stopped",
                           "secrets-on-disk",
                           "secrets-on-tmpfs",

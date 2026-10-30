@@ -737,11 +737,19 @@ proc parseDependsOn(kindTag, raw: string): seq[ResourceDependency] =
 const
   SecretsRunRoot* = "/run/repro/secrets"
     ## Where the add-on materialises plaintext secrets (a ramfs, §10.3).
-  SecretsOrderingUnit* = "repro-addon-reassert.service"
-    ## The unit that re-materialises secrets at boot (§7.7 step 3). A
-    ## unit that loads credentials is ordered after it, so it never starts
-    ## at boot before its secrets exist; on a host without it (full
-    ## ReproOS) an `After=` on a unit that does not exist orders nothing.
+  SecretsBootUnit* = "repro-addon-secrets.service"
+    ## The add-on's boot-time secrets step (``generation0``): a bounded
+    ## oneshot, off the recovery's path, that re-materialises the current
+    ## generation's secrets (ReproOS Add-On Mode §7.7, §10.3).
+  SecretsOrderingUnit* = SecretsBootUnit
+    ## The unit a unit that loads credentials is ordered after (and
+    ## wants), so it never starts at boot before its secrets exist. It is
+    ## the bounded secrets step, NOT the re-assert unit: units with
+    ## credentials are wanted by multi-user.target, so whatever they are
+    ## ordered after is on the base's boot path, and the recovery (which
+    ## may confirm health checks for many minutes) must never be (§7.7).
+    ## On a host without it (full ReproOS) `Wants=`/`After=` on a unit
+    ## that does not exist pull in and order nothing.
 
 proc isSafeSecretComponent*(s: string): bool =
   ## One path segment of `[A-Za-z0-9._-]`, at most 64 bytes, not starting
@@ -789,8 +797,8 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
   ##
   ## With `credentials`, the `[Service]` section also gains one
   ## `LoadCredential=` line per credential (`credentialLines`) and the
-  ## `[Unit]` section an `After=` the boot-time secrets step
-  ## (`SecretsOrderingUnit`), ReproOS-Add-On-Mode §10.3.
+  ## `[Unit]` section a `Wants=` and an `After=` on the boot-time secrets
+  ## step (`SecretsOrderingUnit`), ReproOS-Add-On-Mode §7.7, §10.3.
   doAssert r.kind == srkSystemdSystemUnit
   var content = r.suContent
   if r.suAptClosureLock.len > 0:
@@ -836,6 +844,7 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
       outLines.add(l)
       if t == "[Unit]" and not unitSeen:
         unitSeen = true
+        outLines.add("Wants=" & SecretsOrderingUnit)
         outLines.add("After=" & SecretsOrderingUnit)
       continue
     outLines.add(l)
@@ -849,7 +858,8 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
       "' names credentials but has no [Service] section")
   if not unitSeen:
-    outLines = @["[Unit]", "After=" & SecretsOrderingUnit, ""] & outLines
+    outLines = @["[Unit]", "Wants=" & SecretsOrderingUnit,
+                 "After=" & SecretsOrderingUnit, ""] & outLines
   outLines.join("\n")
 
 proc checkUnitStateResource*(r: SystemResource) =

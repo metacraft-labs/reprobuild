@@ -316,6 +316,37 @@ proc reassertSecrets*(stateDir: string; l: SecretsLayout): SecretsCheck =
     result.findings.add("degraded: secrets: " & e.msg)
     result.status = "degraded"
 
+proc bootSecrets*(stateDir: string; l = defaultSecretsLayout()):
+    tuple[ok: bool; line: string] =
+  ## ``repro-addon-secrets.service`` (§7.7, §10.3): the current generation's
+  ## secrets, re-materialised early in the boot and without waiting for
+  ## anything slow -- the units that load them, and multi-user.target with
+  ## them, are ordered after this. Both locks are tried once
+  ## (``reassertSecrets``): an apply that holds one materialises its own
+  ## generation's secrets, and waiting for it here would put that apply
+  ## (or a recovery's confirm) on the base's boot path. The one exception
+  ## is the state directory's lock left by a switch a crash killed in a
+  ## previous boot (its recorded boot id is not this boot's): nothing
+  ## holds it, whatever process its PID now names, so it is taken over, as
+  ## the recovery would. Never raises.
+  var tookStale = false
+  try:
+    let rec = readApplyLockRecord(stateDir)
+    let boot = currentBootId()
+    if rec.present and rec.bootId.len > 0 and boot.len > 0 and
+        rec.bootId != boot and applyLockOwner(stateDir) != getCurrentProcessId():
+      var policy = defaultApplyLockPolicy()
+      policy.forceUnlock = true
+      tookStale = tryAcquireApplyLock(stateDir, policy).acquired
+  except CatchableError:
+    discard
+  defer:
+    if tookStale: releaseApplyLock(stateDir)
+  let r = reassertSecrets(stateDir, l)
+  (r.status in ["ok", "drift", "deferred"],
+   r.status & (if r.notes.len + r.findings.len > 0:
+                 ": " & (r.notes & r.findings).join("; ") else: ""))
+
 # ---------------------------------------------------------------------------
 # The CLI.
 # ---------------------------------------------------------------------------

@@ -162,6 +162,9 @@ t_addon_secret_files_created_private_and_never_through_symlinks:
 e2e_addon_recovery_never_holds_up_boot:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_recovery_never_holds_up_boot
 
+e2e_addon_refused_recovery_keeps_its_record:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_refused_recovery_keeps_its_record
+
 e2e_addon_net_sysctl_applies_in_host_namespace:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace
 

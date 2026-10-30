@@ -32,10 +32,15 @@
 ## must end in A -- after B's account, directory and diversion had been
 ## made -- and the attempt is recorded ``rolled-back``.
 ##
-## An unusable record: the plan of a paused switch is truncated before the
+## An unusable record: the plan of a switch paused at ``step-3`` (it may
+## have written, and the ledger does not say what) is truncated before the
 ## reset; recovery must write nothing, report ``degraded`` and keep the
 ## marker; restoring the plan and running ``repro system addon recover``
-## must then finish the recovery.
+## must then finish the recovery. The same at ``step-2`` (nothing written
+## yet but stops): the replay cannot run, so recovery reverts instead --
+## the host is A, the unit reports ``ok``, no marker is left and the
+## attempt is recorded ``rolled-back`` (§7.2: a replay that fails reverts
+## whenever a revert is possible).
 ##
 ## Then the write-time refusal (A4 review F7): a foreign symlink planted on
 ## one of B's target paths before the first write makes the switch roll
@@ -47,7 +52,13 @@
 ## - ``reassert-skips-recovery`` (negative control): red;
 ## - ``nofollow-write-skips-fsync`` (the writer of the marker, the record
 ##   and the managed files without its fsyncs): red -- the gate sees what
-##   a missing fsync loses;
+##   a missing fsync loses. Deterministically: before every paused switch
+##   the guest's writeback is held back (``holdWriteback``: no flusher,
+##   ext4 ``commit=600,noauto_da_alloc``), so what nothing fsynced is not
+##   on the disk at the reset, and a file renamed into place unsynced is
+##   empty there. Without the mutation the same conditions must leave A
+##   or B, which is what makes every point a test of the switch's own
+##   fsyncs rather than of the kernel's timing;
 ## - ``current-remove-then-create`` at ``commit-current-removed``: red --
 ##   a commit that is not one rename loses `current`, and the recovered
 ##   history no longer names A.
@@ -261,6 +272,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     for point in selectedPoints(Points):
       if point.startsWith("revert:"): continue
       toA(point)
+      g.holdWriteback()
       let paused = g.startSwitchPausedAt(repro, "b", profileB(), point)
       step(point & ": the switch to B paused there", paused.exitCode == 0,
            paused.stdout & paused.stderr)
@@ -278,6 +290,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       if not point.startsWith("revert:"): continue
       toA(point)
       let before = g.rolledBackRecords()
+      g.holdWriteback()
       let paused = g.startSwitchPausedAt(repro, "c", failing, point)
       step(point & ": the revert of the failed switch paused there",
            paused.exitCode == 0, paused.stdout & paused.stderr)
@@ -318,6 +331,28 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              rec.exitCode == 0 and "reassert: ok" in rec.stdout,
              rec.stdout & rec.stderr)
         let gen = judge("unusable-record", rec.stdout, "")
+        inB = gen == "B"
+
+      # --- An unusable record before any write: recovery reverts.
+      toA("unusable-record-before-writes")
+      let before2 = g.rolledBackRecords()
+      let p3 = g.startSwitchPausedAt(repro, "b", profileB(), "step-2")
+      step("unusable-record-before-writes: the switch paused at step-2",
+           p3.exitCode == 0, p3.stdout & p3.stderr)
+      if p3.exitCode == 0:
+        discard g.run(": > " & SeamDir & "/pending.d/plan && sync")
+        g.hardReset()
+        g.boot()
+        let j = g.waitReasserted()
+        step("unusable-record-before-writes: the recovery reverted and reported ok",
+             "repro-addon reassert: ok" in j and "reverted to" in j, j)
+        step("unusable-record-before-writes: no pending marker is left",
+             g.exec("test ! -e " & SeamDir & "/pending").exitCode == 0, "")
+        let gen = judge("unusable-record-before-writes", j, "")
+        step("unusable-record-before-writes: the host is A", gen == "A", gen)
+        step("unusable-record-before-writes: the attempt is recorded rolled-back",
+             g.rolledBackRecords() > before2,
+             $before2 & " -> " & $g.rolledBackRecords())
         inB = gen == "B"
 
       # --- F7: a write refused at write time rolls the switch back.

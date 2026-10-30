@@ -27,7 +27,7 @@ libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protoc
 libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
 libs/repro_addon/tests/t_addon_collision.nim	nim	35
-libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	20
+libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	23
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	3
@@ -1088,6 +1088,7 @@ tests/e2e/addon/t_e2e_addon_no_plaintext_secret_on_disk.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
 tests/e2e/addon/t_e2e_addon_recipient_key_rotation.nim	nim	1
 tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim	nim	1
+tests/e2e/addon/t_e2e_addon_refused_recovery_keeps_its_record.nim	nim	1
 tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_follow_generations.nim	nim	1
 tests/e2e/addon/t_e2e_addon_service_reads_only_its_credentials.nim	nim	1

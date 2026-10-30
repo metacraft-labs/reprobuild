@@ -784,6 +784,35 @@ proc hardReset*(g: Guest) =
     if not g.waitPoweredOff(120):
       raise newException(TestBedError, "QEMU did not exit after system_reset")
 
+proc holdWriteback*(g: Guest) =
+  ## Make "not fsynced" mean "not on the disk" in this guest until its next
+  ## boot, so a durability falsifier is red every time rather than when
+  ## the kernel happens not to have written the data yet:
+  ##
+  ## - no periodic or background writeback: the flusher never wakes
+  ##   (``vm.dirty_writeback_centisecs=0``), dirty data never expires
+  ##   (``vm.dirty_expire_centisecs``) and the background and blocking
+  ##   thresholds are far above what a switch dirties
+  ##   (https://docs.kernel.org/admin-guide/sysctl/vm.html);
+  ## - ext4 on the root filesystem commits its journal only when something
+  ##   fsyncs (``commit=600``), and never flushes a file's data because it
+  ##   was renamed over another (``noauto_da_alloc``, the heuristic that
+  ##   otherwise papers over a missing fsync before a rename;
+  ##   https://docs.kernel.org/admin-guide/ext4.html).
+  ##
+  ## With delayed allocation a file renamed into place without an fsync
+  ## then reaches the disk, at the switch's next fsync of anything (which
+  ## commits the journal, renames included), as an empty file. The
+  ## settings are in memory only and end with the reset.
+  let r = g.exec("sysctl -q -w vm.dirty_writeback_centisecs=0 " &
+    "vm.dirty_expire_centisecs=360000 vm.dirty_background_ratio=90 " &
+    "vm.dirty_ratio=95 && mount -o remount,commit=600,noauto_da_alloc / " &
+    "&& findmnt -n -o FSTYPE,OPTIONS /")
+  if r.exitCode != 0 or not r.stdout.startsWith("ext4") or
+      "noauto_da_alloc" notin r.stdout:
+    raise newException(TestBedError, "could not hold writeback back: " &
+      r.stdout & r.stderr)
+
 proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
                           timeoutSec = 900): ExecOut =
   ## Start ``repro infra apply --profile <text>`` in the background with the
