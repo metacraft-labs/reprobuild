@@ -115,3 +115,63 @@ proc newAddOnUnsupportedBase*(observedBase, detail: string):
     diagnosticMessage(adUnsupportedBase, detail))
   result.diagnostic = adUnsupportedBase
   result.observedBase = observedBase
+
+# ---------------------------------------------------------------------------
+# The collision diagnostics (spec ReproOS-Add-On-Mode §4.3). They are raised
+# by the add-on's collision observer at plan time and again before each
+# write; the structured fields let the plan's collision report and the
+# tests name the package, the path and the alternative the operator has.
+# ---------------------------------------------------------------------------
+
+type
+  EAddOnPackageOwned* = object of EAddOn
+    ## `adPackageOwned`: a target path an installed package lists.
+    path*: string
+    package*: string
+    conffile*: bool
+      ## True when the package declares the path a conffile: the case
+      ## where editing in place would meet dpkg's conffile prompt on the
+      ## next upgrade, so `collision = divert` is the only safe opt-in.
+    dropInHint*: string
+      ## A drop-in or `.d` directory the program is known to read, when
+      ## the observer knows one; "" otherwise.
+
+  EAddOnUnitShadows* = object of EAddOn
+    ## `adUnitShadows`: a unit name a package already provides.
+    unit*: string
+    fragmentPath*: string
+      ## The package's unit file (`systemctl show -p FragmentPath`).
+
+proc newAddOnPackageOwned*(path, package: string; conffile: bool;
+                           dropInHint: string): ref EAddOnPackageOwned =
+  ## `EAddOnPackageOwned` for `path`, owned by `package`. The message names
+  ## the opt-ins the decision table allows, drop-in first when one is
+  ## known.
+  var detail = path & " is " &
+    (if conffile: "a conffile" else: "a file") & " of package " & package &
+    "; the add-on refuses to write over a package's file"
+  if dropInHint.len > 0:
+    detail.add(". Prefer a drop-in under " & dropInHint)
+    detail.add(", or declare `collision = \"divert\"` on the resource")
+  else:
+    detail.add(". Declare `collision = \"divert\"` on the resource to " &
+      "divert the package's copy to " & path & ".distrib")
+  result = newException(EAddOnPackageOwned,
+    diagnosticMessage(adPackageOwned, detail))
+  result.diagnostic = adPackageOwned
+  result.path = path
+  result.package = package
+  result.conffile = conffile
+  result.dropInHint = dropInHint
+
+proc newAddOnUnitShadows*(unit, fragmentPath: string): ref EAddOnUnitShadows =
+  ## `EAddOnUnitShadows` for `unit`, provided by a package at
+  ## `fragmentPath`.
+  result = newException(EAddOnUnitShadows, diagnosticMessage(adUnitShadows,
+    unit & " is provided by a package (" & fragmentPath & "); an /etc " &
+    "unit of the same name would shadow it. Declare " &
+    "`collision = \"dropIn\"` to change the unit without hiding it, or " &
+    "`collision = \"replace\"` to shadow it knowingly"))
+  result.diagnostic = adUnitShadows
+  result.unit = unit
+  result.fragmentPath = fragmentPath

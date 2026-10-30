@@ -165,6 +165,12 @@ type
       ## declares them. They are folded into the SAME apply as the
       ## target-profile convergence, so a rollback still raises at
       ## most one elevation prompt.
+    preWriteGuard*: PreWriteGuard
+      ## Consulted before every privileged operation on the in-process
+      ## (already-elevated) path; see `repro_elevation.PreWriteGuard`. The
+      ## ReproOS add-on re-runs its collision observer here. `nil` (the
+      ## default) checks nothing extra. The broker path does not carry
+      ## it: the add-on applies as root, in process.
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G: the action-edge intent
       ## items the profile macro emitted from inside the
@@ -602,7 +608,8 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       # Already-elevated fast path: run the privileged set in-process,
       # no broker, no prompt.
       outcome = applyPrivilegedSetInProcess(
-        FixtureContext(), planned, onProgress = beat)
+        FixtureContext(), planned, onProgress = beat,
+        preWriteGuard = opts.preWriteGuard)
       result.usedBroker = false
     else:
       # Launch EXACTLY ONE broker. A declined prompt is equivalent to

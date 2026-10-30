@@ -4,9 +4,10 @@
 ## preflight, a statically linked bootstrap binary, a store at
 ## ``/repro/store`` and a byte-identity uninstall.
 
-import repro_addon/[addon_apply, bootstrap, cli, fingerprint, generation0,
-                    ledger, linux_fs, mutations, preflight, store_root,
-                    uninstall, verify]
+import repro_addon/[addon_apply, bootstrap, cli, collision, etc_write,
+                    fingerprint, generation0, ledger, linux_fs, mutations,
+                    preflight, store_root, uninstall, verify]
 
-export addon_apply, bootstrap, cli, fingerprint, generation0, ledger,
-       linux_fs, mutations, preflight, store_root, uninstall, verify
+export addon_apply, bootstrap, cli, collision, etc_write, fingerprint,
+       generation0, ledger, linux_fs, mutations, preflight, store_root,
+       uninstall, verify

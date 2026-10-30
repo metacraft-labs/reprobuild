@@ -300,6 +300,12 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # unchanged.
   if p.catalogImports.len > 0:
     result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
+  # ReproOS add-on mode: the profile-wide `addOn:` section, only when the
+  # profile declares it, so the key set of a profile without one is
+  # unchanged.
+  if p.addOn.declared:
+    result.add ",\"addOn\":{\"managedEtcPrefixes\":" &
+      encodeStringArray(p.addOn.managedEtcPrefixes) & "}"
   # The concerns Reprobuild applies per host (`applies:` in a block-form
   # `hosts:` entry), only when some host declares them, so the key set of a
   # profile without a declaration is unchanged
@@ -522,6 +528,21 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
   if root.hasKey("catalogImports"):
     for it in root["catalogImports"]:
       result.catalogImports.add it.getStr()
+  # Optional; absent when the profile has no `addOn:` section. A malformed
+  # section is refused, never dropped (dropping it would lift the managed
+  # prefixes and let every /etc path through).
+  if root.hasKey("addOn"):
+    let a = root["addOn"]
+    if a.kind != JObject or not a.hasKey("managedEtcPrefixes") or
+        a["managedEtcPrefixes"].kind != JArray:
+      raise newException(ValueError,
+        "addOn must be an object with a `managedEtcPrefixes` array")
+    result.addOn.declared = true
+    for it in a["managedEtcPrefixes"]:
+      if it.kind != JString:
+        raise newException(ValueError,
+          "addOn.managedEtcPrefixes must be an array of strings")
+      result.addOn.managedEtcPrefixes.add it.getStr()
   # Optional; absent when no host declares the concerns Reprobuild applies.
   if root.hasKey("hostApplies"):
     for k, v in root["hostApplies"]:

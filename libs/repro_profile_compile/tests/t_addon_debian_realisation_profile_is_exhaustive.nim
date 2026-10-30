@@ -29,6 +29,9 @@ import repro_profile
 import repro_profile_compile
 import repro_infra/addon_diagnostics
 
+const LockText = staticRead("../../repro_dsl_stdlib/tests/fixtures/" &
+  "apt_closure/debian-trixie-20261001-armhf-node-exporter.lock")
+
 proc refusal(body: proc ()): ref EAddOnOutOfScope =
   ## The `EAddOnOutOfScope` `body` raises, or nil.
   try:
@@ -85,6 +88,14 @@ suite "add-on-debian realisation profile":
     linuxFirewallRule(r, chain = "inet repro input", name = "web",
       protocol = "tcp", action = "accept", direction = "inbound",
       localPort = "443")
+    # The collision opt-ins (A3) and the unit-state and tool kinds.
+    systemdSystemUnit(r, name = "cron.service", content = "[Service]\n",
+      collision = "dropIn", dropInName = "nice", restartIfChanged = false)
+    fsSystemFile(r, path = "/etc/ssh/sshd_config", content = "x",
+      collision = "divert")
+    systemdUnitState(r, name = "avahi-daemon.service", enabled = true,
+      state = "Running")
+    addOnTool(r, command = "wakeonlan", aptClosureLock = LockText)
     # The diversion class has no profile constructor yet (its kind exists
     # on the apply side, A2); the intent is what the text form carries.
     r.add ResourceIntent(kind: "linux.dpkgDiversion",

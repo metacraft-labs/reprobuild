@@ -90,6 +90,14 @@ type
       ## what makes the apply's reboot notice reachable from a profile
       ## rather than only from the Windows resource drivers.
 
+  AddOnIntent* = object
+    ## What a profile's `addOn:` section declares (ReproOS-Add-On-Mode
+    ## §4.4). The text form's `addOn { managedEtcPrefixes = [...] }` stanza
+    ## is its rendering; the apply refuses an `/etc` path outside the
+    ## prefixes with `EAddOnOutOfScope`.
+    declared*: bool
+    managedEtcPrefixes*: seq[string]
+
   ProfileIntent* = object
     name*: string
     activities*: seq[ActivityIntent]
@@ -112,6 +120,11 @@ type
       ## has its whole system managed here, the default (Gradual-Nix-To-
       ## Reprobuild-Migration.md §Hosts, feature 2; ReproOS add-on mode).
     resources*: seq[ResourceIntent]
+    addOn*: AddOnIntent
+      ## The profile-wide `addOn:` section of ReproOS add-on mode
+      ## (ReproOS-Add-On-Mode §4.4): the `/etc` prefixes the profile's
+      ## resources may own on an add-on host. `declared` is false for a
+      ## profile without the section.
     stowScopes*: seq[StowScope]
       ## GM11: the `stow/` packages an activity claims (a `stow:` block in
       ## `activity <name>:`), one record per claim. A package no record

@@ -128,12 +128,30 @@ proc addOnDebianProfile*(): RealisationProfile =
   result.name = AddOnDebianProfileName
   result.kinds = @[
     KindRule(kind: "systemd.systemUnit", class: fcShared,
-      fields: shared("name", "content", "enabled")),
+      fields: shared("name", "content", "enabled", "aptClosureLock",
+                     "restartIfChanged") &
+        @[FieldRule(field: "collision", class: fcAddOnSpecific,
+            reason: "the opt-in when a package provides a unit of the " &
+              "same name (spec §4.3): `dropIn` or `replace`"),
+          FieldRule(field: "dropInName", class: fcAddOnSpecific,
+            reason: "names the drop-in file of a `collision = dropIn` " &
+              "unit")]),
+    KindRule(kind: "systemd.unitState", class: fcAddOnSpecific,
+      reason: "the desired enablement and activity of a distribution " &
+        "unit the add-on does not own (spec §4.1)",
+      fields: shared("name", "enabled", "state")),
+    KindRule(kind: "linux.addOnTool", class: fcAddOnSpecific,
+      reason: "an operator command run from an apt closure through a " &
+        "wrapper under /etc/repro/bin (spec §8.3)",
+      fields: shared("command", "aptClosureLock", "program")),
     KindRule(kind: "systemd.systemTimer", class: fcShared,
       fields: shared("name", "content", "enabled", "state")),
     KindRule(kind: "fs.systemFile", class: fcShared,
       fields: shared("path", "content", "sourceUrl", "sha256", "sourceLocal",
-        "mode")),
+        "mode") &
+        @[FieldRule(field: "collision", class: fcAddOnSpecific,
+            reason: "the opt-in when a package owns the path (spec §4.3): " &
+              "`divert`")]),
     KindRule(kind: "passwd.user", class: fcShared,
       fields: shared("name", "shell", "extraGroups")),
     KindRule(kind: "passwd.group", class: fcShared,

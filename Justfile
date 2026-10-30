@@ -90,6 +90,20 @@ e2e_addon_bootstrap_installs_anchors_and_private_recipient_key:
 e2e_addon_store_roots_and_btrfs:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_store_roots_and_btrfs
 
+# The ownership-ledger and collision gates (A3). They run on the two
+# supported bases by default; the Debian 12 upgrade source has no row here.
+e2e_addon_collision_matrix:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_collision_matrix
+
+e2e_addon_divert_survives_package_upgrade:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_divert_survives_package_upgrade
+
+e2e_addon_removal_respects_ledger:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_removal_respects_ledger
+
+e2e_addon_symlink_on_target_path_is_refused:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_symlink_on_target_path_is_refused
+
 test-hcr-native-library-prerequisite:
     nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
 

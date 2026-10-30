@@ -77,6 +77,13 @@ const
   KeyMode         = "mode"
   KeyManagedBy    = "managedBy"
   KeySystemActivities = "activities"
+  KeyAddOn        = "addOn"
+    ## ReproOS add-on mode: the profile-wide `addOn:` section
+    ## (`ProfileIntent.addOn`), a map with `"managedEtcPrefixes"` (an array
+    ## of text). Optional; omitted when the profile declares none, so a
+    ## profile without the section encodes exactly as before. Envelope
+    ## schema 12.
+  KeyManagedEtcPrefixes = "managedEtcPrefixes"
   KeyStowScopes   = "stowScopes"
     ## GM11: the activities' stow claims (`ProfileIntent.stowScopes`): an
     ## array of maps with `"package"` and `"activity"` (text) and, under a
@@ -331,6 +338,9 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
     entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
   if p.catalogImports.len > 0:
     entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
+  if p.addOn.declared:
+    entries.add entry(KeyAddOn, cborMap(@[entry(KeyManagedEtcPrefixes,
+      encodeStringArray(p.addOn.managedEtcPrefixes))]))
   if p.hostApplies.len > 0:
     entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
   if p.hostSystems.len > 0:
@@ -644,6 +654,16 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   if ciFound:
     for it in expectArray(ciNode, KeyCatalogImports):
       result.catalogImports.add expectText(it, KeyCatalogImports)
+  # ReproOS add-on mode: the `addOn:` section is OPTIONAL on the wire
+  # (absent when the profile declares none). A malformed one is corrupt.
+  var aoFound = false
+  let aoNode = lookupOpt(entries, KeyAddOn, aoFound)
+  if aoFound:
+    let ao = expectMap(aoNode, KeyAddOn)
+    result.addOn.declared = true
+    for it in expectArray(lookup(ao, KeyManagedEtcPrefixes, KeyAddOn),
+                          KeyManagedEtcPrefixes):
+      result.addOn.managedEtcPrefixes.add expectText(it, KeyManagedEtcPrefixes)
   # The per-host concern declaration is OPTIONAL on the wire (absent when
   # no host declares one).
   var haFound = false

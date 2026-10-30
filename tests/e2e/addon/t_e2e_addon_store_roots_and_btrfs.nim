@@ -26,13 +26,21 @@ import repro_test_support/reasoned_skip
 
 import ./addon_testbed
 
-const Gen1 = """fs.systemFile {
+const Gen1 = """addOn {
+  managedEtcPrefixes = ["/etc/repro-addon-fixture/"]
+}
+
+fs.systemFile {
   path = "/etc/repro-addon-fixture/one.conf"
   content = "one
 "
 }
 """
-const Gen2 = """fs.systemFile {
+const Gen2 = """addOn {
+  managedEtcPrefixes = ["/etc/repro-addon-fixture/"]
+}
+
+fs.systemFile {
   path = "/etc/repro-addon-fixture/two.conf"
   content = "two
 "
@@ -97,6 +105,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "mkdir -p /mnt/repro-addon-btrfs && " &
       "mount -o loop /var/tmp/repro-addon-btrfs.img /mnt/repro-addon-btrfs && " &
       "stat -f -c %T /mnt/repro-addon-btrfs", timeoutSec = 1200)
+    # `stat` prints last: mkfs.btrfs on Debian 12 precedes it with a NOTE
+    # about its changed defaults.
     step("a loop-backed btrfs filesystem is mounted",
          mk.exitCode == 0 and mk.stdout.strip().endsWith("btrfs"), mk.stdout & mk.stderr)
     if mk.exitCode == 0:

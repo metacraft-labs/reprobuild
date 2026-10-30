@@ -1073,6 +1073,56 @@ proc parseAdapterPreferenceSection(body: NimNode; profileVar: NimNode): NimNode 
     blk.add inner
     result.add blk
 
+proc parseAddOnSection(body: NimNode; profileVar: NimNode): NimNode =
+  ## ReproOS add-on mode's profile-wide declaration
+  ## (ReproOS-Add-On-Mode §4.4):
+  ##
+  ##   addOn:
+  ##     managedEtcPrefixes:
+  ##       "/etc/vaultwarden/"
+  ##       "/etc/caddy/"
+  ##
+  ## Each prefix is one string literal per line: `/etc/name/` for a subtree,
+  ## `/etc/name` for that exact path. The macro records them
+  ## (`ProfileIntent.addOn`); their validation is the text form's
+  ## (`repro_infra.managedPrefixError`), applied when the compiled profile
+  ## is rendered to it, so a hand-written and a compiled profile refuse the
+  ## same prefixes.
+  result = newNimNode(nnkStmtList)
+  if body.kind != nnkStmtList:
+    error("addOn: expects an indented block (managedEtcPrefixes: ...)", body)
+  result.add quote do:
+    `profileVar`.addOn.declared = true
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt:
+      continue
+    of nnkCall:
+      if entry[0].kind != nnkIdent or $entry[0] != "managedEtcPrefixes":
+        error("addOn: unknown field " & entry[0].repr &
+              " (known: managedEtcPrefixes)", entry)
+      if entry.len < 2 or entry[1].kind != nnkStmtList:
+        error("managedEtcPrefixes must be an indented block of string " &
+              "literals", entry)
+      var seen: seq[string] = @[]
+      for p in entry[1]:
+        case p.kind
+        of nnkCommentStmt:
+          continue
+        of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+          let prefix = p.strVal
+          if prefix in seen:
+            error("managedEtcPrefixes: \"" & prefix & "\" is declared twice", p)
+          seen.add prefix
+          let lit = newStrLitNode(prefix)
+          result.add quote do:
+            `profileVar`.addOn.managedEtcPrefixes.add `lit`
+        else:
+          error("managedEtcPrefixes: expected a string literal, got " &
+                $p.kind, p)
+    else:
+      error("addOn: expected `managedEtcPrefixes:`, got " & $entry.kind, entry)
+
 proc parseDataSection(body: NimNode; profileVar: NimNode): NimNode =
   ## GM4: `data:` body is one string literal per line, each naming a
   ## plan-time data file relative to the profile directory:
@@ -1346,6 +1396,7 @@ macro profile*(name: static[string]; body: untyped): untyped =
 
   var sawData = false
   var sawCatalogs = false
+  var sawAddOn = false
   for stmt in body:
     case stmt.kind
     of nnkCommand:
@@ -1390,6 +1441,13 @@ macro profile*(name: static[string]; body: untyped): untyped =
             error("exactly one `catalogs:` section per profile", stmt)
           sawCatalogs = true
           stmts.add parseCatalogsSection(stmt[1], profSym)
+        of "addOn":
+          if stmt.len < 2 or stmt[1].kind != nnkStmtList:
+            error("addOn must be `addOn: <body>`", stmt)
+          if sawAddOn:
+            error("exactly one `addOn:` section per profile", stmt)
+          sawAddOn = true
+          stmts.add parseAddOnSection(stmt[1], profSym)
         else:
           error("unrecognised profile body form: " & $head, stmt)
       else:

@@ -33,6 +33,7 @@ import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
+import repro_infra/addon_diagnostics
 import repro_addon/addon_apply as addon_apply
 import repro_addon/cli as addon_cli
 import repro_infra/host_base
@@ -506,6 +507,19 @@ proc runInfraPlan(args: openArray[string]): int =
       outProjection = addr projection):
     return 1
   ensureSystemStateDir(stateDir)
+  # ReproOS add-on mode: the add-on's plan is the collision pass over the
+  # operator's profile (spec §7.1); it writes nothing and prints the
+  # ledger diff and the collision report, then the plain plan follows.
+  if addon_apply.isAddonHost(stateDir):
+    try:
+      let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
+        stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
+        reconcileDrift: flags.reconcileDrift, planOnly: true))
+      echo "repro infra plan (add-on)"
+      stdout.write(addon_cli.renderAddonSections(r))
+    except CatchableError as e:
+      stderr.writeLine("repro infra plan: " & e.msg)
+      return 2
   # M82 Phase C: pass the state dir so the planner can read the
   # previously-applied generation's recorded `postWriteDigest` per
   # resource and surface external drift. The `--accept-drift` /
@@ -756,14 +770,27 @@ proc runInfraApply(args: openArray[string]): int =
       return 2
     try:
       let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
-        stateDir: stateDir, hostIdentity: host, userProfileText: profileText))
+        stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
+        reconcileDrift: flags.reconcileDrift))
+      stdout.write(addon_cli.renderAddonSections(r))
       echo "repro infra apply (add-on): generation " & r.generationId &
         " (previous " & r.previousGenerationId & "), applied " &
-        $r.infra.appliedCount & ", removed " & $r.removed.len
+        $r.infra.appliedCount & ", removed " & $r.removed.len &
+        ", restored " & $r.restored.len
+      if r.drift.len > 0:
+        stderr.writeLine("repro infra apply: " & $r.drift.len &
+          " object(s) left in place as actionable drift")
+        return 1
       return 0
+    except EAddOn as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
+    except addon_apply.AddonCollisionError as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
     except addon_apply.AddonDriftError as e:
       stderr.writeLine("repro infra apply: " & e.msg)
-      return 1
+      return 2
     except CatchableError as e:
       stderr.writeLine("repro infra apply: " & e.msg)
       return 1
@@ -1352,6 +1379,14 @@ proc runSystemCommand*(args: seq[string]): int =
     of "rollback": return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
     of "addon": return addon_cli.runAddonCli(rest)
+    of "adopt":
+      # System-scope adoption exists for add-on hosts (spec §11.2 step 3);
+      # a full system profile has no unowned objects to claim.
+      if not addon_apply.isAddonHost(resolveSystemStateDir()):
+        stderr.writeLine("repro system adopt: only an add-on host has " &
+          "objects to adopt; this host carries no ownership ledger")
+        return 2
+      return addon_cli.runAddonAdoptCli(rest)
     else:
       stderr.writeLine("repro system: unknown subcommand: " & sub)
       return 2
