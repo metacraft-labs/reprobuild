@@ -5932,6 +5932,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_peer_cache_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_peer_cache/tests/t_peer_cache_private_scalar_range.nim",
+    binary: "build/test-bin/t_peer_cache_private_scalar_range",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let dir = getTempDir() / (\"repro-peer-scalar-\" & $getCurrent..."),
+  TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim",
     binary: "build/test-bin/t_peer_cache_refuses_timestamp_records_across_hosts",
     defines: @[],

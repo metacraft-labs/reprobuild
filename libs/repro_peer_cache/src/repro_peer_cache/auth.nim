@@ -142,10 +142,37 @@ proc parseHexBuf(hex: string; expectedBytes: int; what: string):
       raise newException(AuthError,
         what & ": invalid hex digit at position " & $(2 * i))
 
+proc isZeroScalar(value: PrivateKeyBytes): bool =
+  for b in value:
+    if b != 0:
+      return false
+  true
+
+proc scalarLessThanP256Order(value: PrivateKeyBytes): bool =
+  for i in 0 ..< P256PrivLen:
+    if value[i] < P256Order[i]:
+      return true
+    if value[i] > P256Order[i]:
+      return false
+  false
+
 proc parsePrivHex(hex: string): PrivateKeyBytes =
+  ## A private scalar read from a file is held to the same range the
+  ## generator samples from, [1, n-1]: a zero scalar has the point at
+  ## infinity for a public key (every ECDH secret derived against it is
+  ## public), and a scalar at or above the group order aliases another
+  ## key. Neither is a key, however well the file is protected, so the
+  ## loader refuses it by name rather than deriving a "public half".
   let buf = parseHexBuf(hex, P256PrivLen, "private-key hex")
   for i in 0 ..< P256PrivLen:
     result[i] = buf[i]
+  if result.isZeroScalar:
+    raise newException(AuthError,
+      "private-key scalar is zero: not a P-256 private key")
+  if not result.scalarLessThanP256Order:
+    raise newException(AuthError,
+      "private-key scalar is not below the P-256 group order: not a " &
+      "P-256 private key")
 
 proc parsePubHex(hex: string): PublicKeyBytes =
   let buf = parseHexBuf(hex, P256PubLen, "public-key hex")
@@ -192,20 +219,6 @@ proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
   # released.
   for i in 0 ..< P256PubLen:
     result[i] = pkBuf[i]
-
-proc isZeroScalar(value: PrivateKeyBytes): bool =
-  for b in value:
-    if b != 0:
-      return false
-  true
-
-proc scalarLessThanP256Order(value: PrivateKeyBytes): bool =
-  for i in 0 ..< P256PrivLen:
-    if value[i] < P256Order[i]:
-      return true
-    if value[i] > P256Order[i]:
-      return false
-  false
 
 proc randomP256Scalar(): PrivateKeyBytes =
   ## Generate a uniformly distributed P-256 private scalar in [1, n-1] from OS

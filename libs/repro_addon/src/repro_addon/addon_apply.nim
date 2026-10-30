@@ -781,20 +781,15 @@ proc parsePrefixIdHex*(hex: string): PrefixIdBytes =
   for i in 0 ..< result.len:
     result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
 
-proc resourceTargetPath(r: SystemResource): string =
-  ## The host path a file-shaped resource materialises, "" for the rest.
-  case r.kind
-  of srkFsSystemFile: r.sfPath
-  of srkSystemdSystemUnit: unitPath(r.suName)
-  of srkLinuxDpkgDiversion: r.ddPath
-  else: ""
-
 proc keptPathRefusal*(previous: Ledger; path: string): string =
   ## "" unless ``path`` is a pre-bootstrap input the ledger keeps as found
   ## (spec §6.1): then why a resource there is refused at plan time. The
   ## input is the add-on's by no resource and is carried forward by every
   ## apply; a resource at the same path would take the ledger slot and
   ## the kept file would neither be restored by uninstall nor reported.
+  ## The path is ``targetPathOf``'s, so every file-shaped kind is covered
+  ## -- a ``linux.tmpfilesRule`` named ``repro-addon-bootstrap.conf`` lands
+  ## exactly on the kept fragment.
   if path.len == 0: return ""
   for e in previous.entries:
     if e.isPreBootstrapInput and e.class in {lcEtcFile, lcKey, lcKept} and
@@ -863,7 +858,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for r in userResources:
     # A pre-bootstrap input is kept as found, by no resource; a resource
     # at its path would silently displace the carried-forward entry.
-    let why = keptPathRefusal(previous, resourceTargetPath(r))
+    let why = keptPathRefusal(previous, targetPathOf(r))
     if why.len > 0:
       raise newException(AddonCollisionError, "refusing " & r.address & ": " & why)
 

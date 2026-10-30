@@ -32,7 +32,7 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	26
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	37
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	25
-libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	7
+libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7
 libs/repro_agent_backend/tests/t_agent_preview_strategy.nim	nim	3
 libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim	nim	21
@@ -546,6 +546,7 @@ libs/repro_peer_cache/tests/t_peer_cache_mint_cert_ca_signed_chain.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_mint_cert_self_signed_round_trip.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_multicast_cidr_allowlist_drops_off_network.nim	nim	2
 libs/repro_peer_cache/tests/t_peer_cache_multicast_loopback_discovery.nim	nim	1
+libs/repro_peer_cache/tests/t_peer_cache_private_scalar_range.nim	nim	5
 libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim	nim	7
 libs/repro_peer_cache/tests/t_peer_cache_registry_advertise_snapshot_and_delta.nim	nim	3
 libs/repro_peer_cache/tests/t_peer_cache_sim_fetch_workload_hits_peer_cache.nim	nim	1
