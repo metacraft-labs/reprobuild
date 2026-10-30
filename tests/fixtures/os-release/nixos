@@ -1,0 +1,4 @@
+NAME=NixOS
+ID=nixos
+VERSION_ID="25.11"
+PRETTY_NAME="NixOS 25.11 (Xantusia)"

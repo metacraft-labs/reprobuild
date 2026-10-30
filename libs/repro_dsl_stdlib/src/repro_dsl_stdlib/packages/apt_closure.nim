@@ -772,6 +772,8 @@ proc parsePaxRecords(payload: string; pkg: string; path, linkPath: var string;
       let key = rec[0 ..< eq]
       var value = rec[eq + 1 .. ^1]
       if value.endsWith("\n"): value.setLen(value.len - 1)
+      if key in ["path", "linkpath"] and '\0' in value:
+        raiseTar(pkg, "pax " & key & " record contains a NUL byte")
       case key
       of "path": path = value
       of "linkpath": linkPath = value
@@ -926,9 +928,10 @@ proc unpackDebTar*(tarPath, outDir, pkg: string) =
       setFilePermissions(dst, DirMode)
       skipTarPayload(f, h.size, pkg)
     of tekFile:
-      if symlinkExists(dst) or dirExists(dst):
-        raiseTar(pkg, "entry '" & h.name & "' is a file where a " &
-          "directory or link was already extracted")
+      if symlinkExists(dst) or dirExists(dst) or fileExists(dst):
+        raiseTar(pkg, "entry '" & h.name & "' is a file where " &
+          "something was already extracted (a duplicate entry would " &
+          "overwrite it, and through a hard link its other names)")
       copyTarFile(f, h.size, dst, pkg)
       setFilePermissions(dst,
         if (h.mode and 0o111) != 0: DirMode else: FileMode)
@@ -983,7 +986,11 @@ proc tempSibling(final: string; tag: string): string =
   ## A fresh, owner-only (0700) scratch directory beside ``final`` (same
   ## filesystem, so the final ``moveDir`` is a rename and hard links are
   ## possible). Its name is unique, not pid-and-second based.
-  createTempDir(".tmp-" & tag & "-", "", parentDir(final))
+  result = createTempDir(".tmp-" & tag & "-", "", parentDir(final))
+  # ``createTempDir`` honours the umask (0755 under the usual 022); the
+  # owner-only mode is set explicitly so nothing can read a half-filled
+  # prefix.
+  setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
 
 proc publishPrefix(tmp, final: string) =
   ## Make the filled scratch directory world-readable and rename it into
@@ -1205,6 +1212,34 @@ proc mountDestinations(key, value: string): seq[string] =
     else:
       result.add(parts[0])
 
+proc joinUnitContinuations*(content: string): seq[string] =
+  ## The logical lines of a unit file, joined the way systemd joins them
+  ## before it parses: a line ending in a backslash continues on the next
+  ## line, with the backslash replaced by a space; comment lines between
+  ## continuation lines are dropped; an unterminated continuation ends at
+  ## the end of the file. Checking physical lines instead would accept
+  ## ``BindReadOnlyPaths=\`` followed by an empty line, which systemd reads
+  ## as the empty assignment that resets the list.
+  ## https://www.freedesktop.org/software/systemd/man/latest/systemd.syntax.html
+  var cur = ""
+  var continuing = false
+  for raw in content.split('\n'):
+    let line = raw.strip(leading = false, trailing = true, chars = {'\r'})
+    if continuing:
+      let t = line.strip()
+      if t.len > 0 and t[0] in {'#', ';'}:
+        continue
+    if line.endsWith("\\"):
+      cur.add(line[0 ..< line.len - 1] & " ")
+      continuing = true
+      continue
+    cur.add(line)
+    result.add(cur)
+    cur = ""
+    continuing = false
+  if continuing:
+    result.add(cur)
+
 proc checkUnitForAptClosure*(content: string; prefix: string;
                              unitName = ""; rendered = false) =
   ## The refusals of spec §8.3 item 5, raised as ``EAptClosureUnit``:
@@ -1231,7 +1266,7 @@ proc checkUnitForAptClosure*(content: string; prefix: string;
   var serviceSeen = false
   var bindLines = 0
   var preloadLines = 0
-  let contentLines = content.split('\n')
+  let contentLines = joinUnitContinuations(content)
   for i in 0 ..< contentLines.len:
     let l = contentLines[i].strip()
     if l.len == 0 or l[0] in {'#', ';'}: continue

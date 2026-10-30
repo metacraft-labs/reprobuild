@@ -9,7 +9,7 @@
 ##     fingerprint is absent (tampered).
 ##   * The MANIFEST parser tolerates blanks + ``#`` comments.
 
-import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
+import std/[os, osproc, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -114,6 +114,23 @@ suite "C2 P3 InRelease signature":
 # accepts an archive signed by a key its operator retired. The verdict is
 # read from the ``--status-fd`` lines instead.
 
+suite "C2 P3 Valid-Until enforcement":
+
+  test "a past Valid-Until refuses, a future one or none passes":
+    let now = dateTime(2026, mOct, 30, 12, 0, 0, zone = utc())
+    expect SignatureVerificationError:
+      enforceValidUntil("Origin: X\nValid-Until: Sat, 08 Jun 2026 00:00:00 UTC\n",
+        now)
+    enforceValidUntil("Origin: X\nValid-Until: Sun, 08 Nov 2026 00:00:00 UTC\n",
+      now)
+    enforceValidUntil("Origin: X\nSuite: stable\n", now)
+
+  test "an unreadable Valid-Until refuses rather than skipping the check":
+    let now = dateTime(2026, mOct, 30, 12, 0, 0, zone = utc())
+    for stamp in ["2026-06-08T00:00:00Z", "never", ""]:
+      expect SignatureVerificationError:
+        enforceValidUntil("Valid-Until: " & stamp & "\n", now)
+
 suite "C2 P3 gpg status verdict":
 
   test "GOODSIG + VALIDSIG with no refusal is good":
@@ -199,3 +216,73 @@ suite "C2 P3 gpg status verdict":
       # A signature by one key checked against the other's keyring: NO_PUBKEY.
       expect SignatureVerificationError:
         discard verifyInReleaseWithKeyring(goodRelease, expiredKeyring)
+
+# ---------------------------------------------------------------------------
+# Valid-Until through the harvester's own index fetch
+# ---------------------------------------------------------------------------
+
+import repro_harvest_apt {.all.}
+import repro_harvest_apt/fetch
+import repro_harvest_apt/source_spec
+
+suite "C2 P3 Valid-Until through fetchAndVerifyIndexes":
+
+  test "a correctly signed but expired InRelease is refused by the harvester":
+    # A frozen mirror: the InRelease verifies against the archive's key, but
+    # its own Valid-Until has passed. The fixture is clearsigned here with a
+    # never-expiring key generated under a faked clock, placed in the fetch
+    # cache at the URL the harvester would fetch, and read back offline.
+    let gpgBin = resolveGpgBin()
+    if gpgBin.len == 0:
+      skip("no gpg on PATH (set REPRO_GPG_BIN)")
+    else:
+      let home = createTempDir("c2-sig-vu-", "")
+      setFilePermissions(home, {fpUserRead, fpUserWrite, fpUserExec})
+      let env = newStringTable()
+      env["GNUPGHOME"] = home
+      let common = gpgBin & " --batch --yes --pinentry-mode loopback" &
+        " --passphrase '' --quiet --faked-system-time 20200101T000000! "
+      var (output, code) = execCmdEx(common & "--quick-gen-key " &
+        "'Fixture <fixture@example.invalid>' default default never",
+        env = env)
+      doAssert code == 0, output
+      (output, code) = execCmdEx(common & "--export --output " &
+        quoteShell(home / "keyring.gpg"), env = env)
+      doAssert code == 0, output
+      proc signed(validUntil: string): string =
+        let payload = home / "payload"
+        writeFile(payload, "Origin: Fixture\nSuite: trixie\n" &
+          "Valid-Until: " & validUntil & "\nSHA256:\n " &
+          "0".repeat(64) & " 1 main/binary-armhf/Packages\n")
+        let outPath = home / "signed"
+        let (o, c) = execCmdEx(common & "--clearsign --output " &
+          quoteShell(outPath) & " " & quoteShell(payload), env = env)
+        doAssert c == 0, o
+        readFile(outPath)
+      var spec = parseAptSourceSpec("apt:x@fixture/trixie")
+      spec.archive = "http://archive.fixture.invalid/debian"
+      proc plant(inRelease: string): FetchClient =
+        let cacheDir = createTempDir("c2-sig-vu-cache-", "")
+        let path = cachePathFor(cacheDir, inReleaseUrl(spec))
+        createDir(parentDir(path))
+        writeFile(path, inRelease)
+        newFetchClient(cacheDir, minIntervalMs = 0, offline = true)
+      # Expired: refused as stale, before any Packages index is read.
+      var staleMsg = ""
+      try:
+        discard fetchAndVerifyIndexes(
+          plant(signed("Sat, 08 Jun 2019 00:00:00 UTC")), spec,
+          keyBundleDir = "", keyring = home / "keyring.gpg",
+          sbExternalGpg, insecure = false, @["main"], "armhf")
+      except SignatureVerificationError as ex:
+        staleMsg = ex.msg
+      check "stale" in staleMsg
+      # Positive control: a future Valid-Until passes the check, and the
+      # run then fails later, on the offline cache miss for the Packages
+      # index — not on the signature.
+      expect FetchError:
+        discard fetchAndVerifyIndexes(
+          plant(signed("Thu, 01 Jan 2099 00:00:00 UTC")), spec,
+          keyBundleDir = "", keyring = home / "keyring.gpg",
+          sbExternalGpg, insecure = false, @["main"], "armhf")
+      removeDir(home)

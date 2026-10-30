@@ -25,12 +25,14 @@
 ## resolver gives it (`host_identity.selectHost`, called by `infra.nim`'s
 ## `resolveInfraHost`), the same name the plan and the generation record.
 
-import std/[os, strutils]
+import std/[algorithm, os, sets, strutils]
 
 import repro_profile
 import repro_profile_intent
 import repro_profile_compile
 import repro_home_intent/host_identity as hostIdentityMod
+import repro_infra/host_base
+import repro_infra/addon_diagnostics
 from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 
 type
@@ -120,3 +122,107 @@ proc describeRegistry*(v: HostRegistryVerdict): string =
   else:
     v.registryPath & " (host " & v.host & ": system " &
       describeManagement(v.management) & ")"
+
+# ---------------------------------------------------------------------------
+# ReproOS add-on mode: the registry's mode against the observed base, and
+# the system-scope target the registry selects.
+# ---------------------------------------------------------------------------
+
+proc checkHostSystemMode*(v: HostRegistryVerdict; base: HostBase) =
+  ## Refuse, with `EAddOnModeMismatch`, a host whose registry entry and
+  ## observed base disagree (spec ReproOS-Add-On-Mode §8.1):
+  ##
+  ## * the registry says `addOn` and the base is not a distribution host
+  ##   (ReproOS, NixOS, not Linux, or an unreadable `os-release`): add-on
+  ##   mode manages objects on top of a distribution, and there is none;
+  ## * the registry declares the host without a `system:` key and the base
+  ##   is a distribution host: writing system objects on a distribution host
+  ##   must be declared (`addOn` or `managedElsewhere`), never inferred.
+  ##
+  ## A host the registry does not declare (or no registry at all) keeps the
+  ## behaviour it had before add-on mode existed; the report's `registry:`
+  ## line names that case. A host managed elsewhere is refused before this
+  ## check by `managedElsewhereRefusal`.
+  if v.registryPath.len == 0 or not v.management.declared:
+    return
+  var mode = v.management.mode
+  when defined(reproMutations):
+    # Falsifying-mutation harness for `t_addon_mode_mismatch_is_refused`:
+    # a planner that reads an undeclared mode on a distribution host as
+    # `addOn`. Compiled in only with `-d:reproMutations`, armed by the
+    # variable, so a production build cannot be put in this state.
+    if mode == mmFull and base.kind == hbkDistribution and
+        getEnv("REPRO_A6_MUTATE_UNDECLARED_MODE_AS_ADDON") == "1":
+      mode = mmAddOn
+  case mode
+  of mmManagedElsewhere:
+    discard
+  of mmAddOn:
+    if base.kind != hbkDistribution:
+      raise newAddOnModeMismatch(v.host, $mmAddOn, describeHostBase(base),
+        "host " & v.host & " is declared `system: " & AddOnKeyword &
+        "` in the host registry " & v.registryPath & ", but it runs " &
+        describeHostBase(base) & ", not a distribution-managed Linux. " &
+        "Add-on mode manages declared objects on top of a distribution " &
+        "(Debian, Ubuntu, ...); on ReproOS or NixOS the whole system is the " &
+        "configuration's -- remove `system: " & AddOnKeyword & "` from its " &
+        "`hosts:` entry. Nothing was planned or changed.")
+  of mmFull:
+    if base.kind == hbkDistribution:
+      raise newAddOnModeMismatch(v.host, $mmFull, describeHostBase(base),
+        "host " & v.host & " runs " & describeHostBase(base) & ", a " &
+        "distribution-managed system, and the host registry " &
+        v.registryPath & " declares it without saying how its system is " &
+        "managed. Writing system objects on a distribution host must be " &
+        "declared: add `system: " & AddOnKeyword & "` to its `hosts:` " &
+        "entry to manage declared services, files and accounts on top of " &
+        "the distribution, or `system: " & ManagedElsewhereKeyword &
+        "(\"<what manages it>\")` if something else does. Nothing was " &
+        "planned or changed.")
+
+proc realisationFor*(v: HostRegistryVerdict; base: HostBase):
+    SystemRealisation =
+  ## How the selected resources are realised on the host: in full, unless
+  ## the registry says `addOn`, which needs a realisation profile for the
+  ## base. Only the Debian family has one (`add-on-debian`); another
+  ## distribution is `EAddOnUnsupportedBase`. Call after
+  ## `checkHostSystemMode`.
+  var addOn = v.management.isAddOn
+  when defined(reproMutations):
+    # The same harness as `checkHostSystemMode`: the mutated planner also
+    # realises the host as an add-on host, so its writes are planned.
+    if not addOn and v.management.declared and
+        base.kind == hbkDistribution and
+        getEnv("REPRO_A6_MUTATE_UNDECLARED_MODE_AS_ADDON") == "1":
+      addOn = true
+  if not addOn:
+    return srFull
+  if base.isDebianFamily:
+    return srAddOnDebian
+  raise newAddOnUnsupportedBase(describeHostBase(base),
+    "host " & v.host & " is declared `system: " & AddOnKeyword & "`, but " &
+    "it runs " & describeHostBase(base) & ", for which no add-on " &
+    "realisation profile exists (`" & AddOnDebianProfileName & "` covers " &
+    "Debian, Ubuntu and their derivatives). Nothing was planned or changed.")
+
+proc systemPlanTargetFor*(v: HostRegistryVerdict; base: HostBase):
+    SystemPlanTarget =
+  ## The system-scope target the registry selects for `v.host`: the
+  ## `default` system activity plus what an add-on entry's block form
+  ## lists (`enabledSystemActivities`), realised as `realisationFor` says.
+  ## A host the registry does not declare, or no registry, plans `default`
+  ## only, in full.
+  systemPlanTarget(v.host, enabledSystemActivities(v.management),
+    realisationFor(v, base))
+
+proc describeSystemTarget*(t: SystemPlanTarget): string =
+  ## One line for the plan / apply report: the system activities planned
+  ## and how they are realised, e.g. `activities default, web; realised
+  ## add-on-debian`.
+  var others: seq[string]
+  for a in t.activities:
+    if a != DefaultSystemActivity:
+      others.add a
+  others.sort()
+  "activities " & (@[DefaultSystemActivity] & others).join(", ") &
+    "; realised " & $t.realisation

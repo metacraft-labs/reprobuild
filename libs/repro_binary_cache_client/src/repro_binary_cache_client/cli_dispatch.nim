@@ -311,7 +311,10 @@ proc cmdSubstitute(args: seq[string]): int =
   # rejected as hostile into a successful substitution with partial output.
   try:
     inProcessArchive.extractPrefixInto(asBytes, outDir)
-  except IOError as e:
+  except CatchableError as e:
+    # IOError is the documented refusal; an OSError from the filesystem
+    # (a link at the output path, a full disk) is the same outcome to the
+    # caller: nothing was substituted.
     stderr.writeLine("substitute: refusing entry " & hex & ": " & e.msg)
     return 1
   echo "hit ", hex, " -> ", outDir
@@ -379,6 +382,13 @@ proc identityFromArgs(a: PublishArgs): CacheEntryIdentity =
     result.addOption(k, v)
   for depHex in a.depHex:
     result.addDep(depHex)
+
+proc identityFromPublishFlags*(flagArgs: seq[string]): CacheEntryIdentity =
+  ## The identity `repro cache publish` / `derive-key` build from their
+  ## identity flags, exposed so a producer that renders those flags
+  ## (`repro infra cache-keys`) can check they round-trip to the key it
+  ## printed.
+  identityFromArgs(parseIdentityFlags(flagArgs))
 
 proc cmdDeriveKey(args: seq[string]): int =
   let parsed = parseIdentityFlags(args)

@@ -45,7 +45,7 @@
 ##     genuinely differs.
 ##   * `passwd.user`          wholly new — no home-scope analogue.
 
-import std/[strutils]
+import std/[os, strutils]
 
 import blake3
 
@@ -150,6 +150,98 @@ proc hostUsesSystemd*(): bool =
 proc desiredStateOf(op: PrivilegedOperation): PasswdUserDesired =
   PasswdUserDesired(name: op.puName, homeDir: op.puHome,
     shell: op.puShell, groups: op.puGroups)
+
+# ===========================================================================
+# systemd.unitState and linux.addOnTool — pure parts (ReproOS Add-On Mode
+# §4.1). Defined ahead of the digest table because the desired digest of
+# both kinds is computed from them, and kept free of I/O so the decisions
+# are unit-tested without systemd or root.
+# ===========================================================================
+
+proc unitStateDigestText*(enabled, active: bool): string =
+  ## The canonical bytes of a unit's enablement + activity, the only two
+  ## facts `systemd.unitState` converges.
+  "enabled=" & $enabled & "\nactive=" & $active & "\n"
+
+proc parseUnitStateShow*(output: string):
+    tuple[loaded, enabled, active: bool] =
+  ## Read `systemctl show -p LoadState,ActiveState,UnitFileState <unit>`.
+  ## `loaded` is false for `not-found` and `masked` (nothing the add-on may
+  ## enable). `enabled` is true for every `UnitFileState` that is enabled
+  ## or cannot be toggled (`static`, `alias`, `indirect`, `generated`,
+  ## `enabled-runtime`, `transient`): the requirement "this unit must be
+  ## enabled" is met by all of them, and `systemctl enable` on a static
+  ## unit only prints a warning. `active` is `ActiveState=active` only.
+  for line in output.splitLines():
+    let eq = line.find('=')
+    if eq < 0: continue
+    let key = line[0 ..< eq].strip()
+    let value = line[eq + 1 .. ^1].strip()
+    case key
+    of "LoadState":
+      result.loaded = value == "loaded"
+    of "UnitFileState":
+      result.enabled = value in ["enabled", "enabled-runtime", "static",
+        "alias", "indirect", "generated", "transient"]
+    of "ActiveState":
+      result.active = value == "active"
+    else: discard
+
+const
+  AddOnToolDir* = "/etc/repro/bin"
+    ## Where `linux.addOnTool` wrappers live: under the add-on's own `/etc`
+    ## prefix (always a managed prefix, §4.4), put on `PATH` by
+    ## `/etc/profile.d/repro-addon.sh` (`addOnToolPath()` in the DSL).
+  AddOnToolLauncherName* = "reprobuild-sandbox-launcher"
+
+proc addOnToolWrapperPath*(command: string): string =
+  AddOnToolDir & "/" & command
+
+proc addOnToolManifestPath*(command: string): string =
+  AddOnToolDir & "/" & command & ".launcher.manifest"
+
+proc addOnToolLauncherPath*(): string =
+  ## The launcher is installed beside the engine (`apps/entrypoints.txt`
+  ## builds both into one `bin/`), so it is resolved from the running
+  ## image's directory, the same way the provider binaries are
+  ## (`siblingStandardProviderPath`). The path is baked into the wrapper,
+  ## so moving the install changes the wrapper's desired bytes and the next
+  ## apply rewrites it.
+  getAppDir() / AddOnToolLauncherName
+
+proc renderAddOnToolManifest*(closurePrefix, program: string): string =
+  ## The launcher manifest (apps/reprobuild-sandbox-launcher/
+  ## MANIFEST-FORMAT.md): the closure's `/usr` over `/usr`, read-only — the
+  ## same view `BindReadOnlyPaths=` gives a service (§8.3 item 5) — and the
+  ## program by its FHS path inside that view.
+  "# reprobuild linux.addOnTool: " & program & " from " & closurePrefix &
+    "\n" &
+  "# The closure's /usr replaces the host's inside the launcher's mount " &
+    "namespace.\n" &
+  closurePrefix & "/usr:/usr:rbind,ro\n" &
+  "exec=" & program & "\n"
+
+proc renderAddOnToolWrapper*(launcher, manifestPath: string): string =
+  ## The `/etc/repro/bin/<command>` script. Single-quoted paths: both come
+  ## from the install location and a checked command name, neither from
+  ## the operator's argv, which is forwarded after `--` untouched.
+  "#!/bin/sh\n" &
+  "# Written by reprobuild (linux.addOnTool); the next apply rewrites it.\n" &
+  "exec '" & launcher & "' --manifest='" & manifestPath & "' -- \"$@\"\n"
+
+proc addOnToolDigestText*(wrapper, manifest: string): string =
+  ## Both files in one digest, so a hand-edited wrapper, a changed closure
+  ## (a different prefix in the manifest) or a moved launcher is drift.
+  wrapper & "\n--\n" & manifest
+
+proc addOnToolDesiredDigestText*(op: PrivilegedOperation): string =
+  doAssert op.kind == pokLinuxAddOnTool
+  let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot,
+    parseAptClosureLock(op.atAptClosureLock))
+  addOnToolDigestText(
+    renderAddOnToolWrapper(addOnToolLauncherPath(),
+      addOnToolManifestPath(op.atCommand)),
+    renderAddOnToolManifest(prefix, op.atProgram))
 
 proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
   ## Canonical desired-state digest for a Phase-C system-scope
@@ -318,6 +410,16 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.darwinModuleContent)
+  of pokSystemdUnitState:
+    if op.usDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(unitStateDigestText(op.usEnabled, op.usRunning))
+  of pokLinuxAddOnTool:
+    if op.atDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(addOnToolDesiredDigestText(op))
   of pokLinuxFhsSandbox:
     if op.fsbDestroy:
       ZeroDigestHex
@@ -481,11 +583,48 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
   else:
     raiseNotImplementedPlatform("systemd.systemUnit observe")
 
+type
+  SystemdUnitTransition* = enum
+    ## What happens to a RUNNING unit after its file is written (ReproOS
+    ## Add-On Mode spec §7.3, the two restart rows).
+    sutNone = "none"                    ## nothing changed, or the unit is
+                                        ## not active: the file write is all
+    sutRestart = "restart"              ## the running instance picks up the
+                                        ## change now
+    sutPendingRestart = "pending-restart" ## changed, but `restartIfChanged
+                                        ## = false`: left running on the old
+                                        ## file, reported
+
+proc systemdUnitTransition*(wasActive, fileChanged, dependencyChanged,
+                            restartHeld: bool): SystemdUnitTransition =
+  ## The §7.3 decision, kept pure so it is testable without systemd:
+  ## a unit is restarted only when it is active AND something it runs from
+  ## changed (its file or closure, or a resource it `depends_on` in this
+  ## apply), unless the profile holds the restart. An inactive unit is never
+  ## started by a change (`enabled = true` starts it through `enable --now`,
+  ## as before), so a timer-driven oneshot is not run by an apply.
+  if not wasActive or not (fileChanged or dependencyChanged):
+    sutNone
+  elif restartHeld:
+    sutPendingRestart
+  else:
+    sutRestart
+
+proc systemdUnitIsActive*(name: string): bool =
+  ## `systemctl is-active` exits 0 only for `active` (`activating` and
+  ## `reloading` exit non-zero), which is the state a restart is for.
+  when defined(linux):
+    execCmd("systemctl is-active --quiet " & quoteShell(name)) == 0
+  else:
+    false
+
 proc applySystemdSystemUnit*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Write the unit file, `systemctl daemon-reload`, then optionally
-  ## `systemctl enable --now` (NO `--user` — this is a system unit).
-  ## The destroy direction `disable --now`s and removes the file.
+  ## `systemctl enable --now` (NO `--user` — this is a system unit), then
+  ## the §7.3 transition: a unit that was active and whose file, closure or
+  ## dependency changed is restarted (`systemdUnitTransition`). The
+  ## destroy direction `disable --now`s and removes the file.
   ##
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
   ## plan-time-baseline drift gate is removed (per
@@ -537,6 +676,15 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
+    # What is running, and from which bytes, BEFORE anything is written:
+    # the transition below compares against this. `before.digestHex` is the
+    # closure-absent sentinel when the closure is not realised yet, so a
+    # unit whose file is unchanged but whose closure was missing counts as
+    # changed and is restarted onto the realised closure.
+    let before = observeSystemdSystemUnit(op)
+    let wasActive = systemdUnitIsActive(op.suName)
+    let fileChanged = not before.present or
+      before.digestHex != posixDigestHexOfText(op.suContent)
     if op.suAptClosureLock.len > 0:
       # Realise the closure the unit binds BEFORE the unit can start: a
       # unit naming a missing `BindReadOnlyPaths=` source fails to start.
@@ -572,8 +720,27 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       if enCode != 0:
         raiseProtocol("systemd.systemUnit enable --now of '" &
           op.suName & "' failed: " & enOut.strip())
+    # §7.3: a running unit picks up a changed file, closure or dependency
+    # now. `enable --now` above does not restart an already-running unit,
+    # and before this step the new configuration waited for whatever
+    # restarted the daemon next (Bring-Up-Plan.md §6 item 4 of the rpi2
+    # profile).
+    var restartPending = false
+    case systemdUnitTransition(wasActive, fileChanged,
+        op.suRestartRequested, op.suRestartHeld)
+    of sutRestart:
+      let (rsOut, rsCode) = execCmdEx(
+        "systemctl restart " & quoteShell(op.suName))
+      if rsCode != 0:
+        raiseProtocol("systemd.systemUnit restart of '" & op.suName &
+          "' after its change failed: " & rsOut.strip())
+    of sutPendingRestart:
+      restartPending = true
+    of sutNone:
+      discard
     # Post-apply re-probe — see the contract comment above.
-    let post = observeSystemdSystemUnit(op)
+    var post = observeSystemdSystemUnit(op)
+    post.serviceRestartPending = restartPending
     let desiredHex = posixDigestHexOfText(op.suContent)
     if not post.present or post.digestHex != desiredHex:
       raiseProtocol("systemd.systemUnit '" & op.suName &
@@ -589,6 +756,169 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("systemd.systemUnit apply")
+
+# ===========================================================================
+# systemd.unitState — enable/disable + start/stop of a unit the add-on does
+# not own (ReproOS Add-On Mode §4.1, `unitState` class).
+# ===========================================================================
+
+proc observeSystemdUnitState*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## `present` is "the unit is loaded" (`not-found` and `masked` are
+  ## absent: there is nothing the add-on may enable); the digest covers the
+  ## two converged facts only, never the unit's bytes, which are not ours.
+  when defined(linux):
+    let (output, _) = execCmdEx("systemctl show " & quoteShell(op.usName) &
+      " --property=LoadState,ActiveState,UnitFileState")
+    let st = parseUnitStateShow(output)
+    if not st.loaded:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    result.present = true
+    result.digestHex = posixDigestHexOfText(
+      unitStateDigestText(st.enabled, st.active))
+  else:
+    raiseNotImplementedPlatform("systemd.unitState observe")
+
+proc applySystemdUnitState*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## `systemctl enable|disable` then `start|stop`, each only when the
+  ## observed flag differs. A missing or masked unit is refused: the add-on
+  ## does not install distribution units (§2.3), so the profile is wrong
+  ## about this host. The destroy direction changes NOTHING: the add-on
+  ## never wrote the unit, so leaving the resource only forgets the
+  ## requirement (§4.1; the §4.3 ledger rule for adopted objects).
+  when defined(linux):
+    if op.usDestroy:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    if not hostUsesSystemd():
+      raiseProtocol("systemd.unitState '" & op.usName &
+        "' refused on a non-systemd host")
+    let (output, _) = execCmdEx("systemctl show " & quoteShell(op.usName) &
+      " --property=LoadState,ActiveState,UnitFileState")
+    let st = parseUnitStateShow(output)
+    if not st.loaded:
+      raiseProtocol("systemd.unitState '" & op.usName & "' is not loaded " &
+        "on this host (" & output.strip().replace("\n", ", ") & "). The " &
+        "add-on does not install distribution units (Add-On spec §2.3): " &
+        "install the package that provides it, or drop the resource.")
+    if st.enabled != op.usEnabled:
+      let verb = if op.usEnabled: "enable" else: "disable"
+      let (out1, code1) = execCmdEx("systemctl " & verb & " " &
+        quoteShell(op.usName))
+      if code1 != 0:
+        raiseProtocol("systemd.unitState " & verb & " of '" & op.usName &
+          "' failed: " & out1.strip())
+    if st.active != op.usRunning:
+      let verb = if op.usRunning: "start" else: "stop"
+      let (out2, code2) = execCmdEx("systemctl " & verb & " " &
+        quoteShell(op.usName))
+      if code2 != 0:
+        raiseProtocol("systemd.unitState " & verb & " of '" & op.usName &
+          "' failed: " & out2.strip())
+    # Post-apply re-probe (M82 Phase A contract).
+    let post = observeSystemdUnitState(op)
+    let desiredHex = posixDigestHexOfText(
+      unitStateDigestText(op.usEnabled, op.usRunning))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("systemd.unitState '" & op.usName &
+        "' post-apply observation disagrees with desired state " &
+        "(enabled=" & $op.usEnabled & ", active=" & $op.usRunning &
+        "): systemctl reported success but the unit is not in that " &
+        "state. The driver fails closed rather than reporting a " &
+        "spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("systemd.unitState apply")
+
+# ===========================================================================
+# linux.addOnTool — an operator command from a package(apt) closure, under
+# /etc/repro/bin (ReproOS Add-On Mode §4.1).
+# ===========================================================================
+
+proc observeLinuxAddOnTool*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Present when the wrapper exists; the digest covers the wrapper and the
+  ## manifest, and, as for `systemd.systemUnit`, carries a sentinel when the
+  ## closure the manifest names is not realised, so the plan repairs it.
+  when defined(linux):
+    let wrapperPath = addOnToolWrapperPath(op.atCommand)
+    if not fileExists(wrapperPath):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let manifestPath = addOnToolManifestPath(op.atCommand)
+    let wrapper = readFile(wrapperPath)
+    let manifest = if fileExists(manifestPath): readFile(manifestPath) else: ""
+    result.present = true
+    var text = addOnToolDigestText(wrapper, manifest)
+    if not op.atDestroy:
+      let lock = parseAptClosureLock(op.atAptClosureLock)
+      if not aptClosureRealised(AddOnSystemStoreRoot, lock):
+        text = "apt-closure-absent:" &
+          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" & text
+    result.digestHex = posixDigestHexOfText(text)
+  else:
+    raiseNotImplementedPlatform("linux.addOnTool observe")
+
+proc applyLinuxAddOnTool*(op: PrivilegedOperation): ObservedOperationState =
+  ## Realise the closure, then write the manifest and the wrapper (0755).
+  ## The launcher must exist where the wrapper will look for it: a wrapper
+  ## that would fail on first use is refused here, naming the path. Destroy
+  ## removes both files; the closure is left to store GC (§5.2).
+  when defined(linux):
+    let wrapperPath = addOnToolWrapperPath(op.atCommand)
+    let manifestPath = addOnToolManifestPath(op.atCommand)
+    if op.atDestroy:
+      for p in [wrapperPath, manifestPath]:
+        if fileExists(p):
+          try: removeFile(p)
+          except OSError: discard
+      if fileExists(wrapperPath):
+        raiseProtocol("linux.addOnTool destroy of '" & op.atCommand &
+          "': " & wrapperPath & " still exists after removeFile")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let launcher = addOnToolLauncherPath()
+    if not fileExists(launcher):
+      raiseProtocol("linux.addOnTool '" & op.atCommand & "': the sandbox " &
+        "launcher is not installed at " & launcher & " (it is built " &
+        "beside the engine; install the reprobuild bundle that carries " &
+        "both). Refusing to write a wrapper that would fail on first use.")
+    let lock = parseAptClosureLock(op.atAptClosureLock)
+    try:
+      discard realiseAptClosure(lock, AddOnSystemStoreRoot,
+        AddOnAptDebCacheDir)
+    except CatchableError as ex:
+      raiseProtocol("linux.addOnTool '" & op.atCommand &
+        "': realising its package(apt) closure failed: " & ex.msg)
+    createDir(AddOnToolDir)
+    setFilePermissions(AddOnToolDir, {fpUserExec, fpUserWrite, fpUserRead,
+      fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+    let manifest = renderAddOnToolManifest(
+      aptClosurePrefixPath(AddOnSystemStoreRoot, lock), op.atProgram)
+    let wrapper = renderAddOnToolWrapper(launcher, manifestPath)
+    writeFile(manifestPath, manifest)
+    setFilePermissions(manifestPath, {fpUserWrite, fpUserRead, fpGroupRead,
+      fpOthersRead})
+    writeFile(wrapperPath, wrapper)
+    setFilePermissions(wrapperPath, {fpUserExec, fpUserWrite, fpUserRead,
+      fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+    let post = observeLinuxAddOnTool(op)
+    let desiredHex = posixDigestHexOfText(addOnToolDigestText(wrapper,
+      manifest))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.addOnTool '" & op.atCommand &
+        "' post-apply observation disagrees with desired state: the " &
+        "files were written but a re-read shows different bytes (or the " &
+        "closure is not realised). The driver fails closed.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.addOnTool apply")
 
 # ===========================================================================
 # launchd.systemDaemon — plist under /Library/LaunchDaemons/, `launchctl`.

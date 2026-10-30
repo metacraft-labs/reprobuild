@@ -560,17 +560,83 @@ proc isHostsBlockForm(value: NimNode): bool =
     value[0].kind in {nnkCall, nnkCommand} and value[0].len == 2 and
     value[0][0].kind == nnkIdent
 
-proc parseHostSystemValue(value: NimNode; hostName: string): string =
-  ## The value of a block-form host entry's `system:` key: `managedElsewhere`
-  ## (no pointer, returns "") or `managedElsewhere("<pointer>")` (returns the
-  ## pointer). Anything else is a compile error naming the host.
+proc systemBlockPairs(v: NimNode): seq[(string, NimNode)] =
+  ## The `key: value` pairs of a block-form `system:` value, written either
+  ## indented under `system:` (a statement list of `key: value` calls) or
+  ## inline as `{key: value, ...}` (a table constructor). Empty when `v` is
+  ## neither shape.
+  case v.kind
+  of nnkStmtList:
+    for item in v:
+      if item.kind notin {nnkCall, nnkCommand} or item.len != 2 or
+          item[0].kind != nnkIdent:
+        return @[]
+      var value = item[1]
+      if value.kind == nnkStmtList and value.len == 1:
+        value = value[0]
+      result.add ($item[0], value)
+  of nnkTableConstr:
+    for item in v:
+      if item.kind != nnkExprColonExpr or item[0].kind != nnkIdent:
+        return @[]
+      result.add ($item[0], item[1])
+  else:
+    discard
+
+proc parseHostSystemBlock(pairs: seq[(string, NimNode)]; where: NimNode;
+                          hostName: string): HostSystemDecl =
+  ## The block form `mode: addOn` + `activities: [...]`. Every refusal is a
+  ## compile error naming the host, worded by `host_system` so the text
+  ## parser refuses the same shapes the same way.
+  var mode = ""
+  var hasActivities = false
+  var activities: seq[string]
+  var seen: seq[string]
+  for (key, value) in pairs:
+    if key in seen:
+      error("hosts entry \"" & hostName & "\": system: `" & key &
+            ":` is given twice", value)
+    seen.add key
+    case key
+    of SystemModeKey:
+      if value.kind != nnkIdent:
+        error("hosts entry \"" & hostName & "\": system: `" & SystemModeKey &
+              ":` takes an identifier (`" & AddOnKeyword & "`)", value)
+      mode = $value
+    of SystemActivitiesKey:
+      hasActivities = true
+      activities = hostsNameList(value, "entry `system: activities:`")
+    else:
+      error("hosts entry \"" & hostName & "\": system: unknown key `" & key &
+            ":` (expected `" & SystemModeKey & ":` and `" &
+            SystemActivitiesKey & ":`)", value)
+  let problem = systemBlockProblem(mode, hasActivities, activities)
+  if problem.len > 0:
+    error("hosts entry \"" & hostName & "\": system: " & problem, where)
+  HostSystemDecl(mode: hsmAddOn, activities: activities)
+
+proc parseHostSystemValue(value: NimNode; hostName: string): HostSystemDecl =
+  ## The value of a block-form host entry's `system:` key:
+  ## `managedElsewhere`, `managedElsewhere("<pointer>")`, `addOn`, or the
+  ## block form `mode: addOn` + `activities: [...]` (indented, or inline as
+  ## `{mode: addOn, activities: [...]}`). Anything else is a compile error
+  ## naming the host.
   var v = value
   if v.kind == nnkStmtList and v.len == 1:
     v = v[0]
-  let expected = "`system: " & ManagedElsewhereKeyword & "` or `system: " &
-    ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  # The inline block form is a table constructor (`{...}`); the indented one
+  # is the statement list under `system:`.
+  let pairs = systemBlockPairs(if v.kind == nnkTableConstr: v else: value)
+  if pairs.len > 0 and pairs[0][0] in [SystemModeKey, SystemActivitiesKey]:
+    return parseHostSystemBlock(pairs, value, hostName)
+  let expected = "`system: " & ManagedElsewhereKeyword & "`, `system: " &
+    ManagedElsewhereKeyword & "(\"<managing repository>\")`, `system: " &
+    AddOnKeyword & "` or the block form `system: {" & SystemModeKey & ": " &
+    AddOnKeyword & ", " & SystemActivitiesKey & ": [...]}`"
+  if v.kind == nnkIdent and $v == AddOnKeyword:
+    return HostSystemDecl(mode: hsmAddOn)
   if v.kind == nnkIdent and $v == ManagedElsewhereKeyword:
-    return ""
+    return HostSystemDecl(mode: hsmManagedElsewhere)
   if v.kind in {nnkCall, nnkCommand} and v.len == 2 and
       v[0].kind == nnkIdent and $v[0] == ManagedElsewhereKeyword:
     # A plain string literal only: the text parser behind `repro home list`
@@ -583,7 +649,7 @@ proc parseHostSystemValue(value: NimNode; hostName: string): string =
     let problem = systemPointerProblem(v[1].strVal)
     if problem.len > 0:
       error("hosts entry \"" & hostName & "\": system: " & problem, v[1])
-    return v[1].strVal
+    return HostSystemDecl(mode: hsmManagedElsewhere, managedBy: v[1].strVal)
   error("hosts entry \"" & hostName & "\": unknown `system:` value " &
         "`" & v.repr & "` (expected " & expected & ")", v)
 
@@ -602,7 +668,9 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
   ##     system: managedElsewhere("org/infra") # omitted: managed here
   ##
   ## `system:` (`repro_profile/host_system`) says the host's system scope is
-  ## managed elsewhere, optionally naming what manages it.
+  ## managed elsewhere (optionally naming what manages it), or managed here
+  ## in add-on mode: `system: addOn`, or the block form
+  ## `system: {mode: addOn, activities: [...]}` selecting system activities.
   ##
   ## An unknown key, a repeated key, an unknown concern, a concern named
   ## twice and a malformed `system:` value are compile errors naming the
@@ -624,8 +692,8 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
     var actNames: seq[string] = @[]
     var applies: seq[string] = @[]
     var hasApplies = false
-    var systemElsewhere = false
-    var systemPointer = ""
+    var hasSystem = false
+    var systemDecl: HostSystemDecl
     let value = entry[1]
     if isHostsBlockForm(value):
       var seenKeys: seq[string] = @[]
@@ -650,8 +718,8 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
             error("hosts entry \"" & hostName & "\": applies: " & problem,
                   item)
         of HostSystemKey:
-          systemElsewhere = true
-          systemPointer = parseHostSystemValue(item[1], hostName)
+          hasSystem = true
+          systemDecl = parseHostSystemValue(item[1], hostName)
         else:
           error("hosts entry \"" & hostName & "\": unknown key `" & key &
                 ":` (expected `activities:`, `applies:` or `system:`)", item)
@@ -678,10 +746,21 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
           `appliesSym`.add `cLit`
       addCalls.add quote do:
         `profileVar`.hostApplies[`hostLit`] = `appliesSym`
-    if systemElsewhere:
-      let pointerLit = newStrLitNode(systemPointer)
+    if hasSystem:
+      let modeLit = newLit(systemDecl.mode)
+      let pointerLit = newStrLitNode(systemDecl.managedBy)
+      var actsLit = newNimNode(nnkBracket)
+      for a in systemDecl.activities:
+        actsLit.add newStrLitNode(a)
+      # `@[]` cannot type itself; an empty list is spelled with its type.
+      var actsExpr: NimNode
+      if actsLit.len == 0:
+        actsExpr = newCall(newTree(nnkBracketExpr, ident"newSeq", ident"string"))
+      else:
+        actsExpr = prefix(actsLit, "@")
       addCalls.add quote do:
-        `profileVar`.systemManagedElsewhere[`hostLit`] = `pointerLit`
+        `profileVar`.hostSystems[`hostLit`] = HostSystemDecl(mode: `modeLit`,
+          managedBy: `pointerLit`, activities: `actsExpr`)
     let blk = newNimNode(nnkBlockStmt)
     blk.add newEmptyNode()
     blk.add addCalls

@@ -58,7 +58,7 @@ proc resourceScope*(kind: string): ResourceScope =
      "passwd.group", "linux.nixDaemonSetting",
      "systemd.systemTimer", "linux.firewallRule",
      "linux.nixosSystemModule", "macos.darwinSystemModule",
-     "linux.fhsSandbox":
+     "linux.fhsSandbox", "systemd.unitState", "linux.addOnTool":
     rsSystem
   else:
     rsUnknown

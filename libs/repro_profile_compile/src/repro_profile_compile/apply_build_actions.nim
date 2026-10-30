@@ -346,6 +346,15 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
       # yields ``configured = false`` and the whole block is a no-op — the
       # local-build path below is byte-identical to pre-M4 behaviour.
       let cacheCfg = resolveBuildActionCacheConfig()
+      # Say when the cache configuration could not be read. A malformed
+      # caches.conf resolves to "no cache" by design (a config the loader
+      # cannot read grants no trust), but silently building every edge
+      # locally on a host that was given a cache is how a typo in a
+      # trusted-key line goes unnoticed for weeks. Once per dispatch.
+      if cacheCfg.configError.len > 0:
+        stderr.writeLine("repro infra apply: binary cache disabled for this " &
+          "apply: the cache configuration could not be read (" &
+          cacheCfg.configError & "); every build-action edge builds locally")
       # The M4 CAS + scratch lives beside the engine's action-cache
       # under the same apply-scoped cache root so a cache sweep of the
       # action-edge half removes both.
@@ -366,6 +375,13 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
           # large profile can exceed the staleness window and make a
           # perfectly healthy apply look hung to the next acquirer.
           beat()
+          # A trust rejection is the one miss an operator must hear about:
+          # the entry exists and would have been served, and the host was
+          # told to refuse it. A plain "not in the cache" miss stays quiet.
+          if attempt.trustRejected:
+            stderr.writeLine("repro infra apply: build-action edge " & a.id &
+              ": a cache entry was refused on trust and the edge builds " &
+              "locally: " & attempt.reason)
           if attempt.hit:
             substituted[a.id] = BuildActionApplyOutcome(
               id: a.id,

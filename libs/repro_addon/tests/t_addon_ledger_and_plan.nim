@@ -10,7 +10,7 @@
 import std/[json, strutils, tables, unittest]
 
 import repro_infra
-import repro_addon/[fingerprint, generation0, ledger, preflight, store_root]
+import repro_addon/[addon_apply, fingerprint, generation0, ledger, preflight, store_root]
 import repro_binary_cache_client/caches_config
 
 proc sampleLedger(): Ledger =
@@ -185,3 +185,29 @@ suite "trust anchors and cache configuration":
       discard renderCachesConf("", @[k1])
     expect ValueError:
       discard renderCachesConf("ftp://x", @[k1])
+
+suite "base matrix, managed kinds and ephemeral sockets":
+  test "Raspberry Pi OS 13 is in the base matrix by its own ID":
+    check baseMatrixNote("raspbian", "13") == "supported"
+    let osr = parseOsRelease("ID=raspbian\nID_LIKE=debian\nVERSION_ID=\"13\"\n")
+    check baseMatrixNote(osr["ID"], osr["VERSION_ID"]) == "supported"
+    check baseMatrixNote("debian", "12") == "release-upgrade source"
+    check baseMatrixNote("debian", "11") == ""
+    check baseMatrixNote("ubuntu", "22.04") == ""
+
+  test "a kind the add-on does not manage is refused by name":
+    let p = parseSystemProfile("linux.sysctl {\n  key = \"net.ipv4.ip_forward\"\n  value = \"1\"\n}\n")
+    let why = unmanagedKindReason(p.resources[0])
+    check "linux.sysctl" in why and "nothing was applied" in why
+    let ok = parseSystemProfile("fs.systemFile {\n  path = \"/etc/x\"\n  content = \"y\"\n}\n")
+    check unmanagedKindReason(ok.resources[0]) == ""
+
+  test "unconnected UDP sockets on ephemeral ports are clients, not listeners":
+    let udp = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+  1: 0F02000A:0044 00000000:0000 07 00000000:00000000 00:00000000 00000000   998        0 1 2 0000000000000000 0
+  2: 0F02000A:985D 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0000000000000000 0
+"""
+    # 0x985D = 39005, inside the default range 32768..60999: a client.
+    check parseProcNet(udp, "udp", 32768, 60999) == @[(key: "udp 10.0.2.15:68", value: "x1")]
+    # Without a range every bound unconnected socket is recorded.
+    check parseProcNet(udp, "udp").len == 2

@@ -1,10 +1,12 @@
-## Who manages a host's system scope: the `system:` key of a block-form
-## `hosts:` entry (reprobuild-pm spec Gradual-Nix-To-Reprobuild-Migration.md
-## §Hosts, feature 2, "System-management attribute").
+## Who manages a host's system scope, and how: the `system:` key of a
+## block-form `hosts:` entry (reprobuild-pm spec Gradual-Nix-To-Reprobuild-
+## Migration.md §Hosts, feature 2, "System-management attribute"; spec
+## ReproOS-Add-On-Mode.md §8.1-§8.2).
 ##
-## A home profile's `hosts:` registry is the single host registry. A host
-## whose home this profile manages but whose system something else manages
-## (another repository's deployment, a distribution's own tooling) says so:
+## A home profile's `hosts:` registry is the single host registry. An entry
+## says nothing about the host's system when this configuration manages the
+## whole of it (the default). Otherwise its `system:` key takes one of two
+## values:
 ##
 ##   hosts:
 ##     "build-server":
@@ -13,23 +15,41 @@
 ##     "arch":
 ##       activities: [default]
 ##       system: managedElsewhere
+##     "rpi2":
+##       activities: [default]
+##       system: addOn
+##     "validator-01":
+##       activities: [default]
+##       system:
+##         mode: addOn
+##         activities: [ethereum_validator, host_baseline]
 ##
-## The argument is an optional pointer to what manages the system --
-## normally the managing repository. `repro infra plan` / `apply` and
-## `repro system sync` refuse such a host and name the pointer, and
+## * `managedElsewhere[("<pointer>")]`: something else manages the system
+##   (another repository's deployment, a distribution's own tooling). The
+##   optional pointer names it. `repro infra plan` / `apply` and
+##   `repro system sync` refuse such a host and name the pointer.
+## * `addOn`: the host's system belongs to its distribution (Debian, Ubuntu,
+##   ...), and Reprobuild manages a declared set of services, files and
+##   accounts on top of it -- ReproOS add-on mode. The short form selects the
+##   system profile's `default` activity only. The block form
+##   (`mode: addOn` plus `activities: [...]`, also writable inline as
+##   `{mode: addOn, activities: [...]}`) selects further system-profile
+##   activities; `default` is always enabled and is not listed.
+##
 ## `repro home export` carries the attribute for the Nix side
-## (`intent.systemManagedElsewhere`, export schema 4).
+## (`intent.hostSystems`, `evaluation.system`, export schema 5).
 ##
-## A host without `system:` is managed here (the default). There is no
-## spelling for "managed here": an entry that says nothing about its system
-## is the common case, and a second spelling for it would be a second way to
-## write the same registry.
+## There is deliberately no spelling for "managed here": an entry that says
+## nothing about its system is the common case, and a second spelling for it
+## would be a second way to write the same registry. For the same reason the
+## block form is refused when it would mean exactly the short form (no
+## activities), and `default` is refused in its activity list.
 ##
 ## This module holds the VOCABULARY and the validation the `profile` macro
-## and the text parser (`repro_home_intent/parser`) share, plus the one
-## lookup every reader uses (`systemManagementFor`).
+## and the text parser (`repro_home_intent/parser`) share, plus the lookups
+## every reader uses (`systemManagementFor`, `enabledSystemActivities`).
 
-import std/[strutils, tables]
+import std/[sets, strutils, tables]
 
 import ./types
 
@@ -37,19 +57,49 @@ const
   HostSystemKey* = "system"
     ## The block-form `hosts:` key.
   ManagedElsewhereKeyword* = "managedElsewhere"
-    ## Its only value: `managedElsewhere` or `managedElsewhere("<pointer>")`.
+    ## `managedElsewhere` or `managedElsewhere("<pointer>")`.
+  AddOnKeyword* = "addOn"
+    ## `addOn`, or `mode: addOn` inside the block form.
+  SystemModeKey* = "mode"
+    ## The block form's mode line.
+  SystemActivitiesKey* = "activities"
+    ## The block form's activity list.
+  DefaultSystemActivity* = "default"
+    ## The system profile's activity every host enables.
 
 type
+  ManagementMode* = enum
+    ## How a host's system scope is managed, as every reader reports it. The
+    ## string values are the export's `evaluation.system.mode` vocabulary.
+    mmFull = "full"
+      ## No `system:` key: this configuration manages the whole system
+      ## (ReproOS, or a system switch such as `nixos-rebuild`).
+    mmAddOn = "addOn"
+      ## `system: addOn`: Reprobuild manages declared objects on top of the
+      ## host's distribution, never the distribution itself.
+    mmManagedElsewhere = "managedElsewhere"
+      ## `system: managedElsewhere[...]`: something else manages it.
+
   HostSystemManagement* = object
     ## The system-management attribute of one host, as read from a
     ## profile's `hosts:` registry.
     declared*: bool
       ## The registry has an entry for the host.
-    managedElsewhere*: bool
-      ## The entry says `system: managedElsewhere[...]`.
+    mode*: ManagementMode
     managedBy*: string
-      ## The pointer, or "" when the entry names none. Meaningful only when
-      ## `managedElsewhere`.
+      ## The pointer, or "" when the entry names none. Meaningful only for
+      ## `mmManagedElsewhere`.
+    systemActivities*: seq[string]
+      ## The system activities the entry selects beyond `default`
+      ## (`mmAddOn` only), in declaration order.
+
+proc managedElsewhere*(m: HostSystemManagement): bool =
+  ## The entry says `system: managedElsewhere[...]`.
+  m.mode == mmManagedElsewhere
+
+proc isAddOn*(m: HostSystemManagement): bool =
+  ## The entry says `system: addOn` (either form).
+  m.mode == mmAddOn
 
 proc systemPointerProblem*(pointer: string): string =
   ## Why `pointer` cannot be a `managedElsewhere("...")` argument, or "".
@@ -64,24 +114,117 @@ proc systemPointerProblem*(pointer: string): string =
     return "the pointer spans several lines; name the manager on one line"
   ""
 
+proc isActivityIdentifier(name: string): bool =
+  ## An activity name as every parser of activity lists accepts it: a
+  ## non-empty run of ASCII letters, digits and `_`.
+  if name.len == 0:
+    return false
+  for c in name:
+    if not (c.isAlphaAscii() or c.isDigit() or c == '_'):
+      return false
+  true
+
+proc systemActivitiesProblem*(activities: openArray[string]): string =
+  ## Why `activities` cannot be the block form's activity list, or "". The
+  ## list is what distinguishes the block form from `system: addOn`, so an
+  ## empty one is a second spelling of the short form; `default` is always
+  ## enabled, so naming it is a second spelling too; a name given twice is
+  ## a typo the planner would silently absorb.
+  if activities.len == 0:
+    return "the activity list is empty; write `system: " & AddOnKeyword &
+      "` to select only the system profile's `default` activity"
+  var seen = initHashSet[string]()
+  for a in activities:
+    if not isActivityIdentifier(a):
+      return "`" & a & "` is not an activity name (letters, digits and `_`)"
+    if a == DefaultSystemActivity:
+      return "`" & DefaultSystemActivity & "` is always enabled; list only " &
+        "the activities selected beyond it"
+    if a in seen:
+      return "activity `" & a & "` is listed twice"
+    seen.incl a
+  ""
+
+proc systemBlockProblem*(mode: string; hasActivities: bool;
+                         activities: openArray[string]): string =
+  ## Why a block-form `system:` value (`mode:` = `mode`, `""` when absent;
+  ## an `activities:` list when `hasActivities`) is invalid, or "". Shared by
+  ## the macro and the text parser so both refuse the same shapes with the
+  ## same words.
+  if mode.len == 0:
+    return "the block form needs `" & SystemModeKey & ": " & AddOnKeyword &
+      "`"
+  if mode == ManagedElsewhereKeyword:
+    return "`" & ManagedElsewhereKeyword & "` selects no system activities; " &
+      "write `system: " & ManagedElsewhereKeyword & "` or `system: " &
+      ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  if mode != AddOnKeyword:
+    return "unknown mode `" & mode & "` (the block form takes `" &
+      SystemModeKey & ": " & AddOnKeyword & "`)"
+  if not hasActivities:
+    return "the block form needs `" & SystemActivitiesKey & ": [...]`; " &
+      "write `system: " & AddOnKeyword & "` to select only `default`"
+  systemActivitiesProblem(activities)
+
+proc hostSystemDeclProblem*(decl: HostSystemDecl): string =
+  ## Why `decl` is not a value either parser could have produced, or "".
+  ## Readers of an encoded intent (RBPI, JSON) check it, so a hand-edited or
+  ## newer document is refused instead of half-read.
+  case decl.mode
+  of hsmManagedElsewhere:
+    if decl.activities.len > 0:
+      return "a `" & ManagedElsewhereKeyword & "` entry selects no system " &
+        "activities"
+    if decl.managedBy.len > 0:
+      return systemPointerProblem(decl.managedBy)
+  of hsmAddOn:
+    if decl.managedBy.len > 0:
+      return "an `" & AddOnKeyword & "` entry names no manager"
+    if decl.activities.len > 0:
+      return systemActivitiesProblem(decl.activities)
+  ""
+
 proc systemManagementFor*(intent: ProfileIntent;
                           host: string): HostSystemManagement =
   ## The system-management attribute of `host` in `intent`'s `hosts:`
   ## registry. A host the registry does not name is reported as not
-  ## declared and managed here; the caller decides whether an undeclared
-  ## host is acceptable (`repro infra` plans it as before; the dotfiles
-  ## scripts refuse it).
+  ## declared and fully managed here; the caller decides whether an
+  ## undeclared host is acceptable (`repro infra` plans it as before; the
+  ## dotfiles scripts refuse it).
   result.declared = intent.hosts.hasKey(host)
-  if intent.systemManagedElsewhere.hasKey(host):
-    result.managedElsewhere = true
-    result.managedBy = intent.systemManagedElsewhere[host]
+  result.mode = mmFull
+  if intent.hostSystems.hasKey(host):
+    let decl = intent.hostSystems[host]
+    case decl.mode
+    of hsmManagedElsewhere:
+      result.mode = mmManagedElsewhere
+      result.managedBy = decl.managedBy
+    of hsmAddOn:
+      result.mode = mmAddOn
+      result.systemActivities = decl.activities
+
+proc enabledSystemActivities*(m: HostSystemManagement): HashSet[string] =
+  ## THE system-scope activity selection rule (spec ReproOS-Add-On-Mode.md
+  ## §8.2): `default` always, plus the activities an add-on entry's block
+  ## form lists. A fully managed or undeclared host enables `default` only.
+  result = initHashSet[string]()
+  result.incl DefaultSystemActivity
+  for a in m.systemActivities:
+    result.incl a
 
 proc describeManagement*(m: HostSystemManagement): string =
-  ## One phrase for diagnostics: "managed elsewhere (by <pointer>)" or
-  ## "managed elsewhere (no pointer given)" or "managed here".
-  if not m.managedElsewhere:
+  ## One phrase for diagnostics: "managed here", "managed here in add-on
+  ## mode (system activities: default, x)" or "managed elsewhere (...)".
+  case m.mode
+  of mmFull:
     "managed here"
-  elif m.managedBy.len > 0:
-    "managed elsewhere (by " & m.managedBy & ")"
-  else:
-    "managed elsewhere (the profile names no manager)"
+  of mmAddOn:
+    var acts = @[DefaultSystemActivity]
+    acts.add m.systemActivities
+    "managed here in add-on mode (system activities: " & acts.join(", ") &
+      ")"
+  of mmManagedElsewhere:
+    if m.managedBy.len > 0:
+      "managed elsewhere (by " & m.managedBy & ")"
+    else:
+      "managed elsewhere (the profile names no manager)"

@@ -65,6 +65,8 @@ type
     srkMacosDarwinSystemModule = "macos.darwinSystemModule"
     srkLinuxFhsSandbox = "linux.fhsSandbox"
     srkLinuxDpkgDiversion = "linux.dpkgDiversion"
+    srkSystemdUnitState = "systemd.unitState"
+    srkLinuxAddOnTool = "linux.addOnTool"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -175,6 +177,7 @@ type
       suEnabled*: bool                 ## desired: enabled --now (default true)
       suAptClosureLock*: string        ## a `package(apt)` closure lock, or ""
                                        ## (Add-On spec §8.3; `apt_closure`)
+      suRestartHeld*: bool             ## `restartIfChanged = false` (§7.3)
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -271,6 +274,14 @@ type
       fsbArgv*: seq[string]               ## additional argv after fsbBinPath
     of srkLinuxDpkgDiversion:
       ddPath*: string                     ## the package-owned path diverted
+    of srkSystemdUnitState:
+      usName*: string                     ## a unit the add-on does NOT own
+      usEnabled*: bool                    ## desired: enabled (default true)
+      usRunning*: bool                    ## desired: active (default true)
+    of srkLinuxAddOnTool:
+      atCommand*: string                  ## wrapper name under /etc/repro/bin
+      atAptClosureLock*: string           ## the closure the command runs from
+      atProgram*: string                  ## FHS path inside the closure
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -341,6 +352,10 @@ proc realWorldIdentity*(r: SystemResource): string =
     "fhsSandbox:" & r.fsbBinPath
   of srkLinuxDpkgDiversion:
     "dpkgDiversion:" & r.ddPath
+  of srkSystemdUnitState:
+    "unitState:" & r.usName
+  of srkLinuxAddOnTool:
+    "addOnTool:" & r.atCommand
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -390,26 +405,81 @@ proc resourceName*(r: SystemResource): string =
   of srkMacosDarwinSystemModule: r.darwinModuleName
   of srkLinuxFhsSandbox: r.fsbBinPath
   of srkLinuxDpkgDiversion: r.ddPath
+  of srkSystemdUnitState: r.usName
+  of srkLinuxAddOnTool: r.atCommand
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
 # ---------------------------------------------------------------------------
 
-proc stripComment(line: string): string =
-  ## Drop a `#`-comment, but not a `#` inside a quoted value.
+# ---------------------------------------------------------------------------
+# Quoting. A field value is a double-quoted string whose only escape is a
+# DOUBLED quote: `""` inside the quotes stands for one `"` character, as in
+# a Nim raw string literal (`r"a""b"` is `a"b`;
+# https://nim-lang.org/docs/manual.html#lexical-analysis-raw-string-literals).
+# Nothing else is decoded: a backslash, a `#`, a `{` / `}` and a newline are
+# all literal, so a Windows path (`HKLM\SOFTWARE\...`), a unit file and a
+# shell script are written verbatim.
+#
+# Why this escape and not `\"`: the format has always been written with
+# single, undecoded backslashes, and every stored generation embeds its
+# profile text (`GenerationEnvelope.profileText`, which `repro system
+# rollback` re-parses). A backslash escape would change the meaning of text
+# already on disk (`"\\server\share"`). No value could contain a `"` before
+# this rule existed, so a doubled quote never occurred inside a value and
+# every existing text parses to exactly what it did. The scanners that track
+# quote state (`stripComments`, the brace walk, the assignment splitter and
+# `parseListLiteral`) toggle once per `"`, so a doubled quote leaves their
+# state unchanged and needs no special case; only `unquote` decodes it.
+# ---------------------------------------------------------------------------
+
+proc quoteSystemValue*(value: string): string =
+  ## Render `value` as a quoted field value of the `system.nim` text form.
+  ## Every byte string round-trips: `unquote(quoteSystemValue(v)) == v`.
+  ## This is the ONE encoder: the editor (`intent.renderStanza`) and the
+  ## compiled-profile renderer (`renderSystemProfileToText`) both call it.
+  "\"" & value.replace("\"", "\"\"") & "\""
+
+proc stripComments(text: string): string =
+  ## Blank out every `#`-comment in `text`, carrying the quote state across
+  ## newlines, so a `#` inside a quoted value — on its first line or any
+  ## later one — is value text, not a comment.
+  ##
+  ## A comment's characters are replaced by spaces rather than removed, so
+  ## an offset into the result is an offset into `text`; the editor maps
+  ## stanza bounds back to lines through `systemProfileStanzaLineSpans`.
+  ##
+  ## This replaces a per-line pass that restarted with `inQuote = false` on
+  ## every line. It dropped `#` lines from a multi-line value and cut a
+  ## value at an in-value `#` (`ExecStart=/bin/echo a#b` became
+  ## `ExecStart=/bin/echo a`), and reported nothing (reprobuild-pm issue
+  ## 2026-10-30-system-profile-text-parser-drops-hash-text-inside-multi-line-quoted-values).
+  result = newString(text.len)
   var inQuote = false
-  for i in 0 ..< line.len:
-    let c = line[i]
-    if c == '"':
+  var inComment = false
+  for i, c in text:
+    if inComment:
+      if c in {'\n', '\r'}:
+        inComment = false
+        result[i] = c
+      else:
+        result[i] = ' '
+    elif c == '"':
       inQuote = not inQuote
+      result[i] = c
     elif c == '#' and not inQuote:
-      return line[0 ..< i]
-  return line
+      inComment = true
+      result[i] = ' '
+    else:
+      result[i] = c
 
 proc unquote(v: string): string =
+  ## The value a field's raw text denotes. A quoted value loses its
+  ## surrounding quotes and has each doubled quote decoded (see
+  ## `quoteSystemValue`); a bare token (`true`, a list) is returned stripped.
   let t = v.strip()
   if t.len >= 2 and t[0] == '"' and t[^1] == '"':
-    return t[1 ..< t.len - 1]
+    return t[1 ..< t.len - 1].replace("\"\"", "\"")
   return t
 
 proc parseBoolField(name, raw: string): bool =
@@ -564,16 +634,45 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
       getCurrentExceptionMsg())
 
-proc parseSystemProfile*(text: string): SystemProfile =
-  ## Parse the declarative `system.nim` text into a `SystemProfile`.
-  ## Raises `ESystemProfileInvalid` on any structural error or an
-  ## unknown / deferred resource kind. Brace-aware: a stanza body may
-  ## be on one line (`kind { k = v }`) or spread across many.
-  # Strip comments globally, then walk by `{` / `}` braces.
-  var clean = ""
-  for line in text.splitLines():
-    clean.add(stripComment(line))
-    clean.add('\n')
+proc checkUnitStateResource*(r: SystemResource) =
+  ## The refusals both the text parser and the DSL adapter apply to a
+  ## `systemd.unitState` (ReproOS Add-On Mode §4.1): the name must be a
+  ## unit name systemd would accept, since the resource owns nothing it
+  ## could validate against.
+  doAssert r.kind == srkSystemdUnitState
+  if not isSafeUnitName(r.usName) or not hasKnownUnitSuffix(r.usName):
+    raiseSystemProfileInvalid("systemd.unitState name '" & r.usName &
+      "' is not a safe unit name with a unit-type suffix " &
+      "(e.g. avahi-daemon.service)")
+
+proc checkAddOnToolResource*(r: SystemResource) =
+  ## The refusals both paths apply to a `linux.addOnTool` (§4.1): a safe
+  ## command name (it becomes a file under `/etc/repro/bin`), an absolute
+  ## program path inside the closure, and a lock that parses — at plan
+  ## time, not on the host at apply time.
+  doAssert r.kind == srkLinuxAddOnTool
+  if not isSafeAddOnToolCommand(r.atCommand):
+    raiseSystemProfileInvalid("linux.addOnTool command '" & r.atCommand &
+      "' is not a safe command name (letters, digits, '.', '-', '_', '+')")
+  if not isPosixAbsolutePath(r.atProgram):
+    raiseSystemProfileInvalid("linux.addOnTool '" & r.atCommand &
+      "': program '" & r.atProgram & "' must be an absolute path inside " &
+      "the closure (e.g. /usr/bin/" & r.atCommand & ")")
+  try:
+    discard parseAptClosureLock(r.atAptClosureLock)
+  except EAptClosureLock:
+    raiseSystemProfileInvalid("linux.addOnTool '" & r.atCommand & "': " &
+      getCurrentExceptionMsg())
+
+proc stanzaBounds(clean: string):
+    seq[tuple[head, brace, close: int]] =
+  ## The stanzas of comment-stripped text, as offsets: where the kind tag
+  ## starts, its `{`, and the matching `}`. There is no nesting in this
+  ## format. A `}` inside a double-quoted value is skipped — required for
+  ## kinds whose content carries JS / shell bodies (`linux.polkitRule
+  ## content = "polkit.addRule(function() { ... });"`) and for any
+  ## multi-line value. Raises `ESystemProfileInvalid` on a head with no
+  ## `{` or a block with no `}`.
   var pos = 0
   while pos < clean.len:
     # Skip whitespace to the next stanza head.
@@ -588,7 +687,57 @@ proc parseSystemProfile*(text: string): SystemProfile =
         raiseSystemProfileInvalid("resource '" & trailing &
           "' must be followed by a '{' block")
       break
-    let kindTag = clean[pos ..< braceIdx].strip()
+    var closeIdx = -1
+    var i = braceIdx + 1
+    var inQuote = false
+    while i < clean.len:
+      let c = clean[i]
+      if c == '"':
+        inQuote = not inQuote
+      elif not inQuote and c == '}':
+        closeIdx = i
+        break
+      inc i
+    if closeIdx < 0:
+      raiseSystemProfileInvalid("resource '" &
+        clean[pos ..< braceIdx].strip() & "' block is not closed with '}'")
+    result.add((head: pos, brace: braceIdx, close: closeIdx))
+    pos = closeIdx + 1
+
+proc systemProfileStanzaLineSpans*(text: string):
+    seq[tuple[startLine, endLine: int]] =
+  ## The 0-based line of each stanza's kind tag and of its closing `}`, in
+  ## file order, found by the SAME quote-aware walk `parseSystemProfile`
+  ## uses. The text editor (`intent.stanzaSpans`) pairs these with the
+  ## parsed resources, so a value holding a `{`, a `}`, a `#` or a blank
+  ## line cannot make the editor and the parser disagree on where a stanza
+  ## ends. Lines are counted by `\n`.
+  let clean = stripComments(text)
+  var line = 0
+  var at = 0
+  proc lineOf(offset: int): int =
+    while at < offset:
+      if clean[at] == '\n': inc line
+      inc at
+    line
+  for span in stanzaBounds(clean):
+    let s = lineOf(span.head)
+    let e = lineOf(span.close)
+    result.add((startLine: s, endLine: e))
+
+proc parseSystemProfile*(text: string): SystemProfile =
+  ## Parse the declarative `system.nim` text into a `SystemProfile`.
+  ## Raises `ESystemProfileInvalid` on any structural error or an
+  ## unknown / deferred resource kind. Brace-aware: a stanza body may
+  ## be on one line (`kind { k = v }`) or spread across many.
+  # Strip comments globally (quote state carried across lines), then walk
+  # by `{` / `}` braces. The bytes of a quoted value reach `unquote`
+  # unchanged: no line splitting, so a `\r` inside a value survives too.
+  let clean = stripComments(text)
+  for span in stanzaBounds(clean):
+    let braceIdx = span.brace
+    let closeIdx = span.close
+    let kindTag = clean[span.head ..< braceIdx].strip()
     var srk: SystemResourceKind
     case kindTag
     of $srkWindowsRegistryValue: srk = srkWindowsRegistryValue
@@ -621,30 +770,12 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkMacosDarwinSystemModule: srk = srkMacosDarwinSystemModule
     of $srkLinuxFhsSandbox: srk = srkLinuxFhsSandbox
     of $srkLinuxDpkgDiversion: srk = srkLinuxDpkgDiversion
+    of $srkSystemdUnitState: srk = srkSystemdUnitState
+    of $srkLinuxAddOnTool: srk = srkLinuxAddOnTool
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
-    # Find the matching `}` (no nesting in this format). A `}` inside
-    # a double-quoted string is skipped — required for kinds whose
-    # content field carries JS / shell bodies (e.g.
-    # `linux.polkitRule content = "polkit.addRule(function() { ... });"`).
-    var closeIdx = -1
-    block:
-      var i = braceIdx + 1
-      var inQuote = false
-      while i < clean.len:
-        let c = clean[i]
-        if c == '"':
-          inQuote = not inQuote
-        elif not inQuote and c == '}':
-          closeIdx = i
-          break
-        inc i
-    if closeIdx < 0:
-      raiseSystemProfileInvalid("resource '" & kindTag &
-        "' block is not closed with '}'")
     let bodyText = clean[braceIdx + 1 ..< closeIdx]
-    pos = closeIdx + 1
     # Collect `key = value` assignments. The RAW value (before
     # `unquote`) is kept so a `[...]` list field can be parsed with
     # `parseListLiteral`; a scalar field uses the unquoted form.
@@ -936,7 +1067,11 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "enabled" in fields: parseBoolField("enabled",
             fields["enabled"]) else: true,
         suAptClosureLock:
-          if "aptClosureLock" in fields: fields["aptClosureLock"] else: "")
+          if "aptClosureLock" in fields: fields["aptClosureLock"] else: "",
+        suRestartHeld:
+          if "restartIfChanged" in fields:
+            not parseBoolField("restartIfChanged", fields["restartIfChanged"])
+          else: false)
       # Refuse an unbindable unit or a malformed lock at parse time, not
       # at apply time on the host.
       discard renderedSystemUnitContent(res)
@@ -1282,6 +1417,28 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "' must end with '.nix' (Nix module convention)")
       res = SystemResource(kind: srkMacosDarwinSystemModule,
         darwinModuleName: n, darwinModuleContent: c)
+    of srkSystemdUnitState:
+      let stateStr =
+        if "state" in fields: fields["state"].toLowerAscii() else: "running"
+      if stateStr notin ["running", "stopped"]:
+        raiseSystemProfileInvalid("systemd.unitState state '" & stateStr &
+          "' is not one of Running / Stopped")
+      res = SystemResource(kind: srkSystemdUnitState,
+        usName: need("name"),
+        usEnabled:
+          if "enabled" in fields: parseBoolField("enabled",
+            fields["enabled"]) else: true,
+        usRunning: stateStr == "running")
+      checkUnitStateResource(res)
+    of srkLinuxAddOnTool:
+      let command = need("command")
+      res = SystemResource(kind: srkLinuxAddOnTool,
+        atCommand: command,
+        atAptClosureLock: need("aptClosureLock"),
+        atProgram:
+          if "program" in fields: fields["program"]
+          else: "/usr/bin/" & command)
+      checkAddOnToolResource(res)
     of srkLinuxFhsSandbox:
       let binPath = need("binPath")
       if not isPosixAbsolutePath(binPath):
@@ -1428,6 +1585,7 @@ proc toPrivilegedOperation*(r: SystemResource;
       suContent: renderedSystemUnitContent(r),
       suEnabled: r.suEnabled,
       suAptClosureLock: r.suAptClosureLock,
+      suRestartHeld: r.suRestartHeld,
       suDestroy: destroy)
   of srkLaunchdSystemDaemon:
     PrivilegedOperation(kind: pokLaunchdSystemDaemon, address: r.address,
@@ -1535,6 +1693,18 @@ proc toPrivilegedOperation*(r: SystemResource;
       darwinModuleName: r.darwinModuleName,
       darwinModuleContent: r.darwinModuleContent,
       darwinModuleDestroy: destroy)
+  of srkSystemdUnitState:
+    PrivilegedOperation(kind: pokSystemdUnitState, address: r.address,
+      usName: r.usName,
+      usEnabled: r.usEnabled,
+      usRunning: r.usRunning,
+      usDestroy: destroy)
+  of srkLinuxAddOnTool:
+    PrivilegedOperation(kind: pokLinuxAddOnTool, address: r.address,
+      atCommand: r.atCommand,
+      atAptClosureLock: r.atAptClosureLock,
+      atProgram: r.atProgram,
+      atDestroy: destroy)
   of srkLinuxFhsSandbox:
     PrivilegedOperation(kind: pokLinuxFhsSandbox, address: r.address,
       fsbBinPath: r.fsbBinPath,

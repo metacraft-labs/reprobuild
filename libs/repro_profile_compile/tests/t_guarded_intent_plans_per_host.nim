@@ -140,19 +140,28 @@ suite "guarded resources and config entries are planned per host":
     check "mac-only" in macPkgs
     check "ripgrep" in linuxPkgs and "ripgrep" in macPkgs
 
-  test "a system profile refuses a runtime guard instead of dropping it":
+  test "a system profile plans a runtime guard per host instead of refusing it":
+    # ReproOS add-on mode §8.2 lifted GM3's refusal: system scope now has host
+    # selection, so a guarded system resource is selected by the SAME walker
+    # (`applicableResourceEntries`) against the planned host's facts.
     var intent: ProfileIntent
+    fsSystemFile(intent.resources, path = "/etc/gm3-common.conf",
+      content = "c", address = "common")
     guarded(intent.resources, linux()):
       fsSystemFile(intent.resources, path = "/etc/gm3.conf",
         content = "x", address = "sysFile")
-    # The refusal is the diagnostic an operator sees (`repro infra plan` /
-    # `apply` print it verbatim), so it must name the resource, the guard
-    # and why it is refused, and point at the form that works.
-    try:
-      discard profileIntentToSystemProfile(intent)
-      check false
-    except ValueError as e:
-      check "fs.systemFile `sysFile`" in e.msg
-      check "runtime predicate `linux`" in e.msg
-      check "system scope has no host selection" in e.msg
-      check "compile-time `when defined(...)`" in e.msg
+    guarded(intent.resources, host() == "gm3-other"):
+      fsSystemFile(intent.resources, path = "/etc/gm3-other.conf",
+        content = "o", address = "otherOnly")
+    proc addresses(t: SystemPlanTarget): seq[string] =
+      for r in profileIntentToSystemProfile(intent, t).resources:
+        result.add r.address
+    var linuxHost = defaultSystemPlanTarget("gm3-host")
+    linuxHost.facts = ctxFor("linux", "x86_64")
+    var macHost = linuxHost
+    macHost.facts = ctxFor("macos", "arm64")
+    var other = linuxHost
+    other.facts.host = "gm3-other"
+    check addresses(linuxHost) == @["common", "sysFile"]
+    check addresses(macHost) == @["common"]
+    check addresses(other) == @["common", "sysFile", "otherOnly"]

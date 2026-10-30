@@ -768,9 +768,17 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             content: string;
                             enabled: bool = true;
                             aptClosureLock: string = "";
+                            restartIfChanged: bool = true;
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
+  ##
+  ## A unit that is active when the apply reaches it is RESTARTED when its
+  ## file, its closure, or a resource it `dependsOn` (its configuration
+  ## file, a credential) changed in that apply, so the change takes effect
+  ## then and not at some unrelated later restart. `restartIfChanged =
+  ## false` holds the restart and the apply log reports it as pending.
+  ## ReproOS Add-On Mode spec §7.3.
   ##
   ## `aptClosureLock` attaches a `package(apt, ...)` closure: the text of a
   ## `repro-apt-closure-lock v1` (`repro-harvest-apt --emit-lock`, usually
@@ -788,10 +796,94 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
     fields["enabled"] = boolField(enabled)
     if aptClosureLock.len > 0:
       fields["aptClosureLock"] = strField(aptClosureLock)
+    fields["restartIfChanged"] = boolField(restartIfChanged)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,
       dependsOn)
+
+template systemdUnitState*(targetResources: var seq[ResourceIntent];
+                           name: string;
+                           enabled: bool = true;
+                           state: string = "Running";
+                           address: string = "";
+                           dependsOn: seq[string] = @[]) =
+  ## Require a unit the profile relies on but does NOT own — a
+  ## distribution unit such as `avahi-daemon.service` — to be enabled and
+  ## active (or disabled and stopped). The apply converges only
+  ## `systemctl enable|disable` and `start|stop`; the unit file and its
+  ## conffiles stay the distribution's, and a unit that is not installed
+  ## or is masked is refused rather than created. Removing the resource
+  ## forgets the requirement and changes nothing on the host. ReproOS
+  ## Add-On Mode spec §4.1, the `unitState` class.
+  ##
+  ## Address default: `systemd.unitState:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["enabled"] = boolField(enabled)
+    fields["state"] = strField(state)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("systemd.unitState", name)
+    pushResource(targetResources, "systemd.unitState", addr0, fields,
+      dependsOn)
+
+# `AddOnToolDir` is where `addOnTool` wrappers land, and `addOnToolPath()`
+# puts it on PATH. `AddOnToolPathScript` is `/etc/profile.d/repro-addon.sh`:
+# it prepends the wrapper directory once (login shells source
+# `/etc/profile.d/*.sh`; it is POSIX sh, as Debian's `/etc/profile` is).
+const
+  AddOnToolDir* = "/etc/repro/bin"
+  AddOnToolPathScript* =
+    "# Written by reprobuild (addOnToolPath): operator commands from the\n" &
+    "# add-on's package(apt) closures live under " & AddOnToolDir & ".\n" &
+    "case \":$PATH:\" in\n" &
+    "  *\":" & AddOnToolDir & ":\"*) ;;\n" &
+    "  *) PATH=\"" & AddOnToolDir & ":$PATH\" ;;\n" &
+    "esac\n" &
+    "export PATH\n"
+
+template addOnTool*(targetResources: var seq[ResourceIntent];
+                    command: string;
+                    aptClosureLock: string;
+                    program: string = "";
+                    address: string = "";
+                    dependsOn: seq[string] = @[]) =
+  ## Put `command` from a `package(apt, ...)` closure on an operator's
+  ## PATH without writing into `/usr`. The apply realises the closure
+  ## (`aptClosureLock`, a `repro-apt-closure-lock v1`, as for
+  ## `systemdSystemUnit`) and writes `/etc/repro/bin/<command>`, a wrapper
+  ## that runs `program` (default `/usr/bin/<command>`) through
+  ## `reprobuild-sandbox-launcher` with the closure's `/usr` bound
+  ## read-only over `/usr` in an unprivileged user namespace, plus the
+  ## launcher manifest beside it. Declare `addOnToolPath()` once in the
+  ## profile for the `PATH` hook. ReproOS Add-On Mode spec §4.1.
+  ##
+  ## Address default: `linux.addOnTool:<command>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["command"] = strField(command)
+    fields["aptClosureLock"] = strField(aptClosureLock)
+    if program.len > 0:
+      fields["program"] = strField(program)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.addOnTool", command)
+    pushResource(targetResources, "linux.addOnTool", addr0, fields,
+      dependsOn)
+
+template addOnToolPath*(targetResources: var seq[ResourceIntent];
+                        address: string = "";
+                        dependsOn: seq[string] = @[]) =
+  ## The `fs.systemFile` `/etc/profile.d/repro-addon.sh` that puts
+  ## `/etc/repro/bin` (the `addOnTool` wrappers) on PATH for login shells.
+  ## One per profile: it is an ordinary file resource with a fixed
+  ## content, so two declarations would be the same address twice.
+  ## ReproOS Add-On Mode spec §4.1.
+  # Positional on purpose: a template substitutes its parameters wherever
+  # the identifier appears, including a named argument's NAME, so
+  # `address = address` would expand to `"" = ""`.
+  fsSystemFile(targetResources, "/etc/profile.d/repro-addon.sh",
+    AddOnToolPathScript, "", "", "", "0644", address, dependsOn)
 
 template launchdSystemDaemon*(targetResources: var seq[ResourceIntent];
                               label: string;
@@ -1323,13 +1415,9 @@ template linuxNixosSystemModule*(targetResources: var seq[ResourceIntent];
   ## re-reads on each invocation" model: the file is the source of
   ## truth; the realization step is downstream.
   ##
-  ## TEXT-FORMAT CONSTRAINT: the M69 system-profile text round-tripper
-  ## quotes each field with simple `"..."` literals and the parser's
-  ## `unquote` strips ONE surrounding pair without escapes; the
-  ## `content` value therefore MUST NOT contain a double-quote
-  ## character. Use Nix's `''...''` URL-string form (which the Nix
-  ## parser treats verbatim, no `"` needed) or pre-bind quoted
-  ## strings to `let` variables in an upstream module.
+  ## `content` may hold any text, double quotes included: the system
+  ## profile text form encodes a `"` as `""` (`repro_infra`
+  ## `quoteSystemValue`) and decodes it on parse.
   ##
   ## Address default: `linux.nixosSystemModule:<name>`.
   block:

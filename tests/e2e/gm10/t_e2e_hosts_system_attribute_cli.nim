@@ -5,12 +5,13 @@
 ## `e2e_hosts_system_attribute_export_and_refusals`, against the real
 ## `build/bin/repro`:
 ##
-## 1. The export (schema 4) carries the attribute: `intent.systemManagedElsewhere`
-##    names exactly the hosts that say `system: managedElsewhere[(...)]`, with
-##    the pointer or `null`; `--target` reports `evaluation.system` for every
-##    host -- `elsewhere` with the pointer, `elsewhere` with `null`, and `here`
-##    for the host without the key (negative control). A profile with no such
-##    host exports no `systemManagedElsewhere` key at all.
+## 1. The export (schema 5, since ReproOS add-on mode) carries the attribute:
+##    `intent.hostSystems` names exactly the hosts that say `system:
+##    managedElsewhere[(...)]`, with the pointer or `null`; `--target` reports
+##    `evaluation.system` for every host -- `elsewhere` with the pointer,
+##    `elsewhere` with `null`, and `here` (mode `full`) for the host without
+##    the key (negative control). A profile with no such host exports no
+##    `hostSystems` key at all. (Add-on hosts: `tests/e2e/addon/`.)
 ## 2. `repro home export --check` sees an attribute edit: a snapshot is
 ##    current, and stale once a pointer changes.
 ## 3. The attribute does not change what the home side plans: `repro home
@@ -73,15 +74,21 @@ suite "GM10: the hosts system attribute through the home CLI":
     checkpoint exported.stderr
     require exported.exitCode == 0
     let doc = parseJson(exported.stdout)
-    check doc["schemaVersion"].getInt == 4
-    check doc["intent"]["systemManagedElsewhere"] == %*{
-      "gm10-elsewhere": {"managedBy": "example-org/gm10-infra"},
-      "gm10-nopointer": {"managedBy": nil}}
+    check doc["schemaVersion"].getInt == 5
+    check doc["intent"]["hostSystems"] == %*{
+      "gm10-elsewhere": {"mode": "managedElsewhere",
+                         "managedBy": "example-org/gm10-infra",
+                         "activities": []},
+      "gm10-nopointer": {"mode": "managedElsewhere", "managedBy": nil,
+                         "activities": []}}
     for (host, want) in [
         ("gm10-elsewhere", %*{"managed": "elsewhere",
-                              "managedBy": "example-org/gm10-infra"}),
-        ("gm10-nopointer", %*{"managed": "elsewhere", "managedBy": nil}),
-        ("gm10-here", %*{"managed": "here", "managedBy": nil})]:
+                              "managedBy": "example-org/gm10-infra",
+                              "mode": "managedElsewhere", "activities": []}),
+        ("gm10-nopointer", %*{"managed": "elsewhere", "managedBy": nil,
+                              "mode": "managedElsewhere", "activities": []}),
+        ("gm10-here", %*{"managed": "here", "managedBy": nil, "mode": "full",
+                         "activities": ["default"]})]:
       let target = sb.runRepro(["home", "export", "--format", "json",
         "--target", "x86_64-linux"], host = host)
       checkpoint host & ": " & target.stderr
@@ -94,7 +101,7 @@ suite "GM10: the hosts system attribute through the home CLI":
       let r = plain.runRepro(["home", "export", "--format", "json"],
         host = "gm10-here")
       require r.exitCode == 0
-      check not parseJson(r.stdout)["intent"].hasKey("systemManagedElsewhere")
+      check not parseJson(r.stdout)["intent"].hasKey("hostSystems")
 
     # 2. --check sees a pointer edit.
     let snapshot = sb.root / "export.json"
@@ -107,7 +114,7 @@ suite "GM10: the hosts system attribute through the home CLI":
       host = "gm10-here")
     checkpoint stale.stdout & stale.stderr
     check stale.exitCode == 1
-    check ("intent.systemManagedElsewhere.gm10-elsewhere.managedBy: " &
+    check ("intent.hostSystems.gm10-elsewhere.managedBy: " &
       "snapshot has \"example-org/gm10-infra\", a fresh export has " &
       "\"example-org/other-infra\"") in stale.stderr
     sb.writeProfileFile("home.nim", profileText(Registry))
@@ -168,6 +175,5 @@ suite "GM10: the hosts system attribute through the home CLI":
       host = "gm10-elsewhere")
     require reexported.exitCode == 0
     let redoc = parseJson(reexported.stdout)
-    check redoc["intent"]["systemManagedElsewhere"] ==
-      doc["intent"]["systemManagedElsewhere"]
+    check redoc["intent"]["hostSystems"] == doc["intent"]["hostSystems"]
     check redoc["selection"]["activities"] == %*["default", "extra", "more"]

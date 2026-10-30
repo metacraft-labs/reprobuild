@@ -342,6 +342,12 @@ type
       ## `dpkg-divert --local --rename --remove <path>`, which moves the
       ## package's file back. Debian and Ubuntu only (refused where dpkg is
       ## absent). See dpkg-divert(1).
+    pokSystemdUnitState = "systemd.unitState"
+      ## Enable/disable and start/stop a unit the add-on does not own, and
+      ## nothing else about it (ReproOS Add-On Mode §4.1, `unitState`).
+    pokLinuxAddOnTool = "linux.addOnTool"
+      ## A wrapper under `/etc/repro/bin` running a command from a
+      ## `package(apt)` closure through the sandbox launcher (§4.1).
     pokInlineExecCall = "reprobuild.inlineExecCall"
       ## Windows-System-Resources Phase E: the cross-cutting privileged
       ## execution of an `inlineExecCall(...)` build-graph edge tagged
@@ -543,6 +549,16 @@ type
         ## "". When set, `suContent` is the RENDERED unit (it already binds
         ## the closure prefix) and the driver realises the closure into
         ## `/repro/store` before writing it. ReproOS Add-On Mode §8.3.
+      suRestartHeld*: bool
+        ## `restartIfChanged = false` in the profile: a RUNNING unit whose
+        ## file, closure or dependency changed is NOT restarted; the apply
+        ## reports "pending restart" instead (Add-On spec §7.3). Default
+        ## false, so an omitted flag restarts.
+      suRestartRequested*: bool
+        ## Set by the apply step when a resource this unit `depends_on` was
+        ## not a no-op in the same apply. The unit file is unchanged, so
+        ## the dispatch would otherwise take the cache-hit path and the new
+        ## configuration would wait for an unrelated restart (§7.3).
     of pokLaunchdSystemDaemon:
       ## Write `/Library/LaunchDaemons/<sdaLabel>.plist` and
       ## `launchctl bootstrap system`. `sdaProgramArgs` is the daemon
@@ -763,6 +779,22 @@ type
       ## to `ddPath & ".distrib"`. `ddDestroy` selects the removal.
       ddPath*: string
       ddDestroy*: bool
+    of pokSystemdUnitState:
+      ## Converge only `systemctl enable|disable` and `start|stop` of
+      ## `usName`, a unit the add-on does not own. `usDestroy` forgets the
+      ## requirement and changes nothing on the host.
+      usName*: string
+      usEnabled*: bool
+      usRunning*: bool
+      usDestroy*: bool
+    of pokLinuxAddOnTool:
+      ## Write `/etc/repro/bin/<atCommand>` and the launcher manifest beside
+      ## it, so an operator runs `atProgram` from the closure
+      ## `atAptClosureLock` pins; the driver realises the closure first.
+      atCommand*: string
+      atAptClosureLock*: string
+      atProgram*: string
+      atDestroy*: bool
     of pokLinuxFhsSandbox:
       ## Launch `fsbBinPath` under bubblewrap with the M0-locked
       ## transparency-posture invocation shape:
@@ -1086,6 +1118,8 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
   of pokLinuxDpkgDiversion: true
+  of pokSystemdUnitState: true
+  of pokLinuxAddOnTool: true
   of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
@@ -1129,6 +1163,8 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
   of $pokLinuxDpkgDiversion: pokLinuxDpkgDiversion
+  of $pokSystemdUnitState: pokSystemdUnitState
+  of $pokLinuxAddOnTool: pokLinuxAddOnTool
   of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
@@ -2575,6 +2611,22 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     for c in op.ddPath:
       if c in {'\0', '\n', '\r'}:
         return "linux.dpkgDiversion path contains a control character"
+  of pokSystemdUnitState:
+    if not isSafeUnitName(op.usName) or not hasKnownUnitSuffix(op.usName):
+      return "systemd.unitState name '" & op.usName &
+        "' is not a safe unit name with a unit-type suffix"
+  of pokLinuxAddOnTool:
+    if not isSafeAddOnToolCommand(op.atCommand):
+      return "linux.addOnTool command '" & op.atCommand &
+        "' is not a safe command name (letters, digits, '.', '-', '_', '+')"
+    if not isPosixAbsolutePath(op.atProgram):
+      return "linux.addOnTool program '" & op.atProgram &
+        "' is not an absolute path inside the closure"
+    if not op.atDestroy:
+      try:
+        discard parseAptClosureLock(op.atAptClosureLock)
+      except EAptClosureLock as ex:
+        return "linux.addOnTool '" & op.atCommand & "': " & ex.msg
   of pokLinuxFhsSandbox:
     # `fsbBinPath` must be a POSIX absolute path (leading `/`). The
     # driver does NOT canonicalize — `..` collapse / symlink resolve

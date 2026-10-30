@@ -50,11 +50,12 @@ suite "Home-intent smoke":
     check act.isSome
     check act.get.activityChildren.len == 3  # neovim, tmux, when block
 
-  test "hosts block form: the GM10 system key is read and validated":
+  test "hosts block form: the system key is read and validated":
     # The text form of what the `profile` macro accepts
     # (`repro_profile/host_system`): `managedElsewhere`, optionally with a
-    # one-line string pointer and a trailing comment; anything else is
-    # refused with the host named.
+    # one-line string pointer and a trailing comment; `addOn`; and the
+    # add-on block form, indented or inline; anything else is refused with
+    # the host named.
     let dir = createTempDir("repro-home-smoke-hosts-system-", "")
     defer: removeDir(dir)
     let path = dir / "home.nim"
@@ -67,22 +68,56 @@ suite "Home-intent smoke":
       "      activities: [default]\n" &
       "      system: managedElsewhere(\"example-org/\\\"infra\\\"\")  # c\n" &
       "    \"distro\":\n" &
-      "      system: managedElsewhere # no pointer\n"))
+      "      system: managedElsewhere # no pointer\n" &
+      "    \"rpi\":\n" &
+      "      activities: [default]\n" &
+      "      system: addOn  # short form\n" &
+      "    \"validator\":\n" &
+      "      system:\n" &
+      "        mode: addOn\n" &
+      "        activities: [ethereum_validator,\n" &
+      "                     host_baseline]  # spans lines\n" &
+      "      activities: [default]\n" &
+      "    \"inline\":\n" &
+      "      system: {mode: addOn, activities: [a, b]} # inline\n"))
     let hostsOpt = findHostsBlock(loadProfile(path))
     require hostsOpt.isSome
-    var seen: Table[string, (bool, string)]
+    var seen: Table[string, (bool, HostSystemDecl)]
+    var acts: Table[string, seq[string]]
     for e in hostsOpt.get.hostsEntries:
-      seen[e.hostName] = (e.hostSystemManagedElsewhere, e.hostSystemManagedBy)
-    check seen["plain"] == (false, "")
-    check seen["infra"] == (true, "example-org/\"infra\"")
-    check seen["distro"] == (true, "")
+      seen[e.hostName] = (e.hostSystemDeclared, e.hostSystem)
+      acts[e.hostName] = e.hostActivities
+    check seen["plain"] == (false, HostSystemDecl())
+    check seen["infra"] == (true, HostSystemDecl(mode: hsmManagedElsewhere,
+      managedBy: "example-org/\"infra\""))
+    check seen["distro"] == (true, HostSystemDecl(mode: hsmManagedElsewhere))
+    check seen["rpi"] == (true, HostSystemDecl(mode: hsmAddOn))
+    check seen["validator"] == (true, HostSystemDecl(mode: hsmAddOn,
+      activities: @["ethereum_validator", "host_baseline"]))
+    check acts["validator"] == @["default"]
+    check seen["inline"] == (true, HostSystemDecl(mode: hsmAddOn,
+      activities: @["a", "b"]))
     for bad in [
         "    \"h\":\n      system: managedSomewhere\n",
         "    \"h\":\n      system: managedElsewhere(infra)\n",
         "    \"h\":\n      system: managedElsewhere(\"   \")\n",
         "    \"h\":\n      system: managedElsewhere(\"x\n",
         "    \"h\":\n      system: managedElsewhere(\"x\") extra\n",
-        "    \"h\":\n      system: managedElsewhere\n      system: managedElsewhere\n"]:
+        "    \"h\":\n      system: managedElsewhere\n      system: managedElsewhere\n",
+        "    \"h\":\n      system: addOn(\"x\")\n",
+        "    \"h\":\n      system: {mode: addOn}\n",
+        "    \"h\":\n      system: {mode: addOn, activities: []}\n",
+        "    \"h\":\n      system: {mode: addOn, activities: [default]}\n",
+        "    \"h\":\n      system: {mode: addOn, activities: [a, a]}\n",
+        "    \"h\":\n      system: {mode: managedElsewhere, activities: [a]}\n",
+        "    \"h\":\n      system: {mode: nixos, activities: [a]}\n",
+        "    \"h\":\n      system: {activities: [a]}\n",
+        "    \"h\":\n      system: {mode: addOn, activities: [a]\n",
+        "    \"h\":\n      system: {mode: addOn, activities: [a], extra: 1}\n",
+        "    \"h\":\n      system:\n        mode: addOn\n",
+        "    \"h\":\n      system:\n        mode: addOn\n        mode: addOn\n        activities: [a]\n",
+        "    \"h\":\n      system:\n        mode: addOn\n          activities: [a]\n",
+        "    \"h\":\n      system:\n"]:
       writeFile(extendedPath(path), withHosts(bad))
       try:
         discard loadProfile(path)

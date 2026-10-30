@@ -22,8 +22,12 @@
 ## a thin wrapper that builds a ``PublishInProcessRequest`` from CLI
 ## flags and forwards.
 
-import std/[algorithm, httpclient, httpcore, net, os,
+import std/[algorithm, httpclient, httpcore, net, os, tempfiles,
             sequtils, strutils, tempfiles, times]
+when defined(posix):
+  # rename(2) directly: Nim's moveDir falls back to copy-and-remove when the
+  # rename fails, which is exactly the partial state extractPrefixInto refuses.
+  proc cRename(oldPath, newPath: cstring): cint {.importc: "rename", header: "<stdio.h>".}
 
 when defined(ssl):
   import wrappers/openssl
@@ -120,7 +124,7 @@ const
   ArchiveCopyBufferBytes = 256 * 1024
 
 type
-  ArchiveEntryKind = enum
+  ArchiveEntryKind* = enum
     aekFile = 0
     aekDirectory = 1
     aekSymlink = 2
@@ -414,9 +418,16 @@ proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
     result = result or (uint64(buf[pos]) shl uint64(shift))
     inc pos
 
-proc extractPrefixRaw(archive: openArray[byte]; outDir: string)
+type
+  ExtractedEntry* = tuple[path: string, kind: ArchiveEntryKind]
+    ## One archive entry as extracted: its POSIX-style relative path and
+    ## kind. ``extractPrefix`` returns the list so a consumer can tell an
+    ## explicit directory entry from a directory that merely exists because
+    ## a file beneath it was created.
 
-proc extractPrefix*(archive: openArray[byte]; outDir: string) =
+proc extractPrefixRaw(archive: openArray[byte]; outDir: string): seq[ExtractedEntry]
+
+proc extractPrefix*(archive: openArray[byte]; outDir: string): seq[ExtractedEntry] {.discardable.} =
   ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
   ## v2 preserves regular files, directory entries, and symbolic links;
   ## v1 remains accepted so already-published cache entries keep working.
@@ -450,8 +461,7 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
       decomp.finish(sink)
     except DecompressError as e:
       raise newException(IOError, "rbcarc zstd decode failed: " & e.msg)
-    extractPrefixRaw(plain, outDir)
-    return
+    return extractPrefixRaw(plain, outDir)
   extractPrefixRaw(archive, outDir)
 
 proc refuseWriteThroughSymlink*(outDir, rel: string) =
@@ -485,7 +495,8 @@ proc refuseWriteThroughSymlink*(outDir, rel: string) =
         "rbcarc rejected entry written through a symbolic link: " & rel &
         " (" & cur & " is a link)")
 
-proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
+proc extractPrefixRaw(archive: openArray[byte]; outDir: string): seq[ExtractedEntry] =
+  result = @[]
   if archive.len < 4 + 4 + 4:
     raise newException(IOError, "rbcarc too short: " & $archive.len)
   for i in 0 ..< 4:
@@ -528,6 +539,7 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
         "rbcarc truncated reading file body for " & rel)
     let absOut = outDir / rel
     refuseWriteThroughSymlink(outDir, normalizedRel)
+    result.add((path: normalizedRel, kind: entryKind))
     # Same MAX_PATH argument as the walk on the publish side: a tree deep
     # enough to archive is deep enough to fail to restore.
     createDir(extendedPath(parentDir(absOut)))
@@ -559,31 +571,58 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
 
 proc extractPrefixInto*(archive: openArray[byte]; outDir: string) =
   ## Extract into ``outDir`` all or nothing. The archive is extracted into a
-  ## fresh sibling directory first and moved into place only when every entry
-  ## was accepted, so a refused or malformed archive (including one
-  ## ``refuseWriteThroughSymlink`` rejects) leaves no partial tree behind.
-  ## ``outDir`` must be absent or empty: extracting over existing content
-  ## would mix the cache's bytes with whatever was there. Raises ``IOError``.
+  ## fresh staging directory beside ``outDir`` first and renamed into place
+  ## only when every entry was accepted, so a refused or malformed archive
+  ## (including one ``refuseWriteThroughSymlink`` rejects) leaves no partial
+  ## tree behind. ``outDir`` must be absent or an empty directory, and not a
+  ## symbolic link: extracting over existing content would mix the cache's
+  ## bytes with whatever was there, and a link would make the rename land
+  ## wherever it points. Raises ``IOError`` on every refusal and failure.
+  ##
+  ## The staging directory has a random name and is created with mkdir
+  ## semantics that fail when the name exists (``createTempDir``), so nothing
+  ## planted beside ``outDir`` can be mistaken for it. This proc never removes
+  ## a path it did not create: an earlier version staged under the predictable
+  ## ``.<name>.repro-extract-<pid>`` and began by removing it, and ``removeDir``
+  ## follows a symbolic link, so a link planted at that name made a privileged
+  ## caller empty the directory it pointed at.
+  if symlinkExists(outDir):
+    raise newException(IOError,
+      "substitute output path is a symbolic link: " & outDir)
   if dirExists(outDir):
     for _ in walkDir(outDir):
       raise newException(IOError,
         "substitute output directory is not empty: " & outDir)
-  elif fileExists(outDir) or symlinkExists(outDir):
+  elif fileExists(outDir):
     raise newException(IOError,
       "substitute output path exists and is not a directory: " & outDir)
-  let parent = parentDir(absolutePath(outDir))
+  let outAbs = absolutePath(outDir)
+  let parent = parentDir(outAbs)
   createDir(parent)
-  let tmp = parent / ("." & extractFilename(outDir) & ".repro-extract-" &
-                      $getCurrentProcessId())
-  removeDir(tmp)
+  let tmp =
+    try:
+      createTempDir(".repro-extract-", "", parent)
+    except CatchableError as e:
+      raise newException(IOError,
+        "cannot create a staging directory beside " & outDir & ": " & e.msg)
   try:
     extractPrefix(archive, tmp)
+    when defined(posix):
+      # rename(2) replaces an empty directory atomically and never follows
+      # a link at the destination; Nim's moveDir would fall back to copying
+      # when the rename fails, which is exactly the partial state refused here.
+      if cRename(tmp.cstring, outAbs.cstring) != 0:
+        raise newException(IOError,
+          "cannot move the extracted prefix into place at " & outDir & ": " &
+          osErrorMsg(osLastError()))
+    else:
+      if dirExists(outAbs):
+        removeDir(outAbs)
+      moveDir(tmp, outAbs)
   except CatchableError as e:
     try: removeDir(tmp) except CatchableError: discard
+    if e of IOError: raise
     raise newException(IOError, e.msg)
-  if dirExists(outDir):
-    removeDir(outDir)
-  moveDir(tmp, outDir)
 
 # ---------------------------------------------------------------------------
 # Multipart body builder.

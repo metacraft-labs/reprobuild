@@ -44,7 +44,7 @@
 ## Any change to the action definition derives a DIFFERENT key, so a
 ## stale cache entry can never shadow a changed edge.
 
-import std/[os, strutils]
+import std/[os, sets, strutils]
 when defined(posix):
   import std/posix
   # std/posix does not export these on every target; take them from libc.
@@ -71,6 +71,7 @@ type
     ## Result of one `trySubstituteBuildAction` call.
     hit*: bool            ## true when the outputs were served from cache
     reason*: string       ## populated on a miss / error (diagnostic)
+    trustRejected*: bool  ## the miss was a trust refusal, not an absent entry
     bytesFetched*: int64
 
 proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
@@ -80,10 +81,16 @@ proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
   resolveTrustedCacheConfig()
 
 proc shouldPublishBuildActionOutputs*(cfg: BuildActionCacheConfig): bool =
-  ## Whether a freshly built edge's outputs are published back. Only a host
-  ## configured as a publisher (cache configured AND an operator-supplied
-  ## keypair present) publishes; every other host is a pure consumer.
-  cfg.configured and cfg.keypairOk and cfg.publishEndpoint.len > 0
+  ## Whether a freshly built edge's outputs are published back. Three things
+  ## must hold: a cache is configured, an operator-supplied keypair is
+  ## present, AND the apply was explicitly opted in to publishing
+  ## (``REPRO_APPLY_PUBLISH=1``, see ``caches_config.ApplyPublishOptInVar``).
+  ## The keypair alone is not enough: it is also the ``repro build``
+  ## publisher's, and a developer shell that exports it must not turn a
+  ## ``sudo -E repro infra apply`` into a fleet-wide publisher. Every other
+  ## host is a pure consumer.
+  cfg.configured and cfg.keypairOk and cfg.publishEndpoint.len > 0 and
+    applyPublishOptedIn()
 
 # ---------------------------------------------------------------------------
 # Content-addressable cache identity for a build-action edge.
@@ -130,27 +137,74 @@ proc cacheFingerprintHex(action: ProfileBuildAction): string =
     parts.add("tool:" & t)
   contentDigestHex(weakFingerprintFromText(parts.join("\n")))
 
+const
+  BuildActionCachePackagePrefix* = "infra-apply-action."
+    ## `packageName` of every build-action cache entry: the prefix plus
+    ## the action id.
+  BuildActionCachePackageVersion* = "1"
+  BuildActionCacheToolchainName* = "infra-apply"
+  BuildActionCacheToolchainVersion* = "1"
+
 proc buildActionCacheIdentity*(action: ProfileBuildAction;
-                               storeRoot: string): CacheEntryIdentity =
+                               platform: PlatformTriple): CacheEntryIdentity =
   ## Derive the content-addressable `CacheEntryIdentity` for one
-  ## build-action edge. The platform is the LOCAL platform (so the
-  ## substitute compat-check passes on the host running the apply). The
-  ## cwd-independent `cacheFingerprintHex` is folded into BOTH the
-  ## provider-revision and the toolchain extra-fingerprint so the key is
-  ## a pure function of the action definition + host platform (NOT the
-  ## apply-scratch cwd — see `cacheFingerprintHex`).
-  let local = detectLocalPlatform(storeRoot)
-  let platform = PlatformTriple(cpu: local.cpu, os: local.os,
-                                abi: local.abi, libcVariant: local.libcVariant)
+  ## build-action edge on `platform`. The cwd-independent
+  ## `cacheFingerprintHex` is folded into BOTH the provider-revision and
+  ## the toolchain extra-fingerprint so the key is a pure function of the
+  ## action definition + platform (NOT the apply-scratch cwd — see
+  ## `cacheFingerprintHex`).
+  ##
+  ## The apply passes the host it runs on (the overload below). A
+  ## producer that builds an edge's outputs FOR another host — a build
+  ## box publishing ahead for a host that cannot build them itself, such
+  ## as a 32-bit ARM appliance — passes that host's platform, so the
+  ## entry carries the key the consuming apply derives and a platform
+  ## its compat check accepts. `repro infra cache-keys` prints both.
   let fpHex = cacheFingerprintHex(action)
   result = newCacheEntryIdentity(
-    packageName = "infra-apply-action." & action.id,
-    packageVersion = "1",
+    packageName = BuildActionCachePackagePrefix & action.id,
+    packageVersion = BuildActionCachePackageVersion,
     platform = platform,
-    toolchain = ToolchainIdentity(name: "infra-apply", version: "1",
+    toolchain = ToolchainIdentity(name: BuildActionCacheToolchainName,
+                                  version: BuildActionCacheToolchainVersion,
                                   hostLdSoAbi: "",
                                   extraFingerprint: fpHex),
     providerRevision = fpHex)
+
+proc localPlatformTriple*(storeRoot: string): PlatformTriple =
+  ## The platform the apply on THIS host keys its build-action entries by
+  ## (`detectLocalPlatform`, minus the store directory).
+  let local = detectLocalPlatform(storeRoot)
+  PlatformTriple(cpu: local.cpu, os: local.os,
+                 abi: local.abi, libcVariant: local.libcVariant)
+
+proc buildActionCacheIdentity*(action: ProfileBuildAction;
+                               storeRoot: string): CacheEntryIdentity =
+  ## The identity the apply on this host looks up: the action on the
+  ## LOCAL platform (so the substitute compat-check passes on the host
+  ## running the apply).
+  buildActionCacheIdentity(action, localPlatformTriple(storeRoot))
+
+proc publishIdentityFlags*(idy: CacheEntryIdentity): seq[string] =
+  ## The `repro cache publish` / `repro cache derive-key` identity flags
+  ## that reproduce `idy`, in the spelling `cli_dispatch` parses. A
+  ## producer publishing an edge's outputs by hand passes exactly these,
+  ## so the manifest records the platform the consumer's compat check
+  ## compares and `derive-key` on the same flags prints the same key.
+  ## Options and dependency keys are never part of a build-action
+  ## identity, so none are rendered.
+  result = @[
+    "--package-name=" & idy.packageName,
+    "--package-version=" & idy.packageVersion,
+    "--platform-cpu=" & idy.platform.cpu,
+    "--platform-os=" & idy.platform.os,
+    "--platform-abi=" & idy.platform.abi,
+    "--platform-libc=" & idy.platform.libcVariant,
+    "--toolchain-name=" & idy.toolchain.name,
+    "--toolchain-version=" & idy.toolchain.version,
+    "--toolchain-host-ldso=" & idy.toolchain.hostLdSoAbi,
+    "--toolchain-extra=" & idy.toolchain.extraFingerprint,
+    "--provider-revision=" & idy.providerRevision]
 
 # ---------------------------------------------------------------------------
 # Output-prefix <-> cwd mapping.
@@ -165,8 +219,17 @@ proc buildActionCacheIdentity*(action: ProfileBuildAction;
 
 proc outputRelPaths(action: ProfileBuildAction): seq[string] =
   ## Normalise the action's declared outputs to cwd-relative POSIX-style
-  ## paths. An absolute output under `cwd` is made relative; an output
-  ## that already is relative is kept as-is.
+  ## paths. An absolute output under `cwd` is made relative; a relative one
+  ## is normalised (`./out.bin` is `out.bin`, `a/../b` is `b`); the working
+  ## directory itself (`.`, or an absolute path equal to `cwd`) becomes the
+  ## empty string, the prefix below which every member lies. An output that
+  ## resolves outside `cwd` is skipped, as before: the caller treats an empty
+  ## set as "not substitutable".
+  ##
+  ## Normalising matters because the substitute copy compares archive
+  ## members against these paths; `./out.bin` spelled in a profile is the
+  ## same output as `out.bin`, and treating it as a different string refused
+  ## a substitutable edge.
   let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
                 else: getCurrentDir())
   for o in action.outputs:
@@ -176,21 +239,48 @@ proc outputRelPaths(action: ProfileBuildAction): seq[string] =
       if oAbs.startsWith(cwdAbs & $DirSep) or oAbs == cwdAbs:
         rel = relativePath(oAbs, cwdAbs)
       else:
-        # Output outside cwd — cannot map into a cwd-rooted prefix.
-        # Signal by skipping; the caller treats an empty rel-set as
-        # "not substitutable" and falls back to a local build.
         continue
-    result.add(rel.replace('\\', '/'))
+    rel = normalizedPath(rel).replace(DirSep, '/')
+    if rel == "." or rel == "":
+      rel = ""
+    elif rel == ".." or rel.startsWith("../"):
+      continue
+    result.add(rel.strip(leading = false, chars = {'/'}))
+
+proc isSubstitutable*(action: ProfileBuildAction): bool =
+  ## Whether the apply would consult the binary cache for this edge at
+  ## all: only an edge with at least one declared output under its `cwd`
+  ## has a prefix to substitute (`outputRelPaths`).
+  outputRelPaths(action).len > 0
 
 proc collectFilesUnder(root, rel: string; acc: var seq[string]) =
   ## Append every regular file under `root/rel` as a `root`-relative
   ## path. `rel` may name a file or a directory.
+  ##
+  ## Raises `IOError` on a symbolic link anywhere in the tree, including a
+  ## link to a directory. The old walk yielded link-to-file entries and
+  ## silently DID NOT DESCEND into link-to-directory entries, so a tree
+  ## carrying `lib -> ../real-lib` published as a prefix with no `lib/` at
+  ## all: a partial prefix that substitutes cleanly and runs without its
+  ## libraries. An outputs archive holds regular files only (the
+  ## substitute side refuses links too), so a producer tree with a link is
+  ## refused, loudly, rather than published without it.
   let abs = root / rel
+  if symlinkExists(abs):
+    raise newException(IOError,
+      "declared output " & rel & " is a symbolic link; an outputs " &
+      "archive holds regular files only, so this edge is not published")
   if fileExists(abs):
     acc.add(rel.replace('\\', '/'))
   elif dirExists(abs):
-    for path in walkDirRec(abs, yieldFilter = {pcFile, pcLinkToFile},
-                           relative = true):
+    for path in walkDirRec(abs,
+                           yieldFilter = {pcFile, pcLinkToFile, pcLinkToDir},
+                           followFilter = {pcDir}, relative = true):
+      if symlinkExists(abs / path):
+        raise newException(IOError,
+          "declared output " & rel & " contains a symbolic link (" &
+          (rel / path).replace('\\', '/') & "); an outputs archive holds " &
+          "regular files only, so this edge is not published")
       acc.add((rel / path).replace('\\', '/'))
 
 proc stagePrefixFromOutputs(action: ProfileBuildAction;
@@ -221,13 +311,23 @@ proc stagePrefixFromOutputs(action: ProfileBuildAction;
     copyFileWithPermissions(src, dst)
   return true
 
-proc isDeclaredOutput(rel: string; declared: openArray[string]): bool =
+proc isDeclaredOutput(rel: string; declared: openArray[string];
+                      archiveDirs: HashSet[string]): bool =
   ## True when the cwd-relative `rel` IS a declared output, or lies below a
-  ## declared output directory. Compared component-wise, so `bin2/x` is not
-  ## below a declared `bin`.
+  ## declared output that the archive itself carries as a directory entry
+  ## (`archiveDirs`). Compared component-wise, so `bin2/x` is not below a
+  ## declared `bin`; an empty declared path is the working directory and
+  ## admits every member.
+  ##
+  ## The directory-entry requirement is what keeps a declared *file* output
+  ## a file: the publisher packs a declared output directory with an explicit
+  ## directory entry, so an archive whose only trace of `out.bin` is a member
+  ## `out.bin/x` did not come from an action whose `out.bin` was a directory,
+  ## and must not turn the declared file into one.
   for d in declared:
-    let dd = d.strip(leading = false, chars = {'/'})
-    if rel == dd or rel.startsWith(dd & "/"):
+    if d.len == 0 or rel == d:
+      return true
+    if rel.startsWith(d & "/") and d in archiveDirs:
       return true
   false
 
@@ -240,22 +340,27 @@ proc writeFileNoFollow(dstDir, name: string; data: string; mode: set[FilePermiss
   let final = dstDir / name
   let tmp = dstDir / ("." & name & ".repro-substitute-" & $getCurrentProcessId())
   when defined(posix):
+    # O_EXCL|O_NOFOLLOW: a planted link or file at the staging name makes
+    # the open fail (nothing is followed, nothing removed), and the
+    # substitution is refused.
     let fd = posix.open(tmp.cstring,
       O_WRONLY or O_CREAT or O_EXCL or oNoFollow or oCloExec, 0o600.Mode)
     if fd < 0:
       raiseOSError(osLastError(), "cannot create " & tmp)
-    var off = 0
-    try:
-      while off < data.len:
-        let n = posix.write(fd, unsafeAddr data[off], data.len - off)
-        if n < 0:
-          raiseOSError(osLastError(), "cannot write " & tmp)
-        off += n
-    finally:
-      discard posix.close(fd)
   else:
     writeFile(tmp, data)
+  # From here on the staging file is ours: every failure removes it.
   try:
+    when defined(posix):
+      var off = 0
+      try:
+        while off < data.len:
+          let n = posix.write(fd, unsafeAddr data[off], data.len - off)
+          if n < 0:
+            raiseOSError(osLastError(), "cannot write " & tmp)
+          off += n
+      finally:
+        discard posix.close(fd)
     setFilePermissions(tmp, mode)
     moveFile(tmp, final)
   except CatchableError:
@@ -263,7 +368,8 @@ proc writeFileNoFollow(dstDir, name: string; data: string; mode: set[FilePermiss
     raise
 
 proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
-                               extractedDir: string) =
+                               extractedDir: string;
+                               entries: openArray[ExtractedEntry]) =
   ## Copy the action's DECLARED outputs from `extractedDir` (a freshly
   ## extracted rbcarc prefix) back under the action's `cwd`, byte-identically,
   ## preserving permissions (so the exec bit the archive carried survives).
@@ -288,6 +394,10 @@ proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
   let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
                 else: getCurrentDir())
   let declared = outputRelPaths(action)
+  var archiveDirs = initHashSet[string]()
+  for e in entries:
+    if e.kind == aekDirectory:
+      archiveDirs.incl(e.path)
   var members: seq[string] = @[]
   for path in walkDirRec(extractedDir,
                          yieldFilter = {pcFile, pcLinkToFile, pcLinkToDir},
@@ -298,7 +408,7 @@ proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
       raise newException(IOError,
         "substituted outputs carry a symbolic link (" & rel &
         "); an outputs archive holds regular files only")
-    if not isDeclaredOutput(rel, declared):
+    if not isDeclaredOutput(rel, declared, archiveDirs):
       raise newException(IOError,
         "substituted outputs carry " & rel &
         ", which the action does not declare as an output")
@@ -361,6 +471,10 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
     if not res.ok or res.outcomes.len == 0:
       result.reason = "cache miss for " & entryHex &
         (if res.reason.len > 0: ": " & res.reason else: "")
+      # The walk's trust refusal wording (`closure_walk.fetchAndVerifyManifest`
+      # / `compat_check` gate 6) is the signal the dispatcher reports per
+      # edge: an entry existed and was refused, which is not a plain miss.
+      result.trustRejected = "not trusted" in res.reason
       return
     let rootOutcome = res.outcomes[^1]
     if rootOutcome.casPath.len == 0 or not fileExists(rootOutcome.casPath):
@@ -372,8 +486,8 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
       archiveBytes[i] = byte(ch)
     removeDir(extractDir)
     createDir(extractDir)
-    extractPrefix(archiveBytes, extractDir)
-    materialisePrefixIntoCwd(action, extractDir)
+    let entries = extractPrefix(archiveBytes, extractDir)
+    materialisePrefixIntoCwd(action, extractDir, entries)
     if not outputsExist(action):
       result.reason = "substituted archive did not materialise the " &
         "declared outputs for " & action.id
@@ -399,9 +513,9 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
   ## is ever generated here.
   if not shouldPublishBuildActionOutputs(cfg):
     return (ok: false,
-            reason: "publish skipped: this host is not configured as a " &
-              "cache publisher (REPRO_BINARY_CACHE_KEY_PATH / " &
-              "REPRO_BINARY_CACHE_CERT_PATH)")
+            reason: "publish skipped: this apply is not an opted-in " &
+              "publisher (REPRO_APPLY_PUBLISH=1 with " &
+              "REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH)")
   let stageDir = scratchRoot / "publish-stage"
   try:
     removeDir(stageDir)

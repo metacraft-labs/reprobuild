@@ -448,6 +448,22 @@ type
       ## ``caches.conf``). The result is then unconfigured: a config the
       ## loader cannot read grants no trust.
 
+const
+  ApplyPublishOptInVar* = "REPRO_APPLY_PUBLISH"
+    ## The explicit opt-in that makes an APPLY (``repro infra apply``,
+    ## ``repro deploy-agent``) publish the outputs it built. Distinct from the
+    ## ``repro build`` publisher's environment on purpose: a developer's shell
+    ## exports ``REPRO_BINARY_CACHE_KEY_PATH`` / ``_CERT_PATH`` for ordinary
+    ## builds, and ``sudo -E repro infra apply`` from that shell would
+    ## otherwise inherit the publisher role and push apply-time outputs that
+    ## every fleet host trusts. A keypair says "this host CAN sign"; this
+    ## variable says "this apply MAY publish". Both are required.
+
+proc applyPublishOptedIn*(): bool =
+  ## ``REPRO_APPLY_PUBLISH=1`` (or ``true`` / ``yes``). Anything else,
+  ## including unset, is no.
+  getEnv(ApplyPublishOptInVar, "").strip().toLowerAscii() in ["1", "true", "yes"]
+
 proc binaryCacheDisabled*(): bool =
   ## ``REPRO_CACHE_DISABLE`` turns every in-process substitute and publish
   ## path off at once, so a wrapper that disables one disables the others.

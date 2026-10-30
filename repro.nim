@@ -367,6 +367,12 @@ const
                  "t_e2e_activity_scoped_resource_follows_host_selection"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
+    # ReproOS add-on mode gates (`tests/e2e/addon/`), on the same harness.
+    for name in ["t_addon_registry_mode_round_trip",
+                 "t_system_profile_host_selection",
+                 "t_addon_mode_mismatch_is_refused"]:
+      rows.add TestGraphArtifacts(source: "tests/e2e/addon/" & name & ".nim",
+        artifacts: @[profileCompileNimSpy])
     # The clang first-run gate's positive control compiles through a "clang"
     # that drops `-fno-temp-file` (`tests/e2e/m83/exec_without_arg.nim`); a
     # compiled program for the reason `nim_spy` is one, so the control runs

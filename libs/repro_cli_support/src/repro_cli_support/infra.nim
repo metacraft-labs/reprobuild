@@ -26,12 +26,16 @@ import repro_infra
 import repro_profile
 import repro_profile_intent
 import repro_profile_compile
+import repro_profile_compile/binary_cache_build_actions as bc_actions
+import repro_binary_cache_client
 import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
 import repro_addon/addon_apply as addon_apply
 import repro_addon/cli as addon_cli
+import repro_infra/host_base
+import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
 from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 
@@ -47,9 +51,11 @@ from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 # edit it byte-for-byte preserving comments and formatting.
 # ---------------------------------------------------------------------------
 
-proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
+proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
+    target: SystemPlanTarget = defaultSystemPlanTarget()):
     tuple[compiled: bool; text: string; cached: bool; compileError: string;
-          adaptError: string; buildActions: seq[ProfileBuildAction]] =
+          adaptError: string; buildActions: seq[ProfileBuildAction];
+          projection: Projection] =
   ## Run the Phase C build-engine edge against `profilePath`, decode
   ## the RBPI artifact, and render the adapted `SystemProfile` back
   ## into the canonical declarative text the M69 lib's APIs consume.
@@ -83,11 +89,19 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
   ## action edges leave this seq empty — the apply driver skips the
   ## dispatcher entirely when empty (see ``dispatchBuildActions``).
   ##
-  ## A profile that compiles but that the system adapter refuses (e.g. a
-  ## runtime guard on a system-scope resource, which system scope cannot
-  ## evaluate) sets `result.adaptError` instead of `result.compileError`:
-  ## the operator is told the profile cannot be used as a system profile,
-  ## not that it failed to compile.
+  ## `target` is the host being planned and what its host-registry entry
+  ## selects (`infra_host_registry.systemPlanTargetFor`): runtime
+  ## predicates are evaluated for it, its system activities select
+  ## activity-scoped resources, and an add-on target projects every
+  ## selected field through the `add-on-debian` realisation profile
+  ## (`result.projection`). The default is the running machine with the
+  ## `default` activity, realised in full -- a plan with no registry.
+  ##
+  ## A profile that compiles but that the system adapter refuses for this
+  ## target (a home-scope resource, an undeclared activity, an
+  ## `EAddOnOutOfScope` field) sets `result.adaptError` instead of
+  ## `result.compileError`: the operator is told the profile cannot be used
+  ## as a system profile for this host, not that it failed to compile.
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
     # Guarded like every internal-verb spawn: the compile wraps its actions
@@ -111,8 +125,9 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
     result.compileError = err.msg
     return
   try:
-    let sp = profileIntentToSystemProfile(intent)
-    result.text = renderSystemProfileToText(sp)
+    let adapted = adaptSystemProfile(intent, target)
+    result.text = renderSystemProfileToText(adapted.profile)
+    result.projection = adapted.projection
   except CatchableError as err:
     result.adaptError = err.msg
     return
@@ -124,7 +139,9 @@ proc resolveSystemProfileText*(profilePath: string;
                                commandName: string;
                                outText: var string;
                                planCommand = "";
-                               outBuildActions: ptr seq[ProfileBuildAction] = nil):
+                               outBuildActions: ptr seq[ProfileBuildAction] = nil;
+                               target: SystemPlanTarget = defaultSystemPlanTarget();
+                               outProjection: ptr Projection = nil):
     bool =
   ## Drive the Phase F3 compile path for a `system.nim`. Sets `outText`
   ## to the canonical text rendered from the adapted profile when the
@@ -153,11 +170,13 @@ proc resolveSystemProfileText*(profilePath: string;
   ## come from inferring failure from absent output instead of from an
   ## actual error.
   discard originalText  # retained for caller compatibility; see docstring
-  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir)
+  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target)
   if outcome.compiled:
     outText = outcome.text
     if outBuildActions != nil:
       outBuildActions[] = outcome.buildActions
+    if outProjection != nil:
+      outProjection[] = outcome.projection
     return true
   if outcome.adaptError.len > 0:
     stderr.writeLine(commandName & ": " & profilePath & " compiled, but " &
@@ -235,6 +254,12 @@ type
   InfraCliFlags = object
     stateDir: string
     profilePath: string
+    platformCpu, platformOs, platformAbi, platformLibc: string
+      ## `repro infra cache-keys --platform-*`: the platform of the host
+      ## the keys are derived FOR. Each defaults to this host's value
+      ## (`localPlatformTriple`), so a bare `cache-keys` prints what an
+      ## apply here would look up, and a producer publishing ahead for
+      ## another host names that host's platform.
     host: string
     hostGiven: bool
       ## `--host` was passed (even as `--host=`), so an empty value is
@@ -332,6 +357,18 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--profile": result.flags.profilePath = valueOf()
     elif a.startsWith("--profile="):
       result.flags.profilePath = a["--profile=".len .. ^1]
+    elif a == "--platform-cpu": result.flags.platformCpu = valueOf()
+    elif a.startsWith("--platform-cpu="):
+      result.flags.platformCpu = a["--platform-cpu=".len .. ^1]
+    elif a == "--platform-os": result.flags.platformOs = valueOf()
+    elif a.startsWith("--platform-os="):
+      result.flags.platformOs = a["--platform-os=".len .. ^1]
+    elif a == "--platform-abi": result.flags.platformAbi = valueOf()
+    elif a.startsWith("--platform-abi="):
+      result.flags.platformAbi = a["--platform-abi=".len .. ^1]
+    elif a == "--platform-libc": result.flags.platformLibc = valueOf()
+    elif a.startsWith("--platform-libc="):
+      result.flags.platformLibc = a["--platform-libc=".len .. ^1]
     elif a == "--home-profile-dir": result.flags.homeProfileDir = valueOf()
     elif a.startsWith("--home-profile-dir="):
       result.flags.homeProfileDir = a["--home-profile-dir=".len .. ^1]
@@ -383,9 +420,14 @@ proc parseInfraFlags(args: openArray[string]):
 
 proc gateHostSystemManagement(flags: InfraCliFlags; host, profilePath,
                               stateDir, command: string;
-                              verdict: var HostRegistryVerdict): bool =
+                              verdict: var HostRegistryVerdict;
+                              target: var SystemPlanTarget): bool =
   ## Read the host registry (`infra_host_registry`) and refuse a host whose
-  ## system is managed elsewhere. Runs BEFORE the system profile is
+  ## system is managed elsewhere, or whose registry mode disagrees with the
+  ## base it runs (`checkHostSystemMode`, `EAddOnModeMismatch`; an add-on
+  ## host on a base without a realisation profile is
+  ## `EAddOnUnsupportedBase`). On success `target` is the system-scope
+  ## target the registry selects (`systemPlanTargetFor`). Runs BEFORE the system profile is
   ## compiled and before any plan, lock or generation is written, so a
   ## refused host leaves the state directory as it was. Returns false (after
   ## printing why) when the command must stop. `host` is the command's
@@ -402,6 +444,16 @@ proc gateHostSystemManagement(flags: InfraCliFlags; host, profilePath,
   let refusal = managedElsewhereRefusal(verdict, command)
   if refusal.len > 0:
     stderr.writeLine(refusal)
+    return false
+  let base = observeHostBase()
+  try:
+    checkHostSystemMode(verdict, base)
+    target = systemPlanTargetFor(verdict, base)
+  except EAddOn as e:
+    stderr.writeLine(command & ": refusing host " & host & ": " & e.msg)
+    stderr.writeLine("  host registry : " &
+      (if verdict.registryPath.len > 0: verdict.registryPath else: "none"))
+    stderr.writeLine("  observed base : " & describeHostBase(base))
     return false
   true
 
@@ -422,16 +474,19 @@ proc runInfraPlan(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro infra plan", host):
     return 2
   var registry: HostRegistryVerdict
+  var target: SystemPlanTarget
   if not gateHostSystemManagement(flags, host, profilePath, stateDir,
-      "repro infra plan", registry):
+      "repro infra plan", registry, target):
     return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
   # failure exits non-zero with a uniform actionable error.
   var profileText: string
+  var projection: Projection
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro infra plan", profileText,
-      planCommand = "repro infra plan"):
+      planCommand = "repro infra plan", target = target,
+      outProjection = addr projection):
     return 1
   ensureSystemStateDir(stateDir)
   # M82 Phase C: pass the state dir so the planner can read the
@@ -448,6 +503,9 @@ proc runInfraPlan(args: openArray[string]): int =
   echo "  profile : " & profilePath
   echo "  host    : " & host
   echo "  registry: " & describeRegistry(registry)
+  echo "  system  : " & describeSystemTarget(target)
+  for e in ignoredEntries(projection):
+    echo "  ignored : " & describeEntry(e)
   let hostNote = recordedHostNote(stateDir, host)
   if hostNote.len > 0:
     echo "  note    : " & hostNote
@@ -531,6 +589,75 @@ proc takeInfraApplyLock(stateDir, command: string;
     stderr.writeLine(command & ": reclaimed an unreadable apply lock.")
   true
 
+proc cacheKeysPlatform*(flags: InfraCliFlags; stateDir: string):
+    PlatformTriple =
+  ## The platform `repro infra cache-keys` derives for: each `--platform-*`
+  ## flag that was given, and this host's value for the rest.
+  result = bc_actions.localPlatformTriple(stateDir)
+  if flags.platformCpu.len > 0: result.cpu = flags.platformCpu
+  if flags.platformOs.len > 0: result.os = flags.platformOs
+  if flags.platformAbi.len > 0: result.abi = flags.platformAbi
+  if flags.platformLibc.len > 0: result.libcVariant = flags.platformLibc
+
+proc renderCacheKeys*(actions: seq[ProfileBuildAction];
+                      platform: PlatformTriple): string =
+  ## The `repro infra cache-keys` report: one block per build-action edge
+  ## with the entry key an apply on `platform` looks up and the identity
+  ## flags that publish under it. Edges whose outputs are not all under
+  ## their `cwd` are listed as not substitutable, which is what the apply
+  ## concludes about them too (`outputRelPaths`).
+  for action in actions:
+    let idy = bc_actions.buildActionCacheIdentity(action, platform)
+    result.add(action.id & "\n")
+    if not bc_actions.isSubstitutable(action):
+      result.add("  not substitutable: an output is not under cwd\n")
+      continue
+    result.add("  entry-key: " & deriveCacheEntryKeyHex(idy) & "\n")
+    result.add("  publish:   repro cache publish " &
+      deriveCacheEntryKeyHex(idy) & " <prefix> " &
+      bc_actions.publishIdentityFlags(idy).join(" ") & "\n")
+
+proc runInfraCacheKeys(args: openArray[string]): int =
+  ## `repro infra cache-keys [--profile P] [--state-dir D] [--platform-cpu C]
+  ## [--platform-os O] [--platform-abi A] [--platform-libc L]`.
+  ##
+  ## Compiles the profile exactly as `plan` and `apply` do and prints, for
+  ## every build-action edge, the binary-cache entry key an apply of that
+  ## profile derives on the given platform (default: this host), with the
+  ## `repro cache publish` flags that publish an output prefix under it.
+  ## This is how a build host publishes an edge's outputs AHEAD of a host
+  ## that cannot build them (Binary-Caches.md §"Publishing for a host that
+  ## cannot build"): the key is a function of the edge and the consuming
+  ## platform only, so it can be derived anywhere the profile compiles.
+  ## Nothing is applied, planned or written outside the profile-compile
+  ## cache under the state directory.
+  let (flags, _) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  let profilePath = resolveProfilePath(flags, stateDir)
+  if not fileExists(profilePath):
+    stderr.writeLine("repro infra cache-keys: no system profile at " &
+      profilePath)
+    return 1
+  var profileText: string
+  var actions: seq[ProfileBuildAction]
+  if not resolveSystemProfileText(profilePath, readFile(profilePath),
+      stateDir, "repro infra cache-keys", profileText,
+      planCommand = "repro infra cache-keys",
+      outBuildActions = addr actions):
+    return 1
+  let platform = cacheKeysPlatform(flags, stateDir)
+  echo "repro infra cache-keys"
+  echo "  profile : " & profilePath
+  echo "  platform: cpu=" & platform.cpu & " os=" & platform.os &
+    " abi=" & platform.abi & " libc=" & platform.libcVariant
+  if actions.len == 0:
+    echo "  (the profile declares no build-action edges)"
+    return 0
+  stdout.write(renderCacheKeys(actions, platform))
+  return 0
+
 proc runInfraApply(args: openArray[string]): int =
   let (flags, positional) = parseInfraFlags(args)
   let stateDir = (if flags.stateDir.len > 0: flags.stateDir
@@ -545,8 +672,9 @@ proc runInfraApply(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro infra apply", host):
     return 2
   var registry: HostRegistryVerdict
+  var target: SystemPlanTarget
   if not gateHostSystemManagement(flags, host, profilePath, stateDir,
-      "repro infra apply", registry):
+      "repro infra apply", registry, target):
     return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
@@ -556,7 +684,7 @@ proc runInfraApply(args: openArray[string]): int =
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro infra apply", profileText,
       planCommand = "repro infra plan",
-      outBuildActions = addr profileBuildActions):
+      outBuildActions = addr profileBuildActions, target = target):
     return 1
 
   var planId = flags.planId
@@ -635,6 +763,7 @@ proc runInfraApply(args: openArray[string]): int =
   echo "  plan-id      : " & applyResult.planId
   echo "  host         : " & host
   echo "  registry     : " & describeRegistry(registry)
+  echo "  system       : " & describeSystemTarget(target)
   if hostNote.len > 0:
     echo "  note         : " & hostNote
   echo "  generation   : " & applyResult.generationId
@@ -879,8 +1008,9 @@ proc runSystemSync(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro system sync", host):
     return 2
   var registry: HostRegistryVerdict
+  var target: SystemPlanTarget
   if not gateHostSystemManagement(flags, host, profilePath, stateDir,
-      "repro system sync", registry):
+      "repro system sync", registry, target):
     return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
@@ -890,7 +1020,7 @@ proc runSystemSync(args: openArray[string]): int =
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro system sync", profileText,
       planCommand = "repro infra plan",
-      outBuildActions = addr profileBuildActions):
+      outBuildActions = addr profileBuildActions, target = target):
     return 1
   if not takeInfraApplyLock(stateDir, "repro system sync", flags):
     return 1
@@ -931,6 +1061,7 @@ proc runSystemSync(args: openArray[string]): int =
   echo "repro system sync"
   echo "  host         : " & host
   echo "  registry     : " & describeRegistry(registry)
+  echo "  system       : " & describeSystemTarget(target)
   if hostNote.len > 0:
     echo "  note         : " & hostNote
   echo "  generation   : " & applyResult.generationId
@@ -1002,9 +1133,12 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro system rollback", host):
     return 2
   var registry: HostRegistryVerdict
+  # The rollback re-applies a recorded generation, so it needs the gate's
+  # refusals (managed elsewhere, mode mismatch) but not its selection.
+  var unusedTarget: SystemPlanTarget
   if not gateHostSystemManagement(flags, host,
       systemProfilePathOrCreate(flags, stateDir), stateDir,
-      "repro system rollback", registry):
+      "repro system rollback", registry, unusedTarget):
     return 1
   let hostNote = recordedHostNote(stateDir, host)
   if not takeInfraApplyLock(stateDir, "repro system rollback", flags):
@@ -1100,7 +1234,8 @@ proc runInfraInstallRootCli(args: seq[string]): int =
 proc runInfraCommand*(args: seq[string]): int =
   ## `repro infra <subcommand>`.
   if args.len == 0:
-    stderr.writeLine("usage: repro infra {plan | apply | install-root} ...")
+    stderr.writeLine("usage: repro infra {plan | apply | cache-keys | " &
+      "install-root} ...")
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -1108,6 +1243,7 @@ proc runInfraCommand*(args: seq[string]): int =
     case sub
     of "plan": return runInfraPlan(rest)
     of "apply": return runInfraApply(rest)
+    of "cache-keys": return runInfraCacheKeys(rest)
     of "install-root": return runInfraInstallRootCli(rest)
     else:
       stderr.writeLine("repro infra: unknown subcommand: " & sub)

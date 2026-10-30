@@ -3,7 +3,8 @@
 ## Wires the deploy agent's injected ``ApplyHook`` to the M4
 ## ``runInfraApply`` path so a converged manifest applies its desired
 ## state with build-action outputs SUBSTITUTED FROM THE BINARY CACHE
-## (when ``REPRO_BINARY_CACHE_URL`` is set) instead of built locally.
+## (when ``caches.conf`` names a cache with its trusted publisher keys)
+## instead of built locally.
 ##
 ## Kept in its own module (separate from ``agent.nim``) so the poll/verify/
 ## monotonic core stays free of the heavyweight ``repro_infra`` +
@@ -26,10 +27,13 @@ import ./manifest
 import ./agent
 
 type
-  ProfileResolver* = proc(profileText: string; outText: var string;
+  ProfileResolver* = proc(profileText: string;
+                          profileFiles: seq[ProfileFile];
+                          outText: var string;
                           outBuildActions: var seq[ProfileBuildAction]):
                        bool {.gcsafe.}
-    ## Turn a manifest's ``profileText`` into the canonical resource text
+    ## Turn a manifest's ``profileText`` (with its ``profileFiles`` bundle
+    ## staged beside it, RDMF v3) into the canonical resource text
     ## ``runInfraApply`` consumes, returning ``false`` (with a diagnostic
     ## already emitted) when the profile does not compile.
     ##
@@ -121,7 +125,8 @@ proc mkRunInfraApplyHook*(stateDir: string;
         var applyText = m.profileText
         var resolvedActions: seq[ProfileBuildAction] = @[]
         if capturedResolver != nil and m.profileText.strip().len > 0:
-          if not capturedResolver(m.profileText, applyText, resolvedActions):
+          if not capturedResolver(m.profileText, m.profileFiles, applyText,
+              resolvedActions):
             return (ok: false,
               message: "profile did not compile; see the diagnostic above")
 

@@ -3758,15 +3758,14 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
   ## Soft-fail on every path. A cache that is unreachable, unconfigured, or
   ## simply does not have this entry must cost nothing but the lookup — the
   ## upstream download still follows.
-  if getEnv("REPRO_CACHE_DISABLE").len > 0:
+  # The shared resolver (``caches_config.resolveTrustedCacheConfig``): the
+  # same trust the provider-compile cache and the apply-time build-action
+  # substitute act on. Three private copies of "which caches, with which
+  # keys" is three places for a trust decision to drift.
+  let cacheCfg = resolveTrustedCacheConfig()
+  if not cacheCfg.configured:
     return false
-  var endpoints: seq[SubstituteEndpoint] = @[]
-  try:
-    endpoints = loadEndpoints()
-  except CatchableError:
-    return false
-  if endpoints.len == 0:
-    return false
+  let endpoints = cacheCfg.endpoints
   let keyHex = deriveCacheEntryKeyHex(toolCacheIdentity(plan, packageName,
     version))
   try:
@@ -3850,8 +3849,7 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   ## Publishing requires credentials to be configured. Their absence is the
   ## ordinary case for most developers and is silent by design; it is not an
   ## error and must not read like one.
-  if getEnv("REPRO_CACHE_DISABLE").len > 0:
-    return
+  # (``REPRO_CACHE_DISABLE`` is honoured by the shared resolver below.)
   # A caller may relax application trust checks for local fixtures. Such a
   # prefix has not met the normal publication contract, so it must never be
   # advertised under the same cache identity as a strictly verified product.
@@ -3867,10 +3865,14 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   # a property of the package rather than an accident of who is running.
   if barredFromCachePublication(plan):
     return
-  let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
-  let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")
-  if keyPath.len == 0 or certPath.len == 0:
+  # Publish credentials come from the shared resolver too: an operator-
+  # supplied keypair, never a generated one, and the publish endpoint it
+  # resolved. No key means this host does not publish toolchains either.
+  let cacheCfg = resolveTrustedCacheConfig()
+  if not (cacheCfg.configured and cacheCfg.keypairOk):
     return
+  let keyPath = cacheCfg.keyPath
+  let certPath = cacheCfg.certPath
   try:
     let keypair = peerAuth.loadOrGenerateKeypair(certPath, keyPath)
     let identity = toolCacheIdentity(plan, packageName, version)
@@ -3878,7 +3880,7 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
       entryKeyHex: deriveCacheEntryKeyHex(identity),
       prefixDir: prefix,
       identity: identity,
-      endpoint: getEnv("REPRO_BINARY_CACHE_URL", ""),
+      endpoint: cacheCfg.publishEndpoint,
       keypair: keypair)
     if request.endpoint.len == 0:
       return

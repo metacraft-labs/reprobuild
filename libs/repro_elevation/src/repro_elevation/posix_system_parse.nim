@@ -1393,3 +1393,26 @@ proc fsSystemDirectoryDigestPayload*(present: bool;
     return "fs.systemDirectory:present"
   "fs.systemDirectory:present|" &
     canonicalDirAclDesired(true, aclOwner, aclEntries, aclInheritance)
+
+proc hasKnownUnitSuffix*(name: string): bool =
+  ## `systemd.unitState` names a unit the add-on does not own, so the only
+  ## shape check available is systemd's own: the name carries a unit-type
+  ## suffix (systemd.unit(5)).
+  for suffix in [".service", ".socket", ".timer", ".target", ".path",
+                 ".mount", ".automount", ".swap", ".slice", ".scope",
+                 ".device"]:
+    if name.endsWith(suffix) and name.len > suffix.len:
+      return true
+  false
+
+proc isSafeAddOnToolCommand*(name: string): bool =
+  ## A `linux.addOnTool` command is a single file name under
+  ## `/etc/repro/bin`, spliced into a shell wrapper and a launcher manifest
+  ## path, so it is held to a conservative charset: letters, digits, `.`,
+  ## `-`, `_`, `+`, not starting with `.` or `-`.
+  if name.len == 0 or name[0] in {'.', '-'}:
+    return false
+  for c in name:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '.', '-', '_', '+'}:
+      return false
+  true
