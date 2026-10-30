@@ -24,15 +24,21 @@
 ##      output blob (BLAKE3-verified). The record's `$WORKSPACE/...` paths
 ##      are rebased onto ws-b and the binary is restored there without
 ##      running the compiler.
+##      A warm re-run of B right after executes nothing: the restored
+##      record is reusable in place on B, which it is only because the
+##      engine refreshes a restored record's output state to the files it
+##      wrote (before that, every warm build after a peer hit re-ran the
+##      edge).
 ##   3. B edits `config.h` (main.c and the weak fingerprint unchanged). The
 ##      peer lookup finds A's selector but the recomputed strong fingerprint
 ##      differs: a strong-fingerprint miss, not a false hit. B rebuilds and
 ##      publishes a SECOND selector under the same weak fingerprint; A's
 ##      entry is untouched and both are served side by side.
 ##   4. B reverts `config.h`. B's own records hold the original execution
-##      (installed from A in step 2) and the reverted file matches its
-##      checksum again, but the build runs IN PLACE and `out/hello` holds
-##      the v2 binary, not the output that record describes: the lookup
+##      (installed from A in step 2, describing the v1 binary as restored
+##      there) and the reverted file matches its checksum again, but the
+##      build runs IN PLACE and `out/hello` holds the v2 binary step 3
+##      compiled, not the output that record describes: the lookup
 ##      fails closed and B recompiles (Incremental-Invalidation.md §"Minimum
 ##      check set" Step 3.3, "declared outputs must already exist and match
 ##      the recorded output metadata"; §"Output change time is the
@@ -446,6 +452,27 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check peerA in hostB.registry.findPeersWithBlob(entryA.pathSetDigest)
     check peerA in hostB.registry.findPeersWithBlob(entryA.outputDigests[0])
 
+    # ---- (2b) a warm re-run after the peer hit executes nothing -----------
+    # The installed record described A's inodes; the restore wrote fresh
+    # ones. The engine refreshes the record to what it restored
+    # (`refreshRestoredOutputs`), so B's in-place consultation now reuses it:
+    # no execution, no second trip to A (Incremental-Invalidation.md
+    # §"Validation Criteria": a warm re-run of an unchanged graph executes
+    # zero actions). Before the refresh existed the record was rejected here
+    # on every warm build ("output metadata changed") and the edge re-ran.
+    let memoTripsBeforeWarm = hostB.client.memoRoundTripCount
+    let warm = runBuild(helloGraph(wsB), configB)
+    let warmItem = warm.byId(ActionId)
+    checkpoint("warm B build: status=" & $warmItem.status & " reason=" &
+      warmItem.reason & traceOf(warm))
+    check warmItem.cacheDecision == cdHit
+    check warmItem.status == asUpToDate
+    check not warmItem.launched
+    check hooksB.stats.hits == 1
+    check hostB.client.memoRoundTripCount == memoTripsBeforeWarm
+    for event in warm.trace:
+      check event.event != "cache-rejected"
+
     # ---- (3) dynamic header edit: strong-fingerprint miss ---------------
     sleep(20)  # a fresh mtime too, though the checksum policy needs none
     writeFile(wsB / "config.h", ConfigV2)
@@ -524,10 +551,12 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
       again.reason & " publish=" & hooksB.stats.lastPublishReason &
       traceOf(third))
     # The newest record whose inputs are unchanged is the v1 record B
-    # installed from A. The build runs in place (`nodeEngineConfig`), and
-    # `out/hello` holds the v2 binary: not the output the record describes,
-    # so the lookup rejects it rather than fall through or restore
-    # (Incremental-Invalidation.md §"Minimum check set" Step 3.3;
+    # installed from A, which describes the v1 binary as the restore wrote
+    # it in step 2 (step 2b reused it in place on that basis). The build
+    # runs in place (`nodeEngineConfig`) and `out/hello` now holds the v2
+    # binary step 3 compiled, so the output on disk is not the one the
+    # record describes: the lookup rejects it rather than fall through or
+    # restore (Incremental-Invalidation.md §"Minimum check set" Step 3.3;
     # Action-Cache-Per-Edge-Store.md §5.3), and the action re-executes.
     check again.cacheDecision == cdRejected
     var rejections = 0
