@@ -14,10 +14,10 @@
 # advanced to on 2026-10-22, the fork's GLOBAL `config/nim.cfg` no longer puts
 # them on the search path, so a program compiled by the installed `nim` never
 # sees them: a project that brings its own nim-stew (CodeTracer's
-# `libs/nim-stew`) would otherwise get two copies and ambiguous symbols. The
-# `forkSrc` default below (fa222005) predates that and still lists them; it
-# moves with the release snapshot `package.nix`'s `src` names, not with
-# `flake.nix` (see the `nixpkgs-package-src-sync` check).
+# `libs/nim-stew`) would otherwise get two copies and ambiguous symbols.
+# The `forkSrc` default moves with the release snapshot `package.nix`'s `src`
+# names, not independently with `flake.nix`; the `nixpkgs-package-src-sync`
+# check holds those source pins together.
 #
 # THIS IS A PRIVATE HELPER of `pkgs/by-name/re/reprobuild/package.nix`, not a
 # top-level nixpkgs attribute: nixpkgs' by-name resolver auto-exposes only
@@ -51,8 +51,8 @@
   forkSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim";
-    rev = "cdb6fd1483fcdc570f306ccfee8865f2214f46f7";
-    hash = "sha256-lsMOcRzeRb7QvCdFneGXR97F9zT+jDVSIjgH3P9olKo=";
+    rev = "22d525d83ff061f5912121f3519418cda806d36c";
+    hash = "sha256-RLYXg/JHHKKi4CDfefgHO0RUnkNJP4pL5msoISPadys=";
   },
   csourcesSrc ? fetchFromGitHub {
     owner = "nim-lang";
