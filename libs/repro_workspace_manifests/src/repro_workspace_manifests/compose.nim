@@ -551,8 +551,6 @@ proc composeManifestLayersWithOptions*(
     # actually contributed repos as the project-level source of truth.
     if not firstLayerSeen:
       composed.projectName = layerResolved.projectName
-      composed.defaultRevision = layerResolved.defaultRevision
-      composed.trunk = layerResolved.trunk
       composed.workspaceMainline = layerResolved.workspaceMainline
       composed.projectFile = layerResolved.projectFile
       firstLayerSeen = true

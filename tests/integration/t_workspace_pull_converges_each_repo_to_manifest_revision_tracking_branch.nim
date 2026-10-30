@@ -9,10 +9,11 @@
 ##
 ## Fixture (all hermetic local repos via ``file://`` origins):
 ##
-##   - ``lib-a``: manifest revision ``dev``. The checkout is parked on a
+##   - ``lib-a``: mainline ``dev``, no revision pin, so its manifest
+##     revision is ``dev``. The checkout is parked on a
 ##     DIFFERENT local branch (``scratch``) at an OLDER commit. ``pull``
 ##     must move it onto branch ``dev`` at ``origin/dev``'s tip.
-##   - ``lib-b``: manifest revision ``dev`` but the checkout is DETACHED
+##   - ``lib-b``: likewise mainline ``dev``, but the checkout is DETACHED
 ##     at an old commit. ``pull`` must attach it to branch ``dev`` at
 ##     ``origin/dev``'s tip — proving "tracking branch, not detached".
 ##
@@ -109,8 +110,7 @@ proc projectToml(aUrl, bUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"dev\"\n" &
-  "trunk = \"dev\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
   "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
   "includes = [\n" &
@@ -119,19 +119,20 @@ proc projectToml(aUrl, bUrl: string): string =
   "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "a-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "dev"
 name = "lib-b"
 path = "lib-b"
 remote = "b-origin"
@@ -327,8 +328,12 @@ suite "RA-11 — pull converges to manifest revision on a tracking branch":
       let source = if pinned: "dev" else: "detached HEAD"
       let target = if pinned: "reprobuild/pinned/" & fx.aTip[0 ..< 12] else: "dev"
       if pinned:
-        writeFile(fx.workspaceRoot / "repos" / "lib-a.toml",
-          libAFragmentToml.replace("revision = \"dev\"", "revision = \"" & fx.aTip & "\""))
+        # A revision pin sits BESIDE the fragment's mainline; the manifest
+        # revision is then the pin, and pull parks it on the synthetic branch.
+        let pinnedFragment = libAFragmentToml.replace("mainline = \"dev\"\n",
+          "mainline = \"dev\"\nrevision = \"" & fx.aTip & "\"\n")
+        require pinnedFragment.contains("revision = \"" & fx.aTip & "\"")
+        writeFile(fx.workspaceRoot / "repos" / "lib-a.toml", pinnedFragment)
       else:
         discard requireGit(q(gitBin) & " -C " & q(repo) & " checkout --detach HEAD")
       let pull = runShell(shellCommand(@[fx.reproBin, "workspace", "pull",

@@ -1,11 +1,12 @@
 ## RA-8 — host bootstrap config; no hardcoded org defaults.
 ##
 ## `repro workspace init` resolves the manifest URL/branch (and the
-## project-to-init via `[projects] default`) from a committed host bootstrap
-## config (`.repro-workspace.toml`, locatable via `REPRO_WORKSPACE_CONFIG`)
-## rather than from a baked-in org URL. The resolution order is:
+## project-to-init via `[projects] default`) from the committed workspace
+## settings file (`repro-workspace.toml`: its `[records] url/branch`,
+## locatable via `REPRO_WORKSPACE_CONFIG`) rather than from a baked-in org
+## URL. The resolution order is:
 ##
-##   explicit `--manifest-url` flag → `.repro-workspace.toml` → host repo origin
+##   explicit `--manifest-url` flag → `repro-workspace.toml` → host repo origin
 ##
 ## and when none of those resolves, `init` FAILS LOUD with a clear "no manifest
 ## configured" diagnostic — the `repro` binary ships no built-in manifest URL.
@@ -13,11 +14,16 @@
 ## Cases (all hermetic: local bare repos in a tempdir; `REPRO_WORKSPACE_CONFIG`
 ## points at a test-authored config so nothing reaches the network):
 ##
-##   A. Config resolves: a config with `[manifest] url/branch` and
+##   A. Config resolves: a config with `[records] url/branch` and
 ##      `[projects] default = ["myproject"]`, NO `--manifest-url`, NO positional
 ##      project → init bootstraps `.repro/manifests` from the config's URL and
 ##      clones the participating repo. (Proves the config feeds the manifest
-##      URL/branch AND the default project selection.)
+##      URL/branch AND the default project selection.) The config also
+##      declares a credentialed companion manifest as a NAMED `[[manifest]]`
+##      layer with no url (Workspace-Settings-Files.md §3); the url comes only
+##      from the `repro-workspace.local.toml` beside it (§4), and init must
+##      acquire that layer from exactly that url — so no companion url is
+##      committed, and none is built in.
 ##
 ##   B. Explicit flag beats config: a config pointing at a *wrong* manifest URL
 ##      plus `--manifest-url=<right>` → init bootstraps from the FLAG's URL, not
@@ -96,30 +102,31 @@ proc projectTomlBody(libUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libATomlBody = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
-proc bootstrapConfigBody(manifestUrl: string; projects: string): string =
-  ## A `.repro-workspace.toml` host bootstrap config. `projects` is the raw
-  ## TOML array literal for `[projects] default`.
-  "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-  "[manifest]\n" &
+proc bootstrapConfigBody(manifestUrl: string; projects: string;
+                         extra = ""): string =
+  ## A `repro-workspace.toml` settings file naming the record store and the
+  ## default projects. `projects` is the raw TOML array literal for
+  ## `[projects] default`; `extra` is appended verbatim.
+  "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+  "[records]\n" &
   "url = \"" & manifestUrl & "\"\n" &
   "branch = \"main\"\n\n" &
   "[projects]\n" &
-  "default = " & projects & "\n"
+  "default = " & projects & "\n" & extra
 
 suite "RA-8 — host bootstrap config; no hardcoded org defaults":
 
@@ -150,38 +157,42 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
       seedBareWithFiles(gitBin, scratch, wrongManifestBare, [
         ("projects/other.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"other\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\nincludes = []\n"),
+          "[project]\nname = \"other\"\n" &
+          "\nincludes = []\n"),
       ])
 
       # A private companion manifest bare (content irrelevant; we only assert
-      # it lands in the parallel private cache when sourced from the sibling
-      # `.repro-workspace-private.toml`).
+      # init acquires it as a manifest layer when its url is supplied by the
+      # local settings file `repro-workspace.local.toml`).
       let privateBare = scratch / "bare-manifest-private.git"
       seedBareWithFiles(gitBin, scratch, privateBare, [
         ("projects/_private_placeholder.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"private\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\nincludes = []\n"),
+          "[project]\nname = \"private\"\n" &
+          "\nincludes = []\n"),
       ])
 
       let manifestCacheRoot = scratch / "manifest-cache"
 
       # ---- Case A: config resolves URL/branch + default project ------------
-      # Also exercises the private-companion fold-in: the `private_url` lives
-      # in a sibling `.repro-workspace-private.toml` (credentialed/SSH URLs are
-      # kept out of the committed public file) and is folded into the resolved
-      # config.
+      # Also exercises the private companion: the committed file declares a
+      # named layer WITHOUT a url (credentialed/SSH URLs are kept out of the
+      # committed file), and the sibling `repro-workspace.local.toml` supplies
+      # the url for that name.
       block caseA:
         let configDir = scratch / "host-config-a"
         createDir(configDir)
-        let configPath = configDir / ".repro-workspace.toml"
+        let configPath = configDir / "repro-workspace.toml"
         writeFile(configPath, bootstrapConfigBody(
-          fileUrl(manifestBare), "[\"myproject\"]"))
-        # Sibling private companion: only carries the credentialed URL.
-        writeFile(configDir / ".repro-workspace-private.toml",
-          "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-          "[manifest]\nprivate_url = \"" & fileUrl(privateBare) & "\"\n")
+          fileUrl(manifestBare), "[\"myproject\"]",
+          "\n[[manifest]]\nname = \"private-companion\"\n" &
+          "visibility = \"private\"\n"))
+        check fileUrl(privateBare) notin readFile(configPath)
+        # Sibling local settings: only supplies the credentialed URL.
+        writeFile(configDir / "repro-workspace.local.toml",
+          "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+          "[[manifest]]\nname = \"private-companion\"\n" &
+          "url = \"" & fileUrl(privateBare) & "\"\nbranch = \"main\"\n")
 
         let workspaceRoot = scratch / "ws-a"
         createDir(workspaceRoot)
@@ -206,11 +217,17 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
           "myproject.toml")
         # The default project's participating repo was cloned.
         check dirExists(workspaceRoot / "lib-a" / ".git")
-        # The private companion URL (from the sibling private file) was folded
-        # in and materialised into the parallel private cache + checkout.
-        check dirExists(manifestCachePath(
-          manifestCacheRoot & "-private", fileUrl(privateBare)))
-        check dirExists(workspaceRoot / ".repro" / "manifests-private")
+        # The private companion (url from the sibling local settings file)
+        # was acquired as a manifest layer: a `manifests-<i>-<url>` checkout
+        # holding the companion's content. The project it does not declare
+        # is unaffected (§4: layers are additive per project).
+        var companionCheckouts: seq[string]
+        for kind, path in walkDir(workspaceRoot / ".repro"):
+          if kind == pcDir and path.lastPathPart.startsWith("manifests-") and
+              fileExists(path / "projects" / "_private_placeholder.toml"):
+            companionCheckouts.add(path)
+        checkpoint("companion checkouts: " & $companionCheckouts)
+        check companionCheckouts.len == 1
 
       # ---- Case B: explicit --manifest-url beats the config ----------------
       block caseB:

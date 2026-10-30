@@ -771,9 +771,23 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             restartIfChanged: bool = true;
                             collision: string = "";
                             dropInName: string = "";
+                            stopOnRemoval: bool = true;
+                            reloadIfChanged: bool = false;
+                            exclusive: bool = false;
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
+  ##
+  ## The add-on switch's service transitions (ReproOS Add-On Mode spec
+  ## §7.3): a unit that leaves the profile is stopped before its file goes
+  ## unless `stopOnRemoval = false`; `reloadIfChanged = true` reloads the
+  ## running instance (`ExecReload=`) instead of restarting it when only a
+  ## resource it `dependsOn` changed; `exclusive = true` makes the switch
+  ## stop the old instance and confirm it exited before the new one starts,
+  ## refusing the apply (`EAddOnExclusiveOverlap`) when it cannot -- for a
+  ## service two instances of which cause harm (a validator client). A unit
+  ## whose content carries `X-Repro-Exclusive=true` in `[Unit]` is
+  ## exclusive too.
   ##
   ## `collision` is add-on mode's opt-in when a distribution package
   ## already provides a unit of this name (ReproOS Add-On Mode spec §4.3):
@@ -811,9 +825,80 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
       fields["collision"] = strField(collision)
     if dropInName.len > 0:
       fields["dropInName"] = strField(dropInName)
+    if not stopOnRemoval:
+      fields["stopOnRemoval"] = boolField(false)
+    if reloadIfChanged:
+      fields["reloadIfChanged"] = boolField(true)
+    if exclusive:
+      fields["exclusive"] = boolField(true)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,
+      dependsOn)
+
+template systemdSystemDropIn*(targetResources: var seq[ResourceIntent];
+                              unit: string;
+                              content: string;
+                              name: string = "addon";
+                              restartIfChanged: bool = true;
+                              address: string = "";
+                              dependsOn: seq[string] = @[]) =
+  ## A drop-in for a unit the profile does NOT own -- a distribution unit
+  ## such as `cron.service` -- written to
+  ## `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` (ReproOS Add-On
+  ## Mode spec §4.1, the `dropIn` class). An active `unit` is restarted
+  ## when the drop-in changes (§7.3) unless `restartIfChanged = false`.
+  ## For a unit the profile itself writes, use `systemdSystemUnit`'s
+  ## `collision = "dropIn"` instead.
+  ##
+  ## Address default: `systemd.systemDropIn:<unit>:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["unit"] = strField(unit)
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    fields["restartIfChanged"] = boolField(restartIfChanged)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("systemd.systemDropIn", unit, name)
+    pushResource(targetResources, "systemd.systemDropIn", addr0, fields,
+      dependsOn)
+
+template linuxSysusersEntry*(targetResources: var seq[ResourceIntent];
+                             name: string;
+                             kind: string = "user";
+                             id: string = "";
+                             description: string = "";
+                             home: string = "";
+                             shell: string = "";
+                             address: string = "";
+                             dependsOn: seq[string] = @[]) =
+  ## A system account (`kind = "user"`) or group (`kind = "group"`) for a
+  ## service, declared as one sysusers.d(5) entry in
+  ## `/etc/sysusers.d/repro-<name>.conf` and created with
+  ## `systemd-sysusers <file>` (ReproOS Add-On Mode spec §4.1, the
+  ## `sysusers` class). `id` pins the UID / GID; `description`, `home` and
+  ## `shell` are the user's GECOS, home and shell (systemd's defaults when
+  ## empty). An existing account of the same name with a different id or
+  ## shell is a collision the apply refuses. The account is never deleted
+  ## when the entry leaves the profile. `passwdUser` / `passwdGroup` stay
+  ## for accounts that need `useradd` semantics.
+  ##
+  ## Address default: `linux.sysusersEntry:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["kind"] = strField(kind)
+    if id.len > 0:
+      fields["id"] = strField(id)
+    if description.len > 0:
+      fields["description"] = strField(description)
+    if home.len > 0:
+      fields["home"] = strField(home)
+    if shell.len > 0:
+      fields["shell"] = strField(shell)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.sysusersEntry", name)
+    pushResource(targetResources, "linux.sysusersEntry", addr0, fields,
       dependsOn)
 
 template systemdUnitState*(targetResources: var seq[ResourceIntent];

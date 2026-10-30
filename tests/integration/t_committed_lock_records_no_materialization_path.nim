@@ -114,9 +114,9 @@ proc advance(gitBin, work: string): string =
   headOf(gitBin, work)
 
 proc fragment(name, path: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & path & "\"\n" &
-    "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+    "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
   if depends.len > 0:
     result.add("depends = [")
     for i, d in depends:
@@ -126,8 +126,8 @@ proc fragment(name, path: string; depends: seq[string]): string =
 
 proc projectToml(project: string; origins: seq[(string, string)]): string =
   result = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"" & project & "\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"" & project & "\"\n" &
+    "\n"
   for (name, origin) in origins:
     result.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
       fileUrl(origin) & "\"\n\n")

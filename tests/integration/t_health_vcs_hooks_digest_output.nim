@@ -38,8 +38,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "multi-repo"
-default_revision = "main"
-trunk = "main"
 
 [[remote]]
 name = "origin-a"
@@ -56,23 +54,23 @@ includes = [
 """
 
 const libAToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "origin-a"
-revision = "main"
+mainline = "main"
 """
 
 const libBToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "origin-b"
-revision = "main"
+mainline = "main"
 """
 
 proc seedOrigin(gitBin, originPath, seedPath, name: string) =

@@ -12,10 +12,18 @@
 ##    first, then ``dpkg-divert --local --rename --remove``, which moves the
 ##    package's file back;
 ## 4. restore adopted, replaced and reconciled ``/etc`` files from the bytes
-##    the ledger preserved and remove the files the add-on created, then
-##    the directories it created, then ``systemctl daemon-reload``;
-## 5. remove the add-on's state and keys, ``/etc/repro``, and the store
-##    (unless ``--keep-store``).
+##    the ledger preserved and remove the files and links the add-on
+##    created (a link into the static tree is removed as a link; the tree
+##    goes with the store), then the directories it created, then
+##    ``systemctl daemon-reload``; put every kernel parameter a sysctl
+##    fragment set back to the value the ledger recorded before it;
+## 5. remove the add-on's state and keys, ``/etc/repro`` (with the static
+##    tree link), and the store (unless ``--keep-store``).
+##
+## Accounts a sysusers fragment created are listed and kept (``account``
+## ledger entries): a reused UID would hand the files the old account
+## owns to a new owner. A ``systemd.unitState`` requirement owned nothing,
+## so its entries change nothing here.
 ##
 ## An object whose digest no longer matches the ledger is NOT removed: it
 ## is reported as drift and left for a human, and the uninstall exits
@@ -34,7 +42,9 @@ import ./generation0
 import ./host_exec
 import ./ledger
 import ./mutations
+import ./static_tree
 import ./store_root
+import ./switch
 
 
 type
@@ -50,10 +60,7 @@ type
       ## ``<class> <path>`` of every ledger entry this run undid; what the
       ## kept ledger of an incomplete run drops.
       ## Accounts the add-on created and leaves in place (spec: sysusers
-      ## accounts are never deleted). Empty in this release: generation 0
-      ## creates none, and ``linux.sysusersEntry`` / the account-creating
-      ## kinds are not yet add-on-managed (``AddonManagedKinds``). The
-      ## milestone that adds them fills this from their ledger entries.
+      ## accounts are never deleted): the ``account`` ledger entries.
     errors*: seq[string]
 
 proc ok*(r: UninstallResult): bool = r.drift.len == 0 and r.errors.len == 0
@@ -152,13 +159,39 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.undone.incl(entryKey(dv))
 
   # 4. /etc files (those a diversion step did not already take), then the
-  #    directories the add-on created, deepest first.
+  #    directories the add-on created, deepest first; the kernel values
+  #    sysctl fragments set go back to what the ledger recorded before.
   for f in byClass[lcEtcFile]:
     if f.path in handled:
       continue
     removeOwned(f, result)
+  for sl in byClass[lcStaticLink]:
+    if symlinkExists(sl.path):
+      try:
+        removeStaticLink()
+        result.removed.add(sl.path)
+        result.undone.incl(entryKey(sl))
+      except CatchableError as ex:
+        result.errors.add(sl.path & ": " & ex.msg)
+    else:
+      result.undone.incl(entryKey(sl))
   removeEmptyDirs(byClass[lcDir])
   systemctlOrRecord(["daemon-reload"], result)
+  for sc in byClass[lcSysctl]:
+    if readLiveSysctl(sc.path) != sc.value:
+      result.undone.incl(entryKey(sc))   # not ours any more: left as is
+      continue
+    try:
+      restoreSysctlValue(sc.path, sc.replaced)
+      result.removed.add("sysctl " & sc.path & " = " & sc.replaced)
+      result.undone.incl(entryKey(sc))
+    except CatchableError as ex:
+      result.errors.add("sysctl " & sc.path & ": " & ex.msg)
+  for a in byClass[lcAccount]:
+    result.keptAccounts.add(a.path)
+    result.undone.incl(entryKey(a))
+  for u in byClass[lcUnitState]:
+    result.undone.incl(entryKey(u))
 
   # 5. State, keys, /etc/repro and the store. A mount still on the store
   #    (a stop that failed above) must not be deleted through. And an

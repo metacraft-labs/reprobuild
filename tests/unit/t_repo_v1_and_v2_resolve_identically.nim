@@ -1,25 +1,23 @@
-## A `repo.v1` fragment and its `repo.v2` rewrite resolve to the same repo.
+## A `repo.v1` fragment no longer resolves; its `repo.v2` rewrite does.
 ##
-## Workspace-Branch-Roles.md §3.1 renames the fragment key `branch` to
+## Workspace-Branch-Roles.md §3.1 renamed the fragment key `branch` to
 ## `mainline` under a schema bump (`reprobuild.workspace.repo.v2`, §3.6), and
-## §6 step 1 requires a `repro` that reads both before any manifest changes.
-## The migration that follows rewrites every fragment mechanically —
-## `branch` -> `mainline`, schema -> v2 — and is only safe if that rewrite
-## changes NOTHING about how the repo resolves. This test is that claim: the
-## same project resolves one fragment written both ways, and the two
-## `ResolvedRepo` values are compared whole, so any field that resolves
-## differently (the tracked branch, the revision it supplies, the fetch URL,
-## anything) fails the primary assertion.
+## §6 step 3 retires reading `repo.v1` once every workspace has rewritten its
+## fragments. Until then this test proved the mechanical rewrite changed
+## nothing about how a repo resolves; now it proves the other half of the
+## retirement through the resolver itself: the SAME project, with the SAME
+## fragment written both ways at the same path, fails to load in the retired
+## spelling — naming the fragment and the rewrite — and resolves to the
+## declared mainline in the current one.
 ##
-## A positive control precedes the comparison: both must resolve the branch
-## to `dev`, so equality cannot pass vacuously because both lost the value.
+## A positive control precedes the refusal: the v2 fragment must resolve the
+## branch to `dev`, so the refusal cannot pass because the project itself is
+## broken.
 ##
 ## No mocks: the fragment and project are real files in a temporary
-## directory, resolved through the real reader and resolver. The fragment is
-## written to the SAME path both times so `fragmentPath` (an absolute path)
-## is equal by construction rather than by excluding it from the comparison.
+## directory, resolved through the real reader and resolver.
 
-import std/[options, os, tempfiles, unittest]
+import std/[options, os, strutils, tempfiles, unittest]
 
 import repro_workspace_manifests
 
@@ -31,8 +29,6 @@ includes = [
 
 [project]
 name = "demo"
-default_revision = "main"
-trunk = "main"
 
 [[remote]]
 name = "acme"
@@ -61,13 +57,7 @@ tags = ["tools"]
 depends = ["gizmo"]
 """
 
-proc resolveWith(root, fragmentText: string): ResolvedRepo =
-  writeFile(root / "repos" / "widget.toml", fragmentText)
-  let project = resolveProject(root / "projects" / "demo.toml")
-  check project.repos.len == 1
-  project.repos[0]
-
-suite "repo.v1 and repo.v2 resolve identically":
+suite "a repo.v1 fragment no longer resolves; its repo.v2 rewrite does":
 
   test "t_repo_v1_and_v2_resolve_identically":
     let root = createTempDir("repro-repo-v1-v2-", "")
@@ -75,25 +65,28 @@ suite "repo.v1 and repo.v2 resolve identically":
     createDir(root / "projects")
     createDir(root / "repos")
     writeFile(root / "projects" / "demo.toml", projectToml)
+    let fragment = root / "repos" / "widget.toml"
 
-    let v1 = resolveWith(root, fragmentV1)
-    let v2 = resolveWith(root, fragmentV2)
+    # Positive control: the current spelling resolves to its mainline.
+    writeFile(fragment, fragmentV2)
+    let v2 = resolveProject(root / "projects" / "demo.toml")
+    check v2.repos.len == 1
+    check v2.repos[0].branch == "dev"
+    check v2.repos[0].revision == "dev"
+    check v2.repos[0].tags == @["tools"]
+    check readRepoFragment(fragment).repo.mainline == some("dev")
 
-    # Positive control: the declared mainline reached both.
-    check v1.branch == "dev"
-    check v2.branch == "dev"
-    check v1.revision == "dev"
-
-    # Primary assertion: the whole resolved repo is the same value.
-    check v1 == v2
-
-    # And the typed fragments agree on the mainline, whichever key held it.
-    let f1 = block:
-      writeFile(root / "repos" / "widget.toml", fragmentV1)
-      readRepoFragment(root / "repos" / "widget.toml")
-    let f2 = block:
-      writeFile(root / "repos" / "widget.toml", fragmentV2)
-      readRepoFragment(root / "repos" / "widget.toml")
-    check f1.repo.mainlineBranch == some("dev")
-    check f2.repo.mainlineBranch == some("dev")
-    check f1.repo.roleDecls == f2.repo.roleDecls
+    # Primary assertion: the retired spelling of the same fragment does not
+    # load, and the refusal names the file and the rewrite.
+    writeFile(fragment, fragmentV1)
+    var refused = false
+    try:
+      discard resolveProject(root / "projects" / "demo.toml")
+    except WorkspaceManifestParseError as e:
+      refused = true
+      check e.path == fragment
+      check e.keyPath == "schema"
+      check e.observedSchema == "reprobuild.workspace.repo.v1"
+      check "reprobuild.workspace.repo.v2" in e.innerMessage
+      check "`mainline`" in e.innerMessage
+    check refused

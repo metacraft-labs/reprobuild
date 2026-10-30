@@ -112,6 +112,17 @@ const
   ZigCrossRustflags* = "-C target-feature=+crt-static -C link-self-contained=no"
     ## See the module header: a static executable, linked by zig's musl.
 
+  ZigCrossRemapTarget* = "/build"
+    ## What the recipe's project root is spelled as inside the produced
+    ## binary. rustc embeds the path of every source file in panic-location
+    ## strings (and in debug info, when any), and a from-source recipe's
+    ## sources live under its project root: the extracted tree and the
+    ## vendored crates alike. Without `--remap-path-prefix` two builds of
+    ## one recipe from two checkouts differ in those strings and nothing
+    ## else (measured: 130 strings, 12 KB, for llm-api-proxy), and a
+    ## digest pinned by a profile (`expectedOutputDigest`) would hold only
+    ## for the checkout that produced it.
+
 proc zigCrossTarget*(rustTriple: string): ZigCrossTarget =
   ## The table row for `rustTriple`, or a `ValueError` naming the triple and
   ## the triples the table has, so a typo is a refusal and not a build that
@@ -239,10 +250,22 @@ proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
   else:
     raise newException(ValueError, "cross_zig: unknown wrapper role " & role)
 
-proc zigCrossCargoEnv*(rustTriple, wrapperDir: string): seq[(string, string)] =
+proc zigCrossRustflags*(remapRoot: string): string =
+  ## The target RUSTFLAGS: the static-musl flags, plus the path remap that
+  ## makes the build independent of where the checkout is (`remapRoot`,
+  ## the recipe's project root, is spelled `ZigCrossRemapTarget` in the
+  ## binary). Empty `remapRoot` (no project root: interface extraction)
+  ## adds no remap.
+  result = ZigCrossRustflags
+  if remapRoot.len > 0:
+    result.add(" --remap-path-prefix=" & remapRoot & "=" & ZigCrossRemapTarget)
+
+proc zigCrossCargoEnv*(rustTriple, wrapperDir: string;
+                       remapRoot = ""): seq[(string, string)] =
   ## The environment that points cargo, rustc and the `cc` crate at the
   ## wrappers in `wrapperDir`. Pure: a recipe or a test can read it without
-  ## any file existing.
+  ## any file existing. `remapRoot` is the recipe's project root, remapped
+  ## out of the binary (`zigCrossRustflags`).
   let cargoKey = cargoTripleEnvKey(rustTriple)
   let ccKey = ccTripleEnvKey(rustTriple)
   @[
@@ -251,7 +274,7 @@ proc zigCrossCargoEnv*(rustTriple, wrapperDir: string): seq[(string, string)] =
     ("AR_" & ccKey, wrapperDir / "ar"),
     ("RANLIB_" & ccKey, wrapperDir / "ranlib"),
     ("CARGO_TARGET_" & cargoKey & "_LINKER", wrapperDir / "rust-linker"),
-    ("CARGO_TARGET_" & cargoKey & "_RUSTFLAGS", ZigCrossRustflags),
+    ("CARGO_TARGET_" & cargoKey & "_RUSTFLAGS", zigCrossRustflags(remapRoot)),
   ]
 
 proc zigCrossWrappersActionId*(packageName, rustTriple: string): string =

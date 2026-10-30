@@ -31,9 +31,16 @@
 ##   3. the pre-push resolution from the member names that root;
 ##   4. `REPRO_WORKSPACE_CONFIG` overrides discovery (both CLI legs and the
 ##      walk name the directory of the file it points at);
-##   5. old roots still work: one marked only by the old
-##      `.repro-workspace.toml`, and one marked only by an old state file
-##      (`.repro/workspace.toml`), each found from its member;
+##   5. old roots are FOUND but REFUSED: a root marked only by the retired
+##      settings file `.repro-workspace.toml`, and one marked only by the
+##      retired state file `.repro/workspace.toml`, are each still discovered
+##      from their member (so a command lands on the unmigrated root rather
+##      than silently treating the member as its own workspace), and a
+##      workspace-wide verb run there is refused naming the retired file and
+##      its remedy — the rename for the settings file, `repro health --fix`
+##      for the state file. Neither old file is read as settings or state;
+##      the retired names and their replacements are listed in the
+##      specification's Retired-Names.md;
 ##   6. precedence: a nested workspace root wins over the outer one for paths
 ##      under it, and a manifest checkout inside a marked root's `.repro/` is
 ##      that root's state, never a root of its own.
@@ -84,6 +91,8 @@ proc fragmentToml(name: string): string =
     "\"\npath = \"" & name & "\"\nremote = \"acme\"\nmainline = \"main\"\n"
 
 const settingsV1 = "schema = \"reprobuild.workspace.settings.v1\"\n"
+# The two retired files, exactly as an unmigrated workspace still carries
+# them: their old names AND their old schemas.
 const bootstrapV1 = "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
   "[manifest]\nurl = \"https://git.example.invalid/acme/records.git\"\n" &
   "branch = \"latest\"\n"
@@ -179,24 +188,36 @@ suite "workspace root discovery keys on the settings file":
       check discoverWorkspaceRoot(member).marker == wrmCommittedLock
       delEnv("REPRO_WORKSPACE_CONFIG")
 
-      # Leg 5 — old roots.
+      # Leg 5 — old roots are found, and refused with the remedy.
       let legacy = scratch / "legacy"
       let legacyMember = seedWorkspace(legacy, "old", ".repro-workspace.toml",
         bootstrapV1)
+      require not fileExists(legacy / "repro-workspace.toml")
       check discoverWorkspaceRoot(legacyMember).marker == wrmSettingsFile
       check discoverWorkspaceRoot(legacyMember).root == legacy
-      let legacyListed = reposList(legacyMember)
-      check legacyListed.code == 0
-      check legacyListed.listing.startsWith("old\told\t")
+      let legacyRun = runRepro(["workspace", "repos", "list"], legacyMember)
+      checkpoint("repos list from " & legacyMember & " -> " & $legacyRun.code &
+        "\nstdout: " & legacyRun.stdout & "\nstderr: " & legacyRun.stderr)
+      check legacyRun.code != 0
+      check not legacyRun.stdout.contains("old\told\t")
+      check (legacy / ".repro-workspace.toml") in legacyRun.stderr
+      check "retired name of the workspace settings file" in legacyRun.stderr
+      check "Rename it to `repro-workspace.toml`" in legacyRun.stderr
 
       let stateOnly = scratch / "state-only"
       let stateMember = seedWorkspace(stateOnly, "kept",
         ".repro" / "workspace.toml", stateV1Old)
+      require not fileExists(stateOnly / ".repro" / "workspace-state.toml")
       check discoverWorkspaceRoot(stateMember).root == stateOnly
       check discoverWorkspaceRoot(stateMember).marker == wrmStateFile
-      let stateListed = reposList(stateMember)
-      check stateListed.code == 0
-      check stateListed.listing.startsWith("kept\tkept\t")
+      let stateRun = runRepro(["workspace", "repos", "list"], stateMember)
+      checkpoint("repos list from " & stateMember & " -> " & $stateRun.code &
+        "\nstdout: " & stateRun.stdout & "\nstderr: " & stateRun.stderr)
+      check stateRun.code != 0
+      check not stateRun.stdout.contains("kept\tkept\t")
+      check (stateOnly / ".repro" / "workspace.toml") in stateRun.stderr
+      check "retired name of the workspace state file" in stateRun.stderr
+      check "repro health --fix" in stateRun.stderr
 
       # Leg 6 — precedence. A nested root wins for paths under it...
       let inner = root / "nested"

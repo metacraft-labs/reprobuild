@@ -129,32 +129,30 @@ proc localBranchWithOwnWork(gitBin, repoPath, branch: string): string =
   requireGit(q(gitBin) & " -C " & q(repoPath) & " rev-parse HEAD").strip()
 
 proc repoFragmentToml(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & name & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc branchTrackingFragmentToml(name, branch: string): string =
   ## The fragment shape every repo in the real workspace uses: a declared
   ## ``branch`` and NO ``revision``. The resolver copies the branch name into
   ## ``revision``, so this is not merely a spelling of the fragment above —
   ## it is the one the field defect was observed through.
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & name & "\"\n" &
-  "branch = \"" & branch & "\"\n"
+  "mainline = \"" & branch & "\"\n"
 
-proc projectToml(remotes: seq[(string, string)]; trunk = "main"): string =
+proc projectToml(remotes: seq[(string, string)]): string =
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
-    "name = \"rewriteproject\"\n" &
-    "default_revision = \"" & trunk & "\"\n" &
-    "trunk = \"" & trunk & "\"\n\n"
+    "name = \"rewriteproject\"\n\n"
   for (name, url) in remotes:
     result.add("[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url &
       "\"\n\n")
@@ -425,7 +423,7 @@ suite "repro workspace sync — never advise pushing onto a rewritten remote":
       remotes.add(("intact", fileUrl(intactOrigin)))
 
       writeFile(workspaceRoot / "projects" / "rewriteproject.toml",
-        projectToml(remotes, trunk = "dev"))
+        projectToml(remotes))
 
       # THE PREMISES, asserted rather than assumed. Each is a fact the case
       # above does NOT have, and without them this would silently re-test the
@@ -584,7 +582,7 @@ suite "repro workspace sync — never advise pushing onto a rewritten remote":
       let observed = seedRewritten("observed", fetchBeforeSync = false)
       let inferred = seedRewritten("inferred", fetchBeforeSync = true)
       writeFile(workspaceRoot / "projects" / "rewriteproject.toml",
-        projectToml(remotes, trunk = "dev"))
+        projectToml(remotes))
 
       proc runSync(extra: openArray[string]): CmdResult =
         var argv = @[reproBin, "workspace", "sync", "rewriteproject",

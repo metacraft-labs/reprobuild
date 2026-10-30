@@ -44,18 +44,16 @@ proc fixture(): tuple[root, repo, oldHead, target: string] =
   writeFile(ws / "projects" / "p.toml", """schema = "reprobuild.workspace.project.v1"
 [project]
 name = "p"
-default_revision = "main"
-trunk = "main"
 [[remote]]
 name = "origin"
 fetch = """" & seed & "\"\nincludes = [\"repos/lib.toml\"]\n")
-  writeFile(ws / "repos" / "lib.toml", """schema = "reprobuild.workspace.repo.v1"
+  writeFile(ws / "repos" / "lib.toml", """schema = "reprobuild.workspace.repo.v2"
 [repo]
 name = "lib"
 path = "lib"
 remote = "origin"
 revision = "main"
-branch = "main"
+mainline = "main"
 """)
 
 suite "sync recognizes compatible interrupted upstream content":

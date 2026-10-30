@@ -410,8 +410,8 @@ proc setupNf2Fixture*(label: string;
     "deps = [" & deps.join(", ") & "]\n")
 
   createDir(result.ws / ".repro")
-  writeFile(result.ws / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.ws / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\n" &
     "project = \"nf2\"\n" &
     "branch = \"main\"\n")

@@ -63,8 +63,6 @@ beta = false
     let f = readRepoFragment(header)
     check f.schema == schemaRepoFragmentV2
     check f.repo.mainline == some("dev")
-    check f.repo.mainlineBranch == some("dev")
-    check f.repo.branch.isNone
     check f.repo.profile == some("product")
     check f.repo.unstable == roleBranch("agents")
     check f.repo.staging == roleAbsent()
@@ -102,40 +100,46 @@ name = "x"
 path = "x"
 profile = "spec"
 """))
-    check f.repo.mainlineBranch.isNone
+    check f.repo.mainline.isNone
     check f.repo.profile == some("spec")
 
-  test "a v1 fragment carrying a v2-only key is refused naming file and key":
+  test "a fragment in the retired repo.v1 schema is refused naming the remedy":
+    # The schema whose one branch key was `branch` is retired: a fragment
+    # declaring it is refused at its `schema` key — whatever else it says,
+    # a plain mainline or a role key — and the diagnostic names the current
+    # schema and the key to rename, so the operator knows what to change.
     let dir = createTempDir("repro-repo-roles-", "")
     defer: removeDir(dir)
-    for (key, line) in [("mainline", "mainline = \"dev\""),
+    for (key, line) in [("branch-only", ""),
+                        ("mainline", "mainline = \"dev\""),
                         ("unstable", "unstable = \"agents\""),
-                        ("staging", "staging = false"),
-                        ("stable", "stable = \"stable\""),
-                        ("production", "production = \"prod\""),
-                        ("lts", "lts = \"lts\""),
                         ("profile", "profile = \"product\"")]:
-      let path = fragmentAt(dir, "v1-" & key, "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-        "[repo]\nname = \"x\"\npath = \"x\"\nbranch = \"dev\"\n" & line & "\n")
+      let path = fragmentAt(dir, "v1-" & key,
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\nname = \"x\"\npath = \"x\"\nbranch = \"dev\"\n" & line &
+        "\n")
       let e = refusal(path)
       check e.path == path
-      check e.keyPath == "repo." & key
+      check e.keyPath == "schema"
+      check e.observedSchema == "reprobuild.workspace.repo.v1"
+      check e.expectedSchema == "reprobuild.workspace.repo.v2"
       check "reprobuild.workspace.repo.v2" in e.innerMessage
-    # The header spelling of the custom-role table, which the typed decoder
-    # would drop without a word.
-    let headerPath = fragmentAt(dir, "v1-branch-roles", """schema = "reprobuild.workspace.repo.v1"
+      check "`mainline`" in e.innerMessage
+    # The header spelling of the custom-role table is read in the current
+    # schema (the typed decoder would drop it without a word, so it is
+    # decoded from the tree).
+    let headerPath = fragmentAt(dir, "v2-branch-roles", """schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "x"
 path = "x"
-branch = "dev"
+mainline = "dev"
 
 [repo.branch-roles]
 beta = "beta"
 """)
-    let e = refusal(headerPath)
-    check e.path == headerPath
-    check e.keyPath == "repo.branch-roles"
+    check readRepoFragment(headerPath).repo.`branch-roles`.entries ==
+      @[("beta", roleBranch("beta"))]
 
   test "a v2 fragment carrying branch is refused naming file and key":
     let dir = createTempDir("repro-repo-roles-", "")

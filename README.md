@@ -333,7 +333,7 @@ Reprobuild wraps all development workflows under one CLI.
   back toward its mainline, and every report names the chain
   (`latest (unstable → mainline)`); a role that IS declared but whose branch
   the remote lacks is refused as `no_role_ref`, never redirected to another
-  branch. `--from-mainlines` is the older spelling of `--from=mainline`.
+  branch.
 
 Workspace cloning uses a shared object pool by default. Pass
 `--clone-objects=none` (or `dissociate`) to create self-contained checkouts

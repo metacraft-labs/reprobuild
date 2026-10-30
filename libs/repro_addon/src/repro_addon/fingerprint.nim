@@ -89,11 +89,16 @@ type
     ## One record the caller expects in a diff (a ledger-derived delta).
     ## ``value`` is matched against the record's ``after`` value (for
     ## ``doAdded`` / ``doChanged``) or ``before`` (for ``doRemoved``);
-    ## ``"*"`` matches any value.
+    ## ``"*"`` matches any value. An ``optional`` expectation is one the
+    ## diff MAY carry: it is never missing, and its ``key`` may be a glob
+    ## (``net.ipv4.conf.*.forwarding``), so a side effect whose exact keys
+    ## the add-on cannot enumerate (the kernel propagating a forwarding
+    ## switch to every interface) is accounted for without being invented.
     op*: DiffOp
     component*: FingerprintComponent
     key*: string
     value*: string
+    optional*: bool
 
   ExceptionRule* = object
     ## An enumerated, permitted difference: ``component`` plus a key glob
@@ -753,14 +758,17 @@ proc applyExceptions*(entries: seq[DiffEntry];
       result.add(e)
 
 proc renderExpectation*(e: Expectation): string =
-  $e.op & " " & $e.component & "\t" & escapeField(e.key) & "\t" &
-    escapeField(e.value)
+  ## ``<op>[?] <component>\t<key>\t<value>``; ``?`` marks an optional one.
+  $e.op & (if e.optional: "? " else: " ") & $e.component & "\t" &
+    escapeField(e.key) & "\t" & escapeField(e.value)
 
 proc parseExpectations*(text: string): seq[Expectation] =
   ## One expectation per line: ``<op> <component>\t<key>\t<value>``.
   for raw in text.splitLines():
     if raw.len == 0 or raw.startsWith("#"): continue
-    if raw.len < 3 or raw[1] != ' ':
+    let optional = raw.len > 2 and raw[1] == '?'
+    let head = if optional: 3 else: 2
+    if raw.len < head + 1 or raw[head - 1] != ' ':
       raise newException(FingerprintError, "malformed expectation: " & raw)
     let op = case raw[0]
       of '+': doAdded
@@ -768,12 +776,12 @@ proc parseExpectations*(text: string): seq[Expectation] =
       of '~': doChanged
       else:
         raise newException(FingerprintError, "malformed expectation op: " & raw)
-    let parts = raw[2 .. ^1].split('\t')
+    let parts = raw[head .. ^1].split('\t')
     if parts.len != 3:
       raise newException(FingerprintError, "malformed expectation: " & raw)
     result.add(Expectation(op: op, component: componentFromString(parts[0]),
                            key: unescapeField(parts[1]),
-                           value: unescapeField(parts[2])))
+                           value: unescapeField(parts[2]), optional: optional))
 
 type
   ExpectationReport* = object
@@ -791,7 +799,11 @@ proc matchExpectations*(entries: seq[DiffEntry];
   var byKey = initTable[(FingerprintComponent, string), DiffEntry]()
   for e in entries: byKey[(e.component, e.key)] = e
   var used = initHashSet[(FingerprintComponent, string)]()
+  var optionals: seq[Expectation]
   for x in expected:
+    if x.optional:
+      optionals.add(x)        # matched against what is left, by glob
+      continue
     let k = (x.component, x.key)
     if k notin byKey:
       result.missing.add(x)
@@ -802,7 +814,16 @@ proc matchExpectations*(entries: seq[DiffEntry];
     if actual.op != x.op or (x.value != "*" and x.value != value):
       result.mismatched.add((expected: x, actual: actual))
   for e in entries:
-    if (e.component, e.key) notin used:
+    if (e.component, e.key) in used: continue
+    var accepted = false
+    for x in optionals:
+      let value = if x.op == doRemoved: e.before else: e.after
+      if x.component == e.component and globMatch(x.key, e.key) and
+          (x.op == e.op or x.value == "*") and
+          (x.value == "*" or x.value == value):
+        accepted = true
+        break
+    if not accepted:
       result.unexpected.add(e)
 
 proc renderExpectationReport*(r: ExpectationReport): string =

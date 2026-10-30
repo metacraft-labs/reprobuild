@@ -3,7 +3,7 @@
 # PS-1 — resolution of a workspace's ACTIVE PROJECT SET.
 #
 # A workspace participates in a SET of manifest projects, not a single one
-# (`[workspace] projects` in `.repro/workspace.toml`). The participating repo
+# (`[workspace] projects` in `.repro/workspace-state.toml`). The participating repo
 # set is the UNION of every project in that set. This module owns the union
 # and the conflict rule; every membership-resolution entry point in the CLI
 # funnels through `extendWithActiveProjectSet` so the whole set is visible to
@@ -139,7 +139,7 @@ export WorkspaceProjectSetConflictError, conflictingFields,
 type
   ProjectSetConflictFrame = object
     ## What a union conflict is attributed to: the workspace's active-set
-    ## record (`.repro/workspace.toml`, key `workspace.projects`) for a
+    ## record (`.repro/workspace-state.toml`, key `workspace.projects`) for a
     ## workspace union, or the metadata source itself for a union resolved
     ## at a revision, which has no active-set record to blame.
     path, keyPath, schema: string
@@ -204,7 +204,7 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
   ## Union `additional` projects onto an already-resolved `primary`.
   ##
   ## The primary project's identity is carried through unchanged
-  ## (`projectName`, `defaultRevision`, `trunk`, `projectFile`): everything
+  ## (`projectName`, `workspaceMainline`, `projectFile`): everything
   ## that needs exactly ONE project — the lock destination, `repro add`'s
   ## mutation target — keeps resolving to the primary. Only the repo set
   ## grows.
@@ -271,8 +271,8 @@ proc resolveProjectSetAt*(source: ManifestSource;
   ## working tree, and without writing to that repository. What it reads is
   ## that single repository's tree and nothing else: the `[[manifest]]` layer
   ## composition `resolveWorkspaceProjectByName` performs is NOT applied,
-  ## because the layer list lives in `.repro/workspace.toml` and the settings
-  ## files — workspace-local state outside the metadata repository, which has
+  ## because the layer list lives in the settings files — workspace-local
+  ## configuration outside the metadata repository, which has
   ## no revision to be read at. A conflict is attributed to the source root
   ## (`displayRoot`), not to an active-set record.
   if names.len == 0:

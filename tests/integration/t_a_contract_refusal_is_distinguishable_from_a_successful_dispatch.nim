@@ -233,13 +233,13 @@ proc writeFlatMembership(workspaceRoot, originUrl: string;
   for r in repos:
     includes.add("  \"repos/" & r.name & ".toml\",\n")
     writeFile(workspaceRoot / "repos" / (r.name & ".toml"),
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
       "[repo]\nname = \"" & r.name & "\"\npath = \"" & r.path & "\"\n" &
-      "remote = \"o\"\nrevision = \"main\"\n")
+      "remote = \"o\"\nmainline = \"main\"\n")
   writeFile(workspaceRoot / "projects" / "p.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"p\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"p\"\n" &
+    "\n" &
     "[[remote]]\nname = \"o\"\nfetch = \"" & originUrl & "\"\n\n" &
     "includes = [\n" & includes & "]\n")
 
@@ -360,15 +360,15 @@ suite "a contract refusal is distinguishable from a successful dispatch":
       createDir(workspaceRoot / "repos")
       writeFile(workspaceRoot / "projects" / "lib-a.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"lib-a\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"lib-a\"\n" &
+        "\n" &
         "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
           originUrl & "\"\n\n" &
         "includes = [\n  \"repos/lib-a.toml\",\n]\n")
       writeFile(workspaceRoot / "repos" / "lib-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
-        "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
+        "remote = \"lib-a-origin\"\nmainline = \"main\"\n")
       writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
       check fileExists(workspaceRoot / ".repro" / "workspace-state.toml")
 

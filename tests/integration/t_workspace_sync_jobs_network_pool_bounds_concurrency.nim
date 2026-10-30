@@ -159,8 +159,7 @@ proc projectTomlWithRepos(remotes: seq[(string, string)]): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "\n"
   for (name, url) in remotes:
     result.add("[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url & "\"\n\n")
   result.add("includes = [\n")
@@ -169,12 +168,12 @@ proc projectTomlWithRepos(remotes: seq[(string, string)]): string =
   result.add("]\n")
 
 proc repoFragmentToml(name, remoteName: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remoteName & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 # ---- marker interval analysis ----------------------------------------------
 

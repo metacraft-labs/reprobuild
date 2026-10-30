@@ -75,9 +75,9 @@ proc writeManifest(root, relPath, body: string) =
   writeFile(abs, body)
 
 proc fragment(name, mainline: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "branch = \"" & mainline & "\"\nurl_prefix = \"acme\"\n"
+    "mainline = \"" & mainline & "\"\nurl_prefix = \"acme\"\n"
 
 proc repoSet(name: string; memberRepos: openArray[string]): string =
   result = "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &

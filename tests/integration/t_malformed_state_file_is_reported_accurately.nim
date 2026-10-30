@@ -1,27 +1,31 @@
 ## A state file that exists but is rejected is reported as such, never as
 ## "neither was present".
 ##
-## The OLD state file `.repro/workspace.toml` (`local.v1`) records the
-## workspace's project and, for a workspace that predates the settings files,
-## its `[[manifest]]` layers (the new `.repro/workspace-state.toml` carries no
-## layers at all — Workspace-Settings-Files.md §5 — so the fixture uses the
-## old file, where a layer is still read until it is migrated). The
-## strict reader rejects a key a recorded layer may not carry — `revision`
-## (a settings-file layer key) or `from_settings` (internal provenance no file
-## may declare) — with a diagnostic that names the file and the key. That
-## diagnostic used to be thrown away twice: the routing probe caught it and
-## answered "no layers", and the single-project ladder caught it again while
-## recovering the recorded project, then reported that the command "requires
-## either `.repro/workspace-state.toml` ... or a <project> argument; neither
-## was present" — about a file that was present.
+## The state file `.repro/workspace-state.toml` (`state.v1`) records the
+## workspace's project. It carries no `[[manifest]]` layers at all
+## (Workspace-Settings-Files.md §5): its strict reader refuses a
+## `[[manifest]]` entry, naming the key `manifest` and the remedy
+## `repro health --fix`, which moves such layers to
+## `repro-workspace.local.toml`. Before that refusal it checks each entry, so
+## an entry carrying a key no recorded layer may carry — `revision` (a
+## settings-file layer key) or `from_settings` (internal provenance no file
+## may declare) — is named by that key. Every one of these is a diagnostic
+## that names the file and the key. Such a diagnostic used to be thrown away
+## twice: the routing probe caught it and answered "no layers", and the
+## single-project ladder caught it again while recovering the recorded
+## project, then reported that the command "requires either
+## `.repro/workspace-state.toml` ... or a <project> argument; neither was
+## present" — about a file that was present.
 ##
 ## The fixture is a real workspace root (`projects/demo.toml` declaring
-## `core`, a real `file://` remote) whose state file carries one rejected key
-## in its `[[manifest]]` entry. For each rejected key, `repro workspace list`
-## and `repro sync --dry-run` (the REAL binary) must exit non-zero with a
+## `core`, a real `file://` remote) whose state file carries a `[[manifest]]`
+## entry. For each rejected key, `repro workspace list` and
+## `repro sync --dry-run` (the REAL binary) must exit non-zero with a
 ## diagnostic naming the state file and `manifest[0].<key>`, and must not say
-## "neither was present". A control run with the key removed resolves `core`,
-## so the failure is the key and nothing else.
+## "neither was present". Two controls bound it: the state file without the
+## entry resolves `core`, and the entry without a rejected key is refused by
+## the `manifest` key itself (with its remedy) and not by `manifest[0].<key>`,
+## so the key-specific diagnostic is about the key and nothing else.
 ##
 ## What each assertion guards: the "names the key" and "never 'neither was
 ## present'" assertions fail when the probe and the ladder swallow the
@@ -70,9 +74,11 @@ proc seedBareRepo(gitBin, scratch, barePath: string) =
   requireSuccess(q(gitBin) & " -C " & q(work) & " commit -q -m fixture")
   requireSuccess(q(gitBin) & " clone -q --bare " & q(work) & " " & q(barePath))
 
+const stateHead = "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+  "[workspace]\nproject = \"demo\"\n"
+
 proc stateText(extraLayerKey: string): string =
-  "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\n" &
-    "project = \"demo\"\n\n[[manifest]]\nlocal_path = \".\"\n" &
+  stateHead & "\n[[manifest]]\nlocal_path = \".\"\n" &
     "visibility = \"public\"\n" & extraLayerKey
 
 suite "a malformed state file is reported accurately":
@@ -93,20 +99,35 @@ suite "a malformed state file is reported accurately":
       writeFile(root / "projects" / "demo.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
         "includes = [\"repos/core.toml\"]\n\n[project]\nname = \"demo\"\n" &
-        "default_revision = \"main\"\ntrunk = \"main\"\n\n[[remote]]\n" &
+        "\n[[remote]]\n" &
         "name = \"acme\"\nfetch = \"" & fileUrl(scratch / "remotes") & "\"\n")
       writeFile(root / "repos" / "core.toml",
         "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
         "name = \"core\"\npath = \"core\"\nremote = \"acme\"\n" &
         "mainline = \"main\"\n")
-      let state = root / ".repro" / "workspace.toml"
+      let state = root / ".repro" / "workspace-state.toml"
 
-      # Control: without a rejected key the recorded project resolves.
-      writeFile(state, stateText(""))
+      # Control: without the layer entry the recorded project resolves.
+      writeFile(state, stateHead)
       let control = runRepro(["workspace", "list", "--workspace-root=" & root])
       checkpoint("control: " & control.stdout & control.stderr)
       require control.code == 0
       require "core" in control.stdout
+
+      # Control: the entry without a rejected key is refused by the
+      # `manifest` key itself, with the remedy — never as "neither was
+      # present", and not as a key it does not carry.
+      writeFile(state, stateText(""))
+      for args in [@["workspace", "list"], @["sync", "--dry-run"]]:
+        let res = runRepro(args & @["--workspace-root=" & root])
+        checkpoint(args.join(" ") & " with a plain layer: exit=" &
+          $res.code & "\nstdout: " & res.stdout & "\nstderr: " & res.stderr)
+        check res.code != 0
+        check "neither was present" notin res.stderr
+        check state in res.stderr
+        check "at key 'manifest'" in res.stderr
+        check "repro health --fix" in res.stderr
+        check "manifest[0]." notin res.stderr
 
       for key in ["revision = \"x\"", "from_settings = true"]:
         let keyName = key.split(" ")[0]

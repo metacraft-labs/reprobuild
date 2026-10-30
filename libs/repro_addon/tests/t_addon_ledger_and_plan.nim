@@ -196,9 +196,9 @@ suite "base matrix, managed kinds and ephemeral sockets":
     check baseMatrixNote("ubuntu", "22.04") == ""
 
   test "a kind the add-on does not manage is refused by name":
-    let p = parseSystemProfile("linux.sysctl {\n  key = \"net.ipv4.ip_forward\"\n  value = \"1\"\n}\n")
+    let p = parseSystemProfile("linux.udevRule {\n  name = \"x.rules\"\n  content = \"\"\n}\n")
     let why = unmanagedKindReason(p.resources[0])
-    check "linux.sysctl" in why and "nothing was applied" in why
+    check "linux.udevRule" in why and "nothing was applied" in why
     let ok = parseSystemProfile("fs.systemFile {\n  path = \"/etc/x\"\n  content = \"y\"\n}\n")
     check unmanagedKindReason(ok.resources[0]) == ""
 

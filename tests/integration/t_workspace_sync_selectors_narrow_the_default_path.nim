@@ -77,7 +77,7 @@ proc seedOrigin(gitBin, originPath, workPath: string): string =
   requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
 
 proc repoFragmentToml(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
@@ -85,7 +85,7 @@ proc repoFragmentToml(name: string): string =
   "revision = \"main\"\n" &
   "url_prefix = \"local\"\n" &
   "url_suffix = \"origin-" & name & ".git\"\n" &
-  "branch = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc repoSetToml(name: string; memberRepos: openArray[string]): string =
   result = "schema = \"reprobuild.workspace.repo-set.v1\"\n\n"
@@ -101,8 +101,7 @@ proc projectToml(project: string; remotes: seq[(string, string)]): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"" & project & "\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "\n"
   for (name, url) in remotes:
     result.add("[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url &
       "\"\n\n")
@@ -321,8 +320,8 @@ suite "repro workspace sync — repo selectors on the default path":
       # A workspace that records its project: the positional is a scope
       # filter over the recorded set.
       createDir(fixture.workspaceRoot / ".repro")
-      writeFile(fixture.workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(fixture.workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"selproject\"\n")
       assertNamesOnly(plannedNames(fixture, @[], @["gamma-tool"]))
       # The spelling the refusal recommends does what was meant.
@@ -359,8 +358,8 @@ suite "repro workspace sync — repo selectors on the default path":
 
       # c) A workspace that records its project in .repro/workspace.toml:
       createDir(fixture.workspaceRoot / ".repro")
-      writeFile(fixture.workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(fixture.workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"selproject\"\n")
 
       let recorded = plannedNames(fixture, @[], @["recorders"])

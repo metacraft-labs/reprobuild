@@ -50,8 +50,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "lib-a"
-default_revision = "main"
-trunk = "main"
 
 [[remote]]
 name = "lib-a-origin"
@@ -68,28 +66,28 @@ includes = [
 """
 
 const libAFragmentTemplate = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 depends = [$1]
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 const workspaceLocalToml = """
-schema = "reprobuild.workspace.local.v1"
+schema = "reprobuild.workspace.state.v1"
 
 [workspace]
 project = "lib-a"
@@ -130,7 +128,7 @@ proc buildFixture(gitBin: string): Fixture =
   createDir(result.workspaceRoot / "projects")
   createDir(result.workspaceRoot / "repos")
   createDir(result.workspaceRoot / ".repro")
-  writeFile(result.workspaceRoot / ".repro" / "workspace.toml",
+  writeFile(result.workspaceRoot / ".repro" / "workspace-state.toml",
     workspaceLocalToml)
   writeFile(result.workspaceRoot / "projects" / "lib-a.toml",
     projectTomlTemplate % [fileUrl(originA), fileUrl(originB)])

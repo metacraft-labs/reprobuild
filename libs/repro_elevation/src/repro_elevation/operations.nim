@@ -348,6 +348,14 @@ type
     pokLinuxAddOnTool = "linux.addOnTool"
       ## A wrapper under `/etc/repro/bin` running a command from a
       ## `package(apt)` closure through the sandbox launcher (§4.1).
+    pokSystemdSystemDropIn = "systemd.systemDropIn"
+      ## A drop-in of a unit the profile does not own:
+      ## `/etc/systemd/system/<unit>.d/50-repro-<name>.conf`, followed by
+      ## `systemctl daemon-reload` (ReproOS Add-On Mode §4.1, `dropIn`).
+    pokLinuxSysusersEntry = "linux.sysusersEntry"
+      ## One sysusers.d(5) fragment, `/etc/sysusers.d/repro-<name>.conf`,
+      ## applied with `systemd-sysusers <file>` (§4.1, `sysusers`). The
+      ## destroy direction removes the fragment and never the account.
     pokInlineExecCall = "reprobuild.inlineExecCall"
       ## Windows-System-Resources Phase E: the cross-cutting privileged
       ## execution of an `inlineExecCall(...)` build-graph edge tagged
@@ -795,6 +803,21 @@ type
       atAptClosureLock*: string
       atProgram*: string
       atDestroy*: bool
+    of pokSystemdSystemDropIn:
+      ## Write `diContent` to `systemDropInPath(diUnit, diName)` and
+      ## `systemctl daemon-reload`. `diDestroy` removes the file (and its
+      ## `.d` directory when that leaves it empty) and reloads.
+      diUnit*: string
+      diName*: string
+      diContent*: string
+      diDestroy*: bool
+    of pokLinuxSysusersEntry:
+      ## Write `seContent` (one rendered sysusers.d line) to
+      ## `sysusersFragmentPath(seName)` and run `systemd-sysusers <file>`.
+      ## `seDestroy` removes the fragment only.
+      seName*: string
+      seContent*: string
+      seDestroy*: bool
     of pokLinuxFhsSandbox:
       ## Launch `fsbBinPath` under bubblewrap with the M0-locked
       ## transparency-posture invocation shape:
@@ -1120,6 +1143,8 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxDpkgDiversion: true
   of pokSystemdUnitState: true
   of pokLinuxAddOnTool: true
+  of pokSystemdSystemDropIn: true
+  of pokLinuxSysusersEntry: true
   of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1190,8 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxDpkgDiversion: pokLinuxDpkgDiversion
   of $pokSystemdUnitState: pokSystemdUnitState
   of $pokLinuxAddOnTool: pokLinuxAddOnTool
+  of $pokSystemdSystemDropIn: pokSystemdSystemDropIn
+  of $pokLinuxSysusersEntry: pokLinuxSysusersEntry
   of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
@@ -2627,6 +2654,24 @@ proc operationValidationError*(op: PrivilegedOperation): string =
         discard parseAptClosureLock(op.atAptClosureLock)
       except EAptClosureLock as ex:
         return "linux.addOnTool '" & op.atCommand & "': " & ex.msg
+  of pokSystemdSystemDropIn:
+    if not isSafeUnitName(op.diUnit) or not hasKnownUnitSuffix(op.diUnit):
+      return "systemd.systemDropIn unit '" & op.diUnit &
+        "' is not a safe unit name with a unit-type suffix"
+    if not isSafeFragmentName(op.diName):
+      return "systemd.systemDropIn name '" & op.diName &
+        "' is not a safe single-segment fragment name"
+  of pokLinuxSysusersEntry:
+    if not isSafePosixUserOrGroupName(op.seName):
+      return "linux.sysusersEntry name '" & op.seName &
+        "' is not a safe account name"
+    if not op.seDestroy:
+      # One line, no second entry smuggled in: the fragment is exactly
+      # the entry the profile declared.
+      let body = op.seContent.strip(leading = false, chars = {'\n'})
+      if '\n' in body or body.len == 0 or body[0] notin {'u', 'g'}:
+        return "linux.sysusersEntry '" & op.seName &
+          "' content is not one sysusers.d entry line"
   of pokLinuxFhsSandbox:
     # `fsbBinPath` must be a POSIX absolute path (leading `/`). The
     # driver does NOT canonicalize — `..` collapse / symlink resolve

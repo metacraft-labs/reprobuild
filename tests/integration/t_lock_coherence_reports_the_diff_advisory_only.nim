@@ -114,19 +114,18 @@ proc projectToml(aUrl, bUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"dev\"\n" &
-  "trunk = \"dev\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
   "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n"
 
 proc repoToml(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"dev\"\n"
+  "mainline = \"dev\"\n"
 
 proc depInline(name, path, revision: string): string =
   "{ name = \"" & name & "\", path = \"" & path & "\", coord_kind = \"vcs\"" &
@@ -180,8 +179,8 @@ proc setupFixture(gitBin, slug: string): Fixture =
   # ``check`` needs either a project positional (it has none) or the workspace
   # metadata marker; the marker also gives sync/status a recorded branch.
   createDir(workspaceRoot / ".repro")
-  writeFile(workspaceRoot / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n" &
+  writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n" &
     "[workspace]\n" &
     "project = \"myproject\"\n" &
     "branch = \"dev\"\n")

@@ -11,8 +11,8 @@
 ##   3. Schema-version mismatch — a TOML whose `schema` value is a
 ##      version this repro does not read (`reprobuild.workspace.repo.v3`)
 ##      raises `WorkspaceManifestParseError` with `keyPath = "schema"`,
-##      `expectedSchema = "reprobuild.workspace.repo.v2"` (the current
-##      schema; v1 is still read), and
+##      `expectedSchema = "reprobuild.workspace.repo.v2"` (the only
+##      schema this repro reads; the retired `repo.v1` is refused), and
 ##      `observedSchema = "reprobuild.workspace.repo.v3"`.
 ##   4. Missing required key — a TOML that omits `repo.path` raises
 ##      `WorkspaceManifestParseError` whose `keyPath` names the missing key.
@@ -29,22 +29,24 @@ import repro_workspace_manifests
 import repro_test_support/process_fixtures
 
 const happyToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "reprobuild"
 path = "reprobuild"
 remote = "metacraft-labs"
-revision = "main"
+mainline = "main"
+revision = "v1.2.3"
 vcs = "git"
 stability = "tracked"
 """
 
 const unknownKeyToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 garbage = "bogus"
 
 [repo]
+mainline = "main"
 name = "x"
 path = "y"
 """
@@ -58,16 +60,18 @@ path = "y"
 """
 
 const missingPathToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "x"
 """
 
 const extensionsToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "x"
 path = "y"
 
@@ -85,9 +89,10 @@ future_key = "forward-compat"
 # ``t_workspace_membership_model_retired_names_fail_as_unknown.nim``;
 # this fixture is the round-trip of the CURRENT one.
 const ra18Toml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "lib"
 path = "lib"
 tags = ["default", "tools"]
@@ -110,13 +115,16 @@ suite "M5 — RepoFragment round-trip":
   test "happy path populates every documented field":
     let path = writeFixture(dir, "repo-happy.toml", happyToml)
     let r = readRepoFragment(path)
-    check r.schema == "reprobuild.workspace.repo.v1"
+    check r.schema == "reprobuild.workspace.repo.v2"
     check r.repo.name == "reprobuild"
     check r.repo.path == "reprobuild"
     check r.repo.remote.isSome
     check r.repo.remote.get() == "metacraft-labs"
+    check r.repo.mainline.isSome
+    check r.repo.mainline.get() == "main"
+    # A revision is an optional pin beside the mainline, and round-trips too.
     check r.repo.revision.isSome
-    check r.repo.revision.get() == "main"
+    check r.repo.revision.get() == "v1.2.3"
     check r.repo.vcs.isSome
     check r.repo.vcs.get() == "git"
     check r.repo.stability.isSome
@@ -131,7 +139,7 @@ suite "M5 — RepoFragment round-trip":
       raised = true
       check e.path == path
       check e.keyPath == "garbage"
-      check e.expectedSchema == "reprobuild.workspace.repo.v1"
+      check e.expectedSchema == "reprobuild.workspace.repo.v2"
     check raised
 
   test "schema-version mismatch surfaces expected/observed pair":
@@ -156,7 +164,7 @@ suite "M5 — RepoFragment round-trip":
       raised = true
       check e.path == path
       check e.keyPath == "repo.path"
-      check e.expectedSchema == "reprobuild.workspace.repo.v1"
+      check e.expectedSchema == "reprobuild.workspace.repo.v2"
     check raised
 
   test "[extensions] table is allowed through strict mode":

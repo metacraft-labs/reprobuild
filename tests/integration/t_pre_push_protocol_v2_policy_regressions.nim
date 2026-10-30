@@ -143,27 +143,27 @@ proc setup(gitBin: string): Fixture =
   let manifests = result.workspace / ".repro" / "manifests"
   createDir(manifests / "projects")
   createDir(manifests / "repos")
-  writeFile(result.workspace / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.workspace / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
   writeFile(manifests / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n" &
     "[[remote]]\nname = \"app-origin\"\nfetch = \"" &
       result.appOrigin.replace('\\', '/') & "\"\n\n" &
     "[[remote]]\nname = \"dep-origin\"\nfetch = \"" &
       result.depOrigin.replace('\\', '/') & "\"\n\n" &
     "includes = [\"repos/app.toml\", \"repos/dep.toml\"]\n")
   writeFile(manifests / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"app-origin\"\nrevision = \"main\"\n" &
+    "remote = \"app-origin\"\nmainline = \"main\"\n" &
     "depends = [\"dep\"]\n")
   writeFile(manifests / "repos" / "dep.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"dep\"\npath = \"dep\"\n" &
-    "remote = \"dep-origin\"\nrevision = \"main\"\n")
+    "remote = \"dep-origin\"\nmainline = \"main\"\n")
   let ensured = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
     "--vcs", "--workspace-root=" & result.workspace, result.workspace]))
   if ensured.code != 0:
@@ -330,7 +330,7 @@ proc manifestProject(name: string; remotes: seq[(string, string)];
     string =
   result = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"" & name &
-    "\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n"
+    "\"\n\n"
   for remote in remotes:
     result.add("[[remote]]\nname = \"" & remote[0] & "\"\nfetch = \"" &
       remote[1].replace('\\', '/') & "\"\n\n")
@@ -341,9 +341,9 @@ proc manifestProject(name: string; remotes: seq[(string, string)];
   result.add("]\n")
 
 proc manifestRepo(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" &
     name & "\"\npath = \"" & name & "\"\nremote = \"" & remote &
-    "\"\nrevision = \"main\"\n"
+    "\"\nmainline = \"main\"\n"
 
 proc seedManifestLayer(gitBin, layer, bare: string;
     files: openArray[(string, string)]) =
@@ -723,8 +723,12 @@ suite "pre-push protocol v2 policy regressions":
       let secretSha = bareHead(gitBin, secretOrigin)
 
       createDir(workspace / ".repro")
-      let publicLayer = workspace / ".repro" / "manifests-public"
-      let privateLayer = workspace / ".repro" / "manifests-private"
+      # Both layers are checkouts inside the workspace directory but outside
+      # `.repro/` (Workspace-Settings-Files.md §4 forbids a layer there): the
+      # public one shared in `repro-workspace.toml`, the private one one
+      # person's in `repro-workspace.local.toml`. The root is the base layer.
+      let publicLayer = workspace / "manifests-public"
+      let privateLayer = workspace / "manifests-private"
       let publicBare = scratch / "manifests-public.git"
       let privateBare = scratch / "manifests-private.git"
       seedManifestLayer(gitBin, publicLayer, publicBare, [
@@ -739,11 +743,15 @@ suite "pre-push protocol v2 policy regressions":
           ("secret-origin", secretOrigin)], @["repos/secret.toml"])),
         ("repos/secret.toml", manifestRepo("secret", "secret-origin")),
       ])
-      writeFile(workspace / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"app\"\nbranch = \"main\"\n\n" &
+      writeFile(workspace / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+        "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
+      writeFile(workspace / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
         "[[manifest]]\nlocal_path = \"" &
-          publicLayer.replace('\\', '/') & "\"\nvisibility = \"public\"\n\n" &
+          publicLayer.replace('\\', '/') & "\"\nvisibility = \"public\"\n")
+      writeFile(workspace / "repro-workspace.local.toml",
+        "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
         "[[manifest]]\nlocal_path = \"" &
           privateLayer.replace('\\', '/') & "\"\nvisibility = \"private\"\n")
       for repo in [(appOrigin, workspace / "app"),

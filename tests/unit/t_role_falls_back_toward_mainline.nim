@@ -98,14 +98,13 @@ suite "role_falls_back_toward_mainline":
       check project.defaultWorkspaceBranch == expected
       check project.repo("core").branch == "member-mainline"
 
-      # Explicit trunk is retained in the source-facing field and overrides
-      # the root for every consumer of the effective workspace default.
+      # The project cannot override it: `[project] trunk` is retired and
+      # refused naming its replacement, so the root's mainline is the only
+      # source of the workspace default.
       let path = fx.projectFile()
       writeFile(path, readFile(path) & "trunk = \"legacy-trunk\"\n")
-      let legacy = resolveProject(path)
-      check legacy.workspaceMainline == expected
-      check legacy.trunk == "legacy-trunk"
-      check legacy.defaultWorkspaceBranch == "legacy-trunk"
+      expect WorkspaceManifestParseError:
+        discard resolveProject(path)
 
   test "repo sets and variants carry the same root workspace default":
     var fx = newRolesFixture("repro-workspace-default-forms-")
@@ -138,7 +137,6 @@ suite "role_falls_back_toward_mainline":
       manifest: @[ManifestLayer(local_path: some(fx.root), visibility: "public"),
                   ManifestLayer(local_path: some(layer.root), visibility: "public")])
     let composed = composeManifestLayers(local, fx.root)
-    check composed.trunk == ""
     # Mutation control: removing only the composer's workspaceMainline copy
     # fails these default assertions while both member mainlines remain valid.
     check composed.workspaceMainline == "root-dev"

@@ -48,6 +48,21 @@
 ##                                            ``lstat``s the components of
 ##                                            a target path (a link on it
 ##                                            goes unnoticed)
+## ``exclusive-as-plain-restart``             an ``exclusive`` unit is
+##                                            restarted like any other
+##                                            (new instance started, then
+##                                            the old one stopped) instead
+##                                            of stopped and confirmed
+##                                            before the switch
+## ``sysctl-in-apply-namespace``              sysctl fragments are applied
+##                                            by running systemd-sysctl in
+##                                            the apply's own namespaces
+##                                            instead of restarting the
+##                                            host's systemd-sysctl.service
+## ``path-based-write-follows-links``         the drivers write managed
+##                                            files with a path-based
+##                                            ``open``, following any link
+##                                            on the path
 ## =========================================  ==============================
 
 const
@@ -58,7 +73,10 @@ const
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",
-                          "observer-checks-path-text-only"]
+                          "observer-checks-path-text-only",
+                          "exclusive-as-plain-restart",
+                          "sysctl-in-apply-namespace",
+                          "path-based-write-follows-links"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

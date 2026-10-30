@@ -47,11 +47,11 @@ suite "manifest editor edge cases":
 
   test "a missing top-level array follows the last top-level key":
     let src = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-      "[project]\nname = \"p\"\ntrunk = \"main\"\n"
+      "[project]\nname = \"p\"\n"
     let got = edited(src, proc (d: var ManifestDoc) =
       check d.addArrayMember("", "member_repos", "a"))
     check got == "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-      "member_repos = [\n  \"a\",\n]\n\n[project]\nname = \"p\"\ntrunk = \"main\"\n"
+      "member_repos = [\n  \"a\",\n]\n\n[project]\nname = \"p\"\n"
 
   test "the key-order rule holds for a scalar top-level key too":
     let src = "[project]\nname = \"p\"\n"
@@ -61,8 +61,8 @@ suite "manifest editor edge cases":
     check got.find("schema") < got.find("[project]")
 
   test "a key of the same name in a later table is not the top-level key":
-    let src = "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-      "[repo]\nname = \"r\"\npath = \"r\"\ndepends = [\"x\"]\n"
+    let src = "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+      "[repo]\nmainline = \"main\"\nname = \"r\"\npath = \"r\"\ndepends = [\"x\"]\n"
     var doc = manifestDocFromText(src)
     check not doc.hasKey("", "name")
     check not doc.hasKey("", "depends")
@@ -256,26 +256,26 @@ suite "manifest editor edge cases":
     let dir = createTempDir("repro-editor-render-", "")
     defer: removeDir(dir)
 
-    let fragment = RepoFragment(schema: schemaRepoFragmentV1, repo: RepoBody(
+    let fragment = RepoFragment(repo: RepoBody(
       name: "llvm-project", path: "refs/llvm-project",
       url_prefix: some("github"), url_suffix: some("llvm/llvm-project"),
-      branch: some("main"), tags: @["refs"], depends: @["mold"],
+      mainline: some("main"), tags: @["refs"], depends: @["mold"],
       copyfile: @[CopyLinkFileEntry(src: "a", dest: "b")]))
     writeWorkspaceManifestFile(dir / "repos" / "llvm-project.toml",
       repoFragmentText(fragment))
     let f = readRepoFragment(dir / "repos" / "llvm-project.toml")
     check f.repo.name == "llvm-project"
     check f.repo.url_suffix == some("llvm/llvm-project")
-    # Nothing here needs repo.v2, so the writer keeps v1 and `branch`.
-    check f.schema == schemaRepoFragmentV1
-    check f.repo.branch == some("main")
-    check f.repo.mainline.isNone
+    # The writer emits the one fragment schema, the mainline as `mainline`.
+    check f.schema == schemaRepoFragmentV2
+    check f.repo.mainline == some("main")
+    check "\nbranch = " notin readFile(dir / "repos" / "llvm-project.toml")
     check f.repo.tags == @["refs"]
     check f.repo.depends == @["mold"]
     check f.repo.copyfile.len == 1 and f.repo.copyfile[0].dest == "b"
 
     let project = ProjectManifest(schema: schemaProjectManifestV1,
-      project: ProjectBody(name: "p", trunk: some("main")),
+      project: ProjectBody(name: "p"),
       member_repos: @["a"],
       remote: @[RemoteEntry(name: "origin", fetch: "https://x")],
       binary_dependency: @[BinaryDependencyEntry(name: "zlib",
@@ -287,7 +287,8 @@ suite "manifest editor edge cases":
     check p.remote.len == 1 and p.remote[0].fetch == "https://x"
     check p.binary_dependency.len == 1
     check p.binary_dependency[0].revision == some("v1")
-    check p.project.trunk == some("main")
+    # A project names no branch: the renderer emits no retired key.
+    check "trunk" notin readFile(dir / "p.toml")
 
     # The settings file is written only as settings.v1 (repro-workspace.toml);
     # the old bootstrap.v1 renderer is gone.
@@ -310,12 +311,15 @@ suite "manifest editor edge cases":
     check b.locking.route.len == 1
     check b.locking.route[0].repos == @["a", "b"]
 
-    var local = WorkspaceLocal(schema: schemaWorkspaceLocalV1)
+    # The record's own schema is ignored: the state file is always written as
+    # state.v1.
+    var local = WorkspaceLocal(schema: "reprobuild.workspace.local.v1")
     local.workspace.project = "a"
     local.workspace.projects = @["a", "b"]
     local.workspace.branch = some("feature/x")
     writeWorkspaceManifestFile(dir / "state.toml", workspaceStateText(local))
     let st = readWorkspaceLocal(dir / "state.toml")
+    check st.schema == schemaWorkspaceStateV1
     check st.workspace.projects == @["a", "b"]
     check st.workspace.branch == some("feature/x")
     check st.manifest.len == 0
@@ -328,22 +332,21 @@ suite "manifest editor edge cases":
 
   test "the renderers reproduce the layouts the CLI stubs used to write":
     check repoFragmentText(RepoFragment(repo: RepoBody(name: "r", path: "r",
-      remote: some("origin"), revision: some("main")))) ==
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"r\"\n" &
-      "path = \"r\"\nremote = \"origin\"\nrevision = \"main\"\n"
+      remote: some("origin"), mainline: some("main")))) ==
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"r\"\n" &
+      "path = \"r\"\nremote = \"origin\"\nmainline = \"main\"\n"
     check urlPrefixText(UrlPrefixManifest(`url-prefix`: UrlPrefixBody(
       name: "gh", url: "https://github.com/o"))) ==
       "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n[url-prefix]\n" &
       "name = \"gh\"\nurl = \"https://github.com/o\"\n"
-    check projectManifestText(ProjectManifest(project: ProjectBody(name: "p",
-      trunk: some("main")))) ==
+    check projectManifestText(ProjectManifest(project: ProjectBody(name: "p"))) ==
       "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\n" &
-      "name = \"p\"\ntrunk = \"main\"\n"
-    check projectManifestText(ProjectManifest(project: ProjectBody(name: "p",
-      trunk: some("main")), member_sets: @["s"])) ==
+      "name = \"p\"\n"
+    check projectManifestText(ProjectManifest(project: ProjectBody(name: "p"),
+      member_sets: @["s"])) ==
       "schema = \"reprobuild.workspace.project.v1\"\n\n" &
       "member_sets = [\n  \"s\",\n]\n\nmember_repos = [\n]\n\n" &
-      "[project]\nname = \"p\"\ntrunk = \"main\"\n"
+      "[project]\nname = \"p\"\n"
     # A new repo-set's arrays now sit ABOVE its identity table, as the
     # key-order rule asks and as every repo-set in the metacraft manifest
     # repo is laid out.

@@ -56,8 +56,6 @@ suite "health forge repository identities":
       var project = """schema = "reprobuild.workspace.project.v1"
 [project]
 name = "fixture"
-default_revision = "main"
-trunk = "main"
 [[remote]]
 name = "origin"
 fetch = "https://github.com/"
@@ -77,14 +75,14 @@ includes = [INCLUDES]
           "schema = \"reprobuild.workspace.url-prefix.v1\"\n[url-prefix]\nname = " &
           $(%prefixName) & "\nurl = " & $(%base) & "\n")
         includes.add("\"repos/" & name & ".toml\"")
-        writeFile(ws / "repos" / (name & ".toml"), """schema = "reprobuild.workspace.repo.v1"
+        writeFile(ws / "repos" / (name & ".toml"), """schema = "reprobuild.workspace.repo.v2"
 [repo]
 name = "NAME"
 path = "NAME"
 remote = "origin"
 url_prefix = "PREFIX"
 url_suffix = "SUFFIX"
-revision = "main"
+mainline = "main"
 """.replace("NAME", name).replace("PREFIX", prefixName).replace("SUFFIX", suffix))
       writeFile(ws / "projects/fixture.toml", project.replace("INCLUDES", includes.join(", ")))
     proc invoke(extra = ""; useTools = true): string =

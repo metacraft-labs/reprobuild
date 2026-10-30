@@ -136,8 +136,8 @@ proc prepareCase(): LockCase =
   try:
     result.workspaceRoot = result.tempRoot / "ws"
     createDir(result.workspaceRoot / ".repro")
-    writeFile(result.workspaceRoot / ".repro" / "workspace.toml",
-      "schema = \"reprobuild.workspace.local.v1\"\n" &
+    writeFile(result.workspaceRoot / ".repro" / "workspace-state.toml",
+      "schema = \"reprobuild.workspace.state.v1\"\n" &
       "\n[workspace]\nproject = \"uprlock-integration\"\n")
     result.ownerProject = result.workspaceRoot / OwnerPackage
     result.consumerProject = result.workspaceRoot / ConsumerPackage

@@ -100,7 +100,7 @@ suite "the local settings file enters the managed exclude block":
       createDir(root / "projects")
       writeFile(root / "projects" / "demo.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\n" &
-        "name = \"demo\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n")
+        "name = \"demo\"\n")
       writeFile(root / ".gitignore", ".repro/\nworkspace-projects.md\n")
       requireGit(gitBin, root, "init -q -b main")
       requireGit(gitBin, root, "config user.email tester@example.invalid")

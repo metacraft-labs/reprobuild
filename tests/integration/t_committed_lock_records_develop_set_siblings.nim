@@ -120,9 +120,9 @@ proc seedPublished(gitBin, scratch, workspace, name: string): string =
   origin
 
 proc fragment(name: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+    "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
   if depends.len > 0:
     result.add("depends = [")
     for i, d in depends:
@@ -174,8 +174,8 @@ suite "the committed lock records the develop-set siblings":
       createDir(workspace / "projects")
       createDir(workspace / "repos")
       var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n"
+        "[project]\nname = \"app\"\n" &
+        "\n"
       for (name, origin) in origins:
         project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
           fileUrl(origin) & "\"\n\n")
@@ -287,8 +287,8 @@ suite "the committed lock records the develop-set siblings":
     createDir(workspace / "projects")
     createDir(workspace / "repos")
     var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-      "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-      "trunk = \"main\"\n\n"
+      "[project]\nname = \"app\"\n" &
+      "\n"
     for (name, origin) in origins:
       project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
         fileUrl(origin) & "\"\n\n")
@@ -520,18 +520,15 @@ suite "the committed lock records the develop-set siblings":
     createDir(layer)
     for name in [".git", "projects", "repos"]:
       moveDir(workspace / name, layer / name)
-    # The layer is recorded the way a workspace from before the settings
-    # files recorded it: in the OLD state file (`local.v1`), the only state
-    # file that may carry layers (Workspace-Settings-Files.md §5). Its layer
-    # indexes — and so the url layer's placement below — are the ones that
-    # file always gave them.
-    let stateNow = workspaceTomlPath(workspace)
-    let state = legacyWorkspaceStatePath(workspace)
-    writeFile(state, readFile(stateNow).replace(
-      "reprobuild.workspace.state.v1", "reprobuild.workspace.local.v1") &
-      "\n[[manifest]]\nlocal_path = \"" & layer.replace('\\', '/') &
+    # The layer is declared where layers live: the workspace's local settings
+    # file (Workspace-Settings-Files.md §4). The root repository is always the
+    # base layer (index 0), so this layer is index 1 — which fixes the url
+    # layer's placement below.
+    let state = workspace / "repro-workspace.local.toml"
+    writeFile(state,
+      "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+      "[[manifest]]\nlocal_path = \"" & layer.replace('\\', '/') &
       "\"\nvisibility = \"public\"\n")
-    removeFile(stateNow)
     writeFile(app / "repro.lock", original)
     discard requireGit(q(gitBin) & " -C " & q(app) & " add repro.lock")
     discard requireGit(q(gitBin) & " -C " & q(app) & " commit -qm wider-lock")
@@ -548,7 +545,7 @@ suite "the committed lock records the develop-set siblings":
     # An already-acquired URL layer uses the composer's standard placement.
     # Its unusable URL makes accidental fetch/clone attempts fail visibly.
     let layerUrl = "https://invalid.example/manifests.git"
-    let urlLayer = workspace / ".repro/manifests-0-https-invalid.example-manifests.git"
+    let urlLayer = workspace / ".repro/manifests-1-https-invalid.example-manifests.git"
     moveDir(layer, urlLayer)
     writeFile(state, readFile(state).replace(
       "local_path = \"" & layer.replace('\\', '/') & "\"",
@@ -611,7 +608,7 @@ package app:
     createDir(workspace / "repos")
     writeFile(workspace / "projects/app.toml",
       "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-      "[project]\nname = \"app\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+      "[project]\nname = \"app\"\n\n" &
       "[[remote]]\nname = \"app-origin\"\nfetch = \"" & fileUrl(appOrigin) & "\"\n\n" &
       "[[remote]]\nname = \"catalog-y-origin\"\nfetch = \"" & fileUrl(catalogOrigin) & "\"\n\n" &
       "includes = [\"repos/app.toml\", \"repos/catalog-y.toml\"]\n")

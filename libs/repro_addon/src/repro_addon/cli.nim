@@ -14,9 +14,13 @@
 ##                                [--expect <file>]
 ##   repro system addon expected-delta <before-ledger|-> <after-ledger>
 ##   repro system addon ledger
+##   repro system addon retention [--keep-generations N] [--keep-days D]
+##   repro system addon selfcheck-write <path>
 ##   repro system adopt <address> --profile <file>
 ##   repro infra plan --profile <file>
 ##   repro infra apply --profile <file> [--reconcile-drift]
+##                                [--keep-generations N] [--keep-days D]
+##   repro store gc [--grace-seconds N] | roots | list
 ##
 ## Exit status: 0 success; 1 failure, drift or a non-empty diff; 2 a usage
 ## error or a refusal decided before anything was written (an incompatible
@@ -30,14 +34,21 @@ import repro_infra
 
 import repro_infra/addon_diagnostics
 
+import repro_elevation
+import repro_elevation/posix_system_driver
+import repro_local_store/store as local_store
+
 import ./addon_apply
 import ./bootstrap
 import ./collision
 import ./fingerprint
+import ./generation0
 import ./ledger
 import ./linux_fs
 import ./preflight
+import ./static_tree
 import ./store_root
+import ./switch
 import ./uninstall
 import ./verify
 
@@ -61,19 +72,32 @@ commands:
   ledger
       Print the current ownership ledger.
   status
-      The current generation, the generations held as store roots, and the
-      store root's kind.
+      The current generation, the generations held as store roots, the
+      static tree and the pending switch marker, and the store root's kind.
+  retention [--keep-generations N] [--keep-days D]
+      Release the store roots of generations outside the policy now (the
+      current and the previous generation are always kept); default last
+      5 generations or 30 days, whichever retains more.
   selfcheck-btrfs <mount point>
       Create and delete a btrfs subvolume under a btrfs mount the way the
       store root is created on a btrfs root (a test of that leg).
+  selfcheck-write <path>
+      Write a managed file at <path> through the system-file driver exactly
+      as the switch does, with no plan and no collision pass: a test of
+      the writer's refusal to follow a symbolic link on the path.
 
 related (add-on hosts):
   repro system adopt <address> --profile <file>
       Claim the object a declared resource targets as it is, writing nothing.
   repro infra plan --profile <file>
-      The ledger diff and collision report of applying <file>; writes nothing.
+      The ledger diff, collision report and service transition list of
+      applying <file>; writes nothing.
   repro infra apply --profile <file> [--reconcile-drift]
-      Apply an add-on generation.
+                    [--keep-generations N] [--keep-days D]
+      Apply an add-on generation through the switch.
+  repro store gc [--grace-seconds N] | roots | list
+      Collect store prefixes no root holds (never one the current or the
+      previous generation holds); list the roots or the prefixes.
 """
 
   FingerprintUsage* = """usage: repro-addon-fingerprint [--root R] [--no-live] [--out F]
@@ -152,6 +176,30 @@ proc runFingerprintCli*(args: seq[string]): int =
   except CatchableError as e:
     stderr.write("repro-addon-fingerprint: " & e.msg & "\n")
     1
+
+proc previousGenerationOf*(stateDir, current: string): string =
+  ## The generation `current` succeeded (its envelope's predecessor), ""
+  ## for generation 0.
+  if current.len == 0: return ""
+  try:
+    readGenerationEnvelope(pointerPath(stateDir, current)).previousGenerationId
+  except CatchableError:
+    ""
+
+proc selfcheckManagedWrite*(path: string): string =
+  ## Exercise the system-file driver's write at ``path`` the way the
+  ## switch's copy step does (``applyFsSystemFile`` with the add-on's
+  ## policy, a copy): no plan, no collision pass, so a link planted on the
+  ## path meets the WRITER's own refusal. Returns a one-line report;
+  ## raises on refusal (``EProtocol`` naming the link) or failure.
+  let op = PrivilegedOperation(kind: pokFsSystemFile,
+    address: "selfcheck:" & path, sfPath: path,
+    sfContent: "repro-addon selfcheck-write\n")
+  let policy: AddOnDispatchPolicy = proc(op: PrivilegedOperation):
+      AddOnMaterialisation {.gcsafe.} =
+    AddOnMaterialisation(orchestrated: true)
+  let post = applyFsSystemFile(FixtureContext(addOn: policy), op)
+  "wrote " & path & " (digest " & post.digestHex[0 ..< 12] & ")"
 
 proc runAddonCli*(args: seq[string]): int =
   ## Dispatch ``repro system addon <args>``.
@@ -257,9 +305,17 @@ proc runAddonCli*(args: seq[string]): int =
     of "status":
       # What an operator (and the store-roots gate) needs to see: the
       # current generation, every generation registered as a store root,
-      # and what kind of thing /repro is.
+      # the static tree and any pending switch, and what kind of thing
+      # /repro is.
       let current = readCurrentGenerationId(DefaultStateDir)
       stdout.write("current generation: " & current & "\n")
+      stdout.write("static tree: " &
+        (if readStaticTarget().len > 0: readStaticTarget() else: "none") & "\n")
+      if hasPendingMarker(DefaultStateDir):
+        let m = readPendingMarker(DefaultStateDir)
+        stdout.write("pending switch: " & m.status & " at step " & $m.step &
+          " (from " & m.fromGeneration & " to " & m.newStatic & ")" &
+          (if m.detail.len > 0: ": " & m.detail else: "") & "\n")
       stdout.write("store root: " & ReproRoot & " " &
         (if not dirExists(ReproRoot): "absent"
          elif isBtrfsSubvolume(ReproRoot): "btrfs-subvolume" else: "dir") &
@@ -275,6 +331,31 @@ proc runAddonCli*(args: seq[string]): int =
         raise newException(ValueError, "selfcheck-btrfs needs a btrfs mount point")
       stdout.write(selfcheckBtrfsSubvolume(rest[0]) & "\n")
       return 0
+    of "selfcheck-write":
+      if rest.len != 1:
+        raise newException(ValueError, "selfcheck-write needs a path")
+      stdout.write(selfcheckManagedWrite(rest[0]) & "\n")
+      return 0
+    of "retention":
+      var policy = DefaultRetention
+      var i = 0
+      while i < rest.len:
+        let a = rest[i]
+        if a == "--keep-generations" or a.startsWith("--keep-generations="):
+          policy.keepGenerations = parseInt(takeValue(rest, i, "--keep-generations"))
+        elif a == "--keep-days" or a.startsWith("--keep-days="):
+          policy.keepDays = parseInt(takeValue(rest, i, "--keep-days"))
+        else:
+          raise newException(ValueError, "unknown option " & a)
+        inc i
+      let current = readCurrentGenerationId(DefaultStateDir)
+      let previous = previousGenerationOf(DefaultStateDir, current)
+      let dropped = pruneGenerationRoots(current, previous, policy)
+      stdout.write("kept: " & current & " (current)" &
+        (if previous.len > 0: ", " & previous & " (previous)" else: "") & "\n")
+      stdout.write("released store roots (" & $dropped.len & "):\n")
+      for g in dropped: stdout.write("  " & g & "\n")
+      return 0
     else:
       raise newException(ValueError, "unknown command " & cmd)
   except ValueError as e:
@@ -285,9 +366,73 @@ proc runAddonCli*(args: seq[string]): int =
     return 1
 
 proc renderAddonSections*(r: AddonApplyResult): string =
-  ## The add-on's plan sections (spec §7.1): the ledger diff and the
-  ## collision report. (The service transition list is A4's.)
-  renderLedgerDiff(r) & renderCollisionReport(r.collisions)
+  ## The add-on's plan sections (spec §7.1): the ledger diff, the
+  ## collision report and the service transition list; after an apply,
+  ## the sysctl values observed from the host's namespaces too.
+  result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
+    renderTransitions(r.transitions)
+  if r.staticTree.len > 0:
+    result.add("static tree: " & r.staticTree & "\n")
+  if r.sysctlObserved.len > 0:
+    result.add("sysctl observed (host namespaces):\n")
+    for (k, v) in r.sysctlObserved:
+      result.add("  " & k & "\t" & v & "\n")
+
+proc runAddonStoreCli*(args: seq[string]): int =
+  ## ``repro store gc | roots | list`` on the add-on's system-scope store:
+  ## the same ``repro_local_store`` collector the full engine's ``repro
+  ## store gc`` runs (the engine's extra, re-deriving pin roots from
+  ## project locks, has nothing to re-derive here: an add-on host has no
+  ## project locks). Roots decide what survives; the retention policy
+  ## keeps the current and the previous generation's roots whatever is
+  ## asked (spec §5.2).
+  if args.len == 0 or args[0] in ["-h", "--help"]:
+    stdout.write("usage: repro store gc [--grace-seconds N] | roots | list\n")
+    return (if args.len == 0: 2 else: 0)
+  try:
+    enterWritableStoreView()
+    var s = openStore(StoreRoot)
+    defer: s.close()
+    case args[0]
+    of "gc":
+      var grace = DefaultGcGraceSeconds
+      var i = 1
+      while i < args.len:
+        let a = args[i]
+        if a == "--grace-seconds" or a.startsWith("--grace-seconds="):
+          grace = parseInt(takeValue(args, i, "--grace-seconds"))
+        else:
+          raise newException(ValueError, "unknown option " & a)
+        inc i
+      let report = s.gc(graceSeconds = grace)
+      stdout.write("repro store gc: store-root=" & StoreRoot & "\n")
+      stdout.write("quarantined: " & $report.quarantined.len & "\n")
+      for row in report.quarantined:
+        stdout.write("  - " & row.adapter & " " & row.packageName & " " &
+          row.version & " " & row.realizedPath & "\n")
+      stdout.write("reclaimed: " & $report.reclaimed.len & "\n")
+      for path in report.reclaimed:
+        stdout.write("  - " & path & "\n")
+      return 0
+    of "roots":
+      stdout.write("repro store roots: store-root=" & StoreRoot & "\n")
+      for row in s.listRoots():
+        stdout.write("  - " & row.rootId & " (" & row.kind & ")\n")
+      return 0
+    of "list":
+      stdout.write("repro store list: store-root=" & StoreRoot & "\n")
+      for row in s.listPrefixes():
+        stdout.write("  - " & row.adapter & " " & row.packageName & " " &
+          row.version & " " & row.realizedPath & "\n")
+      return 0
+    else:
+      raise newException(ValueError, "unknown store command " & args[0])
+  except ValueError as e:
+    stderr.write("repro store: " & e.msg & "\n")
+    return 2
+  except CatchableError as e:
+    stderr.write("repro store " & args[0] & ": " & e.msg & "\n")
+    return 1
 
 proc runAddonGeneration(verb: string; args: seq[string];
                         planOnly: bool; adopt: seq[string] = @[]): int =
@@ -299,6 +444,7 @@ proc runAddonGeneration(verb: string; args: seq[string];
   ## that failed or left actionable drift, 0 otherwise.
   var profile = ""
   var reconcile = false
+  var retention: RetentionPolicy
   var i = 0
   try:
     while i < args.len:
@@ -307,6 +453,10 @@ proc runAddonGeneration(verb: string; args: seq[string];
         profile = takeValue(args, i, "--profile")
       elif a == "--reconcile-drift" or a == "--accept-drift":
         reconcile = true
+      elif a == "--keep-generations" or a.startsWith("--keep-generations="):
+        retention.keepGenerations = parseInt(takeValue(args, i, "--keep-generations"))
+      elif a == "--keep-days" or a.startsWith("--keep-days="):
+        retention.keepDays = parseInt(takeValue(args, i, "--keep-days"))
       elif a == "--no-preview":
         discard          # an add-on apply always converges without preview
       else:
@@ -320,7 +470,8 @@ proc runAddonGeneration(verb: string; args: seq[string];
         "`repro system addon bootstrap` first")
     let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
       hostIdentity: readHostname(), userProfileText: readFile(profile),
-      reconcileDrift: reconcile, adoptAddresses: adopt, planOnly: planOnly))
+      reconcileDrift: reconcile, adoptAddresses: adopt, planOnly: planOnly,
+      retention: retention))
     stdout.write(renderAddonSections(r))
     if planOnly:
       stdout.write("plan only: nothing was written\n")
@@ -329,6 +480,9 @@ proc runAddonGeneration(verb: string; args: seq[string];
       r.previousGenerationId & "): applied " & $r.infra.appliedCount &
       ", no-op " & $r.infra.noOpCount & ", removed " & $r.removed.len &
       ", restored " & $r.restored.len & "\n")
+    if r.retentionDropped.len > 0:
+      stdout.write("retention released the store roots of: " &
+        r.retentionDropped.join(", ") & "\n")
     for a in adopt:
       var found = false
       for c in r.collisions:

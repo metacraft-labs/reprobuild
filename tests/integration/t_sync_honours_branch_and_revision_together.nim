@@ -81,19 +81,19 @@ proc seedOrigin(gitBin, originPath, workPath: string): string =
 
 proc writeFragment(workspaceRoot, name, remote, branch, revision: string) =
   writeFile(workspaceRoot / "repos" / (name & ".toml"),
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & remote & "\"\n" &
-    (if branch.len > 0: "branch = \"" & branch & "\"\n" else: "") &
+    (if branch.len > 0: "mainline = \"" & branch & "\"\n" else: "") &
     (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
 
 proc writeProject(workspaceRoot, remoteName, fetchUrl: string;
                   includes: openArray[string]) =
   var body = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"vendored\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"vendored\"\n" &
+    "\n" &
     "[[remote]]\nname = \"" & remoteName & "\"\nfetch = \"" & fetchUrl &
     "\"\n\n" &
     "includes = [\n"

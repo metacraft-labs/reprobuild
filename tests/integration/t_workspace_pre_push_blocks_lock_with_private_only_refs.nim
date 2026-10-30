@@ -3,8 +3,10 @@
 ## manifest layer.
 ##
 ## The sixth pre-push stage activates when:
-##   - ``--current-repo`` is one of the manifest-layer repos declared
-##     in ``.repro/workspace.toml``,
+##   - ``--current-repo`` is one of the manifest-layer repos the workspace
+##     composes (the root base layer and the settings files' ``[[manifest]]``
+##     layers,
+##     Workspace-Settings-Files.md §3–§4),
 ##   - that layer's ``visibility = "public"``,
 ##   - the pushed refs introduce or modify at least one
 ##     ``locks/<project>/<file>.toml`` path in the layer repo.
@@ -15,9 +17,22 @@
 ## emits a ``lock_references_private_repo`` failure when a path in the
 ## lock is declared exclusively in non-public layers.
 ##
-## Fixture: two ``local_path`` manifest layers (a public one and a
-## private one) backed by local git repositories in the test scratch
-## directory. The public layer's project file declares two repos
+## Fixture: two manifest layers backed by local git repositories, with
+## ``.repro/workspace-state.toml`` recording only the project and branch:
+##
+##   - the PUBLIC layer is the workspace root repository itself: its own
+##     ``projects/`` + ``repos/``, its committed ``repro-workspace.toml``, and
+##     a ``.gitignore`` keeping the sibling clones, ``.repro/`` and the
+##     personal settings file out of it. The root is always the base layer
+##     (Workspace-Settings-Files.md §3), and so — no ``[records]`` being
+##     declared — the lock record store, which is what makes the lock the
+##     tests commit there the workspace's own lock (case 1 reads it back as
+##     current). The root is the ``--current-repo`` every case pushes from;
+##   - the PRIVATE layer is one person's, a ``local_path`` layer in
+##     ``repro-workspace.local.toml`` (§4) pointing into the test scratch
+##     directory. Declaring it is also what composes the root as a layer.
+##
+## The public layer's project file declares two repos
 ## (``lib-public-a`` / ``lib-public-b``); the private layer declares
 ## one additional repo (``lib-private``). Sibling repos are clean
 ## clones with published HEADs so stages 1-3 always pass; there are no
@@ -122,8 +137,7 @@ proc publicProjectToml(originPubA, originPubB: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"pub-a-origin\"\nfetch = \"" &
       originPubA & "\"\n\n" &
     "[[remote]]\nname = \"pub-b-origin\"\nfetch = \"" &
@@ -138,8 +152,7 @@ proc privateProjectToml(originPrivate: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"priv-origin\"\nfetch = \"" &
       originPrivate & "\"\n\n" &
     "includes = [\n" &
@@ -147,33 +160,33 @@ proc privateProjectToml(originPrivate: string): string =
     "]\n"
 
 const libPublicAFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-public-a"
 path = "lib-public-a"
 remote = "pub-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libPublicBFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-public-b"
 path = "lib-public-b"
 remote = "pub-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libPrivateFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-private"
 path = "lib-private"
 remote = "priv-origin"
-revision = "main"
+mainline = "main"
 """
 
 # ---- fixture --------------------------------------------------------------
@@ -231,31 +244,30 @@ proc seedManifestLayerRepo(gitBin, layerPath: string;
   discard requireGit(q(gitBin) & " -C " & q(layerPath) &
     " push origin main")
 
-proc writeWorkspaceToml(workspaceRoot, publicLayerPath,
-                        privateLayerPath: string): string =
+proc writeWorkspaceToml(workspaceRoot, privateLayerPath: string): string =
+  ## The state file (project and branch only) and the personal settings file
+  ## declaring the private layer. The shared settings file is committed in
+  ## the root repository by ``setupFixture``.
   let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
-  result = dotRepo / "workspace.toml"
-  # Use ``local_path`` layers so the M26 stage's per-layer on-disk
-  # lookup picks the literal directories the test seeded — no need to
+  result = dotRepo / "workspace-state.toml"
+  # Use a ``local_path`` layer so the M26 stage's per-layer on-disk
+  # lookup picks the literal directory the test seeded — no need to
   # mirror the composer's URL-sanitization machinery.
-  # Forward-slash the paths so the TOML basic strings don't trip the
+  # Forward-slash the path so the TOML basic string doesn't trip the
   # ``\U`` / ``\u`` escape rules on Windows (``C:\Users\...`` would
   # otherwise be rejected by the strict reader). Nim's ``isAbsolute`` /
   # ``dirExists`` on Windows accept forward-slash forms, so the
   # composer reads them just fine.
-  let publicLocalPath = publicLayerPath.replace('\\', '/')
   let privateLocalPath = privateLayerPath.replace('\\', '/')
-  let body =
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
-    "[[manifest]]\n" &
-    "local_path = \"" & publicLocalPath & "\"\n" &
-    "visibility = \"public\"\n\n" &
+  writeFile(result,
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n")
+  writeFile(workspaceRoot / "repro-workspace.local.toml",
+    "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
     "[[manifest]]\n" &
     "local_path = \"" & privateLocalPath & "\"\n" &
-    "visibility = \"private\"\n"
-  writeFile(result, body)
+    "visibility = \"private\"\n")
 
 proc setupFixture(gitBin, slug: string): M26Fixture =
   result.scratch = createTempDir("repro-m26-" & slug & "-", "")
@@ -285,8 +297,10 @@ proc setupFixture(gitBin, slug: string): M26Fixture =
   result.workspaceRoot = result.scratch / "workspace"
   createDir(result.workspaceRoot)
 
-  # Public manifest layer is a git repo under the scratch dir.
-  result.publicLayerPath = result.scratch / "manifest-public"
+  # The public manifest layer is the workspace root repository (the root
+  # base layer, see the header); the private one is a git repo under the
+  # scratch dir.
+  result.publicLayerPath = result.workspaceRoot
   result.privateLayerPath = result.scratch / "manifest-private"
 
   seedManifestLayerRepo(gitBin, result.publicLayerPath, [
@@ -295,6 +309,14 @@ proc setupFixture(gitBin, slug: string): M26Fixture =
       fileUrl(result.libPublicB.origin))),
     ("repos/lib-public-a.toml", libPublicAFragment),
     ("repos/lib-public-b.toml", libPublicBFragment),
+    # The root's shared settings file declares no extra layer.
+    ("repro-workspace.toml",
+      "schema = \"reprobuild.workspace.settings.v1\"\n"),
+    # Local state, the personal settings file and the sibling checkouts are
+    # never part of the root repository. Anchored (leading `/`): unanchored,
+    # `lib-public-a/` would also ignore `locks/myproject/lib-public-a/`.
+    (".gitignore", "/.repro/\n/repro-workspace.local.toml\n" &
+      "/lib-public-a/\n/lib-public-b/\n/lib-private/\n"),
   ])
   seedManifestLayerRepo(gitBin, result.privateLayerPath, [
     ("projects/myproject.toml", privateProjectToml(
@@ -302,8 +324,7 @@ proc setupFixture(gitBin, slug: string): M26Fixture =
     ("repos/lib-private.toml", libPrivateFragment),
   ])
 
-  discard writeWorkspaceToml(result.workspaceRoot,
-    result.publicLayerPath, result.privateLayerPath)
+  discard writeWorkspaceToml(result.workspaceRoot, result.privateLayerPath)
 
   # Clone the two public sibling repos so stages 1-3 (clean +
   # published) have something to inspect. ``lib-private`` is not
@@ -494,13 +515,14 @@ suite "M26 — pre-push lock visibility check":
       check failure["repo"].getStr() == "lib-private"
       check failure["source"].getStr() == lockRel
       check failure["remediation"].getStr().contains("lib-private")
-      # The remediation embeds the layer's ``provenance`` string, which
-      # is the ``local_path`` value from workspace.toml verbatim. On
-      # Windows the test seeds that value in forward-slash form (to
-      # avoid TOML basic-string ``\U`` escapes), so the substring may
-      # not match ``fx.publicLayerPath`` (native backslash form) byte
-      # for byte. Match either separator shape.
+      # The remediation must name the public layer the lock was pushed to,
+      # so the operator can find it — here the workspace root repository
+      # (the root base layer), named by its path. A path may be rendered
+      # in forward-slash form on Windows, so the substring may not match
+      # ``fx.publicLayerPath`` (native backslash form) byte for byte.
+      # Match either separator shape.
       let remediationStr = failure["remediation"].getStr()
+      checkpoint("remediation: " & remediationStr)
       check remediationStr.contains(fx.publicLayerPath) or
         remediationStr.contains(fx.publicLayerPath.replace('\\', '/'))
       check failure["evidence"].getStr().contains("private")

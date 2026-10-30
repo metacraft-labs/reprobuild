@@ -11,11 +11,10 @@
 ##   one person's extra manifest layers and the URLs of shared layers that need
 ##   credentials. `[[manifest]]` entries and nothing else.
 ##
-## **Transition.** Until the old names are retired (§8 step 4) the OLD host
-## bootstrap config `.repro-workspace.toml` (`bootstrap.v1`) is still read —
-## exactly as before, private companion included — and mapped onto the same
-## `WorkspaceSettings` record (see that type for the mapping). Discovery keys
-## on either name and prefers `repro-workspace.toml` in the same directory.
+## The settings file's retired name is not read. A directory holding it
+## without a `repro-workspace.toml` is refused with the remedy
+## (`retired_names.refuseRetiredSettingsFile`) wherever discovery reaches it,
+## and so is a file declaring the retired schema under any name.
 ##
 ## **Why a hand-written tree decoder.** Every other workspace file goes
 ## through the typed strict decoder in `reader.nim`. These two cannot: the
@@ -33,6 +32,7 @@ import types
 import diagnostics
 import reader
 import roles
+import retired_names
 import repro_core/workspace_root
 
 export workspace_root.settingsFileIn
@@ -43,9 +43,6 @@ const
     ## and review, and the file that makes a directory a workspace root.
   localSettingsFileName* = "repro-workspace.local.toml"
     ## The per-user settings file (§4), read when it sits beside the shared one.
-  legacySettingsFileName* = bootstrapConfigFileName
-    ## The old host bootstrap config (`.repro-workspace.toml`). Read only when
-    ## no `repro-workspace.toml` sits in the same directory.
   workspaceRootLayerName* = "<workspace-root>"
     ## `ManifestLayer.name` of the base layer the root repository contributes
     ## when the settings files declare extra layers (§3: "The root repo is
@@ -57,15 +54,17 @@ const
 proc findWorkspaceSettingsPath*(workspaceRoot: string): string =
   ## Locate the workspace settings file (§6):
   ##
-  ##   1. `REPRO_WORKSPACE_CONFIG`, when set, names the file explicitly (either
-  ##      schema); a name that does not exist means "no settings file".
+  ##   1. `REPRO_WORKSPACE_CONFIG`, when set, names the file explicitly; a
+  ##      name that does not exist means "no settings file".
   ##   2. Otherwise the nearest of `workspaceRoot` and its ancestors holding
-  ##      `repro-workspace.toml` or `.repro-workspace.toml`, the new name
-  ##      winning within one directory. The ancestor walk is kept from the
-  ##      bootstrap config: a product repo committing the file may be a parent
-  ##      of the directory a command runs in.
+  ##      `repro-workspace.toml`. The ancestor walk exists because a product
+  ##      repo committing the file may be a parent of the directory a command
+  ##      runs in.
   ##
-  ## Returns "" when there is none.
+  ## Returns "" when there is none. Raises when the walk reaches a directory
+  ## holding the settings file only under its retired name: that is an
+  ## unmigrated workspace root, and walking past it would silently drop its
+  ## policy (`retired_names.refuseRetiredSettingsFile`).
   ##
   ## This answers "which settings file governs `workspaceRoot`", not "where is
   ## the workspace root" — that is `repro_core/workspace_root`'s
@@ -86,6 +85,8 @@ proc findWorkspaceSettingsPath*(workspaceRoot: string): string =
     let found = settingsFileIn(dir)
     if found.len > 0:
       return found
+    if refuseRetiredSettingsFile(dir):
+      return ""
     let parent = dir.parentDir
     if parent.len == 0 or parent == dir:
       break
@@ -329,7 +330,10 @@ proc decodeSettingsTree(path, content: string): WorkspaceSettings =
       c.optBool("records", records, "publish_locks")
 
   var names: seq[string]
-  for i, row in c.tableRows("manifest", child(tree, "manifest")):
+  let manifestNode = child(tree, "manifest")
+  if not manifestNode.isNil and manifestNode.kind == TomlKind.Table:
+    c.fail("manifest", retiredManifestTableMessage())
+  for i, row in c.tableRows("manifest", manifestNode):
     let kp = "manifest[" & $i & "]"
     let layer = c.layerFromTree(kp, row)
     if layer.name.isSome:
@@ -422,26 +426,6 @@ proc decodeSettingsTree(path, content: string): WorkspaceSettings =
   # load, so a settings file that cannot resolve never reaches a command.
   validateRoleSettings(result)
 
-proc settingsFromBootstrap(cfg: WorkspaceBootstrap;
-                           path: string): WorkspaceSettings =
-  ## Map an old `bootstrap.v1` file onto the settings record, preserving what
-  ## every consumer read from it before (see `WorkspaceSettings`).
-  result.path = path
-  result.schema = schemaWorkspaceBootstrapV1
-  result.push_gateway = cfg.push_gateway
-  result.projects = cfg.projects
-  if cfg.manifest.url.len > 0:
-    result.records.url = some(cfg.manifest.url)
-  result.records.branch = cfg.manifest.branch
-  result.records.publish_locks = cfg.manifest.publish_locks
-  result.privateManifestUrl = cfg.manifest.private_url
-  result.manifestRevision = cfg.manifest.revision
-  result.verify = cfg.verify
-  result.develop = cfg.develop
-  result.locking = cfg.locking
-  result.foreign_env = cfg.foreign_env
-  result.extensions = cfg.extensions
-
 # ---- the local file ---------------------------------------------------------
 
 proc readLocalSettingsLayers*(localPath, sharedPath: string;
@@ -507,60 +491,44 @@ proc readLocalSettingsLayers*(localPath, sharedPath: string;
 
 # ---- reading ----------------------------------------------------------------
 
-proc decodeWorkspaceSettingsContent*(path, content: string):
-    Option[WorkspaceSettings] =
-  ## Decode a shared settings file supplied as TEXT — one read from a source
-  ## other than the filesystem, such as a commit of the metadata repository.
-  ## `path` only names the file in diagnostics.
-  ##
-  ## `settings.v1` is decoded strictly, exactly as `readWorkspaceSettings`
-  ## decodes it (its role rules included). `bootstrap.v1` answers `none`:
-  ## reading it needs its private companion file beside it on disk, and it
-  ## declares nothing a content-only caller (role resolution) can use. The
-  ## local file `repro-workspace.local.toml` is never consulted: it is
-  ## per-checkout and is never part of a commit.
+proc requireSettingsSchema(path, content: string) =
+  ## The settings file's `schema` must be `settings.v1`. The retired schema is
+  ## refused with the remedy rather than as a bare mismatch.
   let tree = decodeTree(path, content, schemaWorkspaceSettingsV1)
   let s = child(tree, "schema")
   if s.isNil or s.kind != TomlKind.String or s.stringVal.len == 0:
     raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, "",
       "top-level `schema` key is missing or empty")
-  if s.stringVal == schemaWorkspaceBootstrapV1:
-    return none(WorkspaceSettings)
+  if s.stringVal == retiredSettingsSchema:
+    raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, s.stringVal,
+      retiredSettingsFileMessage())
   if s.stringVal != schemaWorkspaceSettingsV1:
     raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, s.stringVal,
-      "schema version mismatch (this repro reads " &
-        schemaWorkspaceSettingsV1 & ", " & schemaWorkspaceBootstrapV1 & ")")
-  some(decodeSettingsTree(path, content))
+      "schema version mismatch")
+
+proc decodeWorkspaceSettingsContent*(path, content: string): WorkspaceSettings =
+  ## Decode a shared settings file supplied as TEXT — one read from a source
+  ## other than the filesystem, such as a commit of the metadata repository.
+  ## `path` only names the file in diagnostics.
+  ##
+  ## Decoded strictly, exactly as `readWorkspaceSettings` decodes it (its role
+  ## rules included). The local file `repro-workspace.local.toml` is never
+  ## consulted: it is per-checkout and is never part of a commit.
+  requireSettingsSchema(path, content)
+  decodeSettingsTree(path, content)
 
 proc readWorkspaceSettings*(path: string): WorkspaceSettings =
-  ## Read the workspace settings at `path`, in either schema, together with
-  ## the `repro-workspace.local.toml` beside it when there is one.
-  ##
-  ## * `settings.v1` (`repro-workspace.toml`, or whatever
-  ##   `REPRO_WORKSPACE_CONFIG` names) is decoded strictly from the tree.
-  ## * `bootstrap.v1` (`.repro-workspace.toml`) is read by the unchanged
-  ##   `readWorkspaceBootstrap` — its `[manifest] url` requirement and its
-  ##   `.repro-workspace-private.toml` companion included — and mapped.
+  ## Read the shared workspace settings at `path` (`repro-workspace.toml`, or
+  ## whatever `REPRO_WORKSPACE_CONFIG` names), decoded strictly from the tree,
+  ## together with the `repro-workspace.local.toml` beside it when there is
+  ## one.
   let content =
     try: readFile(path)
     except IOError, OSError:
       raiseManifestError(path, "", schemaWorkspaceSettingsV1, "",
         "settings file does not exist or cannot be read")
-  let schema = block:
-    let tree = decodeTree(path, content, schemaWorkspaceSettingsV1)
-    let s = child(tree, "schema")
-    if s.isNil or s.kind != TomlKind.String or s.stringVal.len == 0:
-      raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, "",
-        "top-level `schema` key is missing or empty")
-    s.stringVal
-  if schema == schemaWorkspaceBootstrapV1:
-    result = settingsFromBootstrap(readWorkspaceBootstrap(path), path)
-  elif schema == schemaWorkspaceSettingsV1:
-    result = decodeSettingsTree(path, content)
-  else:
-    raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, schema,
-      "schema version mismatch (this repro reads " &
-        schemaWorkspaceSettingsV1 & ", " & schemaWorkspaceBootstrapV1 & ")")
+  requireSettingsSchema(path, content)
+  result = decodeSettingsTree(path, content)
   let localPath = parentDir(path) / localSettingsFileName
   if fileExists(localPath):
     result.localPath = localPath
@@ -581,9 +549,8 @@ proc readLoneLocalSettings*(workspaceRoot: string): Option[WorkspaceSettings] =
   ## ``WorkspaceSettings`` carrying only its layers; ``none`` when there is no
   ## such file. A malformed file raises the strict reader's diagnostic.
   ##
-  ## Why a local file can stand alone: ``repro health --fix`` (and the first
-  ## state write of a repro that migrates the old state file) moves the
-  ## layers an old ``.repro/workspace.toml`` carried into
+  ## Why a local file can stand alone: ``repro health --fix`` moves the
+  ## layers the state file carried under its retired name into
   ## ``repro-workspace.local.toml`` (Workspace-Settings-Files.md §8 step 2).
   ## A workspace from before the settings files has no shared file for it to
   ## sit beside, and its layers must keep applying after the move. Its
@@ -662,35 +629,12 @@ proc profileRoles*(s: WorkspaceSettings; name: string): Option[BranchRoleDecls] 
       return some(decls)
   none(BranchRoleDecls)
 
-proc rootMainline*(s: WorkspaceSettings;
-                   legacyStoreIsRoot: bool): Option[string] =
-  ## The workspace ROOT repository's declared mainline (Branch-Roles §3.4).
-  ##
-  ## `settings.v1`: resolved from `[workspace]` by the same procedure as any
-  ## repo's roles (`resolveRootRoles`): `[workspace] mainline`, else the
-  ## mainline of the profile `[workspace] profile` names, else of
-  ## `default_profile`. Always `some` — a `settings.v1` file that declares no
-  ## root mainline RAISES (naming the file and `workspace.mainline`) rather
-  ## than returning `none`, so no caller can fall through to the root repo's
-  ## `origin/HEAD`, the inference §3.4 forbids. `legacyStoreIsRoot` does not
-  ## apply to it: a `settings.v1` file has no `[manifest]` pointer.
-  ##
-  ## `bootstrap.v1` (the old `.repro-workspace.toml`): `[manifest] branch`,
-  ## which is what the root's mainline was read from before the settings file
-  ## existed — but only when `legacyStoreIsRoot`, i.e. the caller has
-  ## established that `[manifest] url` is absent or names the root repository
-  ## itself. Once the record store is a separate repository
-  ## (Workspace-Manifests.md §"Metadata and records are separate
-  ## repositories") that branch is the STORE's, and reading it as the root's
-  ## refuses `mainline_unresolved` on a root that has no such branch
-  ## (CLI/branch.md §"The root workspace repo is cut from its mainline too").
-  ## Deciding repository identity needs the root's remote, which this pure
-  ## reader does not see, so the caller decides it. `none` otherwise: §3.4
-  ## replaces that chain for the settings file that can declare
-  ## `[workspace]`; the old file cannot, so its callers keep today's
-  ## behaviour (then `origin/HEAD`) until the old name is retired.
-  if s.isLegacySettings:
-    if legacyStoreIsRoot:
-      return s.records.branch
-    return none(string)
-  some(resolveRootRoles(s).findRole("mainline").get().branch)
+proc rootMainline*(s: WorkspaceSettings): string =
+  ## The workspace ROOT repository's declared mainline (Branch-Roles §3.4),
+  ## resolved from `[workspace]` by the same procedure as any repo's roles
+  ## (`resolveRootRoles`): `[workspace] mainline`, else the mainline of the
+  ## profile `[workspace] profile` names, else of `default_profile`. A
+  ## settings file that declares no root mainline RAISES (naming the file and
+  ## `workspace.mainline`) rather than answering "", so no caller can fall
+  ## through to the root repo's `origin/HEAD`, the inference §3.4 forbids.
+  resolveRootRoles(s).findRole("mainline").get().branch

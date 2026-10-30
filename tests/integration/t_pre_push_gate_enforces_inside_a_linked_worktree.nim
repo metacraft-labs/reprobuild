@@ -97,8 +97,8 @@ suite "the publication gate enforces inside a linked worktree":
       let workspace = scratch / "workspace"
       createDir(workspace)
       createDir(workspace / ".repro")
-      writeFile(workspace / ".repro" / "workspace.toml", """
-schema = "reprobuild.workspace.local.v1"
+      writeFile(workspace / ".repro" / "workspace-state.toml", """
+schema = "reprobuild.workspace.state.v1"
 
 [workspace]
 project = "demo"
@@ -119,13 +119,13 @@ name = "demo"
 """)
       createDir(workspace / "repos")
       writeFile(workspace / "repos" / "member.toml", """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "member"
 path = "member"
 url_prefix = "example"
-branch = "main"
+mainline = "main"
 """)
       createDir(workspace / "url-prefixes")
       writeFile(workspace / "url-prefixes" / "example.toml",

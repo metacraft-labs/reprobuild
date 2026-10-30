@@ -164,6 +164,57 @@ proc isSafeUnitName*(name: string): bool =
     return false
   '/' notin n and '\\' notin n
 
+const
+  SystemdSysusersDir* = "/etc/sysusers.d"
+    ## Where a `linux.sysusersEntry` fragment lands (ReproOS Add-On Mode
+    ## spec §4.1, the `sysusers` class).
+  AddOnFragmentPrefix* = "repro-"
+    ## The add-on's fragment naming convention (`repro-<name>.conf` for
+    ## sysusers and tmpfiles fragments, spec §4.1): so that a human can
+    ## see which fragments are the add-on's. Ownership is the ledger's,
+    ## never the name's.
+  AddOnDropInPrefix* = "50-repro-"
+    ## A `systemd.systemDropIn` is `<unit>.d/50-repro-<name>.conf`.
+  AddOnSysctlPrefix* = "90-repro-"
+    ## A `linux.sysctl` fragment on an add-on host is
+    ## `/etc/sysctl.d/90-repro-<name>.conf` (spec §4.1).
+
+proc isSafeFragmentName*(name: string): bool =
+  ## One path segment of `[A-Za-z0-9._-]`, not `.` or `..`: the `<name>`
+  ## part of every add-on fragment file name.
+  if name.len == 0 or name == "." or name == "..":
+    return false
+  for c in name:
+    if c notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      return false
+  true
+
+proc systemDropInPath*(unit, name: string): string =
+  ## `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` (spec §4.1, the
+  ## `dropIn` class). `name` defaults to `addon`.
+  let n = if name.len > 0: name else: "addon"
+  SystemdSystemUnitDir & "/" & unit.strip() & ".d/" & AddOnDropInPrefix &
+    n & ".conf"
+
+proc sysusersFragmentPath*(name: string): string =
+  ## `/etc/sysusers.d/repro-<name>.conf` (spec §4.1, the `sysusers` class).
+  SystemdSysusersDir & "/" & AddOnFragmentPrefix & name.strip() & ".conf"
+
+proc sysusersFragmentContent*(kind, name, id, description, home,
+                              shell: string): string =
+  ## The canonical bytes of a sysusers fragment for one entry, in the
+  ## sysusers.d(5) line format: `u <name> <uid|-> "<description>" <home>
+  ## <shell>` for an account, `g <name> <gid|->` for a group. A field left
+  ## empty is written as `-` (systemd-sysusers' "unspecified"). The
+  ## description may not carry a double quote; the validator refuses one.
+  let dash = proc(s: string): string = (if s.len > 0: s else: "-")
+  case kind
+  of "group":
+    "g " & name & " " & dash(id) & "\n"
+  else:
+    "u " & name & " " & dash(id) & " \"" & description & "\" " &
+      dash(home) & " " & dash(shell) & "\n"
+
 type
   SystemdUnitObservation* = object
     ## What `systemctl show <unit>` reports for a system unit. The

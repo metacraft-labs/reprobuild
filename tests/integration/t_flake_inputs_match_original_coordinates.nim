@@ -90,10 +90,10 @@ suite "flake input original coordinates":
       remotes.add("\n[[remote]]\nname = \"" & name & "\"\nfetch = \"" & explicitUrl & "\"\n")
       includes.add("\"repos/" & name & ".toml\"")
       writeFile(manifests / "repos" / (name & ".toml"),
-        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\nname = \"" & name &
-        "\"\npath = \"" & name & "\"\nremote = \"" & name & "\"\nrevision = \"main\"\n")
+        "schema = \"reprobuild.workspace.repo.v2\"\n[repo]\nname = \"" & name &
+        "\"\npath = \"" & name & "\"\nremote = \"" & name & "\"\nmainline = \"main\"\n")
     let project = projectHeader & "includes = [" & includes.join(", ") & "]\n" &
-      "[project]\nname = \"nf2\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n" & remotes
+      "[project]\nname = \"nf2\"\n" & remotes
     writeFile(manifests / "projects" / "nf2.toml", project)
     let betaStart = wsLock.find("{ name = \"beta\"")
     let betaEnd = wsLock.find(" }", betaStart) + 2
@@ -427,14 +427,14 @@ suite "flake input original coordinates":
             "{ name = \"upstream\", remote = \"alpha-upstream\" }]\n"
         else: ""
       writeFile(manifests / "repos" / (name & ".toml"),
-        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\nname = \"" & name &
+        "schema = \"reprobuild.workspace.repo.v2\"\n[repo]\nname = \"" & name &
         "\"\npath = \"" & name & "\"\nremote = \"" & name &
-        "\"\nrevision = \"main\"\n" & extra)
+        "\"\nmainline = \"main\"\n" & extra)
     writeFile(manifests / "projects" / "nf2.toml",
       "schema = \"reprobuild.workspace.project.v1\"\n" &
       "includes = [" & includes.join(", ") & "]\n" &
-      "[project]\nname = \"nf2\"\ndefault_revision = \"main\"\n" &
-      "trunk = \"main\"\n" & remotes)
+      "[project]\nname = \"nf2\"\n" &
+      "" & remotes)
     let alphaHead = headOf(fx, siblingDir(fx, "alpha"))
     let betaHead = headOf(fx, siblingDir(fx, "beta"))
     writeFile(fx.app / "flake.nix", "{ inputs = { " &
@@ -506,11 +506,11 @@ suite "flake input original coordinates":
       includes.add("\"repos/" & name & ".toml\"")
       let member = if name == "alpha": "legacy-alpha" else: name
       writeFile(manifests / "repos" / (name & ".toml"),
-        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\nname = \"" & member &
-        "\"\npath = \"" & name & "\"\nremote = \"" & name & "\"\nrevision = \"main\"\n")
+        "schema = \"reprobuild.workspace.repo.v2\"\n[repo]\nname = \"" & member &
+        "\"\npath = \"" & name & "\"\nremote = \"" & name & "\"\nmainline = \"main\"\n")
     writeFile(manifests / "projects" / "nf2.toml",
       "schema = \"reprobuild.workspace.project.v1\"\nincludes = [" & includes.join(", ") &
-      "]\n[project]\nname = \"nf2\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n" & remotes)
+      "]\n[project]\nname = \"nf2\"\n" & remotes)
     writeFile(fx.app / "flake.nix", "{ inputs.modules-alias.url = \"github:metacraft-labs/alpha\"; outputs = _: {}; }\n")
     var lock = parseJson(nf2FlakeLockText(fx, fx.seedSha[0], fx.seedSha[1], fx.seedSha[2]))
     lock["nodes"]["root"]["inputs"] = %*{"modules-alias": "alpha-src"}

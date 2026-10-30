@@ -5,18 +5,23 @@
 ## routes ``repro workspace manifests`` to
 ## ``runWorkspaceManifestsCommand``, which:
 ##
-##   1. Reads ``<workspaceRoot>/.repro/workspace.toml`` (M5 surface). A
-##      missing workspace.toml is treated as "no layered workspace" —
-##      the report's ``hasLayeredWorkspace`` flag is false and the
-##      renderer prints a single "no workspace metadata" info line; exit 0.
-##   2. For each declared ``[[manifest]]`` layer, computes the layer's
-##      provenance string (URL or local_path), visibility tier, and
-##      on-disk checkout path that the M8 composer would have
-##      materialised at.
+##   1. Reads the workspace's state (``<workspaceRoot>/.repro/
+##      workspace-state.toml``: the project) and the layers its settings
+##      files declare (``repro-workspace.toml`` for shared layers,
+##      ``repro-workspace.local.toml`` for one person's own;
+##      Workspace-Settings-Files.md §3–§4). A workspace with neither state
+##      nor settings layers is "no layered workspace" — the report's
+##      ``hasLayeredWorkspace`` flag is false and the renderer prints a
+##      single "no workspace metadata" info line; exit 0.
+##   2. For each composed layer — the root repository first, which is
+##      always the base layer (§3), then the settings layers in order —
+##      computes the layer's provenance string (URL or local_path),
+##      visibility tier, and on-disk checkout path that the M8 composer
+##      would have materialised at.
 ##   3. Composes the layers via M8 to learn which composed repos each
 ##      layer ultimately contributed to (post-shadow-merge).
 ##   4. Emits ``<workspaceRoot>/.repro/build/reports/manifests-report.json``
-##      and exits 0 on success, 1 on malformed workspace.toml.
+##      and exits 0 on success, 1 on a malformed state or settings file.
 ##
 ## Fixture pattern: hermetic bare-repo "manifest hosts" containing
 ## TOML files (mirrors the M8 composer test
@@ -86,9 +91,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "myproject"
-default_revision = "main"
 default_remote = "origin"
-trunk = "main"
 
 [[remote]]
 name = "origin"
@@ -101,21 +104,21 @@ includes = [
 """
 
 const publicLibAToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
-revision = "main"
+mainline = "main"
 """
 
 const publicLibBToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
-revision = "main"
+mainline = "main"
 """
 
 const privateProjectToml = """
@@ -123,9 +126,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "myproject"
-default_revision = "main"
 default_remote = "origin"
-trunk = "main"
 
 [[remote]]
 name = "origin"
@@ -138,30 +139,54 @@ includes = [
 """
 
 const privateLibBToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
-revision = "private-pin"
+mainline = "private-pin"
 """
 
 const privateLibCToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
-revision = "main"
+mainline = "main"
 """
 
 # ---- helpers --------------------------------------------------------------
 
-proc writeWorkspaceToml(workspaceRoot, body: string): string =
+proc writeWorkspaceState(workspaceRoot: string) =
+  ## The state file: the active project and branch. Manifest layers are not
+  ## state; they are declared in the settings files below.
   let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
-  result = dotRepo / "workspace.toml"
-  writeFile(result, body)
+  writeFile(dotRepo / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n")
+
+proc writeSharedSettings(workspaceRoot, layersBody: string) =
+  ## ``repro-workspace.toml``: the shared, committed layers.
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" & layersBody)
+
+proc writeLocalSettings(workspaceRoot, layersBody: string) =
+  ## ``repro-workspace.local.toml``: one person's own (unnamed) layers.
+  writeFile(workspaceRoot / "repro-workspace.local.toml",
+    "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" & layersBody)
+
+proc checkRootBaseLayer(layers: JsonNode) =
+  ## §3: the root repository is always the base layer, so it is listed
+  ## first, as a ``local_path`` layer over the root itself. This fixture's
+  ## root carries no ``projects/`` or ``repos/``, so it contributes nothing.
+  let root = layers[0]
+  check root["index"].getInt() == 0
+  check root["url"].getStr() == ""
+  check root["localPath"].getStr() == "."
+  check root["visibility"].getStr() == "public"
+  check root["contributedRepos"].len == 0
 
 proc invokeManifests(reproBin, workspaceRoot: string;
                      extra: openArray[string] = []): CmdResult =
@@ -222,16 +247,14 @@ suite "M12 — repro workspace manifests (enumerates layers)":
 
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let workspaceTomlBody =
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
+      writeWorkspaceState(workspaceRoot)
+      writeSharedSettings(workspaceRoot,
         "[[manifest]]\n" &
         "url = \"" & fileUrl(publicBare) & "\"\n" &
         "visibility = \"public\"\nbranch = \"main\"\n\n" &
         "[[manifest]]\n" &
         "url = \"" & fileUrl(privateBare) & "\"\n" &
-        "visibility = \"private\"\nbranch = \"main\"\n"
-      discard writeWorkspaceToml(workspaceRoot, workspaceTomlBody)
+        "visibility = \"private\"\nbranch = \"main\"\n")
 
       let res = invokeManifests(reproBin, workspaceRoot)
       if res.code != 0:
@@ -241,7 +264,9 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       let report = readReport(workspaceRoot)
       check report["hasLayeredWorkspace"].getBool() == true
       check report["project"].getStr() == "myproject"
-      check report["layers"].len == 2
+      # The root's base layer, then the two declared layers in order.
+      check report["layers"].len == 3
+      checkRootBaseLayer(report["layers"])
 
       let publicLayer = findLayerByProvenance(report["layers"],
         fileUrl(publicBare))
@@ -254,11 +279,11 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       check publicLayer["url"].getStr() == fileUrl(publicBare)
       check publicLayer["localPath"].getStr() == ""
       check publicLayer["branch"].getStr() == "main"
-      check publicLayer["index"].getInt() == 0
+      check publicLayer["index"].getInt() == 1
 
       check privateLayer["visibility"].getStr() == "private"
       check privateLayer["url"].getStr() == fileUrl(privateBare)
-      check privateLayer["index"].getInt() == 1
+      check privateLayer["index"].getInt() == 2
 
       # Contribution map: public contributed lib-a only (lib-b was
       # shadowed by private); private contributed lib-b (the shadow)
@@ -277,15 +302,15 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       # The layer's on-disk checkout path must follow the composer's
       # ``manifests-<i>-<sanitized>`` convention.
       check canonical(publicLayer["layerCheckoutPath"].getStr()).startsWith(
-        canonical(workspaceRoot / ".repro" / "manifests-0-"))
-      check canonical(privateLayer["layerCheckoutPath"].getStr()).startsWith(
         canonical(workspaceRoot / ".repro" / "manifests-1-"))
+      check canonical(privateLayer["layerCheckoutPath"].getStr()).startsWith(
+        canonical(workspaceRoot / ".repro" / "manifests-2-"))
 
   test "test_m12_manifests_no_workspace_toml_reports_missing_metadata":
-    # No workspace.toml in this fixture; the subcommand should not
-    # blow up — it should report ``hasLayeredWorkspace = false`` and
-    # exit 0 cleanly. We use a fresh scratch directory without any
-    # ``.repro/workspace.toml``.
+    # No state file and no settings file in this fixture; the subcommand
+    # should not blow up — it should report ``hasLayeredWorkspace = false``
+    # and exit 0 cleanly. We use a fresh scratch directory without any
+    # ``.repro/workspace-state.toml`` or ``repro-workspace.toml``.
     let scratch = createTempDir("repro-m12-manifests-bare-", "")
     defer: removeDir(scratch)
     let reproBin = reproBinary()
@@ -324,8 +349,11 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       createDir(workspaceRoot)
 
       # Pre-populate an in-tree local-path manifest layer alongside
-      # the URL layer so the JSON shape covers both kinds of entry.
-      let localManifestRel = ".repro/manifests-personal"
+      # the URL layer so the JSON shape covers both kinds of entry. It is
+      # one person's own layer, so the local settings file declares it, and
+      # it lives outside ``.repro/`` (§4: a ``local_path`` there is refused,
+      # since everything under ``.repro/`` is disposable state).
+      let localManifestRel = "manifests-personal"
       let localManifestAbs = workspaceRoot / localManifestRel
       createDir(localManifestAbs / "projects")
       createDir(localManifestAbs / "repos")
@@ -334,16 +362,15 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       writeFile(localManifestAbs / "repos" / "lib-b.toml", privateLibBToml)
       writeFile(localManifestAbs / "repos" / "lib-c.toml", privateLibCToml)
 
-      let workspaceTomlBody =
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
+      writeWorkspaceState(workspaceRoot)
+      writeSharedSettings(workspaceRoot,
         "[[manifest]]\n" &
         "url = \"" & fileUrl(publicBare) & "\"\n" &
-        "visibility = \"public\"\nbranch = \"main\"\n\n" &
+        "visibility = \"public\"\nbranch = \"main\"\n")
+      writeLocalSettings(workspaceRoot,
         "[[manifest]]\n" &
         "local_path = \"" & localManifestRel & "\"\n" &
-        "visibility = \"personal\"\n"
-      discard writeWorkspaceToml(workspaceRoot, workspaceTomlBody)
+        "visibility = \"personal\"\n")
 
       let res = invokeManifests(reproBin, workspaceRoot,
         extra = ["--json"])
@@ -354,7 +381,9 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       let payload = res.output[braceIdx .. ^1]
       let parsed = parseJson(payload)
       check parsed["hasLayeredWorkspace"].getBool() == true
-      check parsed["layers"].len == 2
+      # The root's base layer, the shared url layer, the local layer.
+      check parsed["layers"].len == 3
+      checkRootBaseLayer(parsed["layers"])
 
       let urlLayer = findLayerByProvenance(parsed["layers"],
         fileUrl(publicBare))
@@ -366,10 +395,12 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       check urlLayer["url"].getStr() == fileUrl(publicBare)
       check urlLayer["localPath"].getStr() == ""
       check urlLayer["visibility"].getStr() == "public"
+      check urlLayer["index"].getInt() == 1
 
       check localLayer["url"].getStr() == ""
       check localLayer["localPath"].getStr() == localManifestRel
       check localLayer["visibility"].getStr() == "personal"
+      check localLayer["index"].getInt() == 2
       # ``local_path`` layers are resolved to absolute paths under
       # workspaceRoot when relative.
       check localLayer["layerCheckoutPath"].getStr() ==

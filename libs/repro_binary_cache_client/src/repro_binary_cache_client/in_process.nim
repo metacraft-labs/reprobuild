@@ -22,7 +22,7 @@
 ## a thin wrapper that builds a ``PublishInProcessRequest`` from CLI
 ## flags and forwards.
 
-import std/[algorithm, httpclient, httpcore, net, os, tempfiles,
+import std/[algorithm, httpclient, httpcore, net, os, sets, tempfiles,
             sequtils, strutils, tempfiles, times]
 when defined(posix):
   # rename(2) directly: Nim's moveDir falls back to copy-and-remove when the
@@ -284,7 +284,11 @@ proc writeArchiveBytes(writer: var ArchiveFileWriter;
                        data: pointer; dataLen: int) =
   if dataLen == 0:
     return
-  if writer.output.writeBuffer(data, dataLen) != dataLen:
+  # A nil `output` is the hash-only writer: the archive is streamed through
+  # the hasher and written nowhere, which is how a consumer checks present
+  # outputs against a pinned digest without a 40 MB temporary file.
+  if writer.output != nil and
+      writer.output.writeBuffer(data, dataLen) != dataLen:
     raise newException(IOError, "short write while creating rbcarc")
   writer.hasher.update(data, dataLen)
   writer.bytesWritten += int64(dataLen)
@@ -358,18 +362,67 @@ proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
 
 proc prefixArchiveDigestHex*(prefix: string): string =
   ## BLAKE3 hex of the raw archive `publishInProcess` would write for
-  ## `prefix` — by the SAME planner and writer, so a consumer that packs its
-  ## present outputs with this gets the digest the publisher printed
+  ## `prefix` — by the SAME planner and writer, so a consumer that hashes
+  ## its present outputs with this gets the digest the publisher printed
   ## (`expectedOutputDigest`), and not a near-identical archive from a
-  ## second implementation. The archive is written to a temporary file and
-  ## removed; only the digest is kept.
-  let plan = planPrefixArchive(prefix)
-  let temp = createTempFile("repro-prefix-digest-", ".rbcarc")
-  var f = temp.cfile
-  defer:
-    try: close(f) except CatchableError: discard
-    try: removeFile(temp.path) except CatchableError: discard
-  writeArchiveFile(plan, f).toHex()
+  ## second implementation. Streamed through the hasher; nothing is written.
+  writeArchiveFile(planPrefixArchive(prefix), nil).toHex()
+
+proc prefixSubsetArchiveDigestHex*(root: string;
+                                   members: openArray[string]): string =
+  ## The digest `prefixArchiveDigestHex` would give for a prefix holding
+  ## only `members` (root-relative paths, each a file or a directory) of
+  ## `root` — what the publisher's staging of an edge's declared outputs
+  ## produces, computed in place over `root` without copying anything.
+  ## The staged tree holds the members' regular files and the directories
+  ## that lead to them, and nothing else, so: an entry outside every member
+  ## is dropped, a directory with no kept file beneath it is dropped (the
+  ## stage never creates it), and a symbolic link is refused as the
+  ## publisher refuses to stage one.
+  var want: seq[string] = @[]
+  for m in members:
+    let n = m.replace('\\', '/').strip(chars = {'/'})
+    if n.len > 0: want.add(n)
+  proc covered(path: string): bool =
+    for w in want:
+      if path == w or path.startsWith(w & "/"): return true
+    false
+  var plan: PrefixArchivePlan
+  plan.root = absolutePath(root)
+  plan.rootIsDirectory = true
+  var kept: seq[ArchiveEntry] = @[]
+  var fileDirs = initHashSet[string]()
+  for entry in walkPrefix(plan.root):
+    case entry.kind
+    of aekSymlink:
+      if covered(entry.path):
+        raise newException(IOError,
+          "output tree holds a symbolic link, which a publisher refuses to " &
+          "stage: " & entry.path)
+    of aekFile:
+      if covered(entry.path):
+        kept.add(entry)
+        var d = entry.path
+        while true:
+          let i = d.rfind('/')
+          if i < 0: break
+          d = d[0 ..< i]
+          fileDirs.incl(d)
+    of aekDirectory:
+      # Every directory is a candidate: a member may be a FILE below a
+      # directory that is not itself a member (`bin/x`), and the stage
+      # creates that directory on the way to the file.
+      kept.add(entry)
+  var entries: seq[ArchiveEntry] = @[]
+  for e in kept:
+    if e.kind == aekDirectory and e.path notin fileDirs: continue
+    entries.add(e)
+  plan.entries = entries
+  for entry in plan.entries:
+    plan.size += 4'i64 + int64(entry.path.len) + 1 + 4 + 8 +
+      archiveEntryPayloadSize(plan, entry)
+  plan.size += 12
+  writeArchiveFile(plan, nil).toHex()
 
 proc packPrefix*(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree. Same

@@ -289,8 +289,8 @@ proc requireGit(gitBin, args: string): string =
 proc writeFragment(path, name, checkoutPath: string;
                    remote = "org"; depends: seq[string] = @[]) =
   var body =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-    "[repo]\nname = \"" & name & "\"\npath = \"" & checkoutPath & "\"\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+    "[repo]\nmainline = \"main\"\nname = \"" & name & "\"\npath = \"" & checkoutPath & "\"\n" &
     "remote = \"" & remote & "\"\n"
   if depends.len > 0:
     var quoted: seq[string]
@@ -760,8 +760,8 @@ suite "a declared checkout path cannot escape the workspace root":
           fileUrl(keeperOrigin) & "\"\n\n"
       writeFile(workspaceRoot / "projects" / "rooted.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" & remotes &
+        "[project]\nname = \"rooted\"\n" &
+        "\n" & remotes &
         "includes = [\n  \"repos/ws-root.toml\",\n" &
         "  \"repos/only-mine.toml\",\n]\n")
       # A second project stays enabled. `disable` refuses to record an EMPTY
@@ -769,8 +769,8 @@ suite "a declared checkout path cannot escape the workspace root":
       # loop is reached at all — and the removal loop is what is under test.
       writeFile(workspaceRoot / "projects" / "keeper.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"keeper\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" & remotes &
+        "[project]\nname = \"keeper\"\n" &
+        "\n" & remotes &
         "includes = [\n  \"repos/keeper.toml\",\n]\n")
 
       writeWorkspaceProjects(workspaceRoot, @["rooted", "keeper"])
@@ -892,16 +892,16 @@ suite "a declared checkout path cannot escape the workspace root":
 
       writeFile(workspaceRoot / "projects" / "rooted.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"rooted\"\n" &
+        "\n" &
         "[[remote]]\nname = \"org\"\nfetch = \"" &
           fileUrl(onlyMineOrigin) & "\"\n\n" &
         "[[remote]]\nname = \"keeper-origin\"\nfetch = \"" &
           fileUrl(keeperOrigin) & "\"\n\n" &
         "includes = [\n  \"repos/ws-root.toml\",\n" &
         "  \"repos/only-mine.toml\",\n  \"repos/keeper.toml\",\n]\n")
-      writeFile(workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"rooted\"\nbranch = \"main\"\n")
 
       discard requireGit(gitBin, "clone --quiet " &
@@ -1043,15 +1043,15 @@ suite "a declared checkout path cannot escape the workspace root":
         remote = "lib-origin")
       writeFile(workspaceRoot / "projects" / "demo.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"demo\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"demo\"\n" &
+        "\n" &
         "[[remote]]\nname = \"root-origin\"\nfetch = \"" &
           fileUrl(rootOrigin) & "\"\n\n" &
         "[[remote]]\nname = \"lib-origin\"\nfetch = \"" &
           fileUrl(libOrigin) & "\"\n\n" &
         "includes = [\n  \"repos/ws-root.toml\",\n  \"repos/lib.toml\",\n]\n")
-      writeFile(workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"demo\"\nbranch = \"main\"\n")
 
       discard requireGit(gitBin, "clone --quiet " & q(fileUrl(libOrigin)) &
@@ -2167,13 +2167,13 @@ suite "a declared checkout path cannot escape the workspace root":
             fileUrl(keeperOrigin) & "\"\n\n"
         writeFile(workspaceRoot / "projects" / "rooted.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\n" & remotes &
+          "[project]\nname = \"rooted\"\n" &
+          "\n" & remotes &
           "includes = [\n  \"repos/only-mine.toml\",\n]\n")
         writeFile(workspaceRoot / "projects" / "keeper.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"keeper\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\n" & remotes &
+          "[project]\nname = \"keeper\"\n" &
+          "\n" & remotes &
           "includes = [\n  \"repos/keeper.toml\",\n]\n")
         writeWorkspaceProjects(workspaceRoot, @["rooted", "keeper"])
         discard requireGit(gitBin, "clone --quiet " &
@@ -2275,16 +2275,16 @@ suite "a declared checkout path cannot escape the workspace root":
           "keeper", "keeper", remote = "keeper-origin")
         writeFile(workspaceRoot / "projects" / "rooted.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\n" &
+          "[project]\nname = \"rooted\"\n" &
+          "\n" &
           "[[remote]]\nname = \"org\"\nfetch = \"" &
             fileUrl(hubOrigin) & "\"\n\n" &
           "[[remote]]\nname = \"keeper-origin\"\nfetch = \"" &
             fileUrl(keeperOrigin) & "\"\n\n" &
           "includes = [\n  \"repos/hub.toml\",\n" &
           "  \"repos/linked.toml\",\n  \"repos/keeper.toml\",\n]\n")
-        writeFile(workspaceRoot / ".repro" / "workspace.toml",
-          "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+        writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+          "schema = \"reprobuild.workspace.state.v1\"\n\n" &
           "[workspace]\nproject = \"rooted\"\nbranch = \"main\"\n")
 
         discard requireGit(gitBin, "clone --quiet " & q(fileUrl(hubOrigin)) &

@@ -38,10 +38,11 @@
 ##   * the workspace ROOT repository is a pushed repo with roles of its own,
 ##     declared in the settings file (§3.4): under `repro-workspace.toml`
 ##     its `[workspace] unstable = "edge"` and `mainline = "main"` are both
-##     refused, and the same rewrite to an undeclared branch passes; under
-##     the old `.repro-workspace.toml`, whose record store is the root, its
-##     `[manifest] branch = "trunk"` is the protected mainline and `main` is
-##     an ordinary branch.
+##     refused, and the same rewrite to an undeclared branch passes. A
+##     `[records] branch` (here `trunk`, even with the root as the store) is
+##     the record store's branch, never a role of the root: a root that
+##     declares no `[workspace]` roles protects nothing by role, and nothing
+##     is inferred from its store or its `origin/HEAD`.
 ##
 ## Mutation-checked: dropping the non-mainline roles from the protected set
 ## (`declaredRoleBranches` returning the mainline alone) passes the `next`
@@ -129,8 +130,8 @@ proc writeManifest(fx: Fixture) =
   createDir(fx.workspace / "projects")
   createDir(fx.workspace / "repos")
   createDir(fx.workspace / ".repro")
-  writeFile(fx.workspace / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(fx.workspace / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
   writeFile(fx.workspace / "repro-workspace.toml",
     "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
@@ -381,15 +382,16 @@ suite "pre-push gate — every declared role branch is protected":
           "the shared mainline 'main'", mainPublished])
         check fx.remoteTip(ws, "origin", "main") == mainPublished
 
-  test "the old settings file protects the root mainline it declares":
+  test "a record store's branch is no role of the root":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip("git is not on PATH; every fixture here is a real git repository")
     else:
       withFixture(gitBin, "root-legacy"):
-        # Under the old `.repro-workspace.toml` the root's mainline is
-        # `[manifest] branch` when the record store it names IS the root
-        # repository; it can declare no other role.
+        # `[records]` names the record store and its branch — here the root
+        # repository itself, on `trunk` — and `[workspace]` declares no root
+        # role. The store's branch is not the root's mainline, so it is not
+        # protected by role.
         let ws = fx.workspace
         for name in ["post-commit", "post-merge", "post-checkout"]:
           for suffix in ["", ".repro-managed", ".repro-local"]:
@@ -399,28 +401,27 @@ suite "pre-push gate — every declared role branch is protected":
         discard require(q(gitBin) & " init --bare -b main " & q(rootOrigin))
         discard fx.gitIn(ws, ["remote", "add", "origin", rootOrigin])
         discard fx.gitIn(ws, ["rm", "-q", "repro-workspace.toml"])
-        writeFile(ws / ".repro-workspace.toml",
-          "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-          "[manifest]\nurl = \"" & rootOrigin.replace('\\', '/') & "\"\n" &
+        writeFile(ws / "repro-workspace.toml",
+          "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+          "[records]\nurl = \"" & rootOrigin.replace('\\', '/') & "\"\n" &
           "branch = \"trunk\"\n")
-        # The old file declares no profiles, so app names none either.
+        # The settings file declares no profiles, so app names none either.
         writeFile(ws / "repos" / "app.toml",
           "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
           "[repo]\nname = \"app\"\npath = \"app\"\n" &
           "remote = \"app-origin\"\nmainline = \"main\"\n" &
           "unstable = \"next\"\n")
         discard fx.gitIn(ws, ["add", "-A"])
-        discard fx.gitIn(ws, ["commit", "-q", "-m", "old settings file"])
+        discard fx.gitIn(ws, ["commit", "-q", "-m", "records-only settings file"])
         discard fx.gitIn(ws, ["push", "--no-verify", "-u", "origin", "main"])
 
         let trunk = fx.publishThenRewrite(ws, "origin", "trunk")
-        let refused = fx.gitIn(ws, ["push", "--force", "origin", "trunk"],
+        let rewritten = fx.gitIn(ws, ["push", "--force", "origin", "trunk"],
           required = false)
-        refuses(refused, ["mainline-history-rewrite",
-          "the shared mainline 'trunk'",
-          "declares for the workspace root repository", trunk.published])
-        check fx.remoteTip(ws, "origin", "trunk") == trunk.published
-        # `main` is no role of this root: an ordinary rewrite passes.
+        passes(rewritten)
+        check "mainline-history-rewrite" notin rewritten.output
+        check fx.remoteTip(ws, "origin", "trunk") != trunk.published
+        # `main` is no role of this root either: an ordinary rewrite passes.
         discard fx.gitIn(ws, ["checkout", "-q", "main"])
         discard fx.commitIn(ws, "root main work")
         passes(fx.gitIn(ws, ["push", "origin", "main"], required = false))

@@ -87,8 +87,8 @@ proc setupFixture(gitBin, slug: string): Fixture =
   # exercise the alias.
   writeFile(workspaceRoot / "projects" / "alpha.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"alpha\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"alpha\"\n" &
+    "\n" &
     "[[remote]]\nname = \"acme\"\n" &
     "fetch = \"https://git.example.invalid/acme\"\n")
   discard requireGit(q(gitBin) & " init -b main " & q(workspaceRoot))
@@ -139,13 +139,12 @@ suite "membership model — `repro ws sets` authoring":
       let infraFragment = readRepoFragment(
         fx.workspaceRoot / "repos" / "infra.toml")
       check infraFragment.repo.url_prefix.get("") == "acme"
-      # `--branch` is the mainline, written in the v1 spelling `branch`: the
-      # fragment declares nothing repo.v1 cannot say, so it stays readable by a
-      # `repro` that predates repo.v2 (Workspace-Branch-Roles.md §6).
-      check infraFragment.schema == schemaRepoFragmentV1
-      check infraFragment.repo.branch == some("dev")
-      check infraFragment.repo.mainline.isNone
-      check infraFragment.repo.mainlineBranch == some("dev")
+      # `--branch` is the mainline, written as `[repo] mainline` in the one
+      # fragment schema (Workspace-Branch-Roles.md §3.1).
+      check infraFragment.schema == schemaRepoFragmentV2
+      check infraFragment.repo.mainline == some("dev")
+      check "\nbranch = " notin
+        readFile(fx.workspaceRoot / "repos" / "infra.toml")
       # The NEW spelling only. A fragment naming a project's `[[remote]]` key
       # is not shareable without every consumer learning that key.
       check infraFragment.repo.remote.isNone
@@ -158,10 +157,18 @@ suite "membership model — `repro ws sets` authoring":
       check "infra" in readRepoSet(setFile).member_repos
 
       # ---- second repo, same org: reuses the prefix -----------------------
+      # ...and pinned: "tracks `dev`, sits at <commit>" writes BOTH keys on
+      # the repo-set path, exactly as the project path does — the pin sits
+      # beside the mainline, it does not replace it.
+      let garmPin = "0123456789abcdef0123456789abcdef01234567"
       check runRepro(fx, ["ws", "repos", "add", "garm",
         "--set=shared-infrastructure",
         "--remote=https://git.example.invalid/acme/garm",
-        "--branch=dev"]).code == 0
+        "--branch=dev", "--revision=" & garmPin]).code == 0
+      let garmFragment = readRepoFragment(
+        fx.workspaceRoot / "repos" / "garm.toml")
+      check garmFragment.repo.mainline == some("dev")
+      check garmFragment.repo.revision == some(garmPin)
       var prefixCount = 0
       for kind, path in walkDir(fx.workspaceRoot / "url-prefixes"):
         if kind in {pcFile, pcLinkToFile} and path.splitFile.ext == ".toml":
@@ -192,6 +199,9 @@ suite "membership model — `repro ws sets` authoring":
         if repo.name == "infra":
           check repo.fetchUrl == "https://git.example.invalid/acme/infra"
           check repo.branch == "dev"
+        elif repo.name == "garm":
+          check repo.branch == "dev"
+          check repo.revision == garmPin
         elif repo.name == "reprobuild-cmake":
           check repo.fetchUrl == "https://git.example.invalid/kitware/CMake"
 
@@ -355,7 +365,7 @@ suite "membership model — `repro ws sets` authoring":
       writeFile(fx.workspaceRoot / "projects" / "legacy.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
         "includes = [\n  \"repos/lib-i.toml\",\n]\n\n" &
-        "[project]\nname = \"legacy\"\ntrunk = \"main\"\n")
+        "[project]\nname = \"legacy\"\n")
       # Committed, not merely written: `sets remove` stages the files it
       # deletes, and `git add` on a path git never tracked fails the whole
       # command — which would make this arm fail for a reason that has nothing

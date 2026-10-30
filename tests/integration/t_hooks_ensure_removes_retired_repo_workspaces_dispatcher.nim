@@ -333,8 +333,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "lib-a"
-default_revision = "main"
-trunk = "main"
 
 [[remote]]
 name = "lib-a-origin"
@@ -346,13 +344,13 @@ includes = [
 """
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 type

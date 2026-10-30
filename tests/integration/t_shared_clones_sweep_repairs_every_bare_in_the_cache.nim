@@ -153,14 +153,14 @@ suite "shared clone cache sweep":
       createDir(ws / "repos")
       writeFile(ws / "projects" / "pg0proj.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"pg0proj\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"pg0proj\"\n" &
+        "\n" &
         "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & url & "\"\n\n" &
         "includes = [\n  \"repos/lib.toml\",\n]\n")
       writeFile(ws / "repos" / "lib.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
         "name = \"lib\"\npath = \"lib\"\nremote = \"lib-origin\"\n" &
-        "revision = \"main\"\n")
+        "mainline = \"main\"\n")
       discard must(q(gitBin) & " clone -q --branch main " & q(url) & " " &
         q(ws / "lib"))
       let stray = cache / "example.invalid" / "org" / "stray.git"

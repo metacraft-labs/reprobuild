@@ -519,11 +519,16 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
 #     and the shell did not run.
 # ---------------------------------------------------------------------------
 
-proc pinnedAction(id, cwd, digest: string; substituteOnly = false):
-    ProfileBuildAction =
+proc pinnedAction(id, cwd, digest: string; substituteOnly = false;
+                  outputs: seq[string] = @[]): ProfileBuildAction =
+  ## `outputs` other than the default declares the output TREE (`bin`)
+  ## rather than the file in it, as rpi2's prefix edges do; the staged
+  ## archive is the same either way, so the digest is too.
   result = witnessShellAction(id, cwd)
   result.expectedOutputDigest = digest
   result.substituteOnly = substituteOnly
+  if outputs.len > 0:
+    result.outputs = outputs
 
 proc applyAction(root, tag: string; action: ProfileBuildAction): ApplyRun =
   result.cwd = action.cwd
@@ -551,7 +556,7 @@ suite "substitute-only edges: the profile pins the bytes, not the publisher":
         let run1 = applyOnce(tmpRoot, "pub", "digest-edge")
         checkBuiltLocally(run1)
         let real = localOutputsDigest(witnessShellAction("digest-edge",
-          run1.cwd), tmpRoot / "stage-real")
+          run1.cwd))
         check real.startsWith("blake3:") and real.len == 7 + 64
         useConsumer(conf, url)
         # A consumer whose profile pins a DIFFERENT digest: the entry is
@@ -584,7 +589,7 @@ suite "substitute-only edges: the profile pins the bytes, not the publisher":
         let run1 = applyOnce(tmpRoot, "pub", "present-edge")
         checkBuiltLocally(run1)
         let real = localOutputsDigest(witnessShellAction("present-edge",
-          run1.cwd), tmpRoot / "stage-real")
+          run1.cwd))
         # The outputs are already in place from run1 (same cwd). Point the
         # consumer at a cache that does not exist: a fetch would fail, so a
         # hit here can only have come from the present bytes.
@@ -667,7 +672,7 @@ suite "substitute-only edges: the profile pins the bytes, not the publisher":
         let run1 = applyOnce(tmpRoot, "pub", "report-edge")
         checkBuiltLocally(run1)
         let action = witnessShellAction("report-edge", run1.cwd)
-        let present = localOutputsDigest(action, tmpRoot / "stage-present")
+        let present = localOutputsDigest(action)
         # Publish the same outputs again by hand, under another id so the
         # server takes it, and read the digest the publisher reports.
         let stage = tmpRoot / "stage-publish"
@@ -685,3 +690,56 @@ suite "substitute-only edges: the profile pins the bytes, not the publisher":
         check res.ok
         check res.rawArchiveDigestHex.len == 64
         check "blake3:" & res.rawArchiveDigestHex == present
+
+  test "a stray file in the output tree is removed by the next substitute, not re-downloaded forever":
+    # The reviewer's probe: an undeclared file inside a declared output
+    # directory. Before, materialisation wrote the archive's members over
+    # it and removed nothing, so the present-outputs check never matched the
+    # pin again and every tick downloaded and rewrote the prefix while
+    # reporting a hit. Now the declared trees are replaced wholesale, what
+    # landed is verified against the pin, and the tick after that is a
+    # no-fetch hit.
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-stray-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+        usePublisher(conf, url, kpA)
+        # The publisher declares the tree `bin` (the declared outputs are
+        # part of the entry key, so the consumer below declares the same),
+        # and the digest of that staged tree equals the file's: the staged
+        # archive is the same either way.
+        let run1 = applyAction(tmpRoot, "pub",
+          pinnedAction("stray-edge", tmpRoot / "cwd-pub", "", outputs = @["bin"]))
+        checkBuiltLocally(run1)
+        let real = localOutputsDigest(pinnedAction("stray-edge", run1.cwd, "",
+          outputs = @["bin"]))
+        check real == localOutputsDigest(witnessShellAction("stray-edge", run1.cwd))
+        useConsumer(conf, url)
+        let cwd = tmpRoot / "cwd-stray"
+        let first = applyAction(tmpRoot, "s1",
+          pinnedAction("stray-edge", cwd, real, substituteOnly = true,
+                       outputs = @["bin"]))
+        checkSubstituted(first)
+        # The stray: undeclared, inside the declared `bin` tree.
+        writeFile(cwd / "bin" / "stale-from-last-version", "x")
+        check localOutputsDigest(pinnedAction("stray-edge", cwd, real,
+          outputs = @["bin"])) != real
+        let second = applyAction(tmpRoot, "s2",
+          pinnedAction("stray-edge", cwd, real, substituteOnly = true,
+                       outputs = @["bin"]))
+        check second.outcome.ok
+        check second.outcome.substitutedFromCache     # it had to fetch once
+        check not fileExists(cwd / "bin" / "stale-from-last-version")
+        check readFile(cwd / OutRel) == ExpectedPayload
+        # And now the tree IS the pin: no fetch on the third tick, even with
+        # the cache gone.
+        writeCachesConf(tmpRoot / "dead.conf", "http://127.0.0.1:9", @[kpA.pubHex])
+        useConsumer(tmpRoot / "dead.conf", "http://127.0.0.1:9")
+        let third = applyAction(tmpRoot, "s3",
+          pinnedAction("stray-edge", cwd, real, substituteOnly = true,
+                       outputs = @["bin"]))
+        check third.outcome.ok
+        check not third.outcome.substitutedFromCache

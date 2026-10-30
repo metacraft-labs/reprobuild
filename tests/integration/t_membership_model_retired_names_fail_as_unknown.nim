@@ -61,12 +61,12 @@ proc fragment(tagsKey: string): string =
   ## One repo fragment, with the subset-label array written under whichever key
   ## the caller names. Identical in every other byte, so the only variable
   ## between the refusal and the positive control is the key itself.
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"lib-tools\"\n" &
   "path = \"lib-tools\"\n" &
   "remote = \"acme\"\n" &
-  "revision = \"main\"\n" &
+  "mainline = \"main\"\n" &
   tagsKey & " = [\"tools\"]\n"
 
 suite "membership model — retired names fail as unknown":

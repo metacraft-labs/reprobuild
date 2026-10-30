@@ -91,21 +91,20 @@ proc projectTomlWith1Remote(libAUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"lib-a\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "includes = [\n" &
     "  \"repos/lib-a.toml\",\n" &
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -163,9 +162,9 @@ proc setupFixture(gitBin, slug: string): Fixture =
   # MO-14 — central lock publication is opt-in. This test asserts the gate
   # PUBLISHES (and retries a non-fast-forward invisibly), so the workspace must
   # opt in via the host bootstrap config's `[manifest] publish_locks = true`.
-  writeFile(workspaceRoot / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"" & fileUrl(result.manifestBare) & "\"\n" &
     "branch = \"main\"\n" &
     "publish_locks = true\n")

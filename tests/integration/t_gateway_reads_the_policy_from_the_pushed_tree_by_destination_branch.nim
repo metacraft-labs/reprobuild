@@ -213,9 +213,9 @@ suite "TC-9c — the gateway reads the policy from the pushed tree":
     # into a record-store project merely because a store exists nearby.
     let customStore = fx.workspaceRoot / "custom-records"
     discard gitOut(fx.workspaceRoot, "init", "-q", customStore)
-    let routingPath = fx.workspaceRoot / ".repro-workspace.toml"
-    let otherRoute = "schema = \"reprobuild.workspace.bootstrap.v1\"\n" &
-      "[manifest]\nurl = \"https://example.invalid/manifests.git\"\n" &
+    let routingPath = fx.workspaceRoot / "repro-workspace.toml"
+    let otherRoute = "schema = \"reprobuild.workspace.settings.v1\"\n" &
+      "[records]\nurl = \"https://example.invalid/manifests.git\"\n" &
       "[locking]\nroute = [{visibility = \"team\", backend = \"git-checkout\", " &
       "path = \"custom-records\", repos = [\"other\"]}]\n"
     writeFile(routingPath, otherRoute)
@@ -248,9 +248,9 @@ suite "TC-9c — the gateway reads the policy from the pushed tree":
     check readGatewayConfig(wired.gatewayDir).lockRecordsDir == ""
 
     let beforeFailure = readFile(gatewayConfigPath(wired.gatewayDir))
-    writeFile(fx.workspaceRoot / ".repro-workspace.toml",
-      "schema = \"reprobuild.workspace.bootstrap.v1\"\n" &
-      "[manifest]\nurl = \"https://example.invalid/manifests.git\"\n" &
+    writeFile(fx.workspaceRoot / "repro-workspace.toml",
+      "schema = \"reprobuild.workspace.settings.v1\"\n" &
+      "[records]\nurl = \"https://example.invalid/manifests.git\"\n" &
       "[locking]\nroute = [{visibility = \"team\", backend = \"git-notes\", " &
       "repos = [\"lib-a\"]}]\n")
     let failed = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",

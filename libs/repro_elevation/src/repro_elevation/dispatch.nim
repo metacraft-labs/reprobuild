@@ -111,7 +111,8 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule, pokLinuxNixosSystemModule,
      pokMacosDarwinSystemModule, pokLinuxFhsSandbox, pokLinuxDpkgDiversion,
-     pokSystemdUnitState, pokLinuxAddOnTool:
+     pokSystemdUnitState, pokLinuxAddOnTool, pokSystemdSystemDropIn,
+     pokLinuxSysusersEntry:
     posixSystemDesiredDigestHex(op)
   of pokInlineExecCall:
     # Windows-System-Resources Phase E: an inline-exec edge has no
@@ -221,6 +222,10 @@ proc reobserve*(ctx: FixtureContext;
     observeSystemdUnitState(op)
   of pokLinuxAddOnTool:
     observeLinuxAddOnTool(op)
+  of pokSystemdSystemDropIn:
+    observeSystemdSystemDropIn(op)
+  of pokLinuxSysusersEntry:
+    observeLinuxSysusersEntry(op)
   of pokLinuxFhsSandbox:
     observeLinuxFhsSandbox(op)
   of pokInlineExecCall:
@@ -264,11 +269,11 @@ proc applyOne(ctx: FixtureContext;
   of pokMacosSystemDefault:
     result = applyMacosSystemDefault(op)
   of pokSystemdSystemUnit:
-    result = applySystemdSystemUnit(op)
+    result = applySystemdSystemUnit(ctx, op)
   of pokLaunchdSystemDaemon:
     result = applyLaunchdSystemDaemon(op)
   of pokFsSystemFile:
-    result = applyFsSystemFile(op)
+    result = applyFsSystemFile(ctx, op)
   of pokFsSystemDirectory:
     result = applyFsSystemDirectory(op)
   of pokEnvSystemVariable:
@@ -289,7 +294,7 @@ proc applyOne(ctx: FixtureContext;
     else:
       result = applyPosixOsHostname(op)
   of pokLinuxSysctl:
-    result = applyLinuxSysctl(op)
+    result = applyLinuxSysctl(ctx, op)
   of pokLinuxDpkgDiversion:
     result = applyLinuxDpkgDiversion(op)
   of pokLinuxUdevRule:
@@ -316,6 +321,10 @@ proc applyOne(ctx: FixtureContext;
     result = applySystemdUnitState(op)
   of pokLinuxAddOnTool:
     result = applyLinuxAddOnTool(op)
+  of pokSystemdSystemDropIn:
+    result = applySystemdSystemDropIn(ctx, op)
+  of pokLinuxSysusersEntry:
+    result = applyLinuxSysusersEntry(op)
   of pokLinuxFhsSandbox:
     result = applyLinuxFhsSandbox(op)
   of pokInlineExecCall:
@@ -414,7 +423,9 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokMacosDarwinSystemModule and op.darwinModuleDestroy) or
     (op.kind == pokLinuxFhsSandbox and op.fsbDestroy) or
     (op.kind == pokSystemdUnitState and op.usDestroy) or
-    (op.kind == pokLinuxAddOnTool and op.atDestroy)
+    (op.kind == pokLinuxAddOnTool and op.atDestroy) or
+    (op.kind == pokSystemdSystemDropIn and op.diDestroy) or
+    (op.kind == pokLinuxSysusersEntry and op.seDestroy)
   # Add-On spec §7.3: a unit whose `depends_on` resource changed in this
   # apply has an UNCHANGED file, so by digest it is a cache-hit. The apply
   # step marked it (`suRestartRequested`), and the driver, not this loop,

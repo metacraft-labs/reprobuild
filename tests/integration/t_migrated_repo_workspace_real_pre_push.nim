@@ -98,15 +98,15 @@ proc writeNativeMembership(fx: Fixture) =
   createDir(fx.workspace / "repos")
   writeFile(fx.workspace / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n" &
     "[[remote]]\nname = \"origin\"\nfetch = \"" &
       fileUrl(fx.origin).replace('\\', '/') & "\"\n\n" &
     "includes = [\"repos/app.toml\"]\n")
   writeFile(fx.workspace / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"origin\"\nrevision = \"main\"\n")
+    "remote = \"origin\"\nmainline = \"main\"\n")
 
 proc writeConflictingLegacyMembership(fx: Fixture) =
   ## This valid legacy project names a repo that has no checkout, and declares
@@ -127,14 +127,14 @@ proc writeConflictingLegacyMembership(fx: Fixture) =
   createDir(legacy / "repos")
   writeFile(legacy / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n\n" &
     "[[remote]]\nname = \"origin\"\nfetch = \"" &
       fileUrl(fx.origin).replace('\\', '/') & "\"\n\n" &
     "includes = [\"repos/legacy-ghost.toml\"]\n")
   writeFile(legacy / "repos" / "legacy-ghost.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"legacy-ghost\"\npath = \"legacy-ghost\"\n" &
-    "remote = \"origin\"\nrevision = \"main\"\n")
+    "remote = \"origin\"\nmainline = \"main\"\n")
 
 proc writeLegacyMigrationArtifacts(fx: Fixture;
                                    marker = "reprobuild migration complete\n") =
@@ -445,15 +445,15 @@ suite "migrated Google Repo workspace pre-push compatibility":
     # (It used to be refused with "requires either ... neither was present",
     # which was wrong about a file that IS present; a present-but-malformed
     # state file is reported as such.)
-    writeFile(fx.workspace / ".repro" / "workspace.toml",
+    writeFile(fx.workspace / ".repro" / "workspace-state.toml",
       "schema = \"not-the-native-schema\"\n")
     let nativeShadow = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    nativeShadow.assertRefused(fx.workspace / ".repro" / "workspace.toml")
+    nativeShadow.assertRefused(fx.workspace / ".repro" / "workspace-state.toml")
     check "schema version mismatch" in nativeShadow.output
     check "neither was present" notin nativeShadow.output
     check bareHead(gitBin, fx.origin) == outgoing
-    removeFile(fx.workspace / ".repro" / "workspace.toml")
+    removeFile(fx.workspace / ".repro" / "workspace-state.toml")
 
     # The remote-name alias is allowed only for the manifest's exact
     # destination. A different real bare cannot borrow the migration fallback

@@ -316,8 +316,8 @@ proc prepareCase(): F5Case =
   result.tempRoot = createTempDir("repro-f5-cli-", "")
   result.workspaceRoot = result.tempRoot / "ws"
   createDir(result.workspaceRoot / ".repro")
-  writeFile(result.workspaceRoot / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n" &
+  writeFile(result.workspaceRoot / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n" &
     "\n[workspace]\nproject = \"f5-integration\"\n")
   result.issuerOwner = result.workspaceRoot / IssuerOwner
   result.issuerConsumer = result.workspaceRoot / IssuerConsumer

@@ -273,7 +273,7 @@ proc cargo_package*(srcDir = "src";
   if zigCross:
     let wrapperDir = zigCrossWrapperDir(
       (if projectRoot.len > 0: projectRoot else: "."), target)
-    env.add(zigCrossCargoEnv(target, wrapperDir))
+    env.add(zigCrossCargoEnv(target, wrapperDir, remapRoot = projectRoot))
     if projectRoot.len > 0:
       compileAfter.add(emitZigCrossWrappersAction(projectRoot, pkgName,
         target))

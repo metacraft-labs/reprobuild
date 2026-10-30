@@ -119,7 +119,7 @@ proc seedBareRepo(gitBin, scratch, barePath: string) =
 proc projectToml(fetch, repo: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\nincludes = [\"repos/" &
     repo & ".toml\"]\n\n[project]\nname = \"demo\"\n" &
-    "default_revision = \"main\"\ntrunk = \"main\"\n\n[[remote]]\n" &
+    "\n[[remote]]\n" &
     "name = \"acme\"\nfetch = \"" & fetch & "\"\n"
 
 proc fragmentToml(name: string): string =

@@ -461,6 +461,15 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.atAptClosureLock)
     body.writeString(op.atProgram)
     body.writeBool(op.atDestroy)
+  of pokSystemdSystemDropIn:
+    body.writeString(op.diUnit)
+    body.writeString(op.diName)
+    body.writeString(op.diContent)
+    body.writeBool(op.diDestroy)
+  of pokLinuxSysusersEntry:
+    body.writeString(op.seName)
+    body.writeString(op.seContent)
+    body.writeBool(op.seDestroy)
   of pokLinuxFhsSandbox:
     body.writeString(op.fsbBinPath)
     body.writeU32Le(uint32(op.fsbFhsTreeRoots.len))
@@ -826,6 +835,19 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.atAptClosureLock = readString(body, pos)
     result.operation.atProgram = readString(body, pos)
     result.operation.atDestroy = readBool(body, pos, "atDestroy")
+  of pokSystemdSystemDropIn:
+    result.operation = PrivilegedOperation(kind: pokSystemdSystemDropIn,
+      address: address)
+    result.operation.diUnit = readString(body, pos)
+    result.operation.diName = readString(body, pos)
+    result.operation.diContent = readString(body, pos)
+    result.operation.diDestroy = readBool(body, pos, "diDestroy")
+  of pokLinuxSysusersEntry:
+    result.operation = PrivilegedOperation(kind: pokLinuxSysusersEntry,
+      address: address)
+    result.operation.seName = readString(body, pos)
+    result.operation.seContent = readString(body, pos)
+    result.operation.seDestroy = readBool(body, pos, "seDestroy")
   of pokLinuxFhsSandbox:
     result.operation = PrivilegedOperation(kind: pokLinuxFhsSandbox,
       address: address)

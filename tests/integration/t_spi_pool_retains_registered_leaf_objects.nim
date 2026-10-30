@@ -324,7 +324,7 @@ suite "SPI-1: the pool retains what registered leaves name":
     createDir(sibling.parentDir)
     moveDir(f.a, workspace)
     moveDir(f.b, sibling)
-    writeFile(workspace / ".repro-workspace.toml", "")
+    writeFile(workspace / "repro-workspace.toml", "")
     # If the workspace-root seed were treated as workspace/repo, scanning
     # would escape to root and this unrelated broken repository would refuse.
     let unrelated = root / "unrelated"

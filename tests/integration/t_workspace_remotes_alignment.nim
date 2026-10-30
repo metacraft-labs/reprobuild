@@ -81,8 +81,7 @@ proc setupFixture(): RemotesFixture =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin-prefix\"\nfetch = \"" & fileUrl(originsDir) & "\"\n\n" &
     "[[remote]]\nname = \"lib-a-upstream-prefix\"\nfetch = \"" & fileUrl(upstreamsDir) & "\"\n\n" &
     "includes = [\n" &
@@ -91,8 +90,8 @@ proc setupFixture(): RemotesFixture =
   writeFile(workspaceRoot / "projects" / "myproject.toml", projectToml)
 
   let repoToml =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-    "[repo]\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+    "[repo]\nmainline = \"main\"\n" &
     "name = \"lib-a\"\n" &
     "path = \"libs/lib-a\"\n" &
     "remote = \"origin\"\n" &

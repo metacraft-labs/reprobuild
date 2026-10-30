@@ -78,9 +78,9 @@ const
     ## not in it.
 
 proc fragment(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+    "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
 
 proc seed(fx: Nf2Fixture; name: string): string =
   ## A bare origin and a published clone at `ws/<name>`, carrying a
@@ -179,8 +179,8 @@ proc setupFixture(label: string): tuple[fx: Nf2Fixture; pin: string] =
   createDir(fx.ws / "projects")
   createDir(fx.ws / "repos")
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"own\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"own\"\n" &
+    "\n"
   for name in Repos:
     project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
       originUrl(fx, name) & "\"\n\n")
@@ -190,8 +190,8 @@ proc setupFixture(label: string): tuple[fx: Nf2Fixture; pin: string] =
   project.add("]\n")
   writeFile(fx.ws / "projects" / "own.toml", project)
   createDir(fx.ws / ".repro")
-  writeFile(fx.ws / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(fx.ws / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"own\"\nbranch = \"main\"\n")
 
   commitOtherLock(fx, [(name: "third", rev: fx.seedSha[3])])

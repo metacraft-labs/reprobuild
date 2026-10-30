@@ -140,10 +140,11 @@ type
     ## Which workspace file a set-aside diagnostic is about; ``repro health``
     ## reports each kind in a row of its own.
     mwkSettings = "workspace-settings"
-      ## ``repro-workspace.toml`` / ``repro-workspace.local.toml`` (or the old
-      ## ``.repro-workspace.toml``).
+      ## ``repro-workspace.toml`` / ``repro-workspace.local.toml``, or a
+      ## settings file under its retired name.
     mwkState = "workspace-state"
-      ## ``.repro/workspace-state.toml`` (or the old ``.repro/workspace.toml``).
+      ## ``.repro/workspace-state.toml``, or the state file under its retired
+      ## name.
     mwkManifest = "manifest"
       ## A file of the manifest closure the workspace resolves through — a
       ## ``repos/*.toml`` fragment, a project / variant / repo-set manifest.

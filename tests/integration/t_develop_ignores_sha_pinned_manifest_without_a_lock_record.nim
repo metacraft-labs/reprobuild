@@ -116,15 +116,14 @@ proc projectToml(coreUrl, teamUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"team-origin\"\nfetch = \"" & teamUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n  \"repos/team-lib.toml\",\n]\n"
 
 proc repoFragment(name, remote, revision: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-  "[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+  "[repo]\nmainline = \"main\"\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
@@ -188,9 +187,9 @@ suite "an advisory SHA-pinned manifest is not a lock record":
       writeWorkspaceBranch(ws, project = "mix", branch = "main")
       writeFile(ws / "repro.lock",
         committedLock(fileUrl(coreOrigin), coreSha))
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"team\", backend = \"git-checkout\", " &

@@ -107,6 +107,23 @@ suite "cross_zig: the target table and the environment":
     check ("CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS=" &
       "-C target-feature=+crt-static -C link-self-contained=no") in m
 
+  test "the project root is remapped out of the binary":
+    # Two builds of one recipe from two checkouts must agree byte for byte;
+    # rustc's panic-location strings carry source paths under the project
+    # root (the extracted tree, the vendored crates), so the root is
+    # spelled `/build` in the binary. Without this, a digest a profile
+    # pins would hold only for the checkout that produced it.
+    let env = zigCrossCargoEnv(Triple, "/w", remapRoot = "/home/x/proj")
+    var rustflags = ""
+    for (k, v) in env:
+      if k == "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS":
+        rustflags = v
+    check rustflags.endsWith(" --remap-path-prefix=/home/x/proj=/build")
+    check rustflags.startsWith(ZigCrossRustflags)
+    # Without a root (no project root at emission) there is nothing to
+    # remap, and the flags are the static-musl flags alone.
+    check zigCrossRustflags("") == ZigCrossRustflags
+
   test "the wrappers filter what zig's driver rejects":
     let t = zigCrossTarget(Triple)
     let cc = zigCrossWrapperScript("cc", t, "/w/lib")
@@ -156,6 +173,7 @@ suite "cargo_package: target, zig cross toolchain, workspace member":
       check edge.envValue("CC_armv7_unknown_linux_musleabihf").endsWith("/cc")
       check edge.envValue("CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER")
         .endsWith("/rust-linker")
+      # No provider project root in this test, so no remap is added.
       check edge.envValue("CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS") ==
         ZigCrossRustflags
 
