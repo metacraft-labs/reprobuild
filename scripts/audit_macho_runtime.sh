@@ -139,14 +139,17 @@ audit_slice() {
   local image=$1
   local arch=$2
   local root_executable=$3
+  local require_package_rpaths=${4:-1}
   local rpaths
   local required
   local install_id
   local dependency
+  local dependencies
 
   "$otool_cmd" -arch "$arch" -h "$image" >/dev/null
   rpaths=$(slice_rpaths "$image" "$arch")
   for required in "${required_rpaths[@]}"; do
+    ((require_package_rpaths)) || break
     # Read from a here-string rather than a pipe.  Under `set -o pipefail`,
     # `printf ... | grep -Fxq` reports the pipeline as failed whenever grep
     # matches early and exits while printf is still writing: printf takes
@@ -168,11 +171,58 @@ audit_slice() {
     fi
   fi
 
+  # Process substitution would discard otool's failure status and falsely
+  # accept unavailable metadata as an empty dependency list.
+  dependencies=$(slice_dependencies "$image" "$arch") || {
+    fail "$image [$arch] dependency inspection failed"
+    return
+  }
   while IFS= read -r dependency; do
     [[ -n $dependency ]] || continue
     audit_dependency "$dependency" "$image" "$arch" "$root_executable" \
       "$rpaths" || return
-  done < <(slice_dependencies "$image" "$arch")
+  done <<<"$dependencies"
+}
+
+# This one shipped support role is intentionally Python. Validate the actual
+# native interpreter, never an ambient PATH lookup or an arbitrary script role.
+# Python owns its own runtime closure, not the SDK's six library search paths.
+audit_interpreted_helper() {
+  local helper=$1 first_line interpreter arch interpreter_archs required_archs
+  [[ -x $helper ]] || { fail "interpreted helper is not executable: $helper"; return; }
+  IFS= read -r first_line < "$helper"
+  case "$first_line" in
+    '#!'/nix/store/*) interpreter=${first_line#\#!} ;;
+    *) fail "interpreted helper lacks a pinned store interpreter: $helper"; return ;;
+  esac
+  if [[ $interpreter == *[[:space:]]* || ! -x $interpreter ]]; then
+    fail "interpreted helper has malformed or missing executable interpreter: $helper"
+    return
+  fi
+  interpreter=$(realpath "$interpreter")
+  case "$interpreter" in
+    /nix/store/*) ;;
+    *) fail "interpreted helper principal resolves outside the store: $interpreter"; return ;;
+  esac
+  interpreter_archs=$("$lipo_cmd" -archs "$interpreter" 2>/dev/null) || {
+    fail "interpreted helper principal is not Mach-O: $interpreter"; return
+  }
+  required_archs=$("$lipo_cmd" -archs "$package_root/bin/.repro-wrapped")
+  [[ -n $required_archs && -n $interpreter_archs ]] || {
+    fail "interpreted helper principal has no architectures: $interpreter"; return
+  }
+  for arch in $required_archs; do
+    case " $interpreter_archs " in
+      *" $arch "*) ;;
+      *) fail "interpreted helper principal lacks architecture $arch: $interpreter"; return ;;
+    esac
+  done
+  for arch in $interpreter_archs; do
+    audit_slice "$interpreter" "$arch" "$interpreter" 0
+    if [[ $arch == arm64 || $arch == arm64e ]]; then
+      "$codesign_cmd" --verify --strict "$interpreter" >/dev/null
+    fi
+  done
 }
 
 macho_count=0
@@ -198,6 +248,9 @@ while IFS= read -r -d '' candidate; do
     fi
   else
     case "$candidate" in
+      "$package_root"/bin/.reprobuild-nix-daemon-wrapped)
+        audit_interpreted_helper "$candidate"
+        ;;
       "$package_root"/lib/*|"$package_root"/bin/.*-wrapped)
         fail "required binary/library role is not Mach-O: $candidate"
         ;;
