@@ -254,6 +254,15 @@ suite "a nix realization is held to the declared range":
     check nixStorePathVersion("/nix/store/abc-zlib-ng-compat-2.2.4/lib/libz.so") == "2.2.4"
     check nixStorePathVersion("/nix/store/abc-zlib-ng-compat-2.2.4-dev") == "2.2.4"
     check nixStorePathVersion("/nix/store/abc-font-adobe-100dpi-1.0.4-man") == "1.0.4"
+    # a nixpkgs unstable version is dashed itself; its last dash-digit
+    # opens the day of the month, not the version.
+    check nixStorePathVersion("/nix/store/abc-foo-0-unstable-2024-01-01") ==
+      "0-unstable-2024-01-01"
+    check nixStorePathVersion("/nix/store/abc-foo-0-unstable-2024-01-01-dev") ==
+      "0-unstable-2024-01-01"
+    check nixStorePathVersion("/nix/store/abc-openssh-9.6p1/bin/ssh") == "9.6p1"
+    # no segment reads as a version: the last dash-digit still opens it.
+    check nixStorePathVersion("/nix/store/abc-foo-1a") == "1a"
 
   test "a library with no version probe is held to its store path's version":
     # zlib has no `--version`: before the store path was read, every nix

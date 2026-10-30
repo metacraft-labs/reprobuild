@@ -1939,11 +1939,17 @@ proc nixStorePathVersion*(path: string): string =
   ## pname may itself hold a dash followed by a digit
   ## (``font-adobe-100dpi-1.0.4``) and dashes before the version
   ## (``zlib-ng-compat-2.2.4``), so the version is NOT the first ``-`` a
-  ## digit follows: it is the segment after the pname, i.e. after dropping a
-  ## trailing ``-<output>``, the LAST ``-`` a digit follows opens it. That
-  ## is the version the pinned nixpkgs built, which is what a range is held
-  ## against for a realization with no version probe -- a library has no
-  ## ``--version`` to ask.
+  ## digit follows. Nor is it the last: a nixpkgs unstable version is itself
+  ## dashed (``0-unstable-2024-01-01``,
+  ## https://nixos.org/manual/nixpkgs/stable/#sec-package-naming), and the
+  ## last dash-digit there opens ``01``. After dropping a trailing
+  ## ``-<output>``, the version opens at the first ``-`` whose segment reads
+  ## as a version -- all digits, or digits holding a dot (``1.0.4``,
+  ## ``9.6p1``) -- which skips a pname segment like ``100dpi``. Only when no
+  ## segment reads so does the last dash-digit open it. That is the version
+  ## the pinned nixpkgs built, which is what a range is held against for a
+  ## realization with no version probe -- a library has no ``--version`` to
+  ## ask.
   const StorePrefix = "/nix/store/"
   let at = path.find(StorePrefix)
   if at < 0:
@@ -1959,6 +1965,14 @@ proc nixStorePathVersion*(path: string): string =
   let lastDash = name.rfind('-')
   if lastDash > 0 and name[lastDash + 1 .. ^1] in NixOutputNames:
     name = name[0 ..< lastDash]
+  for i in 0 .. name.len - 2:
+    if name[i] == '-' and name[i + 1] in Digits:
+      var stop = name.find('-', i + 1)
+      if stop < 0: stop = name.len
+      let segment = name[i + 1 ..< stop]
+      if segment.allCharsInSet(Digits) or
+          ('.' in segment and segment.allCharsInSet(Digits + Letters + {'.'})):
+        return name[i + 1 .. ^1]
   for i in countdown(name.len - 2, 0):
     if name[i] == '-' and name[i + 1] in Digits:
       return name[i + 1 .. ^1]
