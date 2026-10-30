@@ -185,6 +185,7 @@ libs/repro_cli_support/tests/t_home_export_ignores_host_local_lock.nim	nim	2
 libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim	nim	1
 libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim	nim	3
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	4
+libs/repro_cli_support/tests/t_infra_cache_keys.nim	nim	9
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	12
 libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim	nim	19

@@ -26,6 +26,8 @@ import repro_infra
 import repro_profile
 import repro_profile_intent
 import repro_profile_compile
+import repro_profile_compile/binary_cache_build_actions as bc_actions
+import repro_binary_cache_client
 import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
@@ -252,6 +254,12 @@ type
   InfraCliFlags = object
     stateDir: string
     profilePath: string
+    platformCpu, platformOs, platformAbi, platformLibc: string
+      ## `repro infra cache-keys --platform-*`: the platform of the host
+      ## the keys are derived FOR. Each defaults to this host's value
+      ## (`localPlatformTriple`), so a bare `cache-keys` prints what an
+      ## apply here would look up, and a producer publishing ahead for
+      ## another host names that host's platform.
     host: string
     hostGiven: bool
       ## `--host` was passed (even as `--host=`), so an empty value is
@@ -349,6 +357,18 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--profile": result.flags.profilePath = valueOf()
     elif a.startsWith("--profile="):
       result.flags.profilePath = a["--profile=".len .. ^1]
+    elif a == "--platform-cpu": result.flags.platformCpu = valueOf()
+    elif a.startsWith("--platform-cpu="):
+      result.flags.platformCpu = a["--platform-cpu=".len .. ^1]
+    elif a == "--platform-os": result.flags.platformOs = valueOf()
+    elif a.startsWith("--platform-os="):
+      result.flags.platformOs = a["--platform-os=".len .. ^1]
+    elif a == "--platform-abi": result.flags.platformAbi = valueOf()
+    elif a.startsWith("--platform-abi="):
+      result.flags.platformAbi = a["--platform-abi=".len .. ^1]
+    elif a == "--platform-libc": result.flags.platformLibc = valueOf()
+    elif a.startsWith("--platform-libc="):
+      result.flags.platformLibc = a["--platform-libc=".len .. ^1]
     elif a == "--home-profile-dir": result.flags.homeProfileDir = valueOf()
     elif a.startsWith("--home-profile-dir="):
       result.flags.homeProfileDir = a["--home-profile-dir=".len .. ^1]
@@ -568,6 +588,75 @@ proc takeInfraApplyLock(stateDir, command: string;
   elif acq.reclaim == alrMalformed:
     stderr.writeLine(command & ": reclaimed an unreadable apply lock.")
   true
+
+proc cacheKeysPlatform*(flags: InfraCliFlags; stateDir: string):
+    PlatformTriple =
+  ## The platform `repro infra cache-keys` derives for: each `--platform-*`
+  ## flag that was given, and this host's value for the rest.
+  result = bc_actions.localPlatformTriple(stateDir)
+  if flags.platformCpu.len > 0: result.cpu = flags.platformCpu
+  if flags.platformOs.len > 0: result.os = flags.platformOs
+  if flags.platformAbi.len > 0: result.abi = flags.platformAbi
+  if flags.platformLibc.len > 0: result.libcVariant = flags.platformLibc
+
+proc renderCacheKeys*(actions: seq[ProfileBuildAction];
+                      platform: PlatformTriple): string =
+  ## The `repro infra cache-keys` report: one block per build-action edge
+  ## with the entry key an apply on `platform` looks up and the identity
+  ## flags that publish under it. Edges whose outputs are not all under
+  ## their `cwd` are listed as not substitutable, which is what the apply
+  ## concludes about them too (`outputRelPaths`).
+  for action in actions:
+    let idy = bc_actions.buildActionCacheIdentity(action, platform)
+    result.add(action.id & "\n")
+    if not bc_actions.isSubstitutable(action):
+      result.add("  not substitutable: an output is not under cwd\n")
+      continue
+    result.add("  entry-key: " & deriveCacheEntryKeyHex(idy) & "\n")
+    result.add("  publish:   repro cache publish " &
+      deriveCacheEntryKeyHex(idy) & " <prefix> " &
+      bc_actions.publishIdentityFlags(idy).join(" ") & "\n")
+
+proc runInfraCacheKeys(args: openArray[string]): int =
+  ## `repro infra cache-keys [--profile P] [--state-dir D] [--platform-cpu C]
+  ## [--platform-os O] [--platform-abi A] [--platform-libc L]`.
+  ##
+  ## Compiles the profile exactly as `plan` and `apply` do and prints, for
+  ## every build-action edge, the binary-cache entry key an apply of that
+  ## profile derives on the given platform (default: this host), with the
+  ## `repro cache publish` flags that publish an output prefix under it.
+  ## This is how a build host publishes an edge's outputs AHEAD of a host
+  ## that cannot build them (Binary-Caches.md §"Publishing for a host that
+  ## cannot build"): the key is a function of the edge and the consuming
+  ## platform only, so it can be derived anywhere the profile compiles.
+  ## Nothing is applied, planned or written outside the profile-compile
+  ## cache under the state directory.
+  let (flags, _) = parseInfraFlags(args)
+  let stateDir = (if flags.stateDir.len > 0: flags.stateDir
+                  else: resolveSystemStateDir())
+  setStateDirOverride(stateDir)
+  let profilePath = resolveProfilePath(flags, stateDir)
+  if not fileExists(profilePath):
+    stderr.writeLine("repro infra cache-keys: no system profile at " &
+      profilePath)
+    return 1
+  var profileText: string
+  var actions: seq[ProfileBuildAction]
+  if not resolveSystemProfileText(profilePath, readFile(profilePath),
+      stateDir, "repro infra cache-keys", profileText,
+      planCommand = "repro infra cache-keys",
+      outBuildActions = addr actions):
+    return 1
+  let platform = cacheKeysPlatform(flags, stateDir)
+  echo "repro infra cache-keys"
+  echo "  profile : " & profilePath
+  echo "  platform: cpu=" & platform.cpu & " os=" & platform.os &
+    " abi=" & platform.abi & " libc=" & platform.libcVariant
+  if actions.len == 0:
+    echo "  (the profile declares no build-action edges)"
+    return 0
+  stdout.write(renderCacheKeys(actions, platform))
+  return 0
 
 proc runInfraApply(args: openArray[string]): int =
   let (flags, positional) = parseInfraFlags(args)
@@ -1145,7 +1234,8 @@ proc runInfraInstallRootCli(args: seq[string]): int =
 proc runInfraCommand*(args: seq[string]): int =
   ## `repro infra <subcommand>`.
   if args.len == 0:
-    stderr.writeLine("usage: repro infra {plan | apply | install-root} ...")
+    stderr.writeLine("usage: repro infra {plan | apply | cache-keys | " &
+      "install-root} ...")
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -1153,6 +1243,7 @@ proc runInfraCommand*(args: seq[string]): int =
     case sub
     of "plan": return runInfraPlan(rest)
     of "apply": return runInfraApply(rest)
+    of "cache-keys": return runInfraCacheKeys(rest)
     of "install-root": return runInfraInstallRootCli(rest)
     else:
       stderr.writeLine("repro infra: unknown subcommand: " & sub)
