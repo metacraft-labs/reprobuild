@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2421,
+    "nimTestBinaries": 2424,
     "pureUnitConsolidationGroups": 69,
-    "pureUnitTests": 688,
+    "pureUnitTests": 689,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2461
+    "testEntries": 2464
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1398,10 +1398,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1348,
+      "integration": 1349,
       "platform/destructive": 146,
-      "pure unit": 688,
-      "unclassified": 261
+      "pure unit": 689,
+      "unclassified": 262
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1609,9 +1609,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2421,
+    "nimTestBinaryCount": 2424,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2461
+    "testEntryCount": 2464
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12608,6 +12608,42 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_apt_closure",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_apt_closure_trixie_armhf",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_c1_dsl_parse",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -17841,6 +17877,27 @@
       "source": "libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_apt_closure_system_unit",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_elevation",
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

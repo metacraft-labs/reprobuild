@@ -336,6 +336,32 @@ proc verifyViaExternalGpg*(inRelease: string; keyBundleDir: string;
 # Public entry point
 # ---------------------------------------------------------------------------
 
+proc verifyInReleaseWithKeyring*(inRelease: string; keyringFile: string):
+    InReleaseVerification =
+  ## Verify against ONE keyring file — apt's ``Signed-By=`` semantics: the
+  ## keys that vouch for this archive are exactly the ones its source
+  ## names, and a key vendored for another archive is never consulted.
+  ## Requires ``gpg`` (the fingerprint allowlist cannot express a
+  ## per-archive key set). ``keyringFile`` is a binary (dearmored) OpenPGP
+  ## keyring, the form apt ships under ``/usr/share/keyrings/``.
+  if not fileExists(keyringFile):
+    var e = newException(SignatureVerificationError,
+      "keyring " & keyringFile & " does not exist")
+    e.backend = sbExternalGpg
+    raise e
+  let gpgBin = resolveGpgBin()
+  if gpgBin.len == 0:
+    var e = newException(SignatureVerificationError,
+      "--keyring needs gpg on PATH (or REPRO_GPG_BIN)")
+    e.backend = sbExternalGpg
+    raise e
+  let dir = createTempDir("apt-harvest-keyring-", "")
+  defer:
+    try: removeDir(dir)
+    except CatchableError: discard
+  copyFile(keyringFile, dir / "keyring.gpg")
+  verifyViaExternalGpg(inRelease, dir, gpgBin)
+
 proc verifyInRelease*(inRelease: string; keyBundleDir: string;
                      preferredBackend = sbExternalGpg):
     InReleaseVerification =
