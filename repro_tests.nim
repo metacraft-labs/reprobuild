@@ -2970,8 +2970,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "per-file config libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim.cfg"),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim",
     binary: "build/test-bin/t_c1_dsl_parse",
@@ -3443,7 +3443,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim",

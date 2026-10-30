@@ -260,6 +260,51 @@ proc resolveGpgBin*(): string =
     return found
   ""
 
+type
+  GpgStatusVerdict* = object
+    good*: bool          ## GOODSIG and VALIDSIG seen, nothing refusing
+    signerKeyId*: string ## the VALIDSIG fingerprint (or GOODSIG key id)
+    reason*: string      ## why good is false
+
+const
+  GpgRefusingStatuses = ["BADSIG", "ERRSIG", "EXPSIG", "EXPKEYSIG",
+                         "REVKEYSIG", "NO_PUBKEY", "KEYEXPIRED",
+                         "KEYREVOKED", "NODATA", "UNEXPECTED", "FAILURE"]
+    ## Status keywords that mean the bytes are NOT vouched for by a current
+    ## key, whatever the exit code. gpg 2.4 exits 0 for a good signature by
+    ## an EXPIRED key (EXPKEYSIG with VALIDSIG, and KEYEXPIRED),
+    ## and documents the same for a revoked one (REVKEYSIG), so the exit
+    ## code alone is a fail-open check. doc/DETAILS in the GnuPG source lists
+    ## the keywords.
+
+proc gpgStatusVerdict*(statusOutput: string): GpgStatusVerdict =
+  ## Decide from --status-fd lines whether a verification is good:
+  ## exactly the GOODSIG + VALIDSIG pair, and none of
+  ## GpgRefusingStatuses. A clearsigned file carrying several
+  ## signatures (Debian signs trixie with three keys) is good when every
+  ## signature is good: one refusing status anywhere refuses the whole.
+  var goodSig = ""
+  var validSig = ""
+  var refusals: seq[string] = @[]
+  for line in statusOutput.splitLines:
+    if not line.startsWith("[GNUPG:] "): continue
+    let parts = line.splitWhitespace()
+    if parts.len < 2: continue
+    let keyword = parts[1]
+    if keyword == "GOODSIG" and parts.len >= 3 and goodSig.len == 0:
+      goodSig = parts[2]
+    elif keyword == "VALIDSIG" and parts.len >= 3 and validSig.len == 0:
+      validSig = parts[2]
+    elif keyword in GpgRefusingStatuses:
+      refusals.add(line[len("[GNUPG:] ") .. ^1])
+  if refusals.len > 0:
+    result.reason = refusals.join("; ")
+  elif goodSig.len == 0 or validSig.len == 0:
+    result.reason = "no GOODSIG + VALIDSIG pair in the status output"
+  else:
+    result.good = true
+    result.signerKeyId = validSig
+
 proc verifyViaExternalGpg*(inRelease: string; keyBundleDir: string;
                            gpgBin: string): InReleaseVerification =
   ## Shell-out backend.
@@ -314,16 +359,15 @@ proc verifyViaExternalGpg*(inRelease: string; keyBundleDir: string;
     e.backend = sbExternalGpg
     e.backendLog = fullLog
     raise e
-
-  # Parse the --status-fd output for the signer key id.
-  var signerId = ""
-  for line in verifyOut.splitLines:
-    if line.startsWith("[GNUPG:] VALIDSIG ") or
-       line.startsWith("[GNUPG:] GOODSIG "):
-      let parts = line.splitWhitespace()
-      if parts.len >= 3:
-        signerId = parts[2]
-        break
+  let verdict = gpgStatusVerdict(verifyOut)
+  if not verdict.good:
+    var e = newException(SignatureVerificationError,
+      "gpg --verify did not report a good, valid signature: " &
+      verdict.reason)
+    e.backend = sbExternalGpg
+    e.backendLog = fullLog
+    raise e
+  let signerId = verdict.signerKeyId
 
   let parts = extractClearsignedPayload(inRelease)
   result = InReleaseVerification(

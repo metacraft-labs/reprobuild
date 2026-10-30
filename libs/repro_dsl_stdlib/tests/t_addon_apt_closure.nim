@@ -1,26 +1,36 @@
 ## Add-On Mode ``package(apt, ...)`` closures — hermetic cases.
 ##
 ## Governing spec: ``reprobuild-pm/spec/ReproOS-Add-On-Mode.md`` §8.3, "How a
-## closure is pinned, stored and bound", items 1-6. The real-archive half
+## closure is pinned, stored and bound", items 1-7. The real-archive half
 ## (a pinned Debian trixie armhf closure unpacked from real ``.deb``s) is
 ## ``t_addon_apt_closure_trixie_armhf.nim``; this file holds the cases that
 ## need exact control over the input: lock codec, resolution rules, unit
-## rendering refusals, the union's conflict and symlink rules, and setuid
-## hardening.
+## rendering refusals, the unpacker's policy on hostile archive entries, mode
+## normalisation, the union's conflict and symlink rules, the bounded
+## downloader, and the host-architecture check.
 ##
-## MOCK JUSTIFICATION. The realiser takes its transport as an injected
-## ``AptDebFetcher``. The union and verification cases below inject a fetcher
-## that copies ``.deb`` files this test builds on disk. That replaces only
-## the HTTP download — the code under test (verification against the lock,
-## ``ar`` parsing, the real ``tar`` extraction, hardening and the union) runs
-## unmodified against real archive bytes on the real filesystem. Real HTTP
-## against a real archive is exercised by the trixie armhf test.
+## MOCK JUSTIFICATION. Two substitutions, both of the transport only:
 ##
-## Fixture ``.deb``s are built here with the host ``tar`` (a ``data.tar``
-## member) inside an ``ar`` container written by ``writeDeb``; the payloads
-## are authored in this file.
+## * The realiser takes its transport as an injected ``AptDebFetcher``. Most
+##   cases inject a fetcher that copies ``.deb`` files this test builds on
+##   disk. The code under test (verification against the lock, ``ar``
+##   parsing, the in-process tar unpacker and its policy, the union) runs
+##   unmodified against real archive bytes on the real filesystem.
+## * ``downloadBounded`` is exercised against a one-thread HTTP/1.0 server in
+##   this process that serves canned responses (an oversized body, a wrong
+##   Content-Length, a redirect). A real archive cannot be made to misbehave
+##   on demand; a local socket can, and the client code is the production
+##   one.
+##
+## Real HTTP against a real archive is exercised by the trixie armhf test.
+##
+## Fixture ``.deb``s are built here byte for byte: a ustar stream written by
+## ``tarEntry`` (so hostile entries — absolute names, ``..``, device nodes,
+## hard links out of the tree, setuid modes — can be expressed, which no
+## well-behaved ``tar`` would write) inside an ``ar`` container written by
+## ``writeDeb``. The payloads are authored in this file.
 
-import std/[algorithm, os, osproc, sequtils, strutils, tables, unittest]
+import std/[algorithm, net, os, sequtils, strutils, tables, unittest]
 when defined(posix):
   import std/posix
 
@@ -56,8 +66,56 @@ proc scratch(tag: string): string =
   createDir(result)
 
 # ---------------------------------------------------------------------------
-# Fixture .deb builder
+# Fixture builders: a ustar writer and an ar writer
 # ---------------------------------------------------------------------------
+
+type
+  TarFixtureEntry = object
+    name: string
+    typeflag: char      ## '0' file, '5' dir, '2' symlink, '1' hard link,
+                        ## '3' char device, '6' FIFO
+    mode: int
+    content: string     ## file payload
+    linkName: string    ## symlink target or hard-link target
+
+proc tarEntry(name: string; typeflag = '0'; mode = 0o644; content = "";
+              linkName = ""): TarFixtureEntry =
+  TarFixtureEntry(name: name, typeflag: typeflag, mode: mode,
+    content: content, linkName: linkName)
+
+proc octal(v: int64; width: int): string =
+  ## ``width-1`` octal digits and a NUL, as ustar writes numbers.
+  result = toOct(v, width - 1) & "\0"
+
+proc tarBytes(entries: seq[TarFixtureEntry]): string =
+  ## A ustar stream (magic ``ustar\0``, version ``00``), owners 0:0 like a
+  ## real Debian build, two zero blocks at the end.
+  for e in entries:
+    var h = newString(512)
+    for i in 0 ..< 512: h[i] = '\0'
+    doAssert e.name.len <= 100 and e.linkName.len <= 100
+    h[0 ..< e.name.len] = e.name
+    h[100 ..< 108] = octal(e.mode, 8)
+    h[108 ..< 116] = octal(0, 8)
+    h[116 ..< 124] = octal(0, 8)
+    let size = if e.typeflag == '0': e.content.len else: 0
+    h[124 ..< 136] = octal(size, 12)
+    h[136 ..< 148] = octal(0, 12)
+    h[156] = e.typeflag
+    if e.linkName.len > 0: h[157 ..< 157 + e.linkName.len] = e.linkName
+    h[257 ..< 263] = "ustar\0"
+    h[263 ..< 265] = "00"
+    for i in 148 ..< 156: h[i] = ' '
+    var sum = 0
+    for c in h: sum += ord(c)
+    h[148 ..< 155] = toOct(sum, 6) & "\0"
+    h[155] = ' '
+    result.add(h)
+    if size > 0:
+      result.add(e.content)
+      let pad = (512 - size mod 512) mod 512
+      result.add("\0".repeat(pad))
+  result.add("\0".repeat(1024))
 
 proc arMember(name, payload: string): string =
   var header = name & "/"
@@ -68,22 +126,33 @@ proc arMember(name, payload: string): string =
   result = header & payload
   if (payload.len and 1) == 1: result.add('\n')
 
-proc writeDeb(stage, debPath: string) =
-  ## ``stage`` is the data tree. Owners are recorded as 0:0 like a real
-  ## Debian build; modes (including setuid) are taken from the files.
-  let tarPath = debPath & ".data.tar"
-  let (output, code) = execCmdEx("tar --owner=0 --group=0 --numeric-owner" &
-    " -C " & quoteShell(stage) & " -cf " & quoteShell(tarPath) & " .")
-  doAssert code == 0, output
-  let deb = "!<arch>\n" & arMember("debian-binary", "2.0\n") &
-    arMember("data.tar", readFile(tarPath))
-  removeFile(tarPath)
-  writeFile(debPath, deb)
+proc writeDeb(debPath: string; entries: seq[TarFixtureEntry]) =
+  writeFile(debPath, "!<arch>\n" & arMember("debian-binary", "2.0\n") &
+    arMember("data.tar", tarBytes(entries)))
 
 type FixtureDeb = object
   name: string
-  files: seq[(string, string)]      ## rel path -> content
-  links: seq[(string, string)]      ## rel path -> symlink target
+  entries: seq[TarFixtureEntry]
+
+proc fileDeb(name: string; files: seq[(string, string)];
+             links: seq[(string, string)] = @[]): FixtureDeb =
+  ## The common shape: regular files (with their parent directories) and
+  ## symlinks, like ``dpkg-deb`` writes them.
+  result.name = name
+  var dirs: seq[string] = @["./"]
+  proc addParents(rel: string) =
+    var p = ""
+    for c in rel.split('/')[0 .. ^2]:
+      p = if p.len == 0: c else: p & "/" & c
+      if ("./" & p & "/") notin dirs: dirs.add("./" & p & "/")
+  for (rel, _) in files: addParents(rel)
+  for (rel, _) in links: addParents(rel)
+  for d in dirs: result.entries.add(tarEntry(d, '5', 0o755))
+  for (rel, content) in files:
+    result.entries.add(tarEntry("./" & rel, '0',
+      (if rel.contains("/bin/"): 0o755 else: 0o644), content))
+  for (rel, target) in links:
+    result.entries.add(tarEntry("./" & rel, '2', 0o777, linkName = target))
 
 proc buildDebs(root: string; specs: seq[FixtureDeb]):
     (AptClosureLock, Table[string, string]) =
@@ -94,18 +163,10 @@ proc buildDebs(root: string; specs: seq[FixtureDeb]):
   lock.debs = @[]
   lock.roots = @[specs[0].name]
   for s in specs:
-    let stage = root / ("stage-" & s.name)
-    createDir(stage)
-    for (rel, content) in s.files:
-      createDir(parentDir(stage / rel))
-      writeFile(stage / rel, content)
-    for (rel, target) in s.links:
-      createDir(parentDir(stage / rel))
-      createSymlink(target, stage / rel)
     let rel = "pool/main/" & s.name & "_1.0_armhf.deb"
     let debPath = root / rel
     createDir(parentDir(debPath))
-    writeDeb(stage, debPath)
+    writeDeb(debPath, s.entries)
     lock.debs.add(AptLockedDeb(name: s.name, version: "1.0",
       architecture: "armhf", filename: rel, size: getFileSize(debPath),
       sha256: sha256OfFile(debPath)))
@@ -115,10 +176,36 @@ proc buildDebs(root: string; specs: seq[FixtureDeb]):
 
 proc localFetcher(urls: Table[string, string]; count: ref int):
     AptDebFetcher =
-  result = proc (url: string; dest: string) =
+  result = proc (url: string; dest: string; expectedSize: int64) =
     inc count[]
     if url notin urls: raise newException(IOError, "404 " & url)
     copyFile(urls[url], dest)
+
+proc realiseLocal(root: string; specs: seq[FixtureDeb];
+                  hostMachine = "armv7l"): (string, AptClosureLock) =
+  ## Build and realise a closure of ``specs`` into ``root/store``.
+  let (lock, urls) = buildDebs(root, specs)
+  var count = new int
+  let prefix = realiseAptClosure(lock, root / "store", root / "cache",
+    localFetcher(urls, count), hostMachine = hostMachine)
+  (prefix, lock)
+
+proc modeOf(path: string): int =
+  when defined(posix):
+    var st: Stat
+    doAssert lstat(path.cstring, st) == 0, path
+    int(st.st_mode.cint and 0o7777)
+  else:
+    0
+
+proc storeIsClean(store: string) =
+  ## Nothing but complete prefixes under the store.
+  if not dirExists(store / "prefixes"): return
+  for kind, p in walkDir(store / "prefixes"):
+    check not p.extractFilename.startsWith(".tmp-")
+    for kind2, q in walkDir(p):
+      check fileExists(q / ".repro-apt-deb") or
+        fileExists(q / ".repro-apt-closure")
 
 suite "Add-On apt closure: lock codec (spec §8.3 item 1)":
   test "render then parse is the identity, and rendering is canonical":
@@ -269,6 +356,10 @@ WantedBy=multi-user.target
     check "sandbox-launcher" notin rendered
     check renderUnitForAptClosureLock(Unit,
       renderAptClosureLock(sampleLock())) == rendered
+    # The rendered unit passes the broker's check; the input does not.
+    checkUnitForAptClosure(rendered, prefix, rendered = true)
+    expect EAptClosureUnit:
+      checkUnitForAptClosure(Unit, prefix, rendered = true)
 
   test "a wrapper, a missing [Service], a /usr bind or a new root is refused":
     let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot, sampleLock())
@@ -279,25 +370,66 @@ WantedBy=multi-user.target
         Unit.replace("ProtectSystem=strict",
           "BindReadOnlyPaths=-/opt/x:/usr/"),
         Unit.replace("ProtectSystem=strict", "BindPaths=/usr"),
-        Unit.replace("ProtectSystem=strict", "RootDirectory=/srv/root")]:
+        Unit.replace("ProtectSystem=strict", "BindPaths=/opt/y:/usr/lib/z"),
+        Unit.replace("ProtectSystem=strict", "RootDirectory=/srv/root"),
+        Unit.replace("ProtectSystem=strict", "RootImage=/srv/root.img")]:
       expect EAptClosureUnit:
         discard renderUnitWithAptClosure(bad, prefix)
     expect EAptClosureUnit:
       discard renderUnitWithAptClosure(Unit, "/repro/store/a:b")
 
+  test "a list reset, a tmpfs over /usr or a hidden /usr is refused":
+    # ``BindReadOnlyPaths=`` with no value resets the list systemd built so
+    # far, which would silently drop the closure's own line placed before
+    # it; ``TemporaryFileSystem=/usr`` and ``InaccessiblePaths=/usr`` would
+    # mask the closure.
+    let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot, sampleLock())
+    for bad in [
+        Unit.replace("ProtectSystem=strict", "BindReadOnlyPaths="),
+        Unit.replace("ProtectSystem=strict", "BindPaths="),
+        Unit.replace("ProtectSystem=strict", "InaccessiblePaths="),
+        Unit.replace("ProtectSystem=strict", "TemporaryFileSystem=/usr"),
+        Unit.replace("ProtectSystem=strict",
+          "TemporaryFileSystem=/var:ro /usr/lib:ro"),
+        Unit.replace("ProtectSystem=strict", "InaccessiblePaths=-/usr/bin")]:
+      expect EAptClosureUnit:
+        discard renderUnitWithAptClosure(bad, prefix)
+    # The same resets after the rendered lines are what the broker refuses.
+    let rendered = renderUnitWithAptClosure(Unit, prefix)
+    for bad in [
+        rendered & "BindReadOnlyPaths=\n",
+        rendered & "TemporaryFileSystem=/usr\n",
+        rendered.replace("InaccessiblePaths=-/etc/ld.so.preload\n", ""),
+        rendered & "BindReadOnlyPaths=" & prefix & "/usr:/usr\n"]:
+      expect EAptClosureUnit:
+        checkUnitForAptClosure(bad, prefix, rendered = true)
+    # Unrelated binds and tmpfs mounts are fine, before and after rendering.
+    let fine = Unit.replace("ProtectSystem=strict",
+      "ProtectSystem=strict\nBindReadOnlyPaths=/etc/ssl\n" &
+      "TemporaryFileSystem=/var/lib/private/x\nInaccessiblePaths=/proc/kmsg")
+    checkUnitForAptClosure(renderUnitWithAptClosure(fine, prefix), prefix,
+      rendered = true)
+
+  test "comment lines are not read":
+    let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot, sampleLock())
+    let commented = Unit.replace("ProtectSystem=strict",
+      "ProtectSystem=strict\n# RootDirectory=/srv/root\n; BindPaths=/usr\n" &
+      "#ExecStart=/x/reprobuild-sandbox-launcher")
+    check "RootDirectory" in renderUnitWithAptClosure(commented, prefix)
+
 suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
   test "members are verified, unpacked, folded and unioned":
     let root = scratch("union")
     let (lock, urls) = buildDebs(root, @[
-      FixtureDeb(name: "svc", files: @[("usr/bin/svc", "svc-binary"),
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary"),
         ("etc/svc/svc.conf", "conf"), ("usr/share/doc/common", "same")]),
-      FixtureDeb(name: "libold", files: @[("lib/libold.so.1", "old-lib"),
+      fileDeb("libold", @[("lib/libold.so.1", "old-lib"),
         ("usr/share/doc/common", "same")],
-        links: @[("bin", "usr/bin")])])
+        links = @[("bin", "usr/bin")])])
     let store = root / "store"
     var count = new int
     let prefix = realiseAptClosure(lock, store, root / "cache",
-      localFetcher(urls, count))
+      localFetcher(urls, count), hostMachine = "armv7l")
     check prefix == aptClosurePrefixPath(store, lock)
     check aptClosureRealised(store, lock)
     check readFile(prefix / "usr/bin/svc") == "svc-binary"
@@ -310,19 +442,30 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
       if d.name == "svc":
         check sameFile(prefix / "usr/bin/svc",
           aptDebPrefixPath(store, d) / "usr/bin/svc")
-    # Nothing is left beside the prefixes.
-    for kind, p in walkDir(store / "prefixes"):
-      check not p.extractFilename.startsWith(".tmp-")
-    # Idempotent and offline once realised.
+    storeIsClean(store)
+    # The cached archives were consumed (spec §8.3 item 7)...
+    check toSeq(walkDir(root / "cache")).len == 0
+    # ...and the realisation is idempotent and offline once done.
     let before = count[]
     check realiseAptClosure(lock, store, root / "cache",
-      localFetcher(urls, count)) == prefix
+      localFetcher(urls, count), hostMachine = "armv7l") == prefix
     check count[] == before
+
+  test "retainDebCache keeps the verified archives":
+    let root = scratch("retain")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "x")])])
+    var count = new int
+    discard realiseAptClosure(lock, root / "store", root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l",
+      retainDebCache = true)
+    check fileExists(root / "cache" / (lock.debs[0].sha256 & ".deb"))
+    check modeOf(root / "cache") == 0o700
 
   test "a download that does not match the lock is refused":
     let root = scratch("verify")
     var (lock, urls) = buildDebs(root, @[
-      FixtureDeb(name: "svc", files: @[("usr/bin/svc", "x")])])
+      fileDeb("svc", @[("usr/bin/svc", "x")])])
     let path = urls[lock.archive & "/" & lock.debs[0].filename]
     var bytes = readFile(path)
     bytes[^3] = char(ord(bytes[^3]) xor 1)
@@ -331,7 +474,7 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
     var count = new int
     expect EAptClosureVerify:
       discard realiseAptClosure(lock, store, root / "cache",
-        localFetcher(urls, count))
+        localFetcher(urls, count), hostMachine = "armv7l")
     check not aptClosureRealised(store, lock)
     check not dirExists(aptDebPrefixPath(store, lock.debs[0]))
     check toSeq(walkDir(root / "cache")).len == 0
@@ -339,15 +482,16 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
   test "two members with different bytes at one path are a refusal":
     let root = scratch("conflict")
     let (lock, urls) = buildDebs(root, @[
-      FixtureDeb(name: "aaa", files: @[("usr/bin/tool", "one")]),
-      FixtureDeb(name: "bbb", files: @[("usr/bin/tool", "two")])])
+      fileDeb("aaa", @[("usr/bin/tool", "one")]),
+      fileDeb("bbb", @[("usr/bin/tool", "two")])])
     var count = new int
     expect EAptClosureConflict:
       discard realiseAptClosure(lock, root / "store", root / "cache",
-        localFetcher(urls, count))
+        localFetcher(urls, count), hostMachine = "armv7l")
     check not aptClosureRealised(root / "store", lock)
+    storeIsClean(root / "store")
 
-  test "a member cannot write through another member's symlink":
+  test "a member cannot place content under another member's symlink":
     # ``aaa`` ships usr/lib/x -> <outside>; ``bbb`` ships usr/lib/x/payload.
     # Following the link would hard-link ``payload`` into <outside> — onto
     # the host for an absolute target. ``bbb``'s tree necessarily holds the
@@ -358,26 +502,247 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
     let outside = root / "outside"
     createDir(outside)
     let (lock, urls) = buildDebs(root, @[
-      FixtureDeb(name: "aaa", links: @[("usr/lib/x", outside)]),
-      FixtureDeb(name: "bbb", files: @[("usr/lib/x/payload", "p")])])
+      fileDeb("aaa", @[], links = @[("usr/lib/x", outside)]),
+      fileDeb("bbb", @[("usr/lib/x/payload", "p")])])
     var count = new int
     expect EAptClosureConflict:
       discard realiseAptClosure(lock, root / "store", root / "cache",
-        localFetcher(urls, count))
+        localFetcher(urls, count), hostMachine = "armv7l")
     check toSeq(walkDir(outside)).len == 0
 
-when defined(posix):
-  suite "Add-On apt closure: hardening (spec §8.3 item 4)":
-    test "setuid and setgid bits are cleared":
-      let root = scratch("harden")
-      createDir(root / "usr/bin")
-      writeFile(root / "usr/bin/su", "x")
-      check chmod((root / "usr/bin/su").cstring, Mode(0o6755)) == 0
-      var st: Stat
-      check lstat((root / "usr/bin/su").cstring, st) == 0
-      # Positive control: the bits really are set before hardening.
-      check (st.st_mode.cint and (S_ISUID or S_ISGID)) != 0
-      hardenTree(root)
-      check lstat((root / "usr/bin/su").cstring, st) == 0
-      check (st.st_mode.cint and (S_ISUID or S_ISGID)) == 0
-      check (st.st_mode.cint and 0o777) == 0o755
+  test "a lock for another architecture is refused on this host":
+    let root = scratch("arch")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "x")])])
+    var count = new int
+    expect EAptClosureHost:
+      discard realiseAptClosure(lock, root / "store", root / "cache",
+        localFetcher(urls, count), hostMachine = "x86_64")
+    check count[] == 0
+    check debianArchitectureRunsOn("armhf", "aarch64")
+    check debianArchitectureRunsOn("amd64", "x86_64")
+    check not debianArchitectureRunsOn("arm64", "armv7l")
+    check not debianArchitectureRunsOn("armhf", "")
+    check hostMachineName().len > 0
+
+suite "Add-On apt closure: the unpacker's policy (spec §8.3 item 4)":
+  ## Each hostile archive is realised through the public entry point; the
+  ## outcome is asserted on the store and on the ``outside`` directory the
+  ## entries try to reach.
+
+  proc refused(root: string; entries: seq[TarFixtureEntry]) =
+    let outside = root / "outside"
+    createDir(outside)
+    writeFile(outside / "sentinel", "keep")
+    let (lock, urls) = buildDebs(root, @[
+      FixtureDeb(name: "evil", entries: @[tarEntry("./", '5', 0o755),
+        tarEntry("./usr/", '5', 0o755), tarEntry("./usr/lib/", '5', 0o755)] &
+        entries)])
+    var count = new int
+    expect AptExtractError:
+      discard realiseAptClosure(lock, root / "store", root / "cache",
+        localFetcher(urls, count), hostMachine = "armv7l")
+    check not aptClosureRealised(root / "store", lock)
+    check not dirExists(aptDebPrefixPath(root / "store", lock.debs[0]))
+    storeIsClean(root / "store")
+    # Nothing landed outside, and the sentinel was not replaced.
+    check toSeq(walkDir(outside)).mapIt(it.path.extractFilename) ==
+      @["sentinel"]
+    check readFile(outside / "sentinel") == "keep"
+
+  test "an absolute entry name is refused, not stripped":
+    refused(scratch("abs"), @[tarEntry("/usr/lib/evil", content = "x")])
+
+  test "a '..' component is refused":
+    refused(scratch("dotdot"), @[
+      tarEntry("./usr/lib/../../../outside/evil", content = "x")])
+
+  test "a path through an absolute symlink is refused":
+    let root = scratch("symabs")
+    refused(root, @[
+      tarEntry("./usr/lib/x", '2', 0o777, linkName = root / "outside"),
+      tarEntry("./usr/lib/x/evil", content = "x")])
+
+  test "a path through a relative symlink is refused":
+    refused(scratch("symrel"), @[
+      tarEntry("./usr/lib/x", '2', 0o777, linkName = "../../../../outside"),
+      tarEntry("./usr/lib/x/evil", content = "x")])
+
+  test "a file over a symlink is refused":
+    let root = scratch("symfile")
+    refused(root, @[
+      tarEntry("./usr/lib/x", '2', 0o777,
+        linkName = root / "outside" / "sentinel"),
+      tarEntry("./usr/lib/x", content = "overwrite")])
+
+  test "a top-level directory symlink followed by content is refused":
+    let root = scratch("binlink")
+    refused(root, @[
+      tarEntry("./bin", '2', 0o777, linkName = root / "outside"),
+      tarEntry("./bin/evil", content = "x")])
+
+  test "a hard link to a path outside the archive is refused":
+    let root = scratch("hardabs")
+    refused(root, @[
+      tarEntry("./usr/lib/h", '1', linkName = root / "outside" / "sentinel")])
+    refused(scratch("hardrel"), @[
+      tarEntry("./usr/lib/h", '1', linkName = "../../outside/sentinel")])
+    refused(scratch("harddangling"), @[
+      tarEntry("./usr/lib/h", '1', linkName = "./usr/lib/not-extracted")])
+
+  test "a device node or a FIFO is refused":
+    refused(scratch("chardev"), @[tarEntry("./usr/lib/null", '3', 0o666)])
+    refused(scratch("fifo"), @[tarEntry("./usr/lib/pipe", '6', 0o644)])
+
+  test "a hard link to a file in the archive is a hard link in the prefix":
+    let root = scratch("hardok")
+    let (prefix, _) = realiseLocal(root, @[FixtureDeb(name: "ok",
+      entries: @[tarEntry("./", '5', 0o755), tarEntry("./usr/", '5', 0o755),
+        tarEntry("./usr/bin/", '5', 0o755),
+        tarEntry("./usr/bin/tool", '0', 0o755, "tool"),
+        tarEntry("./usr/bin/alias", '1', linkName = "./usr/bin/tool")])])
+    check sameFile(prefix / "usr/bin/tool", prefix / "usr/bin/alias")
+    check readFile(prefix / "usr/bin/alias") == "tool"
+
+  test "modes are normalised: no setuid, setgid, sticky or group/world write":
+    # util-linux ships a 4755 ``su``, passwd a 2755 ``chage``; a hostile
+    # archive could ship 0777 directories and 0666 files. Every one lands as
+    # 0755 or 0644, through the realiser, in the published prefix. As root
+    # (CI, ``unshare -r``) the files are also owned by uid 0.
+    let root = scratch("modes")
+    let (prefix, lock) = realiseLocal(root, @[FixtureDeb(name: "modes",
+      entries: @[tarEntry("./", '5', 0o755), tarEntry("./usr/", '5', 0o755),
+        tarEntry("./usr/bin/", '5', 0o777),
+        tarEntry("./usr/bin/su", '0', 0o4755, "su"),
+        tarEntry("./usr/bin/chage", '0', 0o2755, "chage"),
+        tarEntry("./usr/bin/sticky", '0', 0o1755, "sticky"),
+        tarEntry("./usr/share/", '5', 0o755),
+        tarEntry("./usr/share/w", '0', 0o666, "w"),
+        tarEntry("./usr/share/ro", '0', 0o444, "ro"),
+        tarEntry("./usr/share/lnk", '2', 0o777, linkName = "w")])])
+    check modeOf(prefix / "usr/bin") == 0o755
+    check modeOf(prefix / "usr/bin/su") == 0o755
+    check modeOf(prefix / "usr/bin/chage") == 0o755
+    check modeOf(prefix / "usr/bin/sticky") == 0o755
+    check modeOf(prefix / "usr/share/w") == 0o644
+    check modeOf(prefix / "usr/share/ro") == 0o644
+    check modeOf(prefix) == 0o755
+    check modeOf(aptDebPrefixPath(root / "store", lock.debs[0])) == 0o755
+    check symlinkExists(prefix / "usr/share/lnk")
+    when defined(posix):
+      var setid: seq[string] = @[]
+      for p in walkDirRec(root / "store", yieldFilter = {pcFile, pcDir}):
+        var st: Stat
+        doAssert lstat(p.cstring, st) == 0
+        if (st.st_mode.cint and (S_ISUID or S_ISGID or S_ISVTX or S_IWGRP or
+                                 S_IWOTH)) != 0:
+          setid.add(p)
+        if geteuid() == 0:
+          check st.st_uid == 0 and st.st_gid == 0
+      check setid.len == 0
+      # verifyHardenedTree is the invariant check: a tree with a setuid file
+      # fails it (positive control for the check itself).
+      let bad = root / "bad"
+      createDir(bad / "usr")
+      writeFile(bad / "usr/su", "x")
+      check chmod((bad / "usr/su").cstring, Mode(0o4755)) == 0
+      expect AptExtractError:
+        verifyHardenedTree(bad, "bad")
+
+# ---------------------------------------------------------------------------
+# A one-thread canned HTTP server for the bounded downloader
+# ---------------------------------------------------------------------------
+
+type CannedServer = object
+  port: int
+
+proc serveCanned(port: int) {.thread.} =
+  ## HTTP/1.0 responder: ``/big`` is 4096 bytes with a true Content-Length,
+  ## ``/short`` claims 4096 bytes and sends 10, ``/redir`` is a 302 to
+  ## ``/ok``, ``/ok`` is ``hello``, ``/quit`` stops the server.
+  let listener = newSocket()
+  listener.setSockOpt(OptReuseAddr, true)
+  listener.bindAddr(Port(port), "127.0.0.1")
+  listener.listen()
+  var running = true
+  while running:
+    var client: Socket
+    listener.accept(client)
+    var line = ""
+    client.readLine(line, timeout = 5000)
+    var path = ""
+    let parts = line.splitWhitespace()
+    if parts.len >= 2: path = parts[1]
+    while true:
+      var h = ""
+      client.readLine(h, timeout = 5000)
+      if h.len == 0 or h == "\r\n": break
+    var body = ""
+    var status = "200 OK"
+    var extra = ""
+    var declared = -1
+    case path
+    of "/big": body = "B".repeat(4096)
+    of "/short":
+      body = "S".repeat(10)
+      declared = 4096
+    of "/redir":
+      status = "302 Found"
+      extra = "Location: /ok\r\n"
+    of "/ok": body = "hello"
+    of "/quit": running = false
+    else: status = "404 Not Found"
+    let length = if declared >= 0: declared else: body.len
+    client.send("HTTP/1.0 " & status & "\r\nContent-Length: " & $length &
+      "\r\n" & extra & "Connection: close\r\n\r\n" & body)
+    client.close()
+  listener.close()
+
+proc freePort(): int =
+  let s = newSocket()
+  s.bindAddr(Port(0), "127.0.0.1")
+  result = int(s.getLocalAddr()[1])
+  s.close()
+
+suite "Add-On apt closure: bounded download (spec §8.3 item 2)":
+  test "a body over the cap, a wrong length and a redirect":
+    let port = freePort()
+    var th: Thread[int]
+    createThread(th, serveCanned, port)
+    let base = "http://127.0.0.1:" & $port
+    let root = scratch("download")
+    # Wait for the listener.
+    for _ in 0 ..< 100:
+      try:
+        let probe = newSocket()
+        probe.connect("127.0.0.1", Port(port), timeout = 200)
+        probe.send("GET /ok HTTP/1.0\r\n\r\n")
+        probe.close()
+        break
+      except CatchableError:
+        sleep(50)
+    # Content-Length above the cap: refused before the body is read.
+    expect IOError:
+      discard downloadBounded(base & "/big", root / "a", maxBytes = 1000)
+    check not fileExists(root / "a")
+    # Content-Length differing from the expected size: refused.
+    expect IOError:
+      discard downloadBounded(base & "/big", root / "b", maxBytes = 1 shl 20,
+        expectedSize = 1000)
+    check not fileExists(root / "b")
+    # A short body under a larger declared length: refused by the transport.
+    expect IOError:
+      discard downloadBounded(base & "/short", root / "c", maxBytes = 1 shl 20)
+    # Exact size: accepted.
+    check downloadBounded(base & "/big", root / "d", maxBytes = 1 shl 20,
+      expectedSize = 4096) == 4096
+    check getFileSize(root / "d") == 4096
+    # A redirect is followed, and the production fetcher caps at the size.
+    check downloadBounded(base & "/redir", root / "e", maxBytes = 100) == 5
+    check readFile(root / "e") == "hello"
+    httpDebFetcher()(base & "/ok", root / "f", 5)
+    check readFile(root / "f") == "hello"
+    expect IOError:
+      httpDebFetcher()(base & "/big", root / "g", 5)
+    discard downloadBounded(base & "/quit", root / "h", maxBytes = 10)
+    joinThread(th)

@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 34,
     "nimTestBinaries": 2434,
     "pureUnitConsolidationGroups": 69,
-    "pureUnitTests": 690,
+    "pureUnitTests": 689,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
     "testEntries": 2474
   },
@@ -1400,8 +1400,8 @@
       "graph-fixture": 18,
       "integration": 1353,
       "platform/destructive": 148,
-      "pure unit": 690,
-      "unclassified": 265
+      "pure unit": 689,
+      "unclassified": 266
     },
     "graphOwnedTestArtifacts": [
       {
@@ -7813,18 +7813,19 @@
   "tests": [
     {
       "binary": "build/test-bin/t_c2_signature",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_harvest_apt"
+        "repro_harvest_apt",
+        "repro_test_support"
       ],
       "owner": "apps",
       "requiresReproBinary": false,
       "source": "apps/repro-harvest-apt/tests/t_c2_signature.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12697,8 +12698,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_apt_closure",
-      "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "class": "unclassified",
+      "classificationReason": "creates threads",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -12708,8 +12709,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 15,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 29,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

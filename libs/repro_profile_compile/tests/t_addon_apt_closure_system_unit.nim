@@ -99,11 +99,27 @@ suite "Add-On: systemd.systemUnit with a package(apt) closure":
   test "the broker refuses a frame whose content does not bind its lock":
     var op = toPrivilegedOperation(unitFromDsl(LockText))
     op.suContent = Unit
-    check operationValidationError(op).contains("closure binding")
+    check operationValidationError(op).contains("bind line")
     op = toPrivilegedOperation(unitFromDsl(LockText))
     op.suAptClosureLock = LockText.replace("root prometheus-node-exporter",
       "root nonexistent")
     check operationValidationError(op).len > 0
+    # The renderer's refusals hold on the frame too, not only the presence
+    # of the bind line: a later empty assignment resets systemd's list, a
+    # tmpfs over /usr hides the closure, a second bind line is not the
+    # rendered unit.
+    let good = toPrivilegedOperation(unitFromDsl(LockText))
+    check operationValidationError(good) == ""
+    for tail in ["BindReadOnlyPaths=\n", "InaccessiblePaths=\n",
+                 "TemporaryFileSystem=/usr\n", "RootDirectory=/srv\n",
+                 expectedBindLine() & "\n"]:
+      op = good
+      op.suContent = good.suContent & tail
+      check operationValidationError(op).len > 0
+    # A commented-out directive is not read.
+    op = good
+    op.suContent = good.suContent & "# RootDirectory=/srv\n"
+    check operationValidationError(op) == ""
 
   test "a malformed lock or an unbindable unit is refused at plan time":
     expect ESystemProfileInvalid:
@@ -115,6 +131,14 @@ suite "Add-On: systemd.systemUnit with a package(apt) closure":
       aptClosureLock = LockText)
     expect ESystemProfileInvalid:
       discard profileIntentToSystemProfile(intent)
+    for bad in ["BindReadOnlyPaths=", "TemporaryFileSystem=/usr/lib",
+                "RootImage=/srv/x.img"]:
+      var i2 = ProfileIntent(name: "rpi2")
+      systemdSystemUnit(i2.resources, name = "bad.service",
+        content = Unit.replace("ProtectSystem=strict", bad),
+        aptClosureLock = LockText)
+      expect ESystemProfileInvalid:
+        discard profileIntentToSystemProfile(i2)
 
   test "the system.nim text form carries the lock both ways":
     let r = unitFromDsl(LockText)
