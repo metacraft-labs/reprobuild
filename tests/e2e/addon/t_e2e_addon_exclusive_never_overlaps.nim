@@ -324,6 +324,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let c1 = ("repro-fixture-excl-c.service", exclusiveUnit("c1"))
     proc instances(pattern: string): string =
       g.exec("pgrep -f " & quoteShell(pattern) & " | sort").stdout.strip()
+    proc forceDown(unit: string) =
+      ## Put a unit down by force and wait until nothing of it is left:
+      ## no process in its control group (any child group included), no
+      ## pending job, not active. A falsifying mutation can leave systemd
+      ## a propagated restart still queued behind a stop that timed out;
+      ## killing once would race it, and the next case would start on a
+      ## live instance.
+      discard g.run("for i in $(seq 1 30); do systemctl kill -s KILL " & unit &
+        " 2>/dev/null; sleep 1; systemctl reset-failed " & unit & " 2>/dev/null; " &
+        "cg=$(systemctl show -p ControlGroup --value " & unit & "); " &
+        "st=$(systemctl show -p ActiveState --value " & unit & "); " &
+        "jobs=$(systemctl list-jobs --no-legend " & unit & " 2>/dev/null | wc -l); " &
+        "if [ \"$st\" != active ] && [ \"$st\" != activating ] && [ \"$st\" != deactivating ] && " &
+        "[ \"$jobs\" = 0 ] && { [ -z \"$cg\" ] || [ ! -e /sys/fs/cgroup$cg ] || " &
+        "grep -q 'populated 0' /sys/fs/cgroup$cg/cgroup.events; }; then break; fi; " &
+        "done; true", timeoutSec = 120)
     # g6b: retry the refused apply while the old instance lives (its unit
     # is `failed`, its process alive).
     let failedState = g.run("systemctl show -p ActiveState --value repro-fixture-excl-d.service").strip()
@@ -356,8 +372,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run(repro & " system addon status"))
     # Put the stubborn instance down by force and start a fresh log: its
     # lifetime never logged a stop, so it would overlap everything after.
-    discard g.run("systemctl kill -s KILL repro-fixture-excl-d.service; sleep 1; " &
-      "systemctl reset-failed repro-fixture-excl-d.service; true")
+    forceDown("repro-fixture-excl-d.service")
     discard g.run("mv " & LogPath & " " & LogPath & ".part1; : > " & LogPath)
 
     # g8: a delegated instance in a child control group.
@@ -379,8 +394,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          instances("^/bin/sh /usr/local/bin/repro-fixture-delegated f2$").len == 0 and
          instances("^/bin/sh /usr/local/bin/repro-fixture-delegated f1$") == fPid,
          g.run("cat " & LogPath))
-    discard g.run("systemctl kill -s KILL repro-fixture-excl-f.service; sleep 1; " &
-      "systemctl reset-failed repro-fixture-excl-f.service; true")
+    forceDown("repro-fixture-excl-f.service")
     discard g.run("mv " & LogPath & " " & LogPath & ".part2; : > " & LogPath)
 
     # g9: socket activation between the pre-stop and the start.
@@ -532,8 +546,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("readlink /etc/repro/static").strip() == staticBefore12 and
          "v1" in g.run("systemctl show -p Description --value repro-fixture-excl-x.service"),
          g.run("cat " & LogPath))
-    discard g.run("systemctl kill -s KILL repro-fixture-excl-e.service; sleep 1; " &
-      "systemctl reset-failed repro-fixture-excl-e.service; true")
+    forceDown("repro-fixture-excl-e.service")
     discard g.run("mv " & LogPath & " " & LogPath & ".part5; : > " & LogPath)
     let goodE = eUnit("e2", "/usr/local/bin/repro-fixture-exclusive")
     applied("g12c-part-of-cooperative", profile([c1, nUnit, xUnit("v2"), goodE]))
@@ -615,8 +628,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "repro-fixture-excl-r.service" in r14.stderr, "exit " & $r14.exitCode & "\n" & r14.stdout & r14.stderr)
     step("g14b: no second instance was started",
          g.run("grep -c '^start r1 ' " & LogPath & "; true").strip() == "1", g.run("cat " & LogPath))
-    discard g.run("systemctl kill -s KILL repro-fixture-excl-r.service; sleep 1; " &
-      "systemctl reset-failed repro-fixture-excl-r.service; true")
+    forceDown("repro-fixture-excl-r.service")
     discard g.run("mv " & LogPath & " " & LogPath & ".part8; : > " & LogPath)
 
     # g15: PropagatesStopTo= carries the anchor's restart to the dependent
