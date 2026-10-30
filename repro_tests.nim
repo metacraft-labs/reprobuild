@@ -7835,6 +7835,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_project_dsl_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_source_cache_identity_target.nim",
+    binary: "build/test-bin/t_source_cache_identity_target",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = getTempDir() / (\"t_sci_target_\" & $getCurrentProce..."),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
     binary: "build/test-bin/t_sub_tool_refs_codec",
     defines: @[],
