@@ -33,7 +33,6 @@ import ./ledger
 import ./mutations
 import ./store_root
 
-import repro_elevation/posix_system_driver
 
 type
   UninstallOptions* = object
@@ -44,6 +43,9 @@ type
     removed*: seq[string]
     drift*: seq[string]          ## objects left in place, with the reason
     keptAccounts*: seq[string]
+    undone*: HashSet[string]
+      ## ``<class> <path>`` of every ledger entry this run undid; what the
+      ## kept ledger of an incomplete run drops.
       ## Accounts the add-on created and leaves in place (spec: sysusers
       ## accounts are never deleted). Empty in this release: generation 0
       ## creates none, and ``linux.sysusersEntry`` / the account-creating
@@ -53,17 +55,24 @@ type
 
 proc ok*(r: UninstallResult): bool = r.drift.len == 0 and r.errors.len == 0
 
+proc entryKey(e: LedgerEntry): string = $e.class & " " & e.path
+
 proc removeOwned(e: LedgerEntry; r: var UninstallResult) =
-  ## Remove one file or link the ledger owns, if it is unchanged.
+  ## Remove one file or link the ledger owns, if it is unchanged. An entry
+  ## whose object is removed here, or was already gone, is recorded in
+  ## ``r.undone`` so the kept ledger of an incomplete run no longer lists
+  ## it.
   let d = observeDrift(e)
   if d.len > 0:
     if d.startsWith("missing"):
-      return                       # already gone: nothing to undo
+      r.undone.incl(entryKey(e))   # already gone: nothing to undo
+      return
     r.drift.add(e.path & ": " & d)
     return
   try:
     removeFile(e.path)
     r.removed.add(e.path)
+    r.undone.incl(entryKey(e))
   except OSError as ex:
     r.errors.add(e.path & ": " & ex.msg)
 
@@ -75,24 +84,16 @@ proc systemctlOrRecord(args: openArray[string]; r: var UninstallResult) =
   except HostToolMissing as ex:
     r.errors.add(ex.msg)
 
-proc stillOwned(e: LedgerEntry): bool =
-  ## Whether the object a ledger entry describes still exists on the host
-  ## (re-observed; the entry's digest is not consulted, since a drifted
-  ## object is still the add-on's to account for).
-  case e.class
-  of lcEtcFile, lcUnit, lcKey: fileExists(e.path) or symlinkExists(e.path)
-  of lcInstallLink: symlinkExists(e.path)
-  of lcRoot, lcDir, lcStorePrefix: dirExists(e.path)
-  of lcMount: isMountPoint(e.path)
-  of lcDiversion:
-    let db = DpkgDiversionsDb
-    fileExists(db) and readDpkgDiversion(readFile(db), e.path).present
-
-proc remainingLedger*(l: Ledger): Ledger =
-  ## ``l`` without the entries whose objects are gone.
+proc remainingLedger*(l: Ledger; r: UninstallResult): Ledger =
+  ## ``l`` without the entries this run undid. Entries are dropped only
+  ## for objects this run removed (or found already gone): the package's
+  ## copy of a file that a removed diversion put back at the same path is
+  ## not the add-on's, so re-observing paths would be wrong here.
   result.generation = l.generation
   for e in l.entries:
-    if stillOwned(e): result.entries.add(e)
+    let gone = entryKey(e) in r.undone or
+               (e.class == lcDir and not dirExists(e.path))
+    if not gone: result.entries.add(e)
 
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -138,6 +139,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
                           res.output.strip())
       else:
         result.removed.add("diversion " & dv.path)
+        result.undone.incl(entryKey(dv))
 
   # 4. /etc files (those a diversion step did not already take), then the
   #    directories the add-on created, deepest first.
@@ -170,7 +172,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       # uninstall acts only on what is left and never reports an object
       # it already undid (a diversion already removed, a file already
       # deleted) as drift.
-      writeLedger(ledgerCopyPath(stateDir), remainingLedger(l))
+      writeLedger(ledgerCopyPath(stateDir), remainingLedger(l, result))
       result.errors.add("the add-on's state and ledger at " & stateDir &
         " are kept: the uninstall is incomplete (see the drift and errors " &
         "above); fix or accept them and run uninstall again")
