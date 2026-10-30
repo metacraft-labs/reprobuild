@@ -38,8 +38,11 @@
 ## bed disables the distribution's periodic apt jobs (``apt-daily*``,
 ## ``unattended-upgrades``, and Debian 13's hourly ``apt-listchanges.timer``,
 ## whose service disables itself on its first run and so changes the
-## unit-file and active-unit state of a run that straddles the hour) and
-## runs ``apt-get update`` once. The first keeps
+## unit-file and active-unit state of a run that straddles the hour; and
+## Ubuntu's ``fwupd-refresh.timer``, hourly with a random delay, whose
+## ``fwupd.service`` rewrites ``/etc/fwupd/fwupd.conf`` to mode 0640 on
+## its first run, with ``motd-news.timer`` and ``ua-timer.timer`` for the
+## same class of reason) and runs ``apt-get update`` once. The first keeps
 ## an unattended upgrade from changing ``dpkg-status`` in the middle of a
 ## gate -- the gates fingerprint the base and an upgrade is not the add-on's
 ## doing; A10 runs with them on. The second makes ``apt-get install`` work,
@@ -499,7 +502,8 @@ proc prepareBase*(g: Guest) =
   discard g.exec("cloud-init status --wait >/dev/null 2>&1 || true",
                  timeoutSec = g.bootTimeout())
   discard g.run("systemctl disable --now apt-daily.timer " &
-    "apt-daily-upgrade.timer apt-listchanges.timer 2>/dev/null; " &
+    "apt-daily-upgrade.timer apt-listchanges.timer fwupd-refresh.timer " &
+    "motd-news.timer ua-timer.timer 2>/dev/null; " &
     "systemctl stop apt-daily.service apt-daily-upgrade.service " &
     "unattended-upgrades.service 2>/dev/null; " &
     "systemctl mask --now unattended-upgrades.service 2>/dev/null; true")
