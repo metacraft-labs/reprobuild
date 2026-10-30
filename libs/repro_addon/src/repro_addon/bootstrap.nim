@@ -161,7 +161,9 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   when mutated("bootstrap-installs-jq"):
     # FALSIFYING MUTATION (see mutations.nim): a bootstrap that installs a
     # distribution package, which the specification forbids.
-    discard runHostTool(["/usr/bin/apt-get", "install", "-y", "jq"])
+    # ``tree`` as well as ``jq``: Ubuntu's cloud image ships jq already, and
+    # a mutation that changes nothing there would not be a falsifier.
+    discard runHostTool(["/usr/bin/apt-get", "install", "-y", "jq", "tree"])
 
   # 3. The recipient key, generated here.
   result.recipientPublicKeyHex = generateRecipientKey()
