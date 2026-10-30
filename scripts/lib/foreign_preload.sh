@@ -57,23 +57,6 @@ foreign_preload_is_own_shim() {
   esac
 }
 
-foreign_preload_kept_value() {
-  # What `strip_foreign_preload` leaves in the variable: the kept entries,
-  # joined, or empty. Computed without changing the environment.
-  local var value entry
-  var="$(foreign_preload_variable)"
-  value="${!var:-}"
-  [[ -n "${value}" ]] || return 0
-  local -a entries kept=()
-  IFS=': ' read -r -a entries <<< "${value}"
-  for entry in "${entries[@]}"; do
-    [[ -n "${entry}" ]] || continue
-    foreign_preload_is_own_shim "${entry}" && kept+=("${entry}")
-  done
-  (( ${#kept[@]} > 0 )) || return 0
-  (IFS=:; printf '%s' "${kept[*]}")
-}
-
 strip_foreign_preload() {
   # Remove every preload entry that is not reprobuild's monitor shim from the
   # platform's preload variable, in this shell's environment, and name each
