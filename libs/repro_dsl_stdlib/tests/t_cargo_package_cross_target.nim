@@ -359,7 +359,12 @@ suite "rust-std: the catalog arm and the target sysroot":
 
   test "the merge copies rustc, links the rest, and proves the target libdir":
     let s = rustSysrootMergeScript("1.94.0", Triple, "/x/rust-std", "/x/sysroot")
+    # The rustc of the component's version, found by walking PATH; never
+    # `command -v rustc`, which is whatever happens to be first.
     check "rustc 1.94.0 " in s
+    check "for d in $PATH" in s
+    check "command -v rustc" notin s
+    check "no rustc 1.94.0 on the edge's PATH" in s
     check "cp \"$HOST_RUSTC\" \"$OUT/bin/rustc\"" in s
     check "ln -s \"$f\" \"$OUT/bin/$n\"" in s
     check "ln -s \"$f\" \"$OUT/lib/$n\"" in s

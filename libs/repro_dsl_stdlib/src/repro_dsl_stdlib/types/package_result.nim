@@ -575,7 +575,7 @@ proc m9r15iScanQt6CmakeDirs*(qt6DepRecipeDir: string;
   ## config file (what CMake expects as ``<Component>_DIR``).
   ##
   ## Exported for unit-test introspection.
-  let cmakeRoot = qt6DepRecipeDir / ".repro" / "output" / "install" /
+  let cmakeRoot = qt6DepRecipeDir / installMirrorSubpath() /
     "usr" / "lib" / "cmake"
   if not dirExists(cmakeRoot):
     return
@@ -650,15 +650,15 @@ proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
     # in legacy mode the mirror root strips exactly that suffix off
     # the emitted recipe-dir shape.
     let depRecipeDir =
-      if mirrorRoot.endsWith("/.repro/output/install"):
-        mirrorRoot[0 ..< mirrorRoot.len - "/.repro/output/install".len]
+      if mirrorRoot.endsWith("/" & installMirrorSubpath()):
+        mirrorRoot[0 ..< mirrorRoot.len - ("/" & installMirrorSubpath()).len]
       else:
         # Non-legacy mode: the mirror root is content-hashed and does
         # not carry the legacy suffix. Scan the cmake root directly by
         # feeding a synthetic "recipe dir" whose ``+ /.repro/output/install``
         # composes to the mirror root.
         mirrorRoot & "/__pseudo_recipe_dir"
-    if mirrorRoot.endsWith("/.repro/output/install"):
+    if mirrorRoot.endsWith("/" & installMirrorSubpath()):
       m9r15iScanQt6CmakeDirs(depRecipeDir, sink)
     else:
       # For non-legacy layouts, scan the mirror root's cmake tree
@@ -750,7 +750,7 @@ proc m9r15iScanCmakeConfigDirs*(depRecipeDir: string;
   ##
   ## Legacy signature preserved for the existing unit tests; the
   ## resolver-aware collector calls the shared core directly.
-  let cmakeRoot = depRecipeDir / ".repro" / "output" / "install" /
+  let cmakeRoot = depRecipeDir / installMirrorSubpath() /
     "usr" / "lib" / "cmake"
   scanCmakeConfigDirsAt(cmakeRoot, dst)
 
@@ -1263,7 +1263,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     else: destdir
   let srcUsr = effectiveDestRoot & "/usr"
   let escapedSrcUsr = srcUsr.replace("\\", "/").replace("\"", "\\\"")
-  let dstUsrRoot = projectRoot / ".repro" / "output" / "install"
+  # The install mirror is keyed by the target the build compiles for
+  # (`installMirrorSubpath`, ReproOS-Add-On-Mode A15): a cross build's
+  # mirror is `.repro/output/install@<triple>`, beside the native one.
+  let dstUsrRoot = projectRoot / installMirrorSubpath()
   let dstUsr = dstUsrRoot / "usr"
   createDir(dstUsrRoot)
   let escapedDstUsrRoot = dstUsrRoot.replace("\\", "/").replace("\"", "\\\"")

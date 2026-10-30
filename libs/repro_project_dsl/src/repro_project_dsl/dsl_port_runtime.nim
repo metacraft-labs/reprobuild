@@ -6635,7 +6635,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
     let escapedStampDir = stampDir.replace("\\", "/").
       replace("\"", "\\\"")
-    let outMirrorRoot = (projectRoot / ".repro" / "output" / "install").
+    let outMirrorRoot = (projectRoot / installMirrorSubpath()).
       replace("\\", "/")
     let shellEnv = @[("OUT_MIRROR", outMirrorRoot)]
     let script = "set -e; mkdir -p \"" & escapedExtracted &
@@ -6685,7 +6685,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
   # action chains off the last shell action's stamp so it runs after
   # the install body completes.
   if prevId.len > 0:
-    let mirrorRoot = projectRoot / ".repro" / "output" / "install"
+    let mirrorRoot = projectRoot / installMirrorSubpath()
     let mirrorUsr = mirrorRoot / "usr"
     createDir(extendedPath(mirrorRoot))
     let mirrorStamp = mirrorRoot / ".m9r15q21_install_mirror.stamp"

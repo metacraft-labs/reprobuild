@@ -43,13 +43,18 @@
 
 import std/[os, strutils]
 
-const
-  InstallMirrorSubpath* = "/.repro/output/install"
-    ## The shape a sibling mirror always has under the recipes root:
-    ## ``<recipesRoot>/<package><InstallMirrorSubpath>/<rest>``. A path of
-    ## this shape carries its own package name, which is what makes it
-    ## remappable onto another checkout.
+import ./install_mirror_resolver
 
+proc InstallMirrorSubpath*(): string =
+  ## The shape a sibling mirror always has under the recipes root:
+  ## ``<recipesRoot>/<package><InstallMirrorSubpath()>/<rest>``. A path of
+  ## this shape carries its own package name, which is what makes it
+  ## remappable onto another checkout. A proc since ReproOS-Add-On-Mode
+  ## A15: the mirror is keyed by the target (``installMirrorSubpath``), so
+  ## a cross build's paths carry ``@<triple>`` and relocate as such.
+  "/" & installMirrorSubpath()
+
+const
   ImmutableStoreRoots* = ["/nix/store/", "/repro/store/"]
     ## Content-addressed roots. A path under one of these denotes the same
     ## bytes on every host that has it, so it is portable by construction.
@@ -300,12 +305,12 @@ proc splitMirrorPath*(value: string):
   ## is what travels: it is the only part of a foreign path that still means
   ## something under a different checkout.
   let v = normalizeSlashes(value)
-  let marker = InstallMirrorSubpath & "/"
+  let marker = InstallMirrorSubpath() & "/"
   var idx = v.find(marker)
   var tail = ""
   if idx < 0:
-    if v.endsWith(InstallMirrorSubpath):
-      idx = v.len - InstallMirrorSubpath.len
+    if v.endsWith(InstallMirrorSubpath()):
+      idx = v.len - InstallMirrorSubpath().len
     else:
       return
   else:
@@ -367,8 +372,8 @@ proc installMirrorCheckoutRoots*(mirrorRoot: string):
   ## root FROM the mirror rather than from a caller-supplied setting keeps the
   ## audit's notion of "here" identical to the path it is auditing.
   let v = normalizeSlashes(mirrorRoot).strip(leading = false, chars = {'/'})
-  if not v.endsWith(InstallMirrorSubpath): return
-  let head = v[0 ..< v.len - InstallMirrorSubpath.len]
+  if not v.endsWith(InstallMirrorSubpath()): return
+  let head = v[0 ..< v.len - InstallMirrorSubpath().len]
   if head.len == 0 or '/' notin head: return
   let parts = head.rsplit('/', maxsplit = 1)
   if parts[0].len == 0 or parts[1].len == 0: return
@@ -380,7 +385,7 @@ proc remapInstallMirrorPath*(value, recipesRoot: string): string =
   if recipesRoot.len == 0: return ""
   let split = splitMirrorPath(value)
   if not split.matched: return ""
-  result = withTrailingSlash(recipesRoot) & split.depName & InstallMirrorSubpath
+  result = withTrailingSlash(recipesRoot) & split.depName & InstallMirrorSubpath()
   if split.rest.len > 0:
     result.add("/" & split.rest)
 

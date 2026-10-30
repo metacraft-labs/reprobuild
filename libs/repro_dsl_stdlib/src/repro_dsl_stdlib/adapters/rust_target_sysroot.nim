@@ -81,17 +81,27 @@ proc rustSysrootMergeScript*(hostRustcVersion, triple, extracted,
                              sysroot: string): string =
   ## The merge, as the shell that runs it. Pure, so a test can read it.
   ##
-  ## `HOST_RUSTC` is the `rustc` the engine put on the edge's PATH (the
-  ## recipe's `nativeBuildDeps: rustc`); its prefix is two levels up. The
-  ## component's `rust-std-<triple>/lib/rustlib/<triple>` is the one
-  ## directory copied; everything else is a link into the host prefix.
-  "set -e; HOST_RUSTC=$(command -v rustc); " &
+  ## `HOST_RUSTC` is the `rustc` OF THE COMPONENT'S VERSION on the edge's
+  ## PATH -- not the first `rustc` there. The engine puts every resolved
+  ## tool's directory on PATH, and a path-mode resolution can put a
+  ## different rustc first (the catalog's nix arm is realized without the
+  ## declared version range: reprobuild-pm issue
+  ## 2026-10-30-path-mode-realizes-a-nix-rustc-outside-the-declared-version-range),
+  ## while the pinned toolchain's prefix (the rust-installer archive that
+  ## also carries `cargo`) is on PATH too. So the script walks PATH and
+  ## takes the first `rustc` whose `--version` is the component's, and
+  ## refuses, naming every version it saw, when none is. Its prefix is two
+  ## levels up. The component's `rust-std-<triple>/lib/rustlib/<triple>`
+  ## is the one directory copied; everything else is a link into it.
+  "set -e; HOST_RUSTC=; SEEN=; IFS_SAVE=$IFS; IFS=:; " &
+  "for d in $PATH; do IFS=$IFS_SAVE; [ -x \"$d/rustc\" ] || continue; " &
+  "v=$(\"$d/rustc\" --version 2>/dev/null || true); SEEN=\"$SEEN $v;\"; " &
+  "case \"$v\" in \"rustc " & hostRustcVersion & " \"*) HOST_RUSTC=\"$d/rustc\"; " &
+  "break;; esac; done; IFS=$IFS_SAVE; " &
+  "[ -n \"$HOST_RUSTC\" ] || { echo \"rust-sysroot: no rustc " & hostRustcVersion &
+    " on the edge's PATH (seen:$SEEN), the " & triple &
+    " standard library is " & hostRustcVersion & "\" >&2; exit 1; }; " &
   "HOST_PREFIX=$(CDPATH= cd -- \"$(dirname -- \"$HOST_RUSTC\")/..\" && pwd); " &
-  "case \"$(\"$HOST_RUSTC\" --version)\" in \"rustc " & hostRustcVersion &
-    " \"*) ;; " &
-  "*) echo \"rust-sysroot: host rustc is $(\"$HOST_RUSTC\" --version), the " &
-    triple & " standard library is " & hostRustcVersion & "\" >&2; exit 1;; " &
-    "esac; " &
   "OUT=" & q(sysroot) & "; rm -rf \"$OUT\"; " &
   "mkdir -p \"$OUT/bin\" \"$OUT/lib/rustlib\"; " &
   "cp \"$HOST_RUSTC\" \"$OUT/bin/rustc\"; " &
