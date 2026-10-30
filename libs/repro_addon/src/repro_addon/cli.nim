@@ -334,7 +334,7 @@ proc runAddonCli*(args: seq[string]): int =
         return 0
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
-      return (if r.status in ["ok", "drift"]: 0 else: 1)
+      return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
     of "probe":
       if rest.len != 1:
         raise newException(ValueError, "probe needs one healthCheck value")

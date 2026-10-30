@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2491,
+    "nimTestBinaries": 2492,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 698,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2531
+    "testEntries": 2532
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1447,9 +1447,9 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1378,
-      "platform/destructive": 155,
+      "platform/destructive": 157,
       "pure unit": 698,
-      "unclassified": 282
+      "unclassified": 281
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1657,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2491,
+    "nimTestBinaryCount": 2492,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2531
+    "testEntryCount": 2532
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8148,13 +8148,32 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_addon",
+        "repro_core",
         "repro_peer_cache"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 37,
+      "staticCaseCount": 38,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_reassert_defers_to_a_live_switch",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_core"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15724,8 +15743,8 @@
     },
     {
       "binary": "build/test-bin/t_two_applies_with_different_state_dirs_never_overlap",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -15738,7 +15757,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -31,7 +31,8 @@ libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	16
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	43
-libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	37
+libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
+libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	1
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	29
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	26
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
@@ -435,7 +436,7 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	207
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
 libs/repro_infra/tests/t_system_profile_addon_fields.nim	nim	7
-libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim	nim	3
+libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim	nim	5
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3

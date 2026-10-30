@@ -31,7 +31,6 @@
 
 import std/[os, strutils, times]
 
-import repro_core/file_lock
 import repro_core/host_apply_lock
 
 import repro_infra
@@ -56,6 +55,11 @@ type
 
   RecoveryOutcome* = object
     resolved*: bool
+    deferred*: bool
+      ## A switch holds the host apply lock right now. That switch is the
+      ## one that started this recovery (it restarts the reassert unit at
+      ## step 7) or will finish its own marker, so there is nothing to
+      ## recover yet and nothing to wait for.
     lines*: seq[string]
 
 proc reassertReportPath*(stateDir: string): string =
@@ -127,12 +131,14 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   except CatchableError as e:
     return RecoveryOutcome(resolved: false,
       lines: @["the pending marker is unreadable: " & e.msg])
-  var hostLock: HostApplyLock
-  try:
-    hostLock = acquireHostApplyLock("add-on switch recovery")
-  except ELockTimeout as e:
-    return RecoveryOutcome(resolved: false,
-      lines: @["a switch is in progress; not touching it: " & e.msg])
+  # Zero wait: repro-addon-reassert.service is a oneshot the switch itself
+  # (re)starts while holding the host apply lock, so waiting here would stall
+  # that switch for the whole deadline. A held lock means a switch is live.
+  var (hostLock, holder) = tryAcquireHostApplyLock("add-on switch recovery")
+  if holder.len > 0:
+    return RecoveryOutcome(resolved: true, deferred: true,
+      lines: @["a switch holds the host apply lock; recovery is its own " &
+               "(" & holder & ")"])
   defer: hostLock.release()
   let lock = takeLockForRecovery(stateDir, atBoot)
   if not lock.ok:
@@ -248,6 +254,17 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
   try:
     let rec = recoverPendingSwitch(stateDir, atBoot, driver)
     result.recovery = rec.lines
+    if rec.deferred:
+      # Mid-switch: the live state is the switch's, not drift. Report and
+      # leave the check to the run after the switch.
+      result.status = "deferred"
+      try:
+        createDir(stateDir / "addon")
+        writeFileAtomic(reassertReportPath(stateDir),
+          "time\t" & $now().utc & "\n" & renderReassert(result), 0o600)
+      except CatchableError:
+        discard
+      return
     if not rec.resolved:
       result.status = "degraded"
     elif rec.lines.len > 0:

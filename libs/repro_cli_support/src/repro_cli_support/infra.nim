@@ -21,6 +21,8 @@
 
 import std/[options, os, strutils, times]
 
+import repro_core/file_lock
+import repro_core/host_apply_lock
 import repro_elevation
 import repro_infra
 import repro_profile
@@ -614,6 +616,14 @@ proc reproExePath(): string =
   ## instead of launching the caller's own image as the broker.
   selfSpawnIoMonitorPath()
 
+var cliHostLock: HostApplyLock
+  ## The host lock `takeInfraApplyLock` took for this command.
+
+proc releaseInfraApplyLock(stateDir: string) =
+  ## The two locks `takeInfraApplyLock` took, in reverse order.
+  releaseApplyLock(stateDir)
+  cliHostLock.release()
+
 proc takeInfraApplyLock(stateDir, command: string;
                         flags: InfraCliFlags): bool =
   ## Acquire the per-host apply lock for a mutating `repro infra` /
@@ -624,10 +634,21 @@ proc takeInfraApplyLock(stateDir, command: string;
   ## actionable rather than a dead end. A reclaim that displaced a
   ## still-running process says so loudly: the lock moved, the process
   ## did not, and the operator must confirm it is gone.
+  ##
+  ## The host-wide apply lock comes FIRST, then the state directory's: one
+  ## order everywhere (`repro_core/host_apply_lock`), so no two commands
+  ## can each hold one and wait for the other.
+  try:
+    cliHostLock = acquireHostApplyLock(command & " (state " & stateDir & ")",
+      privileged = isProcessElevated())
+  except ELockTimeout as e:
+    stderr.writeLine(command & ": " & e.msg)
+    return false
   var policy = defaultApplyLockPolicy()
   policy.forceUnlock = flags.forceUnlock
   let acq = tryAcquireApplyLock(stateDir, policy)
   if not acq.acquired:
+    cliHostLock.release()
     stderr.writeLine(command & ": another system apply is in progress (" &
       describeApplyLockHolder(stateDir, acq) & ").")
     stderr.writeLine("  The owner is alive and not provably stalled, so " &
@@ -794,7 +815,7 @@ proc runInfraApply(args: openArray[string]): int =
 
   if not takeInfraApplyLock(stateDir, "repro infra apply", flags):
     return 1
-  defer: releaseApplyLock(stateDir)
+  defer: releaseInfraApplyLock(stateDir)
 
   when defined(linux):
     # ReproOS add-on mode: on a host the add-on was bootstrapped on, every
@@ -1151,7 +1172,7 @@ proc runSystemSync(args: openArray[string]): int =
     return 1
   if not takeInfraApplyLock(stateDir, "repro system sync", flags):
     return 1
-  defer: releaseApplyLock(stateDir)
+  defer: releaseInfraApplyLock(stateDir)
   # M82 Phase C: surface plan-time drift BEFORE the apply runs. `sync`
   # has `--no-preview` baked in, so we synthesize the same drift output
   # the explicit `infra plan` flow prints; the apply itself then
@@ -1270,7 +1291,7 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
   let hostNote = recordedHostNote(stateDir, host)
   if not takeInfraApplyLock(stateDir, "repro system rollback", flags):
     return 1
-  defer: releaseApplyLock(stateDir)
+  defer: releaseInfraApplyLock(stateDir)
   var opts: SystemRollbackOptions
   opts.stateDir = stateDir
   opts.hostIdentity = host

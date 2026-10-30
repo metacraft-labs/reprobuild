@@ -94,6 +94,11 @@ proc isReadOnlyMount*(path: string): bool =
 
 when defined(linux):
   var privateNamespaceEntered {.threadvar.}: bool
+    ## Set only once BOTH the unshare and the ``MS_PRIVATE`` mount succeeded.
+  var privateNamespaceBroken {.threadvar.}: bool
+    ## The unshare succeeded and ``MS_PRIVATE`` did not: this thread is in
+    ## a namespace that still propagates mounts to and from the host, and
+    ## it must never remount the store there or try again.
 
   proc keptMountFlags(path: string): culong =
     ## The per-mount flags of ``path`` other than read-only. A bind
@@ -127,16 +132,22 @@ proc enterWritableStoreView*(storeRoot: string) =
         "filesystem, not a read-only bind of itself; a private remount " &
         "cannot make it writable. The add-on store needs a writable " &
         "filesystem under the read-only bind (spec §5.1, §10.2)")
+    if privateNamespaceBroken:
+      raise newException(OSError, "refusing to write " & storeRoot & ": " &
+        "an earlier attempt on this thread unshared its mount namespace but " &
+        "could not make it private, so a remount here would reach the host")
     if not privateNamespaceEntered:
       if c_unshare(CloneNewNs) != 0:
         raiseOSError(osLastError(), "unshare(CLONE_NEWNS) to write " &
           storeRoot)
       # Stop mount events propagating out of (or into) this namespace
-      # before changing anything in it. Until this succeeds the thread is
-      # in a namespace that still shares propagation with the host, so the
-      # view is not recorded as entered and no remount is attempted.
+      # before changing anything in it.
       if c_mount(nil, "/", nil, MsRec or MsPrivate, nil) != 0:
-        raiseOSError(osLastError(), "make / private in the store view")
+        let err = osLastError()
+        privateNamespaceBroken = true
+        raiseOSError(err, "make / private in the store view; refusing to " &
+          "remount " & storeRoot & " in a namespace that shares the host's " &
+          "mount propagation")
       privateNamespaceEntered = true
     if c_mount(nil, storeRoot.cstring, nil,
         MsRemount or MsBind or keptMountFlags(storeRoot), nil) != 0:

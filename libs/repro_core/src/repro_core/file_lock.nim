@@ -42,6 +42,8 @@ else:
     {.importc: "flock", header: "<sys/file.h>".}
   var ProviderLockOpenDirectory {.importc: "O_DIRECTORY",
                                   header: "<fcntl.h>".}: cint
+  var ProviderLockNoFollow {.importc: "O_NOFOLLOW",
+                             header: "<fcntl.h>".}: cint
 
 type ReproFileLock* = object
   held: bool
@@ -162,16 +164,16 @@ type
 when not defined(windows):
   proc flockHolderPids*(fd: cint): seq[int] =
     ## The PIDs /proc/locks names as holding a granted FLOCK on the file
-    ## open at ``fd``, excluding this process. Empty where /proc/locks is
-    ## unavailable (non-Linux) or names nobody.
+    ## open at ``fd``, excluding this process. A line matches only on the
+    ## device (major and minor, compared as numbers: the kernel's minimum
+    ## field width is not a fixed one) AND the inode. Empty where
+    ## /proc/locks is unavailable (non-Linux) or names nobody.
     var st: Stat
     if fstat(fd, st) != 0: return
-    let ino = $uint64(st.st_ino)
+    let ino = uint64(st.st_ino)
     let dev = uint64(st.st_dev)
     let major = ((dev shr 8) and 0xfff'u64) or ((dev shr 32) and not 0xfff'u64)
     let minor = (dev and 0xff'u64) or ((dev shr 12) and not 0xff'u64)
-    let devIno = toHex(major, 2).toLowerAscii() & ":" &
-      toHex(minor, 2).toLowerAscii() & ":" & ino
     let me = getCurrentProcessId()
     var text = ""
     try: text = readFile("/proc/locks")
@@ -179,10 +181,15 @@ when not defined(windows):
     for line in text.splitLines():
       let f = line.splitWhitespace()
       # "N: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<ino> <start> <end>";
-      # a blocked waiter's line carries "->" after the ordinal.
+      # a blocked waiter's line carries "->" after the ordinal and is
+      # skipped by the field-1 test.
       if f.len < 6 or f[1] != "FLOCK": continue
-      if f[5] != devIno and not f[5].endsWith(":" & ino): continue
+      let id = f[5].split(':')
+      if id.len != 3: continue
       try:
+        if fromHex[uint64](id[0]) != major or fromHex[uint64](id[1]) != minor or
+            parseBiggestUInt(id[2]) != ino:
+          continue
         let pid = parseInt(f[4])
         if pid != me and pid notin result: result.add(pid)
       except ValueError: discard
@@ -193,22 +200,25 @@ when not defined(windows):
 
 proc acquireExclusiveLockWithin*(lockPath: string; deadlineMs: int;
                                  directory = false;
-                                 onBusy: LockBusyHook = nil): ReproFileLock =
-  ## Take an exclusive ``flock`` on ``lockPath`` (a lock file created
-  ## 0600, or with ``directory`` the directory itself, so no file is
-  ## added to it), retrying non-blocking until ``deadlineMs`` has passed.
+                                 onBusy: LockBusyHook = nil;
+                                 mode = 0o600): ReproFileLock =
+  ## Take an exclusive ``flock`` on ``lockPath`` (a lock file created with
+  ## ``mode``, never through a symbolic link, or with ``directory`` the
+  ## directory itself, so no file is added to it), retrying non-blocking
+  ## until ``deadlineMs`` has passed.
   ## A lock still held then raises ``ELockTimeout`` naming the holder's
   ## PID, rather than waiting on a holder that may never let go.
   ## ``onBusy`` runs once, at the first refusal.
   when defined(windows):
-    discard deadlineMs; discard directory; discard onBusy
+    discard deadlineMs; discard directory; discard onBusy; discard mode
     return acquireExclusiveFileLock(lockPath)
   else:
     if not directory:
       createDir(extendedPath(parentDir(lockPath)))
-    let flags = if directory: O_RDONLY or O_CLOEXEC or ProviderLockOpenDirectory
-                else: O_RDWR or O_CREAT or O_CLOEXEC
-    let fd = posix.open(lockPath.cstring, flags, Mode(0o600))
+    let flags = if directory: O_RDONLY or O_CLOEXEC or ProviderLockNoFollow or
+                  ProviderLockOpenDirectory
+                else: O_RDWR or O_CREAT or O_CLOEXEC or ProviderLockNoFollow
+    let fd = posix.open(lockPath.cstring, flags, Mode(mode))
     if fd < 0:
       raise newException(IOError,
         "open(" & lockPath & ") to lock it failed, errno=" & $errno)

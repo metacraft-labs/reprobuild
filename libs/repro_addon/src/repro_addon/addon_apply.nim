@@ -1359,20 +1359,22 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         "there); re-run as root" &
         (if getEnv(ForceBrokerEnvVar).len > 0: " without " & ForceBrokerEnvVar
          else: ""))
-    enterWritableStoreView()
-    createDir(addonDir(stateDir))
-  # One apply at a time per state directory (the same lock `repro infra
-  # apply` takes). A caller that already holds it -- the full engine's CLI
-  # -- is not asked to take it twice. A plan takes none: it writes nothing.
-  # And one apply at a time per HOST, whatever its state directory
-  # (``repro_core/host_apply_lock``), held across the whole switch, not
-  # only the infra apply inside it.
+  # One apply at a time per HOST, whatever its state directory
+  # (``repro_core/host_apply_lock``), taken before the first write and
+  # before the state directory's own lock, and held across the whole
+  # switch, not only the infra apply inside it.
   var hostLock: HostApplyLock
   if not opts.planOnly:
     hostLock = acquireHostApplyLock("add-on " &
       (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
       stateDir & ")")
   defer: hostLock.release()
+  if not opts.planOnly:
+    enterWritableStoreView()
+    createDir(addonDir(stateDir))
+  # One apply at a time per state directory (the same lock `repro infra
+  # apply` takes). A caller that already holds it -- the full engine's CLI
+  # -- is not asked to take it twice. A plan takes none: it writes nothing.
   var ownLock = false
   if not opts.planOnly and applyLockOwner(stateDir) != getCurrentProcessId():
     let acq = tryAcquireApplyLock(stateDir)

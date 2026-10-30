@@ -26,6 +26,7 @@ import std/[os, posix, strutils, unittest]
 
 import repro_peer_cache/auth as peerAuth
 import repro_addon/[generation0, preflight]
+import repro_core/host_apply_lock
 
 const
   SignerKey = "04" & repeat("ab", 64)
@@ -127,6 +128,29 @@ suite "rpi2's pre-bootstrap state is taken over, not refused":
     check e.refused.len == 0 and e.inputs.roots.len == 0 and
           e.inputs.keptFiles.len == 0
     removeDir(empty)
+
+  test "the host apply lock any apply leaves behind is not an occupant":
+    # Every apply, and bootstrap itself, creates the host-wide apply lock.
+    # At 97645920d it lived at /run/repro/apply.lock, inside an add-on
+    # root, so bootstrap's own lock made the plan it recomputes
+    # incompatible (a foreign occupant under /run/repro), and the file
+    # stayed and refused every later preflight. It must sit outside every
+    # add-on root.
+    for tree in ["pristine", "rpi2"]:
+      let r = getTempDir() / ("repro-addon-preflight-lock-" & tree & "-" &
+                              $getCurrentProcessId())
+      removeDir(r)
+      if tree == "rpi2": rpi2Tree(r) else: createDir(r)
+      let before = inspect(r)
+      let lockFile = r & SystemHostApplyLockPath
+      createDir(parentDir(lockFile))
+      writeFile(lockFile, "")
+      let after = inspect(r)
+      check after.refused == newSeq[string]()
+      check after.inputs.roots == before.inputs.roots
+      for root in AddonOwnedRoots:
+        check not SystemHostApplyLockPath.startsWith(root & "/")
+      removeDir(r)
 
   test "the agent's sequence floor is kept, with its content unpinned":
     createDir(root / "var/lib/repro/agent/state/deploy-agent")

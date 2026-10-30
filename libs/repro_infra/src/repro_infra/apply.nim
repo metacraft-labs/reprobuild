@@ -549,7 +549,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## does not stop a second apply that uses another state directory, and
   ## the deploy agent's tick reaches this proc without taking it at all.
   var hostLock = acquireHostApplyLock("repro infra apply (state " &
-    opts.stateDir & ")")
+    opts.stateDir & ")", privileged = isProcessElevated())
   defer: hostLock.release()
   resetBrokerLaunchCount()
   refreshApplyLock(opts.stateDir)

@@ -253,8 +253,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "",
-    singleReason: "no other source shares its compile options"),
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
     binary: "build/test-bin/t_addon_ledger_and_plan",
@@ -277,6 +277,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let root = freshRoot(\"rpi2\")"),
+  TestSpec(
+    source: "libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim",
+    binary: "build/test-bin/t_addon_reassert_defers_to_a_live_switch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim",
     binary: "build/test-bin/t_addon_switch_exclusive_retention",
