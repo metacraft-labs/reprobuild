@@ -2720,6 +2720,9 @@
               # shells out to node. (Safe now that the test runner isolates git
               # config — adding shells no longer perturbs the gpg-signing tests.)
               pkgs.nodejs
+              # The typed tree-sitter generation controls execute the real
+              # generator, including JavaScript grammar evaluation via node.
+              pkgs.tree-sitter
               pkgs.zsh
               pkgs.fish
             ]
