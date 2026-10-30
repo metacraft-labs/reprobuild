@@ -59,7 +59,7 @@ import ./packages/[jdk, cabal, claude_code, composer, crystal, elixir, erlang,
   dotnet_sdk, gcc, gh, git, go, just, meson, nim, ninja, node, python3, fpc,
   pkg_7zip, wix3, innounp, lessmsi, autoconf, automake, libtool, ocaml, alire,
   gcc_winlibs, llvm_mingw, cargo, circom, clippy, forc, foundry, rustc,
-  rustfmt, solc, create_dmg]
+  rustfmt, solc, create_dmg, rust_std]
 
 proc linkedPackageNames*(): HashSet[string] =
   ## The names of every package definition registered in this process — the

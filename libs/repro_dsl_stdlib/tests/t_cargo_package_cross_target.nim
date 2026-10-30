@@ -23,6 +23,7 @@ import std/[os, strutils, unittest]
 import repro_project_dsl
 import repro_dsl_stdlib/active_context
 import repro_dsl_stdlib/adapters/cross_zig
+import repro_dsl_stdlib/adapters/rust_target_sysroot
 import repro_dsl_stdlib/constructors/cargo_package
 import repro_dsl_stdlib/packages/cargo as cargo_module
 
@@ -302,7 +303,91 @@ suite "cargo_package reads the active cross target":
       resetBuildActionRegistry()
       setCurrentOwningPackageOverride("probeSource")
       defer: clearCurrentOwningPackageOverride()
-      let res = cargo_package()
+      # No `rust-std` component is catalogued for the triple either, so the
+      # recipe has to bring its own sysroot; without one it is refused.
+      let res = cargo_package(extraEnv = @[("RUSTC", "/own/bin/rustc")])
       check argvOf(res.compileEdge).containsPair("--target",
         "mips-unknown-linux-gnu")
-      check res.compileEdge.envValue("CC_mips_unknown_linux_gnu") == "")
+      check res.compileEdge.envValue("CC_mips_unknown_linux_gnu") == ""
+      check res.compileEdge.envValue("RUSTC") == "/own/bin/rustc"
+      expect ValueError:
+        discard cargo_package()
+      try:
+        discard cargo_package()
+      except ValueError as e:
+        check "mips-unknown-linux-gnu" in e.msg
+        check Triple in e.msg)
+
+suite "rust-std: the catalog arm and the target sysroot":
+
+  test "the catalog's rust-std arms are the adapter's table, one row each":
+    # One table: the stdlib edge reads `RustStdComponents`, the deferred
+    # engine half will select the package's arms, and the two must not
+    # drift. Every row has exactly one arm with its URL and digest, keyed by
+    # the TARGET's cpu/os, and every arm is a row.
+    var found = false
+    for pkg in registeredPackages():
+      if pkg.packageName != "rust-std": continue
+      found = true
+      check pkg.tarballProvisioning.len == RustStdComponents.len
+      for c in RustStdComponents:
+        var arms = 0
+        for arm in pkg.tarballProvisioning:
+          if arm.url == rustStdUrl(c):
+            inc arms
+            check arm.sha256 == c.sha256
+            check arm.cpu == c.cpu
+            check arm.os == c.os
+        check arms == 1
+    check found
+
+  test "the component is looked up by triple and refused by name":
+    check rustStdComponent(Triple).sha256 ==
+      "abfc0e7c1eaff1e3332b5c6262d12da309035a228261d07155add44464ed52f4"
+    check rustStdUrl(rustStdComponent(Triple)) ==
+      "https://static.rust-lang.org/dist/rust-std-1.94.0-" & Triple & ".tar.xz"
+    check hasRustStdComponent(Triple)
+    check not hasRustStdComponent("mips-unknown-linux-gnu")
+    expect ValueError:
+      discard rustStdComponent("mips-unknown-linux-gnu")
+
+  test "the merge copies rustc, links the rest, and proves the target libdir":
+    let s = rustSysrootMergeScript("1.94.0", Triple, "/x/rust-std", "/x/sysroot")
+    check "rustc 1.94.0 " in s
+    check "cp \"$HOST_RUSTC\" \"$OUT/bin/rustc\"" in s
+    check "ln -s \"$f\" \"$OUT/bin/$n\"" in s
+    check "ln -s \"$f\" \"$OUT/lib/$n\"" in s
+    check ("cp -a '/x/rust-std/rust-std-" & Triple & "/lib/rustlib/" & Triple &
+      "' \"$OUT/lib/rustlib/\"") in s
+    check ("--target " & Triple & " --print target-libdir") in s
+    check "--print sysroot | grep -qx \"$OUT\"" in s
+
+  test "cargo_package drives the merged rustc and orders after the merge":
+    withTargetEnv(Triple, proc() =
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("probeSource")
+      defer: clearCurrentOwningPackageOverride()
+      let res = cargo_package()
+      # No provider project root under a test, so the path is relative to
+      # the recipe root (`"." / x` is `x`).
+      check res.compileEdge.envValue("RUSTC").endsWith(
+        ".repro/build/cross/" & Triple & "/rust-sysroot/bin/rustc")
+      check res.installEdge.envValue("RUSTC") ==
+        res.compileEdge.envValue("RUSTC"))
+
+  test "a recipe's own RUSTC wins and emits no sysroot":
+    withTargetEnv(Triple, proc() =
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("probeSource")
+      defer: clearCurrentOwningPackageOverride()
+      let res = cargo_package(extraEnv = @[("RUSTC", "/own/bin/rustc")])
+      check res.compileEdge.envValue("RUSTC") == "/own/bin/rustc"
+      for act in registeredBuildActions():
+        check not act.id.startsWith("rust-sysroot-"))
+
+  test "a native build has no RUSTC":
+    delEnv("REPRO_VARIANTS")
+    resetBuildActionRegistry()
+    setCurrentOwningPackageOverride("probeSource")
+    defer: clearCurrentOwningPackageOverride()
+    check cargo_package().compileEdge.envValue("RUSTC") == ""

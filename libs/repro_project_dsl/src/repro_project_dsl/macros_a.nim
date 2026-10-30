@@ -1933,8 +1933,13 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   if result.stripComponents < 0:
     error("tarball stripComponents must not be negative", node)
   let cpuText = litText(cpuNode)
-  if cpuText.len > 0 and cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
-    error("tarball cpu must be one of any|x86_64|aarch64; got '" &
+  # `armv7` is the cache's family for every supported 32-bit ARM target
+  # (`packages_schema.parsePlatformCpuToken`); a `tarball` arm keyed by it is
+  # how a TARGET-platform component (`packages/rust_std.nim`) is catalogued
+  # for the Add-On Mode appliances (ReproOS-Add-On-Mode A15).
+  if cpuText.len > 0 and
+      cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64", "armv7"]:
+    error("tarball cpu must be one of any|x86_64|aarch64|armv7; got '" &
       cpuText & "'", node)
   let osText = litText(osNode)
   if osText.len > 0 and
@@ -4496,7 +4501,11 @@ const BundledStdlibSelectors* = [
   # the header names ``zstd-dev``; one that runs the binary names ``zstd``.
   # See ``repro_dsl_stdlib/packages/zstd_dev.nim`` for why the dev package
   # declares a HEADER as its ``executablePath``.
-  "zstd-dev"
+  "zstd-dev",
+  # ReproOS-Add-On-Mode A15: the Rust standard library of a TARGET
+  # platform. Its arms are keyed by the target the build compiles for,
+  # not by the host; see ``repro_dsl_stdlib/packages/rust_std.nim``.
+  "rust-std"
   ]
   ## The stdlib package selectors a recipe's ``uses:`` reaches by name alone:
   ## ``usesImportCode`` auto-imports ``repro_dsl_stdlib/packages/<module>``

@@ -57,10 +57,14 @@
 ## active cross target is refused: the two would otherwise produce an
 ## artefact for one platform under a cache identity stamped for another.
 ## The target's standard library has to be in rustc's sysroot
-## (`lib/rustlib/<triple>/`): the recipe declares a toolchain that has it
-## (reprobuild-packages assembles one per target from the host `rustc` and
-## upstream's `rust-std-<version>-<triple>` component) until the catalog's
-## `rust-std` component arm lands (ReproOS-Add-On-Mode A15).
+## (`lib/rustlib/<triple>/`), and the catalog's `rustc` carries only the
+## host's: for a cross target this constructor emits the two edges of
+## `adapters/rust_target_sysroot` -- a fetch of the catalog's `rust-std`
+## component for the triple and a merge of it into a copy of the host
+## `rustc` prefix -- and points the cargo edges at the result with `RUSTC`.
+## A recipe that sets `RUSTC` in `extraEnv` brings its own sysroot and the
+## edges are not emitted; a target the catalog has no component for is
+## refused by name.
 ##
 ## `package` selects one member of a virtual workspace (`cargo build -p`),
 ## and `installPath` is that member's directory within the source tree
@@ -76,6 +80,7 @@ import repro_project_dsl/cargo_vendor
 import ../types/package_result
 import ../packages/cargo as cargo_module
 import ../adapters/cross_zig
+import ../adapters/rust_target_sysroot
 import ../active_context
 
 const
@@ -277,6 +282,22 @@ proc cargo_package*(srcDir = "src";
     if projectRoot.len > 0:
       compileAfter.add(emitZigCrossWrappersAction(projectRoot, pkgName,
         target))
+
+  # The target's standard library (see the header). A `RUSTC` the recipe
+  # set itself is its own sysroot and wins; otherwise the catalog must have
+  # the component, and the merged prefix is what cargo drives.
+  if target.len > 0:
+    var recipeRustc = false
+    for (k, _) in env:
+      if k == "RUSTC": recipeRustc = true
+    if not recipeRustc:
+      discard rustStdComponent(target)   # refuses an uncatalogued target
+      let root = if projectRoot.len > 0: projectRoot else: "."
+      env.add(("RUSTC", rustTargetRustcPath(root, target)))
+      if projectRoot.len > 0:
+        let fetch = emitRustStdFetchAction(projectRoot, pkgName, target)
+        compileAfter.add(emitRustTargetSysrootAction(projectRoot, pkgName,
+          target, fetch))
 
   var compileEdge = cargo_module.cargo.build(
     locked = true,
