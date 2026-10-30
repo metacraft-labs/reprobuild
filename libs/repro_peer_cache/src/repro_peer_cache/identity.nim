@@ -51,6 +51,8 @@
 import std/[options, os, strutils, tables, times]
 when defined(posix):
   import std/posix
+when defined(windows):
+  import ./owner_only_file
 
 import ./auth
 import ./pki
@@ -159,13 +161,16 @@ const KeyFilePrefix = "ecdsa-p256:"
 proc readKeyFileSecure(keyPath: string): PrivateKeyBytes =
   ## Reads the `ecdsa-p256:<hex>` key file into a fixed buffer on this
   ## stack frame (never a heap string), parses it, and zeroes the buffer.
+  ## Only the I/O differs by platform; the parse is the same bytes on both.
+  ## Neither reader checks the file's mode or DACL: the writer is what
+  ## makes the file owner-only (`writeKeyFileSecure`).
+  var buf: array[256, char]
+  defer: secureZeroVar(buf)
+  var n = 0
   when defined(posix):
-    var buf: array[256, char]
-    defer: secureZeroVar(buf)
     let fd = posix.open(keyPath.cstring, O_RDONLY or O_CLOEXEC)
     if fd < 0:
       raise newException(IdentityError, "cannot open " & keyPath)
-    var n = 0
     try:
       while n < buf.len:
         let r = posix.read(fd, addr buf[n], buf.len - n)
@@ -176,44 +181,52 @@ proc readKeyFileSecure(keyPath: string): PrivateKeyBytes =
         n += r
     finally:
       discard posix.close(fd)
-    var pos = 0
-    while pos < n and buf[pos] in {' ', '\t', '\n', '\r'}: inc pos
-    if pos + KeyFilePrefix.len + 2 * P256PrivLen > n:
-      raise newException(IdentityError, keyPath & " is not an ecdsa-p256 key file")
-    for i, ch in KeyFilePrefix:
-      if buf[pos + i] != ch:
-        raise newException(IdentityError, keyPath & " lacks the ecdsa-p256: marker")
-    pos += KeyFilePrefix.len
-    proc nibble(c: char): int =
-      case c
-      of '0' .. '9': ord(c) - ord('0')
-      of 'a' .. 'f': ord(c) - ord('a') + 10
-      of 'A' .. 'F': ord(c) - ord('A') + 10
-      else: -1
-    for i in 0 ..< P256PrivLen:
-      let hi = nibble(buf[pos + 2 * i])
-      let lo = nibble(buf[pos + 2 * i + 1])
-      if hi < 0 or lo < 0:
-        secureZeroVar(result)
-        raise newException(IdentityError, keyPath & " has invalid hex")
-      result[i] = byte(hi * 16 + lo)
+  elif defined(windows):
+    try:
+      n = readOwnerFileInto(keyPath, buf)
+    except OwnerOnlyFileError as err:
+      raise newException(IdentityError, err.msg)
   else:
-    let ck = loadCertAndKey("", keyPath)
-    result = ck.keypair.privateKey
+    {.error: "host-identity key files need a POSIX or Windows reader".}
+  var pos = 0
+  while pos < n and buf[pos] in {' ', '\t', '\n', '\r'}: inc pos
+  if pos + KeyFilePrefix.len + 2 * P256PrivLen > n:
+    raise newException(IdentityError, keyPath & " is not an ecdsa-p256 key file")
+  for i, ch in KeyFilePrefix:
+    if buf[pos + i] != ch:
+      raise newException(IdentityError, keyPath & " lacks the ecdsa-p256: marker")
+  pos += KeyFilePrefix.len
+  proc nibble(c: char): int =
+    case c
+    of '0' .. '9': ord(c) - ord('0')
+    of 'a' .. 'f': ord(c) - ord('a') + 10
+    of 'A' .. 'F': ord(c) - ord('A') + 10
+    else: -1
+  for i in 0 ..< P256PrivLen:
+    let hi = nibble(buf[pos + 2 * i])
+    let lo = nibble(buf[pos + 2 * i + 1])
+    if hi < 0 or lo < 0:
+      secureZeroVar(result)
+      raise newException(IdentityError, keyPath & " has invalid hex")
+    result[i] = byte(hi * 16 + lo)
 
 proc writeKeyFileSecure(keyPath: string; priv: PrivateKeyBytes) =
   ## Writes the `ecdsa-p256:<hex>` key file from a buffer on this stack
-  ## frame, created owner-only (`O_CREAT|O_EXCL`, mode 0600), and zeroes the
-  ## buffer.
+  ## frame, created owner-only, and zeroes the buffer. Owner-only is
+  ## `O_CREAT|O_EXCL` with mode 0600 on POSIX, and on Windows a protected
+  ## DACL holding only the current user, applied by the create itself with
+  ## `CREATE_NEW` (`owner_only_file.nim` says why that is the same thing).
+  ## Either way any previous file is removed first, and the file never
+  ## exists with broader access, not even momentarily.
+  const HexChars = "0123456789abcdef"
+  var buf: array[KeyFilePrefix.len + 2 * P256PrivLen + 1, char]
+  defer: secureZeroVar(buf)
+  for i, ch in KeyFilePrefix: buf[i] = ch
+  for i in 0 ..< P256PrivLen:
+    buf[KeyFilePrefix.len + 2 * i] = HexChars[(int(priv[i]) shr 4) and 0xf]
+    buf[KeyFilePrefix.len + 2 * i + 1] = HexChars[int(priv[i]) and 0xf]
+  buf[^1] = '\n'
   when defined(posix):
-    const HexChars = "0123456789abcdef"
-    var buf: array[KeyFilePrefix.len + 2 * P256PrivLen + 1, char]
-    defer: secureZeroVar(buf)
-    for i, ch in KeyFilePrefix: buf[i] = ch
-    for i in 0 ..< P256PrivLen:
-      buf[KeyFilePrefix.len + 2 * i] = HexChars[(int(priv[i]) shr 4) and 0xf]
-      buf[KeyFilePrefix.len + 2 * i + 1] = HexChars[int(priv[i]) and 0xf]
-    buf[^1] = '\n'
     if fileExists(keyPath) or symlinkExists(keyPath):
       removeFile(keyPath)
     let fd = posix.open(keyPath.cstring, O_WRONLY or O_CREAT or O_EXCL or
@@ -230,9 +243,13 @@ proc writeKeyFileSecure(keyPath: string; priv: PrivateKeyBytes) =
         off += r
     finally:
       discard posix.close(fd)
+  elif defined(windows):
+    try:
+      createOwnerOnlyFile(keyPath, buf)
+    except OwnerOnlyFileError as err:
+      raise newException(IdentityError, err.msg)
   else:
-    var kp = PeerKeypair(privateKey: priv)
-    writeCertAndKey(CertAndKey(keypair: kp), "", keyPath)
+    {.error: "host-identity key files need a POSIX or Windows writer".}
 
 proc loadOrCreateHostIdentity*(certPath, keyPath: string): HostIdentity =
   ## The host CA at `certPath` / `keyPath`, minted on first use. A half-

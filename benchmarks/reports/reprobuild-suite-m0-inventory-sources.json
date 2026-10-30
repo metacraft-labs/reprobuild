@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2458,
+    "nimTestBinaries": 2459,
     "pureUnitConsolidationGroups": 71,
     "pureUnitTests": 696,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2498
+    "testEntries": 2499
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1435,7 +1435,7 @@
       "integration": 1362,
       "platform/destructive": 153,
       "pure unit": 696,
-      "unclassified": 269
+      "unclassified": 270
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1643,9 +1643,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2458,
+    "nimTestBinaryCount": 2459,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2498
+    "testEntryCount": 2499
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17159,6 +17159,23 @@
       "source": "libs/repro_peer_cache/tests/t_evidence_store_receipts_and_key_separation.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_host_identity_key_file_is_owner_only",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": false,
+      "source": "libs/repro_peer_cache/tests/t_host_identity_key_file_is_owner_only.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -46,6 +46,8 @@
 import std/[base64, os, strutils, tables, times]
 when defined(posix):
   from std/posix import nil
+when defined(windows):
+  import ./owner_only_file
 
 import bearssl/[ec, hash as bsslHash]
 import bearssl/abi/bearssl_ec as bsslEcAbi
@@ -1129,10 +1131,20 @@ proc writeCertAndKey*(c: CertAndKey; certPath, keyPath: string) =
         off += n
     finally:
       discard posix.close(fd)
+  elif defined(windows):
+    # The same guarantee in Windows terms: a protected DACL holding only the
+    # current user, applied by `CreateFileW(CREATE_NEW)` itself, after
+    # removing any previous file (`owner_only_file.nim`). The branch this
+    # replaces created the file with the directory's inherited DACL and then
+    # called `setFilePermissions`, which on Windows only sets or clears the
+    # read-only attribute and never restricts who may open the file.
+    try:
+      createOwnerOnlyFile(keyPath, content)
+    except OwnerOnlyFileError as err:
+      raise newException(OSError, "creating key file " & keyPath & ": " &
+        err.msg)
   else:
-    writeFile(keyPath, "")
-    setFilePermissions(keyPath, {fpUserRead, fpUserWrite})
-    writeFile(keyPath, content)
+    {.error: "key files need a POSIX or Windows writer".}
 
 # ---------------------------------------------------------------------------
 # Trust-anchor directory loader.

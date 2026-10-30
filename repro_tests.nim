@@ -5591,6 +5591,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_peer_cache_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_peer_cache/tests/t_host_identity_key_file_is_owner_only.nim",
+    binary: "build/test-bin/t_host_identity_key_file_is_owner_only",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_peer_cache_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_peer_cache/tests/t_memo_attestation_trusted_time.nim",
     binary: "build/test-bin/t_memo_attestation_trusted_time",
     defines: @[],
@@ -5852,7 +5863,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_multicast_loopback_discovery.nim",
@@ -5863,7 +5874,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim",
@@ -5885,7 +5896,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_sim_fetch_workload_hits_peer_cache.nim",
@@ -5896,7 +5907,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_sim_mixed_tenant_isolation.nim",
@@ -5907,7 +5918,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_sim_report_renders_markdown.nim",
@@ -5918,7 +5929,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_simulation_200_peer_convergence.nim",
@@ -5929,7 +5940,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_simulation_partition_recovery.nim",
@@ -5940,7 +5951,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_50_peer_convergence.nim",
@@ -5951,7 +5962,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_dissemination_piggyback.nim",
@@ -5962,7 +5973,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_incarnation_self_refute.nim",
@@ -5973,7 +5984,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_indirect_probe_K_3.nim",
@@ -5984,7 +5995,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_swim_partition_recovery.nim",
@@ -5995,7 +6006,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tier2_daemon_listener_is_declared.nim",
@@ -6006,7 +6017,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tier2_inter_rack_advertisement.nim",
@@ -6017,7 +6028,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tier2_preferred_in_fetch_order.nim",
@@ -6028,7 +6039,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_application_data_flows_through_tunnel.nim",
@@ -6039,7 +6050,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_rejects_unknown_cert.nim",
@@ -6050,7 +6061,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_round_trip.nim",
@@ -6061,7 +6072,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_handshake_validates_cert_chain.nim",
@@ -6072,7 +6083,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_mixed_mode_compat.nim",
@@ -6083,7 +6094,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_ca_isolation.nim",
@@ -6094,7 +6105,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_isolation.nim",
@@ -6105,7 +6116,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim",
@@ -6116,7 +6127,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
@@ -6138,7 +6149,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_peer_cache_tests_g01",
+    group: "t_group_libs_repro_peer_cache_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_snapshot_index_lock_fails_closed.nim",
