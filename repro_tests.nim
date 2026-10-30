@@ -267,6 +267,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let root = freshRoot(\"rpi2\")"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
+    binary: "build/test-bin/t_addon_uninstall_keeps_pre_bootstrap_inputs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = getTempDir() / (\"repro-addon-uninstall-kept-\" & $get..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_switch_planning.nim",
     binary: "build/test-bin/t_addon_switch_planning",
     defines: @[],

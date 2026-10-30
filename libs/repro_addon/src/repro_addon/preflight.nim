@@ -28,6 +28,7 @@
 import std/[algorithm, json, os, posix, strutils, tables]
 
 import repro_core
+import repro_peer_cache/auth as peerAuth
 
 import ./fingerprint
 import ./generation0
@@ -52,16 +53,27 @@ type
     cacheUrl*: string              ## "" => no binary cache
     binaryPath*: string            ## "" => /proc/self/exe
 
+  KeptFile* = object
+    ## A file bootstrap keeps as found. A content-pinned input (the signers
+    ## file, the tmpfiles fragment, the recipient key pair) is bound into
+    ## the plan by its digest and ledgered with it; an agent record (the
+    ## sequence floor, the tick files) is rewritten by the deploy agent at
+    ## every tick, so it is kept by path with its content unpinned.
+    path*: string
+    sha256*: string           ## "" when the content is unpinned
+    pinned*: bool
+
   PreBootstrapInputs* = object
     ## Reprobuild's own pre-bootstrap inputs the preflight found on the
     ## host and bootstrap takes over (spec §6.1): a host stood up with the
     ## deploy agent before the add-on bootstraps it already carries them,
     ## and they are not foreign occupants.
     roots*: seq[string]       ## existing directories, parents before children
-    keptFiles*: seq[string]   ## files bootstrap leaves byte for byte as found
+    keptFiles*: seq[KeptFile] ## files bootstrap leaves as found
     signersFile*: string      ## PreBootstrapSignersPath when kept, else ""
     signersKeys*: seq[string] ## its keys, canonical (parseAnchorKeys)
     recipientKey*: string     ## RecipientKeyPath when kept, else ""
+    recipientPublicKey*: string ## the kept key's public half (hex), else ""
     tmpfilesFragment*: string ## PreBootstrapTmpfilesPath when kept, else ""
 
   OccupancyReport* = object
@@ -122,6 +134,16 @@ const
     ## The tmpfiles fragment a pre-bootstrap stand-up installs so that
     ## ``/run/repro/secrets`` (a tmpfs, §5.3) exists at every boot.
   SecretsRunDir* = "/run/repro/secrets"
+  PreBootstrapTmpfilesRules* = [
+    @["d", "/run/repro", "0755", "root", "root"],
+    @["d", "/run/repro/secrets", "0700", "root", "root"],
+  ]
+    ## The only rules the kept fragment may hold, in this order (an age
+    ## field of ``-`` may follow each). Anything else -- another type, a
+    ## wider mode, another owner, another path -- is a refusal: tmpfiles.d
+    ## rules run as root at every boot, so a fragment is accepted by its
+    ## exact content, never by the paths it names.
+  RootOwner* = (uid: 0, gid: 0)
 
   UnitSearchDirs* = ["/etc/systemd/system", "/run/systemd/system",
                      "/run/systemd/transient", "/run/systemd/generator",
@@ -271,22 +293,49 @@ proc sortedEntries(dir: string): seq[string] =
     result.add(p)
   result.sort()
 
-proc tmpfilesRulePaths*(text: string): seq[string] =
-  ## The path field of every rule in a tmpfiles.d(5) fragment (comments
-  ## and blank lines skipped; a rule with no path field yields "").
+proc tmpfilesRules*(text: string): seq[seq[string]] =
+  ## Every rule of a tmpfiles.d(5) fragment as its whitespace-separated
+  ## fields, comments and blank lines skipped, a trailing ``-`` age field
+  ## dropped (it is the default).
   for raw in text.splitLines():
     let line = raw.strip()
     if line.len == 0 or line[0] == '#': continue
-    let f = line.splitWhitespace()
-    result.add(if f.len >= 2: f[1] else: "")
+    var f = line.splitWhitespace()
+    if f.len == 6 and f[5] == "-": f.setLen(5)
+    result.add(f)
+
+proc tmpfilesFragmentRefusal*(text: string): string =
+  ## "" when ``text`` is exactly the stand-up fragment of spec §6.1
+  ## (``PreBootstrapTmpfilesRules``), else why it is refused.
+  let rules = tmpfilesRules(text)
+  if rules.len != PreBootstrapTmpfilesRules.len:
+    return "holds " & $rules.len & " rule(s); the stand-up fragment is " &
+           "exactly `d /run/repro 0755 root root -` and `d " &
+           SecretsRunDir & " 0700 root root -`"
+  for i, r in rules:
+    if r != PreBootstrapTmpfilesRules[i]:
+      return "rule `" & r.join(" ") & "` is not `" &
+             PreBootstrapTmpfilesRules[i].join(" ") & "`"
+  ""
 
 proc inspectOccupancy*(hostRoot: string; deploySigners: seq[string];
-                       deploySignersGiven: bool): OccupancyReport =
+                       deploySignersGiven: bool;
+                       owner = RootOwner): OccupancyReport =
   ## Classify what exists at the add-on's own roots into the pre-bootstrap
   ## inputs bootstrap takes over and the foreign occupants it refuses,
   ## by the closed list of spec §6.1. Reads only; ``hostRoot`` ("" or "/"
   ## for the live host) is prepended to every path so the classification
-  ## can be exercised against a fixture tree.
+  ## can be exercised against a fixture tree, and ``owner`` is who every
+  ## accepted path must belong to (root on the live host; the test's own
+  ## uid on a fixture).
+  ##
+  ## Shape is not enough: an input is accepted only with the ownership and
+  ## mode that make it safe to take over -- every directory ``owner``'s and
+  ## not group- or other-writable, every file ``owner``'s and not group- or
+  ## other-writable, the recipient key exactly ``0400`` (a key that was
+  ## ever wider is refused as compromised, never narrowed) and parseable,
+  ## its ``.pub`` its own public half. Bootstrap re-runs this before it
+  ## writes, so a refusal here is a refusal before any write.
   ##
   ## ``deploySigners`` are the ``--deploy-signers`` anchors when
   ## ``deploySignersGiven``; a kept signers file must then hold the same
@@ -297,15 +346,36 @@ proc inspectOccupancy*(hostRoot: string; deploySigners: seq[string];
   proc hp(p: string): string = prefix & p
   proc refuse(p, why: string) = refused.add(p & ": " & why)
 
-  # A directory on the list: accepted when it is a real directory whose
-  # entries are all on its own allowed list (``anyEntry``: the caller
-  # judges the entries itself). Returns true when the caller may look
-  # inside it.
+  proc modeOf(p: string): int =
+    var st: Stat
+    if lstat(hp(p).cstring, st) != 0: -1 else: int(st.st_mode) and 0o7777
+
+  # Ownership and the write bits, the same for every accepted path.
+  proc ownedAndUnshared(p: string): bool =
+    var st: Stat
+    if lstat(hp(p).cstring, st) != 0:
+      return false
+    if int(st.st_uid) != owner.uid or int(st.st_gid) != owner.gid:
+      refuse(p, "owned by " & $st.st_uid & ":" & $st.st_gid & ", not " &
+             $owner.uid & ":" & $owner.gid)
+      return false
+    if (int(st.st_mode) and 0o022) != 0:
+      refuse(p, "writable by group or others (mode " &
+             toOct(int(st.st_mode) and 0o7777, 4) & ")")
+      return false
+    true
+
+  # A directory on the list: accepted when it is a real directory, owned
+  # and unshared, whose entries are all on its own allowed list
+  # (``anyEntry``: the caller judges the entries itself). Returns true
+  # when the caller may look inside it.
   proc acceptDir(p: string; allowed: openArray[string];
                  anyEntry = false): bool =
     case inodeKind(hp(p))
     of "": false
     of "dir":
+      if not ownedAndUnshared(p):
+        return false
       inputs.roots.add(p)
       if not anyEntry:
         for name in sortedEntries(hp(p)):
@@ -331,13 +401,17 @@ proc inspectOccupancy*(hostRoot: string; deploySigners: seq[string];
   proc acceptFile(p: string): bool =
     case inodeKind(hp(p))
     of "": false
-    of "file": true
+    of "file": ownedAndUnshared(p)
     of "symlink":
       refuse(p, "a symbolic link")
       false
     else:
       refuse(p, "not a regular file")
       false
+
+  proc keep(p: string; pinned: bool) =
+    inputs.keptFiles.add(KeptFile(path: p, pinned: pinned,
+      sha256: (if pinned: sha256OfFile(hp(p)) else: "")))
 
   # /repro: only the empty store root.
   if acceptDir(ReproRoot, ["store"]):
@@ -363,7 +437,7 @@ proc inspectOccupancy*(hostRoot: string; deploySigners: seq[string];
     else:
       inputs.signersFile = PreBootstrapSignersPath
       inputs.signersKeys = keys
-      inputs.keptFiles.add(PreBootstrapSignersPath)
+      keep(PreBootstrapSignersPath, pinned = true)
 
   # /var/lib/repro: an empty system state directory (no generation of an
   # earlier install) and the deploy agent's directory with its key and
@@ -372,11 +446,40 @@ proc inspectOccupancy*(hostRoot: string; deploySigners: seq[string];
     acceptEmptyDir("/var/lib/repro/system",
                    "generations or state of an earlier install")
     if acceptDir(AgentDir, ["recipient.key", "recipient.pub", "state"]):
+      # The key: exactly 0400 and usable. ``acceptFile`` already refused a
+      # link, another owner and the write bits; a key readable by group or
+      # others may have been read by them, so it is refused as compromised,
+      # not narrowed to 0400 (that is why the check is here and not only
+      # in the keygen, which bootstrap reaches after it has written).
       if acceptFile(RecipientKeyPath):
-        inputs.recipientKey = RecipientKeyPath
-        inputs.keptFiles.add(RecipientKeyPath)
+        let mode = modeOf(RecipientKeyPath)
+        if mode != 0o400:
+          refuse(RecipientKeyPath, "mode " & toOct(mode, 4) & ", not 0400: " &
+                 "a recipient key readable by group or others is refused " &
+                 "as compromised, never narrowed")
+        else:
+          var pubHex = ""
+          var err = ""
+          try:
+            pubHex = peerAuth.publicKeyHex(peerAuth.derivePublicKey(
+              peerAuth.loadPrivateKeyFile(hp(RecipientKeyPath))))
+          except CatchableError as e:
+            err = e.msg
+          if err.len > 0:
+            refuse(RecipientKeyPath, "not a usable recipient key (" & err & ")")
+          else:
+            inputs.recipientKey = RecipientKeyPath
+            inputs.recipientPublicKey = pubHex
+            keep(RecipientKeyPath, pinned = true)
       if acceptFile(RecipientPubPath):
-        inputs.keptFiles.add(RecipientPubPath)
+        if inputs.recipientPublicKey.len == 0:
+          refuse(RecipientPubPath, "present without a usable " &
+                 RecipientKeyPath & " beside it")
+        elif readFile(hp(RecipientPubPath)).strip() != inputs.recipientPublicKey:
+          refuse(RecipientPubPath, "is not the public half of " &
+                 RecipientKeyPath)
+        else:
+          keep(RecipientPubPath, pinned = true)
       if acceptDir(AgentStateDir, ["deploy-agent"]) and
           acceptDir(AgentStateRecordsDir, [], anyEntry = true):
         for name in sortedEntries(hp(AgentStateRecordsDir)):
@@ -388,33 +491,38 @@ proc inspectOccupancy*(hostRoot: string; deploySigners: seq[string];
             refuse(p, "not a deploy-agent record (" &
                    AgentStateRecordSuffixes.join(", ") & ")")
           elif acceptFile(p):
-            inputs.keptFiles.add(p)
+            keep(p, pinned = false)   # rewritten by the agent at every tick
 
   # /run/repro: only the empty materialised-secrets directory.
   if acceptDir("/run/repro", ["secrets"]):
     acceptEmptyDir(SecretsRunDir, "materialised secrets")
 
-  # The tmpfiles fragment that recreates /run/repro/secrets at boot.
+  # The tmpfiles fragment that recreates /run/repro/secrets at boot:
+  # accepted only as exactly the stand-up's two rules.
   if acceptFile(PreBootstrapTmpfilesPath):
-    var foreign: seq[string]
-    for p in tmpfilesRulePaths(readFile(hp(PreBootstrapTmpfilesPath))):
-      if p notin ["/run/repro", SecretsRunDir]: foreign.add(p)
-    if foreign.len > 0:
-      refuse(PreBootstrapTmpfilesPath, "rules a path other than /run/repro " &
-             "or " & SecretsRunDir & ": " & foreign.join(", "))
+    let why = tmpfilesFragmentRefusal(readFile(hp(PreBootstrapTmpfilesPath)))
+    if why.len > 0:
+      refuse(PreBootstrapTmpfilesPath, why)
     else:
       inputs.tmpfilesFragment = PreBootstrapTmpfilesPath
-      inputs.keptFiles.add(PreBootstrapTmpfilesPath)
+      keep(PreBootstrapTmpfilesPath, pinned = true)
 
-  # Any repro-* unit anywhere in the load path: an earlier install's or a
-  # pre-bootstrap stand-up's agent units, which bootstrap neither adopts
-  # nor overwrites.
+  # Any repro-* unit anywhere in the load path -- as a unit file, a
+  # drop-in directory, or a link in a ``.wants`` / ``.requires``
+  # directory: an earlier install's or a pre-bootstrap stand-up's agent
+  # units, which bootstrap neither adopts nor overwrites.
   for d in UnitSearchDirs:
     if inodeKind(hp(d)) != "dir": continue
     for name in sortedEntries(hp(d)):
       if name.startsWith("repro-"):
         refuse(d & "/" & name, "a repro-* unit; the add-on's units must be " &
                "absent before bootstrap")
+      elif (name.endsWith(".wants") or name.endsWith(".requires")) and
+          inodeKind(hp(d & "/" & name)) == "dir":
+        for link in sortedEntries(hp(d & "/" & name)):
+          if link.startsWith("repro-"):
+            refuse(d & "/" & name & "/" & link, "a repro-* unit link; the " &
+                   "add-on's units must be absent before bootstrap")
 
   refused.sort()
   result = OccupancyReport(inputs: inputs, refused: refused)
@@ -427,8 +535,10 @@ proc renderPreBootstrap*(inputs: PreBootstrapInputs): string =
               (if inputs.roots.len == 1: "y" else: "ies") & " (" &
               inputs.roots.join(", ") & ")")
   if inputs.keptFiles.len > 0:
-    parts.add($inputs.keptFiles.len & " kept file(s) (" &
-              inputs.keptFiles.join(", ") & ")")
+    var names: seq[string]
+    for k in inputs.keptFiles:
+      names.add(k.path & (if k.pinned: "" else: " (content unpinned)"))
+    parts.add($inputs.keptFiles.len & " kept file(s) (" & names.join(", ") & ")")
   if parts.len == 0: "" else: parts.join("; ")
 
 # ---------------------------------------------------------------------------
@@ -566,10 +676,11 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
 
   result.add("trust-anchors", anchorsError.len == 0,
     if anchorsError.len > 0: anchorsError
-    else: $signers.len & " deploy signer(s)" & signersSource & "; " &
+    else: $signers.len & " deploy signer(s)" & signersSource &
+          (if signers.len > 0: ": " & signers.join(", ") else: "") & "; " &
           (if inp.cacheUrl.len == 0: "no binary cache"
            else: "cache " & inp.cacheUrl & " trusting " & $publishers.len &
-                 " publisher key(s)"))
+                 " publisher key(s): " & publishers.join(", ")))
   if anchorsError.len > 0:
     publishers = @[]
 
@@ -606,6 +717,13 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     checksJson.add(%*{"id": c.id, "verdict": $c.verdict, "detail": c.detail})
   var objects = newJArray()
   for p in ownObjectPaths(result.gen0): objects.add(%p)
+  # The kept files by path AND, for the content-pinned ones, by digest, so
+  # a swap between the preflight and the bootstrap changes the digest the
+  # operator acknowledged. An agent record is bound by path only: the
+  # agent rewrites it at every tick.
+  var keptJson = newJArray()
+  for k in result.preBootstrap.keptFiles:
+    keptJson.add(%*{"path": k.path, "sha256": k.sha256, "pinned": k.pinned})
   let plan = %*{
     "schema": PlanSchema,
     "compatible": result.compatible,
@@ -639,7 +757,8 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     },
     "preBootstrap": {
       "roots": %result.preBootstrap.roots,
-      "keptFiles": %result.preBootstrap.keptFiles,
+      "keptFiles": keptJson,
+      "recipientPublicKey": result.preBootstrap.recipientPublicKey,
     },
   }
   result.planJson = canonical(plan)

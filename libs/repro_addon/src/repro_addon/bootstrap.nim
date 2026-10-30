@@ -149,13 +149,30 @@ proc establishRoot(plan: PreflightReport; path: string; mode: int;
     rootEntry(path, createRootDir(path, mode, asSubvolume), "")
 
 proc keptFileEntry(path, preserved: string; class = lcEtcFile): LedgerEntry =
-  ## The ledger entry of a file bootstrap keeps as found: adopted, produced
-  ## by no resource, its prior value recorded (so the bootstrap delta is
-  ## exact) and its bytes preserved (so uninstall can put it back).
+  ## The ledger entry of a content-pinned file bootstrap keeps as found:
+  ## adopted, produced by no resource, its prior value recorded (so the
+  ## bootstrap delta is exact) and its bytes preserved (so uninstall can
+  ## put it back).
   let st = statOwner(path)
   LedgerEntry(class: class, path: path, sha256: sha256OfFile(path),
               mode: st.mode, owner: st.owner, replaced: etcEntryValue(path),
               collision: "adopt", preserved: preserved)
+
+proc keptRecordEntry(path: string): LedgerEntry =
+  ## The ledger entry of an agent record kept with its content unpinned
+  ## (``lcKept``): path, mode and owner only.
+  let st = statOwner(path)
+  LedgerEntry(class: lcKept, path: path, mode: st.mode, owner: st.owner,
+              collision: "adopt")
+
+const
+  TakenOverDirModes = [
+    # Spec §5.3 modes for every directory the plan may list beyond the
+    # add-on's own roots: the secrets tmpfs and the agent's state are the
+    # agent's (0700), /run/repro itself is traversable (0755).
+    ("/run/repro", 0o755), (SecretsRunDir, 0o700),
+    (AgentStateDir, 0o700), (AgentStateRecordsDir, 0o700),
+  ]
 
 proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -181,6 +198,14 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     raise newException(AddonBootstrapError,
       "the acknowledged plan is not compatible; nothing was written:\n  " &
       failed.join("\n  "))
+  if plan.preBootstrap.roots.len > 0 and stateDir != DefaultStateDir:
+    # The preflight inspected the default state directory; a bootstrap
+    # into another one would leave the inspected /var/lib/repro/system
+    # untouched and unledgered.
+    raise newException(AddonBootstrapError, "the host carries pre-bootstrap " &
+      "inputs under /var/lib/repro, which the preflight inspected at the " &
+      "default state directory " & DefaultStateDir & "; --state-dir " &
+      stateDir & " is refused; nothing was written")
   for p in [opts.deploySignersPath, opts.cachePublishersPath]:
     if p.len > 0:
       discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
@@ -201,7 +226,13 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   for p in plan.preBootstrap.roots:
     if p notin [ReproRoot, StoreRoot, "/var/lib/repro", stateDir, AgentDir,
                 "/etc/repro", AnchorsDir]:
-      entries.add(rootEntry(p, takeOverRootDir(p), baseRootValue(p)))
+      var mode = -1
+      for (dir, m) in TakenOverDirModes:
+        if dir == p: mode = m
+      if mode < 0:
+        raise newException(AddonBootstrapError, "the plan lists " & p &
+          " as a pre-bootstrap input, which bootstrap has no mode for")
+      entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
   ensureSystemStateDir(stateDir)
 
   when mutated("bootstrap-installs-jq"):
@@ -216,8 +247,14 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   # the tmpfiles fragment, the agent's sequence floor) are adopted as
   # found, their bytes preserved for uninstall.
   let keyKept = plan.preBootstrap.recipientKey.len > 0
-  let pubKept = RecipientPubPath in plan.preBootstrap.keptFiles
+  var pubKept = false
+  for k in plan.preBootstrap.keptFiles:
+    if k.path == RecipientPubPath: pubKept = true
   result.recipientPublicKeyHex = generateRecipientKey(keyKept)
+  if keyKept and result.recipientPublicKeyHex != plan.preBootstrap.recipientPublicKey:
+    raise newException(AddonBootstrapError, RecipientKeyPath & " is not the " &
+      "key the acknowledged plan saw (public half " &
+      plan.preBootstrap.recipientPublicKey[0 ..< 16] & "...)")
   when mutated("provisions-publisher-key"):
     # FALSIFYING MUTATION (see mutations.nim): a bootstrap that leaves a
     # binary-cache publisher keypair on the host, which would make it a
@@ -234,9 +271,16 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       let st = statOwner(k)
       entries.add(LedgerEntry(class: lcKey, path: k, sha256: sha256OfFile(k),
                               mode: st.mode, owner: st.owner))
-  for p in plan.preBootstrap.keptFiles:
-    if p in [RecipientKeyPath, RecipientPubPath]: continue
-    entries.add(keptFileEntry(p, preserveBytes(stateDir, readFile(p))))
+  for k in plan.preBootstrap.keptFiles:
+    if k.path in [RecipientKeyPath, RecipientPubPath]: continue
+    if k.pinned:
+      let content = readFile(k.path)
+      if sha256Hex(content) != k.sha256:
+        raise newException(AddonBootstrapError, k.path & " changed since " &
+          "the acknowledged plan was computed")
+      entries.add(keptFileEntry(k.path, preserveBytes(stateDir, content)))
+    else:
+      entries.add(keptRecordEntry(k.path))
 
   # 4. This binary and generation 0's file bodies into the store.
   var files: seq[tuple[name, content: string]]

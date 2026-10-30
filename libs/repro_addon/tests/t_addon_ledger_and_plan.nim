@@ -74,6 +74,14 @@ suite "ledger expectations":
     for e in expectedDelta(Ledger(), l): lines.add(renderExpectation(e))
     check lines == @["~ addon-roots\t/var/lib/repro\tdir 0755 0:0"]
 
+  test "a kept agent record is never drift and never fingerprinted":
+    let kept = LedgerEntry(class: lcKept,
+      path: "/var/lib/repro/agent/state/deploy-agent/rpi2.seq",
+      mode: "0600", owner: "0:0", collision: "adopt")
+    check kept.isPreBootstrapInput
+    check observeDrift(kept) == ""          # the path does not even exist
+    check expectedRecords(Ledger(entries: @[kept])).len == 0
+
   test "uninstall back to nothing reverses each record":
     let d = expectedDelta(sampleLedger(), Ledger())
     var lines: seq[string]
