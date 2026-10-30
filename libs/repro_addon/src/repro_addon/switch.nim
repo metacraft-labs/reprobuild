@@ -163,10 +163,19 @@ proc disableUnit*(unit: string) = systemctlVerb("disable", unit)
 proc daemonReload*() = systemctlVerb("daemon-reload", "")
 
 proc describeAlive(unit: string): string =
+  ## The unit's state for a refusal, naming every active unit that can
+  ## activate it again (a socket the add-on does not own, say): a removed
+  ## exclusive unit such a trigger keeps re-starting is refused, never
+  ## stopped by stopping a trigger that is not the add-on's (§7.3).
   let procs = cgroupProcs(unit)
+  var active: seq[string]
+  for t in unitProperty(unit, "TriggeredBy").splitWhitespace():
+    if unitIsActive(t): active.add(t)
   "(ActiveState=" & unitProperty(unit, "ActiveState") & ", SubState=" &
     unitProperty(unit, "SubState") &
-    (if procs.len > 0: ", process(es) " & procs.join(", ") else: "") & ")"
+    (if procs.len > 0: ", process(es) " & procs.join(", ") else: "") & ")" &
+    (if active.len > 0: "; it can be activated again by " &
+       active.join(", ") & " (active)" else: "")
 
 proc stopExclusive*(unit: string; graceSeconds = ExclusiveStopGraceSeconds) =
   ## Stop ``unit`` and confirm its control group (with every group below

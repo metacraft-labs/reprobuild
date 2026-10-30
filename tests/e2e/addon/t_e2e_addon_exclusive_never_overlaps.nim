@@ -28,7 +28,7 @@
 ##   refuses too: the removed unit is stopped and confirmed, and the
 ##   successor never starts.
 ##
-## Then four more cases:
+## Then five more cases:
 ##
 ## - a **delegated** instance (``Delegate=yes``) that moves its process
 ##   into a child control group and ignores SIGTERM: the unit's top-level
@@ -38,6 +38,10 @@
 ##   whose connections queue up while its exclusive service is stopped
 ##   would start the old definition again in that window; the switch
 ##   pauses the socket for the stop-start, and the new definition runs;
+## - removing that service while the socket (not the add-on's) is still
+##   active: the socket starts it again after every stop, so the stop is
+##   never confirmed and the apply refuses before the flip, naming the
+##   socket, with the fingerprint unchanged;
 ## - an **unmanaged predecessor** the successor names in ``Conflicts=``:
 ##   while it runs (or is enabled) the apply refuses and the successor
 ##   never starts; once the operator stopped and disabled it the apply
@@ -376,6 +380,24 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("systemctl is-active repro-fixture-excl-s.service").strip() == "active" and
          g.run("grep -c '^start s2 ' " & LogPath & "; true").strip() == "2",
          g.run("cat " & LogPath))
+    # g9c: removing the exclusive service while a socket the add-on does
+    # not own keeps activating it: the stop cannot be confirmed (the
+    # socket starts it again), and the add-on does not stop a trigger it
+    # does not own, so the apply refuses before the flip, naming the
+    # socket, and writes nothing.
+    let fb = g.takeFingerprint(repro)
+    let r9c = g.applyProfile(repro, "g9c-remove-with-unmanaged-socket", profile([c1]))
+    step("g9c: removing a unit an unmanaged active socket re-activates refuses, naming the socket",
+         r9c.exitCode == 2 and "EAddOnExclusiveOverlap" in r9c.stderr and
+         "repro-fixture-excl-s.service" in r9c.stderr and
+         "repro-fixture-excl-s.socket" in r9c.stderr,
+         "exit " & $r9c.exitCode & "\n" & r9c.stdout & r9c.stderr)
+    let ib = identityReport(fb, g.takeFingerprint(repro))
+    step("g9c: the refused removal wrote nothing (fingerprint unchanged)", ib.ok, ib.text)
+    step("g9c: the unit file is still there and the service still runs from the socket",
+         g.exec("test -f /etc/systemd/system/repro-fixture-excl-s.service").exitCode == 0 and
+         g.run("systemctl is-active repro-fixture-excl-s.service").strip() == "active" and
+         g.exec("test ! -e /var/lib/repro/system/addon/pending").exitCode == 0, "")
     discard g.run("kill " & loopPid & "; true")
     # The socket is the test's scaffolding, not the add-on's: take it away
     # (its queued connections would start the service again whenever it

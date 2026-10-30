@@ -26,6 +26,11 @@
 ## (an unknown verb fails the gate) and compared with the ``exclusive``
 ## flag.
 ##
+## Falsifying mutation (``REPRO_ADDON_MUTATION=plan-id-omits-unit-state``):
+## the plan id covers the units but not the state observed for them, so
+## the pinned apply after the crash goes through instead of refusing:
+## red.
+##
 ## The switch's materialisation is checked too: a managed ``/etc`` file
 ## is a link into ``/etc/repro/static``, which is a link into the store;
 ## unit files, sysusers and tmpfiles fragments are regular files; and a

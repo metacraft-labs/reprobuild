@@ -65,6 +65,11 @@
 ##                                            is empty, and an unreadable
 ##                                            group as exited (a delegated
 ##                                            child group goes unseen)
+## ``plan-id-omits-unit-state``               the add-on plan id covers the
+##                                            units but not their observed
+##                                            state, so a pinned apply does
+##                                            not see a unit that crashed
+##                                            since the plan
 ## ``path-based-write-follows-links``         the drivers write managed
 ##                                            files with a path-based
 ##                                            ``open``, following any link
@@ -89,6 +94,7 @@ const
                           "exclusive-as-plain-restart",
                           "sysctl-in-apply-namespace",
                           "exclusive-exited-by-top-level-procs",
+                          "plan-id-omits-unit-state",
                           "path-based-write-follows-links",
                           "scope-accepts-unnormalised-paths"]
 

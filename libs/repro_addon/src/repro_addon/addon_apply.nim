@@ -1591,11 +1591,17 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       inputs.add("target\t" & t.address & "\t" & t.path & "\t" &
         t.observation & "\t" & t.observedSha256 & "\t" & $t.verdict)
     for f in facts:
-      inputs.add("unit\t" & f.unit & "\t" & f.activeState & "\t" & $f.alive &
-        "\t" & f.triggers.join(","))
-      for pred in f.predecessors:
-        inputs.add("predecessor\t" & pred & "\t" &
-          readUnitProvision(pred).activeState & "\t" & $unitAliveness(pred))
+      when mutated("plan-id-omits-unit-state"):
+        # The falsifying mutation of the stale-plan check: the id covers
+        # which units the plan considered but not the state it observed
+        # them in, so a unit that crashed since the plan goes unnoticed.
+        inputs.add("unit\t" & f.unit)
+      else:
+        inputs.add("unit\t" & f.unit & "\t" & f.activeState & "\t" & $f.alive &
+          "\t" & f.triggers.join(","))
+        for pred in f.predecessors:
+          inputs.add("predecessor\t" & pred & "\t" &
+            readUnitProvision(pred).activeState & "\t" & $unitAliveness(pred))
     result.planId = planIdOf(inputs)
   if opts.planId.len > 0 and opts.planId != result.planId:
     raisePlanStale(opts.planId, @["the add-on observations the plan was " &
