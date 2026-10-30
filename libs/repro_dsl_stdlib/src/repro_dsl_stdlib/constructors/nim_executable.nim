@@ -6,12 +6,14 @@ import repro_project_dsl
 
 import ../types/executable
 import ../packages/nim as nim_module
+import ../active_context
 
 proc nim_executable*(into: string;
                      source: string;
                      defines: seq[string] = @[];
                      mm = "orc";
                      paths: seq[string] = @[]): Executable =
+  requireCrossTargetConsulted("nim_executable")
   let action = nim.c(
     source = source,
     output = into,

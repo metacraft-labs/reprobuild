@@ -217,7 +217,7 @@ proc cargo_package*(srcDir = "src";
   # one, and the two must agree when both are present (see the header).
   # `zigCross` follows the adapter that filled the slot; a recipe may still
   # say `zigCross = true` with an explicit `target` and no active one.
-  let active = activeCrossTarget()
+  let active = peekActiveCrossTarget()
   let activeTriple = active.tripleOrEmpty()
   var target = target
   var zigCross = zigCross

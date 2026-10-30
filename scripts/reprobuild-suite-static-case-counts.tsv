@@ -361,6 +361,7 @@ libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim	nim	11
+libs/repro_dsl_stdlib/tests/t_target_refuses_a_constructor_that_does_not_thread_it.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_windows_monitor_artifacts.nim	nim	9
@@ -829,6 +830,7 @@ libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.ni
 libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim	nim	6
 libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	3
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
+libs/repro_tool_profiles/tests/t_native_and_target_outputs_are_disjoint.nim	nim	10
 libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim	nim	4
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
 libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim	nim	8
@@ -836,7 +838,7 @@ libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	27
 libs/repro_tool_profiles/tests/t_sibling_resolves_for_its_side_of_the_split.nim	nim	4
 libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim	nim	3
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
-libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	19
+libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	22
 libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	6
 libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim	nim	4
 libs/repro_workspace_snapshot/tests/t_workspace_snapshot_export_and_materialize.nim	nim	10
@@ -2096,6 +2098,7 @@ tests/integration/t_tampered_uki_detected.nim	nim	5
 tests/integration/t_tampered_uki_fails_unseal.nim	nim	6
 tests/integration/t_tarball_mode_builds_a_fall_through_source_recipe.nim	nim	1
 tests/integration/t_tarball_provisioning_cold_store_extractors.nim	nim	3
+tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim	nim	1
 tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim	nim	1
 tests/integration/t_tdx_agent_backend.nim	nim	28

@@ -239,4 +239,40 @@ suite "a nix realization is held to the declared range":
     try:
       enforceUsesVersionRange(nixProfile("usage: rustc [OPTIONS]"), useDef)
     except OSError as err:
-      check "reports no version" in err.msg
+      check "report no version" in err.msg
+
+  test "a library's version is the one its nixpkgs store path names":
+    check nixStorePathVersion("/nix/store/l7xwm1f6-zlib-1.3.1/lib/libz.so") == "1.3.1"
+    check nixStorePathVersion("/nix/store/abc-zlib-1.3.1-dev") == "1.3.1"
+    check nixStorePathVersion("/nix/store/abc-openssl-3.6.1-bin/bin/openssl") == "3.6.1"
+    check nixStorePathVersion("/nix/store/abc-python3-3.12.8") == "3.12.8"
+    check nixStorePathVersion("/nix/store/x-rustc-wrapper/bin/rustc") == ""
+    check nixStorePathVersion("/usr/lib/libz.so") == ""
+
+  test "a library with no version probe is held to its store path's version":
+    # zlib has no `--version`: before the store path was read, every nix
+    # library with a declared range was refused as unverifiable, which
+    # stopped `packages/source/openssl` (`uses "zlib >=1.2.11"`) in path mode.
+    let zlib = InterfaceToolUse(packageSelector: "zlib",
+      executableName: "zlib", rawConstraint: "zlib >=1.2.11")
+    let lib = PathOnlyToolProfile(installMethod: "nix", nixSelector: "nixpkgs#zlib",
+      resolvedExecutablePath: "/nix/store/l7xwm1f6-zlib-1.3.1/lib/libz.so",
+      selectedStorePath: "/nix/store/l7xwm1f6-zlib-1.3.1")
+    enforceUsesVersionRange(lib, zlib)
+    let tooNew = InterfaceToolUse(packageSelector: "zlib",
+      executableName: "zlib", rawConstraint: "zlib >=1.4")
+    try:
+      enforceUsesVersionRange(lib, tooNew)
+      check false
+    except OSError as err:
+      check "1.3.1" in err.msg
+      check "zlib >=1.4" in err.msg
+
+  test "the probe outranks the store path name":
+    # A wrapper's store path names the wrapper's version, not the tool's.
+    let useDef = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    var profile = nixProfile("rustc 1.91.1 (x)")
+    profile.selectedStorePath = "/nix/store/abc-rustc-wrapper-1.94.0"
+    expect OSError:
+      enforceUsesVersionRange(profile, useDef)

@@ -8,6 +8,7 @@ import repro_project_dsl
 
 import ../types/library
 import ../packages/nim as nim_module
+import ../active_context
 
 proc activePackageName(): string {.inline.} =
   let st = tryCurrentBuildState()
@@ -20,6 +21,7 @@ proc nim_library*(into: string;
                   paths: seq[string] = @[]): Library =
   ## Build a Nim library from one entry-point source file via
   ## ``nim c --app:lib``.
+  requireCrossTargetConsulted("nim_library")
   let pkg = activePackageName()
   let api = registeredLibraryApi(pkg, into)
 

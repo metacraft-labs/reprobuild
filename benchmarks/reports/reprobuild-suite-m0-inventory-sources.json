@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2474,
+    "nimTestBinaries": 2477,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 698,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2514
+    "testEntries": 2517
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1446,10 +1446,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1369,
+      "integration": 1370,
       "platform/destructive": 153,
       "pure unit": 698,
-      "unclassified": 276
+      "unclassified": 278
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1657,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2474,
+    "nimTestBinaryCount": 2477,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2514
+    "testEntryCount": 2517
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14300,6 +14300,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_target_refuses_a_constructor_that_does_not_thread_it",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_target_refuses_a_constructor_that_does_not_thread_it.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_undeclared_lock_file_is_compile_error",
       "class": "unclassified",
       "classificationReason": "spawns a subprocess (through `libs/repro_dsl_stdlib/tests/lock_file_compile_probe.nim`)",
@@ -23060,6 +23078,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_native_and_target_outputs_are_disjoint",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_native_and_target_outputs_are_disjoint.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_one_tarball_realizer",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -23204,7 +23240,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 19,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -45518,6 +45554,25 @@
       "source": "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_target_build_refuses_a_recipe_that_does_not_thread_it",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

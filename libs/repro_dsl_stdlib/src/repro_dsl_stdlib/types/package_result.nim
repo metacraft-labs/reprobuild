@@ -1528,7 +1528,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   if flagKey in stageCopyEmitted:
     return
   stageCopyEmitted.incl(flagKey)
-  let outputDir = projectRoot / ".repro" / "output" / name
+  let outputDir = projectRoot / ".repro" / "output" /
+    targetKeyedOutputName(name)
   createDir(outputDir)
   let outputPath = outputDir / name
   let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")
@@ -2112,7 +2113,8 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   if flagKey in stageCopyEmitted:
     return
   stageCopyEmitted.incl(flagKey)
-  let outputDir = projectRoot / ".repro" / "output" / aliasName
+  let outputDir = projectRoot / ".repro" / "output" /
+    targetKeyedOutputName(aliasName)
   createDir(outputDir)
   let outputPath = outputDir / aliasName
   let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")

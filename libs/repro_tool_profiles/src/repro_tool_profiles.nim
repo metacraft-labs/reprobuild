@@ -1918,6 +1918,38 @@ proc realizedVersionOf*(profile: PathOnlyToolProfile): string =
       if v.len > 0: return v
   ""
 
+proc nixStorePathVersion*(path: string): string =
+  ## The version a nixpkgs store path's name carries, or "".
+  ##
+  ## nixpkgs names a derivation ``<pname>-<version>`` and an output other
+  ## than ``out`` adds ``-<output>``, so the store entry
+  ## ``/nix/store/<hash>-zlib-1.3.1-dev`` names version ``1.3.1``: the first
+  ## ``-`` that a digit follows opens the version, and the next ``-`` closes
+  ## it. That is the version the pinned nixpkgs built, which is what a range
+  ## is held against for a realization with no version probe -- a library
+  ## has no ``--version`` to ask.
+  ## (https://nixos.org/manual/nixpkgs/stable/#sec-package-naming)
+  const StorePrefix = "/nix/store/"
+  let at = path.find(StorePrefix)
+  if at < 0:
+    return ""
+  var entry = path[at + StorePrefix.len .. ^1]
+  let slash = entry.find('/')
+  if slash >= 0:
+    entry = entry[0 ..< slash]
+  let dash = entry.find('-')
+  if dash < 0:
+    return ""
+  let name = entry[dash + 1 .. ^1]
+  for i in 0 ..< name.len - 1:
+    if name[i] == '-' and name[i + 1] in Digits:
+      var version = name[i + 1 .. ^1]
+      let next = version.find('-')
+      if next >= 0:
+        version = version[0 ..< next]
+      return version
+  ""
+
 proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
                               realizedVersion, realization: string): string =
   ## The refusal, or "", for a realization that reports `realizedVersion`
@@ -1938,8 +1970,8 @@ proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
   if realizedVersion.len == 0:
     return "tool-resolution failed: `" & useDef.packageSelector &
       "` requested by uses \"" & useDef.rawConstraint & "\" was realized " &
-      "by " & realization & ", whose version probe reports no version to " &
-      "hold against the declared range '" & range & "'; a realization " &
+      "by " & realization & ", whose version probe and store path " &
+      "report no version to hold against the declared range '" & range & "'; a realization " &
       "that cannot be verified is not one that satisfies it"
   if matchesVersionRange(realizedVersion, parsed):
     return ""
@@ -1955,7 +1987,15 @@ proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
                               useDef: InterfaceToolUse) =
   ## Raise ``OSError`` for a profile whose realized version is outside the
   ## recipe's declared range (see ``usesVersionRangeRefusal``).
-  let refusal = usesVersionRangeRefusal(useDef, realizedVersionOf(profile),
+  # The probe first: it is what the realized program says about itself. A
+  # realization nothing can ask (a library) is held to the version its
+  # nixpkgs store path names instead.
+  var version = realizedVersionOf(profile)
+  if version.len == 0:
+    version = nixStorePathVersion(
+      if profile.selectedStorePath.len > 0: profile.selectedStorePath
+      else: profile.resolvedExecutablePath)
+  let refusal = usesVersionRangeRefusal(useDef, version,
     "nix://" & profile.nixSelector & " (" & profile.resolvedExecutablePath & ")")
   if refusal.len > 0:
     raise newException(OSError, refusal)
@@ -7915,7 +7955,7 @@ proc fromSourceArtifactCandidate*(recipeRoot, packageName,
   ## (with ``.exe`` suffix appended on Windows when the file exists at
   ## the suffixed path). Callers test ``fileExists`` themselves.
   result = recipeRoot / packageName / ".repro" / "output" /
-    executableName / executableName
+    targetKeyedOutputName(executableName) / executableName
 
 # ---------------------------------------------------------------------------
 # M9.R.14d.1 — library vs executable artefact discovery for from-source deps
@@ -8080,12 +8120,18 @@ proc m9r14dEnumerateArtifacts*(recipeDir: string):
   if not dirExists(extendedPath(outputRoot)):
     return
   let kinds = m9r14dLoadInterfaceKinds(recipeDir)
+  # Only the entries the build being resolved for wrote: a native build's
+  # directories are bare, a target build's carry ``@<triple>``
+  # (``targetKeyedOutputName``), and neither may answer for the other.
+  let wantTriple = effectiveInstallMirrorTarget()
   for kindPc, name in walkDir(extendedPath(outputRoot)):
     if kindPc != pcDir and kindPc != pcLinkToDir:
       continue
-    let artifactName = lastPathPart(name)
-    if artifactName.len == 0: continue
-    let outDir = outputRoot / artifactName
+    let entryName = lastPathPart(name)
+    if entryName.len == 0: continue
+    let (artifactName, entryTriple) = outputEntryTarget(entryName)
+    if entryTriple != wantTriple or artifactName.len == 0: continue
+    let outDir = outputRoot / entryName
     let artKind = kinds.getOrDefault(artifactName, makUnknown)
     let resolved = m9r14dProbeArtifactFile(outDir, artifactName, artKind)
     result.add(M9R14dArtifactCandidate(
@@ -8762,7 +8808,8 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
   # candidates can be enumerated (the recipe's `.repro/output/` tree
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
-  let baseCandidate = recipeDir / ".repro" / "output" / name / name
+  let baseCandidate = recipeDir / ".repro" / "output" /
+    targetKeyedOutputName(name) / name
   if not realizationInfoMatchesCurrentPlatform(recipeDir):
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,

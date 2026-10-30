@@ -202,11 +202,25 @@ proc activeCrossTarget*(): CrossTarget =
   ## the slot would have been filled with. Constructors read THIS rather than
   ## `currentBuildContext()` so they answer the same way in both settings
   ## instead of raising in the second.
+  ##
+  ## Calling this from a recipe is the recipe's statement that it threads
+  ## the target itself, so it lifts `requireCrossTargetConsulted` for the
+  ## rest of the build block. A cross-aware constructor reads
+  ## `peekActiveCrossTarget` instead, so its own read does not lift the
+  ## guard for an unrelated constructor in the same block.
   if tryCurrentBuildState() != nil:
-    let state = tryCurrentBuildState()
-    state.crossTargetConsulted = true
     return currentBuildContext().crossTarget
   resolveCrossTarget()
+
+proc peekActiveCrossTarget*(): CrossTarget =
+  ## `activeCrossTarget` without lifting `requireCrossTargetConsulted`.
+  let state = tryCurrentBuildState()
+  if state != nil:
+    let consulted = state.crossTargetConsulted
+    result = currentBuildContext().crossTarget
+    state.crossTargetConsulted = consulted
+  else:
+    result = resolveCrossTarget()
 
 proc featureSet*(ctx: BuildContext): FeatureSet =
   if ctx.state.featureSetSlot == nil:
@@ -240,28 +254,30 @@ proc setFeatureSet*(ctx: BuildContext; fs: FeatureSet) =
   ctx.state.featureSetSlot = fs
 
 proc requireCrossTargetConsulted*(caller: string) =
-  ## A15 fail-closed guard. When `--target` is active (a non-native
-  ## triple), every build action emitter must have read `activeCrossTarget()`
-  ## before emitting edges, so it can thread the target's flags, sysroot,
-  ## and compiler wrappers into the action. A constructor that never reads
-  ## the cross target produces a HOST binary under a TARGET cache key —
-  ## silently wrong. This guard is called by `compile()`, `link()`,
-  ## `nim.c()`, and `cmake_package`'s build edges; `cargo_package` passes
-  ## because it already calls `activeCrossTarget()`.
+  ## ReproOS-Add-On-Mode A15 fail-closed guard, called first by every
+  ## constructor that does not thread the target itself. Under a non-native
+  ## `--target` such a constructor would emit host-compiler edges whose
+  ## output is filed under the target's cache key and install mirror, so it
+  ## refuses before emitting anything — unless the recipe read
+  ## `activeCrossTarget()` in this build block and so threads the target
+  ## through the constructor's own options. Outside a build block there is
+  ## no recipe to have done that, so the refusal is unconditional.
   let triple = activeTargetTriple()
   if triple.len == 0:
     return
   let state = tryCurrentBuildState()
-  if state == nil:
+  if state != nil and state.crossTargetConsulted:
     return
-  if not state.crossTargetConsulted:
-    raise newException(ValueError,
-      caller & ": a non-native --target '" & triple & "' is active but " &
-      "this constructor never consulted activeCrossTarget(). Under " &
-      "--target every typed-tool call must read the CrossTarget slot " &
-      "to thread --target=/--sysroot=/CC_<triple> flags; without it " &
-      "the action produces a host binary under a target cache key. " &
-      "Add activeCrossTarget() handling or build without --target.")
+  let recipe =
+    if state != nil: state.packageName
+    else: currentOwningPackage()
+  raise newException(ValueError,
+    "recipe '" & recipe & "': " & caller & " cannot build for --target '" &
+    triple & "': it does not thread a cross target, so it would compile " &
+    "for the host and file the result under the target. Use a " &
+    "cross-aware constructor (cargo_package), read activeCrossTarget() " &
+    "in the recipe and pass its flags through the constructor's options, " &
+    "or build without --target.")
 
 # ---------------------------------------------------------------------------
 # Named-Lock-Files NLF-M7 (§4.4) — the fifth slot

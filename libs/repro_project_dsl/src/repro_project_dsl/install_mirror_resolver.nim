@@ -20,7 +20,8 @@ const StoreRootEnvVar* = "REPRO_STORE_ROOT"
 
 const RealizationInfoFileName* = ".realization-info"
   ## Per-recipe sidecar written under
-  ## ``<recipesRoot>/<depName>/.repro/output/.realization-info``.
+  ## ``<recipesRoot>/<depName>/.repro/output/.realization-info`` (with
+  ## ``@<triple>`` appended under ``--target``; ``targetKeyedOutputName``).
 
 type
   InstallMirrorMode* = enum
@@ -69,6 +70,25 @@ proc effectiveInstallMirrorTarget*(): string =
   ## else the build's target.
   if installMirrorTargetOverride.active: installMirrorTargetOverride.triple
   else: activeTargetTripleTag()
+
+proc targetKeyedOutputName*(name: string): string =
+  ## ``name`` for a native build, ``name@<triple>`` under ``--target``: the
+  ## spelling of every entry of a recipe's ``.repro/output/`` that one build
+  ## writes (the install mirror, the per-artifact staging directories, the
+  ## realization sidecar), so a native and a target build of one recipe
+  ## never read or overwrite each other's.
+  let triple = effectiveInstallMirrorTarget()
+  if triple.len == 0: name
+  else: name & InstallMirrorTargetSeparator & triple
+
+proc outputEntryTarget*(entryName: string): tuple[name, triple: string] =
+  ## Split a ``.repro/output/`` entry name into the base name and the
+  ## triple it was written for ("" = native); the inverse of
+  ## ``targetKeyedOutputName``.
+  let at = entryName.find(InstallMirrorTargetSeparator)
+  if at < 0: (entryName, "")
+  else: (entryName[0 ..< at],
+         entryName[at + InstallMirrorTargetSeparator.len .. ^1])
 
 template withInstallMirrorTarget*(targetTriple: string; body: untyped) =
   ## Run ``body`` with the install mirror keyed by ``targetTriple``
@@ -141,8 +161,8 @@ proc resolveCasStoreRoot*(): string =
     return getHomeDir() & ".cache/repro/store"
 
 proc realizationInfoPath*(recipesRoot, depName: string): string =
-  (recipesRoot / depName / ".repro" / "output" / RealizationInfoFileName)
-    .replace("\\", "/")
+  (recipesRoot / depName / ".repro" / "output" /
+    targetKeyedOutputName(RealizationInfoFileName)).replace("\\", "/")
 
 proc currentRealizationPlatformTag*(): string =
   ## Stable producer identity for mutable source-package mirrors. This is the
@@ -287,7 +307,8 @@ proc realizationInfoMatchesCurrentPlatform*(recipeDir: string): bool =
   ## A missing sidecar is the pre-install compatibility case used by staged
   ## artifacts. Once a producer writes the sidecar, it must identify this
   ## process's OS and CPU; empty legacy sidecars are deliberately stale.
-  let path = recipeDir / ".repro" / "output" / RealizationInfoFileName
+  let path = recipeDir / ".repro" / "output" /
+    targetKeyedOutputName(RealizationInfoFileName)
   if not fileExists(path):
     return true
   let info = readRealizationInfoFile(parentDir(recipeDir),
