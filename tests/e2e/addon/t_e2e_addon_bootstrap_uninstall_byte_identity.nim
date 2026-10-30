@@ -175,6 +175,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "repro-addon.sh" in unDrift.stdout,
          unDrift.stdout & unDrift.stderr & "\nledger kept: " & $ledgerKept &
          " file kept: " & $fileKept)
+    # The kept ledger describes what is still owned: the objects the first
+    # uninstall did undo (the diversion, the units) are no longer in it.
+    let kept = g.ledgerOf()
+    step("the kept ledger lists only what is still owned",
+         "\ndiversion\t" notin kept and "repro-addon.target" notin kept and
+         "repro-addon.sh" in kept, kept)
     discard g.run("cp -p /root/addon/profile.d.orig /etc/profile.d/repro-addon.sh")
 
     let un = g.exec(repro & " system addon uninstall")

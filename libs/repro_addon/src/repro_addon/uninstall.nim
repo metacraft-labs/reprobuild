@@ -33,6 +33,8 @@ import ./ledger
 import ./mutations
 import ./store_root
 
+import repro_elevation/posix_system_driver
+
 type
   UninstallOptions* = object
     stateDir*: string
@@ -72,6 +74,25 @@ proc systemctlOrRecord(args: openArray[string]; r: var UninstallResult) =
       r.errors.add("systemctl " & args.join(" ") & ": " & res.output.strip())
   except HostToolMissing as ex:
     r.errors.add(ex.msg)
+
+proc stillOwned(e: LedgerEntry): bool =
+  ## Whether the object a ledger entry describes still exists on the host
+  ## (re-observed; the entry's digest is not consulted, since a drifted
+  ## object is still the add-on's to account for).
+  case e.class
+  of lcEtcFile, lcUnit, lcKey: fileExists(e.path) or symlinkExists(e.path)
+  of lcInstallLink: symlinkExists(e.path)
+  of lcRoot, lcDir, lcStorePrefix: dirExists(e.path)
+  of lcMount: isMountPoint(e.path)
+  of lcDiversion:
+    let db = DpkgDiversionsDb
+    fileExists(db) and readDpkgDiversion(readFile(db), e.path).present
+
+proc remainingLedger*(l: Ledger): Ledger =
+  ## ``l`` without the entries whose objects are gone.
+  result.generation = l.generation
+  for e in l.entries:
+    if stillOwned(e): result.entries.add(e)
 
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -144,6 +165,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   #    Only a complete reversal removes the state.
   when not mutated("uninstall-discards-state-on-drift"):
     if result.drift.len > 0 or result.errors.len > 0:
+      # The ledger must describe what the add-on still owns NOW: the
+      # objects this run did remove are taken out of it, so the next
+      # uninstall acts only on what is left and never reports an object
+      # it already undid (a diversion already removed, a file already
+      # deleted) as drift.
+      writeLedger(ledgerCopyPath(stateDir), remainingLedger(l))
       result.errors.add("the add-on's state and ledger at " & stateDir &
         " are kept: the uninstall is incomplete (see the drift and errors " &
         "above); fix or accept them and run uninstall again")
