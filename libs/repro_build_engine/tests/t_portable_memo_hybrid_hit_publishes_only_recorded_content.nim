@@ -25,6 +25,8 @@
 ## engine, action cache and CAS.
 
 import std/[os, strutils, times, unittest]
+when defined(posix):
+  import std/posix
 
 from repro_test_support import testCaseScratchSlug
 
@@ -82,13 +84,45 @@ proc build(project: string; policy: FileFingerprintPolicy;
   checkpoint(result.trace)
   require result.result.status in {asSucceeded, asCacheHit, asUpToDate}
 
+when defined(posix):
+  # Not in std/posix. The one call that restores a timestamp to the
+  # nanosecond, which is the only restore the hybrid lookup cannot see.
+  var AtFdcwd {.importc: "AT_FDCWD", header: "<fcntl.h>".}: cint
+  proc utimensat(dirfd: cint; path: cstring; times: ptr array[2, Timespec];
+                 flags: cint): cint {.importc, header: "<sys/stat.h>".}
+
 proc rewriteKeepingMetadata(path, text: string) =
   ## New bytes, the same size and the same mtime: what a hybrid lookup
   ## cannot see without reading the file.
+  ##
+  ## The mtime is restored with `utimensat(2)`, not
+  ## `os.setLastModificationTime`. The latter goes through `utimes(2)` and
+  ## keeps microseconds only, while the store records `mtimeNs` from
+  ## `lstat(2)` and compares it exactly. Measured on nixos-ci-bare-003 (ZFS)
+  ## at `1c2752eef9`: `writeFile` left `.163630251`, the restore produced
+  ## `.163630000`, the lookup saw the metadata move, hashed the new bytes
+  ## and MISSED -- so this case asserted "no publish on a hit" against a run
+  ## that was never a hit, and failed on every filesystem whose clock has
+  ## sub-microsecond mtimes. The assertion at the end is the control: the
+  ## metadata the store compares must be byte-for-byte what it was, or the
+  ## case is not testing what its name says.
   doAssert readFile(path).len == text.len
-  let mtime = getLastModificationTime(path)
-  writeFile(path, text)
-  setLastModificationTime(path, mtime)
+  let before = observeFile(path, ffpTimestamp).metadata
+  when defined(posix):
+    var st: Stat
+    doAssert stat(path.cstring, st) == 0
+    var times = [st.st_atim, st.st_mtim]
+    writeFile(path, text)
+    doAssert utimensat(AtFdcwd, path.cstring, addr times, 0) == 0
+  else:
+    let mtime = getLastModificationTime(path)
+    writeFile(path, text)
+    setLastModificationTime(path, mtime)
+  let after = observeFile(path, ffpTimestamp).metadata
+  doAssert after == before,
+    "the rewrite moved the metadata the hybrid lookup compares (" &
+    $before & " -> " & $after & "); the case would then measure a miss, " &
+    "not a hit"
 
 suite "M17: a portable record derived from a hybrid hit binds the recorded content":
 
