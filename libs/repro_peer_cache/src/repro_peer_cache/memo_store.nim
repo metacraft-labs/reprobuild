@@ -35,14 +35,16 @@ import std/[algorithm, options, os, strutils]
 import blake3
 from repro_core/codec import elementCountFits
 import repro_core/evidence_level
+import repro_core/evidence_source
 
 export evidence_level
+export evidence_source
 
 import ./types
 
 const
   MemoEntryMagic = "RPME"
-  MemoEntryVersion = 3'u16
+  MemoEntryVersion* = 4'u16
     ## v2 (Distributed-Execution M7) appends the issuer attestation. A v1
     ## entry still decodes — with an empty attestation, which every
     ## consumer refuses (`memo_attestation.nim`).
@@ -54,11 +56,32 @@ const
     ## the v2 layout, byte for byte, so a legacy entry re-encoded by this
     ## build is the entry its issuer signed; v1 and v2 entries decode with
     ## `elUnstated`, which every consumer of this build refuses.
+    ##
+    ## v4 (campaign M17 chunk 2: the published-trace record, Edge-Derived-
+    ## Identities.md §3.1, with the same semantics as the portable memo's
+    ## `rbpm-v2`) adds the EVIDENCE SOURCE after the level byte (u16 length,
+    ## then its text: `monitored`, `format:<name>`, `builtin`, ...), and goes
+    ## with path set v2 (`PathSetVersion`), whose entries keep declared
+    ## inputs apart from observed ones, and with identities that carry each
+    ## input's entry kind and executable bit and a published-digest-domain
+    ## content digest (`two_phase.observedIdentity`). The attestation covers
+    ## the source. A v4 entry STATES both level and source. Entries of
+    ## versions 1-3 still decode, byte for byte as signed, so a node can say
+    ## what it holds -- and every consumer of this build refuses them across
+    ## hosts as pre-rbpm-v2 records (`two_phase.memoEntryRefusal`), a miss
+    ## with a diagnostic.
+  FirstPublishedTraceEntryVersion* = 4'u16
+    ## The first entry version a consumer accepts from another host.
   MaxIssuerLeafBytes* = 8 * 1024
   MemoEntryExt = ".rpme"
   MemoStoreLayoutDir = "v1"
   PathSetMagic = "RPPS"
-  PathSetVersion = 1'u16
+  PathSetVersion* = 2'u16
+    ## v2 (campaign M17 chunk 2): entries are tagged with their ROLE as well as
+    ## their access (`two_phase.pathSetEntryOf`), and the identities a strong
+    ## fingerprint is computed over carry entry kind and executable bit. A v1
+    ## path set (a pre-rbpm-v2 producer's) is refused with
+    ## `LegacyPeerFormatError`: a miss, not a forgery.
   MemoAdvertDomain = "reprobuild/peer-cache/memo-weak/v1\x00"
     ## Domain prefix for the advertisement key of a weak fingerprint. The
     ## advertisement index is a flat set of 32-byte keys shared with CAS
@@ -71,6 +94,9 @@ const
 
 type
   PeerMemoStoreError* = object of CatchableError
+  LegacyPeerFormatError* = object of PeerMemoStoreError
+    ## A path set in a format this build no longer reads across hosts (v1,
+    ## before the published-trace record): well formed for its writer.
 
   PeerPathSet* = seq[string]
     ## The PATHS an execution observed, without their content: BuildXL's
@@ -105,6 +131,14 @@ type
       ## execution at, signed by the issuer with the rest. Only `elComplete`
       ## is accepted by a consumer; `elUnstated` is what an entry from a
       ## producer older than the field reads as.
+    evidenceSource*: EvidenceSource
+      ## Campaign M17 chunk 2: where the execution's evidence came from
+      ## (Edge-Derived-Identities.md §3.1), signed with the rest. Stated by
+      ## every v4 entry; `eskUnstated` for an older entry.
+    formatVersion*: uint16
+      ## The version the entry was DECODED from (0 for an entry built in
+      ## memory and not yet encoded). Not encoded itself: the encoder writes
+      ## the layout the stated fields need (`encodeMemoEntry`).
 
   PeerMemoStore* = object
     root*: string
@@ -216,6 +250,10 @@ proc decodePeerPathSet*(data: openArray[byte]): PeerPathSet =
   checkMagic(data, PathSetMagic, "path set")
   var pos = PathSetMagic.len
   let version = getU16(data, pos, "path set version")
+  if version == 1'u16:
+    raise newException(LegacyPeerFormatError,
+      "a version-1 path set, written before the published-trace record " &
+      "(rbpm-v2): its entries do not separate declared from observed inputs")
   if version != PathSetVersion:
     raise newException(PeerMemoStoreError,
       "unsupported path set version " & $version)
@@ -276,14 +314,21 @@ proc twoPhaseStrongFingerprint*(weakFingerprint, pathSetDigest: BlobDigest;
 proc encodeMemoEntry*(entry: MemoEntry): seq[byte] =
   ## "RPME" u16 version weak[32] pathSet[32] strong[32]
   ## u32 recordLen record u32 outputCount {digest[32]}*
-  ## [v3: u8 evidenceLevel] u32 leafLen leaf i64 issuedAt issuer[32]
-  ## u32 sigLen sig
+  ## [v3+: u8 evidenceLevel] [v4: u16 sourceLen source]
+  ## u32 leafLen leaf i64 issuedAt issuer[32] u32 sigLen sig
   ##
-  ## An entry with no stated evidence level is written as v2, unchanged.
+  ## The layout is the one the STATED fields need, so an entry decoded from
+  ## an older version re-encodes byte for byte as its issuer signed it: a
+  ## stated source writes v4 (and needs a stated level); a stated level alone
+  ## writes v3; neither writes v2.
   let stated = entry.evidenceLevel != elUnstated
+  let sourced = entry.evidenceSource.kind != eskUnstated
+  if sourced and not stated:
+    raise newException(PeerMemoStoreError,
+      "a memo entry that states its evidence source must state its level")
   for ch in MemoEntryMagic:
     result.add(byte(ord(ch)))
-  result.putU16(if stated: MemoEntryVersion else: 2'u16)
+  result.putU16(if sourced: MemoEntryVersion elif stated: 3'u16 else: 2'u16)
   result.putDigest(entry.weakFingerprint)
   result.putDigest(entry.pathSetDigest)
   result.putDigest(entry.strongFingerprint)
@@ -295,6 +340,11 @@ proc encodeMemoEntry*(entry: MemoEntry): seq[byte] =
     result.putDigest(d)
   if stated:
     result.add(evidenceLevelByte(entry.evidenceLevel))
+  if sourced:
+    let text = $entry.evidenceSource
+    result.putU16(uint16(text.len))
+    for ch in text:
+      result.add(byte(ord(ch)))
   result.putU32(uint32(entry.issuerLeafDer.len))
   for b in entry.issuerLeafDer:
     result.add(b)
@@ -327,7 +377,7 @@ proc decodeMemoEntryHeader(data: openArray[byte]):
   checkMagic(data, MemoEntryMagic, "memo entry")
   var pos = MemoEntryMagic.len
   let version = getU16(data, pos, "memo entry version")
-  if version notin [1'u16, 2'u16, MemoEntryVersion]:
+  if version notin [1'u16, 2'u16, 3'u16, MemoEntryVersion]:
     raise newException(PeerMemoStoreError,
       "unsupported memo entry version " & $version)
   result.version = version
@@ -342,6 +392,7 @@ proc decodeMemoEntry*(data: openArray[byte]): MemoEntry =
   result.weakFingerprint = header.weak
   result.pathSetDigest = header.pathSet
   result.strongFingerprint = header.strong
+  result.formatVersion = header.version
   let recordLen = int(getU32(data, pos, "memo entry record length"))
   need(data, pos, recordLen, "memo entry record")
   result.recordBytes = newSeq[byte](recordLen)
@@ -366,6 +417,18 @@ proc decodeMemoEntry*(data: openArray[byte]): MemoEntry =
       raise newException(PeerMemoStoreError,
         "memo entry carries an unknown evidence level " & $data[pos])
     pos += 1
+  if header.version >= 4'u16:
+    let sourceLen = int(getU16(data, pos, "memo entry evidence source length"))
+    need(data, pos, sourceLen, "memo entry evidence source")
+    var text = newString(sourceLen)
+    for i in 0 ..< sourceLen:
+      text[i] = char(data[pos + i])
+    pos += sourceLen
+    # A v4 entry STATES its source, as a v3 one states its level.
+    if not parseEvidenceSource(text, result.evidenceSource) or
+        result.evidenceSource.kind == eskUnstated:
+      raise newException(PeerMemoStoreError,
+        "memo entry carries an unknown evidence source '" & text & "'")
   if header.version >= 2'u16:
     let leafLen = int(getU32(data, pos, "memo entry issuer leaf length"))
     if leafLen > MaxIssuerLeafBytes:

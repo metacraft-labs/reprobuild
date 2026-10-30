@@ -297,10 +297,13 @@ proc installTwoPhaseBundle*(cas: var CasStore; cache: var ActionCache;
   # refused before anything is written, whoever sent it and whatever the
   # lookup that handed it here decided. The reason names the policy or the
   # level.
-  let ruleRefusal = publicationRefusalOf(normalized, entry.evidenceLevel)
+  # Campaign M17 chunk 2: an entry from before the published-trace record
+  # (versions 1-3) is refused here too, naming its version, and the rule
+  # judges the evidence source its issuer signed as well as the level.
+  let ruleRefusal = memoEntryRefusal(entry, normalized)
   if ruleRefusal.len > 0:
     return (false, "refused a record from another host: " & ruleRefusal)
-  let pathSet = pathSetOf(normalized)
+  let pathSet = pathSetOf(normalized, ctx)
   if digestOf(bundle.pathSetBytes) != entry.pathSetDigest:
     return (false, "path set blob does not match the entry's digest")
   try:
@@ -326,7 +329,7 @@ proc installTwoPhaseBundle*(cas: var CasStore; cache: var ActionCache;
     expected[entry] = bundle.identities[i]
   var inputs: seq[FileFingerprint] = @[]
   for i, input in record.inputs:
-    let entry = pathSetEntryOf(normalized.inputs[i])
+    let entry = pathSetEntryOf(normalized.inputs[i], ctx)
     let wanted = expected.getOrDefault(entry, "")
     let location = recordedInputLocation(ctx.cwd, input.path)
     let id = observedIdentity(location,

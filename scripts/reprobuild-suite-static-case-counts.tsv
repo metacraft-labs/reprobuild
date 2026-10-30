@@ -64,7 +64,7 @@ libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
 libs/repro_binary_cache_client/tests/t_archive_extract_refuses_writing_through_symlinks.nim	nim	10
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
 libs/repro_binary_cache_client/tests/t_local_platform_is_named_and_unknown_refuses.nim	nim	2
-libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	13
+libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	15
 libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim	nim	1
 libs/repro_binary_cache_client/tests/t_r1_caches_config.nim	nim	10
 libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	6
@@ -122,7 +122,8 @@ libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_memo_hybrid_hit_publishes_only_recorded_content.nim	nim	2
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	5
 libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim	nim	10
-libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim	nim	3
+libs/repro_build_engine/tests/t_published_record_states_evidence_source.nim	nim	3
+libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim	nim	4
 libs/repro_build_engine/tests/t_publishers_refuse_zero_evidence_records.nim	nim	3
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	8
 libs/repro_build_engine/tests/t_remove_before_run.nim	nim	5
@@ -490,6 +491,7 @@ libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim	nim	7
 libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	17
 libs/repro_local_store/tests/t_portable_memo.nim	nim	8
 libs/repro_local_store/tests/t_prefix_owning_path.nim	nim	4
+libs/repro_local_store/tests/t_published_trace_record.nim	nim	9
 libs/repro_local_store/tests/t_refresh_restored_outputs.nim	nim	2
 libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
@@ -534,6 +536,7 @@ libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim	nim	7
 libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim	nim	10
 libs/repro_peer_cache/tests/t_evidence_sink_append_only_and_liveness.nim	nim	6
 libs/repro_peer_cache/tests/t_evidence_store_receipts_and_key_separation.nim	nim	3
+libs/repro_peer_cache/tests/t_host_identity_key_file_is_owner_only.nim	nim	5
 libs/repro_peer_cache/tests/t_memo_attestation_trusted_time.nim	nim	1
 libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim	nim	1
@@ -560,7 +563,7 @@ libs/repro_peer_cache/tests/t_peer_cache_mint_cert_self_signed_round_trip.nim	ni
 libs/repro_peer_cache/tests/t_peer_cache_multicast_cidr_allowlist_drops_off_network.nim	nim	2
 libs/repro_peer_cache/tests/t_peer_cache_multicast_loopback_discovery.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_private_scalar_range.nim	nim	5
-libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim	nim	7
+libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim	nim	11
 libs/repro_peer_cache/tests/t_peer_cache_registry_advertise_snapshot_and_delta.nim	nim	3
 libs/repro_peer_cache/tests/t_peer_cache_sim_fetch_workload_hits_peer_cache.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_sim_mixed_tenant_isolation.nim	nim	1
