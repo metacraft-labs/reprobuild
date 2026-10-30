@@ -19,8 +19,8 @@
 ##   and the retained account are all exactly what the ledger says.
 ##
 ## The switch's materialisation is checked too: a managed ``/etc`` file
-## and a unit are links into ``/etc/repro/static``, which is a link into
-## the store; sysusers and tmpfiles fragments are regular files; and a
+## is a link into ``/etc/repro/static``, which is a link into the store;
+## unit files, sysusers and tmpfiles fragments are regular files; and a
 ## generation whose only change is a dependency of a unit restarts (or,
 ## with ``reloadIfChanged``, reloads) that unit and nothing else.
 ##
@@ -277,9 +277,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              g.run("readlink /etc/repro-fixture/a.conf").strip() ==
                "/etc/repro/static/repro-fixture/a.conf" and
              g.run("cat /etc/repro-fixture/a.conf") == "one\n", "")
-        step("g1: the unit is a link into /etc/repro/static and systemd loads it",
-             g.run("readlink /etc/systemd/system/repro-fixture-a.service").strip() ==
-               "/etc/repro/static/systemd/system/repro-fixture-a.service" and
+        step("g1: the unit is a regular file (enable must not resolve a link) and systemd loads it",
+             g.exec("test -f /etc/systemd/system/repro-fixture-a.service && test ! -L /etc/systemd/system/repro-fixture-a.service").exitCode == 0 and
              "fixture A (v1)" in g.run("systemctl show -p Description --value repro-fixture-a.service"), "")
         step("g1: /etc/repro/static is a link into the store",
              g.run("readlink /etc/repro/static").strip().startsWith("/repro/store/prefixes/repro-addon-etc"), "")
@@ -293,7 +292,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
           if e.resource.len > 0 and e.class in {lcEtcFile, lcUnit}: forms.add(e.path & "=" & e.form)
         step("g1: the ledger records the forms",
              "/etc/repro-fixture/a.conf=link" in forms and
-             "/etc/systemd/system/repro-fixture-a.service=link" in forms and
+             "/etc/systemd/system/repro-fixture-a.service=copy" in forms and
              "/etc/sysusers.d/repro-repro-fixture.conf=copy" in forms and
              "/etc/tmpfiles.d/repro-fixture.conf=copy" in forms, $forms)
       of "g4-dropin-sysctl":

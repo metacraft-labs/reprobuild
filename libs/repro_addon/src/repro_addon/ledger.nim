@@ -249,6 +249,12 @@ proc observeDrift*(e: LedgerEntry): string =
   of lcEtcFile, lcUnit, lcDropIn:
     if e.isLink:
       if not symlinkExists(e.path):
+        if fileExists(e.path):
+          # Something replaced the add-on's link with a file of its own:
+          # drift, to be left in place, never "gone".
+          return "replaced by a regular file (sha256 " &
+                 sha256OfFile(e.path)[0 ..< 12] & "), ledger link to " &
+                 e.linkTarget
         return "missing (or no longer the add-on's link)"
       let t = expandSymlink(e.path)
       if t != e.linkTarget:

@@ -77,9 +77,10 @@ fs.systemFile {
 }
 """
 
-const UnmanagedKindProfile = """linux.sysctl {
-  key = "net.ipv4.ip_forward"
-  value = "1"
+const UnmanagedKindProfile = """linux.udevRule {
+  name = "99-repro-fixture.rules"
+  content = "KERNEL==\"null\", MODE=\"0666\"
+"
 }
 """
 
@@ -164,7 +165,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # (incus exec merges the guest's stderr into stdout; ssh keeps them apart.)
     let a3Out = a3.stdout & a3.stderr
     step("an unmanaged kind is refused", a3.exitCode != 0 and
-         "linux.sysctl" in a3Out and "nothing was applied" in a3Out,
+         "linux.udevRule" in a3Out and "nothing was applied" in a3Out,
          "exit " & $a3.exitCode & "\n" & a3.stdout & a3.stderr)
     let f3b = g.takeFingerprint(repro)
     let unchanged = identityReport(f3, f3b)
