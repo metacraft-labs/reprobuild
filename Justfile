@@ -104,6 +104,13 @@ e2e_addon_removal_respects_ledger:
 e2e_addon_symlink_on_target_path_is_refused:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_symlink_on_target_path_is_refused
 
+# The write-time re-check, made deterministic by a test-only pause seam:
+# the default run uses the `pause-before-write` build (the seam is the
+# gate's instrument); REPRO_ADDON_MUTATION=pause-before-write-no-recheck is
+# its falsifying run.
+e2e_addon_write_time_recheck:
+    REPRO_ADDON_MUTATION="${REPRO_ADDON_MUTATION:-pause-before-write}" REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_write_time_recheck
+
 # A4: the add-on switch and service transitions (Debian 13 and Ubuntu 24.04
 # by default). Falsifying mutations: REPRO_ADDON_MUTATION=exclusive-as-plain-restart
 # (exclusive_never_overlaps), sysctl-in-apply-namespace
@@ -120,6 +127,17 @@ e2e_addon_gc_keeps_current_and_previous:
 
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
+
+# Milestone A5: crash consistency, boot re-assertion, confirm-or-revert. The
+# reset gate runs the seam build (run_addon_gate.sh selects it).
+e2e_addon_hard_reset_at_every_step:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_hard_reset_at_every_step
+
+e2e_addon_base_boots_without_store:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_base_boots_without_store
+
+e2e_addon_confirm_or_revert:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_confirm_or_revert
 
 e2e_addon_net_sysctl_applies_in_host_namespace:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace

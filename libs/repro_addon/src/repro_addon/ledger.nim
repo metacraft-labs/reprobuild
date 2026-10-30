@@ -135,6 +135,10 @@ type
                            ## target; spec §7.2); "" reads as ``copy``
     value*: string         ## sysctl: the value applied; account: the
                            ## fingerprint value of the account
+    displaced*: string     ## where the bytes the MOST RECENT reconcile of
+                           ## this object displaced are kept; ``preserved``
+                           ## keeps the first-touch bytes removal restores.
+                           ## "" when nothing was reconciled since
 
   Ledger* = object
     generation*: string
@@ -143,10 +147,16 @@ type
   LedgerError* = object of CatchableError
 
 const
-  LedgerHeader* = "# repro-addon-ledger v3"
+  LedgerHeader* = "# repro-addon-ledger v4"
+  LedgerHeaderV3* = "# repro-addon-ledger v3"
   LedgerHeaderV2* = "# repro-addon-ledger v2"
-  LedgerFields = 22
+  LedgerHeaderV1* = "# repro-addon-ledger v1"
+    ## Written by the A2 bootstrap (``552e2af5d6``): thirteen fields, up to
+    ## ``resource``. A host bootstrapped by that release carries one.
+  LedgerFields = 23
+  LedgerFieldsV3 = 22
   LedgerFieldsV2 = 20
+  LedgerFieldsV1 = 13
   FileClasses* = {lcEtcFile, lcUnit, lcDropIn}
     ## The classes a generation materialises as a link or a copy.
 
@@ -171,7 +181,8 @@ proc render*(l: Ledger): string =
                   e.linkTarget, e.kindHint, flag(e.enabled), flag(e.started),
                   flag(e.hasInstall), e.replaced, e.resource, e.observation,
                   e.collision, e.preserved, e.unitState, e.activeState,
-                  e.baseUnitState, e.baseActiveState, e.form, e.value]
+                  e.baseUnitState, e.baseActiveState, e.form, e.value,
+                  e.displaced]
     var line = ""
     for i, f in fields:
       if i > 0: line.add('\t')
@@ -184,13 +195,21 @@ proc classFromString(s: string): LedgerClass =
   raise newException(LedgerError, "unknown ledger class: " & s)
 
 proc parseLedger*(text: string): Ledger =
-  ## Strict inverse of ``render``. A v2 ledger (A3: no ``form`` and
-  ## ``value`` fields) is read too; every file it lists is a copy, which
-  ## is what v2 always wrote.
+  ## Strict inverse of ``render``. Older versions are read too, so a host
+  ## bootstrapped by an earlier release upgrades in place (the next apply
+  ## writes the current version): a v1 ledger (A2's bootstrap: no
+  ## observation, collision, preserved bytes or unit states -- it only
+  ## ever recorded what bootstrap created, so nothing was adopted or
+  ## observed), a v2 one (no ``form`` and ``value`` fields: every file it
+  ## lists is a copy, which is what v2 always wrote) and a v3 one (no
+  ## ``displaced``: nothing reconciled since).
   let lines = text.splitLines()
-  if lines.len < 2 or lines[0] notin [LedgerHeader, LedgerHeaderV2]:
+  if lines.len < 2 or lines[0] notin [LedgerHeader, LedgerHeaderV3,
+                                      LedgerHeaderV2, LedgerHeaderV1]:
     raise newException(LedgerError, "not a repro-addon ledger")
-  let fieldCount = if lines[0] == LedgerHeaderV2: LedgerFieldsV2
+  let fieldCount = if lines[0] == LedgerHeaderV1: LedgerFieldsV1
+                   elif lines[0] == LedgerHeaderV2: LedgerFieldsV2
+                   elif lines[0] == LedgerHeaderV3: LedgerFieldsV3
                    else: LedgerFields
   let g = lines[1].split('\t')
   if g.len != 2 or g[0] != "generation":
@@ -206,13 +225,20 @@ proc parseLedger*(text: string): Ledger =
     var e = LedgerEntry(class: classFromString(u[0]), path: u[1],
       unit: u[2], sha256: u[3], mode: u[4], owner: u[5], linkTarget: u[6],
       kindHint: u[7], enabled: u[8] == "1", started: u[9] == "1",
-      hasInstall: u[10] == "1", replaced: u[11], resource: u[12],
-      observation: u[13], collision: u[14], preserved: u[15],
-      unitState: u[16], activeState: u[17], baseUnitState: u[18],
-      baseActiveState: u[19])
-    if fieldCount == LedgerFields:
+      hasInstall: u[10] == "1", replaced: u[11], resource: u[12])
+    if fieldCount >= LedgerFieldsV2:
+      e.observation = u[13]
+      e.collision = u[14]
+      e.preserved = u[15]
+      e.unitState = u[16]
+      e.activeState = u[17]
+      e.baseUnitState = u[18]
+      e.baseActiveState = u[19]
+    if fieldCount >= LedgerFieldsV3:
       e.form = u[20]
       e.value = u[21]
+    if fieldCount == LedgerFields:
+      e.displaced = u[22]
     result.entries.add(e)
 
 proc readLedger*(path: string): Ledger =
@@ -262,7 +288,9 @@ proc observeDrift*(e: LedgerEntry): string =
           return "replaced by a regular file (sha256 " &
                  sha256OfFile(e.path)[0 ..< 12] & "), ledger link to " &
                  e.linkTarget
-        return "missing (or no longer the add-on's link)"
+        if dirExists(e.path):
+          return "replaced by a directory, ledger link to " & e.linkTarget
+        return "missing"
       let t = expandSymlink(e.path)
       if t != e.linkTarget:
         return "points at " & t & ", ledger " & e.linkTarget
@@ -274,8 +302,18 @@ proc observeDrift*(e: LedgerEntry): string =
         return "content behind the link changed (sha256 " & digest[0 ..< 12] &
                ", ledger " & e.sha256[0 ..< min(12, e.sha256.len)] & ")"
       return ""
-    if not fileExists(e.path) or symlinkExists(e.path):
-      return "missing (or no longer a regular file)"
+    if symlinkExists(e.path):
+      # Someone put a link where the add-on's copy was: the link is
+      # theirs, never "gone" -- removal would otherwise unlink it.
+      var target = ""
+      try: target = expandSymlink(e.path)
+      except OSError: discard
+      return "replaced by a symbolic link to " & target &
+             " (ledger: a regular file)"
+    if dirExists(e.path):
+      return "replaced by a directory (ledger: a regular file)"
+    if not fileExists(e.path):
+      return "missing"
     let digest = sha256OfFile(e.path)
     if digest != e.sha256:
       return "content changed (sha256 " & digest[0 ..< 12] & ", ledger " &

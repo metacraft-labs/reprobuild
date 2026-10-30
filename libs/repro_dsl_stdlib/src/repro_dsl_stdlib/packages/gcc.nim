@@ -31,6 +31,8 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/winlibs_pin
+import repro_dsl_stdlib/packages/binutils as binutilsModule
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/types/library
 import repro_dsl_stdlib/types/options
@@ -57,16 +59,16 @@ package gcc:
     # entry but ships as a single (non-nested) .7z, which our tarball
     # resolver can extract directly. archive layout is `mingw64/bin/
     # gcc.exe` so stripComponents=1 flattens to `bin/gcc.exe`.
-    tarball url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z",
-      sha256 = "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232",
+    tarball url = WinLibsX64Url,
+      sha256 = WinLibsX64Sha256,
       archiveType = "7z",
       stripComponents = 1,
       executablePath = "bin/gcc.exe",
-      packageId = "gcc-winlibs@16.1.0",
+      packageId = WinLibsX64PackageId,
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:gcc-winlibs@16.1.0:sha256:62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232",
-      version = "16.1.0"
+      lockIdentity = WinLibsX64LockIdentity,
+      version = WinLibsGccVersion
     # GM4b: archive realizations formerly held by the retired
     # `VersionedProvisioning` catalog record (see the conflict notes
     # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
@@ -313,37 +315,14 @@ proc gccLink*(opts: LinkOptions): BuildActionDef =
     libDirs = libDirs)
 
 proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
-  ## ``ar`` archive call. v1 emits a thin ``BuildActionDef`` carrying
-  ## the canonical ``ar rcs <archive> <objs...>`` argv directly.
-  result = BuildActionDef(
-    call: PublicCliCall(
-      packageName: "binutils",
-      executableName: "ar",
-      subcommand: "",
-      arguments: @[]))
-  let modifiers =
-    if opts.modifiers.len > 0: opts.modifiers else: "rcs"
-  result.call.arguments.add(PublicCliArg(
-    name: "modifiers",
-    kind: cpkPositional,
-    position: 0,
-    encodedValue: modifiers))
-  result.call.arguments.add(PublicCliArg(
-    name: "archive",
-    kind: cpkPositional,
-    position: 1,
-    role: carOutput,
-    encodedValue: opts.target))
-  for i, obj in opts.objects:
-    let path =
-      if obj.outputs.len > 0: obj.outputs[0] else: ""
-    result.call.arguments.add(PublicCliArg(
-      name: "object" & $i,
-      kind: cpkPositional,
-      position: 2 + i,
-      role: carInput,
-      encodedValue: path))
-  result.outputs.add(opts.target)
+  ## Use the canonical archiver's existing typed CLI and provisioning identity.
+  ## The aggregate binutils selector may resolve to ld, which is not ar.
+  var objects: seq[string]
+  for obj in opts.objects:
+    objects.add(if obj.outputs.len > 0: obj.outputs[0] else: "")
+  binutilsModule.ar(
+    modifiers = (if opts.modifiers.len > 0: opts.modifiers else: "rcs"),
+    archive = opts.target, objects = objects, after = opts.objects)
 
 proc gccStrip*(opts: StripOptions): BuildActionDef =
   ## ``strip`` invocation.

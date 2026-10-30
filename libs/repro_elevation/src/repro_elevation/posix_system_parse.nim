@@ -146,23 +146,62 @@ proc isSystemDefaultDomain*(domain: string): bool =
 const SystemdSystemUnitDir* = "/etc/systemd/system"
   ## The directory a `systemd.systemUnit` unit file lands in.
 
+const UnitNameMutation {.strdefine: "reproAddonMutation".} = ""
+  ## ``scope-accepts-unnormalised-paths`` (the add-on's falsifying build)
+  ## also compiles the strict unit-name check out, so the collision gate
+  ## shows it is what refuses `" cron.service"`.
+
 proc systemUnitPath*(name: string): string =
   ## The on-disk location of a systemd SYSTEM unit. A forward-slash
   ## join so the derivation is platform-independent for unit testing.
-  ## `name` is the unit file name (e.g. `repro-agent.service`).
-  let n = name.strip()
-  SystemdSystemUnitDir & "/" & n
+  ## `name` is the unit file name (e.g. `repro-agent.service`), already
+  ## validated by `systemdUnitNameError`: it is used exactly as written,
+  ## never stripped, so the path the driver writes and the path any
+  ## observer (the add-on's collision pass) looks at are the same string.
+  SystemdSystemUnitDir & "/" & name
+
+proc hasKnownUnitSuffix*(name: string): bool
+  ## Forward declaration; defined with `systemd.unitState`'s checks.
+
+proc systemdUnitNameError*(field, name: string; requireSuffix = true): string =
+  ## "" when ``name`` is a unit name systemd accepts, else why not
+  ## (systemd.unit(5), `unit_name_is_valid()` in systemd's
+  ## src/basic/unit-name.c): at most 255 characters of
+  ## `[A-Za-z0-9:_.@-]` (systemd's `\` escapes are refused here: a
+  ## profile spells the escaped form's target instead), a non-empty
+  ## prefix, at most one `@` (an instance or a template, `foo@.service`),
+  ## and, with ``requireSuffix``, a unit-type suffix. Nothing is stripped
+  ## or rewritten: `" cron.service"` is refused, because systemd would
+  ## not load it and the driver would otherwise write a different file
+  ## than the one the name's text names.
+  when UnitNameMutation == "scope-accepts-unnormalised-paths":
+    if name.strip().len > 0 and '/' notin name: return ""
+  if name.len == 0:
+    return field & " is empty"
+  if name.len > 255:
+    return field & " '" & name & "' is longer than 255 characters"
+  if name == "." or name == "..":
+    return field & " '" & name & "' is not a unit name"
+  for c in name:
+    if c notin {'A'..'Z', 'a'..'z', '0'..'9', ':', '_', '.', '@', '-'}:
+      return field & " '" & name.escape() & "' contains '" & ($c).escape() &
+        "', which is not a character of a systemd unit name " &
+        "([A-Za-z0-9:_.@-]; no whitespace)"
+  if name[0] in {'.', '@'}:
+    return field & " '" & name & "' has an empty unit-name prefix"
+  if name.count('@') > 1:
+    return field & " '" & name & "' has more than one '@'"
+  if requireSuffix and not hasKnownUnitSuffix(name):
+    return field & " '" & name & "' has no unit-type suffix " &
+      "(.service, .socket, .timer, ...)"
+  ""
 
 proc isSafeUnitName*(name: string): bool =
-  ## A systemd unit name must be a single path segment — no `/`, no
-  ## `..`, non-empty — so a `systemd.systemUnit` resource cannot
-  ## escape `/etc/systemd/system/`.
-  let n = name.strip()
-  if n.len == 0:
-    return false
-  if n == "." or n == "..":
-    return false
-  '/' notin n and '\\' notin n
+  ## A unit name systemd accepts (`systemdUnitNameError`, suffix not
+  ## required: callers that need one check it), so a `systemd.systemUnit`
+  ## resource cannot escape `/etc/systemd/system/` and names exactly the
+  ## file it writes.
+  systemdUnitNameError("unit name", name, requireSuffix = false).len == 0
 
 const
   SystemdSysusersDir* = "/etc/sysusers.d"
@@ -193,12 +232,12 @@ proc systemDropInPath*(unit, name: string): string =
   ## `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` (spec §4.1, the
   ## `dropIn` class). `name` defaults to `addon`.
   let n = if name.len > 0: name else: "addon"
-  SystemdSystemUnitDir & "/" & unit.strip() & ".d/" & AddOnDropInPrefix &
+  SystemdSystemUnitDir & "/" & unit & ".d/" & AddOnDropInPrefix &
     n & ".conf"
 
 proc sysusersFragmentPath*(name: string): string =
   ## `/etc/sysusers.d/repro-<name>.conf` (spec §4.1, the `sysusers` class).
-  SystemdSysusersDir & "/" & AddOnFragmentPrefix & name.strip() & ".conf"
+  SystemdSysusersDir & "/" & AddOnFragmentPrefix & name & ".conf"
 
 proc sysusersFragmentContent*(kind, name, id, description, home,
                               shell: string): string =
@@ -374,6 +413,59 @@ proc isAllowedSystemFilePath*(path: string; programDataRoot = ""): bool =
     if norm.startsWith(pdRoot):
       return true
   return false
+
+const NonCanonicalPathMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation selector (``repro_addon/mutations``).
+  ## ``scope-accepts-unnormalised-paths`` compiles the check below out, so
+  ## the add-on's collision gate can show it is what refuses
+  ## ``/etc/ssh//sshd_config``. A build without the define has no switch.
+
+proc nonCanonicalPathError*(field, path: string;
+                            allowTrailingSlash = false): string =
+  ## "" when ``path`` is an absolute POSIX path in canonical form, else a
+  ## diagnostic naming ``field``. Canonical means: starts with ``/``, has
+  ## no empty segment (``//``), no ``.`` or ``..`` segment, no leading or
+  ## trailing whitespace, no control character, and ends with ``/`` only
+  ## when ``allowTrailingSlash`` (a directory prefix such as a managed
+  ## ``/etc`` prefix) and is then more than ``/``.
+  ##
+  ## Why refuse rather than canonicalise: every consumer of these paths
+  ## compares their TEXT -- dpkg's file lists, its diversion database and
+  ## ucf's registry hold canonical paths, and the scope checks are prefix
+  ## compares -- so ``/etc/ssh//sshd_config`` reads as "no package owns
+  ## it" and ``/etc/./systemd/system/x.service`` as "not under the unit
+  ## directory" while the kernel resolves both to the package's file. A
+  ## silently canonicalised path would also leave the profile and the
+  ## ledger naming different strings for one object. Refusing makes the
+  ## canonical form the only spelling, so every text compare downstream is
+  ## a compare of what the kernel resolves (threat model G8, T9).
+  when NonCanonicalPathMutation == "scope-accepts-unnormalised-paths":
+    return ""
+  else:
+    if path.len == 0:
+      return field & " is empty"
+    if path != path.strip():
+      return field & " '" & path & "' has leading or trailing whitespace"
+    for c in path:
+      if ord(c) < 32 or ord(c) == 127:
+        return field & " '" & path.escape() & "' contains a control character"
+    if path[0] != '/':
+      return field & " '" & path & "' is not an absolute path"
+    if path.endsWith("/") and not allowTrailingSlash:
+      return field & " '" & path & "' ends with '/'; a file path names " &
+        "the file itself"
+    let body = if path.endsWith("/"): path[1 ..< path.len - 1]
+               else: path[1 .. ^1]
+    if body.len == 0:
+      return field & " '" & path & "' names the root directory"
+    for seg in body.split('/'):
+      if seg.len == 0:
+        return field & " '" & path & "' has an empty segment ('//'); " &
+          "write the path in canonical form"
+      if seg == "." or seg == "..":
+        return field & " '" & path & "' has a '" & seg & "' segment; " &
+          "write the path in canonical form"
+    ""
 
 proc systemFileScopeError*(path: string; programDataRoot = ""): string =
   ## Returns "" when the path is in-scope, otherwise a human

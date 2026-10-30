@@ -20,7 +20,7 @@
 ## `applyPrivilegedSetInProcess` is the already-elevated fast path:
 ## the SAME dispatch, no broker, no channel.
 
-import std/[random]
+import std/[random, strutils]
 
 import ./dispatch
 import ./elevation_state
@@ -380,6 +380,10 @@ else:
 # Parent: drive the broker over the authenticated channel.
 # ===========================================================================
 
+const
+  PreWriteKeepPrefix* = "keep: "
+    ## See ``PreWriteGuard``.
+
 type
   PreWriteGuard* = proc(op: PrivilegedOperation): string {.gcsafe.}
     ## Optional check run immediately before an operation is dispatched
@@ -390,6 +394,14 @@ type
     ## what was decided at plan time is re-checked against the host as it
     ## is at write time (a link planted on the path, a package installed
     ## in between).
+    ##
+    ## An answer that starts with ``PreWriteKeepPrefix`` is not a refusal
+    ## but a decision to leave the object as it is: the operation is not
+    ## dispatched and is recorded as a no-op carrying the reason. The
+    ## add-on answers so for a removal whose object changed between the
+    ## plan and the destroy -- the object is then actionable drift, left in
+    ## place, and the rest of the apply goes on (its spec's removal rule),
+    ## which an error outcome would turn into a withheld generation.
 
   ApplyProgressHook* = proc() {.gcsafe.}
     ## Optional "one more unit of work finished" callback. The privileged
@@ -642,11 +654,25 @@ proc applyPrivilegedSetInProcess*(ctx: FixtureContext;
   ##
   ## `preWriteGuard`, when given, is consulted before each operation; a
   ## non-empty answer refuses that operation (recorded as an error with
-  ## the guard's reason) and the set continues with the next one.
+  ## the guard's reason) and the set continues with the next one. An
+  ## answer starting with `PreWriteKeepPrefix` leaves the object as it is,
+  ## recorded as a no-op with the reason.
   for plannedOp in planned:
     var dr: DispatchResult
     if preWriteGuard != nil:
       let refusal = preWriteGuard(plannedOp.operation)
+      if refusal.startsWith(PreWriteKeepPrefix):
+        # Left as it is, by the guard's decision: nothing written, and not
+        # a failure of the operation.
+        result.applyLog.add(ApplyLogRecord(
+          operationAddress: plannedOp.operation.address,
+          operationKind: $plannedOp.operation.kind,
+          outcome: $doNoOp, detail: refusal))
+        result.results.add(OperationResultFrame(
+          operationAddress: plannedOp.operation.address,
+          ok: true, driftDetected: false, diagnostic: refusal))
+        notifyProgress(onProgress)
+        continue
       if refusal.len > 0:
         result.applyLog.add(ApplyLogRecord(
           operationAddress: plannedOp.operation.address,

@@ -481,7 +481,11 @@ proc splitPathList(pathValue: string): seq[string] =
 
 proc configuredProbes*(packageSelector, executableName: string): seq[
     ToolProbeSpec] =
-  discard packageSelector
+  if (packageSelector == "7zip" or packageSelector.startsWith("7zip@")) and
+      executableName.toLowerAscii() in ["7z", "7z.exe"]:
+    # 7-Zip has no --version switch; `i` prints the version banner and
+    # supported formats without opening or modifying an archive.
+    return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["i"])]
   if executableName == "tmux":
     return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["-V"])]
   if executableName == "sddm":
@@ -3854,10 +3858,16 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
       # The clone carries the sibling's receipt. Drop it: the caller seals
       # this package's own, and a prefix holding somebody else's provenance
       # is worse than one holding none.
-      let clonedReceipt = tempPrefix / ".repro-receipt"
-      if fileExists(extendedPath(clonedReceipt)):
-        try: removeFile(extendedPath(clonedReceipt))
-        except CatchableError: discard
+      for receiptName in [".repro-receipt", ".reprobuild-tarball-receipt.json"]:
+        let clonedReceipt = tempPrefix / receiptName
+        if fileExists(extendedPath(clonedReceipt)):
+          try:
+            # The payload may share inodes, but each view writes its own
+            # provenance. Truncating a linked adapter receipt edits the source.
+            removeFile(extendedPath(clonedReceipt))
+          except CatchableError:
+            removeDir(extendedPath(tempPrefix))
+            raise
       if executableInStorePath(tempPrefix, plan.declaredExecutablePath,
           rejectSymlinks = true).len == 0:
         try: removeDir(extendedPath(tempPrefix))
@@ -5326,9 +5336,9 @@ const
   BootstrapNimPackageId = "nim@" & BootstrapNimVersion
   BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
-    "https://nim-lang.org/download/nim-2.2.10_x64.zip"
+    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip"
   BootstrapNimTarballSha256 =
-    "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
+    "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b"
   # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
   # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
   # x86_64: unsigned), so the monitor shim loads into it like into any other

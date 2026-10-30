@@ -40,6 +40,28 @@ type
       ## The stop must be confirmed (the unit's cgroup empty) before the
       ## switch goes on; a stop that cannot be confirmed refuses the apply
       ## (`EAddOnExclusiveOverlap`).
+    predecessors*: seq[string]
+      ## Exclusive starts only: the units whose control groups must be
+      ## empty, besides the unit's own, before it starts -- every
+      ## exclusive unit this generation removes (a rename's old name) and
+      ## the `.service` units the unit's own `Conflicts=` names (an
+      ## adoption under a new name). Not part of the rendered record: the
+      ## reason names them.
+    triggers*: seq[string]
+      ## `stop-start` only: the units that can activate this one (systemd's
+      ## `TriggeredBy=`: sockets, timers, paths) and were active at plan
+      ## time. Step 2 stops them before the unit, step 7 starts them again
+      ## after it, so an activation between the two steps cannot start the
+      ## old definition again. Named in the reason, not rendered apart.
+
+  UnitAliveness* = enum
+    ## What the unit's control group says (cgroup v2 ``cgroup.events``
+    ## ``populated``, which covers every child group of the unit).
+    uaEmpty = "empty"
+    uaPopulated = "populated"
+    uaUnknown = "unknown"
+      ## Could not be read (no unified hierarchy, a read error, systemd
+      ## not answering): an exclusive check treats it as alive.
 
   UnitFacts* = object
     ## One unit as the planner sees it, in dependency order.
@@ -50,6 +72,11 @@ type
     removed*: bool        ## leaves the profile in this apply
     isNew*: bool          ## not in the previous ledger
     active*: bool         ## ActiveState=active now
+    activeState*: string  ## the ActiveState observed (the plan pins it)
+    alive*: UnitAliveness ## the control group's population, observed for
+                          ## exclusive units (and their predecessors):
+                          ## ActiveState alone misses an instance left
+                          ## alive by a stop that timed out (`failed`)
     enabled*: bool        ## desired: enabled (an inactive enabled unit is
                           ## started when it is (re)applied)
     desiredActive*: bool  ## unitState: desired active (owned = false)
@@ -61,6 +88,37 @@ type
     fileChanged*: bool    ## the rendered unit file (or its closure) changed
     dropInsChanged*: bool ## a drop-in of the unit was created, changed or removed
     depsChanged*: bool    ## a resource it depends_on changed in this apply
+    predecessors*: seq[string]
+                          ## exclusive units: the `.service` units the
+                          ## unit's own `Conflicts=` names
+    triggers*: seq[string] ## active units that can activate it (TriggeredBy)
+
+proc running*(f: UnitFacts): bool =
+  ## Is an instance of the unit alive? For an exclusive unit the control
+  ## group decides, not ``ActiveState``: a SIGTERM-ignoring instance under
+  ## ``SendSIGKILL=no`` leaves its unit ``failed`` and its process alive,
+  ## and planning a plain ``start`` (or skipping a removed unit) would run
+  ## the successor beside it. An unknown population counts as alive.
+  f.active or (f.exclusive and f.alive != uaEmpty)
+
+proc conflictsServices*(content: string): seq[string] =
+  ## The ``.service`` units a unit file's ``[Unit]`` section names in
+  ## ``Conflicts=`` (space-separated, repeatable): an exclusive unit's
+  ## declared predecessors (spec §7.3). Implicit conflicts systemd adds
+  ## (``shutdown.target``) are not in the file and not services.
+  var inUnit = false
+  for raw in content.splitLines():
+    let line = raw.strip()
+    if line.startsWith("["):
+      inUnit = line == "[Unit]"
+      continue
+    if not inUnit or line.len == 0 or line[0] in {'#', ';'}:
+      continue
+    let eq = line.find('=')
+    if eq < 0 or line[0 ..< eq].strip() != "Conflicts": continue
+    for name in line[eq + 1 .. ^1].splitWhitespace():
+      if name.endsWith(".service") and name notin result:
+        result.add(name)
 
 proc isEffective*(t: Transition): bool =
   ## Does the switch act on it (every verb but `leave`)?
@@ -95,16 +153,31 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
   ## reaches it; an inactive unit is started by a change only when it is
   ## `enabled` (the `enable --now` of a plain apply).
   var stops, starts: seq[Transition]
+  # Every exclusive unit this generation removes is a predecessor of every
+  # exclusive unit it starts (a rename's old name): its control group must
+  # be empty before any of them starts.
+  var removedExclusive: seq[string]
+  for f in facts:
+    if f.removed and f.exclusive: removedExclusive.add(f.unit)
+  proc predecessorsOf(f: UnitFacts): seq[string] =
+    for u in removedExclusive & f.predecessors:
+      if u != f.unit and u notin result: result.add(u)
+  proc after(f: UnitFacts): string =
+    let p = predecessorsOf(f)
+    if p.len == 0: "" else: "; after confirming " & p.join(", ") & " exited"
   for f in facts:
     if f.removed:
-      if not f.active:
+      if not f.running:
         continue                        # nothing running: the file goes
       if f.stopHeld:
         starts.add(Transition(unit: f.unit, verb: tvLeave,
           reason: "removed; left running (stopOnRemoval = false)"))
       else:
         stops.add(Transition(unit: f.unit, verb: tvStop,
-          reason: "removed", exclusive: f.exclusive))
+          reason: (if f.active or not f.exclusive: "removed"
+                   else: "removed; " & f.activeState & " but its control " &
+                     "group is " & $f.alive),
+          exclusive: f.exclusive))
       continue
     if f.unitState:
       # A requirement on a distribution unit: its driver converges it.
@@ -116,12 +189,13 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
           reason: "unitState requires it stopped"))
       continue
     let changed = f.fileChanged or f.dropInsChanged or f.depsChanged
-    if not f.active:
+    if not f.running:
       if f.owned and f.enabled and (f.isNew or changed):
         starts.add(Transition(unit: f.unit, verb: tvStart,
           reason: (if f.isNew: "added (enabled)"
-                   else: "enabled and inactive; (re)applied"),
-          exclusive: f.exclusive))
+                   else: "enabled and inactive; (re)applied") & after(f),
+          exclusive: f.exclusive,
+          predecessors: (if f.exclusive: predecessorsOf(f) else: @[])))
       continue
     if not changed:
       continue
@@ -136,7 +210,13 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
     elif f.exclusive:
       starts.add(Transition(unit: f.unit, verb: tvStopStart,
         reason: why & "; exclusive: stopped and confirmed exited before " &
-          "the new instance starts", exclusive: true))
+          "the new instance starts" &
+          (if f.active: "" else: " (" & f.activeState &
+             ", control group " & $f.alive & ")") &
+          (if f.triggers.len > 0: "; pauses " & f.triggers.join(", ")
+           else: "") & after(f),
+        exclusive: true, predecessors: predecessorsOf(f),
+        triggers: f.triggers))
     elif f.reloadIfChanged and not f.fileChanged and not f.dropInsChanged:
       starts.add(Transition(unit: f.unit, verb: tvReload,
         reason: why & " (reloadIfChanged)"))
@@ -169,28 +249,52 @@ proc propagateDependencyChanges*(facts: var seq[UnitFacts];
 
 proc renderTransitions*(ts: seq[Transition]): string =
   ## The plan's transition section: ``<verb>\t<unit>\t<reason>`` lines,
-  ## machine-readable like the ledger diff.
+  ## with a fourth field ``exclusive`` on an entry whose stop must be
+  ## confirmed; machine-readable like the ledger diff.
   if ts.len == 0:
     return "service transitions: none\n"
   result = "service transitions:\n"
   for t in ts:
-    result.add("  " & $t.verb & "\t" & t.unit & "\t" & t.reason & "\n")
+    result.add("  " & $t.verb & "\t" & t.unit & "\t" & t.reason &
+               (if t.exclusive: "\texclusive" else: "") & "\n")
+
+type TransitionParseError* = object of ValueError
 
 proc parseTransitions*(text: string): seq[Transition] =
-  ## The inverse of ``renderTransitions`` over a plan's output (the gate
-  ## reads the section back).
+  ## The strict inverse of ``renderTransitions`` over a plan's output (the
+  ## gates read the section back): an unknown verb, a record with too few
+  ## or too many fields, or a fourth field other than ``exclusive`` is an
+  ## error, never read as ``leave``.
   var inSection = false
   for raw in text.splitLines():
     if raw.startsWith("service transitions:"):
-      inSection = true
+      inSection = raw.strip() == "service transitions:"
       continue
     if not inSection: continue
     if not raw.startsWith("  "):
       inSection = false
       continue
     let f = raw[2 .. ^1].split('\t')
-    if f.len < 3: continue
-    var verb = tvLeave
+    if f.len notin 3 .. 4:
+      raise newException(TransitionParseError,
+        "malformed transition record: " & raw)
+    var verb: TransitionVerb
+    var known = false
     for v in TransitionVerb:
-      if $v == f[0]: verb = v
-    result.add(Transition(unit: f[1], verb: verb, reason: f[2 .. ^1].join("\t")))
+      if $v == f[0]:
+        verb = v
+        known = true
+    if not known:
+      raise newException(TransitionParseError,
+        "unknown transition verb '" & f[0] & "': " & raw)
+    if f[1].len == 0:
+      raise newException(TransitionParseError,
+        "transition record without a unit: " & raw)
+    var exclusive = false
+    if f.len == 4:
+      if f[3] != "exclusive":
+        raise newException(TransitionParseError,
+          "unknown transition flag '" & f[3] & "': " & raw)
+      exclusive = true
+    result.add(Transition(unit: f[1], verb: verb, reason: f[2],
+                          exclusive: exclusive))

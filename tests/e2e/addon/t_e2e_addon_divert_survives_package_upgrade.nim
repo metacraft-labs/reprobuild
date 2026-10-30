@@ -18,6 +18,18 @@
 ## the diversion gone, and uninstall leaves the base as it was apart from
 ## the package upgrade itself.
 ##
+## Then a **ucf-managed** file: a second fixture package whose postinst
+## registers ``/etc/repro-fixture/u.conf`` with ``ucf`` (as openssh-server
+## does for ``sshd_config``), so the file is in no dpkg record and the
+## observer's ucf record owns it. Such a file cannot be diverted (owner
+## decision 2026-10-30): ucf follows dpkg's diversions but keys its records
+## by the original path, so it would withhold the package's next version
+## as ``<path>.distrib.ucf-dist`` (measured 2026-10-30 on Debian 13 and
+## Ubuntu 24.04), and undoing that would mean writing ucf's private state,
+## which the add-on does not do. The gate asserts the refusal, by default
+## (``EAddOnPackageOwned``) and with ``collision = "divert"`` (naming
+## ucf), with the fingerprint and the ledger unchanged.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_divert_survives_package_upgrade``).
 ##
 ## *Mocking.* None: a real package built by equivs, real dpkg.
@@ -46,6 +58,39 @@ fs.systemFile {
   managedEtcPrefixes = ["/etc/repro-fixture/"]
 }
 """
+  UPath = "/etc/repro-fixture/u.conf"
+  UDiverted = """addOn {
+  managedEtcPrefixes = ["/etc/repro-fixture/"]
+}
+
+fs.systemFile {
+  path = "/etc/repro-fixture/u.conf"
+  content = "ours
+"
+  collision = "divert"
+}
+"""
+
+proc buildUcfPackage(g: Guest; version, content: string): string =
+  ## A package that manages ``u.conf`` through ucf from its postinst, the way
+  ## openssh-server manages sshd_config: the file is not in the package's
+  ## data, so dpkg records nothing about it; ``ucf`` copies the shipped
+  ## version from /usr/share into place and ``ucfr`` registers it.
+  let dir = "/root/fixture/repro-fixture-ucf-" & version
+  let deb = dir & ".deb"
+  discard g.run("set -e; rm -rf " & dir & "; mkdir -p " & dir & "/DEBIAN " & dir &
+    "/usr/share/repro-fixture-ucf\n" &
+    "printf '%s' '" & content & "' > " & dir & "/usr/share/repro-fixture-ucf/u.conf\n" &
+    "cat > " & dir & "/DEBIAN/control <<'EOF'\nPackage: repro-fixture-ucf\nVersion: " & version &
+    "\nSection: misc\nPriority: optional\nArchitecture: all\nDepends: ucf\n" &
+    "Maintainer: Reprobuild add-on test bed <addon@testbed.invalid>\n" &
+    "Description: Reprobuild add-on ucf fixture\n A package that manages a file through ucf.\nEOF\n" &
+    "cat > " & dir & "/DEBIAN/postinst <<'EOF'\n#!/bin/sh\nset -e\nmkdir -p /etc/repro-fixture\n" &
+    "ucf --debconf-ok /usr/share/repro-fixture-ucf/u.conf " & UPath & "\n" &
+    "ucfr repro-fixture-ucf " & UPath & "\nEOF\n" &
+    "chmod 0755 " & dir & "/DEBIAN/postinst\n" &
+    "dpkg-deb --build --root-owner-group " & dir & " " & deb & " >/dev/null")
+  deb
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest
@@ -127,14 +172,45 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         if e.component == fcEtc and (e.key == Path or e.key == Path & ".distrib"):
           continue
         if e.component == fcDiversions and e.key == Path: continue
+        # A committed generation moves the static tree link (A4, §7.2).
+        if e.component == fcEtc and e.key == "/etc/repro/static": continue
         unexpected.add(renderDiff(@[e]))
-      step("remove: nothing but the diverted path changed", unexpected.len == 0,
-           unexpected.join(""))
+      step("remove: nothing but the diverted path (and the static tree link) changed",
+           unexpected.len == 0, unexpected.join(""))
+
+    # --- The ucf-managed file: never diverted. ---
+    let u1 = g.buildUcfPackage("1.0", "v1\n")
+    discard g.run("export DEBIAN_FRONTEND=noninteractive; dpkg -i " & u1 & " >/dev/null < /dev/null")
+    step("ucf: the fixture is registered with ucf and in no dpkg record",
+         g.exec("grep -Eq 'repro-fixture-ucf[[:space:]]+" & UPath & "$' /var/lib/ucf/registry && " &
+                "! grep -qx " & UPath & " /var/lib/dpkg/info/repro-fixture-ucf.list && " &
+                "test ! -e /var/lib/dpkg/info/repro-fixture-ucf.conffiles").exitCode == 0 and
+         g.run("cat " & UPath) == "v1\n", "")
+    f = g.takeFingerprint(repro)
+    l = g.ledgerOf()
+    let ur = g.applyProfile(repro, "ucf-refused", UDiverted.replace("  collision = \"divert\"\n", ""))
+    step("ucf: refused as package-owned by default, naming the package",
+         ur.exitCode == 2 and "EAddOnPackageOwned" in ur.stderr and "repro-fixture-ucf" in ur.stderr,
+         ur.stdout & ur.stderr)
+    let ua = g.applyProfile(repro, "ucf-divert", UDiverted)
+    step("ucf-divert: refused, naming ucf; nothing diverted",
+         ua.exitCode == 2 and "through ucf" in ua.stderr and "repro-fixture-ucf" in ua.stderr and
+         g.run("dpkg-divert --list " & UPath).strip().len == 0 and
+         g.sha256InGuest(UPath & ".distrib") == "absent" and
+         g.run("cat " & UPath) == "v1\n",
+         "exit " & $ua.exitCode & "\n" & ua.stdout & ua.stderr)
+    let same = identityReport(f, g.takeFingerprint(repro))
+    step("ucf-divert: the refused applies wrote nothing (fingerprint and ledger unchanged)",
+         same.ok and g.ledgerOf() == l, same.text)
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
+    # The upgrades changed the two packages' status and the two files'
+    # content; nothing else may differ -- in particular no `.distrib`,
+    # `.distrib.ucf-dist` or `.ucf-dist` beside either file.
     let ident = identityReport(fBase, g.takeFingerprint(repro),
-      ["dpkg-status:repro-fixture-conf*", "etc:" & Path])
+      ["dpkg-status:repro-fixture-conf*", "etc:" & Path,
+       "dpkg-status:repro-fixture-ucf*", "etc:" & UPath])
     step("base fingerprint after uninstall == before bootstrap (apart from the upgrade)",
          ident.ok, ident.text)
     step("the upgraded conffile is the maintainer's v2", g.run("cat " & Path) == "v2\n", "")

@@ -136,7 +136,10 @@ proc addOnDebianProfile*(): RealisationProfile =
               "same name (spec §4.3): `dropIn` or `replace`"),
           FieldRule(field: "dropInName", class: fcAddOnSpecific,
             reason: "names the drop-in file of a `collision = dropIn` " &
-              "unit")]),
+              "unit"),
+          FieldRule(field: "healthCheck", class: fcAddOnSpecific,
+            reason: "what the add-on switch's confirm step waits for " &
+              "before committing a generation (spec §7.5)")]),
     KindRule(kind: "systemd.systemDropIn", class: fcAddOnSpecific,
       reason: "a drop-in for a distribution unit the add-on does not " &
         "own, at `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` " &

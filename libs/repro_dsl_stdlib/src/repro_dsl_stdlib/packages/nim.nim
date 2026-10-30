@@ -71,16 +71,17 @@ package nim:
     # tarball(...) entry per (cpu, os) the package supports. The selector
     # takes the most specific entry matching the target; entries with
     # cpu/os = "any" (or omitted) match every target and act as a
-    # catch-all. URLs + SHAs come straight from nim-lang.org.
-    tarball url = "https://nim-lang.org/download/nim-2.2.10_x64.zip",
-      sha256 = "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f",
+    # catch-all. The Windows maintenance prefix is a qualified full source
+    # build; other platform archives retain their upstream supplier pins.
+    tarball url = "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip",
+      sha256 = "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "bin/nim.exe",
       packageId = "nim@2.2.10",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:nim@2.2.10:sha256:fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f",
+      lockIdentity = "tarball:nim@2.2.10:sha256:92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b",
       version = "2.2.10",
       extraExecutable = "bin\\atlas.exe",
       extraExecutable = "bin\\nimble.exe",

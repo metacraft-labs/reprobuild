@@ -59,8 +59,17 @@ type
     step*: SwitchStep         ## the last step completed
     status*: string           ## in-progress | failed
     stopped*: seq[string]     ## units step 2 stopped (and may need restarting
-                              ## by a recovery that undoes the switch)
+                              ## by a recovery that undoes the switch).
+                              ## Each is recorded BEFORE it is stopped, so a
+                              ## crash or a refusal in the middle of step 2
+                              ## never leaves a stopped unit unrecorded.
+    disabled*: seq[string]    ## units step 2 disabled, recorded the same way
     detail*: string           ## why it failed, when it did
+    attempt*: string          ## the generation id the infra apply allocated
+                              ## for this switch (known from step 4 on); the
+                              ## switch committed iff `current` names it
+    purpose*: string          ## apply | revert | rollback | replay: what
+                              ## started this switch (diagnostic only)
 
 const
   StaticLinkPath* = "/etc/repro/static"
@@ -142,6 +151,46 @@ proc realiseStaticTree*(files: seq[StaticFile]):
   s.registerRoot(PendingRootId, rkProfile)
   s.attachPrefixToRoot(PendingRootId, result.prefixId)
 
+proc holdOnPendingRoot*(prefixIds: openArray[PrefixIdBytes]) =
+  ## Attach more of the generation's closure (its units' realised package
+  ## closures) to the ``addon-pending`` root, so ``repro store gc`` can
+  ## collect none of what the switch is about to run from -- before the
+  ## commit, and after a crash until recovery promotes or releases it
+  ## (spec §7.2 step 1: the root is registered at realise). Called after
+  ## ``realiseStaticTree``, which registered the root: it is not registered
+  ## again here, because re-registering replaces the root's row.
+  if prefixIds.len == 0: return
+  enterWritableStoreView()
+  var s = openStore(StoreRoot)
+  defer: s.close()
+  for p in prefixIds:
+    s.attachPrefixToRoot(PendingRootId, p)
+
+proc promotePendingRoot*(generationId: string;
+                         extra: openArray[PrefixIdBytes] = []) =
+  ## Step 9: the committed generation's ``profile`` root takes over every
+  ## prefix the ``addon-pending`` root held (the static tree and the units'
+  ## closures, rooted at realise) plus ``extra`` (the prefixes its ledger
+  ## names), then the pending root goes. The generation root holds all of
+  ## them before the pending root lets any go, so nothing is collectable
+  ## in between. Idempotent: a recovery that finishes a committed switch
+  ## calls it again.
+  if not dirExists(StoreRoot): return
+  enterWritableStoreView()
+  var s = openStore(StoreRoot)
+  defer: s.close()
+  var held = s.prefixesHeldByRoot(PendingRootId)
+  for p in extra: held.add(p)
+  let rootId = RootIdPrefix & generationId
+  var exists = false
+  for r in s.listRoots():
+    if r.rootId == rootId: exists = true
+  if not exists:
+    s.registerRoot(rootId, rkProfile)
+  for p in held:
+    s.attachPrefixToRoot(rootId, p)
+  s.deleteRoot(PendingRootId)
+
 proc releasePendingRoot*() =
   ## Drop the ``addon-pending`` root once the generation holds the tree.
   if not dirExists(StoreRoot): return
@@ -183,6 +232,9 @@ proc render*(m: PendingMarker): string =
   result.add("status\t" & escapeField(m.status) & "\n")
   result.add("stopped\t" & escapeField(m.stopped.join(" ")) & "\n")
   result.add("detail\t" & escapeField(m.detail) & "\n")
+  result.add("disabled\t" & escapeField(m.disabled.join(" ")) & "\n")
+  result.add("attempt\t" & escapeField(m.attempt) & "\n")
+  result.add("purpose\t" & escapeField(m.purpose) & "\n")
 
 proc parsePendingMarker*(text: string): PendingMarker =
   let lines = text.splitLines()
@@ -212,6 +264,10 @@ proc parsePendingMarker*(text: string): PendingMarker =
     of "stopped":
       if v.len > 0: result.stopped = v.split(' ')
     of "detail": result.detail = v
+    of "disabled":
+      if v.len > 0: result.disabled = v.split(' ')
+    of "attempt": result.attempt = v
+    of "purpose": result.purpose = v
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
 

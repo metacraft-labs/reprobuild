@@ -57,12 +57,52 @@
 ## ``sysctl-in-apply-namespace``              sysctl fragments are applied
 ##                                            by running systemd-sysctl in
 ##                                            the apply's own namespaces
-##                                            instead of restarting the
-##                                            host's systemd-sysctl.service
+##                                            instead of as a transient
+##                                            unit in the host's
+## ``exclusive-exited-by-top-level-procs``    an exclusive unit counts as
+##                                            exited when the top-level
+##                                            ``cgroup.procs`` of its group
+##                                            is empty, and an unreadable
+##                                            group as exited (a delegated
+##                                            child group goes unseen)
+## ``plan-id-omits-unit-state``               the add-on plan id covers the
+##                                            units but not their observed
+##                                            state, so a pinned apply does
+##                                            not see a unit that crashed
+##                                            since the plan
+## ``reassert-required-by-boot``              the re-assert unit is wanted
+##                                            by multi-user.target and
+##                                            ``Requires=`` the store
+##                                            mount, so a missing store
+##                                            fails it before it reports
+## ``reassert-skips-recovery``                the re-assert unit leaves an
+##                                            interrupted switch as it
+##                                            finds it (a negative control
+##                                            of the hard-reset gate: the
+##                                            resets must leave mixtures)
 ## ``path-based-write-follows-links``         the drivers write managed
 ##                                            files with a path-based
 ##                                            ``open``, following any link
 ##                                            on the path
+## ``scope-accepts-unnormalised-paths``       a target path or managed
+##                                            prefix with a ``//``, ``.``
+##                                            or ``..`` segment is not
+##                                            refused (the parser's and
+##                                            the scope check's canonical
+##                                            form check is compiled out)
+## ``pause-before-write``                     NOT a breakage: the test seam
+##                                            of the write-time re-check
+##                                            gate. The apply pauses after
+##                                            planning, before the first
+##                                            write, while the FIFO
+##                                            ``/run/repro-addon-test-seam/
+##                                            continue`` exists, so the
+##                                            gate can change the host
+##                                            deterministically in between
+## ``pause-before-write-no-recheck``          the same seam, and the
+##                                            write-time re-check (the
+##                                            ``PreWriteGuard``, destroys
+##                                            included) is not installed
 ## =========================================  ==============================
 
 const
@@ -76,7 +116,14 @@ const
                           "observer-checks-path-text-only",
                           "exclusive-as-plain-restart",
                           "sysctl-in-apply-namespace",
-                          "path-based-write-follows-links"]
+                          "exclusive-exited-by-top-level-procs",
+                          "plan-id-omits-unit-state",
+                          "path-based-write-follows-links",
+                          "scope-accepts-unnormalised-paths",
+                          "reassert-required-by-boot",
+                          "reassert-skips-recovery",
+                          "pause-before-write",
+                          "pause-before-write-no-recheck"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}
@@ -86,3 +133,8 @@ template mutated*(name: static string): bool =
   static:
     doAssert name in KnownAddonMutations, "unknown add-on mutation " & name
   AddonMutation == name
+
+const TestPauseSeam* = AddonMutation in ["pause-before-write",
+                                         "pause-before-write-no-recheck"]
+  ## The write-time re-check gate's pause seam is compiled in (a test-only
+  ## build; see the table above). False in every product build.

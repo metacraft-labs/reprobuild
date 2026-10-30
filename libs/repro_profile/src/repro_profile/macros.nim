@@ -1086,6 +1086,7 @@ proc parseAddOnSection(body: NimNode; profileVar: NimNode): NimNode =
   ##     managedEtcPrefixes:
   ##       "/etc/vaultwarden/"
   ##       "/etc/caddy/"
+  ##     confirmTimeout: 30      # optional, seconds (§7.5)
   ##
   ## Each prefix is one string literal per line: `/etc/name/` for a subtree,
   ## `/etc/name` for that exact path. The macro records them
@@ -1103,9 +1104,20 @@ proc parseAddOnSection(body: NimNode; profileVar: NimNode): NimNode =
     of nnkCommentStmt:
       continue
     of nnkCall:
+      if entry[0].kind == nnkIdent and $entry[0] == "confirmTimeout":
+        # `confirmTimeout: 30`: whole seconds. The range is the text
+        # form's (`repro_infra.MaxConfirmTimeoutSec`), checked when the
+        # compiled profile is rendered to it.
+        if entry.len < 2 or entry[1].kind != nnkStmtList or
+            entry[1].len != 1 or entry[1][0].kind notin {nnkIntLit .. nnkInt64Lit}:
+          error("confirmTimeout: expects a whole number of seconds", entry)
+        let secs = newIntLitNode(entry[1][0].intVal)
+        result.add quote do:
+          `profileVar`.addOn.confirmTimeoutSec = `secs`
+        continue
       if entry[0].kind != nnkIdent or $entry[0] != "managedEtcPrefixes":
         error("addOn: unknown field " & entry[0].repr &
-              " (known: managedEtcPrefixes)", entry)
+              " (known: managedEtcPrefixes, confirmTimeout)", entry)
       if entry.len < 2 or entry[1].kind != nnkStmtList:
         error("managedEtcPrefixes must be an indented block of string " &
               "literals", entry)

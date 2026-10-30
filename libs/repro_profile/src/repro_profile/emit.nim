@@ -305,7 +305,12 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # unchanged.
   if p.addOn.declared:
     result.add ",\"addOn\":{\"managedEtcPrefixes\":" &
-      encodeStringArray(p.addOn.managedEtcPrefixes) & "}"
+      encodeStringArray(p.addOn.managedEtcPrefixes)
+    # Only when declared, so the envelope of a profile without it is
+    # unchanged.
+    if p.addOn.confirmTimeoutSec > 0:
+      result.add ",\"confirmTimeout\":" & $p.addOn.confirmTimeoutSec
+    result.add "}"
   # The concerns Reprobuild applies per host (`applies:` in a block-form
   # `hosts:` entry), only when some host declares them, so the key set of a
   # profile without a declaration is unchanged
@@ -544,6 +549,11 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         raise newException(ValueError,
           "addOn.managedEtcPrefixes must be an array of strings")
       result.addOn.managedEtcPrefixes.add it.getStr()
+    if a.hasKey("confirmTimeout"):
+      if a["confirmTimeout"].kind != JInt or a["confirmTimeout"].getInt() <= 0:
+        raise newException(ValueError,
+          "addOn.confirmTimeout must be a positive number of seconds")
+      result.addOn.confirmTimeoutSec = a["confirmTimeout"].getInt()
   # Optional; absent when no host declares the concerns Reprobuild applies.
   if root.hasKey("hostApplies"):
     for k, v in root["hostApplies"]:

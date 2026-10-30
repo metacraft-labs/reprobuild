@@ -292,6 +292,19 @@ suite "no-follow primitives":
     check removeEmptyDirNoFollow(root / "etc" / "new" / "deep" / "dir")
     check not removeEmptyDirNoFollow(root / "etc" / "new")  # not empty
 
+  test "a temporary file a crashed run left behind does not block the write":
+    # A writer that died between creating its temporary file and renaming
+    # it leaves `.<leaf>.repro-tmp-<pid>`; once the PID is reused the
+    # exclusive create would fail for ever.
+    let p = root / "etc" / "app" / "crash.conf"
+    let leftover = root / "etc" / "app" /
+      (".crash.conf.repro-tmp-" & $getCurrentProcessId())
+    writeFile(leftover, "half-written")
+    writeFileNoFollow(p, "whole\n", 0o644)
+    check readFile(p) == "whole\n"
+    check not fileExists(leftover)
+    removeFile(p)
+
   test "leafNoFollow reports what is there":
     check leafNoFollow(root / "etc" / "app" / "a.conf").kind == lkLink
     check leafNoFollow(root / "etc" / "app").kind == lkDir

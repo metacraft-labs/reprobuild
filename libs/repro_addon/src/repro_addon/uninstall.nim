@@ -37,7 +37,10 @@
 
 import std/[algorithm, os, posix, sets, strutils]
 
+import repro_elevation/posix_system_driver
+
 import ./addon_apply
+import ./collision
 import ./etc_write
 import ./generation0
 import ./host_exec
@@ -85,7 +88,9 @@ proc removeOwned(e: LedgerEntry; r: var UninstallResult) =
     if restorePreserved(e):
       r.removed.add(e.path & " (restored)")
     else:
-      removeFile(e.path)
+      # Unlinked relative to its parent's descriptor: never through a link
+      # planted on the path since it was observed (threat model G29).
+      discard removeLeafNoFollow(e.path)
       r.removed.add(e.path)
     r.undone.incl(entryKey(e))
   except CatchableError as ex:
@@ -202,10 +207,17 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   for c in LedgerClass:
     byClass[c].reverse()
 
-  # 1. Stop and disable every unit. `disable` removes the [Install] links;
-  #    stopping repro-store.mount unmounts the store's read-only bind.
+  # 1. Stop and disable every unit the add-on created. `disable --now`
+  #    removes the [Install] links; stopping repro-store.mount unmounts the
+  #    store's read-only bind. A replaced or adopted unit (its base state is
+  #    in the ledger) is handed back instead: its file is restored or removed
+  #    in step 2, and after the daemon reload of step 4 the base's enablement
+  #    and activity are re-asserted (spec §4.2, C36).
+  var handBack: seq[LedgerEntry]
   for u in byClass[lcUnit]:
-    if fileExists(u.path):
+    if u.collision in ["replace", "adopt", "reconcile"]:
+      handBack.add(u)
+    elif fileExists(u.path):
       systemctlOrRecord(["disable", "--now", u.unit], result)
 
   # 2. Units and drop-ins, and any install link `disable` did not remove.
@@ -229,17 +241,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
           "the one the ledger recorded (it drifted, or is not the add-on's); " &
           "the diversion is left in place until the path is free")
         continue
-      let exe = resolveHostTool(DpkgDivertCandidates)
-      if exe.len == 0:
-        result.errors.add(dv.path & ": dpkg-divert is not installed")
-        continue
-      let res = runHostTool([exe, "--local", "--rename", "--remove", dv.path])
-      if res.exitCode != 0:
-        result.errors.add("dpkg-divert --remove " & dv.path & ": " &
-                          res.output.strip())
-      else:
+      # The same removal the apply's destroy runs.
+      try:
+        removeLocalDpkgDiversion(dv.path)
         result.removed.add("diversion " & dv.path)
         result.undone.incl(entryKey(dv))
+      except CatchableError as ex:
+        result.errors.add("dpkg-divert --remove " & dv.path & ": " & ex.msg)
 
   # 4. /etc files (those a diversion step did not already take), then the
   #    directories the add-on created, deepest first; the kernel values
@@ -260,6 +268,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       result.undone.incl(entryKey(sl))
   removeEmptyDirs(byClass[lcDir])
   systemctlOrRecord(["daemon-reload"], result)
+  for u in handBack:
+    if entryKey(u) notin result.undone:
+      continue                   # left as drift above: not ours to touch
+    try:
+      restoreUnitState(u, detectCollisionDriver())
+    except CatchableError as ex:
+      result.errors.add(u.unit & ": " & ex.msg)
   for sc in byClass[lcSysctl]:
     if readLiveSysctl(sc.path) != sc.value:
       result.undone.incl(entryKey(sc))   # not ours any more: left as is

@@ -27298,9 +27298,11 @@ proc resolveProducerBinding*(selector: string;
       contentIdentity: resolved.binding.contentIdentity,
       overrideBinding: resolved.binding)
 
-  # 2. lock-pinned mode — no override matched; consult the committed lock.
+  # 2. lock-pinned mode — consult sibling pins, not the consumer's own record.
+  # The self row is bookkeeping and can name an earlier containing revision.
+  # It does not turn a same-named archive or host tool into a source producer.
   for dep in lock.deps:
-    if dep.name == selector:
+    if dep.name == selector and not isSelfLockedDep(dep):
       return ProducerBinding(
         selector: selector,
         kind: pbkLockPinned,
@@ -27315,6 +27317,15 @@ proc resolveProducerBinding*(selector: string;
   block onDiskSibling:
     let sibling = findSiblingProjectFile(selector, workspaceRoot)
     if sibling.len > 0:
+      let consumerRoot =
+        if workspaceRoot.len > 0: workspaceRoot
+        else: getCurrentDir()
+      # ../nim/repro.nim from a consumer named nim is its own recipe. Compare
+      # directory identity so aliases and case differences cannot claim it as
+      # a sibling after the self row has been excluded above.
+      if dirExists(extendedPath(consumerRoot)) and
+          sameFile(extendedPath(parentDir(sibling)), extendedPath(consumerRoot)):
+        return ProducerBinding(selector: selector, kind: pbkNotProducer)
       return ProducerBinding(
         selector: selector,
         kind: pbkOnDiskSibling,

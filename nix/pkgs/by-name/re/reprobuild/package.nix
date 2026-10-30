@@ -105,8 +105,8 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "75334780682e70b1adb58bf813d869e7f5df63f5";
-    hash = "sha256-3RJlICnd6npijpbB0ZnMUmPkYeKQBGFBQoamkuEg8xI=";
+    rev = "3af8a4e937dcf68666d1e47e4191cad496c6d793";
+    hash = "sha256-w2b3D6BdOA5NZthVhIcsAuti1Pz1UxiEDnCwjwkJdM4=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -129,8 +129,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "e05beda08343b04b3d53f008ebcd0fe7bd27d8b1";
-    hash = "sha256-GmuldVzusLd3VQB8IFNz1tptxb555r1At2+CCaKDFL8=";
+    rev = "e0fe6b4461f0555a7b44d57f42d1dbc6e07d1255";
+    hash = "sha256-OgJJqJG6WS5bjimeCj5labICT2PoxuS9ABOFzq40twI=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -177,8 +177,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "35b9dfe4af6e18f3f2a2242ece7cff330eb581e2";
-    hash = "sha256-b8gZqy5EpKbKdBAU3BdjmbgtFfGWO5LCdxJAH17EGis=";
+    rev = "9818dc0c90be8ba7993424a7bbfbb6e009ffa965";
+    hash = "sha256-A9b+rJTlp/pz6MgmZot/WDfvozmOYzBpPFOhRbxUUAM=";
   },
 }:
 let
@@ -230,7 +230,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.18";
+  version = "0.2.19";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -241,8 +241,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "413830138a7a73293dfc551d623f7bf2cb0ab62c";
-    hash = "sha256-BWzQFwTN+Z/SvONo6FpRbrZusXJZfP+qDcz7qD677Ek=";
+    rev = "f7903db3c1799562d9de1f5ca99ee31f8519efd8";
+    hash = "sha256-D6rOfOyGnaQCehpBi7bzPEUUVqDuvQ7Ud+w7RW2s10Q=";
   };
 
   strictDeps = true;

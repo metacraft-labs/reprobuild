@@ -34,7 +34,7 @@
 ## package-unit rows must go red; ``observer-checks-path-text-only``
 ## skips the link check, so the symlink gate must go red.
 
-import std/[os, sets, strutils, tables]
+import std/[os, posix, sets, strutils, tables]
 
 import repro_elevation
 import repro_infra/addon_diagnostics
@@ -50,6 +50,9 @@ type
   PackageOwnership* = object
     package*: string      ## "" when no installed package lists the path
     conffile*: bool       ## the package declares it a conffile
+    viaUcf*: bool         ## the package manages it through ``ucf`` (Debian:
+                          ## registered in ``/var/lib/ucf/registry``, in no
+                          ## dpkg record), the fourth ownership record
 
   DiversionRecord* = object
     present*: bool
@@ -72,6 +75,10 @@ type
     dropInHint*: proc(path: string): string {.gcsafe.}
       ## A drop-in directory the program behind ``path`` is known to
       ## read, or "".
+    diversionTarget*: proc(path: string): string {.gcsafe.}
+      ## Where this distribution's diversion of ``path`` sends the
+      ## package's copy (dpkg: ``<path>.distrib``). "" on a base without
+      ## diversions.
     supportsDiversions*: bool
       ## dpkg has ``dpkg-divert``; pacman does not, and the plan says so
       ## by name when the ``divert`` opt-in is asked for.
@@ -119,11 +126,40 @@ type
 
 const
   DpkgInfoDir* = "/var/lib/dpkg/info"
-  PackageUnitDirs* = ["/usr/lib/systemd/system/", "/lib/systemd/system/",
-                      "/usr/local/lib/systemd/system/"]
+  UcfRegistry* = "/var/lib/ucf/registry"
+    ## ``ucf``'s registry: one ``<package> <path>`` line per file a
+    ## package's maintainer scripts manage through ``ucf`` (openssh-server's
+    ## ``/etc/ssh/sshd_config`` on Debian 13 and Ubuntu 24.04). Such a file
+    ## is package-owned without being in any dpkg record.
+  PackageUnitDirs* = ["/usr/lib/systemd/system/", "/lib/systemd/system/"]
     ## Where a package's unit lives. A ``FragmentPath`` below one of
     ## these, with no ``/etc`` unit of the same name, is the
-    ## ``EAddOnUnitShadows`` row.
+    ## ``EAddOnUnitShadows`` row. ``/usr/local/lib/systemd/system`` is the
+    ## local administrator's, not a package's: a unit there is refused
+    ## with no opt-in, like a transient or generated one (see
+    ## ``classifyUnit``).
+
+type
+  UnitClass* = enum
+    ## Where systemd loads a unit from, as the decision table sees it.
+    ucNone = "none"           ## no unit of that name is loaded
+    ucEtc = "etc"             ## ``/etc/systemd/system``: the add-on's or a hand-written one
+    ucPackage = "package"     ## a package unit directory
+    ucMasked = "masked"       ## masked (permanently or at runtime)
+    ucElsewhere = "elsewhere" ## transient (``/run/systemd/system``), generated, or local
+                              ## (``/usr/local/lib``): shadowing it silently is wrong,
+                              ## and no opt-in covers it
+
+proc classifyUnit*(u: UnitProvision): UnitClass =
+  if u.loadState.startsWith("masked"):
+    return ucMasked
+  if u.fragmentPath.len == 0:
+    return ucNone
+  if u.fragmentPath.startsWith(SystemdSystemUnitDir & "/"):
+    return ucEtc
+  for d in PackageUnitDirs:
+    if u.fragmentPath.startsWith(d): return ucPackage
+  ucElsewhere
 
 proc isPackageUnit*(u: UnitProvision): bool =
   ## Does a package provide the unit (its fragment is under a package
@@ -145,7 +181,17 @@ type
   DpkgIndex = ref object
     owner: Table[string, string]     ## path -> package
     conffiles: HashSet[string]
+    ucf: Table[string, string]       ## path -> package, from ucf's registry
     loaded: bool
+    stamp: string                    ## ``indexStamp`` the tables were read at
+
+proc parseUcfRegistry*(text: string): Table[string, string] =
+  ## ``<package> <path>`` lines of ``/var/lib/ucf/registry`` -> path ->
+  ## package. Blank lines and lines without an absolute path are skipped.
+  for line in text.splitLines():
+    let f = line.splitWhitespace()
+    if f.len >= 2 and f[1].len > 1 and f[1][0] == '/':
+      result[f[1]] = f[0]
 
 proc packageNameOfInfoFile(fileName: string): string =
   ## ``bash.list`` -> ``bash``; ``libc6:amd64.list`` -> ``libc6`` (the
@@ -156,14 +202,68 @@ proc packageNameOfInfoFile(fileName: string): string =
   if colon > 0: n = n[0 ..< colon]
   n
 
+proc statStamp(path: string): string =
+  ## Inode, size, modification and status-change times of ``path``
+  ## (nanoseconds), or ``absent``.
+  var st: Stat
+  if lstat(path.cstring, st) != 0:
+    return "absent"
+  $st.st_ino & ":" & $st.st_size & ":" & $int64(st.st_mtim.tv_sec) & "." &
+    $st.st_mtim.tv_nsec & ":" & $int64(st.st_ctim.tv_sec) & "." & $st.st_ctim.tv_nsec
+
+proc indexStamp*(root: string): string =
+  ## What the package index depends on, cheaply: the stamp of the
+  ## ``info`` directory and of ucf's registry.
+  ##
+  ## Why the directory's stamp covers every ``*.list`` and ``*.conffiles``
+  ## file: dpkg never rewrites one of them in place. A file list is
+  ## written to ``<pkg>.list-new`` and renamed over ``<pkg>.list``
+  ## (dpkg's atomic-file writer), control files such as ``*.conffiles``
+  ## are unpacked to ``/var/lib/dpkg/tmp.ci`` and renamed into ``info``,
+  ## and a removal unlinks them -- each of which changes the directory's
+  ## entries and so its modification and status-change times
+  ## (rename(2), unlink(2)). ucf's ``ucfr`` replaces its registry by
+  ## writing a temporary file and renaming it, which changes the
+  ## registry's inode. dpkg's ``status`` file (rewritten by rename on
+  ## every package state change) and the diversion database are stamped
+  ## too, so a package operation is seen even where a filesystem's
+  ## coarse timestamps (one-second or worse) could leave the directory's
+  ## times unchanged across two renames within the same tick: the status
+  ## file's inode changes with every rewrite. Known limit (spec §4.3): an
+  ## in-place edit of a ``*.list`` file that changes neither its inode,
+  ## its size nor any of the stamped times is not seen until the next
+  ## change of one of them; dpkg never edits a list in place.
+  statStamp(root / DpkgInfoDir) & "|" & statStamp(root / UcfRegistry) &
+    "|" & statStamp(root / "/var/lib/dpkg/status") & "|" &
+    statStamp(root / DpkgDiversionsDb)
+
 proc loadDpkgIndex(root: string; idx: DpkgIndex) =
-  ## Every installed package's file list, read once per observer. The
-  ## lists name the paths as installed (dpkg strips nothing), so a lookup
-  ## is an exact match on the path text.
-  if idx.loaded: return
-  idx.loaded = true
+  ## Every installed package's file list. The lists name the paths as
+  ## installed (dpkg strips nothing), so a lookup is an exact match on the
+  ## path text -- which is why every target path is canonical before it
+  ## gets here (``nonCanonicalPathError``).
+  ##
+  ## The tables are read again whenever ``indexStamp`` changed since they
+  ## were read, so the observer the apply keeps for its whole run still
+  ## sees a package installed between the plan and a write (the guard's
+  ## per-operation freshness) without re-reading every list for every
+  ## operation.
+  ##
+  ## A missing ``info`` directory refuses (fail closed): with no file
+  ## lists every path would read as unowned, and the add-on would write
+  ## over package files believing nobody owns them.
+  let stamp = indexStamp(root)
+  if idx.loaded and stamp == idx.stamp: return
   let dir = root / DpkgInfoDir
-  if not dirExists(dir): return
+  if not dirExists(dir):
+    raise newException(AddonCollisionError, "the dpkg package database " &
+      "is incomplete: " & dir & " does not exist, so package ownership " &
+      "cannot be observed; nothing is decided without it")
+  idx.owner = initTable[string, string]()
+  idx.conffiles = initHashSet[string]()
+  idx.ucf = initTable[string, string]()
+  idx.loaded = true
+  idx.stamp = stamp
   for f in walkFiles(dir / "*.list"):
     let pkg = packageNameOfInfoFile(extractFilename(f))
     for line in readFile(f).splitLines():
@@ -177,6 +277,9 @@ proc loadDpkgIndex(root: string; idx: DpkgIndex) =
         if tok.len > 1 and tok[0] == '/':
           idx.conffiles.incl(tok)
           break
+  let registry = root / UcfRegistry
+  if fileExists(registry):
+    idx.ucf = parseUcfRegistry(readFile(registry))
 
 proc parseSystemctlShow*(text: string): Table[string, string] =
   ## ``Key=Value`` lines of ``systemctl show``.
@@ -195,15 +298,28 @@ proc unitProvisionFromShow*(text: string): UnitProvision =
   result.activeState = kv.getOrDefault("ActiveState")
 
 proc readUnitProvision*(unit: string): UnitProvision =
-  ## ``systemctl show`` for one unit. A host without systemctl reports an
-  ## empty provision (the preflight already refused such a host).
+  ## ``systemctl show`` for one unit. Fails closed: a missing systemctl,
+  ## a non-zero exit (no bus, systemd not answering) or an answer without
+  ## ``LoadState`` raises ``AddonCollisionError`` instead of reading as
+  ## "no unit of that name" -- which the decision table would take for
+  ## permission to create an /etc unit over whatever really provides it.
+  ## (A unit that does not exist is not an error: systemctl answers 0
+  ## with ``LoadState=not-found``.)
+  var r: HostToolResult
   try:
-    let r = runSystemctl(["show", "-p",
+    r = runSystemctl(["show", "-p",
       "LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState",
       "--", unit])
-    unitProvisionFromShow(r.output)
-  except HostToolMissing:
-    UnitProvision()
+  except HostToolMissing as e:
+    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+      ": " & e.msg)
+  if r.exitCode != 0:
+    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+      ": systemctl show exited " & $r.exitCode & ": " & r.output.strip())
+  result = unitProvisionFromShow(r.output)
+  if result.loadState.len == 0:
+    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+      ": systemctl show reported no LoadState: " & r.output.strip())
 
 proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
                     UnitProvision {.gcsafe.} = nil): CollisionDriver =
@@ -221,6 +337,8 @@ proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
       if path in idx.owner:
         PackageOwnership(package: idx.owner[path],
                          conffile: path in idx.conffiles)
+      elif path in idx.ucf:
+        PackageOwnership(package: idx.ucf[path], conffile: true, viaUcf: true)
       else:
         PackageOwnership()
   result.diversion = proc(path: string): DiversionRecord =
@@ -247,10 +365,17 @@ proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
     # Programs that read a `.d` directory beside their file (sshd's
     # `Include /etc/ssh/sshd_config.d/*.conf`, sudoers, ...) ship it.
     if dirExists(path & ".d"): path & ".d/" else: ""
+  result.diversionTarget = proc(path: string): string =
+    dpkgDiversionTarget(path)
 
 proc detectCollisionDriver*(root = "/"): CollisionDriver =
   ## The driver for the host's distribution: dpkg where its database is.
+  ## A status file without the ``info`` directory is a damaged database,
+  ## refused rather than read as "nothing is owned" (``loadDpkgIndex``).
   if fileExists(root / "/var/lib/dpkg/status"):
+    if not dirExists(root / DpkgInfoDir):
+      raise newException(AddonCollisionError, "the dpkg package database " &
+        "is incomplete: " & root / DpkgInfoDir & " does not exist")
     return newDpkgDriver(root)
   raise newAddOnUnsupportedBase("unknown",
     "no package database the collision observer can read (dpkg at " &
@@ -320,8 +445,9 @@ proc observationText*(o: TargetObservation; kind: TargetKind): string =
   if o.diversion.present and o.diversion.package != ":":
     return "diversion:" & o.diversion.package
   if o.ownership.package.len > 0:
-    return (if o.ownership.conffile: "conffile:" else: "package:") &
-      o.ownership.package
+    return (if o.ownership.viaUcf: "ucf:"
+            elif o.ownership.conffile: "conffile:"
+            else: "package:") & o.ownership.package
   if kind == tkUnit and o.unit.fragmentPath.len > 0 and
       not o.unit.fragmentPath.startsWith(SystemdSystemUnitDir & "/"):
     return "unit:" & o.unit.fragmentPath
@@ -340,6 +466,7 @@ type
     desiredContent*: string    ## the bytes themselves (for preservation)
     ledgerSha256*: string      ## the current ledger's digest, "" if unowned
     ledgerOwns*: bool
+    ledgerOwnsDiversion*: bool ## the ledger lists a diversion of the path
     collision*: string         ## the resource's opt-in, "" for none
     divertedByProfile*: bool   ## a `linux.dpkgDiversion` of the path is declared
     reconcileDrift*: bool
@@ -351,17 +478,40 @@ proc refuseLink(o: TargetObservation; address: string) =
       o.linkComponent & " is a symbolic link on the target path " & o.path &
       "; the add-on never writes through a link (threat model G29)")
 
-proc refuseForeignDiversion(o: TargetObservation; address: string) =
-  ## Someone else's diversion of the path: no opt-in exists.
-  if not o.diversion.present: return
-  let local = o.diversion.package == ":" and
-              o.diversion.divertTo == dpkgDiversionTarget(o.path)
-  if not local:
-    raise newException(AddonCollisionError, "refusing " & address & ": " &
-      o.path & " is already diverted to " & o.diversion.divertTo & " by " &
-      (if o.diversion.package == ":": "a local diversion"
-       else: "package " & o.diversion.package) &
-      "; an existing diversion by someone else has no opt-in")
+proc refuseForeignDiversion(o: TargetObservation; address: string;
+                            ownedByLedger: bool) =
+  ## Someone else's diversion of the path: no opt-in exists. A diversion
+  ## the ledger does not list is someone else's whatever its target is
+  ## called -- a local diversion to ``<path>.distrib`` made by hand is not
+  ## the add-on's because it spells its name the way the add-on would.
+  if not o.diversion.present or ownedByLedger: return
+  raise newException(AddonCollisionError, "refusing " & address & ": " &
+    o.path & " is already diverted to " & o.diversion.divertTo & " by " &
+    (if o.diversion.package == ":": "a local diversion the ledger does not list"
+     else: "package " & o.diversion.package) &
+    "; an existing diversion by someone else has no opt-in")
+
+proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
+                     address: string) =
+  ## A file a package manages through ucf cannot be diverted (owner
+  ## decision 2026-10-30). ucf follows dpkg's diversions but keys its own
+  ## records by the original path, so on the package's next upgrade it
+  ## cannot tell the diverted copy is unmodified and withholds the new
+  ## maintainer version as `<path>.distrib.ucf-dist`; undoing that on
+  ## removal would mean writing ucf's private state (its hashfile and
+  ## cache), which the add-on does not do. The plan refuses instead and
+  ## names what does work: the program's drop-in directory when it reads
+  ## one.
+  if not o.ownership.viaUcf: return
+  let hint = d.dropInHint(o.path)
+  raise newException(AddonCollisionError, "refusing " & address & ": " &
+    o.path & " is managed by package " & o.ownership.package &
+    " through ucf (/var/lib/ucf/registry), and a ucf-managed file cannot " &
+    "be diverted: ucf would withhold the package's next version of it " &
+    "and the add-on does not write ucf's records to undo that. " &
+    (if hint.len > 0: "Put the change in a drop-in under " & hint & " instead."
+     else: "Change it through a drop-in or configuration directory the " &
+           "program reads, or leave it to the package."))
 
 proc decideFile(d: CollisionDriver; o: TargetObservation;
                 inp: DecisionInputs): CollisionDecision =
@@ -370,7 +520,7 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
   result.observation = observationText(o, tkFile)
   result.observedSha256 = o.sha256
   refuseLink(o, inp.address)
-  refuseForeignDiversion(o, inp.address)
+  refuseForeignDiversion(o, inp.address, inp.ledgerOwnsDiversion)
   if o.exists and not o.isRegular:
     raise newException(AddonCollisionError, "refusing " & inp.address &
       ": " & o.path & " exists and is not a regular file")
@@ -407,10 +557,11 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
         ": " & o.path & " is owned by package " & o.ownership.package &
         " and the " & d.name & " base has no diversions; `collision = " &
         "\"divert\"` is unavailable here")
+    refuseUcfDivert(d, o, inp.address)
     result.verdict = cvDivert
     result.reason = "owned by package " & o.ownership.package &
       (if o.ownership.conffile: " (conffile)" else: "") &
-      "; diverted to " & dpkgDiversionTarget(o.path) & " by opt-in"
+      "; diverted to " & d.diversionTarget(o.path) & " by opt-in"
     return
   # Unowned rows.
   if not o.exists:
@@ -456,7 +607,7 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
     var dec = CollisionDecision(observation: observationText(o, tkFile),
                                 observedSha256: o.sha256)
     refuseLink(o, inp.address)
-    refuseForeignDiversion(o, inp.address)
+    refuseForeignDiversion(o, inp.address, inp.ledgerOwns)
     if not d.supportsDiversions:
       raise newException(AddonCollisionError, "refusing " & inp.address &
         ": the " & d.name & " base has no diversions")
@@ -464,9 +615,11 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
       raise newException(AddonCollisionError, "refusing " & inp.address &
         ": no installed package owns " & path & "; a diversion is only " &
         "for a package-owned path (declare the file as an fs.systemFile)")
+    refuseUcfDivert(d, o, inp.address)
     if o.diversion.present:
-      dec.verdict = (if inp.ledgerOwns: cvNoOp else: cvAdopt)
-      dec.reason = "already diverted locally to " & o.diversion.divertTo
+      # Only reachable when the ledger owns it (a foreign one was refused).
+      dec.verdict = cvNoOp
+      dec.reason = "the add-on's diversion to " & o.diversion.divertTo
     else:
       dec.verdict = cvCreate
       dec.reason = "owned by package " & o.ownership.package & "; diverted"
@@ -476,20 +629,40 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
     var dec = CollisionDecision(observation: observationText(o, tkUnit),
                                 observedSha256: o.sha256)
     refuseLink(o, inp.address)
+    # Someone else's diversion of the /etc unit path refuses it whether or
+    # not a file is there now (a diversion of an absent path is still
+    # dpkg's promise to put the package's file elsewhere).
+    refuseForeignDiversion(o, inp.address, inp.ledgerOwnsDiversion)
     if o.ownership.package.len > 0:
       raise newAddOnPackageOwned(o.path, o.ownership.package,
                                  o.ownership.conffile, "")
-    let packageUnit = isPackageUnit(o.unit)
+    let cls = classifyUnit(o.unit)
+    let packageUnit = cls == ucPackage
+    case cls
+    of ucMasked:
+      raise newException(AddonCollisionError, "refusing " & inp.address &
+        ": " & inp.unit & " is masked (" & o.unit.loadState &
+        "); the add-on does not write over a mask")
+    of ucElsewhere:
+      raise newException(AddonCollisionError, "refusing " & inp.address &
+        ": " & inp.unit & " is loaded from " & o.unit.fragmentPath &
+        ", a transient, generated or local unit outside the package and " &
+        "/etc directories; an /etc unit would shadow it silently and no " &
+        "opt-in covers that")
+    else:
+      discard
     if inp.collision == "dropIn":
       # The unit itself is not written; the drop-in file is decided by
-      # the file rows from `decideDropIn`. Here: what the drop-in modifies.
+      # the file rows. Here: what the drop-in modifies, which must exist.
+      if cls == ucNone:
+        raise newException(AddonCollisionError, "refusing " & inp.address &
+          ": nothing provides " & inp.unit & ", so a drop-in has nothing " &
+          "to modify; declare the unit itself")
       dec.verdict = cvDropIn
       dec.reason =
         if packageUnit: "package unit at " & o.unit.fragmentPath &
           "; changed by a drop-in"
-        elif o.unit.fragmentPath.len > 0: "unit at " & o.unit.fragmentPath &
-          "; changed by a drop-in"
-        else: "no unit of that name is loaded; the drop-in waits for one"
+        else: "unit at " & o.unit.fragmentPath & "; changed by a drop-in"
       return (dec, o)
     if o.exists:
       # An /etc unit of that name exists: the file rows apply to it.
@@ -526,10 +699,16 @@ proc renderCollisionReport*(lines: seq[CollisionLine]): string =
 # The before-each-write re-check.
 # ---------------------------------------------------------------------------
 
+proc diversionText*(d: DiversionRecord): string =
+  ## A diversion as the guard compares it: "" when there is none, else
+  ## ``<diverted to> <by>`` (``:`` for a local diversion).
+  if d.present: d.divertTo & " " & d.package else: ""
+
 type
   PlannedTarget* = object
     ## What the plan decided for one privileged operation, kept so the
-    ## guard can compare.
+    ## guard can compare. An operation may carry more than one: a drop-in
+    ## also carries the unit it modifies.
     address*: string
     path*: string
     kind*: TargetKind
@@ -540,6 +719,29 @@ type
       ## What the switch's flip (step 3, between the plan and this
       ## guard) legitimately puts behind the add-on's own link.
     verdict*: CollisionVerdict
+    diversion*: string
+      ## ``diversionText`` of the path at plan time. The ledger's
+      ## observation text leaves a local diversion out (the add-on's own
+      ## diversion must not change how the file it fills is recorded), so
+      ## the guard compares the diversion itself: a local diversion made
+      ## by hand between the plan and the write is a change like any other.
+    unitClass*: UnitClass
+      ## tkUnit: where systemd loaded the unit from at plan time; a unit
+      ## masked, or moved to a transient or package fragment, since then
+      ## refuses the write (a drop-in's unit included).
+    replay*: bool
+      ## The plan is an interrupted switch's, replayed (spec §7.7): the
+      ## switch may already have written this target before it stopped.
+
+proc plannedTarget*(address: string; inp: DecisionInputs; path: string;
+                    dec: CollisionDecision; o: TargetObservation):
+    PlannedTarget =
+  ## The guard's record of one decision.
+  PlannedTarget(address: address, path: path, kind: inp.kind,
+    unit: inp.unit, observation: dec.observation,
+    observedSha256: dec.observedSha256, desiredSha256: inp.desiredSha256,
+    verdict: dec.verdict, diversion: diversionText(o.diversion),
+    unitClass: (if inp.kind == tkUnit: classifyUnit(o.unit) else: ucNone))
 
 proc preWriteRefusal*(d: CollisionDriver; t: PlannedTarget): string =
   ## Re-observe ``t`` and return the reason to refuse the write, or "".
@@ -550,50 +752,102 @@ proc preWriteRefusal*(d: CollisionDriver; t: PlannedTarget): string =
     return "refusing " & t.address & " at write time: " & o.linkComponent &
       " is now a symbolic link on " & t.path
   let kind = if t.kind == tkDiversion: tkFile else: t.kind
+  if t.replay and t.kind != tkDiversion and o.exists and
+      o.sha256 == t.desiredSha256 and o.ownership.package.len == 0 and
+      not o.diversion.present:
+    # The interrupted switch already wrote exactly the planned bytes here
+    # (a copy, or the add-on's own link reading through the new tree), on
+    # a path no package claims: its own work, not a change under the plan.
+    return ""
   let obsNow = observationText(o, kind)
   if obsNow != t.observation:
     return "refusing " & t.address & " at write time: the ownership " &
       "observation changed since the plan (" & t.observation & " -> " &
       obsNow & ")"
+  if t.kind == tkUnit:
+    let cls = classifyUnit(o.unit)
+    if cls != t.unitClass:
+      return "refusing " & t.address & " at write time: " & t.unit &
+        " is now " & $cls & " (" & o.unit.loadState & ", " &
+        (if o.unit.fragmentPath.len > 0: o.unit.fragmentPath else: "no fragment") &
+        "), planned " & $t.unitClass
+  # The diversion of the path. The one change the plan itself makes is
+  # the add-on's own diversion that a `divert` verdict depends on: the
+  # diversion operation ran first (the file depends on it) and moved the
+  # package's copy to the diversion target, so the path is now absent.
+  var expectedSha = t.observedSha256
+  let divNow = diversionText(o.diversion)
+  if divNow != t.diversion:
+    let ownDiversionAppeared = t.verdict == cvDivert and
+      t.diversion.len == 0 and o.diversion.package == ":" and
+      o.diversion.divertTo == d.diversionTarget(t.path)
+    if not ownDiversionAppeared:
+      return "refusing " & t.address & " at write time: the diversion of " &
+        t.path & " changed since the plan (" &
+        (if t.diversion.len > 0: t.diversion else: "none") & " -> " &
+        (if divNow.len > 0: divNow else: "none") & ")"
+    expectedSha = ""
+  elif t.verdict == cvDivert and t.diversion.len == 0:
+    return "refusing " & t.address & " at write time: the diversion the " &
+      "plan decided for " & t.path & " is not in place"
   if o.ownLink and o.sha256 == t.desiredSha256:
     # The static tree was flipped after the plan: the add-on's own link
     # now shows the planned bytes. That is the switch, not a change.
     return ""
-  if t.kind != tkDiversion and o.sha256 != t.observedSha256 and
-      t.verdict notin {cvDivert}:
+  if o.sha256 != expectedSha:
     return "refusing " & t.address & " at write time: " & t.path &
       " changed since the plan (sha256 " &
       (if o.sha256.len > 0: o.sha256[0 ..< 12] else: "absent") & ", planned " &
-      (if t.observedSha256.len > 0: t.observedSha256[0 ..< 12] else: "absent") & ")"
+      (if expectedSha.len > 0: expectedSha[0 ..< 12] else: "absent") & ")"
   ""
 
-proc makePreWriteGuard*(d: CollisionDriver;
-                        targets: seq[PlannedTarget]): PreWriteGuard =
-  ## The apply's ``PreWriteGuard`` over the plan's targets. Operations the
-  ## plan did not decide on (none, for an add-on apply) pass.
-  var byAddress = initTable[string, PlannedTarget]()
-  for t in targets: byAddress[t.address] = t
+type
+  DriverFactory* = proc(): CollisionDriver {.gcsafe.}
+    ## The observer the guard uses for an operation. The dpkg driver
+    ## re-reads its package index whenever the database changed since it
+    ## was read (``indexStamp``), so one driver kept for the whole apply
+    ## still sees a package installed between the plan and the write; a
+    ## factory may hand out that one driver.
+
+  DestroyCheck* = proc(op: PrivilegedOperation): string {.gcsafe.}
+    ## Re-observe what a destroy would remove, immediately before it is
+    ## dispatched: "" to let it go, or why the object must be left as it
+    ## is (it changed since the plan decided to remove it).
+
+proc isDestroy*(op: PrivilegedOperation): bool =
+  ## The destroy direction of the kinds an add-on generation carries.
+  case op.kind
+  of pokFsSystemFile: op.sfDestroy
+  of pokSystemdSystemUnit: op.suDestroy
+  of pokLinuxDpkgDiversion: op.ddDestroy
+  of pokSystemdSystemDropIn: op.diDestroy
+  of pokLinuxSysctl: op.sysctlDestroy
+  of pokLinuxTmpfilesRule: op.tmpfilesDestroy
+  of pokLinuxSysusersEntry: op.seDestroy
+  else: false
+
+proc makePreWriteGuard*(newDriver: DriverFactory;
+                        targets: seq[PlannedTarget];
+                        destroyCheck: DestroyCheck = nil): PreWriteGuard =
+  ## The apply's ``PreWriteGuard`` over the plan's targets. Every
+  ## operation of an add-on apply was decided on at plan time; one the
+  ## plan did not decide on is refused, never let through. A destroy is
+  ## not a plan target: ``destroyCheck`` re-observes the object it would
+  ## remove, and an object changed since the plan is left in place
+  ## (answered with ``PreWriteKeepPrefix``: drift, not a failure; spec
+  ## §4.2 rule 1). With no ``destroyCheck`` a destroy is let through.
+  var byAddress = initTable[string, seq[PlannedTarget]]()
+  for t in targets: byAddress.mgetOrPut(t.address, @[]).add(t)
   result = proc(op: PrivilegedOperation): string =
+    if isDestroy(op):
+      if destroyCheck == nil: return ""
+      let why = destroyCheck(op)
+      return (if why.len > 0: PreWriteKeepPrefix & why else: "")
     if op.address notin byAddress:
-      return ""
-    let t = byAddress[op.address]
-    # A destroy writes nothing new into the path; the ledger check that
-    # preceded it is its guard.
-    case op.kind
-    of pokFsSystemFile:
-      if op.sfDestroy: return ""
-    of pokSystemdSystemUnit:
-      if op.suDestroy: return ""
-    of pokLinuxDpkgDiversion:
-      if op.ddDestroy: return ""
-    of pokSystemdSystemDropIn:
-      if op.diDestroy: return ""
-    of pokLinuxSysctl:
-      if op.sysctlDestroy: return ""
-    of pokLinuxTmpfilesRule:
-      if op.tmpfilesDestroy: return ""
-    of pokLinuxSysusersEntry:
-      if op.seDestroy: return ""
-    else:
-      discard
-    preWriteRefusal(d, t)
+      return "refusing " & op.address & ": the plan decided nothing about " &
+        "it, so it cannot be written"
+    let d = newDriver()
+    for t in byAddress[op.address]:
+      let why = preWriteRefusal(d, t)
+      if why.len > 0: return why
+    ""

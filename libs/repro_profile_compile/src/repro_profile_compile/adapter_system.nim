@@ -318,7 +318,10 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suDropInName: fieldString(r, "dropInName"),
       suStopHeld: not fieldBool(r, "stopOnRemoval", true),
       suReloadIfChanged: fieldBool(r, "reloadIfChanged", false),
-      suExclusive: fieldBool(r, "exclusive", false))
+      suExclusive: fieldBool(r, "exclusive", false),
+      suHealthCheck: fieldString(r, "healthCheck"))
+    if result.suHealthCheck.len > 0:
+      discard parseHealthCheck(result.suHealthCheck)
     if result.suDropInName.len > 0 and result.suCollision != "dropIn":
       raise newException(ValueError, "systemd.systemUnit '" &
         result.suName & "' sets dropInName without `collision = \"dropIn\"`")
@@ -927,6 +930,12 @@ proc adaptSystemProfile*(p: ProfileIntent;
         raise newException(ValueError, "addOn: " & problem)
       if prefix notin result.profile.addOn.managedEtcPrefixes:
         result.profile.addOn.managedEtcPrefixes.add prefix
+    if p.addOn.confirmTimeoutSec != 0:
+      if p.addOn.confirmTimeoutSec notin 1 .. MaxConfirmTimeoutSec:
+        raise newException(ValueError, "addOn: confirmTimeout " &
+          $p.addOn.confirmTimeoutSec & " must be between 1 and " &
+          $MaxConfirmTimeoutSec & " seconds")
+      result.profile.addOn.confirmTimeoutSec = p.addOn.confirmTimeoutSec
   for r in selected:
     result.profile.resources.add(buildSystemResource(r))
   # Same cross-resource refusal as the text path (`parseSystemProfile`).
@@ -1014,7 +1023,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
   # anywhere and the editor's renderer puts it first too.
   if sp.addOn.declared:
     result.add(AddOnStanzaTag & " {\n  managedEtcPrefixes = " &
-      renderListLiteral(sp.addOn.managedEtcPrefixes) & "\n}\n\n")
+      renderListLiteral(sp.addOn.managedEtcPrefixes) & "\n" &
+      (if sp.addOn.confirmTimeoutSec > 0:
+         "  confirmTimeout = " & $sp.addOn.confirmTimeoutSec & "\n"
+       else: "") & "}\n\n")
   for r in sp.resources:
     var pairs: seq[(string, string)] = @[]
     case r.kind
@@ -1124,6 +1136,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("reloadIfChanged", "true"))
       if r.suExclusive:
         pairs.add(("exclusive", "true"))
+      if r.suHealthCheck.len > 0:
+        pairs.add(("healthCheck", quoteSystemValue(r.suHealthCheck)))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))

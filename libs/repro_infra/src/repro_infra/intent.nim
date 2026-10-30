@@ -329,6 +329,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  reloadIfChanged = true")
     if r.suExclusive:
       result.add("  exclusive = true")
+    if r.suHealthCheck.len > 0:
+      result.add("  healthCheck = " & renderScalar(r.suHealthCheck))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))
@@ -487,6 +489,8 @@ proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
     return @[]
   result.add(AddOnStanzaTag & " {")
   result.add("  managedEtcPrefixes = " & renderList(settings.managedEtcPrefixes))
+  if settings.confirmTimeoutSec > 0:
+    result.add("  confirmTimeout = " & $settings.confirmTimeoutSec)
   result.add("}")
 
 proc renderProfileText*(p: SystemProfile): string =

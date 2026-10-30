@@ -12,6 +12,10 @@
 #                         (libs/repro_addon/src/repro_addon/mutations.nim);
 #                         the gate is then expected to FAIL
 #   REPRO_ADDON_BACKEND   "incus" for the Incus inner loop (amd64 only)
+#   REPRO_ADDON_TEST_SEAMS  "1" builds and runs the variant with the
+#                         switch's pause points (seams.nim); the gates that
+#                         stop a switch mid-way set it themselves in
+#                         GatesNeedingSeams below
 #   GOSTI_SRC             gosti's src directory (default: ../gosti/src, else
 #                         ../vm-harness/src)
 #
@@ -55,6 +59,12 @@ fi
 
 mutation_args=()
 [ -n "${REPRO_ADDON_MUTATION:-}" ] && mutation_args=(--mutation "$REPRO_ADDON_MUTATION")
+# Gates that pause a switch at a step need the seam build.
+case "$test" in
+  t_e2e_addon_hard_reset_at_every_step)
+    export REPRO_ADDON_TEST_SEAMS=1 ;;
+esac
+[ "${REPRO_ADDON_TEST_SEAMS:-}" = "1" ] && mutation_args+=(--test-seams)
 bash ./scripts/build_addon_static.sh ${mutation_args[@]+"${mutation_args[@]}"} "${arches[@]}"
 
 mkdir -p build/test-bin

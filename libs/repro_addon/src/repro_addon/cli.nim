@@ -8,6 +8,10 @@
 ##                                [--cache-publishers F [--cache-url U]]
 ##   repro system addon uninstall [--keep-store]
 ##   repro system addon verify [--boot | --after-dpkg]
+##   repro system addon reassert [--boot]
+##   repro system addon recover
+##   repro system addon probe <healthCheck>
+##   repro system rollback [<generation>] [--reconcile-drift]
 ##   repro system addon fingerprint [--root R] [--no-live] [--out F]
 ##   repro system addon fingerprint diff <before> <after>
 ##                                [--except <component>:<key glob>]...
@@ -18,7 +22,7 @@
 ##   repro system addon selfcheck-write <path>
 ##   repro system adopt <address> --profile <file>
 ##   repro infra plan --profile <file>
-##   repro infra apply --profile <file> [--reconcile-drift]
+##   repro infra apply --profile <file> [--reconcile-drift] [--plan <add-on plan-id>]
 ##                                [--keep-generations N] [--keep-days D]
 ##   repro store gc [--grace-seconds N] | roots | list
 ##
@@ -26,7 +30,7 @@
 ## error or a refusal decided before anything was written (an incompatible
 ## host, a plan digest that does not match).
 
-import std/[os, strutils]
+import std/[options, os, strutils]
 
 import std/algorithm
 
@@ -39,13 +43,16 @@ import repro_elevation/posix_system_driver
 import repro_local_store/store as local_store
 
 import ./addon_apply
+import ./addon_rollback
 import ./bootstrap
 import ./collision
 import ./fingerprint
 import ./generation0
 import ./ledger
 import ./linux_fs
+import ./health
 import ./preflight
+import ./reassert
 import ./static_tree
 import ./store_root
 import ./switch
@@ -64,6 +71,16 @@ commands:
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only).
+  reassert [--boot]
+      Finish or revert an interrupted switch, check the current generation
+      (static tree, store objects, ledger digests) and report ok, drift or
+      degraded; never re-applies on drift. --boot (the re-assert unit):
+      always exits 0.
+  recover
+      The same, for an operator: exits 1 unless the host ends ok or drift.
+  probe <healthCheck>
+      Run one tcp: or http:// health check here (the confirm step runs it
+      in the host's namespaces); exits 0 when it passes.
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -91,8 +108,9 @@ related (add-on hosts):
       Claim the object a declared resource targets as it is, writing nothing.
   repro infra plan --profile <file>
       The ledger diff, collision report and service transition list of
-      applying <file>; writes nothing.
-  repro infra apply --profile <file> [--reconcile-drift]
+      applying <file>, and the add-on plan-id that `--plan` pins; writes
+      nothing.
+  repro infra apply --profile <file> [--reconcile-drift] [--plan <add-on plan-id>]
                     [--keep-generations N] [--keep-days D]
       Apply an add-on generation through the switch.
   repro store gc [--grace-seconds N] | roots | list
@@ -185,6 +203,16 @@ proc previousGenerationOf*(stateDir, current: string): string =
     readGenerationEnvelope(pointerPath(stateDir, current)).previousGenerationId
   except CatchableError:
     ""
+
+proc retentionCount(value, flag: string): int =
+  ## A retention bound: a non-negative integer (0 keeps only what is
+  ## always kept).
+  try:
+    result = parseInt(value)
+  except ValueError:
+    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
+  if result < 0:
+    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
 
 proc selfcheckManagedWrite*(path: string): string =
   ## Exercise the system-file driver's write at ``path`` the way the
@@ -291,6 +319,34 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonVerify()
       stdout.write(renderVerify(r))
       return (if r.status == "ok": 0 else: 1)
+    of "reassert", "recover":
+      var atBoot = false
+      for a in rest:
+        if a == "--boot" and cmd == "reassert": atBoot = true
+        else: raise newException(ValueError, "unknown option " & a)
+      if atBoot:
+        # The boot unit: never fails the boot transaction, whatever it finds.
+        try:
+          stdout.write(renderReassert(runAddonReassert(DefaultStateDir,
+            atBoot = true)))
+        except CatchableError as e:
+          stdout.write("repro-addon reassert: degraded\n  " & e.msg & "\n")
+        return 0
+      let r = runAddonReassert(DefaultStateDir, atBoot = false)
+      stdout.write(renderReassert(r))
+      return (if r.status in ["ok", "drift"]: 0 else: 1)
+    of "probe":
+      if rest.len != 1:
+        raise newException(ValueError, "probe needs one healthCheck value")
+      let spec = parseHealthCheck(rest[0])
+      if spec.kind notin {hcTcp, hcHttp}:
+        raise newException(ValueError, "probe runs tcp: and http:// checks only")
+      let why = runProbe(spec)
+      if why.len == 0:
+        stdout.write("probe " & rest[0] & ": ok\n")
+        return 0
+      stdout.write("probe " & rest[0] & ": " & why & "\n")
+      return 1
     of "expected-delta":
       if rest.len != 2:
         raise newException(ValueError, "expected-delta needs two ledgers")
@@ -342,15 +398,17 @@ proc runAddonCli*(args: seq[string]): int =
       while i < rest.len:
         let a = rest[i]
         if a == "--keep-generations" or a.startsWith("--keep-generations="):
-          policy.keepGenerations = parseInt(takeValue(rest, i, "--keep-generations"))
+          policy.keepGenerations = retentionCount(takeValue(rest, i, "--keep-generations"), "--keep-generations")
         elif a == "--keep-days" or a.startsWith("--keep-days="):
-          policy.keepDays = parseInt(takeValue(rest, i, "--keep-days"))
+          policy.keepDays = retentionCount(takeValue(rest, i, "--keep-days"), "--keep-days")
         else:
           raise newException(ValueError, "unknown option " & a)
         inc i
       let current = readCurrentGenerationId(DefaultStateDir)
       let previous = previousGenerationOf(DefaultStateDir, current)
-      let dropped = pruneGenerationRoots(current, previous, policy)
+      let dropped = pruneGenerationRoots(current, previous, policy,
+        running = runningManagedUnits(readLedger(ledgerCopyPath(DefaultStateDir))),
+        lookup = generationUnitLookup(DefaultStateDir))
       stdout.write("kept: " & current & " (current)" &
         (if previous.len > 0: ", " & previous & " (previous)" else: "") & "\n")
       stdout.write("released store roots (" & $dropped.len & "):\n")
@@ -371,6 +429,8 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   ## the sysctl values observed from the host's namespaces too.
   result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
     renderTransitions(r.transitions)
+  if r.planId.len > 0:
+    result.add("add-on plan-id: " & r.planId & "\n")
   if r.staticTree.len > 0:
     result.add("static tree: " & r.staticTree & "\n")
   if r.sysctlObserved.len > 0:
@@ -444,7 +504,8 @@ proc runAddonGeneration(verb: string; args: seq[string];
   ## that failed or left actionable drift, 0 otherwise.
   var profile = ""
   var reconcile = false
-  var retention: RetentionPolicy
+  var retention = none(RetentionPolicy)
+  var planId = ""
   var i = 0
   try:
     while i < args.len:
@@ -454,9 +515,15 @@ proc runAddonGeneration(verb: string; args: seq[string];
       elif a == "--reconcile-drift" or a == "--accept-drift":
         reconcile = true
       elif a == "--keep-generations" or a.startsWith("--keep-generations="):
-        retention.keepGenerations = parseInt(takeValue(args, i, "--keep-generations"))
+        var p = retention.get(DefaultRetention)
+        p.keepGenerations = retentionCount(takeValue(args, i, "--keep-generations"), "--keep-generations")
+        retention = some(p)
       elif a == "--keep-days" or a.startsWith("--keep-days="):
-        retention.keepDays = parseInt(takeValue(args, i, "--keep-days"))
+        var p = retention.get(DefaultRetention)
+        p.keepDays = retentionCount(takeValue(args, i, "--keep-days"), "--keep-days")
+        retention = some(p)
+      elif a == "--plan" or a.startsWith("--plan="):
+        planId = takeValue(args, i, "--plan")
       elif a == "--no-preview":
         discard          # an add-on apply always converges without preview
       else:
@@ -471,7 +538,7 @@ proc runAddonGeneration(verb: string; args: seq[string];
     let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
       hostIdentity: readHostname(), userProfileText: readFile(profile),
       reconcileDrift: reconcile, adoptAddresses: adopt, planOnly: planOnly,
-      retention: retention))
+      retention: retention, planId: planId))
     stdout.write(renderAddonSections(r))
     if planOnly:
       stdout.write("plan only: nothing was written\n")
@@ -483,15 +550,6 @@ proc runAddonGeneration(verb: string; args: seq[string];
     if r.retentionDropped.len > 0:
       stdout.write("retention released the store roots of: " &
         r.retentionDropped.join(", ") & "\n")
-    for a in adopt:
-      var found = false
-      for c in r.collisions:
-        if c.address == a and c.verdict in ["adopt", "no-op", "update"]:
-          found = true
-      if not found:
-        stderr.write(verb & ": " & a & " was not adopted (see the " &
-          "collision report)\n")
-        return 1
     if r.drift.len > 0:
       stderr.write(verb & ": " & $r.drift.len & " object(s) left in " &
         "place as actionable drift\n")
@@ -500,6 +558,11 @@ proc runAddonGeneration(verb: string; args: seq[string];
   except ValueError as e:
     stderr.write(verb & ": " & e.msg & "\n")
     2
+  except EPlanStale as e:
+    # Exit 3, as `repro infra apply` does for a stale plain plan.
+    stderr.write(verb & ": " & e.msg & "\n")
+    for d in e.drifted: stderr.write("  drifted: " & d & "\n")
+    3
   except EAddOn as e:
     stderr.write(verb & ": " & e.msg & "\n")
     2
@@ -507,6 +570,11 @@ proc runAddonGeneration(verb: string; args: seq[string];
     stderr.write(verb & ": " & e.msg & "\n")
     2
   except AddonDriftError as e:
+    stderr.write(verb & ": " & e.msg & "\n")
+    2
+  except ESystemProfileInvalid as e:
+    # The profile was refused as written (a non-canonical path, a bad
+    # prefix, a malformed stanza) before anything was observed or written.
     stderr.write(verb & ": " & e.msg & "\n")
     2
   except CatchableError as e:
@@ -523,11 +591,42 @@ proc runAddonInfraPlanCli*(args: seq[string]): int =
   ## the ledger diff and the collision report, nothing written.
   runAddonGeneration("repro infra plan", args, planOnly = true)
 
+proc runAddonRollbackCli*(args: seq[string]): int =
+  ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
+  ## add-on host: re-apply a retained generation through the switch.
+  var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
+                                  hostIdentity: readHostname())
+  for a in args:
+    if a == "--reconcile-drift": opts.reconcileDrift = true
+    elif a.startsWith("-"):
+      stderr.write("repro system rollback: unknown option " & a & "\n")
+      return 2
+    elif opts.target.len == 0: opts.target = a
+    else:
+      stderr.write("repro system rollback: unexpected argument " & a & "\n")
+      return 2
+  try:
+    let r = runAddonRollback(opts)
+    stdout.write("rolled back from " & r.fromGeneration & " to " &
+      r.toGeneration & " (applied as generation " & r.apply.generationId &
+      ")\n")
+    0
+  except AddonApplyError as e:
+    stderr.write("repro system rollback: " & e.msg & "\n")
+    1
+  except CatchableError as e:
+    stderr.write("repro system rollback: " & e.msg & "\n")
+    1
+
 proc runAddonAdoptCli*(args: seq[string]): int =
   ## ``repro system adopt <address> --profile <file>`` (spec §11.2 step
   ## 3): the object the resource targets is claimed as it is -- its bytes
   ## become the add-on's, nothing is written to it -- and the generation
-  ## that results owns it.
+  ## that results owns it. Only that resource is taken from the profile;
+  ## the generation is otherwise the current one, so no pending change
+  ## of the profile is applied on the way (``scopedAdoptProfile``). An
+  ## object that cannot be adopted as it is refuses before anything is
+  ## written or committed (exit 2).
   var address = ""
   var rest: seq[string]
   var i = 0

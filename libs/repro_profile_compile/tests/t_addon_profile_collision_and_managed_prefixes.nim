@@ -23,7 +23,10 @@ proc intentWithAddOn(): ProfileIntent =
   result = ProfileIntent(name: "rpi2")
   result.addOn = AddOnIntent(declared: true,
     managedEtcPrefixes: @["/etc/vaultwarden/", "/etc/issue.net",
-                          "/etc/vaultwarden/"])
+                          "/etc/vaultwarden/"], confirmTimeoutSec: 45)
+  systemdSystemUnit(result.resources, name = "vaultwarden.service",
+    content = "[Service]\nExecStart=/bin/true\n",
+    healthCheck = "http://127.0.0.1:8000/alive", address = "vw")
   systemdSystemUnit(result.resources, name = "cron.service",
     content = "[Service]\nNice=5\n", collision = "dropIn",
     dropInName = "nice", address = "cron")
@@ -55,7 +58,11 @@ suite "the add-on's profile surface, DSL to text":
     let viaRbpi = decodeRbpi(encodeRbpi(p))
     check viaRbpi.addOn.declared
     check viaRbpi.addOn.managedEtcPrefixes == p.addOn.managedEtcPrefixes
-    check viaRbpi.resources[0].fields["collision"].s == "dropIn"
+    check viaRbpi.addOn.confirmTimeoutSec == 45
+    check viaJson.addOn.confirmTimeoutSec == 45
+    check viaRbpi.resources[0].fields["healthCheck"].s ==
+      "http://127.0.0.1:8000/alive"
+    check viaRbpi.resources[1].fields["collision"].s == "dropIn"
     # A profile without the section encodes without the key.
     var bare = ProfileIntent(name: "bare")
     check "addOn" notin emitProfileIntentJson(bare)
@@ -68,11 +75,13 @@ suite "the add-on's profile surface, DSL to text":
     let sp = adapted.profile
     check sp.addOn.declared
     check sp.addOn.managedEtcPrefixes == @["/etc/vaultwarden/", "/etc/issue.net"]
-    check sp.resources[0].suCollision == "dropIn"
-    check sp.resources[0].suDropInName == "nice"
-    check sp.resources[1].suCollision == "replace"
-    check sp.resources[2].sfCollision == "divert"
-    check sp.resources[3].sfCollision == ""
+    check sp.addOn.confirmTimeoutSec == 45
+    check sp.resources[0].suHealthCheck == "http://127.0.0.1:8000/alive"
+    check sp.resources[1].suCollision == "dropIn"
+    check sp.resources[1].suDropInName == "nice"
+    check sp.resources[2].suCollision == "replace"
+    check sp.resources[3].sfCollision == "divert"
+    check sp.resources[4].sfCollision == ""
     # Every emitted field is classified by the realisation profile.
     for e in adapted.projection.entries:
       check e.class in {fcShared, fcAddOnSpecific}
@@ -92,6 +101,19 @@ suite "the add-on's profile surface, DSL to text":
     # The editor's renderer agrees with the compiled-profile renderer.
     check renderProfileText(parseSystemProfile(renderProfileText(sp))) ==
       renderProfileText(back)
+
+  test "a health check or confirmTimeout the text parser would refuse is refused here too":
+    var p = ProfileIntent(name: "bad")
+    systemdSystemUnit(p.resources, name = "a.service", content = "[Unit]\n",
+      healthCheck = "http://example.org/")
+    expect CatchableError:
+      discard adaptSystemProfile(p, systemPlanTarget("rpi2",
+        toHashSet(["default"]), srAddOnDebian))
+    var q = ProfileIntent(name: "bad2")
+    q.addOn = AddOnIntent(declared: true, confirmTimeoutSec: 100000)
+    expect ValueError:
+      discard adaptSystemProfile(q, systemPlanTarget("rpi2",
+        toHashSet(["default"]), srAddOnDebian))
 
   test "a managed prefix the text parser would refuse is refused here too":
     var p = ProfileIntent(name: "bad")

@@ -1959,7 +1959,11 @@ proc isSafeDropInBasename*(name: string): bool =
   ## profile carrying `name = "../etc/shadow"` cannot escape the fixed
   ## `/etc/X.d/` directory and so a `name = "x; rm -rf /"` cannot
   ## smuggle a shell metacharacter past the closed-set validator.
-  let n = name.strip()
+  # Validated as written, never stripped: a caller that derived a path
+  # or an argv element from the unstripped text would name something
+  # else than what was checked (a name with surrounding whitespace is
+  # refused by the charset below).
+  let n = name
   if n.len == 0:
     return false
   if n == "." or n == "..":
@@ -1977,7 +1981,11 @@ proc isSafeSysctlKey*(key: string): bool =
   ## key flows into `sysctl -n <key>` AND into a `<key> = <value>` file
   ## line; both surfaces need a closed charset so neither path can
   ## smuggle a shell metacharacter or a stray `=` past validation.
-  let k = key.strip()
+  # Validated as written, never stripped: a caller that derived a path
+  # or an argv element from the unstripped text would name something
+  # else than what was checked (a name with surrounding whitespace is
+  # refused by the charset below).
+  let k = key
   if k.len == 0:
     return false
   for ch in k:
@@ -2017,7 +2025,11 @@ proc isSafePosixUserOrGroupName*(name: string): bool =
   ## Refuses `.` and `..` explicitly as defence-in-depth. The trailing
   ## `$` that Samba accounts use is permitted only at the end of the
   ## name (a `$` mid-string is refused).
-  let n = name.strip()
+  # Validated as written, never stripped: a caller that derived a path
+  # or an argv element from the unstripped text would name something
+  # else than what was checked (a name with surrounding whitespace is
+  # refused by the charset below).
+  let n = name
   if n.len == 0:
     return false
   if n == "." or n == "..":
@@ -2631,6 +2643,13 @@ proc operationValidationError*(op: PrivilegedOperation): string =
         op.ddPath.endsWith("/..") or op.ddPath.endsWith("/"):
       return "linux.dpkgDiversion path '" & op.ddPath &
         "' must be an absolute file path without '..' segments"
+    # Canonical as well: dpkg's diversion database and the add-on's
+    # ownership lookups compare the path text, so `/etc//x` would divert a
+    # name no package lists while the kernel resolves it to the package's
+    # file.
+    let canon = nonCanonicalPathError("linux.dpkgDiversion path", op.ddPath)
+    if canon.len > 0:
+      return canon
     if not (op.ddPath.startsWith("/etc/") or
             op.ddPath.startsWith("/usr/local/etc/")):
       return "linux.dpkgDiversion path '" & op.ddPath &

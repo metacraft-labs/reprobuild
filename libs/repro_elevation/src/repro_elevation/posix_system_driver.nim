@@ -60,6 +60,7 @@ import ./posix_system_parse
 
 when defined(linux) or defined(macosx):
   import std/[os, osproc, streams]
+  from std/posix import geteuid
 elif defined(windows):
   import std/[os, osproc]
   # Windows-System-Resources Phase D: re-observe the live NTFS ACL
@@ -664,14 +665,27 @@ const DriverMutation {.strdefine: "reproAddonMutation".} = ""
   ## `path-based-write-follows-links` is a property of this writer. A
   ## build without the define has none of that code.
 
+proc managedCopyMode*(existing: LeafKind; existingMode, defaultMode: int): int =
+  ## The mode a managed copy is written with: the permission bits of the
+  ## regular file it replaces (an operator's `chmod 0600` survives an
+  ## update), else `defaultMode`; never the setuid, setgid or sticky bit
+  ## of whatever was there (see `writeManagedFile`).
+  let kept = existingMode and 0o777
+  if existing == lkFile and kept != 0: kept else: defaultMode and 0o777
+
 proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
                       defaultMode: int; what: string) =
   ## Put `content` at `path` as the add-on asked: a link to
-  ## `m.linkTarget` when set, else a copy with the mode an existing
-  ## regular file at the path already has (an operator's `chmod 0600`
-  ## on a managed configuration file survives an update) or
-  ## `defaultMode`. Atomic and never through a link; a link on the path
-  ## is `EProtocol` naming it.
+  ## `m.linkTarget` when set, else a copy owned by root (`0:0`, the
+  ## owner every kind written here declares) with the permission bits an
+  ## existing regular file at the path already has (an operator's
+  ## `chmod 0600` on a managed configuration file survives an update) or
+  ## `defaultMode`. The setuid, setgid and sticky bits are never carried
+  ## over -- none of these kinds declares them, and keeping a setuid bit
+  ## someone put on the path would make the add-on's root-owned bytes a
+  ## setuid program -- and neither is the previous owner: the bytes are
+  ## the add-on's, written as root. Atomic and never through a link; a
+  ## link on the path is `EProtocol` naming it.
   when DriverMutation == "path-based-write-follows-links":
     # The falsifying mutation: the pre-A4 writer, a path-based
     # `open(fmWrite)` that resolves every link on the path.
@@ -691,8 +705,11 @@ proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
       replaceWithLinkNoFollow(path, m.linkTarget)
     else:
       let (kind, mode) = leafNoFollow(path)
-      let finalMode = if kind == lkFile and mode != 0: mode else: defaultMode
-      writeFileNoFollow(path, content, finalMode)
+      let finalMode = managedCopyMode(kind, mode, defaultMode)
+      # Root: owned by 0:0 explicitly (a process's group need not be 0).
+      # Anyone else (the unprivileged unit tests) owns what it creates.
+      let owner = if geteuid() == 0: 0 else: -1
+      writeFileNoFollow(path, content, finalMode, uid = owner, gid = owner)
   except SymlinkOnPath as e:
     raiseProtocol(what & " refuses to write through a symbolic link: " &
       e.link & " (threat model G29)")
@@ -4145,6 +4162,22 @@ proc readDpkgDiversion*(dbText, path: string):
     i += 3
   (false, "", "")
 
+proc removeLocalDpkgDiversion*(path: string) =
+  ## ``dpkg-divert --local --rename --remove <path>``, which moves the
+  ## package's copy back from ``<path>.distrib``. The path must be free:
+  ## dpkg refuses to rename over a file, so the caller removes the
+  ## add-on's copy first. Shared by the driver's destroy and the add-on's
+  ## uninstall. (A ucf-managed path is never diverted: the add-on refuses
+  ## that at plan time, so no ucf state needs handing back here.)
+  when defined(linux):
+    let (o, c) = execCmdEx("/usr/bin/dpkg-divert --local --rename " &
+      "--remove " & quoteShell(path))
+    if c != 0:
+      raiseProtocol("linux.dpkgDiversion remove of " & path &
+        " failed: " & o.strip())
+  else:
+    raiseNotImplementedPlatform("linux.dpkgDiversion remove")
+
 proc observeLinuxDpkgDiversion*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Present when dpkg records a diversion of `ddPath`. The digest covers
@@ -4184,11 +4217,7 @@ proc applyLinuxDpkgDiversion*(op: PrivilegedOperation):
         # `--rename` moves `<path>.distrib` back to `<path>`; dpkg refuses
         # when `<path>` still exists, so the file the profile put there must
         # already have been removed (the caller orders that first).
-        let (o, c) = execCmdEx("/usr/bin/dpkg-divert --local --rename " &
-          "--remove " & quoteShell(op.ddPath))
-        if c != 0:
-          raiseProtocol("linux.dpkgDiversion remove of " & op.ddPath &
-            " failed: " & o.strip())
+        removeLocalDpkgDiversion(op.ddPath)
       let post = observeLinuxDpkgDiversion(op)
       if post.present:
         raiseProtocol("linux.dpkgDiversion remove of " & op.ddPath &

@@ -97,6 +97,9 @@ type
     ## prefixes with `EAddOnOutOfScope`.
     declared*: bool
     managedEtcPrefixes*: seq[string]
+    confirmTimeoutSec*: int
+      ## `confirmTimeout: <seconds>` (§7.5): how long the add-on switch
+      ## waits for every unit's `healthCheck`; 0 when not declared.
 
   ProfileIntent* = object
     name*: string
