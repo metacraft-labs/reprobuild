@@ -351,18 +351,33 @@ proc readSingleHexLine(path: string; what: string): string =
   raise newException(AuthError,
     what & " file is empty / all-comment: " & path)
 
-proc readKeyFile(path: string): PrivateKeyBytes =
-  ## Parses an `ecdsa-p256:<hex>` file. A file without the prefix is
-  ## treated as a legacy M3 stand-in keypair and rejected (per the
-  ## hard-cutover stance).
-  let line = readSingleHexLine(path, "peer private-key")
+proc parseKeyLine(line, what: string): PrivateKeyBytes =
   if not line.startsWith(KeyFilePrefix):
     raise newException(AuthError,
-      "peer private-key file " & path &
+      "peer private-key file " & what &
       " lacks the `ecdsa-p256:` marker — looks like a legacy M3 " &
       "stand-in keypair. Regenerate the file: this campaign does " &
       "not auto-migrate legacy keys.")
   result = parsePrivHex(line[KeyFilePrefix.len .. ^1])
+
+proc readKeyFile(path: string): PrivateKeyBytes =
+  ## Parses an `ecdsa-p256:<hex>` file. A file without the prefix is
+  ## treated as a legacy M3 stand-in keypair and rejected (per the
+  ## hard-cutover stance).
+  parseKeyLine(readSingleHexLine(path, "peer private-key"), path)
+
+proc parsePrivateKeyText*(text, what: string): PrivateKeyBytes =
+  ## The `ecdsa-p256:<hex>` key in `text`, the bytes of a key file a caller
+  ## read itself -- through a descriptor whose owner and mode it checked
+  ## first, so the check and the read are of the same file. `what` names
+  ## the file in errors. Same rules as `loadPrivateKeyFile`.
+  for rawLine in text.splitLines:
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    return parseKeyLine(line, what)
+  raise newException(AuthError,
+    "peer private-key file is empty / all-comment: " & what)
 
 proc readCertFile(path: string): PublicKeyBytes =
   let line = readSingleHexLine(path, "peer public-key (cert)")

@@ -130,6 +130,14 @@ type
     secretsDir*: string
       ## Directory the opened secret files are materialised under. Securing it
       ## is the profile's job (see `materialiseSecrets`).
+    secretsSink*: proc(target: string; sealed: SealedSecrets): string {.gcsafe.}
+      ## When set, takes the selected manifest's sealed section INSTEAD of
+      ## opening it with `secretsKeyPath` and writing it under `secretsDir`,
+      ## and returns "" when it was accepted or why not (reported as
+      ## `aoSecretsFailed`). A ReproOS add-on host sets it: there the
+      ## section is checked against the host's recipient key, retained
+      ## sealed, and materialised only into a tmpfs, per service, by the
+      ## apply (`repro_addon/secrets_ops`).
 
   AgentDeps* = object
     ## Test seam. ``apply`` is the apply hook. ``httpGet`` overrides the
@@ -435,7 +443,14 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   # apply: converging desired state that depends on a secret which never
   # arrived produces a box that looks applied and cannot run a job -- the exact
   # shape of failure this campaign keeps rediscovering.
-  if selected.hasSecrets:
+  if selected.hasSecrets and cfg.secretsSink != nil:
+    let refused = cfg.secretsSink(selected.target, selected.secrets)
+    if refused.len > 0:
+      return AgentOutcome(kind: aoSecretsFailed, target: cfg.target,
+        sequence: selected.sequence, deploymentId: selected.deploymentId,
+        message: "sealed secrets were not accepted: " & refused,
+        errorCode: "secrets_failed")
+  elif selected.hasSecrets:
     if cfg.secretsKeyPath.len == 0 or cfg.secretsDir.len == 0:
       return AgentOutcome(kind: aoSecretsFailed, target: cfg.target,
         sequence: selected.sequence, deploymentId: selected.deploymentId,

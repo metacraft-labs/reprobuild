@@ -217,6 +217,15 @@ type
         ## `active`, `tcp:<loopback>:<port>`, `http://<loopback>:<port>/…`
         ## or `exec:/repro/store/…` (see `parseHealthCheck`). Outside
         ## add-on mode the field is carried and ignored.
+      suCredentials*: seq[string]
+        ## `credentials = ["<name>", ...]` (ReproOS-Add-On-Mode §10.3): the
+        ## secrets this unit reads through systemd credentials. Each name
+        ## must be declared by a `secrets.secretFile` of the unit's
+        ## service (`credentialServiceOf`), and renders as
+        ## `LoadCredential=<name>:/run/repro/secrets/<service>/<name>` in
+        ## the unit's `[Service]` section (`renderedSystemUnitContent`), so
+        ## the service reads it from `$CREDENTIALS_DIRECTORY` and its
+        ## account never gets access to the shared directory.
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -369,11 +378,27 @@ type
       ## `healthCheck` to pass. 0 when not declared: the default applies
       ## (`DefaultConfirmTimeoutSec`).
 
+  SecretFileDecl* = object
+    ## A `secrets.secretFile { service = "<s>"  name = "<n>" }` declaration
+    ## (ReproOS-Add-On-Mode §8.3, §10.3). The generation needs the sealed
+    ## entry `<s>/<n>` of the host's retained envelope materialised as
+    ## `/run/repro/secrets/<s>/<n>`; a unit of the service `<s>` reads it
+    ## by naming `<n>` in its `credentials`. It is not a resource: it has
+    ## no driver, no ledger entry and nothing under `/etc` -- the secret
+    ## itself never appears in a profile, only the name of the entry that
+    ## carries it -- so it is carried beside the resources, like the
+    ## `addOn` stanza, and the add-on's secrets layer
+    ## (`repro_addon/addon_secrets`) gives it its meaning.
+    service*: string
+    name*: string
+
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
     ## order is the apply order.
     resources*: seq[SystemResource]
     addOn*: AddOnSettings
+    secretFiles*: seq[SecretFileDecl]
+      ## The `secrets.secretFile` declarations, in profile order.
 
 proc realWorldIdentity*(r: SystemResource): string =
   ## Stable identity of the real-world object the resource targets.
@@ -709,6 +734,50 @@ proc parseDependsOn(kindTag, raw: string): seq[ResourceDependency] =
         "' — both kind and name must be non-empty")
     result.add((kind: depKind, name: depName))
 
+const
+  SecretsRunRoot* = "/run/repro/secrets"
+    ## Where the add-on materialises plaintext secrets (a tmpfs, §10.3).
+  SecretsOrderingUnit* = "repro-addon-reassert.service"
+    ## The unit that re-materialises secrets at boot (§7.7 step 3). A
+    ## unit that loads credentials is ordered after it, so it never starts
+    ## at boot before its secrets exist; on a host without it (full
+    ## ReproOS) an `After=` on a unit that does not exist orders nothing.
+
+proc isSafeSecretComponent*(s: string): bool =
+  ## One path segment of `[A-Za-z0-9._-]`, at most 64 bytes, not starting
+  ## with `.` (so never `.`, `..`, or the materialiser's hidden temporary
+  ## names): a secret's service and name both become a path component
+  ## under `/run/repro/secrets` and part of a `LoadCredential=` line.
+  if s.len == 0 or s.len > 64 or s[0] == '.':
+    return false
+  for c in s:
+    if c notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      return false
+  true
+
+proc secretEntryPath*(service, name: string): string =
+  ## The sealed entry a `secrets.secretFile` names: `<service>/<name>`, the
+  ## same relative path it is materialised at under `SecretsRunRoot`. The
+  ## entry itself names the one service that may load it (CRED-3).
+  service & "/" & name
+
+proc credentialServiceOf*(unitName: string): string =
+  ## The secrets service of a unit: its name without `.service`, or "" when
+  ## the unit cannot load credentials (not a `.service`, a template
+  ## instance, or a name that is not a safe component).
+  if not unitName.endsWith(".service"):
+    return ""
+  let stem = unitName[0 ..< unitName.len - ".service".len]
+  if isSafeSecretComponent(stem): stem else: ""
+
+proc credentialLines*(unitName: string; credentials: openArray[string]):
+    seq[string] =
+  ## The `[Service]` lines the `credentials` of `unitName` render to.
+  let svc = credentialServiceOf(unitName)
+  for c in credentials:
+    result.add("LoadCredential=" & c & ":" & SecretsRunRoot & "/" & svc &
+               "/" & c)
+
 proc renderedSystemUnitContent*(r: SystemResource): string =
   ## The unit-file bytes a `systemd.systemUnit` resource installs. Without
   ## a closure lock that is `suContent` verbatim. With one, the unit's
@@ -717,15 +786,71 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
   ## prefix the lock pins under the Add-On store root — the path the host's
   ## driver realises before it writes the unit. A malformed lock or a unit
   ## that cannot carry the binding is an `ESystemProfileInvalid`.
+  ##
+  ## With `credentials`, the `[Service]` section also gains one
+  ## `LoadCredential=` line per credential (`credentialLines`) and the
+  ## `[Unit]` section an `After=` the boot-time secrets step
+  ## (`SecretsOrderingUnit`), ReproOS-Add-On-Mode §10.3.
   doAssert r.kind == srkSystemdSystemUnit
-  if r.suAptClosureLock.len == 0:
-    return r.suContent
-  try:
-    renderUnitForAptClosureLock(r.suContent, r.suAptClosureLock,
-      unitName = r.suName)
-  except EAptClosureLock, EAptClosureUnit:
-    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
-      getCurrentExceptionMsg())
+  var content = r.suContent
+  if r.suAptClosureLock.len > 0:
+    try:
+      content = renderUnitForAptClosureLock(r.suContent, r.suAptClosureLock,
+        unitName = r.suName)
+    except EAptClosureLock, EAptClosureUnit:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
+        getCurrentExceptionMsg())
+  if r.suCredentials.len == 0:
+    return content
+  if credentialServiceOf(r.suName).len == 0:
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+      "' names credentials, but only a plain `<service>.service` unit " &
+      "(no template instance) can load them")
+  var seenCred: seq[string]
+  for c in r.suCredentials:
+    if not isSafeSecretComponent(c):
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        "' credential '" & c & "' must be one path segment of letters, " &
+        "digits, '.', '-' or '_', at most 64 bytes, not starting with '.'")
+    if c in seenCred:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        "' names the credential '" & c & "' twice")
+    seenCred.add(c)
+  var outLines: seq[string]
+  var inService = false
+  var serviceSeen = false
+  var unitSeen = false
+  for l in content.split('\n'):
+    let t = l.strip()
+    if t.startsWith("[") and t.endsWith("]"):
+      if inService:
+        # Close the [Service] section with the credential lines, before the
+        # next section starts (blank lines stay where they were).
+        var tail: seq[string]
+        while outLines.len > 0 and outLines[^1].strip().len == 0:
+          tail.add(outLines.pop())
+        outLines.add(credentialLines(r.suName, r.suCredentials))
+        for i in countdown(tail.high, 0): outLines.add(tail[i])
+      inService = t == "[Service]"
+      if inService: serviceSeen = true
+      outLines.add(l)
+      if t == "[Unit]" and not unitSeen:
+        unitSeen = true
+        outLines.add("After=" & SecretsOrderingUnit)
+      continue
+    outLines.add(l)
+  if inService:
+    var tail: seq[string]
+    while outLines.len > 0 and outLines[^1].strip().len == 0:
+      tail.add(outLines.pop())
+    outLines.add(credentialLines(r.suName, r.suCredentials))
+    for i in countdown(tail.high, 0): outLines.add(tail[i])
+  if not serviceSeen:
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+      "' names credentials but has no [Service] section")
+  if not unitSeen:
+    outLines = @["[Unit]", "After=" & SecretsOrderingUnit, ""] & outLines
+  outLines.join("\n")
 
 proc checkUnitStateResource*(r: SystemResource) =
   ## The refusals both the text parser and the DSL adapter apply to a
@@ -882,6 +1007,9 @@ proc checkPasswdPrimaryGroups*(resources: openArray[SystemResource]) =
 
 const
   AddOnStanzaTag* = "addOn"
+  SecretFileStanzaTag* = "secrets.secretFile"
+    ## The `secrets.secretFile` declaration (`SecretFileDecl`). Like the
+    ## `addOn` stanza it is not a resource stanza.
   UnitCollisionOptIns* = ["dropIn", "replace"]
     ## `collision` values a `systemd.systemUnit` may declare.
   FileCollisionOptIns* = ["divert"]
@@ -1016,6 +1144,56 @@ proc isSafeDropInName*(name: string): bool =
     if c notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
       return false
   true
+
+proc parseSecretFileStanza*(body: string): SecretFileDecl =
+  ## The `secrets.secretFile { service = "<s>"  name = "<n>" }` stanza.
+  for assignment in splitFieldAssignments(body):
+    let eq = assignment.find('=')
+    if eq < 0:
+      raiseSystemProfileInvalid("expected 'key = value' in '" &
+        SecretFileStanzaTag & "', got: '" & assignment & "'")
+    let key = assignment[0 ..< eq].strip()
+    let value = unquote(assignment[eq + 1 .. ^1].strip())
+    case key
+    of "service": result.service = value
+    of "name": result.name = value
+    else:
+      raiseSystemProfileInvalid("'" & SecretFileStanzaTag &
+        "' has no field '" & key & "' (known: service, name; the secret " &
+        "itself never appears in a profile: it arrives sealed, §10.3)")
+  for (what, v) in [("service", result.service), ("name", result.name)]:
+    if not isSafeSecretComponent(v):
+      raiseSystemProfileInvalid("'" & SecretFileStanzaTag & "' " & what &
+        " '" & v & "' must be one path segment of letters, digits, '.', " &
+        "'-' or '_', at most 64 bytes, not starting with '.'")
+
+proc checkSecretDeclarations*(p: SystemProfile) =
+  ## The cross-stanza refusals of the secrets surface (§10.3), shared by the
+  ## text parser and the DSL adapter: one declaration per entry, and every
+  ## credential a unit names declared for that unit's service. A unit that
+  ## names credentials but cannot load them (not a plain `.service`) is
+  ## refused too. Raises `ESystemProfileInvalid`.
+  var seen: seq[string]
+  for d in p.secretFiles:
+    let e = secretEntryPath(d.service, d.name)
+    if e in seen:
+      raiseSystemProfileInvalid("'" & SecretFileStanzaTag & "' " & e &
+        " is declared twice")
+    seen.add(e)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCredentials.len == 0:
+      continue
+    let svc = credentialServiceOf(r.suName)
+    if svc.len == 0:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        "' names credentials, but only a plain `<service>.service` unit " &
+        "(no template instance) can load them")
+    for c in r.suCredentials:
+      if secretEntryPath(svc, c) notin seen:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' loads the credential '" & c & "', but the profile declares " &
+          "no `" & SecretFileStanzaTag & " { service = \"" & svc &
+          "\"  name = \"" & c & "\" }`")
 
 proc managedPrefixError*(prefix: string): string =
   ## Why `prefix` cannot be a managed `/etc` prefix, or "" when it can.
@@ -1158,7 +1336,8 @@ proc systemProfileStanzaLineSpans*(text: string;
   for span in stanzaBounds(clean):
     # The `addOn` stanza is not a resource: the editor pairs spans with
     # parsed resources by ordinal, so it is left out here as it is there.
-    if clean[span.head ..< span.brace].strip() == AddOnStanzaTag:
+    if clean[span.head ..< span.brace].strip() in
+        [AddOnStanzaTag, SecretFileStanzaTag]:
       continue
     let s = lineOf(span.head)
     let e = lineOf(span.close)
@@ -1184,6 +1363,11 @@ proc parseSystemProfile*(text: string): SystemProfile =
         raiseSystemProfileInvalid("a profile may carry one '" &
           AddOnStanzaTag & "' stanza, not two")
       result.addOn = parseAddOnStanza(clean[braceIdx + 1 ..< closeIdx])
+      continue
+    if kindTag == SecretFileStanzaTag:
+      # Not a resource either (`SecretFileDecl`): no address, no driver.
+      result.secretFiles.add(parseSecretFileStanza(
+        clean[braceIdx + 1 ..< closeIdx]))
       continue
     var srk: SystemResourceKind
     case kindTag
@@ -1546,7 +1730,10 @@ proc parseSystemProfile*(text: string): SystemProfile =
             parseBoolField("exclusive", fields["exclusive"])
           else: false,
         suHealthCheck:
-          if "healthCheck" in fields: fields["healthCheck"] else: "")
+          if "healthCheck" in fields: fields["healthCheck"] else: "",
+        suCredentials:
+          if "credentials" in rawFields: parseListLiteral(rawFields["credentials"])
+          else: @[])
       if res.suHealthCheck.len > 0:
         discard parseHealthCheck(res.suHealthCheck)
       if res.suDropInName.len > 0 and res.suCollision != "dropIn":
@@ -2013,6 +2200,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     result.resources.add(res)
   checkUnitStateConflicts(result.resources)
   checkPasswdPrimaryGroups(result.resources)
+  checkSecretDeclarations(result)
 
 # ---------------------------------------------------------------------------
 # SystemResource -> typed PrivilegedOperation. A `destroy` flag flips

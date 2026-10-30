@@ -139,7 +139,14 @@ proc addOnDebianProfile*(): RealisationProfile =
               "unit"),
           FieldRule(field: "healthCheck", class: fcAddOnSpecific,
             reason: "what the add-on switch's confirm step waits for " &
-              "before committing a generation (spec §7.5)")]),
+              "before committing a generation (spec §7.5)"),
+          FieldRule(field: "credentials", class: fcShared,
+            reason: "the secrets the unit loads through systemd " &
+              "credentials, rendered as `LoadCredential=` (spec §10.3)")]),
+    KindRule(kind: "secrets.secretFile", class: fcShared,
+      reason: "a sealed secret materialised under /run/repro/secrets " &
+        "for one service (spec §8.3, §10.3)",
+      fields: shared("service", "name")),
     KindRule(kind: "systemd.systemDropIn", class: fcAddOnSpecific,
       reason: "a drop-in for a distribution unit the add-on does not " &
         "own, at `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` " &

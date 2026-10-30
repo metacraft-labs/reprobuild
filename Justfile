@@ -139,6 +139,23 @@ e2e_addon_base_boots_without_store:
 e2e_addon_confirm_or_revert:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_confirm_or_revert
 
+# Milestone A7: secrets. The disk-scan gate runs the seam build (its second
+# pass kills the tick mid-materialisation; run_addon_gate.sh selects it).
+e2e_addon_no_plaintext_secret_on_disk:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_no_plaintext_secret_on_disk
+
+e2e_addon_service_reads_only_its_credentials:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_service_reads_only_its_credentials
+
+e2e_addon_recipient_key_rotation:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_recipient_key_rotation
+
+t_addon_recipient_key_mode_checked_at_load:
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_recipient_key_mode_checked_at_load recipient-key-mode-unchecked
+
+t_addon_secret_files_created_private_and_never_through_symlinks:
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_secret_files_created_private_and_never_through_symlinks secrets-write-then-narrow
+
 e2e_addon_recovery_never_holds_up_boot:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_recovery_never_holds_up_boot
 

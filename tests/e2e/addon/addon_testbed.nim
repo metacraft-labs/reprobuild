@@ -642,6 +642,8 @@ const TestCacheUrl* = "https://cache.addon-testbed.invalid:7878"
 
 type Anchors* = object
   deploySigners*: seq[string]
+  deploySignerKeys*: seq[peerAuth.PeerKeypair]
+    ## The signers' key pairs, for a gate that publishes manifests.
   cachePublishers*: seq[string]
   flags*: string            ## the preflight / bootstrap options naming them
 
@@ -652,7 +654,9 @@ proc installAnchors*(g: Guest; dir = "/root/addon"): Anchors =
   ## Two deploy-signer keys and one cache-publisher key, freshly generated,
   ## written to anchor files and copied into the guest.
   for i in 0 ..< 2:
-    result.deploySigners.add(hexKey(peerAuth.generateKeypair().publicKey))
+    let kp = peerAuth.generateKeypair()
+    result.deploySignerKeys.add(kp)
+    result.deploySigners.add(hexKey(kp.publicKey))
   result.cachePublishers.add(hexKey(peerAuth.generateKeypair().publicKey))
   writeFile(g.runDir / "deploy-signers.anchors",
             "# test deploy signers\n" & result.deploySigners.join("\n") & "\n")
@@ -674,17 +678,26 @@ type
   StepFn* = proc(name: string; ok: bool; detail: string)
     ## A gate's step recorder (see each gate's ``runBase``).
 
-proc bootstrapAddon*(g: Guest; repro: string; step: StepFn): bool =
-  ## Preflight, then bootstrap with the acknowledged plan digest. False when
-  ## either failed (the step is recorded red).
+proc bootstrapAddonWithAnchors*(g: Guest; repro: string; step: StepFn):
+    tuple[ok: bool; anchors: Anchors] =
+  ## Preflight, then bootstrap with the acknowledged plan digest; also
+  ## returns the anchors (with the deploy signers' key pairs), for a gate
+  ## that publishes signed manifests. ``ok`` is false when either failed
+  ## (the step is recorded red).
   let anchors = g.installAnchors()
+  result.anchors = anchors
   let pre = g.exec(repro & " system addon preflight" & anchors.flags)
   step("preflight is compatible", pre.exitCode == 0, pre.stdout & pre.stderr)
-  if pre.exitCode != 0: return false
+  if pre.exitCode != 0: return
   let boot = g.exec(repro & " system addon bootstrap --plan " &
                     planDigestOf(pre.stdout) & anchors.flags, timeoutSec = 1800)
   step("bootstrap", boot.exitCode == 0, boot.stdout & boot.stderr)
-  boot.exitCode == 0
+  result.ok = boot.exitCode == 0
+
+proc bootstrapAddon*(g: Guest; repro: string; step: StepFn): bool =
+  ## Preflight, then bootstrap with the acknowledged plan digest. False when
+  ## either failed (the step is recorded red).
+  g.bootstrapAddonWithAnchors(repro, step).ok
 
 proc putProfile*(g: Guest; name, text: string): string =
   ## Write a profile into the guest; returns its guest path.

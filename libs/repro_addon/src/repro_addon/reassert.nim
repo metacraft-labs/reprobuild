@@ -20,7 +20,10 @@
 ## 2. **checks** that ``/etc/repro/static`` points at ``current``'s tree,
 ##    that ``current``'s store objects are there, and that every ledger
 ##    object matches its digest;
-## 3. re-materialises secrets (milestone A7; nothing to do before it);
+## 3. re-materialises the current generation's secrets into
+##    ``/run/repro/secrets`` from the retained sealed envelope
+##    (``secrets_ops.reassertSecrets``, milestone A7); a secret it cannot
+##    materialise makes the report ``degraded``;
 ## 4. **reports** ``ok``, ``drift`` (with the objects) or ``degraded`` (the
 ##    store, the ledger or a recovery is broken). It never re-applies on
 ##    drift: that would undo an out-of-band change before anyone saw it.
@@ -46,6 +49,8 @@ import ./mutations
 import ./pending_plan
 import ./static_tree
 import ./seams
+import ./addon_secrets
+import ./secrets_ops
 import ./switch
 import ./transitions
 
@@ -326,6 +331,14 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
   except CatchableError as e:
     result.findings.add("degraded: " & e.msg)
     result.status = "degraded"
+  # --- Step 3 (milestone A7): secrets. BEGIN A7 hook -------------------
+  let sec = reassertSecrets(stateDir, defaultSecretsLayout())
+  if sec.ok:
+    result.notes.add(sec.line)
+  else:
+    result.findings.add(sec.line)
+    result.status = "degraded"
+  # --- END A7 hook -----------------------------------------------------
   try:
     createDir(stateDir / "addon")
     writeFileAtomic(reassertReportPath(stateDir),

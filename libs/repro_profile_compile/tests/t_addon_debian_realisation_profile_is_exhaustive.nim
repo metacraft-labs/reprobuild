@@ -146,7 +146,10 @@ suite "add-on-debian realisation profile":
     systemdSystemUnit(r, name = "cron.service", content = "[Service]\n",
       collision = "dropIn", dropInName = "nice", restartIfChanged = false,
       stopOnRemoval = false, reloadIfChanged = true, exclusive = true,
-      healthCheck = "http://127.0.0.1:8000/alive")
+      healthCheck = "http://127.0.0.1:8000/alive",
+      credentials = @["token"])
+    # The secrets class (A7).
+    secretFile(r, service = "cron", name = "token")
     systemdSystemDropIn(r, unit = "cron.service", name = "nice",
       content = "[Service]\nNice=5\n", restartIfChanged = false)
     linuxSysusersEntry(r, name = "web", kind = "user", id = "990",
