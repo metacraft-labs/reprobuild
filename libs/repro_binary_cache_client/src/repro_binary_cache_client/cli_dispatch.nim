@@ -466,6 +466,10 @@ proc cmdPublish(rawArgs: seq[string]): int =
       return 2
     return 1
   echo "published ", res.responseBody.strip()
+  # What a substitute-only profile edge pins (`expectedOutputDigest`): the
+  # raw archive's digest, printed so the producer never computes it by
+  # hand and never hashes a near-identical archive from another packer.
+  echo "output-digest blake3:", res.rawArchiveDigestHex
   return 0
 
 # ---------------------------------------------------------------------------

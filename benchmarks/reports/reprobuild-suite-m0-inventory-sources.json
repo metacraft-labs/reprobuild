@@ -18383,7 +18383,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

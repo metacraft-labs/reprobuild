@@ -650,3 +650,38 @@ suite "substitute-only edges: the profile pins the bytes, not the publisher":
         check not run.outcome.ok
         check "pins no expectedOutputDigest" in run.outcome.diagnostic
         check not fileExists(tmpRoot / "cwd-nopin" / OutRel)
+
+  test "repro cache publish reports the digest the consumer verifies against":
+    # The producer's pin comes from `publishInProcess`'s report; the
+    # consumer's check hashes the raw archive it fetched, and the no-fetch
+    # hit hashes the present outputs with the same packer. All three must
+    # be one number, or a producer pins a digest nothing ever matches.
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-publish-digest-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+        usePublisher(conf, url, kpA)
+        let run1 = applyOnce(tmpRoot, "pub", "report-edge")
+        checkBuiltLocally(run1)
+        let action = witnessShellAction("report-edge", run1.cwd)
+        let present = localOutputsDigest(action, tmpRoot / "stage-present")
+        # Publish the same outputs again by hand, under another id so the
+        # server takes it, and read the digest the publisher reports.
+        let stage = tmpRoot / "stage-publish"
+        createDir(stage / "bin")
+        copyFile(run1.cwd / OutRel, stage / OutRel)
+        let keypair = peerAuth.loadOrGenerateKeypair(kpA.certPath, kpA.keyPath)
+        let idy = buildActionCacheIdentity(
+          witnessShellAction("report-edge-2", run1.cwd), "")
+        let res = publishInProcess(PublishInProcessRequest(
+          entryKeyHex: deriveCacheEntryKeyHex(idy),
+          prefixDir: stage,
+          identity: idy,
+          endpoint: url,
+          keypair: keypair))
+        check res.ok
+        check res.rawArchiveDigestHex.len == 64
+        check "blake3:" & res.rawArchiveDigestHex == present

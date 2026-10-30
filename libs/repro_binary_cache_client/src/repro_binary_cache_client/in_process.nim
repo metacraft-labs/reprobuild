@@ -98,6 +98,10 @@ type
 
   PublishInProcessResult* = object
     ## Outcome of a single ``publishInProcess`` call.
+    ##   * ``rawArchiveDigestHex`` — BLAKE3 hex of the raw (uncompressed)
+    ##     prefix archive, set as soon as the archive is written (so it is
+    ##     present on a failed upload too); what a profile pins as
+    ##     ``expectedOutputDigest = "blake3:<hex>"``.
     ##   * ``ok``  — true iff the server responded 2xx.
     ##   * ``statusCode`` — HTTP status from ``/publish``; ``0`` when
     ##     the call short-circuited before issuing the request
@@ -115,6 +119,7 @@ type
     error*: string
     bytesUploaded*: int
     responseBody*: string
+    rawArchiveDigestHex*: string
 
 const
   ArchiveMagic = "RBCA"
@@ -828,6 +833,10 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     rawDigest = writeArchiveFile(archivePlan, archiveFile)
     close(archiveFile)
     archiveOpen = false
+    # The digest a profile pins as `expectedOutputDigest`: of the RAW
+    # archive, before compression, which is also what a consumer hashes
+    # after it has decompressed the payload (`rawArchiveBytes`).
+    result.rawArchiveDigestHex = rawDigest.toHex()
   except CatchableError as e:
     result.error = "publish: cannot create prefix archive: " & e.msg
     return
