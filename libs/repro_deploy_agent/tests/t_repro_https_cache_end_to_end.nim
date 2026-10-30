@@ -491,9 +491,11 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
         defer: delEnv("REPRO_BINARY_CACHE_URL")
         putEnv("REPRO_BINARY_CACHE_KEY_PATH", producerKey)
         putEnv("REPRO_BINARY_CACHE_CERT_PATH", producerCert)
+        putEnv("REPRO_APPLY_PUBLISH", "1")  # the apply-time publish opt-in
         defer:
           delEnv("REPRO_BINARY_CACHE_KEY_PATH")
           delEnv("REPRO_BINARY_CACHE_CERT_PATH")
+          delEnv("REPRO_APPLY_PUBLISH")
 
         # RUN 1: empty cache → build locally + publish over HTTPS.
         let cwd1 = tmpRoot / "m4-cwd1"

@@ -15,7 +15,7 @@
 #
 # Review the diff. A row that DECREASES or DISAPPEARS is a test leaving
 # the suite; that is the event this baseline exists to make visible.
-apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	9
+apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	12
 libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim	nim	24
@@ -27,7 +27,7 @@ libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protoc
 libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
-libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	20
+libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	23
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7
 libs/repro_agent_backend/tests/t_agent_preview_strategy.nim	nim	3
 libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim	nim	21
@@ -51,6 +51,7 @@ libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
 libs/repro_binary_cache_client/tests/t_archive_extract_refuses_writing_through_symlinks.nim	nim	10
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
+libs/repro_binary_cache_client/tests/t_local_platform_is_named_and_unknown_refuses.nim	nim	2
 libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	13
 libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim	nim	1
 libs/repro_binary_cache_client/tests/t_r1_caches_config.nim	nim	10
@@ -186,6 +187,7 @@ libs/repro_cli_support/tests/t_home_export_ignores_host_local_lock.nim	nim	2
 libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim	nim	1
 libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim	nim	3
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	4
+libs/repro_cli_support/tests/t_infra_cache_keys.nim	nim	9
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	12
 libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim	nim	19
@@ -277,7 +279,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim	nim	
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	29
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	32
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
@@ -573,7 +575,7 @@ libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
-libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	4
+libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	6
 libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim	nim	8
 libs/repro_profile_compile/tests/t_smoke_apply_integration.nim	nim	4
 libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
@@ -1039,6 +1041,7 @@ tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_uninstall_byte_identity.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
+tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	1
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
 tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim	nim	3

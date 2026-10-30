@@ -383,6 +383,13 @@ proc identityFromArgs(a: PublishArgs): CacheEntryIdentity =
   for depHex in a.depHex:
     result.addDep(depHex)
 
+proc identityFromPublishFlags*(flagArgs: seq[string]): CacheEntryIdentity =
+  ## The identity `repro cache publish` / `derive-key` build from their
+  ## identity flags, exposed so a producer that renders those flags
+  ## (`repro infra cache-keys`) can check they round-trip to the key it
+  ## printed.
+  identityFromArgs(parseIdentityFlags(flagArgs))
+
 proc cmdDeriveKey(args: seq[string]): int =
   let parsed = parseIdentityFlags(args)
   let idy = identityFromArgs(parsed)

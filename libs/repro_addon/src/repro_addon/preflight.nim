@@ -221,6 +221,16 @@ proc anchorText(path: string): string =
 # The preflight.
 # ---------------------------------------------------------------------------
 
+proc baseMatrixNote*(id, versionId: string): string =
+  ## The matrix entry's note for an ``os-release`` ``ID`` / ``VERSION_ID``
+  ## pair ("supported", "release-upgrade source"), or "" when the pair is
+  ## not in the matrix. Raspberry Pi OS reports ``ID=raspbian`` (with
+  ## ``ID_LIKE=debian``) and is its own row.
+  for b in SupportedBases:
+    if b.id == id and b.versionId == versionId:
+      return b.note
+  ""
+
 proc add(r: var PreflightReport; id: string; ok: bool; detail: string) =
   r.checks.add(PreflightCheck(id: id, verdict: (if ok: vPass else: vFail),
                               detail: detail))
@@ -228,8 +238,13 @@ proc add(r: var PreflightReport; id: string; ok: bool; detail: string) =
 proc runPreflight*(inp: PreflightInputs): PreflightReport =
   ## Inventory the host and compute the plan. Writes nothing.
   when mutated("preflight-writes"):
-    # FALSIFYING MUTATION (see mutations.nim): a preflight that writes.
-    writeFile("/var/lib/repro-addon-preflight-was-here", "x")
+    # FALSIFYING MUTATION (see mutations.nim): a preflight that writes, and
+    # swallows the error when it cannot -- so only observing the write, not
+    # the preflight's exit status, can catch it.
+    try:
+      writeFile("/var/lib/repro-addon-preflight-was-here", "x")
+    except IOError, OSError:
+      discard
   let binary = if inp.binaryPath.len > 0: inp.binaryPath else: "/proc/self/exe"
   result.binarySha256 = sha256OfFile(binary)
 
@@ -244,10 +259,7 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   let id = osr.getOrDefault("ID")
   let versionId = osr.getOrDefault("VERSION_ID")
   let idLike = osr.getOrDefault("ID_LIKE")
-  var baseNote = ""
-  for b in SupportedBases:
-    if b.id == id and b.versionId == versionId:
-      baseNote = b.note
+  let baseNote = baseMatrixNote(id, versionId)
   result.add("distribution", baseNote.len > 0,
     if baseNote.len > 0: id & " " & versionId & " (" & baseNote & ")"
     else: "ID=" & id & " VERSION_ID=" & versionId &

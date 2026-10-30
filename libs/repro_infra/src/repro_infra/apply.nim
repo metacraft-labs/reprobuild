@@ -202,7 +202,8 @@ type
       ## Windows-Runner-Binary-Cache-Deploy M4: how many build-action
       ## edges had their outputs SERVED FROM THE BINARY CACHE this
       ## apply (``BuildActionApplyOutcome.substitutedFromCache``). Zero
-      ## when no cache is configured (``REPRO_BINARY_CACHE_URL`` unset)
+      ## when no cache is configured (no ``caches.conf`` entry and no
+      ## ``REPRO_BINARY_CACHE_URL``)
       ## or every edge missed the cache and built locally. The apply
       ## summary reports "N substituted from cache, M built locally"
       ## where N == this count and M == the number of applied edges

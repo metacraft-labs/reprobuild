@@ -15,9 +15,18 @@
 ## fingerprint failed to exclude would otherwise show up as an add-on
 ## difference.
 ##
+## Two more steps before the uninstall: an apply declaring a kind the add-on
+## does not manage (``linux.sysctl``) must be refused with nothing written,
+## no generation committed; and an uninstall that meets drift (a tampered
+## ledger file) must fail, keep the object and the ledger copy, and
+## complete once the object is restored.
+##
 ## Negative control: with ``REPRO_ADDON_MUTATION=uninstall-skips-diversion-removal``
 ## the run uses the add-on binary built with that mutation; this gate must
-## then FAIL, with a diff naming the diversion of ``/etc/issue.net``.
+## then FAIL, with a diff naming the diversion of ``/etc/issue.net``. Two
+## more mutations: ``apply-skips-kind-check`` (the sysctl is applied and
+## left behind) and ``uninstall-discards-state-on-drift`` (the ledger is
+## gone after the failed uninstall, so the second one cannot run).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_bootstrap_uninstall_byte_identity``).
 ## Bases: ``REPRO_ADDON_BASES`` (default: the amd64 matrix). Backend:
@@ -61,6 +70,12 @@ fs.systemFile {
   content = "Managed by the Reprobuild add-on test fixture.
 "
   depends_on = ["linux.dpkgDiversion:/etc/issue.net"]
+}
+"""
+
+const UnmanagedKindProfile = """linux.sysctl {
+  key = "net.ipv4.ip_forward"
+  value = "1"
 }
 """
 
@@ -131,6 +146,36 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let f3 = g.takeFingerprint(repro)
     let d2 = deltaReport(f2, f3, l1, l2)
     step("generation 2 diff == ledger delta", d2.ok, d2.text)
+
+    # A kind the add-on does not manage is refused before anything is
+    # written: the fingerprint, the ledger and `current` are unchanged.
+    writeFile(g.runDir / "gen3.profile", UnmanagedKindProfile)
+    g.copyTo(g.runDir / "gen3.profile", "/root/addon/gen3.profile")
+    let cur2 = g.run("cat /var/lib/repro/system/current 2>/dev/null || readlink /var/lib/repro/system/current").strip()
+    let a3 = g.exec(repro & " infra apply --profile /root/addon/gen3.profile")
+    step("an unmanaged kind is refused", a3.exitCode == 1 and
+         "linux.sysctl" in a3.stderr and "nothing was applied" in a3.stderr,
+         a3.stdout & a3.stderr)
+    let f3b = g.takeFingerprint(repro)
+    let unchanged = identityReport(f3, f3b)
+    step("the refused apply wrote nothing", unchanged.ok, unchanged.text)
+    let cur3 = g.run("cat /var/lib/repro/system/current 2>/dev/null || readlink /var/lib/repro/system/current").strip()
+    step("the refused apply committed no generation", cur2 == cur3 and
+         g.ledgerOf() == l2, "current " & cur2 & " -> " & cur3)
+
+    # An uninstall that meets drift leaves the object AND the ledger, and
+    # fails; once the object is restored a second uninstall completes.
+    discard g.run("cp -p /etc/profile.d/repro-addon.sh /root/addon/profile.d.orig && " &
+                  "echo '# tampered' >> /etc/profile.d/repro-addon.sh")
+    let unDrift = g.exec(repro & " system addon uninstall")
+    let ledgerKept = g.exec("test -f /var/lib/repro/system/addon-ledger").exitCode == 0
+    let fileKept = g.exec("grep -q tampered /etc/profile.d/repro-addon.sh").exitCode == 0
+    step("uninstall with drift fails, keeps the object and the ledger",
+         unDrift.exitCode == 1 and ledgerKept and fileKept and
+         "repro-addon.sh" in unDrift.stdout,
+         unDrift.stdout & unDrift.stderr & "\nledger kept: " & $ledgerKept &
+         " file kept: " & $fileKept)
+    discard g.run("cp -p /root/addon/profile.d.orig /etc/profile.d/repro-addon.sh")
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)

@@ -74859,6 +74859,46 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   var checks: seq[HealthCheck]
   let self = reproSelfPath()
 
+  # 0. Stale auto-generated binary-cache producer keys. Until reprobuild
+  #    1c2752eef9 the apply-time substitute path minted an ECDSA-P256
+  #    producer keypair under the per-OS config dir on every host that ran
+  #    an apply without one configured, and published under it. The path no
+  #    longer mints or uses such a key, and no cache allowlists one, so a
+  #    keypair at that location is inert -- but it is still a private key on
+  #    disk that nothing created on purpose, and it reads as "this host is a
+  #    publisher" to anyone who finds it. Reported with the remedy; never
+  #    auto-removed, because the same directory is where the developer-side
+  #    `repro build` publisher keeps a key it DID mean to mint.
+  block staleProducerKey:
+    let credDir = defaultAutoCredentialDir()
+    let keyFile = credDir / "producer.key.pem"
+    let certFile = credDir / "producer.cert.pem"
+    let present = fileExists(keyFile) or fileExists(certFile)
+    let configured = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "").len > 0 and
+      getEnv("REPRO_BINARY_CACHE_CERT_PATH", "").len > 0
+    if present and not configured:
+      checks.add(HealthCheck(
+        name: "binary-cache-producer-key",
+        status: hsWarn,
+        detail: "an auto-generated binary-cache producer keypair sits at " &
+          credDir & " and no publisher is configured " &
+          "(REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH unset). Nothing uses " &
+          "it: the apply path stopped minting and publishing under such " &
+          "keys at reprobuild 1c2752eef9, and no cache allowlists it",
+        remedy: "rm -r " & quoteShell(credDir) &
+          "   # unless `repro build` publishing on this host relies on it; " &
+          "then point REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH at it",
+        fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "binary-cache-producer-key",
+        status: hsOk,
+        detail: (if present: "auto-generated producer keypair present and " &
+                   "a publisher is configured"
+                 elif configured: "publisher keypair configured by the operator"
+                 else: "no auto-generated producer keypair on this host"),
+        remedy: "", fixKind: hfNone))
+
   # 1. reprobuild install & version. The binary that is running answers
   #    this affirmatively by construction; we still surface the version
   #    so the table is informative.

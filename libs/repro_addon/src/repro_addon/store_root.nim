@@ -81,15 +81,19 @@ proc filesPrefixPath*(names: openArray[string]): string =
 # Roots.
 # ---------------------------------------------------------------------------
 
-proc createRootDir*(path: string; mode: int): string =
+proc createRootDir*(path: string; mode: int; asSubvolume = false): string =
   ## Create one root directory that must not exist yet, with exactly
   ## ``mode`` (the umask does not apply). Returns the ledger kind hint.
-  ## ``/repro`` on a btrfs filesystem becomes a subvolume.
+  ## With ``asSubvolume`` the directory is a btrfs subvolume (bootstrap asks
+  ## for it when ``/repro``'s parent is btrfs); the parent must be btrfs.
   var st: Stat
   if lstat(path.cstring, st) == 0:
     raise newException(StoreRootError, path & " already exists")
   let parent = parentDir(path)
-  if path == ReproRoot and isBtrfs(parent):
+  if asSubvolume:
+    if not isBtrfs(parent):
+      raise newException(StoreRootError, parent & " is not btrfs; " & path &
+        " cannot be a subvolume")
     createBtrfsSubvolume(parent, extractFilename(path))
     result = "btrfs-subvolume"
   else:
@@ -100,6 +104,30 @@ proc createRootDir*(path: string; mode: int): string =
     raiseOSError(osLastError(), "chmod " & path)
   if posix.chown(path.cstring, 0, 0) != 0:
     raiseOSError(osLastError(), "chown " & path)
+
+proc selfcheckBtrfsSubvolume*(mountPoint: string): string =
+  ## Exercise the subvolume leg of ``createRootDir`` on a btrfs filesystem
+  ## mounted at ``mountPoint`` (a loop-backed one in a test guest): create
+  ## ``<mountPoint>/repro-addon-selfcheck`` as a subvolume, verify the
+  ## kernel calls it one, delete it through the subvolume ioctl, verify it
+  ## is gone. Returns a one-line report; raises on any failure.
+  if not isBtrfs(mountPoint):
+    raise newException(StoreRootError, mountPoint & " is not btrfs")
+  let name = "repro-addon-selfcheck"
+  let path = mountPoint / name
+  let hint = createRootDir(path, 0o755, asSubvolume = true)
+  if hint != "btrfs-subvolume" or not isBtrfsSubvolume(path):
+    raise newException(StoreRootError, path & " was created but is not a " &
+      "btrfs subvolume (hint " & hint & ")")
+  var st: Stat
+  if lstat(path.cstring, st) != 0 or (int(st.st_mode) and 0o7777) != 0o755:
+    raise newException(StoreRootError, path & " does not have mode 0755")
+  deleteBtrfsSubvolume(mountPoint, name)
+  if lstat(path.cstring, st) == 0:
+    raise newException(StoreRootError, path & " still exists after the " &
+      "subvolume delete")
+  "btrfs subvolume " & path & ": created (inode " & $BtrfsFirstFreeObjectId &
+    ", mode 0755), deleted"
 
 proc removeReproRoot*() =
   ## Delete ``/repro`` and everything below it: a btrfs subvolume through

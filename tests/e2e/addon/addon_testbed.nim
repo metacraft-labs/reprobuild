@@ -36,7 +36,10 @@
 ##
 ## *Base preparation.* After cloud-init finishes on the first boot, the test
 ## bed disables the distribution's periodic apt jobs (``apt-daily*``,
-## ``unattended-upgrades``) and runs ``apt-get update`` once. The first keeps
+## ``unattended-upgrades``, and Debian 13's hourly ``apt-listchanges.timer``,
+## whose service disables itself on its first run and so changes the
+## unit-file and active-unit state of a run that straddles the hour) and
+## runs ``apt-get update`` once. The first keeps
 ## an unattended upgrade from changing ``dpkg-status`` in the middle of a
 ## gate -- the gates fingerprint the base and an upgrade is not the add-on's
 ## doing; A10 runs with them on. The second makes ``apt-get install`` work,
@@ -496,7 +499,7 @@ proc prepareBase*(g: Guest) =
   discard g.exec("cloud-init status --wait >/dev/null 2>&1 || true",
                  timeoutSec = g.bootTimeout())
   discard g.run("systemctl disable --now apt-daily.timer " &
-    "apt-daily-upgrade.timer 2>/dev/null; " &
+    "apt-daily-upgrade.timer apt-listchanges.timer 2>/dev/null; " &
     "systemctl stop apt-daily.service apt-daily-upgrade.service " &
     "unattended-upgrades.service 2>/dev/null; " &
     "systemctl mask --now unattended-upgrades.service 2>/dev/null; true")
