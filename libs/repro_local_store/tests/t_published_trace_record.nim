@@ -195,6 +195,16 @@ suite "M17 chunk 2: the published-trace record rbpm-v2":
       probes = @[project / "src" / "b.h"])
     check undeclared.declared.len == 0
     check undeclared.strongHex != record.strongHex
+    # ...and under the SAME weak fingerprint: one input, identical but for its
+    # role, is a different strong fingerprint. (Added by the independent
+    # verification of chunk 2: the case above also differs in its weak
+    # fingerprint, so it passed with the role left out of the strong one.)
+    let asDeclared = @[PortableInput(kind: pikRead, path: "project:src/a.c",
+      digest: "file:" & repeat('0', 64), role: irDeclared)]
+    var asObserved = asDeclared
+    asObserved[0].role = irObserved
+    check portableStrongFingerprint(hex('d'), asDeclared) !=
+      portableStrongFingerprint(hex('d'), asObserved)
     # A miss says which kind of input differed.
     let store = base / "store"
     recordMemo(store, record)
