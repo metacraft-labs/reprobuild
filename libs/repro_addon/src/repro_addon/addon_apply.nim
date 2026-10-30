@@ -347,7 +347,7 @@ proc targetPathOf*(r: SystemResource): string =
   of srkLinuxDpkgDiversion: r.ddPath
   else: ""
 
-proc preObserve(p: var ResourcePlan) =
+proc preObserve(p: var ResourcePlan; driver: CollisionDriver) =
   case p.r.kind
   of srkFsSystemFile:
     p.targetPath = p.r.sfPath
@@ -375,7 +375,7 @@ proc preObserve(p: var ResourcePlan) =
     if p.r.seKind == "user":
       p.groupBefore = accountFingerprintValue("group", p.r.seName)
   of srkSystemdUnitState:
-    let u = readUnitProvision(p.r.usName)
+    let u = driver.unitProvision(p.r.usName)
     p.baseUnitState = u.unitFileState
     p.baseActiveState = u.activeState
   of srkSystemdSystemUnit:
@@ -387,7 +387,7 @@ proc preObserve(p: var ResourcePlan) =
           p.newDirs.add(l.dir)
         if symlinkExists(l.link):
           p.preLinks.add(l.link)
-    let u = readUnitProvision(p.r.suName)
+    let u = driver.unitProvision(p.r.suName)
     p.baseUnitState = u.unitFileState
     p.baseActiveState = u.activeState
   of srkLinuxDpkgDiversion:
@@ -423,14 +423,31 @@ proc parseEtcFileValue(value: string): tuple[mode, owner: string] =
   (parts[1], parts[2])
 
 proc restorePreserved*(e: LedgerEntry): bool =
-  ## Put the bytes the ledger preserved for ``e`` back at its path, with
-  ## the mode and owner the path had. False when the entry preserved
-  ## nothing (a plain deletion is then the right undo).
+  ## Undo ``e`` the way its history says: put back the bytes the ledger
+  ## preserved, with the mode and owner the path had -- or, when the path
+  ## was absent before the add-on (``replaced`` empty, so the preserved
+  ## bytes are what a later ``--reconcile-drift`` displaced, not a prior
+  ## state), delete it: the undo of a creation is a deletion, and the
+  ## displaced bytes stay under the state directory for the operator.
+  ## False when the entry preserved nothing (a plain deletion is then the
+  ## right undo, and the caller's).
   if e.preserved.len == 0:
     return false
+  if e.replaced.len == 0:
+    # The object may be the add-on's link into the static tree, or the
+    # file a hand edit put in its place: either way it goes.
+    if symlinkExists(e.path) or fileExists(e.path):
+      removeFile(e.path)
+    return true
   if not fileExists(e.preserved):
     raise newException(AddonApplyError, "preserved bytes for " & e.path &
       " are missing at " & e.preserved)
+  if e.isLink and symlinkExists(e.path) and expandSymlink(e.path) == e.linkTarget:
+    # The add-on's own link into the static tree (the ledger names its
+    # target; the restore loop checked nothing else moved it). The writer
+    # below rightly refuses a link on the leaf, so the link goes first:
+    # the restored bytes are a regular file where the link was.
+    removeFile(e.path)
   let (mode, owner) = parseEtcFileValue(e.replaced)
   let (uid, gid) = parseOwner(owner)
   writeFileNoFollow(e.path, readFile(e.preserved), parseOctInt(mode), uid, gid)
@@ -461,7 +478,8 @@ proc dirEntry(path, resource: string): LedgerEntry =
   LedgerEntry(class: lcDir, path: path, mode: st.mode, owner: st.owner,
               resource: resource)
 
-proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry]): seq[LedgerEntry] =
+proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry];
+                driver: CollisionDriver): seq[LedgerEntry] =
   ## The ledger entries of one applied resource. Entries the previous
   ## ledger already holds for the same resource and target keep what was
   ## recorded when the add-on first touched the object (the replaced
@@ -487,6 +505,12 @@ proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry]): seq[LedgerEntry] =
     else: p.collision
   let preserved = if known and prevMain.preserved.len > 0: prevMain.preserved
                   else: p.preserved
+  # The newest reconcile's displaced bytes are named too: ``preserved``
+  # keeps the first-touch bytes removal restores, ``displaced`` what the
+  # operator's last --reconcile-drift threw out.
+  let displaced = if p.collision == "reconcile": p.preserved
+                  elif known: prevMain.displaced
+                  else: ""
   if known:
     for d in prevDirs:
       if dirExists(d.path): result.add(d)
@@ -501,6 +525,7 @@ proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry]): seq[LedgerEntry] =
       f.observation = observation
       f.collision = collisionMode
       f.preserved = preserved
+      f.displaced = displaced
       if collisionMode == "dropIn":
         # /etc/systemd/system/<unit>.d/<file>: the unit is the directory's
         # stem.
@@ -518,7 +543,8 @@ proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry]): seq[LedgerEntry] =
       u.observation = observation
       u.collision = collisionMode
       u.preserved = preserved
-      let now = readUnitProvision(r.suName)
+      u.displaced = displaced
+      let now = driver.unitProvision(r.suName)
       u.unitState = now.unitFileState
       u.activeState = now.activeState
       if known:
@@ -742,13 +768,13 @@ proc systemctlOrRaise(args: openArray[string]) =
   except HostToolMissing as e:
     raise newException(AddonApplyError, e.msg)
 
-proc restoreUnitState*(e: LedgerEntry) =
+proc restoreUnitState*(e: LedgerEntry; driver: CollisionDriver) =
   ## After the add-on's unit file left (restored or removed), put the unit
   ## back in the state the base had it: a `replace`d package unit that was
   ## enabled and active stays so, now from the package's file; an adopted
   ## hand-written unit the add-on enabled is disabled again. Runs after
   ## `daemon-reload`.
-  let now = readUnitProvision(e.unit)
+  let now = driver.unitProvision(e.unit)
   let nowEnabled = now.unitFileState in ["enabled", "enabled-runtime"]
   if e.baseUnitState == "enabled" and not nowEnabled and
       now.loadState == "loaded":
@@ -806,6 +832,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## apply did create, so uninstall still finds them.
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   if not opts.planOnly:
+    # The before-each-write re-check runs on the in-process apply path,
+    # which is the one an add-on apply takes: as root, in this process. A
+    # process that would hand the privileged set to a broker would apply
+    # without it, so it is refused rather than let through unchecked.
+    if not isProcessElevated() or getEnv(ForceBrokerEnvVar).len > 0:
+      raise newException(AddonApplyError, "an add-on apply runs as root " &
+        "in one process (the before-each-write collision check runs " &
+        "there); re-run as root" &
+        (if getEnv(ForceBrokerEnvVar).len > 0: " without " & ForceBrokerEnvVar
+         else: ""))
     enterWritableStoreView()
     createDir(addonDir(stateDir))
   # One apply at a time per state directory (the same lock `repro infra
@@ -852,7 +888,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       raise newException(AddonApplyError, "cannot adopt " & a &
         ": the profile declares no resource with that address")
 
-  let driver = if opts.driver != nil: opts.driver else: detectCollisionDriver()
+  var newDriver: DriverFactory
+  if opts.driver != nil:
+    let given = opts.driver
+    newDriver = proc(): CollisionDriver = given
+  else:
+    newDriver = proc(): CollisionDriver = detectCollisionDriver()
+  let driver = newDriver()
   var dropIns = initHashSet[string]()
   var userResources = reshape(user, dropIns)
   for r in userResources:
@@ -875,16 +917,55 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var plans: seq[ResourcePlan]
   var targets: seq[PlannedTarget]
   var verdictByAddress = initTable[string, CollisionVerdict]()
+  # The add-on's own objects go through the same table as the operator's:
+  # a link planted on one of their paths, or a package that came to own
+  # one, is met the same way, and the pre-write guard knows them.
   for r in own.resources:
     var p = ResourcePlan(r: r, own: true, form: "copy")
-    preObserve(p)
+    preObserve(p, driver)
     p.content = desiredBytes(r)
-    verdictByAddress[r.address] = cvNoOp
+    var inp = DecisionInputs(address: r.address,
+      reconcileDrift: opts.reconcileDrift, desiredContent: p.content)
+    case r.kind
+    of srkFsSystemFile:
+      inp.kind = tkFile
+    of srkSystemdSystemUnit:
+      inp.kind = tkUnit
+      inp.unit = r.suName
+    else:
+      discard
+    inp.desiredSha256 = sha256Hex(inp.desiredContent)
+    inp.ledgerOwns = p.targetPath in prevOwned
+    inp.ledgerSha256 = prevSha.getOrDefault(p.targetPath)
+    let (dec, _) = decide(driver, inp, p.targetPath)
+    p.observation = dec.observation
+    p.verdict = $dec.verdict
+    if dec.verdict == cvReconcile:
+      p.collision = "reconcile"
+      if not opts.planOnly:
+        p.preserved = preserveBytes(stateDir, dec.preWriteBytes)
+    elif dec.verdict == cvAdopt:
+      p.collision = "adopt"
+      if not opts.planOnly:
+        p.preserved = preserveBytes(stateDir, dec.preWriteBytes)
+    verdictByAddress[r.address] = dec.verdict
+    result.collisions.add(CollisionLine(address: r.address, target: p.targetPath,
+      observation: dec.observation, verdict: $dec.verdict, reason: dec.reason))
+    targets.add(PlannedTarget(address: r.address, path: p.targetPath,
+      kind: inp.kind, unit: inp.unit, observation: dec.observation,
+      observedSha256: dec.observedSha256, desiredSha256: inp.desiredSha256,
+      verdict: dec.verdict))
     plans.add(p)
   for i in 0 ..< userResources.len:
     var r = userResources[i]
     var p = ResourcePlan(r: r)
-    preObserve(p)
+    preObserve(p, driver)
+    if r.kind == srkSystemdSystemDropIn:
+      # The unit a drop-in modifies must be provided by something; the
+      # unit rows decide that (a package unit, or a hand-written one), the
+      # file rows the drop-in file itself.
+      discard decide(driver, DecisionInputs(address: r.address, kind: tkUnit,
+        unit: r.diUnit, collision: "dropIn"), unitPath(r.diUnit))
     if r.kind == srkSystemdUnitState:
       # Nothing of the add-on's on the host: no target, no collision row.
       # A missing or masked unit is refused by its driver.
@@ -925,6 +1006,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     inp.ledgerOwns = (if r.kind == srkLinuxDpkgDiversion:
                         ("diversion:" & path) in prevOwned
                       else: path in prevOwned)
+    inp.ledgerOwnsDiversion = ("diversion:" & path) in prevOwned
     inp.ledgerSha256 = prevSha.getOrDefault(path)
     let (dec, _) = decide(driver, inp, path)
     if r.kind == srkLinuxSysusersEntry and p.accountBefore.len > 0 and
@@ -985,8 +1067,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         p.collision = "dropIn"
     # The materialisation form (spec §7.2 steps 4 and 5): a link for the
     # link-form kinds, except an object adopted as it is (nothing is
-    # written to it) -- a copy until its content changes.
-    p.form = if r.kind in LinkFormKinds and dec.verdict != cvAdopt: "link"
+    # written to it) -- a copy until its content changes -- and a file
+    # taken over from a package by a diversion. The package's own tooling
+    # reads the diverted path and resolves the link: ucf, run by the
+    # package's postinst, wrote its `.ucf-dist` beside the store copy and
+    # the upgrade failed on the read-only store (measured 2026-10-30,
+    # Debian 13 and Ubuntu 24.04). Unit files are copies by kind, above.
+    p.form = if r.kind in LinkFormKinds and
+                dec.verdict notin {cvAdopt, cvDivert}: "link"
              else: "copy"
     result.collisions.add(CollisionLine(address: r.address, target: path,
       observation: dec.observation, verdict: $dec.verdict, reason: dec.reason))
@@ -1100,7 +1188,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         removedSysctl.add(e)
     if not restoresInstead:
       destroy.add(r)
-    if r.kind == srkSystemdSystemUnit:
+    if r.kind == srkSystemdSystemUnit and restoresInstead:
+      # Handed back to the base (a `replace`d package unit, an adopted or
+      # reconciled hand-written one): the switch neither stops nor
+      # disables it; `restoreUnitState` re-asserts the base's enablement
+      # and restarts it from the base's file after the reload.
+      needReloadAfterRemoval = true
+    elif r.kind == srkSystemdSystemUnit:
       removedUnits.add(r)
       if r.suStopHeld:
         # Left running (§7.3 `stopOnRemoval = false`): the instance is
@@ -1344,8 +1438,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       var needReload = needReloadAfterRemoval
       var unitsToRestore: seq[LedgerEntry]
       for e in restore:
-        if observeDrift(e).len > 0:
-          continue                 # changed meanwhile: left, as drift
+        # Changed meanwhile: left, as drift. Not a change: the flip of
+        # step 3 moved the static tree from under a link-form object the
+        # new generation no longer carries, so the add-on's own link now
+        # dangles; that is the removal in progress, and the restore (or
+        # the deletion) replaces the link.
+        let d = observeDrift(e)
+        if d.len > 0 and not (e.isLink and d.startsWith("dangling")):
+          continue
         try:
           if restorePreserved(e):
             hookRestored.add(e.path)
@@ -1356,7 +1456,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
               hookRestored.add(e.path)
           if e.class in {lcUnit, lcDropIn}:
             needReload = true
-            if e.class == lcUnit: unitsToRestore.add(e)
+            if e.class == lcUnit:
+              unitsToRestore.add(e)
+              # The install links the add-on made for it go too (a
+              # package's own link was never ledgered, so it stays).
+              for li in previous.entries:
+                if li.resource == e.resource and li.class == lcInstallLink and
+                    symlinkExists(li.path):
+                  removeFile(li.path)
         except CatchableError as ex:
           problems.add("restoring " & e.path & ": " & ex.msg)
       if needReload:
@@ -1364,7 +1471,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         except CatchableError as ex:
           problems.add(ex.msg)
       for e in unitsToRestore:
-        try: restoreUnitState(e)
+        try: restoreUnitState(e, driver)
         except CatchableError as ex:
           problems.add(ex.msg)
       # Directories the removed resources had created.
@@ -1394,7 +1501,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       put(LedgerEntry(class: lcStorePrefix, path: treePath,
         sha256: prefixIdHex(treePrefixId), resource: "static-tree"))
       for p in plans:
-        for e in entriesFor(p, previous.entries):
+        for e in entriesFor(p, previous.entries, driver):
           put(e)
       # A removed resource whose objects are still there stays in the
       # ledger, so nothing it created is orphaned and the add-on still
@@ -1441,7 +1548,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
       noPreview: true, elevationMode: emBroker,
       extraDestroyResources: destroy,
-      preWriteGuard: makePreWriteGuard(driver, targets),
+      preWriteGuard: makePreWriteGuard(newDriver, targets),
       addOnDispatch: policy,
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
                               afterPrivilegedSet: afterSet,

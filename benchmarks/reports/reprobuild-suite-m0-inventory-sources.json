@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 34,
     "nimTestBinaries": 2473,
     "pureUnitConsolidationGroups": 72,
-    "pureUnitTests": 698,
+    "pureUnitTests": 697,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
     "testEntries": 2513
   },
@@ -1448,8 +1448,8 @@
       "graph-fixture": 18,
       "integration": 1369,
       "platform/destructive": 153,
-      "pure unit": 698,
-      "unclassified": 275
+      "pure unit": 697,
+      "unclassified": 276
     },
     "graphOwnedTestArtifacts": [
       {
@@ -8055,13 +8055,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_addon",
+        "repro_elevation",
         "repro_infra"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_collision.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 23,
+      "staticCaseCount": 29,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8101,8 +8102,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_ledger_and_plan",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -8114,8 +8115,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 26,
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15844,7 +15845,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

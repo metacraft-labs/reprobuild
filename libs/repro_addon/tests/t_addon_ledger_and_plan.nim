@@ -7,7 +7,7 @@
 ## diff equalling its ledger's delta -- is the VM gates' job
 ## (``tests/e2e/addon``).
 
-import std/[json, strutils, tables, unittest]
+import std/[json, os, posix, strutils, tables, unittest]
 
 import repro_infra
 import repro_profile
@@ -221,6 +221,74 @@ suite "trust anchors and cache configuration":
       discard renderCachesConf("", @[k1])
     expect ValueError:
       discard renderCachesConf("ftp://x", @[k1])
+
+suite "undoing a reconciled object":
+  test "a file the add-on created is deleted on undo even after a reconcile preserved bytes":
+    let dir = getTempDir() / ("repro-addon-undo-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeFile(dir / "x.conf", "x\n")
+    writeFile(dir / "preserved", "x-mod\n")
+    let created = LedgerEntry(class: lcEtcFile, path: dir / "x.conf",
+      preserved: dir / "preserved", replaced: "", collision: "reconcile")
+    check restorePreserved(created)
+    check not fileExists(dir / "x.conf")
+    check fileExists(dir / "preserved")
+    # Nothing preserved: the caller deletes.
+    check not restorePreserved(LedgerEntry(class: lcEtcFile, path: dir / "y"))
+
+  test "a created link-form object is deleted on undo too":
+    # Since the switch (§7.2) a managed file is a link into the static
+    # tree; the undo of its creation removes the link, not what it names.
+    let dir = getTempDir() / ("repro-addon-undo-link-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeFile(dir / "tree-x.conf", "x\n")
+    createSymlink(dir / "tree-x.conf", dir / "x.conf")
+    writeFile(dir / "preserved", "x-mod\n")
+    let created = LedgerEntry(class: lcEtcFile, path: dir / "x.conf",
+      preserved: dir / "preserved", replaced: "", collision: "reconcile")
+    check restorePreserved(created)
+    check not symlinkExists(dir / "x.conf")
+    check fileExists(dir / "tree-x.conf")
+
+  test "a reconciled link-form object is restored as the file it replaced":
+    # The flip left the add-on's link dangling (the new tree does not
+    # carry the object); the pre-add-on bytes come back as a regular file.
+    let dir = getTempDir() / ("repro-addon-undo-restore-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    createSymlink(dir / "gone-tree" / "r.conf", dir / "r.conf")
+    writeFile(dir / "preserved", "theirs\n")
+    let e = LedgerEntry(class: lcEtcFile, path: dir / "r.conf", form: "link",
+      linkTarget: dir / "gone-tree" / "r.conf", preserved: dir / "preserved",
+      replaced: "f 0644 " & $getuid() & ":" & $getgid() & " sha256:x",
+      collision: "reconcile")
+    check restorePreserved(e)
+    check not symlinkExists(dir / "r.conf")
+    check readFile(dir / "r.conf") == "theirs\n"
+
+suite "drift on a link-form object":
+  test "a regular file where the add-on's link was is drift, not a missing object":
+    # An operator cannot write through the link into the read-only tree,
+    # so a hand edit replaces it with a file. That file is theirs: the
+    # removal must leave it in place (spec §4.2), which it does only when
+    # the observation is a difference rather than "missing".
+    let dir = getTempDir() / ("repro-addon-drift-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeFile(dir / "tree-b.conf", "b\n")
+    createSymlink(dir / "tree-b.conf", dir / "b.conf")
+    let e = LedgerEntry(class: lcEtcFile, path: dir / "b.conf", form: "link",
+      linkTarget: dir / "tree-b.conf", sha256: sha256Hex("b\n"))
+    check observeDrift(e) == ""
+    removeFile(dir / "b.conf")
+    writeFile(dir / "b.conf", "b-modified\n")
+    let d = observeDrift(e)
+    check d.len > 0 and not d.startsWith("missing")
+    check "regular file" in d
+    removeFile(dir / "b.conf")
+    check observeDrift(e).startsWith("missing")
 
 suite "base matrix, managed kinds and ephemeral sockets":
   test "Raspberry Pi OS 13 is in the base matrix by its own ID":

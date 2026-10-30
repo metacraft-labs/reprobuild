@@ -9,12 +9,13 @@
 ##
 ## Rows:
 ##
-## - **package-owned conffile** (``/etc/ssh/ssh_config``, a dpkg conffile of
-##   openssh-client on both bases -- ``/etc/ssh/sshd_config``, the spec's
-##   example, is managed by ``ucf`` there and is in no dpkg record):
-##   ``EAddOnPackageOwned`` naming the package; ``collision = divert`` moves
-##   the package's copy to ``.distrib`` and records the diversion; removal
-##   puts it back.
+## - **package-owned conffile**, twice: ``/etc/ssh/sshd_config`` (the spec's
+##   example; on Debian 13 and Ubuntu 24.04 openssh-server manages it through
+##   ``ucf``, so it is in no dpkg record and the observer's fourth record,
+##   ucf's registry, is what owns it) and ``/etc/ssh/ssh_config`` (a plain
+##   dpkg conffile of openssh-client): ``EAddOnPackageOwned`` naming the
+##   package; ``collision = divert`` moves the package's copy to ``.distrib``
+##   and records the diversion; removal puts it back.
 ## - **package unit** (``cron.service``; the ``cron`` package is installed
 ##   before the baseline, Debian 13's cloud image ships none): ``EAddOnUnitShadows`` naming the
 ##   package's fragment; ``collision = dropIn`` writes a drop-in systemd
@@ -29,8 +30,22 @@
 ##   replaces the differing one and keeps its bytes; removal restores both.
 ## - **foreign diversion** (``/etc/issue`` diverted by another package):
 ##   refused with or without the opt-in.
+## - **unowned file that differs** (``/etc/repro-fixture/h.conf``, written by
+##   hand): ``EDrift``; ``repro system adopt`` claims it as it is; a second
+##   such file is replaced by ``--reconcile-drift`` with its bytes
+##   preserved; removal restores both.
+## - **foreign local diversion** (``/etc/issue`` diverted by hand to
+##   ``/etc/issue.distrib``, the very name the add-on would use): refused,
+##   because a diversion the ledger does not list is someone else's whatever
+##   its target is called.
+## - **drop-in for a unit nothing provides**: refused.
 ## - **out of scope**: a path outside the declared managed prefixes is
 ##   ``EAddOnOutOfScope``.
+## - **uninstall with a replaced and an adopted unit still in the profile**
+##   (``cron.service`` replaced; ``fixture-base.service``, a
+##   hand-written unit the base had enabled and active, adopted): both are
+##   enabled and active afterwards, from the base's files, and the
+##   fingerprint equals the base's.
 ## - **create / no-op**: an absent unowned path is created, and re-applying
 ##   is a no-op.
 ##
@@ -53,14 +68,15 @@ import repro_addon/[fingerprint, ledger]
 import ./addon_testbed
 
 const
-  SshdContent = "Include /etc/ssh/ssh_config.d/*.conf\nHost *\n    SendEnv LANG LC_*\n"
+  SshContent = "Include /etc/ssh/ssh_config.d/*.conf\nHost *\n    SendEnv LANG LC_*\n"
+  SshdContent = "Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin prohibit-password\n"
   ConffileRefused = """addOn {
   managedEtcPrefixes = ["/etc/ssh/"]
 }
 
 fs.systemFile {
-  path = "/etc/ssh/ssh_config"
-  content = "$1"
+  path = "$1"
+  content = "$2"
 }
 """
   ConffileDiverted = """addOn {
@@ -68,8 +84,8 @@ fs.systemFile {
 }
 
 fs.systemFile {
-  path = "/etc/ssh/ssh_config"
-  content = "$1"
+  path = "$1"
+  content = "$2"
   collision = "divert"
 }
 """
@@ -152,6 +168,67 @@ fs.systemFile {
 "
 }
 """
+  BaseUnit = "[Unit]\nDescription=base fixture the add-on adopts\n\n[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n"
+  FinalProfile = """systemd.systemUnit {
+  name = "cron.service"
+  content = "[Unit]
+Description=Regular background program processing daemon (Reprobuild add-on replace fixture)
+
+[Service]
+ExecStart=/usr/sbin/cron -f
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+"
+  collision = "replace"
+}
+
+systemd.systemUnit {
+  name = "fixture-base.service"
+  content = "$1"
+}
+"""
+  FilesPrefix = """addOn {
+  managedEtcPrefixes = ["/etc/repro-fixture/"]
+}
+"""
+  FileH = FilesPrefix & """
+fs.systemFile {
+  path = "/etc/repro-fixture/h.conf"
+  content = "$1"
+}
+"""
+  FilesHR = FilesPrefix & """
+fs.systemFile {
+  path = "/etc/repro-fixture/h.conf"
+  content = "$1"
+}
+
+fs.systemFile {
+  path = "/etc/repro-fixture/r.conf"
+  content = "$2"
+}
+"""
+  ForeignLocalDiverted = """addOn {
+  managedEtcPrefixes = ["/etc/issue"]
+}
+
+fs.systemFile {
+  path = "/etc/issue"
+  content = "ours
+"
+  collision = "divert"
+}
+"""
+  DropInNothing = """systemd.systemUnit {
+  name = "repro-fixture-nothing.service"
+  content = "[Service]
+Nice=5
+"
+  collision = "dropIn"
+}
+"""
   OutOfScope = """fs.systemFile {
   path = "/etc/motd-repro"
   content = "x
@@ -189,6 +266,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # baseline fingerprint.
     discard g.run("export DEBIAN_FRONTEND=noninteractive; " &
       "apt-get install -y -qq cron >/dev/null", timeoutSec = 1200)
+    # A hand-written unit the base has enabled and active: the adoption
+    # and uninstall rows below must hand it back exactly so.
+    writeFile(g.runDir / "base.unit", BaseUnit)
+    # Not `repro-*`: preflight refuses a pre-bootstrap `repro-*` unit as a
+    # foreign occupant (spec §6.1); this one stands for an operator's own.
+    g.copyTo(g.runDir / "base.unit", "/etc/systemd/system/fixture-base.service")
+    discard g.run("chmod 0644 /etc/systemd/system/fixture-base.service && " &
+      "systemctl daemon-reload && systemctl enable --now fixture-base.service")
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     let fBase = g.takeFingerprint(repro)
@@ -224,39 +309,49 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       l = l2
       r.stdout
 
-    # --- Row: package-owned conffile. ---
-    let sshdBefore = g.sha256InGuest("/etc/ssh/ssh_config")
-    step("vacuity guard: openssh-client owns /etc/ssh/ssh_config",
-         g.exec("grep -qx /etc/ssh/ssh_config /var/lib/dpkg/info/openssh-client.conffiles").exitCode == 0, "")
-    refused("conffile", ConffileRefused % [SshdContent],
-            "EAddOnPackageOwned", "openssh-client")
-    let planR = g.planProfile(repro, "conffile-plan", ConffileRefused % [SshdContent])
-    step("conffile: the plan refuses the same way and writes nothing",
-         planR.exitCode == 2 and "EAddOnPackageOwned" in planR.stderr and
-         identityReport(f, g.takeFingerprint(repro)).ok, planR.stdout & planR.stderr)
-    discard applied("conffile-divert", ConffileDiverted % [SshdContent])
-    let distrib = g.sha256InGuest("/etc/ssh/ssh_config.distrib")
-    step("conffile-divert: the package's copy is at .distrib, untouched",
-         distrib == sshdBefore, "distrib " & distrib & " before " & sshdBefore)
-    step("conffile-divert: the add-on's copy is at the path",
-         g.run("cat /etc/ssh/ssh_config") == SshdContent, "")
-    let dv = entriesFor(l, "dpkgDiversion:/etc/ssh/ssh_config")
-    let fe = entriesFor(l, "systemFile:/etc/ssh/ssh_config")
-    step("conffile-divert: exactly its ledger entries",
-         dv.len == 1 and dv[0].class == lcDiversion and fe.len == 1 and
-         fe[0].class == lcEtcFile and fe[0].collision == "divert" and
-         fe[0].observation == "conffile:openssh-client",
-         "diversion entries " & $dv.len & ", file entries " & $fe.len &
-         (if fe.len > 0: " collision=" & fe[0].collision & " observation=" &
-          fe[0].observation else: ""))
-    step("conffile-divert: dpkg lists the local diversion",
-         "local diversion of /etc/ssh/ssh_config to /etc/ssh/ssh_config.distrib" in
-           g.run("dpkg-divert --list /etc/ssh/ssh_config"), "")
-    discard applied("conffile-remove", SshOnly)
-    step("conffile-remove: the package's copy is back and the diversion gone",
-         g.sha256InGuest("/etc/ssh/ssh_config") == sshdBefore and
-         g.sha256InGuest("/etc/ssh/ssh_config.distrib") == "absent" and
-         g.run("dpkg-divert --list /etc/ssh/ssh_config").strip().len == 0, "")
+    # --- Rows: package-owned conffiles (a dpkg conffile, a ucf-managed file). ---
+    proc conffileRows(path, pkg, content, observation, guard: string) =
+      let before = g.sha256InGuest(path)
+      let tag = extractFilename(path)
+      step("vacuity guard: " & pkg & " owns " & path & " (" & observation & ")",
+           g.exec(guard).exitCode == 0, "")
+      refused(tag & "-conffile", ConffileRefused % [path, content],
+              "EAddOnPackageOwned", pkg)
+      let planR = g.planProfile(repro, tag & "-conffile-plan", ConffileRefused % [path, content])
+      step(tag & "-conffile: the plan refuses the same way and writes nothing",
+           planR.exitCode == 2 and "EAddOnPackageOwned" in planR.stderr and
+           identityReport(f, g.takeFingerprint(repro)).ok, planR.stdout & planR.stderr)
+      discard applied(tag & "-conffile-divert", ConffileDiverted % [path, content])
+      let distrib = g.sha256InGuest(path & ".distrib")
+      step(tag & "-conffile-divert: the package's copy is at .distrib, untouched",
+           distrib == before, "distrib " & distrib & " before " & before)
+      step(tag & "-conffile-divert: the add-on's copy is at the path",
+           g.run("cat " & path) == content, "")
+      let dv = entriesFor(l, "dpkgDiversion:" & path)
+      let fe = entriesFor(l, "systemFile:" & path)
+      step(tag & "-conffile-divert: exactly its ledger entries",
+           dv.len == 1 and dv[0].class == lcDiversion and fe.len == 1 and
+           fe[0].class == lcEtcFile and fe[0].collision == "divert" and
+           fe[0].observation == observation,
+           "diversion entries " & $dv.len & ", file entries " & $fe.len &
+           (if fe.len > 0: " collision=" & fe[0].collision & " observation=" &
+            fe[0].observation else: ""))
+      step(tag & "-conffile-divert: dpkg lists the local diversion",
+           ("local diversion of " & path & " to " & path & ".distrib") in
+             g.run("dpkg-divert --list " & path), "")
+      discard applied(tag & "-conffile-remove", SshOnly)
+      step(tag & "-conffile-remove: the package's copy is back and the diversion gone",
+           g.sha256InGuest(path) == before and
+           g.sha256InGuest(path & ".distrib") == "absent" and
+           g.run("dpkg-divert --list " & path).strip().len == 0, "")
+    conffileRows("/etc/ssh/ssh_config", "openssh-client", SshContent,
+      "conffile:openssh-client",
+      "grep -qx /etc/ssh/ssh_config /var/lib/dpkg/info/openssh-client.conffiles")
+    conffileRows("/etc/ssh/sshd_config", "openssh-server", SshdContent,
+      "ucf:openssh-server",
+      "grep -Eq 'openssh-server[[:space:]]+/etc/ssh/sshd_config$' /var/lib/ucf/registry && " &
+      "! grep -rqx /etc/ssh/sshd_config /var/lib/dpkg/info/openssh-server.list " &
+      "/var/lib/dpkg/info/openssh-server.conffiles")
 
     # --- Row: package unit. ---
     step("vacuity guard: a package provides cron.service",
@@ -360,9 +455,53 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("hand-remove: both units restored to their pre-add-on bytes",
          g.run("cat /etc/systemd/system/repro-fixture-hand.service") == HandUnitV1 and
          g.run("cat /etc/systemd/system/repro-fixture-hand2.service") == HandUnitV1, "")
-    discard g.run("rm /etc/systemd/system/repro-fixture-hand.service " &
-                  "/etc/systemd/system/repro-fixture-hand2.service && systemctl daemon-reload")
+    discard g.exec("rm -f /etc/systemd/system/repro-fixture-hand.service " &
+                   "/etc/systemd/system/repro-fixture-hand2.service; systemctl daemon-reload")
     f = g.takeFingerprint(repro)
+
+    # --- Rows: unowned files that differ (EDrift, adopt, reconcile). ---
+    discard g.run("mkdir -p /etc/repro-fixture && printf 'theirs\n' > /etc/repro-fixture/h.conf")
+    f = g.takeFingerprint(repro)
+    refused("file-drift", FileH % ["ours\n"], "EDrift", "/etc/repro-fixture/h.conf")
+    let fa = g.adoptResource(repro, "file-adopt", FileH % ["ours\n"],
+                             "systemFile:/etc/repro-fixture/h.conf")
+    step("file-adopt: adopted as it is, nothing written", fa.exitCode == 0 and
+         g.run("cat /etc/repro-fixture/h.conf") == "theirs\n", fa.stdout & fa.stderr)
+    block:
+      let after = g.takeFingerprint(repro)
+      let l2 = g.ledgerOf()
+      let d = deltaReport(f, after, l, l2)
+      step("file-adopt: fingerprint diff == ledger delta (no change)", d.ok, d.text)
+      let he = entriesFor(l2, "systemFile:/etc/repro-fixture/h.conf")
+      step("file-adopt: owned with its bytes preserved", he.len == 1 and
+           he[0].collision == "adopt" and he[0].preserved.len > 0, $he.len)
+      f = after
+      l = l2
+    discard g.run("printf 'theirs2\n' > /etc/repro-fixture/r.conf")
+    f = g.takeFingerprint(repro)
+    refused("file-r-drift", FilesHR % ["theirs\n", "ours2\n"], "EDrift", "/etc/repro-fixture/r.conf")
+    discard applied("file-reconcile", FilesHR % ["theirs\n", "ours2\n"], " --reconcile-drift")
+    step("file-reconcile: replaced, old bytes preserved",
+         g.run("cat /etc/repro-fixture/r.conf") == "ours2\n" and
+         g.exec("test -f /var/lib/repro/system/addon/preserved/" & sha256Hex("theirs2\n")).exitCode == 0, "")
+    discard applied("file-remove", FilesPrefix)
+    step("file-remove: both files restored to their pre-add-on bytes",
+         g.run("cat /etc/repro-fixture/h.conf") == "theirs\n" and
+         g.run("cat /etc/repro-fixture/r.conf") == "theirs2\n", "")
+    discard g.exec("rm -r /etc/repro-fixture")
+    f = g.takeFingerprint(repro)
+
+    # --- Row: a foreign LOCAL diversion to the name the add-on would use. ---
+    discard g.run("dpkg-divert --local --rename --divert /etc/issue.distrib --add /etc/issue")
+    f = g.takeFingerprint(repro)
+    refused("foreign-local-diversion", ForeignLocalDiverted, "already diverted", "/etc/issue.distrib")
+    # Cleanup that must not end the run when a red row left the host in
+    # another state: a later row is still worth its verdict.
+    discard g.exec("dpkg-divert --local --rename --remove /etc/issue")
+    f = g.takeFingerprint(repro)
+
+    # --- Row: a drop-in for a unit nothing provides. ---
+    refused("dropin-nothing", DropInNothing, "provides", "repro-fixture-nothing.service")
 
     # --- Row: foreign diversion. ---
     discard g.run("dpkg-divert --package repro-fixture-foreign --divert /etc/issue.foreign --rename --add /etc/issue")
@@ -370,7 +509,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     refused("foreign-diversion", ForeignDiverted % ["divert"], "already diverted", "repro-fixture-foreign")
     refused("foreign-diversion-no-optin", ForeignNotDiverted,
             "already diverted", "repro-fixture-foreign")
-    discard g.run("dpkg-divert --package repro-fixture-foreign --rename --remove /etc/issue")
+    discard g.exec("dpkg-divert --package repro-fixture-foreign --rename --remove /etc/issue")
     f = g.takeFingerprint(repro)
 
     # --- Row: out of scope. ---
@@ -382,8 +521,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("create-again: a no-op", "no-op\t/etc/repro-fixture/x.conf" in again, again)
     discard applied("create-remove", Empty)
 
+    # --- Uninstall with a replaced and an adopted unit in the profile. ---
+    discard applied("final", FinalProfile % [BaseUnit])
+    step("final: cron is replaced and the base unit adopted",
+         g.run("systemctl show -p FragmentPath cron.service").strip() ==
+           "FragmentPath=/etc/systemd/system/cron.service" and
+         entriesFor(l, "systemUnit:fixture-base.service").len >= 1, "")
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
+    # `is-enabled` / `is-active` exit non-zero for "disabled" / "inactive":
+    # the answer is the verdict, not a transport failure.
+    let states = g.exec("systemctl is-enabled cron.service; systemctl is-active cron.service; " &
+      "systemctl is-enabled fixture-base.service; systemctl is-active fixture-base.service")
+    step("uninstall handed both units back enabled and active",
+         states.stdout.splitLines()[0 .. 3] == @["enabled", "active", "enabled", "active"] and
+         g.exec("cat /etc/systemd/system/fixture-base.service").stdout == BaseUnit,
+         states.stdout)
     let ident = identityReport(fBase, g.takeFingerprint(repro))
     step("base fingerprint after uninstall == before bootstrap", ident.ok, ident.text)
   except CatchableError as e:

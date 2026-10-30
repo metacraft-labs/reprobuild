@@ -135,6 +135,10 @@ type
                            ## target; spec §7.2); "" reads as ``copy``
     value*: string         ## sysctl: the value applied; account: the
                            ## fingerprint value of the account
+    displaced*: string     ## where the bytes the MOST RECENT reconcile of
+                           ## this object displaced are kept; ``preserved``
+                           ## keeps the first-touch bytes removal restores.
+                           ## "" when nothing was reconciled since
 
   Ledger* = object
     generation*: string
@@ -143,9 +147,11 @@ type
   LedgerError* = object of CatchableError
 
 const
-  LedgerHeader* = "# repro-addon-ledger v3"
+  LedgerHeader* = "# repro-addon-ledger v4"
+  LedgerHeaderV3* = "# repro-addon-ledger v3"
   LedgerHeaderV2* = "# repro-addon-ledger v2"
-  LedgerFields = 22
+  LedgerFields = 23
+  LedgerFieldsV3 = 22
   LedgerFieldsV2 = 20
   FileClasses* = {lcEtcFile, lcUnit, lcDropIn}
     ## The classes a generation materialises as a link or a copy.
@@ -171,7 +177,8 @@ proc render*(l: Ledger): string =
                   e.linkTarget, e.kindHint, flag(e.enabled), flag(e.started),
                   flag(e.hasInstall), e.replaced, e.resource, e.observation,
                   e.collision, e.preserved, e.unitState, e.activeState,
-                  e.baseUnitState, e.baseActiveState, e.form, e.value]
+                  e.baseUnitState, e.baseActiveState, e.form, e.value,
+                  e.displaced]
     var line = ""
     for i, f in fields:
       if i > 0: line.add('\t')
@@ -184,13 +191,14 @@ proc classFromString(s: string): LedgerClass =
   raise newException(LedgerError, "unknown ledger class: " & s)
 
 proc parseLedger*(text: string): Ledger =
-  ## Strict inverse of ``render``. A v2 ledger (A3: no ``form`` and
-  ## ``value`` fields) is read too; every file it lists is a copy, which
-  ## is what v2 always wrote.
+  ## Strict inverse of ``render``. A v2 ledger (no ``form`` and ``value``
+  ## fields: every file it lists is a copy, which is what v2 always wrote)
+  ## and a v3 one (no ``displaced``: nothing reconciled since) are read too.
   let lines = text.splitLines()
-  if lines.len < 2 or lines[0] notin [LedgerHeader, LedgerHeaderV2]:
+  if lines.len < 2 or lines[0] notin [LedgerHeader, LedgerHeaderV3, LedgerHeaderV2]:
     raise newException(LedgerError, "not a repro-addon ledger")
   let fieldCount = if lines[0] == LedgerHeaderV2: LedgerFieldsV2
+                   elif lines[0] == LedgerHeaderV3: LedgerFieldsV3
                    else: LedgerFields
   let g = lines[1].split('\t')
   if g.len != 2 or g[0] != "generation":
@@ -210,9 +218,11 @@ proc parseLedger*(text: string): Ledger =
       observation: u[13], collision: u[14], preserved: u[15],
       unitState: u[16], activeState: u[17], baseUnitState: u[18],
       baseActiveState: u[19])
-    if fieldCount == LedgerFields:
+    if fieldCount >= LedgerFieldsV3:
       e.form = u[20]
       e.value = u[21]
+    if fieldCount == LedgerFields:
+      e.displaced = u[22]
     result.entries.add(e)
 
 proc readLedger*(path: string): Ledger =

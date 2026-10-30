@@ -14,6 +14,7 @@
 
 import std/[os, posix, strutils, tables, unittest]
 
+import repro_elevation
 import repro_infra/addon_diagnostics
 import repro_addon/[collision, etc_write, fingerprint]
 
@@ -31,9 +32,11 @@ proc at(path: string): string = root / path
 proc listing(paths: varargs[string]): string =
   for p in paths: result.add(at(p) & "\n")
 writeFile(root / "var/lib/dpkg/info/openssh-server.list",
-          "/.\n" & listing("/etc", "/etc/ssh", "/etc/ssh/sshd_config", "/usr/sbin/sshd"))
-writeFile(root / "var/lib/dpkg/info/openssh-server.conffiles",
-          listing("/etc/ssh/sshd_config"))
+          "/.\n" & listing("/etc", "/etc/ssh", "/usr/sbin/sshd"))
+writeFile(root / "var/lib/dpkg/info/openssh-client.list",
+          listing("/etc/ssh/ssh_config"))
+writeFile(root / "var/lib/dpkg/info/openssh-client.conffiles",
+          listing("/etc/ssh/ssh_config"))
 writeFile(root / "var/lib/dpkg/info/cron.list",
           listing("/usr/lib/systemd/system/cron.service", "/usr/sbin/cron"))
 writeFile(root / "var/lib/dpkg/info/libc6:amd64.list",
@@ -43,6 +46,10 @@ writeFile(root / "var/lib/dpkg/info/base-files.list",
 writeFile(root / "var/lib/dpkg/info/base-files.conffiles",
           "remove-on-upgrade " & at("/etc/legacy.conf") & "\n" &
           at("/etc/issue.net") & " obsolete\n")
+createDir(root / "var/lib/ucf")
+writeFile(root / "var/lib/ucf/registry",
+          "openssh-server " & at("/etc/ssh/sshd_config") & "\n" &
+          "\n" & "broken-line\n" & "other-pkg " & at("/etc/other/ucf.conf") & "\n")
 writeFile(root / "var/lib/dpkg/diversions",
           at("/etc/foreign") & "\n" & at("/etc/foreign.other") & "\nsomepkg\n" &
           at("/etc/mine") & "\n" & at("/etc/mine.distrib") & "\n:\n")
@@ -55,6 +62,18 @@ let units = {
     fragmentPath: "/etc/systemd/system/hand.service",
     unitFileState: "disabled", activeState: "inactive"),
   "new.service": UnitProvision(loadState: "not-found"),
+  "transient.service": UnitProvision(loadState: "loaded",
+    fragmentPath: "/run/systemd/system/transient.service",
+    unitFileState: "transient", activeState: "active"),
+  "generated.service": UnitProvision(loadState: "loaded",
+    fragmentPath: "/run/systemd/generator.late/generated.service",
+    unitFileState: "generated", activeState: "inactive"),
+  "local.service": UnitProvision(loadState: "loaded",
+    fragmentPath: "/usr/local/lib/systemd/system/local.service",
+    unitFileState: "disabled", activeState: "inactive"),
+  "masked.service": UnitProvision(loadState: "masked-runtime",
+    fragmentPath: "/run/systemd/system/masked.service",
+    unitFileState: "masked-runtime", activeState: "inactive"),
 }.toTable
 
 proc provision(unit: string): UnitProvision {.gcsafe.} =
@@ -65,8 +84,8 @@ let d = newDpkgDriver(root, provision)
 
 suite "the dpkg driver":
   test "package ownership from info/*.list, conffiles from *.conffiles":
-    let o = d.packageOwner(at("/etc/ssh/sshd_config"))
-    check o.package == "openssh-server" and o.conffile
+    let o = d.packageOwner(at("/etc/ssh/ssh_config"))
+    check o.package == "openssh-client" and o.conffile and not o.viaUcf
     check d.packageOwner(at("/usr/sbin/sshd")).package == "openssh-server"
     check not d.packageOwner(at("/usr/sbin/sshd")).conffile
     check d.packageOwner(at("/etc/app/app.conf")).package == ""
@@ -78,6 +97,13 @@ suite "the dpkg driver":
     check d.packageOwner(at("/etc/legacy.conf")).conffile
     check d.packageOwner(at("/etc/issue.net")).conffile
     check d.packageOwner(at("/etc/issue.net")).package == "base-files"
+
+  test "a ucf-registered file is package-owned (the fourth record), as a conffile":
+    let o = d.packageOwner(at("/etc/ssh/sshd_config"))
+    check o.package == "openssh-server" and o.conffile and o.viaUcf
+    check not d.packageOwner(at("/etc/ssh/ssh_config")).viaUcf
+    let r = parseUcfRegistry("pkg /etc/a\nbad\n\nother\t/etc/b\n")
+    check r.len == 2 and r["/etc/a"] == "pkg" and r["/etc/b"] == "other"
 
   test "diversions come from dpkg's database":
     let f = d.diversion(at("/etc/foreign"))
@@ -151,9 +177,18 @@ suite "the decision table, file rows":
       check e.path == at("/etc/ssh/sshd_config")
       check e.dropInHint == at("/etc/ssh/sshd_config") & ".d/"
 
+  test "a ucf-managed file is package-owned: refused by default, diverted by opt-in":
+    try:
+      discard d.decide(fileInputs("sshd", "Port 22\n"), at("/etc/ssh/sshd_config"))
+      check false
+    except EAddOnPackageOwned as e:
+      check e.package == "openssh-server" and e.conffile
+    let (dv, _) = d.decide(fileInputs("sshd", "Port 22\n", collision = "divert"), at("/etc/ssh/sshd_config"))
+    check dv.verdict == cvDivert and dv.observation == "ucf:openssh-server"
+
   test "package-owned with the divert opt-in (field or declared diversion): divert":
     let (a, _) = d.decide(fileInputs("sshd", "Port 22\n", collision = "divert"), at("/etc/ssh/sshd_config"))
-    check a.verdict == cvDivert and a.observation == "conffile:openssh-server"
+    check a.verdict == cvDivert and a.observation == "ucf:openssh-server"
     let (b, _) = d.decide(fileInputs("sshd", "Port 22\n", diverted = true), at("/etc/ssh/sshd_config"))
     check b.verdict == cvDivert
 
@@ -163,15 +198,28 @@ suite "the decision table, file rows":
     expect AddonCollisionError:
       discard d.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/foreign"))
 
-  test "a diversion of an unowned path is refused; of an owned one, created or adopted":
+  test "a diversion the ledger does not list is foreign even when it is local and named <path>.distrib":
+    writeFile(root / "var/lib/dpkg/info/mine.list", listing("/etc/mine"))
+    let d3 = newDpkgDriver(root, provision)
+    expect AddonCollisionError:
+      discard d3.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/mine"))
+    expect AddonCollisionError:
+      discard d3.decide(fileInputs("f", "x", collision = "divert"), at("/etc/mine"))
+    # The ledger's own diversion is a no-op for the diversion and lets the
+    # file through.
+    let (own, _) = d3.decide(DecisionInputs(address: "dv", kind: tkDiversion,
+      ledgerOwns: true), at("/etc/mine"))
+    check own.verdict == cvNoOp
+    var fi = fileInputs("f", "x", collision = "divert")
+    fi.ledgerOwnsDiversion = true
+    let (fd, _) = d3.decide(fi, at("/etc/mine"))
+    check fd.verdict == cvDivert
+
+  test "a diversion of an unowned path is refused; of an owned one, created":
     expect AddonCollisionError:
       discard d.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/app/new.conf"))
     let (c, _) = d.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/ssh/sshd_config"))
     check c.verdict == cvCreate
-    writeFile(root / "var/lib/dpkg/info/mine.list", listing("/etc/mine"))
-    let d3 = newDpkgDriver(root, provision)
-    let (ad, _) = d3.decide(DecisionInputs(address: "dv", kind: tkDiversion), at("/etc/mine"))
-    check ad.verdict == cvAdopt
 
 suite "the decision table, unit rows":
   proc unitInputs(unit, content: string; collision = ""; ledgerSha = ""): DecisionInputs =
@@ -203,6 +251,25 @@ suite "the decision table, unit rows":
   test "no unit of that name anywhere: create":
     let (c, _) = d.decide(unitInputs("new.service", "[Unit]\n"), at("/etc/systemd/system/new.service"))
     check c.verdict == cvCreate and c.observation == "absent"
+
+  test "a transient, generated, local or masked unit is refused with no opt-in":
+    for u in ["transient.service", "generated.service", "local.service", "masked.service"]:
+      for c in ["", "replace", "dropIn"]:
+        expect AddonCollisionError:
+          discard d.decide(unitInputs(u, "[Unit]\n", collision = c), at("/etc/systemd/system/" & u))
+    check classifyUnit(units["transient.service"]) == ucElsewhere
+    check classifyUnit(units["local.service"]) == ucElsewhere
+    check classifyUnit(units["masked.service"]) == ucMasked
+    check classifyUnit(units["cron.service"]) == ucPackage
+    check classifyUnit(units["hand.service"]) == ucEtc
+    check classifyUnit(units["new.service"]) == ucNone
+
+  test "a drop-in for a unit nothing provides is refused":
+    try:
+      discard d.decide(unitInputs("new.service", "[Service]\n", collision = "dropIn"), at("/etc/systemd/system/new.service"))
+      check false
+    except AddonCollisionError as e:
+      check "nothing provides new.service" in e.msg
 
   test "drop-in paths follow the spec's naming":
     check dropInPath("cron.service", "") == "/etc/systemd/system/cron.service.d/50-repro-addon.conf"
@@ -246,12 +313,34 @@ suite "the before-each-write re-check":
     discard posix.symlink(cstring(at("/usr/lib/app/target")), cstring(at("/etc/app/guarded.conf")))
     check "symbolic link" in preWriteRefusal(d, t)
 
-  test "a package that appeared since the plan refuses the write":
+  test "a package that appeared since the plan refuses the write, through the guard the apply uses":
     writeFile(at("/etc/app/late.conf"), "l\n")
-    let t = PlannedTarget(address: "late", path: at("/etc/app/late.conf"),
-      kind: tkFile, observation: "unowned", observedSha256: "", verdict: cvCreate)
+    # The guard takes the SAME factory the apply does and makes a fresh
+    # driver per operation: the plan-time driver's cached package index
+    # must not be what decides a write.
+    let factory: DriverFactory = proc(): CollisionDriver {.gcsafe.} =
+      {.cast(gcsafe).}: newDpkgDriver(root, provision)
+    let planDriver = factory()
+    let (dec, _) = planDriver.decide(fileInputs("systemFile:" & at("/etc/app/late.conf"), "l\n"),
+                                     at("/etc/app/late.conf"))
+    let t = PlannedTarget(address: "systemFile:" & at("/etc/app/late.conf"),
+      path: at("/etc/app/late.conf"), kind: tkFile, observation: dec.observation,
+      observedSha256: dec.observedSha256, verdict: dec.verdict)
+    let guard = makePreWriteGuard(factory, @[t])
+    let op = PrivilegedOperation(kind: pokFsSystemFile, address: t.address,
+      sfPath: at("/etc/app/late.conf"), sfContent: "l\n")
+    check guard(op) == ""
     writeFile(root / "var/lib/dpkg/info/late.list", listing("/etc/app/late.conf"))
-    let d4 = newDpkgDriver(root, provision)
-    check "ownership observation changed" in preWriteRefusal(d4, t)
+    check "ownership observation changed" in guard(op)
+    # The plan-time driver alone would not have seen it.
+    check preWriteRefusal(planDriver, t) == ""
+
+  test "an operation the plan did not decide on is refused by the guard":
+    let factory: DriverFactory = proc(): CollisionDriver {.gcsafe.} =
+      {.cast(gcsafe).}: newDpkgDriver(root, provision)
+    let guard = makePreWriteGuard(factory, @[])
+    let op = PrivilegedOperation(kind: pokFsSystemFile, address: "systemFile:/etc/x",
+      sfPath: "/etc/x", sfContent: "x")
+    check "decided nothing" in guard(op)
 
 removeDir(root)
