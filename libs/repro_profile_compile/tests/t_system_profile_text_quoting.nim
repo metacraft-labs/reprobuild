@@ -132,9 +132,10 @@ suite "system.nim text form: quoting and comments":
     defer: removeDir(dir)
     let path = dir / "system.nim"
     writeFile(path, "")
-    # LF only: the editor picks ONE line ending for the whole file from the
-    # first CRLF it sees, so a CRLF inside a value is not an editor case.
-    let sp = compiledProfile(Unit.replace("\r\n", "\n"))
+    # `Unit` holds a CRLF line: the editor must keep it inside the value
+    # while the file itself is LF (the line ending is decided by the first
+    # line only).
+    let sp = compiledProfile()
     var doc = loadSystemIntent(path)
     for r in sp.resources:
       addResource(doc, r)
@@ -166,3 +167,40 @@ suite "system.nim text form: quoting and comments":
         if r.kind == srkFsSystemFile and r.sfPath == "/etc/q/edge" & $i:
           a = realWorldIdentity(r)
       check after.contentOf(a) == e
+
+  test "the editor on a CRLF file keeps a bare newline inside a value":
+    # The reverse of the case above: a CRLF profile whose value holds LF-only
+    # lines. `lines` is split on `\r\n` only, stanza bounds are counted the
+    # same way, and the bytes written back are the bytes read.
+    let dir = getTempDir() / "t_system_profile_text_quoting_crlf_" &
+      $getCurrentProcessId()
+    createDir(dir)
+    defer: removeDir(dir)
+    let path = dir / "system.nim"
+    let lfValue = "line1\nline2 \"q\"\n# not a comment\n"
+    let crlfText = "fs.systemFile {\r\n  path = \"/etc/q/first\"\r\n" &
+      "  content = " & quoteSystemValue(lfValue) & "\r\n}\r\n"
+    writeFile(path, crlfText)
+    var doc = loadSystemIntent(path)
+    check doc.lineEnding == "\r\n"
+    check doc.lines.len == 4
+    # Adding a resource whose value holds BOTH endings keeps each as written.
+    let mixed = "a\r\nb\nc"
+    var intent = ProfileIntent(name: "crlf")
+    fsSystemFile(intent.resources, path = "/etc/q/second", content = mixed)
+    let r = profileIntentToSystemProfile(intent).resources[0]
+    addResource(doc, r)
+    writeSystemIntent(doc)
+    let back = parseSystemProfile(readFile(path))
+    check back.resources.len == 2
+    check back.contentOf(realWorldIdentity(back.resources[0])) == lfValue
+    check back.contentOf(realWorldIdentity(r)) == mixed
+    check readFile(path).startsWith(crlfText)
+    # Removing the first stanza removes exactly it, by the parser's bounds.
+    doc = loadSystemIntent(path)
+    check stanzaSpans(doc).len == 2
+    check removeResource(doc, realWorldIdentity(back.resources[0]))
+    writeSystemIntent(doc)
+    let final = parseSystemProfile(readFile(path))
+    check final.resources.len == 1
+    check final.contentOf(realWorldIdentity(r)) == mixed

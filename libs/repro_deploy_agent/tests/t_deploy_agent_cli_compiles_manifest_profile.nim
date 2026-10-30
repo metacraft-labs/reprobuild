@@ -64,6 +64,7 @@
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_deploy_agent
+import repro_test_support/reasoned_skip
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_profile
 
@@ -327,3 +328,63 @@ suite "M5 — deploy agent CLI compiles a manifest's profile":
       # build action never fired.
       check fileExists(stagedProfilePath(stateDir))
       check not fileExists(applyCwd / OutRel)
+
+  test "a bundled file the profile staticReads reaches the apply, and a changed one is recompiled":
+    when not (defined(linux) or defined(macosx)):
+      skip("spawns the POSIX `repro deploy-agent` and a /bin/sh action edge; " &
+        "no Windows leg")
+    else:
+      # RDMF v3 (Deploy-Agent.md §"Field semantics", `profileFiles`): the
+      # profile reads `locks/payload.txt` at compile time and writes its
+      # content through an action edge. The manifest's `profileText` is the
+      # SAME in both ticks; only the bundled file changes between them. If
+      # the second tick produced the first payload, the bundle was staged
+      # wrongly or the compile was answered from a stale cache — the
+      # silent failure the declared-input rule exists to prevent.
+      const OutRel = "bin/from-bundle.txt"
+      let profileText =
+        "import repro_profile\n\n" &
+        "const payload = staticRead(\"locks/payload.txt\")\n\n" &
+        "profile \"bundleProfile\":\n" &
+        "  resources:\n" &
+        "    inlineExecCall(\n" &
+        "      argv = @[\"/bin/sh\", \"-c\", \"mkdir -p bin; printf '%s' '\" & " &
+          "payload & \"' > '" & OutRel & "'\"],\n" &
+        "      cwd = \"" & applyCwd & "\",\n" &
+        "      outputs = @[\"" & OutRel & "\"],\n" &
+        "      requiresElevation = true,\n" &
+        "      address = \"writeFromBundle\",\n" &
+        "      commandStatsId = \"m5.resolver.bundle.write\")\n"
+      proc manifestWith(sequence: uint64; lockBody: string): DeployManifest =
+        result = DeployManifest(
+          target: Target,
+          sequence: sequence,
+          deploymentId: "deploy-bundle-" & $sequence,
+          profileText: profileText,
+          profileFiles: @[ProfileFile(path: "locks/payload.txt",
+                                      content: lockBody)],
+          buildActions: @[])
+        signManifest(signer, result)
+
+      writeManifestFile(manifestPath, manifestWith(10'u64, "first-lock"))
+      let first = runDeployAgent(stateDir, cacheRoot, manifestPath, signersPath)
+      check "profile did not compile" notin first.output
+      check first.exitCode == 0
+      check "outcome      : aoApplied" in first.output
+      # Staged where `staticRead("locks/payload.txt")` resolves it: beside
+      # the module.
+      check readIfExists(stateDir / "deploy-agent" / "locks" / "payload.txt") ==
+        "first-lock"
+      check readIfExists(applyCwd / OutRel) == "first-lock"
+
+      # Same profile text, a different lock, a higher sequence.
+      removeFile(applyCwd / OutRel)
+      writeManifestFile(manifestPath, manifestWith(11'u64, "second-lock"))
+      let second = runDeployAgent(stateDir, cacheRoot, manifestPath, signersPath)
+      check second.exitCode == 0
+      check "outcome      : aoApplied" in second.output
+      check readIfExists(stateDir / "deploy-agent" / "locks" / "payload.txt") ==
+        "second-lock"
+      # The resolved profile changed although its text did not.
+      check readIfExists(applyCwd / OutRel) == "second-lock"
+      check rbpiArtifactCount(stateDir) >= 1

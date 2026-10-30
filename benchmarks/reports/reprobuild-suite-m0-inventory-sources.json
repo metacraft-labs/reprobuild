@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2448,
+    "nimTestBinaries": 2449,
     "pureUnitConsolidationGroups": 71,
-    "pureUnitTests": 693,
+    "pureUnitTests": 694,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2488
+    "testEntries": 2489
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1434,7 +1434,7 @@
       "graph-fixture": 18,
       "integration": 1357,
       "platform/destructive": 152,
-      "pure unit": 693,
+      "pure unit": 694,
       "unclassified": 268
     },
     "graphOwnedTestArtifacts": [
@@ -1643,9 +1643,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2448,
+    "nimTestBinaryCount": 2449,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2488
+    "testEntryCount": 2489
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12548,13 +12548,14 @@
       "localDependencyShape": [
         "repro_deploy_agent",
         "repro_peer_cache",
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "libs/repro_deploy_agent",
       "requiresReproBinary": true,
       "source": "libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12647,7 +12648,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12666,6 +12667,23 @@
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_deploy_agent_profile_file_paths_corpus",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_deploy_agent"
+      ],
+      "owner": "libs/repro_deploy_agent",
+      "requiresReproBinary": false,
+      "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_profile_file_paths_corpus.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18172,7 +18190,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18466,7 +18484,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18486,7 +18504,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

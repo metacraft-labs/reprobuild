@@ -53,7 +53,8 @@ from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 # ---------------------------------------------------------------------------
 
 proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
-    target: SystemPlanTarget = defaultSystemPlanTarget()):
+    target: SystemPlanTarget = defaultSystemPlanTarget();
+    declaredInputs: seq[string] = @[]):
     tuple[compiled: bool; text: string; cached: bool; compileError: string;
           adaptError: string; buildActions: seq[ProfileBuildAction];
           projection: Projection] =
@@ -114,7 +115,8 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
     repoRoot: "",
     workDir: profilePath.parentDir,
     verbose: false,
-    forceRebuild: false)
+    forceRebuild: false,
+    declaredInputs: declaredInputs)
   var intent: ProfileIntent
   try:
     let artifact = compileProfileToRbpi(profilePath, opts)
@@ -142,6 +144,7 @@ proc resolveSystemProfileText*(profilePath: string;
                                planCommand = "";
                                outBuildActions: ptr seq[ProfileBuildAction] = nil;
                                target: SystemPlanTarget = defaultSystemPlanTarget();
+                               declaredInputs: seq[string] = @[];
                                outProjection: ptr Projection = nil):
     bool =
   ## Drive the Phase F3 compile path for a `system.nim`. Sets `outText`
@@ -171,7 +174,8 @@ proc resolveSystemProfileText*(profilePath: string;
   ## come from inferring failure from absent output instead of from an
   ## actual error.
   discard originalText  # retained for caller compatibility; see docstring
-  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target)
+  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target,
+    declaredInputs)
   if outcome.compiled:
     outText = outcome.text
     if outBuildActions != nil:
@@ -1271,6 +1275,28 @@ proc runInfraInstallRootCli(args: seq[string]): int =
   echo "  grub-install exit: " & $outcome.grubInstallExit
   return 0
 
+const InfraSubcommandUsage = [
+  ("plan", "repro infra plan [--profile FILE] [--state-dir DIR] " &
+    "[--home-profile-dir DIR] [--host NAME] [--accept-drift | " &
+    "--reconcile-drift]\n  Compile the system profile and show what an " &
+    "apply would change; writes nothing but the plan."),
+  ("apply", "repro infra apply [--profile FILE] [--state-dir DIR] " &
+    "[--home-profile-dir DIR] [--host NAME] --plan ID [--no-elevate | " &
+    "--elevate] [--no-preview] [--accept-feature-destroy] " &
+    "[--accept-passwd-destroy] [--force-unlock] [--reconcile-drift]\n  " &
+    "Apply the plan `repro infra plan` printed, as a new system generation."),
+  ("cache-keys", "repro infra cache-keys [--profile FILE] [--state-dir DIR] " &
+    "[--host NAME] [--platform-cpu CPU] [--platform-os OS] " &
+    "[--platform-abi ABI] [--platform-libc LIBC]\n  Print, for every " &
+    "build-action edge of the profile, the binary-cache entry key an apply " &
+    "derives on the given platform (default: this host) and the `repro " &
+    "cache publish` flags that publish under it. Nothing is applied."),
+  ("install-root", "repro infra install-root ...\n  Install a built root " &
+    "image onto a target disk (see the ReproOS installer documentation)."),
+]
+  ## What `repro infra <sub> --help` prints. The flag lists are the ones
+  ## `parseInfraFlags` accepts; a flag not listed here is one it refuses.
+
 proc runInfraCommand*(args: seq[string]): int =
   ## `repro infra <subcommand>`.
   if args.len == 0:
@@ -1279,6 +1305,15 @@ proc runInfraCommand*(args: seq[string]): int =
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
+  # `--help` / `-h` answers for every subcommand before its flags are parsed,
+  # so it is never reported as an unknown flag.
+  if "--help" in rest or "-h" in rest:
+    for (name, usage) in InfraSubcommandUsage:
+      if name == sub:
+        echo "usage: " & usage
+        return 0
+    stderr.writeLine("repro infra: unknown subcommand: " & sub)
+    return 2
   try:
     case sub
     of "plan": return runInfraPlan(rest)

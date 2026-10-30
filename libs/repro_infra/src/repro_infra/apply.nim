@@ -23,7 +23,7 @@
 ## supplies the typed drivers the broker dispatches and does NOT
 ## re-implement the elevation mechanism.
 
-import std/[os, sets, strutils, tables, times]
+import std/[os, strutils, times]
 
 import repro_elevation
 import repro_profile
@@ -268,61 +268,29 @@ proc allocateGenerationId(stateDir, profileDigestHex, hostIdentity: string;
 # (typed op + plan baseline digest).
 # ---------------------------------------------------------------------------
 
-proc unitsWithChangedDependencies*(profile: SystemProfile;
-                                   env: PlanEnvelope): HashSet[string] =
-  ## Addresses of the `systemd.systemUnit` resources whose own plan action
-  ## is `no-op` while a resource they `depends_on` is not a no-op in `env`
-  ## (ReproOS Add-On Mode spec §7.3: "a resource the unit depends_on
-  ## changed in this apply -> restart"). A unit's file does not change
-  ## when its configuration file does, so without this the unit is a
-  ## cache-hit and the new configuration takes effect at some unrelated
-  ## later restart. The dependency edge is the declaration: a file the unit
-  ## reads but does not list is not a trigger.
-  var actionByAddress = initTable[string, string]()
-  for rec in env.operations:
-    actionByAddress[rec.address] = rec.action
-  # `depends_on` names a resource as `kind:name`; resolve that to the
-  # address the plan records (the same pairing the planner's dependency
-  # graph uses).
-  var addressByKey = initTable[string, string]()
-  for r in profile.resources:
-    addressByKey[resourceKindTag(r) & ":" & resourceName(r)] = r.address
-  for r in profile.resources:
-    if r.kind != srkSystemdSystemUnit:
-      continue
-    if actionByAddress.getOrDefault(r.address, "") != "no-op":
-      continue
-    for dep in r.dependsOn:
-      let depAddress = addressByKey.getOrDefault(dep.kind & ":" & dep.name, "")
-      if depAddress.len > 0 and
-          actionByAddress.getOrDefault(depAddress, "no-op") != "no-op":
-        result.incl(r.address)
-        break
-
-proc plannedOperationsFor*(profileText: string; env: PlanEnvelope):
-    tuple[planned: seq[PlannedOperation]; promoted: HashSet[string]] =
+proc plannedOperationsFor*(profileText: string;
+                           env: PlanEnvelope): seq[PlannedOperation] =
   ## Build the typed `PlannedOperation` list for the EFFECTIVE
   ## (non-no-op) operations of a plan. Each carries the plan's
   ## recorded baseline digest so the broker's drift gate can tell a
   ## safe update from a mid-flight drift.
   ##
-  ## `promoted` holds the addresses of units the plan recorded as no-op
-  ## that are dispatched anyway, with `suRestartRequested` set, because a
-  ## resource they `depends_on` changes in this apply
-  ## (`unitsWithChangedDependencies`). The caller takes them out of its
-  ## no-op tally: they are applied, and the apply log says why.
+  ## A record the planner marked `DependencyRestartAction` (a unit whose
+  ## own bytes are unchanged but whose `depends_on` resource changes in
+  ## this plan, Add-On spec §7.3) is dispatched with `suRestartRequested`,
+  ## which makes the dispatch loop skip its no-op short-circuit and the
+  ## driver restart the running instance.
   let profile = parseSystemProfile(profileText)
-  result.promoted = unitsWithChangedDependencies(profile, env)
   for rec in env.operations:
-    let restartOnly = rec.action == "no-op" and rec.address in result.promoted
-    if rec.action == "no-op" and not restartOnly:
+    if rec.action == "no-op":
       continue
     for r in profile.resources:
       if r.address == rec.address:
         var op = toPrivilegedOperation(r)
-        if restartOnly:
+        if rec.action == DependencyRestartAction and
+            op.kind == pokSystemdSystemUnit:
           op.suRestartRequested = true
-        result.planned.add(PlannedOperation(
+        result.add(PlannedOperation(
           operation: op,
           baselineDigestHex: rec.baselineDigestHex))
         break
@@ -574,10 +542,10 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   refreshApplyLock(opts.stateDir)
 
   # --- 2. Partition the effective operations. ---
-  var (planned, promoted) = plannedOperationsFor(profileText, env)
+  var planned = plannedOperationsFor(profileText, env)
   var noOps: seq[PlannedOperationRecord]
   for rec in env.operations:
-    if rec.action == "no-op" and rec.address notin promoted:
+    if rec.action == "no-op":
       noOps.add(rec)
   # Windows-System-Resources Phase G: ADD the live-state no-op count
   # rather than overwriting; ``dispatchBuildActions`` may have

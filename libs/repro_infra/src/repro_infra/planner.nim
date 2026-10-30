@@ -282,6 +282,50 @@ proc decideAction*(obs: ResourceObservation; desiredDigestHex: string;
   else:
     "update"
 
+const DependencyRestartAction* = "restart"
+  ## The plan action of a `systemd.systemUnit` whose own bytes are a no-op
+  ## but which a resource it `depends_on` changes in the same plan (ReproOS
+  ## Add-On Mode spec §7.3). The apply dispatches it with
+  ## `suRestartRequested` instead of taking the no-op short-circuit.
+
+proc markDependencyRestarts*(profile: SystemProfile;
+                             ops: var seq[PlannedOperationRecord]) =
+  ## Promote every `systemd.systemUnit` record whose action is `no-op` and
+  ## that `depends_on` a record with any other action (create, update,
+  ## destroy, or a restart decided by an earlier pass) to
+  ## `DependencyRestartAction`, to a fixpoint: a unit that depends on a
+  ## unit that is itself restarted because its configuration changed is
+  ## restarted too. The dependency edge is the declaration; a file a unit
+  ## reads but does not list is not a trigger. The summary names the reason
+  ## so `repro infra plan` shows `restart system-unit x.service
+  ## (depends_on changed)`.
+  var addressByKey = initTable[string, string]()
+  var resourceByAddress = initTable[string, int]()
+  for i, r in profile.resources:
+    addressByKey[resourceKindTag(r) & ":" & resourceName(r)] = r.address
+    resourceByAddress[r.address] = i
+  var changed = true
+  while changed:
+    changed = false
+    var actionByAddress = initTable[string, string]()
+    for rec in ops:
+      actionByAddress[rec.address] = rec.action
+    for rec in ops.mitems:
+      if rec.action != "no-op" or rec.address notin resourceByAddress:
+        continue
+      let r = profile.resources[resourceByAddress[rec.address]]
+      if r.kind != srkSystemdSystemUnit:
+        continue
+      for dep in r.dependsOn:
+        let depAddress = addressByKey.getOrDefault(dep.kind & ":" & dep.name, "")
+        if depAddress.len > 0 and
+            actionByAddress.getOrDefault(depAddress, "no-op") != "no-op":
+          rec.action = DependencyRestartAction
+          rec.summary = DependencyRestartAction & " system-unit " & r.suName &
+            " (depends_on changed: " & dep.kind & ":" & dep.name & ")"
+          changed = true
+          break
+
 proc summaryLine(r: SystemResource; action: string): string =
   case r.kind
   of srkWindowsRegistryValue:
@@ -698,6 +742,10 @@ proc producePlan*(profileText: string; hostIdentity: string;
           classification: classifyDrift(recorded, obs.observedDigestHex,
                                         desired),
           accepted: opts.acceptDrift))
+  # Add-On spec §7.3: a unit whose dependency changes is restarted even
+  # though its own bytes are a no-op. Decided here, in the plan, so the
+  # operator reads `[restart]` before the apply runs it.
+  markDependencyRestarts(profile, env.operations)
   env.planId = computePlanId(profileDigest, hostIdentity, createdTs)
   result.envelope = env
 

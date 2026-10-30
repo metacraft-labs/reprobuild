@@ -790,6 +790,25 @@ verify_fresh_artifact \
   "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon staging" ||
   abort_if_failed
 
+# The sandbox launcher (apps/reprobuild-sandbox-launcher/launcher.c) is plain
+# C with its own build script, not a Nim entrypoint, so it is built here
+# explicitly. It ships beside `repro` because the `linux.addOnTool` driver
+# resolves it from the engine's own directory (`addOnToolLauncherPath` in
+# repro_elevation/posix_system_driver.nim) and refuses to write a wrapper
+# when it is absent; the Nix package installs every file under build/bin, so
+# this one step covers `just build`, the package and the release bundle. The
+# cross build for another Linux CPU (scripts/cross/build_linux_cross.sh)
+# builds it with the target's compiler. Linux only: the launcher's namespace
+# setup is Linux-specific and the Windows stub is exercised by its own tests.
+if [ "${REPRO_HOST_PLATFORM}" = linux ]; then
+  bash apps/reprobuild-sandbox-launcher/build.sh \
+    --out build/bin/reprobuild-sandbox-launcher ||
+    record_failure "reprobuild-sandbox-launcher: apps/reprobuild-sandbox-launcher/build.sh failed"
+  verify_fresh_artifact \
+    "build/bin/reprobuild-sandbox-launcher" "reprobuild-sandbox-launcher" ||
+    abort_if_failed
+fi
+
 # Build the shared DSL runtime DLL — the Tier 1 artifact described in
 # reprobuild-specs/Provider-Compile-Tiering.md. Per-project provider
 # compiles eventually link against this library instead of statically
@@ -1214,6 +1233,11 @@ while read -r name _path _extra_flags; do
 done < apps/entrypoints.txt
 verify_fresh_artifact \
   "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon (final sweep)" || true
+if [ "${REPRO_HOST_PLATFORM}" = linux ]; then
+  verify_fresh_artifact \
+    "build/bin/reprobuild-sandbox-launcher" \
+    "reprobuild-sandbox-launcher (final sweep)" || true
+fi
 verify_fresh_artifact \
   "build/lib/librepro_project_dsl_runtime.${dll_ext}" \
   "librepro_project_dsl_runtime (final sweep)" || true
