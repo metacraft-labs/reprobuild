@@ -308,6 +308,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  enabled = false")
     if r.suAptClosureLock.len > 0:
       result.add("  aptClosureLock = " & renderScalar(r.suAptClosureLock))
+    if r.suRestartHeld:
+      result.add("  restartIfChanged = false")
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))

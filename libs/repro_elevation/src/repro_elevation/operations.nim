@@ -534,6 +534,16 @@ type
         ## "". When set, `suContent` is the RENDERED unit (it already binds
         ## the closure prefix) and the driver realises the closure into
         ## `/repro/store` before writing it. ReproOS Add-On Mode §8.3.
+      suRestartHeld*: bool
+        ## `restartIfChanged = false` in the profile: a RUNNING unit whose
+        ## file, closure or dependency changed is NOT restarted; the apply
+        ## reports "pending restart" instead (Add-On spec §7.3). Default
+        ## false, so an omitted flag restarts.
+      suRestartRequested*: bool
+        ## Set by the apply step when a resource this unit `depends_on` was
+        ## not a no-op in the same apply. The unit file is unchanged, so
+        ## the dispatch would otherwise take the cache-hit path and the new
+        ## configuration would wait for an unrelated restart (§7.3).
     of pokLaunchdSystemDaemon:
       ## Write `/Library/LaunchDaemons/<sdaLabel>.plist` and
       ## `launchctl bootstrap system`. `sdaProgramArgs` is the daemon

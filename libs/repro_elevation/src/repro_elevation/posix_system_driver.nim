@@ -45,7 +45,7 @@
 ##     genuinely differs.
 ##   * `passwd.user`          wholly new — no home-scope analogue.
 
-import std/[strutils]
+import std/[os, strutils]
 
 import blake3
 
@@ -475,11 +475,48 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
   else:
     raiseNotImplementedPlatform("systemd.systemUnit observe")
 
+type
+  SystemdUnitTransition* = enum
+    ## What happens to a RUNNING unit after its file is written (ReproOS
+    ## Add-On Mode spec §7.3, the two restart rows).
+    sutNone = "none"                    ## nothing changed, or the unit is
+                                        ## not active: the file write is all
+    sutRestart = "restart"              ## the running instance picks up the
+                                        ## change now
+    sutPendingRestart = "pending-restart" ## changed, but `restartIfChanged
+                                        ## = false`: left running on the old
+                                        ## file, reported
+
+proc systemdUnitTransition*(wasActive, fileChanged, dependencyChanged,
+                            restartHeld: bool): SystemdUnitTransition =
+  ## The §7.3 decision, kept pure so it is testable without systemd:
+  ## a unit is restarted only when it is active AND something it runs from
+  ## changed (its file or closure, or a resource it `depends_on` in this
+  ## apply), unless the profile holds the restart. An inactive unit is never
+  ## started by a change (`enabled = true` starts it through `enable --now`,
+  ## as before), so a timer-driven oneshot is not run by an apply.
+  if not wasActive or not (fileChanged or dependencyChanged):
+    sutNone
+  elif restartHeld:
+    sutPendingRestart
+  else:
+    sutRestart
+
+proc systemdUnitIsActive*(name: string): bool =
+  ## `systemctl is-active` exits 0 only for `active` (`activating` and
+  ## `reloading` exit non-zero), which is the state a restart is for.
+  when defined(linux):
+    execCmd("systemctl is-active --quiet " & quoteShell(name)) == 0
+  else:
+    false
+
 proc applySystemdSystemUnit*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Write the unit file, `systemctl daemon-reload`, then optionally
-  ## `systemctl enable --now` (NO `--user` — this is a system unit).
-  ## The destroy direction `disable --now`s and removes the file.
+  ## `systemctl enable --now` (NO `--user` — this is a system unit), then
+  ## the §7.3 transition: a unit that was active and whose file, closure or
+  ## dependency changed is restarted (`systemdUnitTransition`). The
+  ## destroy direction `disable --now`s and removes the file.
   ##
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
   ## plan-time-baseline drift gate is removed (per
@@ -531,6 +568,15 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
+    # What is running, and from which bytes, BEFORE anything is written:
+    # the transition below compares against this. `before.digestHex` is the
+    # closure-absent sentinel when the closure is not realised yet, so a
+    # unit whose file is unchanged but whose closure was missing counts as
+    # changed and is restarted onto the realised closure.
+    let before = observeSystemdSystemUnit(op)
+    let wasActive = systemdUnitIsActive(op.suName)
+    let fileChanged = not before.present or
+      before.digestHex != posixDigestHexOfText(op.suContent)
     if op.suAptClosureLock.len > 0:
       # Realise the closure the unit binds BEFORE the unit can start: a
       # unit naming a missing `BindReadOnlyPaths=` source fails to start.
@@ -566,8 +612,27 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       if enCode != 0:
         raiseProtocol("systemd.systemUnit enable --now of '" &
           op.suName & "' failed: " & enOut.strip())
+    # §7.3: a running unit picks up a changed file, closure or dependency
+    # now. `enable --now` above does not restart an already-running unit,
+    # and before this step the new configuration waited for whatever
+    # restarted the daemon next (Bring-Up-Plan.md §6 item 4 of the rpi2
+    # profile).
+    var restartPending = false
+    case systemdUnitTransition(wasActive, fileChanged,
+        op.suRestartRequested, op.suRestartHeld)
+    of sutRestart:
+      let (rsOut, rsCode) = execCmdEx(
+        "systemctl restart " & quoteShell(op.suName))
+      if rsCode != 0:
+        raiseProtocol("systemd.systemUnit restart of '" & op.suName &
+          "' after its change failed: " & rsOut.strip())
+    of sutPendingRestart:
+      restartPending = true
+    of sutNone:
+      discard
     # Post-apply re-probe — see the contract comment above.
-    let post = observeSystemdSystemUnit(op)
+    var post = observeSystemdSystemUnit(op)
+    post.serviceRestartPending = restartPending
     let desiredHex = posixDigestHexOfText(op.suContent)
     if not post.present or post.digestHex != desiredHex:
       raiseProtocol("systemd.systemUnit '" & op.suName &

@@ -316,7 +316,8 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " system-default " & r.sdDomain & " " & r.sdKey
   of srkSystemdSystemUnit:
     action & " system-unit " & r.suName &
-      (if r.suEnabled: " (enable)" else: " (no-enable)")
+      (if r.suEnabled: " (enable)" else: " (no-enable)") &
+      (if r.suRestartHeld: " (restart held)" else: "")
   of srkLaunchdSystemDaemon:
     action & " system-daemon " & r.sdaLabel
   of srkFsSystemFile:

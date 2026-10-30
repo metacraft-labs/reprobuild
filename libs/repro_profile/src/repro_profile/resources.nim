@@ -768,9 +768,17 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             content: string;
                             enabled: bool = true;
                             aptClosureLock: string = "";
+                            restartIfChanged: bool = true;
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
+  ##
+  ## A unit that is active when the apply reaches it is RESTARTED when its
+  ## file, its closure, or a resource it `dependsOn` (its configuration
+  ## file, a credential) changed in that apply, so the change takes effect
+  ## then and not at some unrelated later restart. `restartIfChanged =
+  ## false` holds the restart and the apply log reports it as pending.
+  ## ReproOS Add-On Mode spec §7.3.
   ##
   ## `aptClosureLock` attaches a `package(apt, ...)` closure: the text of a
   ## `repro-apt-closure-lock v1` (`repro-harvest-apt --emit-lock`, usually
@@ -788,6 +796,7 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
     fields["enabled"] = boolField(enabled)
     if aptClosureLock.len > 0:
       fields["aptClosureLock"] = strField(aptClosureLock)
+    fields["restartIfChanged"] = boolField(restartIfChanged)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,

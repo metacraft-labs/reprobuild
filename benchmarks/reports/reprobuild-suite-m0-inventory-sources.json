@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2426,
-    "pureUnitConsolidationGroups": 69,
-    "pureUnitTests": 690,
+    "nimTestBinaries": 2427,
+    "pureUnitConsolidationGroups": 70,
+    "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2466
+    "testEntries": 2467
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -522,6 +522,22 @@
       "sources": [
         "libs/repro_platform/tests/test_msvc_activation_multiline_env.nim",
         "libs/repro_platform/tests/test_msvc_env_merge.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_elevation",
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "sources": [
+        "libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim",
+        "libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1400,7 +1416,7 @@
       "graph-fixture": 18,
       "integration": 1349,
       "platform/destructive": 146,
-      "pure unit": 690,
+      "pure unit": 691,
       "unclassified": 263
     },
     "graphOwnedTestArtifacts": [
@@ -1609,9 +1625,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2426,
+    "nimTestBinaryCount": 2427,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2466
+    "testEntryCount": 2467
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18188,6 +18204,26 @@
       "source": "libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_systemd_unit_restart_on_change",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_elevation",
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

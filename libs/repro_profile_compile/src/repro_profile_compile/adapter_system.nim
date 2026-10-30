@@ -304,7 +304,8 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suName: fieldString(r, "name"),
       suContent: fieldString(r, "content"),
       suEnabled: fieldBool(r, "enabled", true),
-      suAptClosureLock: fieldString(r, "aptClosureLock"))
+      suAptClosureLock: fieldString(r, "aptClosureLock"),
+      suRestartHeld: not fieldBool(r, "restartIfChanged", true))
     # Same parse-time refusal as the text path (`parseSystemProfile`).
     discard renderedSystemUnitContent(result)
   of "launchd.systemDaemon":
@@ -924,6 +925,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("enabled", (if r.suEnabled: "true" else: "false")))
       if r.suAptClosureLock.len > 0:
         pairs.add(("aptClosureLock", quoteSystemValue(r.suAptClosureLock)))
+      if r.suRestartHeld:
+        pairs.add(("restartIfChanged", "false"))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))

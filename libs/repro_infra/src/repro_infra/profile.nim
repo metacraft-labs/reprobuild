@@ -174,6 +174,7 @@ type
       suEnabled*: bool                 ## desired: enabled --now (default true)
       suAptClosureLock*: string        ## a `package(apt)` closure lock, or ""
                                        ## (Add-On spec §8.3; `apt_closure`)
+      suRestartHeld*: bool             ## `restartIfChanged = false` (§7.3)
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -1011,7 +1012,11 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "enabled" in fields: parseBoolField("enabled",
             fields["enabled"]) else: true,
         suAptClosureLock:
-          if "aptClosureLock" in fields: fields["aptClosureLock"] else: "")
+          if "aptClosureLock" in fields: fields["aptClosureLock"] else: "",
+        suRestartHeld:
+          if "restartIfChanged" in fields:
+            not parseBoolField("restartIfChanged", fields["restartIfChanged"])
+          else: false)
       # Refuse an unbindable unit or a malformed lock at parse time, not
       # at apply time on the host.
       discard renderedSystemUnitContent(res)
@@ -1492,6 +1497,7 @@ proc toPrivilegedOperation*(r: SystemResource;
       suContent: renderedSystemUnitContent(r),
       suEnabled: r.suEnabled,
       suAptClosureLock: r.suAptClosureLock,
+      suRestartHeld: r.suRestartHeld,
       suDestroy: destroy)
   of srkLaunchdSystemDaemon:
     PrivilegedOperation(kind: pokLaunchdSystemDaemon, address: r.address,

@@ -343,6 +343,8 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeBool(op.suEnabled)
     body.writeBool(op.suDestroy)
     body.writeString(op.suAptClosureLock)
+    body.writeBool(op.suRestartHeld)
+    body.writeBool(op.suRestartRequested)
   of pokLaunchdSystemDaemon:
     body.writeString(op.sdaLabel)
     body.writeU32Le(uint32(op.sdaProgramArgs.len))
@@ -640,6 +642,9 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.suEnabled = readBool(body, pos, "suEnabled")
     result.operation.suDestroy = readBool(body, pos, "suDestroy")
     result.operation.suAptClosureLock = readString(body, pos)
+    result.operation.suRestartHeld = readBool(body, pos, "suRestartHeld")
+    result.operation.suRestartRequested =
+      readBool(body, pos, "suRestartRequested")
   of pokLaunchdSystemDaemon:
     result.operation = PrivilegedOperation(kind: pokLaunchdSystemDaemon,
       address: address)
