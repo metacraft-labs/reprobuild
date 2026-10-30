@@ -9,8 +9,11 @@
 ## record (no port opened), and no ``accounts`` record.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=bootstrap-installs-jq``): a
-## bootstrap that also runs ``apt-get install -y jq``. The gate must go red
-## on the ``dpkg-status`` component.
+## bootstrap that also runs ``apt-get install -y jq tree`` (``tree`` because
+## Ubuntu's cloud image already ships ``jq``). The gate must go red on the
+## ``dpkg-status`` component. A mutation run first checks that the base does
+## not ship both packages -- a mutation that could change nothing would be
+## vacuous, and that is reported as a failure of the run, not as red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_bootstrap_changes_nothing_preexisting``).
 ##
@@ -43,6 +46,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let det = identityReport(f0, g.takeFingerprint(repro))
     step("fingerprint is deterministic", det.ok, det.text)
     if not det.ok: return fails
+    if mutation() == "bootstrap-installs-jq":
+      let present = g.exec("dpkg -s jq tree >/dev/null 2>&1").exitCode == 0
+      step("vacuity guard: the base does not ship both jq and tree", not present,
+           if present: "both preinstalled; the mutation could change nothing"
+           else: "at least one absent")
     let anchors = g.installAnchors()
     let pre = g.exec(repro & " system addon preflight" & anchors.flags)
     step("preflight is compatible", pre.exitCode == 0, pre.stdout & pre.stderr)

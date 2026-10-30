@@ -20,7 +20,10 @@
 ## ``uninstall-skips-diversion-removal``      uninstall leaves every dpkg
 ##                                            diversion in place
 ## ``bootstrap-installs-jq``                  bootstrap also runs
-##                                            ``apt-get install -y jq``
+##                                            ``apt-get install -y jq tree``
+##                                            (``tree`` so the mutation
+##                                            changes a base that already
+##                                            ships ``jq``, as Ubuntu does)
 ## ``preflight-writes``                       the preflight writes a marker
 ##                                            file under ``/var/lib``
 ## ``recipient-key-0644``                     bootstrap writes the recipient
