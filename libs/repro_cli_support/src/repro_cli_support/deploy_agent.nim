@@ -49,6 +49,7 @@ import repro_deploy_agent/secrets
 import repro_peer_cache/auth as peerAuth
 import repro_home_intent/host_identity
 import repro_profile
+from repro_profile_compile import defaultSystemPlanTarget
 import ./infra
 
 type
@@ -262,6 +263,12 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # downstream keys its own cache on the profile's sources, so a repeat tick
   # with an unchanged profile still short-circuits there.
   let capturedStateDir = flags.stateDir
+  # The agent reads no host registry: a signed manifest names its target,
+  # and its producer decides what that target applies. The profile is
+  # planned for this host -- its runtime predicates evaluated here, the
+  # `default` system activity selected -- as `repro infra apply` plans a host
+  # the registry does not declare.
+  let capturedTarget = defaultSystemPlanTarget(host)
   let resolver: ProfileResolver = proc(profileText: string;
                                        profileFiles: seq[ProfileFile];
                                        outText: var string;
@@ -273,7 +280,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
       result = resolveSystemProfileText(profilePath, profileText,
         capturedStateDir, "repro deploy-agent", outText,
         planCommand = "repro infra plan",
-        outBuildActions = addr outBuildActions)
+        outBuildActions = addr outBuildActions, target = capturedTarget)
 
   let deps = AgentDeps(
     apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,

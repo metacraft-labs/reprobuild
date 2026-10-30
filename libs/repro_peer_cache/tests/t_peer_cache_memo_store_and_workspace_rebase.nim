@@ -12,13 +12,18 @@
 ##   caller is refused it per message (Distributed-Execution M7), and a
 ##   server wired to a memo store answers an authenticated peer's selector
 ##   and entry requests over TLS, while a content-plane request for a memo
-##   key is an honest miss, never a suspect mark.
+##   key is an honest miss, never a suspect mark. The entry it serves
+##   carries a record the cross-host publication rule accepts (campaign
+##   M17): a node serves only what it would publish, so an entry whose
+##   record bytes decode to nothing, or to a timestamp-policy record, is
+##   declined by its reader and never reaches the wire.
 ##
 ## No mocks: real files in a temp dir, real loopback sockets, real TLS with
 ## host-CA leaves.
 
 import std/[asyncdispatch, options, os, strutils, tables, tempfiles, unittest]
 
+import repro_hash
 import repro_local_store
 import repro_peer_cache
 import repro_cli_support/peer_cache_wiring
@@ -31,6 +36,39 @@ proc digestN(seed: byte): BlobDigest =
     raw[i] = byte((int(seed) * 13 + i) and 0xff)
   blobDigestFromBytes(raw)
 
+proc contentDigestN(seed: byte; domain: HashDomain): ContentDigest =
+  result = ContentDigest(algorithm: haBlake3_256, domain: domain)
+  for i in 0 ..< 32:
+    result.bytes[i] = byte((int(seed) * 13 + i) and 0xff)
+
+proc recordFor(seed: byte): ActionResultRecord =
+  ## A record the publication rule accepts (Edge-Derived-Identities.md
+  ## §3.3a and §3.4 item 1; `publicationRefusal`): made under `ffpChecksum`,
+  ## every regular-file input carrying a content hash, and one CAS output.
+  ## Its inputs are the entry's path set. A node serves an entry only when
+  ## the rule accepts its record (campaign M17, `entryReaderFor`), so a
+  ## fixture entry carries a real record, as every published one does.
+  proc input(path: string; seed: byte): FileFingerprint =
+    FileFingerprint(path: path, policy: ffpChecksum,
+      metadata: FileMetadata(kind: ffkRegular, sizeBytes: uint64(seed) + 10,
+        mtimeNs: 1_700_000_000_000_000_000'u64),
+      hasLocalHash: true,
+      localHash: LocalInvalidationHash(algorithm: haXxh3_64,
+        domain: hdLocalInvalidation, value: uint64(seed) * 7919))
+  ActionResultRecord(
+    weakFingerprint: contentDigestN(seed, hdActionFingerprint),
+    policy: ffpChecksum,
+    inputs: @[input("$WORKSPACE/main.c", 1),
+              input("$WORKSPACE/config-" & $seed & ".h", seed)],
+    strongFingerprint: contentDigestN(seed + 50, hdActionFingerprint),
+    outputPayloadKind: opkCasBlobs,
+    outputs: @[OutputBlob(path: "$WORKSPACE/out/hello",
+      metadata: FileMetadata(kind: ffkRegular, sizeBytes: 64,
+        mtimeNs: 1_700_000_000_000_000_000'u64),
+      blob: CasBlobRef(digest: contentDigestN(seed + 100, hdCasContent),
+        sizeBytes: 64),
+      permissions: {fpUserRead, fpUserWrite, fpUserExec})])
+
 proc entryFor(weak: BlobDigest; seed: byte): MemoEntry =
   let pathSet = encodePeerPathSet(@["$WORKSPACE/main.c",
     "$WORKSPACE/config-" & $seed & ".h"])
@@ -38,8 +76,9 @@ proc entryFor(weak: BlobDigest; seed: byte): MemoEntry =
   MemoEntry(weakFingerprint: weak, pathSetDigest: psd,
     strongFingerprint: twoPhaseStrongFingerprint(weak, psd,
       @["id-a", "id-" & $seed]),
-    recordBytes: @[seed, seed, seed],
-    outputDigests: @[digestN(seed + 100)])
+    recordBytes: encodeActionResultRecord(recordFor(seed)),
+    outputDigests: @[digestN(seed + 100)],
+    evidenceLevel: elComplete)
 
 suite "Distributed-Execution M0: workspace rebasing":
 

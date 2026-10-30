@@ -135,8 +135,13 @@ suite "GM10: repro infra refuses a host whose system is managed elsewhere":
       let systemPath = sb.profileDir / "system.nim"
       let stateDir = sb.root / "infra-state"
       createDir(stateDir)
+      # The registry declares `gm10-here` without `system:`; since ReproOS
+      # add-on mode a distribution base would refuse it (EAddOnModeMismatch),
+      # so the base is pinned to ReproOS, whatever machine runs the gate.
       let cacheEnv = [("REPROBUILD_ACTION_CACHE_ROOT",
-                       sb.root / "action-cache")]
+                       sb.root / "action-cache"),
+                      ("REPRO_OS_RELEASE_PATH", ProjectRoot / "tests" /
+                        "fixtures" / "os-release" / "reproos")]
 
       proc infra(args: openArray[string]; host = ""): ReproRun =
         var argv = @args
@@ -254,7 +259,8 @@ profile "gm10OwnHosts":
         host = "", extraEnv = cacheEnv)
       checkpoint("own hosts:\n" & ownRun.stdout & ownRun.stderr)
       check ownRun.exitCode == 1
-      check "cannot say who manages a host's system" in ownRun.stderr
+      check "would be a second host registry that nothing reads" in
+        ownRun.stderr
       check "home profile's `hosts:` registry" in ownRun.stderr
 
       # 4b. A registry that does not compile refuses, naming it.

@@ -264,6 +264,14 @@ if [ -n "${source_revision}" ]; then
   nim_mode_flags+=("-d:ReprobuildSourceRevision=${source_revision}")
 fi
 
+# MS-2 falsifying-mutation harnesses (`when defined(reproMutations)` in the
+# libraries) are compiled in only on request: a gate's red run builds with
+# REPROBUILD_MUTATIONS=1 and arms one mutation through its own variable; a
+# build without it carries none of them.
+if [ -n "${REPROBUILD_MUTATIONS:-}" ]; then
+  nim_mode_flags+=("-d:reproMutations")
+fi
+
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
     ;;

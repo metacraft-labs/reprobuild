@@ -12,7 +12,8 @@ Each case is a profile (`<case>/profile/`) and what Reprobuild says about it:
   Reprobuild's own evaluation (`evaluateHomeExport`), the answer the Nix
   evaluator (`nix/lib/intent.nix`) must reproduce from `export.json` alone.
 
-Hosts evaluated: `m1`, `home-pc`, `server` (declared, declared, undeclared).
+Hosts evaluated: `m1`, `home-pc`, `server` (declared, declared, undeclared),
+plus, in `neutral`, the add-on hosts `rpi` and `validator`.
 The undeclared host is refused on every system, by `repro home export` and by
 the Nix evaluator alike (`{ "undeclaredHost": true }`): a profile with a
 `hosts:` registry declares every host it may be applied to (reprobuild-pm
@@ -46,9 +47,12 @@ Cases:
   conjoin, in the planner and in `nix/lib/intent.nix` alike (reprobuild-pm
   issue 2026-10-18-home-planner-drops-packages-under-nested-activity-guards).
   Since GM10 `m1`'s entry says `system: managedElsewhere("example-org/infra")`,
-  so the export carries `intent.systemManagedElsewhere` and every evaluation
-  `system` (`elsewhere` for m1, `here` for home-pc); `lib-tests` also checks
-  `reprobuild.lib.hostSystemManagement` against them.
+  and since ReproOS add-on mode `rpi` says `system: addOn` and `validator`
+  the block form selecting the system activities `web` and `backup`, so the
+  export carries `intent.hostSystems` (schema 5) and every evaluation
+  `system` with its `mode` -- `managedElsewhere` for m1, `full` for home-pc,
+  `addOn` with the system activities for rpi and validator; `lib-tests` also
+  checks `reprobuild.lib.hostSystemManagement` against them.
 - `compile-time` — a `when defined(macosx)` in `resources:`: exported on
   Linux, the darwin targets are `differs` and must be refused; the Linux and
   Windows targets are evaluated.

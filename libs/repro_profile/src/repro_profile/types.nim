@@ -85,12 +85,14 @@ type
       ## validated by the macro; an empty seq is a host where Reprobuild
       ## applies nothing (Gradual-Nix-To-Reprobuild-Migration.md
       ## §Concern-scoped apply).
-    systemManagedElsewhere*: Table[string, string]
-      ## The hosts whose `hosts:` entry says `system: managedElsewhere[(...)]`
-      ## (`repro_profile/host_system`): host -> the pointer to what manages
-      ## the host's system, "" when the entry names none. A host absent from
-      ## this table has its system managed here (Gradual-Nix-To-Reprobuild-
-      ## Migration.md §Hosts, feature 2).
+    hostSystems*: Table[string, HostSystemDecl]
+      ## The hosts whose `hosts:` entry has a `system:` key
+      ## (`repro_profile/host_system`): host -> what the entry declares
+      ## about the host's system scope -- managed elsewhere (with the
+      ## pointer to what manages it), or managed here in add-on mode (with
+      ## the system activities it selects). A host absent from this table
+      ## has its whole system managed here, the default (Gradual-Nix-To-
+      ## Reprobuild-Migration.md §Hosts, feature 2; ReproOS add-on mode).
     resources*: seq[ResourceIntent]
     stowScopes*: seq[StowScope]
       ## GM11: the `stow/` packages an activity claims (a `stow:` block in
@@ -140,6 +142,31 @@ type
       ## it extracts the profile's package references from, as a recipe
       ## imports them (Provisioning-Contributions.md §"Profile Package
       ## References").
+
+  HostSystemMode* = enum
+    ## The two values a host entry's `system:` key can take. There is no
+    ## value for "this configuration manages the whole system": that is the
+    ## entry without a `system:` key (`repro_profile/host_system`).
+    hsmManagedElsewhere = "managedElsewhere"
+      ## Something other than this configuration manages the host's system
+      ## scope; `repro infra` refuses the host.
+    hsmAddOn = "addOn"
+      ## The host's system belongs to its distribution; Reprobuild manages a
+      ## declared set of services, files and accounts on top of it (ReproOS
+      ## add-on mode).
+
+  HostSystemDecl* = object
+    ## What one `hosts:` entry's `system:` key declares.
+    mode*: HostSystemMode
+    managedBy*: string
+      ## `hsmManagedElsewhere` only: the `managedElsewhere("...")` pointer,
+      ## "" when the entry names none. Always "" for `hsmAddOn`.
+    activities*: seq[string]
+      ## `hsmAddOn` only: the system-profile activities the block form's
+      ## `activities: [...]` selects, in declaration order, on top of the
+      ## system profile's `default` activity (which is always enabled).
+      ## Empty for the short form `system: addOn`, which selects `default`
+      ## alone. Always empty for `hsmManagedElsewhere`.
 
   ActivityElementKind* = enum
     aekPackageRef

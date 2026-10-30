@@ -141,15 +141,30 @@ suite "GM9: activity-scoped resources are planned per host selection":
     expect ValueError:
       discard parseProfileIntentJson($node)
 
-  test "a system profile refuses an activity-scoped resource":
+  test "a system profile plans an activity-scoped resource where it is selected":
+    # ReproOS add-on mode §8.2: system profiles have activities now, selected
+    # by the home profile's host registry; an activity-scoped system resource
+    # is planned only where the target enables its activity, and one naming
+    # an undeclared activity is refused rather than planned nowhere.
     var intent: ProfileIntent
+    intent.activities.add ActivityIntent(name: "desktop_core")
     fsSystemFile(intent.resources, path = "/etc/gm9.conf", content = "x",
       address = "sysFile")
     applyActivity(intent.resources, 0, "desktop_core")
+    let without = profileIntentToSystemProfile(intent,
+      defaultSystemPlanTarget("gm9-host"))
+    check without.resources.len == 0
+    let with = profileIntentToSystemProfile(intent, systemPlanTarget(
+      "gm9-host", toHashSet(["default", "desktop_core"])))
+    check with.resources.len == 1 and with.resources[0].address == "sysFile"
+    var undeclared = intent
+    undeclared.activities.setLen(0)
     try:
-      discard profileIntentToSystemProfile(intent)
+      discard profileIntentToSystemProfile(undeclared,
+        defaultSystemPlanTarget("gm9-host"))
       check false
     except ValueError as e:
       checkpoint(e.msg)
       check "fs.systemFile `sysFile`" in e.msg
-      check "activity `desktop_core`" in e.msg
+      check "activity `desktop_core`, which the profile does not declare" in
+        e.msg

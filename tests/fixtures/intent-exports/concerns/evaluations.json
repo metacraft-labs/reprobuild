@@ -115,7 +115,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "applications",
@@ -237,7 +241,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "applications",
@@ -359,7 +367,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "applications",
@@ -481,7 +493,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "applications",
@@ -595,7 +611,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "applications",
@@ -709,7 +729,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "applications",
@@ -827,7 +851,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "aarch64-linux": {
@@ -939,7 +967,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "x86_64-darwin": {
@@ -1051,7 +1083,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "aarch64-darwin": {
@@ -1163,7 +1199,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "x86_64-windows": {
@@ -1269,7 +1309,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "aarch64-windows": {
@@ -1375,7 +1419,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     }
   },
@@ -1486,7 +1534,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "packages"
@@ -1602,7 +1654,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "packages"
@@ -1718,7 +1774,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "packages"
@@ -1834,7 +1894,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "packages"
@@ -1942,7 +2006,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "packages"
@@ -2050,7 +2118,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       },
       "applies": [
         "packages"
