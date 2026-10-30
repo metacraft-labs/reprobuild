@@ -37,7 +37,7 @@
 ##     It carries the backend profile records io-mon writes first, as
 ##     `t_portable_record_from_local_hit` does.
 
-import std/[os, strutils, unittest]
+import std/[options, os, strutils, unittest]
 
 from repro_test_support import testCaseScratchSlug
 
@@ -75,6 +75,7 @@ type
   PeerOffer = object
     level: EvidenceLevel
     policy: FileFingerprintPolicy
+    source: EvidenceSource
 
   Built = object
     result: ActionResult
@@ -113,7 +114,7 @@ proc build(project, cacheRoot, capture: string;
         record: ActionResultRecord; cas: var CasStore) {.gcsafe, closure.} =
       {.cast(gcsafe).}:
         peer[].add(PeerOffer(level: query.evidenceLevel,
-          policy: record.policy))
+          policy: record.policy, source: query.evidenceSource))
   let run = runBuild(graph(@[action], newSeq[BuildPool]()), config)
   require run.results.len == 1
   checkpoint(run.results[0].reason)
@@ -198,6 +199,11 @@ suite "M17: neither publisher offers a Level-1 record":
     check live.peer.len == 1
     check live.peer.len == 1 and live.peer[0].level == elComplete
     check live.peer.len == 1 and live.peer[0].policy == ffpChecksum
+    # M17 chunk 2: both publishers are told where the evidence came from --
+    # an io-mon capture, so `monitored` (Edge-Derived-Identities.md §3.1).
+    check live.peer.len == 1 and live.peer[0].source == MonitoredEvidence
+    check live.portable.len == 1 and
+      live.portable[0].evidenceSource == MonitoredEvidence
     check refusals(live.trace, "portable-memo-publish-refused").len == 0
     check refusals(live.trace, "peer-cache-publish-refused").len == 0
 
@@ -214,12 +220,15 @@ suite "M17: neither publisher offers a Level-1 record":
     let sidecars = accessSidecars(cacheRoot)
     require sidecars.len == 1
     # Rewrite it as the version-1 sidecar the previous build wrote: the
-    # same bytes without the trailing level byte.
+    # same bytes without the trailing level byte (and, since version 3, the
+    # evidence source after it).
     var raw = readFile(extendedPath(sidecars[0]))
     require raw.len > 6
-    require raw[4] == char(2) and raw[5] == char(0)
+    require raw[4] == char(3) and raw[5] == char(0)
+    let stated = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
+      extractFilename(sidecars[0]).changeFileExt("")).get()
     raw[4] = char(1)
-    raw.setLen(raw.len - 1)
+    raw.setLen(raw.len - 1 - 4 - ($stated.evidenceSource).len)
     writeFile(extendedPath(sidecars[0]), raw)
     let warm = build(project, cacheRoot, capture)
     checkpoint(warm.trace)
@@ -231,3 +240,36 @@ suite "M17: neither publisher offers a Level-1 record":
     let refused = refusals(warm.trace, "portable-memo-publish-refused")
     check refused.len == 1
     check refused.len == 1 and "unstated" in refused[0]
+
+  test "a hit on a record whose sidecar does not state an evidence source publishes nothing":
+    # M17 chunk 2: a version-2 sidecar states the level but not where the
+    # evidence came from (Edge-Derived-Identities.md §3.1), so a record
+    # derived from a hit on it does not leave the host either. Falsifier:
+    # dropping the source check from the rule publishes it.
+    let project = newProject("unsourced")
+    let capture = TmpDir / "unsourced" / "capture.iomon"
+    writeCapture(capture, fileRead(project / "src" / "main.c"))
+    let cacheRoot = TmpDir / "unsourced" / "cache"
+    let live = build(project, cacheRoot, capture, publishers = false)
+    require live.result.launched
+    let sidecars = accessSidecars(cacheRoot)
+    require sidecars.len == 1
+    var raw = readFile(extendedPath(sidecars[0]))
+    require raw.len > 6
+    require raw[4] == char(3) and raw[5] == char(0)
+    let stated = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
+      extractFilename(sidecars[0]).changeFileExt("")).get()
+    check stated.evidenceLevel == elComplete
+    check stated.evidenceSource == MonitoredEvidence
+    # The version-2 sidecar: level stated, no source after it.
+    raw[4] = char(2)
+    raw.setLen(raw.len - 4 - ($stated.evidenceSource).len)
+    writeFile(extendedPath(sidecars[0]), raw)
+    let warm = build(project, cacheRoot, capture)
+    checkpoint(warm.trace)
+    check not warm.result.launched
+    check warm.result.portable
+    check warm.portable.len == 0
+    let refused = refusals(warm.trace, "portable-memo-publish-refused")
+    check refused.len == 1
+    check refused.len == 1 and "evidence source" in refused[0]

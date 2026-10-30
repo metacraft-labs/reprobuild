@@ -166,7 +166,7 @@ suite "Distributed-Execution M0: ancestor probes of the workspace":
       let ctx = TwoPhaseContext(peerKey: weak, cwd: ws, workspaceRoot: ws,
         portable: true)
       let normalized = normalizeRecord(recordFor(ws), ctx)
-      let ps = pathSetOf(normalized)
+      let ps = pathSetOf(normalized, ctx)
       (ps, twoPhaseStrongFingerprint(weak, digestOf(encodePeerPathSet(ps)),
         identitiesFor(ps, ctx)))
     let a = strongOf(wsA)
@@ -198,13 +198,23 @@ suite "Distributed-Execution M0: PathSet and strong fingerprint":
     check digestOf(a) == digestOf(b)
 
   test "a non-canonical PathSet encoding is rejected":
-    # Hand-build "RPPS" v1 with entries out of order.
-    var raw: seq[byte] = @[byte('R'), byte('P'), byte('P'), byte('S'), 1, 0,
-      2, 0, 0, 0]
+    # Hand-build "RPPS" (the current version) with entries out of order.
+    var raw: seq[byte] = @[byte('R'), byte('P'), byte('P'), byte('S'),
+      byte(PathSetVersion and 0xff), byte(PathSetVersion shr 8), 2, 0, 0, 0]
     for s in ["b", "a"]:
       raw.add(@[1'u8, 0, 0, 0])
       raw.add(byte(ord(s[0])))
-    expect PeerMemoStoreError:
+    try:
+      discard decodePeerPathSet(raw)
+      check false
+    except LegacyPeerFormatError:
+      check false   # the current version, so not refused as a legacy one
+    except PeerMemoStoreError as err:
+      check "not canonical" in err.msg
+    # Campaign M17 chunk 2: a version-1 PathSet (before the published-trace
+    # record) is refused as a legacy format, canonical or not.
+    raw[4] = 1   # version-literal-ok: the frozen pre-rbpm-v2 PathSet version, refused as legacy
+    expect LegacyPeerFormatError:
       discard decodePeerPathSet(raw)
 
   test "the strong fingerprint moves with any identity and only then":

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2459,
+    "nimTestBinaries": 2460,
     "pureUnitConsolidationGroups": 71,
     "pureUnitTests": 696,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2499
+    "testEntries": 2500
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1432,10 +1432,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1362,
-      "platform/destructive": 153,
+      "integration": 1361,
+      "platform/destructive": 154,
       "pure unit": 696,
-      "unclassified": 270
+      "unclassified": 271
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1643,9 +1643,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2459,
+    "nimTestBinaryCount": 2460,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2499
+    "testEntryCount": 2500
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8560,7 +8560,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 13,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9682,7 +9682,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16387,6 +16387,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_published_trace_record",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_published_trace_record.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_retention_gc",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -17613,8 +17631,8 @@
     },
     {
       "binary": "build/test-bin/t_peer_cache_refuses_timestamp_records_across_hosts",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -17630,8 +17648,8 @@
       "owner": "libs/repro_peer_cache",
       "requiresReproBinary": true,
       "source": "libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

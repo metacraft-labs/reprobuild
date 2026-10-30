@@ -71,7 +71,12 @@ import ../../../repro_build_engine/src/repro_build_engine/platform as enginePlat
 
 const
   MemoCacheToolchain* = "reprobuild-memo"
-  MemoCacheVersion* = "1"
+  MemoCacheVersion* = "2"
+    ## "2" since the published-trace record `rbpm-v2` (campaign M17 chunk 2):
+    ## every key moved with it, so no `rbpm-v1` entry is ever fetched by a
+    ## lookup -- the one-time re-key of Edge-Derived-Identities.md §3.3's
+    ## rider. A v1 record or path set met under a v2 key all the same (a
+    ## non-conforming publisher) is refused, naming its format.
   MemoRecordPackage* = "reprobuild-memo.record"
   MemoOutputsPackage* = "reprobuild-memo.outputs"
   MemoPathSetPackage* = "reprobuild-memo.pathset"
@@ -235,12 +240,17 @@ proc verifyStagedEntry*(stageDir, weakHex, pathSetHashHex, strongHex: string;
     try:
       let raw = readFile(extendedPath(memoPath))
       decodeMemo(raw.toOpenArrayByte(0, raw.high))
+    except LegacyMemoFormatError as err:
+      return (none(PortableMemoRecord), "refused " & err.msg)
     except CatchableError as err:
       return (none(PortableMemoRecord), "undecodable memo record: " & err.msg)
   if record.weakHex != weakHex or record.strongHex != strongHex or
       pathSetHash(record.pathSet) != pathSetHashHex:
     return (none(PortableMemoRecord),
       "the memo record does not describe the key it was published under")
+  let inconsistent = recordConsistencyReason(record)
+  if inconsistent.len > 0:
+    return (none(PortableMemoRecord), inconsistent)
   if not manifestsConsistent(record):
     return (none(PortableMemoRecord),
       "a directory listing in the memo record is not the tree its digest names")
@@ -255,6 +265,11 @@ proc verifyStagedEntry*(stageDir, weakHex, pathSetHashHex, strongHex: string;
         return (none(PortableMemoRecord),
           "the entry's bytes for " & output.path &
           " are not the content its record names")
+      if not output.directory and
+          executableBit(stagedOutputPath(stageDir, i)) != output.executable:
+        return (none(PortableMemoRecord),
+          "the entry's " & output.path & " does not have the executable " &
+          "bit its record names")
   (some(record), "")
 
 # --- transport ---------------------------------------------------------------
@@ -312,6 +327,7 @@ type
   SlotState = enum
     ssMissing   ## nothing published there: the slot is free
     ssCorrupt   ## occupied, but its path set does not decode
+    ssLegacy    ## occupied by an `rbps-v1` path set: well formed, refused
     ssPresent
 
   SlotRead = object
@@ -333,20 +349,31 @@ proc fetchPathSetSlot(remote: MemoRemote; weakHex: string; slot: int):
     let raw = readFile(extendedPath(dir / StagedPathSetName))
     SlotRead(state: ssPresent,
       pathSet: decodePathSet(raw.toOpenArrayByte(0, raw.high)))
+  except LegacyMemoFormatError:
+    SlotRead(state: ssLegacy)
   except CatchableError:
     SlotRead(state: ssCorrupt)
 
-proc remoteCandidatePathSets*(remote: MemoRemote; weakHex: string):
-    seq[PathSet] =
+proc remoteCandidatePathSets*(remote: MemoRemote; weakHex: string;
+                              legacy: var int): seq[PathSet] =
   ## Every candidate path set published for ``weakHex``: slots are filled in
   ## order, so the first missing slot ends the walk. A corrupt slot is
-  ## skipped, never trusted and never treated as free.
+  ## skipped, never trusted and never treated as free; so is a legacy
+  ## ``rbps-v1`` one, counted in ``legacy`` so a miss can name it.
   for slot in 0 ..< MaxPathSetSlots:
     let read = fetchPathSetSlot(remote, weakHex, slot)
     case read.state
     of ssMissing: break
     of ssCorrupt: continue
+    of ssLegacy:
+      inc legacy
+      continue
     of ssPresent: result.add(read.pathSet)
+
+proc remoteCandidatePathSets*(remote: MemoRemote; weakHex: string):
+    seq[PathSet] =
+  var legacy = 0
+  remoteCandidatePathSets(remote, weakHex, legacy)
 
 # --- lookup ------------------------------------------------------------------
 
@@ -359,9 +386,16 @@ proc lookupRemoteMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
   ## materialization), fetch the record that computation names, and verify it
   ## names that computation. Metadata only: executes nothing, fetches no
   ## output bytes and places nothing in the checkout.
-  let candidates = remoteCandidatePathSets(remote, weakHex)
+  var legacy = 0
+  let candidates = remoteCandidatePathSets(remote, weakHex, legacy)
   if candidates.len == 0:
-    result.reason = "no path set published for this weak fingerprint"
+    result.reason =
+      if legacy > 0:
+        "refused: the only path sets published for this weak fingerprint " &
+          "are " & LegacyPathSetTag & ", from before the published-trace " &
+          "record " & MemoTag & "; they are not used across hosts"
+      else:
+        "no path set published for this weak fingerprint"
     return
   var refusals: seq[string] = @[]
   for pathSet in candidates:
@@ -378,6 +412,15 @@ proc lookupRemoteMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
       requireOutputs = false)
     if verdict.record.isNone:
       refusals.add(verdict.reason)
+      continue
+    # The publication rule, applied by the CONSUMER to what another host
+    # published (campaign M17; Edge-Derived-Identities.md §3.3a, §3.4, §3.1):
+    # the same rule its publisher should have applied, over what the record
+    # states, whatever that publisher's version or conformance. A miss, with
+    # the reason.
+    let ruleRefusal = portableRecordRefusal(verdict.record.get())
+    if ruleRefusal.len > 0:
+      refusals.add("the record may not cross hosts: " & ruleRefusal)
       continue
     result.hit = verdict.record
     return
