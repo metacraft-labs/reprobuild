@@ -2208,6 +2208,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           facts.add(df)
           factUnits.incl(d)
       inc i
+  # Kept for step 2: a removed unit the re-check leaves in place whole is
+  # taken out of these facts and the transitions planned again, so it is
+  # neither stopped nor the cause of any dependent's stop or restart.
+  let unpropagatedFacts = facts
   propagateDependencyChanges(facts, unitDeps)
   result.transitions = planTransitions(facts)
 
@@ -2376,6 +2380,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                            orchestrated: true)
 
   let transitions = result.transitions
+  var stepTransitions = transitions
+    ## What steps 2 and 7 run: the plan's transitions, or -- when step 2's
+    ## re-check keeps removed units in place -- those planned again
+    ## without them.
   # The install links of each removed unit, decided in step 2 together
   # with the unit's own destroy (``removalDisables``).
   var removedUnitEntries: seq[tuple[unit, address: string;
@@ -2498,7 +2506,17 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
               links.add((path: e.path, target: e.linkTarget))
             linkOwner[e.path] = u.address
         disableOnRemoval.add((unit: u.unit, links: links))
-      let pre = runPreStop(transitions, disableOnRemoval, onStop)
+      var keptUnits = initHashSet[string]()
+      for u in removedUnitEntries:
+        if u.address in hookKept: keptUnits.incl(u.unit)
+      if keptUnits.len > 0:
+        when not mutated("kept-units-still-stopped"):
+          var without: seq[UnitFacts]
+          for f in unpropagatedFacts:
+            if not (f.removed and f.unit in keptUnits): without.add(f)
+          propagateDependencyChanges(without, unitDeps)
+          stepTransitions = planTransitions(without)
+      let pre = runPreStop(stepTransitions, disableOnRemoval, onStop)
       for kept in pre.keptLinks:
         # Changed in the instant between the re-check and the unlink.
         hookKept.incl(linkOwner.getOrDefault(kept))
@@ -2571,7 +2589,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       # generation is not started.
       if clean and problems.len == 0:
         try:
-          runStart(transitions, paused, notRunning,
+          runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts)
           # A replay or a revert plans the units the interrupted switch had
           # running as running, but `try-restart` leaves a unit the crash

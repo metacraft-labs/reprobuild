@@ -143,6 +143,11 @@
 ##                                            ``Alias``, ``Also`` or
 ##                                            ``UpheldBy`` is neither
 ##                                            decided nor ledgered
+## ``kept-units-still-stopped``              (with the pause seam) a
+##                                            removed unit step 2's
+##                                            re-check keeps in place is
+##                                            still stopped with the plan's
+##                                            transitions
 ## =========================================  ==============================
 
 const
@@ -173,7 +178,8 @@ const
                           "install-targets-ignore-alias-also",
                           "addon-target-in-boot-order",
                           "current-remove-then-create",
-                          "nofollow-write-skips-fsync"]
+                          "nofollow-write-skips-fsync",
+                          "kept-units-still-stopped"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}
@@ -186,6 +192,6 @@ template mutated*(name: static string): bool =
 
 const TestPauseSeam* = AddonMutation in ["pause-before-write",
                                          "pause-before-write-no-recheck",
-                          "install-targets-ignore-alias-also"]
+                                         "kept-units-still-stopped"]
   ## The write-time re-check gate's pause seam is compiled in (a test-only
   ## build; see the table above). False in every product build.
