@@ -12560,7 +12560,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           if runtimeOnly: producerArtifact.projectInterface.runtimeToolUses
           else: producerArtifact.projectInterface.toolUses
         for dependency in dependencies:
-          if dependency.depKind != "native":
+          if dependency.depKind != DepKindNative:
             pendingSourceUses.add(dependency)
 
     while nextSourceUse < pendingSourceUses.len:

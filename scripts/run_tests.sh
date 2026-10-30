@@ -207,6 +207,10 @@ if [[ -n "${REPROBUILD_SOURCE_ROOT:-}" &&
   echo "run_tests: REPROBUILD_SOURCE_ROOT named ${REPROBUILD_SOURCE_ROOT}; testing ${repo_root} instead" >&2
 fi
 export REPROBUILD_SOURCE_ROOT="${repo_root}"
+# Marks a gate run. A test that needs a built `build/bin/repro` fails instead
+# of skipping when this is set: step 1 below bootstraps it, so its absence in
+# a gate run is a defect, not a missing optional prerequisite.
+export REPROBUILD_GATE_RUN=1
 
 # Tests must not depend on the developer's persistent action cache. Large or
 # stale user-level metadata can dominate memory use in daemon-hosted cache-hit

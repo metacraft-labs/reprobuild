@@ -22,6 +22,7 @@ import std/[os, strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/active_context
+import repro_dsl_stdlib/toolchain_policy
 import repro_dsl_stdlib/operations/compile
 import repro_dsl_stdlib/operations/link
 import repro_dsl_stdlib/constructors/c_executable
@@ -147,3 +148,58 @@ suite "what the guard lets through":
         let msg = refusal(proc() = discard cmake_package("src"))
         check "cmake_package" in msg
         check registeredBuildActions().len == emitted))
+
+suite "nested frames, helper reads and host triples":
+
+  test "a read in the package's build: covers an artifact frame nested in it":
+    withTarget(Triple, proc() =
+      inBuild(proc() =
+        discard activeCrossTarget()
+        let inner = beginBuildBlock(Recipe, ownerKind = "executable",
+          ownerName = "hello")
+        try:
+          check refusal(proc() =
+            discard compile("src/a.c", "build/a.o")) == ""
+        finally:
+          endBuildBlock(inner)))
+
+  test "a read in another package's enclosing frame does not cover this one":
+    withTarget(Triple, proc() =
+      inBuild(proc() =
+        discard activeCrossTarget()
+        let other = beginBuildBlock("someOtherPackage")
+        try:
+          check "compile" in refusal(proc() =
+            discard compile("src/a.c", "build/a.o"))
+        finally:
+          endBuildBlock(other)))
+
+  test "a helper reading through peekActiveCrossTarget lifts nothing":
+    withTarget(Triple, proc() =
+      inBuild(proc() =
+        proc helper(): string = peekActiveCrossTarget().triple
+        check helper() == Triple
+        let inner = beginBuildBlock(Recipe, ownerKind = "executable",
+          ownerName = "hello")
+        try:
+          check helper() == Triple
+          check "compile" in refusal(proc() =
+            discard compile("src/a.c", "build/a.o"))
+        finally:
+          endBuildBlock(inner)
+        check "compile" in refusal(proc() =
+          discard compile("src/a.c", "build/a.o"))))
+
+  test "--target naming the build host is native: no refusal":
+    when defined(linux) and defined(amd64):
+      for host in ["x86_64-unknown-linux-gnu", "x86_64-pc-linux-gnu"]:
+        withTarget(host, proc() =
+          check not isCrossTriple(host)
+          check activeTargetTriple() == ""
+          check activeTargetTripleTag() == ""
+          inBuild(proc() =
+            check refusal(proc() =
+              discard compile("src/a.c", "build/a.o")) == ""))
+      check isCrossTriple("x86_64-unknown-linux-musl")
+    check isCrossTriple(Triple)
+    check not isCrossTriple("native")

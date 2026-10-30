@@ -53,6 +53,7 @@ import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/in_process as bcInProcess
 import repro_binary_cache_server/types as bcTypes
 import repro_project_dsl/install_mirror_resolver
+import repro_project_dsl/target_object_check
 import repro_project_dsl/reprobuild_packages_catalog
 # Tarball realization is a build-graph edge (Dependency-Provisioning-In-Build-
 # Graph.md sections 2 and 4): this module builds the `bakForeignProvision`
@@ -67,7 +68,8 @@ export executable_evidence
 import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest]
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/packages/[lessmsi, wix3, innounp, php, jdk]
-from repro_project_dsl import PackageDef, PackageUseDef, registeredPackages, registeredProvisioningContributions
+from repro_project_dsl import PackageDef, PackageUseDef, registeredPackages, registeredProvisioningContributions,
+  DepKindTarget, DepKindNative, DepKindRuntime
 export archive_inputs
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
@@ -1922,17 +1924,26 @@ proc realizedVersionOf*(profile: PathOnlyToolProfile): string =
       if v.len > 0: return v
   ""
 
+const NixOutputNames = ["out", "bin", "dev", "lib", "man", "doc", "info",
+  "devdoc", "static", "debug", "data", "py", "python", "tools", "modules",
+  "bindings", "examples", "headers", "include", "share", "terminfo"]
+  ## Output names nixpkgs appends as ``-<output>`` to a non-``out`` output's
+  ## store entry. None starts with a digit.
+
 proc nixStorePathVersion*(path: string): string =
   ## The version a nixpkgs store path's name carries, or "".
   ##
   ## nixpkgs names a derivation ``<pname>-<version>`` and an output other
-  ## than ``out`` adds ``-<output>``, so the store entry
-  ## ``/nix/store/<hash>-zlib-1.3.1-dev`` names version ``1.3.1``: the first
-  ## ``-`` that a digit follows opens the version, and the next ``-`` closes
-  ## it. That is the version the pinned nixpkgs built, which is what a range
-  ## is held against for a realization with no version probe -- a library
-  ## has no ``--version`` to ask.
-  ## (https://nixos.org/manual/nixpkgs/stable/#sec-package-naming)
+  ## than ``out`` adds ``-<output>``
+  ## (https://nixos.org/manual/nixpkgs/stable/#sec-package-naming). The
+  ## pname may itself hold a dash followed by a digit
+  ## (``font-adobe-100dpi-1.0.4``) and dashes before the version
+  ## (``zlib-ng-compat-2.2.4``), so the version is NOT the first ``-`` a
+  ## digit follows: it is the segment after the pname, i.e. after dropping a
+  ## trailing ``-<output>``, the LAST ``-`` a digit follows opens it. That
+  ## is the version the pinned nixpkgs built, which is what a range is held
+  ## against for a realization with no version probe -- a library has no
+  ## ``--version`` to ask.
   const StorePrefix = "/nix/store/"
   let at = path.find(StorePrefix)
   if at < 0:
@@ -1944,14 +1955,13 @@ proc nixStorePathVersion*(path: string): string =
   let dash = entry.find('-')
   if dash < 0:
     return ""
-  let name = entry[dash + 1 .. ^1]
-  for i in 0 ..< name.len - 1:
+  var name = entry[dash + 1 .. ^1]
+  let lastDash = name.rfind('-')
+  if lastDash > 0 and name[lastDash + 1 .. ^1] in NixOutputNames:
+    name = name[0 ..< lastDash]
+  for i in countdown(name.len - 2, 0):
     if name[i] == '-' and name[i + 1] in Digits:
-      var version = name[i + 1 .. ^1]
-      let next = version.find('-')
-      if next >= 0:
-        version = version[0 ..< next]
-      return version
+      return name[i + 1 .. ^1]
   ""
 
 proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
@@ -8370,18 +8380,27 @@ proc fromSourceInstallTreeRoots*(): seq[string] =
   ## populator emits the M9.R.14e.2 staged-tree first when both layouts
   ## are present. A proc rather than a const since A15: the install mirror
   ## is keyed by the target (``installMirrorSubpath``).
-  @[
-    installMirrorSubpath() & "/usr",
-    installMirrorSubpath(),
-    "build/out/usr",
+  result = @[installMirrorSubpath() & "/usr", installMirrorSubpath()]
+  # The constructors' ``build/out`` staging tree is not keyed by the target:
+  # nothing records which build wrote it, so under ``--target`` it is never
+  # consulted -- it may hold the native build's objects (CLI/build.md
+  # §"Cross Targets: `--target`").
+  if effectiveInstallMirrorTarget().len == 0:
+    result.add("build/out/usr")
     # M9.R.15e.11 — some autotools projects (Linux-PAM, glibc) hardcode
     # libdir=/lib64 in their configure.ac regardless of --prefix, so the
     # .so files install to ``<destdir>/lib64/`` (no ``/usr/`` segment).
     # Add the bare destdir root so consumers' LIBRARY_PATH /
     # CMAKE_PREFIX_PATH find ``<destdir>/lib64/libpam.so`` etc. The
     # populator's lib + lib64 walk picks up files under either root.
-    "build/out",
-  ]
+    result.add("build/out")
+
+proc siblingPrefixSubdirs(leaf: string): seq[string] =
+  ## ``<mirror>/<leaf>``, plus the unkeyed ``build/out/<leaf>`` staging tree
+  ## for a native build only (see ``fromSourceInstallTreeRoots``).
+  result = @[installMirrorSubpath() & "/" & leaf]
+  if effectiveInstallMirrorTarget().len == 0:
+    result.add("build/out/" & leaf)
 
 proc addUniquePath*(dst: var seq[string]; value: string) =
   ## Append ``value`` to ``dst`` when it isn't already present AND when
@@ -8644,7 +8663,7 @@ proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
   # sibling. An unresolved cycle-break tool is skipped, while a completed
   # source mirror remains part of the search-path closure.
   for useDef in m9r14fLoadInterfaceToolUses(recipeDir):
-    if useDef.depKind == "native":
+    if useDef.depKind == DepKindNative:
       continue
     for depName in m9r14fDepRecipeNames(useDef):
       let depDir = recipeRoot / depName
@@ -8904,7 +8923,7 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
     # Probe both the install-mirror and the build/out trees for the
     # canonical CMake-config locations.
     var probeRoots: seq[tuple[root: string, layout: string]] = @[]
-    for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
+    for prefixSubdir in siblingPrefixSubdirs("usr"):
       let prefixRoot = recipeDir / prefixSubdir
       if dirExists(extendedPath(prefixRoot)):
         probeRoots.add((root: prefixRoot / "share", layout: "share"))
@@ -8950,7 +8969,7 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
     # check; PKG_CONFIG_PATH (built from the install-mirror via
     # ``addUniquePath`` in toolProfileFor) takes care of consumption.
     block pcWalk:
-      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
+      for prefixSubdir in siblingPrefixSubdirs("usr"):
         let prefixRoot = recipeDir / prefixSubdir
         for pcSubdir in ["lib/pkgconfig", "lib64/pkgconfig",
                          "share/pkgconfig"]:
@@ -8972,7 +8991,7 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
     # executable, library, pkg-config file, or CMake config. A regular
     # file in the realized share tree is sufficient build evidence.
     block sharedDataWalk:
-      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
+      for prefixSubdir in siblingPrefixSubdirs("usr"):
         let shareRoot = recipeDir / prefixSubdir / "share"
         if not dirExists(extendedPath(shareRoot)):
           continue
@@ -8986,7 +9005,7 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
     # etc/ssl/certs/ca-certificates.crt rather than an executable or
     # library. Treat a regular staged configuration file as build evidence.
     block configurationDataWalk:
-      for etcSubdir in [installMirrorSubpath() & "/etc", "build/out/etc"]:
+      for etcSubdir in siblingPrefixSubdirs("etc"):
         let etcRoot = recipeDir / etcSubdir
         if not dirExists(extendedPath(etcRoot)):
           continue
@@ -9003,7 +9022,7 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
     # library file cannot satisfy a missing package.
     let depName = name.toLowerAscii
     block packageLibDataWalk:
-      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
+      for prefixSubdir in siblingPrefixSubdirs("usr"):
         let prefixRoot = recipeDir / prefixSubdir
         for libSubdir in ["lib", "lib64"]:
           let libRoot = prefixRoot / libSubdir
@@ -9077,6 +9096,22 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
   # production (where ``recipeDir = <root>/<name>``) but the tests'
   # ``REPRO_FROM_SOURCE_ROOT`` override pattern wants the explicit form.
   populateFromSourceSearchPaths(profile, recipeDir, root)
+
+  # The object check again, at consume time (CLI/build.md §"Cross Targets:
+  # `--target`"): a target mirror written before the check existed, or
+  # altered since, is refused here rather than linked. Before the probes,
+  # so nothing in a refused mirror is executed.
+  let consumeTriple = effectiveInstallMirrorTarget()
+  if consumeTriple.len > 0:
+    let context = "sibling '" & name & "' consumed under --target"
+    refuseTargetObjectMismatches(recipeDir / installMirrorSubpath(),
+      consumeTriple, context)
+    if fileExists(extendedPath(absolute)):
+      let bad = targetObjectMismatchesInFile(absolute,
+        targetObjectRuleFor(consumeTriple))
+      if bad.len > 0:
+        raise newException(TargetObjectMismatch, context & ": " &
+          bad.join("; "))
 
   profile.probes = collectConfiguredProbes(absolute,
     useDef.packageSelector, useDef.executableName)
@@ -9314,16 +9349,31 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # the sibling is realized by its own `repro build` (path mode never
     # auto-recurses), and an unbuilt sibling is what PATH or an arm
     # answers for.
-    let libraryDep = useDef.depKind in ["build", "runtime"]
-    if libraryDep and activeTargetTripleTag().len > 0:
+    # The DSL's own constants: `buildDeps:` / `uses:` are emitted as
+    # `DepKindTarget` ("target"), never "build".
+    let libraryDep = useDef.depKind in [DepKindTarget, DepKindRuntime]
+    let crossTriple = activeTargetTripleTag()
+    if libraryDep and crossTriple.len > 0:
       let sibling = tryResolveFromSourceTool(useDef)
-      if sibling.kind == rrResolved:
+      case sibling.kind
+      of rrResolved:
         return sibling.profile
+      of rrNeedsBuild:
+        # A sibling recipe exists but has no (verified) build for the
+        # target. PATH can only hold a host build, which a cross build must
+        # not link: refuse by name rather than fall through to it.
+        raise newException(OSError, "'" & useDef.packageSelector &
+          "' (" & useDef.depKind & " dependency) has no build for --target '" &
+          crossTriple & "': build its sibling recipe " & sibling.recipeDir &
+          " with `repro build --target=" & crossTriple & "` first. A host " &
+          "build from PATH is not used for a cross build's link inputs.")
+      of rrSiblingMissing:
+        discard
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:
       let sibling = tryResolveFromSourceTool(useDef,
-        hostSide = useDef.depKind == "native")
+        hostSide = useDef.depKind == DepKindNative)
       if sibling.kind == rrResolved:
         return sibling.profile
       if hasHostTarballProvisioning(useDef):
@@ -9543,7 +9593,7 @@ proc resolveSourceDependencyClosure(profile: var PathOnlyToolProfile;
     let uses = if entry.runtimeOnly: artifact.projectInterface.runtimeToolUses
                else: artifact.projectInterface.toolUses
     for useDef in uses:
-      if useDef.depKind == "native":
+      if useDef.depKind == DepKindNative:
         continue
       if useDef in resolvedUses:
         continue

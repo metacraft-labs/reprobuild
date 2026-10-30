@@ -43,6 +43,7 @@ import std/[os, strutils, tables]
 
 import repro_lock_files
 import repro_project_dsl
+import repro_project_dsl/target_object_check
 
 import ./configurables/variants
 
@@ -132,10 +133,14 @@ proc activeSolvedVariants*(): ToolchainSelection =
     result.targetTriple = targetTripleFromEnv()
 
 proc isCrossTriple*(triple: string): bool =
-  ## A triple names a cross build when it is present and is not `native`.
-  ## Written once so the two former paths cannot drift on the spelling of
-  ## "not cross" — they already had two copies of this test.
-  triple.len > 0 and triple.toLowerAscii() != "native"
+  ## A triple names a cross build when it is present, is not `native`, and
+  ## does not name the build host itself (CLI/build.md §"Cross Targets:
+  ## `--target`": `--target=<host triple>` is native). Written once so the
+  ## two former paths cannot drift on the spelling of "not cross"; the
+  ## install-mirror keying (`activeTargetTripleTag`) folds the same
+  ## spellings through the same `isHostTriple`.
+  triple.len > 0 and triple.toLowerAscii() != "native" and
+    not isHostTriple(triple)
 
 proc activeTargetTriple*(): string =
   ## The triple the active build region compiles FOR, or "" for a native

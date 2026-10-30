@@ -244,6 +244,19 @@ proc tryCurrentBuildState*(): PackageBuildState {.dynOrStatic.} =
     return nil
   activeBuilds[^1]
 
+proc enclosingBuildFrames*(): seq[PackageBuildState] {.dynOrStatic.} =
+  ## The active `build:` frames of the innermost frame's package, innermost
+  ## first: the top frame and every frame directly beneath it with the same
+  ## `packageName` (an `executable` / `library` block nested in its
+  ## package's build). Empty when no build block is active.
+  if activeBuilds.len == 0:
+    return
+  let package = activeBuilds[^1].packageName
+  for i in countdown(activeBuilds.high, 0):
+    if activeBuilds[i].packageName != package:
+      break
+    result.add(activeBuilds[i])
+
 
 const fs* = ReproFs()
 const hcr* = ReproHcr()

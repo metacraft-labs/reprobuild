@@ -266,8 +266,13 @@ proc requireCrossTargetConsulted*(caller: string) =
   if triple.len == 0:
     return
   let state = tryCurrentBuildState()
-  if state != nil and state.crossTargetConsulted:
-    return
+  # A read in an enclosing frame of the same package covers the frames
+  # nested in it (an `executable` block inside the package's `build:`).
+  # `peekActiveCrossTarget` never sets the flag, so a helper's read through
+  # it lifts nothing.
+  for frame in enclosingBuildFrames():
+    if frame.crossTargetConsulted:
+      return
   let recipe =
     if state != nil: state.packageName
     else: currentOwningPackage()

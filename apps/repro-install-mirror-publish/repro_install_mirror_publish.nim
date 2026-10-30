@@ -2,10 +2,13 @@ import std/[os, strutils]
 
 import repro_project_dsl/install_mirror_resolver
 import repro_project_dsl/install_mirror_publish
+import repro_project_dsl/target_object_check
 
 proc usage(): string =
   "usage: repro-install-mirror-publish --recipes-root <dir> " &
-    "--package <name> --version <version> --source <dir>"
+    "--package <name> --version <version> --source <dir>\n" &
+    "       repro-install-mirror-publish --check-target <triple> " &
+    "--source <dir>"
 
 proc valueArg(args: seq[string]; i: var int; name, arg: string): string =
   let prefix = name & "="
@@ -23,6 +26,7 @@ proc runInstallMirrorPublishCommand*(args: seq[string]): int =
   var packageName = ""
   var version = ""
   var sourceDir = ""
+  var checkTarget = ""
   var i = 0
   try:
     while i < args.len:
@@ -43,8 +47,25 @@ proc runInstallMirrorPublishCommand*(args: seq[string]): int =
             if value.len > 0:
               sourceDir = value
             else:
-              raise newException(ValueError, "unknown argument: " & arg)
+              value = valueArg(args, i, "--check-target", arg)
+              if value.len > 0:
+                checkTarget = value
+              else:
+                raise newException(ValueError, "unknown argument: " & arg)
       inc i
+    if checkTarget.len > 0:
+      # The object check of a cross build's staged mirror (CLI/build.md
+      # §"Cross Targets: `--target`"). Exit 1 names every offending path.
+      if sourceDir.len == 0:
+        raise newException(ValueError, usage())
+      try:
+        refuseTargetObjectMismatches(sourceDir, checkTarget,
+          "install mirror")
+      except TargetObjectMismatch, UnknownTargetCpu:
+        stderr.writeLine("repro-install-mirror-publish: " &
+          getCurrentExceptionMsg())
+        return 1
+      return 0
     if recipesRoot.len == 0 or packageName.len == 0 or version.len == 0 or
         sourceDir.len == 0:
       raise newException(ValueError, usage())

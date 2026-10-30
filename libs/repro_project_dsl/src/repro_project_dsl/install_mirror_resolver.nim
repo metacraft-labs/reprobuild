@@ -12,6 +12,7 @@ import repro_platform
 # and a profile compile's ``--path`` set deliberately excludes the store
 # runtime's SQLite binding and shm-index/shm-queue dependencies.
 import repro_local_store/prefix_paths
+import ./target_object_check
 
 const InstallMirrorModeEnvVar* = "REPRO_INSTALL_MIRROR_MODE"
 
@@ -50,7 +51,10 @@ proc activeTargetTripleTag*(): string =
     let kv = assignment.split('=', 1)
     if kv.len == 2 and kv[0].strip() == "targetTriple":
       let value = kv[1].strip()
-      if value.len > 0 and value.toLowerAscii() != "native":
+      # A triple naming the build host itself is a native build
+      # (CLI/build.md §"Cross Targets: `--target`").
+      if value.len > 0 and value.toLowerAscii() != "native" and
+          not isHostTriple(value):
         return value
       return ""
   ""
@@ -305,12 +309,17 @@ proc hashedDepMirrorRoot*(recipesRoot, depName: string): string =
 
 proc realizationInfoMatchesCurrentPlatform*(recipeDir: string): bool =
   ## A missing sidecar is the pre-install compatibility case used by staged
-  ## artifacts. Once a producer writes the sidecar, it must identify this
-  ## process's OS and CPU; empty legacy sidecars are deliberately stale.
+  ## artifacts of a NATIVE build. Once a producer writes the sidecar, it must
+  ## identify this process's OS and CPU; empty legacy sidecars are
+  ## deliberately stale. Under ``--target`` a missing keyed sidecar is never
+  ## a match: the sidecar is written only after the staged tree passed the
+  ## object check, so a target mirror without one -- left by a build before
+  ## that check existed, or by a refused one -- is a sibling that needs a
+  ## build (CLI/build.md §"Cross Targets: `--target`").
   let path = recipeDir / ".repro" / "output" /
     targetKeyedOutputName(RealizationInfoFileName)
   if not fileExists(path):
-    return true
+    return effectiveInstallMirrorTarget().len == 0
   let info = readRealizationInfoFile(parentDir(recipeDir),
     extractFilename(recipeDir))
   info.platformTag == currentRealizationPlatformTag()
@@ -388,11 +397,31 @@ proc packageInstallMirrorHumanFriendlyPath*(recipesRoot, depName: string):
 proc shellDoubleQuote(value: string): string =
   "\"" & value.replace("\\", "/").replace("\"", "\\\"") & "\""
 
+proc emitInstallMirrorTargetCheck*(sourceDir: string): string =
+  ## Under ``--target``: the shell fragment that runs the object check over
+  ## the staged mirror ``sourceDir`` and, on a mismatch, removes the mirror
+  ## and fails the action, so nothing is mirrored and no sidecar is written
+  ## (CLI/build.md §"Cross Targets: `--target`", the object check). Empty
+  ## for a native build.
+  let triple = effectiveInstallMirrorTarget()
+  if triple.len == 0 or sourceDir.len == 0:
+    return ""
+  let dir = shellDoubleQuote(sourceDir)
+  result.add(InstallMirrorPublishToolName)
+  result.add(" --check-target ")
+  result.add(shellDoubleQuote(triple))
+  result.add(" --source ")
+  result.add(dir)
+  result.add(" || { rm -rf ")
+  result.add(dir)
+  result.add("; exit 1; }; ")
+
 proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
                                     sourceDir: string): string =
+  result = emitInstallMirrorTargetCheck(sourceDir)
   if recipesRoot.len == 0 or depName.len == 0 or version.len == 0 or
       sourceDir.len == 0:
-    return ""
+    return
   let sidecarPath = realizationInfoPath(recipesRoot, depName)
   let sidecarParent = parentDir(sidecarPath)
   result.add("case \"${")

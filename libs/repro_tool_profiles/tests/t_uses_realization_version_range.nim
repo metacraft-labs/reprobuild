@@ -248,6 +248,12 @@ suite "a nix realization is held to the declared range":
     check nixStorePathVersion("/nix/store/abc-python3-3.12.8") == "3.12.8"
     check nixStorePathVersion("/nix/store/x-rustc-wrapper/bin/rustc") == ""
     check nixStorePathVersion("/usr/lib/libz.so") == ""
+    # The version is the segment after the pname, not the first `-<digit>`:
+    # a pname may hold one (`font-adobe-100dpi`) or several dashes.
+    check nixStorePathVersion("/nix/store/abc-font-adobe-100dpi-1.0.4") == "1.0.4"
+    check nixStorePathVersion("/nix/store/abc-zlib-ng-compat-2.2.4/lib/libz.so") == "2.2.4"
+    check nixStorePathVersion("/nix/store/abc-zlib-ng-compat-2.2.4-dev") == "2.2.4"
+    check nixStorePathVersion("/nix/store/abc-font-adobe-100dpi-1.0.4-man") == "1.0.4"
 
   test "a library with no version probe is held to its store path's version":
     # zlib has no `--version`: before the store path was read, every nix

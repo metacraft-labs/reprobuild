@@ -32,8 +32,20 @@
 ## an x86-64 `install@armv7-unknown-linux-musleabihf/usr/bin/hello`, failing
 ## 1, 2 and 3.
 ##
+## The second case is the object check that backstops the refusal
+## (CLI/build.md §"Cross Targets: `--target`", approved by Zahary Karadjov
+## 2026-10-30): a recipe that reads `activeCrossTarget()` -- so the
+## constructor guard lets it through -- but threads nothing still compiles
+## for the host. Its staged mirror is refused by its bytes: exit non-zero,
+## the message names the x86-64 object, and nothing is left under
+## `install@<triple>`. Falsifiability: with the check fragment removed from
+## `emitInstallMirrorStorePublish`, the run exits 0 and mirrors an x86-64
+## `install@armv7-…/usr/bin/hello`.
+##
 ## Skip rule: `sh`, `cc` or `make` missing on PATH, or `build/bin/repro`
-## unbuilt.
+## unbuilt -- except in a gate run (`REPROBUILD_GATE_RUN=1`, exported by
+## `scripts/run_tests.sh`, which builds `build/bin/repro` first), where an
+## unbuilt binary FAILS the case instead of skipping it.
 
 import std/[algorithm, monotimes, os, osproc, strtabs, strutils, tempfiles,
   unittest]
@@ -76,12 +88,31 @@ install: hello
 MK
 """
 
+  # Lifts the guard by reading the slot, then threads nothing: the
+  # constructor runs the host compiler exactly as `Recipe` would.
+  DishonestRecipe = """
+import repro_project_dsl
+import repro_dsl_stdlib/active_context
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
+
+package hostOnly:
+  defaultToolProvisioning "path"
+  nativeBuildDeps:
+    "gcc"
+    "make"
+  build:
+    discard activeCrossTarget()
+    let pkg = autotools_package(srcDir = "./src")
+    discard pkg.executable("hello")
+"""
+
   HelloC = "#include <stdio.h>\nint main(void){puts(\"hi\");return 0;}\n"
 
-proc createProject(root: string): string =
+proc createProject(root: string; recipe = Recipe): string =
   result = root / "proj"
   createDir(result / "src")
-  writeFile(result / "repro.nim", Recipe)
+  writeFile(result / "repro.nim", recipe)
   writeFile(result / "src/configure", Configure)
   setFilePermissions(result / "src/configure",
     {fpUserRead, fpUserWrite, fpUserExec})
@@ -97,6 +128,9 @@ proc runBuild(root, project: string; args: seq[string]):
   env["REPRO_STORE_ROOT"] = root / "cas"
   env["REPRO_CACHE_DISABLE"] = "1"
   env.del("REPRO_VARIANTS")
+  # The mirror action's object check runs `repro-install-mirror-publish`,
+  # built beside `repro`.
+  env["PATH"] = reproBinary.parentDir & PathSep & getEnv("PATH")
   let log = root / ("build-" & $getMonoTime().ticks & ".log")
   let argv = @[reproBinary, "build", "--daemon=off", "--progress=quiet",
     "--log=actions"] & args
@@ -124,7 +158,10 @@ proc outputDigest(project: string): seq[string] =
 suite "--target refuses a recipe that does not thread it, end to end":
 
   test "t_target_build_refuses_a_recipe_that_does_not_thread_it":
-    if not fileExists(reproBinary) or findExe("sh").len == 0 or
+    if not fileExists(reproBinary) and getEnv("REPROBUILD_GATE_RUN") == "1":
+      checkpoint(reproBinary & " is missing in a gate run")
+      check false
+    elif not fileExists(reproBinary) or findExe("sh").len == 0 or
         findExe("cc").len == 0 or findExe("make").len == 0:
       skip("build/bin/repro unbuilt, or sh/cc/make missing on PATH")
     else:
@@ -161,3 +198,24 @@ suite "--target refuses a recipe that does not thread it, end to end":
       check not dirExists(project / ".repro/output/install@" & Triple)
       check not dirExists(project / ".repro/output/hello@" & Triple)
       check outputDigest(project) == before
+
+  test "t_target_build_refuses_host_objects_a_recipe_claims_to_thread":
+    if not fileExists(reproBinary) and getEnv("REPROBUILD_GATE_RUN") == "1":
+      checkpoint(reproBinary & " is missing in a gate run")
+      check false
+    elif not fileExists(reproBinary) or findExe("sh").len == 0 or
+        findExe("cc").len == 0 or findExe("make").len == 0:
+      skip("build/bin/repro unbuilt, or sh/cc/make missing on PATH")
+    else:
+      let root = createTempDir("target-object-check-", "")
+      defer: removeDir(root)
+      let project = createProject(root, DishonestRecipe)
+      let cross = runBuild(root, project, @["--target=" & Triple])
+      checkpoint(cross.output)
+      check cross.code != 0
+      check ("are not for --target '" & Triple & "'") in cross.output
+      check "bin/hello: x86-64 (EM_X86_64)" in cross.output
+      let keyed = project / ".repro/output/install@" & Triple
+      check not fileExists(keyed / "usr/bin/hello")
+      check not fileExists(project / ".repro/output/.realization-info@" &
+        Triple)
