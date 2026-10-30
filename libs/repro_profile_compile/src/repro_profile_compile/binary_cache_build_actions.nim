@@ -45,6 +45,11 @@
 ## stale cache entry can never shadow a changed edge.
 
 import std/[os, strutils]
+when defined(posix):
+  import std/posix
+  # std/posix does not export these on every target; take them from libc.
+  var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+  var oCloExec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
 
 import repro_binary_cache_client
 import repro_build_engine
@@ -216,19 +221,97 @@ proc stagePrefixFromOutputs(action: ProfileBuildAction;
     copyFileWithPermissions(src, dst)
   return true
 
-proc materialisePrefixIntoCwd(action: ProfileBuildAction;
-                              extractedDir: string) =
-  ## Copy every file under `extractedDir` (a freshly-extracted rbcarc
-  ## prefix) back under the action's `cwd`, byte-identically, preserving
-  ## permissions (so the exec bit the archive carried survives).
+proc isDeclaredOutput(rel: string; declared: openArray[string]): bool =
+  ## True when the cwd-relative `rel` IS a declared output, or lies below a
+  ## declared output directory. Compared component-wise, so `bin2/x` is not
+  ## below a declared `bin`.
+  for d in declared:
+    let dd = d.strip(leading = false, chars = {'/'})
+    if rel == dd or rel.startsWith(dd & "/"):
+      return true
+  false
+
+proc writeFileNoFollow(dstDir, name: string; data: string; mode: set[FilePermission]) =
+  ## Write `data` to `dstDir/name` without ever following a symbolic link:
+  ## the bytes go to a fresh temporary file created with
+  ## `O_CREAT|O_EXCL|O_NOFOLLOW` in the same directory, which is then renamed
+  ## over the destination. `rename(2)` replaces a link at the destination
+  ## rather than writing through it.
+  let final = dstDir / name
+  let tmp = dstDir / ("." & name & ".repro-substitute-" & $getCurrentProcessId())
+  when defined(posix):
+    let fd = posix.open(tmp.cstring,
+      O_WRONLY or O_CREAT or O_EXCL or oNoFollow or oCloExec, 0o600.Mode)
+    if fd < 0:
+      raiseOSError(osLastError(), "cannot create " & tmp)
+    var off = 0
+    try:
+      while off < data.len:
+        let n = posix.write(fd, unsafeAddr data[off], data.len - off)
+        if n < 0:
+          raiseOSError(osLastError(), "cannot write " & tmp)
+        off += n
+    finally:
+      discard posix.close(fd)
+  else:
+    writeFile(tmp, data)
+  try:
+    setFilePermissions(tmp, mode)
+    moveFile(tmp, final)
+  except CatchableError:
+    try: removeFile(tmp) except CatchableError: discard
+    raise
+
+proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
+                               extractedDir: string) =
+  ## Copy the action's DECLARED outputs from `extractedDir` (a freshly
+  ## extracted rbcarc prefix) back under the action's `cwd`, byte-identically,
+  ## preserving permissions (so the exec bit the archive carried survives).
+  ##
+  ## The archive comes from a cache, so it is treated as hostile even after
+  ## its signature checked out, and the copy runs inside a privileged apply:
+  ##
+  ##   * Only declared outputs are copied. A file the action did not declare
+  ##     (`.git/hooks/post-checkout`, a shell profile) refuses the whole
+  ##     substitution rather than landing in the working directory.
+  ##   * The archive may carry no symbolic link. The publisher stages outputs
+  ##     with `copyFileWithPermissions`, which dereferences links, so an honest
+  ##     outputs archive holds regular files only; a link would make this copy
+  ##     read whatever it points at (a secret) into the outputs.
+  ##   * The destination is written without following links: no existing
+  ##     component of the destination path may be a link, and each file is
+  ##     created fresh and renamed into place.
+  ##
+  ## Any refusal raises `IOError`; the caller turns it into a cache miss and
+  ## builds locally. Validation of every member happens before anything is
+  ## written, so a refused archive writes nothing.
   let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
                 else: getCurrentDir())
-  for path in walkDirRec(extractedDir, yieldFilter = {pcFile, pcLinkToFile},
-                         relative = true):
+  let declared = outputRelPaths(action)
+  var members: seq[string] = @[]
+  for path in walkDirRec(extractedDir,
+                         yieldFilter = {pcFile, pcLinkToFile, pcLinkToDir},
+                         followFilter = {pcDir}, relative = true):
+    let rel = path.replace(DirSep, '/')
     let src = extractedDir / path
-    let dst = cwdAbs / path
+    if symlinkExists(src):
+      raise newException(IOError,
+        "substituted outputs carry a symbolic link (" & rel &
+        "); an outputs archive holds regular files only")
+    if not isDeclaredOutput(rel, declared):
+      raise newException(IOError,
+        "substituted outputs carry " & rel &
+        ", which the action does not declare as an output")
+    members.add(rel)
+  for rel in members:
+    refuseWriteThroughSymlink(cwdAbs, rel)
+  for rel in members:
+    let dst = cwdAbs / rel
     createDir(parentDir(dst))
-    copyFileWithPermissions(src, dst)
+    refuseWriteThroughSymlink(cwdAbs, rel)
+    writeFileNoFollow(parentDir(dst), extractFilename(dst),
+                      readFile(extractedDir / rel),
+                      getFilePermissions(extractedDir / rel))
 
 proc outputsExist(action: ProfileBuildAction): bool =
   ## True when every mappable declared output is present on disk under

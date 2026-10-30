@@ -62,6 +62,11 @@
 ## decryption fail closed, and it is checked BEFORE any plaintext is used.
 
 import std/[os, strutils]
+when defined(posix):
+  import std/posix
+  # std/posix does not export these on every target; take them from libc.
+  var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+  var oCloExec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
 
 from repro_core/codec import elementCountFits
 
@@ -361,6 +366,19 @@ proc openSecrets*(recipientPrivKey: peerAuth.PrivateKeyBytes;
 # Materialisation.
 # ---------------------------------------------------------------------------
 
+proc refuseLinkOnPath(root, rel: string) =
+  ## Raise unless no existing component of ``root/rel`` (the leaf included)
+  ## is a symbolic link. The agent writes secrets as root/SYSTEM; a link
+  ## planted on the path would redirect plaintext, or overwrite a file of
+  ## the attacker's choosing with it.
+  var cur = root
+  for part in rel.split('/'):
+    cur = cur / part
+    if symlinkExists(cur):
+      raise newException(SecretsError,
+        "refusing to write secret " & rel & " through a symbolic link (" &
+        cur & ")")
+
 proc materialiseSecrets*(files: seq[SecretFile]; destDir: string): seq[string] =
   ## Write the opened secrets under `destDir`, returning the absolute paths.
   ##
@@ -370,33 +388,65 @@ proc materialiseSecrets*(files: seq[SecretFile]; destDir: string): seq[string] =
   ## able to observe the path existing with partial content. Renaming within
   ## the same directory is atomic on both NTFS and POSIX.
   ##
+  ## **Never readable more widely than declared, never through a link.** On
+  ## POSIX the staged file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` and
+  ## its final mode already applied, so there is no window in which the
+  ## process umask leaves plaintext group- or world-readable (writing first
+  ## and narrowing the mode afterwards had exactly that window), and a link
+  ## planted at the staged name cannot redirect the write. No existing
+  ## component of the destination path may be a link either.
+  ##
   ## **Securing `destDir` is the PROFILE's job, not this proc's.** The
   ## directory carries the DACL and the files inherit it, exactly as
   ## `C:\actions-runner-tokens` already does (an `fs.systemDirectory` paired
   ## with a `windows.acl`). Setting per-file ACLs here would mean the agent
   ## and the profile both assert who may read these bytes, and the profile
-  ## would re-apply forever against whatever the agent last wrote. The POSIX
-  ## mode below is applied only where it is the whole story.
+  ## would re-apply forever against whatever the agent last wrote.
   createDir(destDir)
   result = newSeqOfCap[string](files.len)
   for f in files:
     validateSecretPath(f.path)
+    refuseLinkOnPath(destDir, f.path)
     let dest = destDir / f.path
     let parent = parentDir(dest)
     if parent.len > 0:
       createDir(parent)
+    refuseLinkOnPath(destDir, f.path)
     let staged = dest & ".staged"
     var content = newString(f.content.len)
     for i, b in f.content:
       content[i] = char(b)
-    writeFile(staged, content)
     when defined(posix):
-      var perms: set[FilePermission] = {}
-      if (f.mode and 0o400'u32) != 0: perms.incl(fpUserRead)
-      if (f.mode and 0o200'u32) != 0: perms.incl(fpUserWrite)
-      if (f.mode and 0o040'u32) != 0: perms.incl(fpGroupRead)
-      if (f.mode and 0o004'u32) != 0: perms.incl(fpOthersRead)
-      setFilePermissions(staged, perms)
+      if symlinkExists(staged):
+        raise newException(SecretsError,
+          "refusing to write secret " & f.path &
+          ": its staging name is a symbolic link")
+      if fileExists(staged):
+        removeFile(staged)      # a leftover from an interrupted earlier tick
+      let modeBits = Mode(f.mode and 0o644'u32)
+      let fd = posix.open(staged.cstring,
+        O_WRONLY or O_CREAT or O_EXCL or oNoFollow or oCloExec, modeBits)
+      if fd < 0:
+        raise newException(SecretsError,
+          "cannot create " & staged & ": " & osErrorMsg(osLastError()))
+      try:
+        # The process umask may have narrowed the open(2) mode further;
+        # fchmod sets exactly the declared bits, on the descriptor.
+        if fchmod(fd, modeBits) != 0:
+          raise newException(SecretsError,
+            "cannot set the mode of " & staged & ": " &
+            osErrorMsg(osLastError()))
+        var off = 0
+        while off < content.len:
+          let n = posix.write(fd, addr content[off], content.len - off)
+          if n < 0:
+            raise newException(SecretsError,
+              "cannot write " & staged & ": " & osErrorMsg(osLastError()))
+          off += n
+      finally:
+        discard posix.close(fd)
+    else:
+      writeFile(staged, content)
     moveFile(staged, dest)
     result.add(dest)
 
