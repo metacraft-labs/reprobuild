@@ -226,6 +226,21 @@ suite "M5 — deploy agent converges from a signed manifest":
       let url = "http://127.0.0.1:" & $port
       putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", tmpRoot / "cred")
       defer: delEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR")
+      # A provisioned producer identity: it publishes run 1, and the
+      # REPRO_BINARY_CACHE_URL cache trusts it (producer-cert rule). The
+      # apply path never mints a key of its own, and an entry signed by an
+      # untrusted key is a miss; REPRO_CACHES_CONFIG keeps the host's own
+      # cache configuration out of the gate.
+      writeFile(tmpRoot / "caches.conf", "")
+      putEnv("REPRO_CACHES_CONFIG", tmpRoot / "caches.conf")
+      defer: delEnv("REPRO_CACHES_CONFIG")
+      discard peerAuth.loadOrGenerateKeypair(tmpRoot / "producer.cert",
+                                             tmpRoot / "producer.key")
+      putEnv("REPRO_BINARY_CACHE_KEY_PATH", tmpRoot / "producer.key")
+      putEnv("REPRO_BINARY_CACHE_CERT_PATH", tmpRoot / "producer.cert")
+      defer:
+        delEnv("REPRO_BINARY_CACHE_KEY_PATH")
+        delEnv("REPRO_BINARY_CACHE_CERT_PATH")
       putEnv("REPRO_BINARY_CACHE_URL", url)
       defer: delEnv("REPRO_BINARY_CACHE_URL")
 

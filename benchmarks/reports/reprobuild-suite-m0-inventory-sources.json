@@ -17988,6 +17988,7 @@
       "localDependencyShape": [
         "repro_elevation",
         "repro_infra",
+        "repro_peer_cache",
         "repro_profile",
         "repro_profile_compile"
       ],
