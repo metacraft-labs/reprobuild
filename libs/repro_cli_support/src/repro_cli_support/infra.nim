@@ -52,7 +52,8 @@ from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 # ---------------------------------------------------------------------------
 
 proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
-    target: SystemPlanTarget = defaultSystemPlanTarget()):
+    target: SystemPlanTarget = defaultSystemPlanTarget();
+    declaredInputs: seq[string] = @[]):
     tuple[compiled: bool; text: string; cached: bool; compileError: string;
           adaptError: string; buildActions: seq[ProfileBuildAction];
           projection: Projection] =
@@ -113,7 +114,8 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
     repoRoot: "",
     workDir: profilePath.parentDir,
     verbose: false,
-    forceRebuild: false)
+    forceRebuild: false,
+    declaredInputs: declaredInputs)
   var intent: ProfileIntent
   try:
     let artifact = compileProfileToRbpi(profilePath, opts)
@@ -141,6 +143,7 @@ proc resolveSystemProfileText*(profilePath: string;
                                planCommand = "";
                                outBuildActions: ptr seq[ProfileBuildAction] = nil;
                                target: SystemPlanTarget = defaultSystemPlanTarget();
+                               declaredInputs: seq[string] = @[];
                                outProjection: ptr Projection = nil):
     bool =
   ## Drive the Phase F3 compile path for a `system.nim`. Sets `outText`
@@ -170,7 +173,8 @@ proc resolveSystemProfileText*(profilePath: string;
   ## come from inferring failure from absent output instead of from an
   ## actual error.
   discard originalText  # retained for caller compatibility; see docstring
-  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target)
+  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target,
+    declaredInputs)
   if outcome.compiled:
     outText = outcome.text
     if outBuildActions != nil:

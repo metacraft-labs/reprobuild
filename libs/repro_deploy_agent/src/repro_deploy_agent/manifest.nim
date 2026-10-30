@@ -132,6 +132,18 @@ const
     ## (an apt closure lock, a long configuration file) and producers had to
     ## inline every such file into the Nim source. Deploy-Agent.md §"The
     ## `RDMF` envelope".
+  StagedProfileModule* = "manifest_profile.nim"
+    ## The file name the agent stages ``profileText`` under before compiling
+    ## it (a valid Nim module name: the compiler rejects a hyphenated stem).
+    ## Reserved: a bundle file may not use it, since staging would then
+    ## overwrite the profile with it.
+  MaxDeployManifestBytes* = 32 * 1024 * 1024
+    ## The largest envelope an agent reads from a source. A manifest is a
+    ## profile plus a bundle of small files (locks, configuration); the cap
+    ## stops a 404-page-sized target from being handed an arbitrarily large
+    ## body to hold in memory before the signature is even checked. Checked
+    ## against ``Content-Length`` before the body is read, and again while
+    ## reading it, since a server need not send the header.
   DeployManifestFormatVersion* = DeployManifestFormatVersionV1
     ## Retained for source compatibility with callers that referenced the
     ## single-version constant. Producers should not read this: the version a
@@ -300,10 +312,23 @@ proc profileFilePathError*(path: string): string =
       return "profile file path '" & path & "' has an empty segment"
     if seg == "." or seg == "..":
       return "profile file path '" & path & "' has a '" & seg & "' segment"
+    # Reserved at ANY depth, as the producer's validator has it (infra
+    # `profile_file_path_error`, corpus `tests/fixtures/profile-file-paths.corpus`):
+    # the staged profile is a module, and a bundle file of the same name in
+    # a subdirectory would shadow nothing today but would be the one name
+    # whose meaning changes if the staging layout ever does.
+    if seg == StagedProfileModule:
+      return "profile file path '" & path & "' names the reserved staged " &
+        "profile module '" & StagedProfileModule & "'"
   ""
 
 proc validateProfileFiles*(files: openArray[ProfileFile]) =
-  ## Raise ``DeployManifestCodecError`` on a bad or duplicate path.
+  ## Raise ``DeployManifestCodecError`` on a bad path (``profileFilePathError``,
+  ## which includes the reserved ``StagedProfileModule`` name), a duplicate,
+  ## or a path that is both a file and a directory of another (``a`` and
+  ## ``a/b``): staging would write one over the other, and which one won
+  ## would depend on order. The rules are the producer's too: both
+  ## implementations are held to ``tests/fixtures/profile-file-paths.corpus``.
   var seen: seq[string]
   for f in files:
     let err = profileFilePathError(f.path)
@@ -312,6 +337,11 @@ proc validateProfileFiles*(files: openArray[ProfileFile]) =
     if f.path in seen:
       raise newException(DeployManifestCodecError,
         "profile file path '" & f.path & "' appears twice")
+    for other in seen:
+      if f.path.startsWith(other & "/") or other.startsWith(f.path & "/"):
+        raise newException(DeployManifestCodecError,
+          "profile file paths '" & other & "' and '" & f.path &
+          "' conflict: one is a directory of the other")
     seen.add(f.path)
 
 proc wireVersion*(m: DeployManifest): uint16 =
@@ -398,6 +428,13 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
     if not elementCountFits(fileCountRaw, buf.len - pos, 8):
       raise newException(DeployManifestCodecError,
         "element count exceeds remaining bytes")
+    # The lowest-version rule, enforced on the reading side: a v3 envelope
+    # with no bundle should have been v2 or v1. Named as such, rather than
+    # failing later as an invalid signature over bytes no producer emits.
+    if fileCountRaw == 0'u32:
+      raise newException(DeployManifestCodecError,
+        "non-canonical envelope: formatVersion 3 with no profile files " &
+        "(a producer must emit the lowest version that expresses its content)")
     for _ in 0 ..< int(fileCountRaw):
       var f: ProfileFile
       f.path = readString(buf, pos)
@@ -420,6 +457,11 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
       raise newException(DeployManifestCodecError,
         "deploy manifest secrets-present flag is " & $flag & ", expected 0 or 1")
     result.hasSecrets = flag == 1'u8
+    if not result.hasSecrets and
+        result.formatVersion == DeployManifestFormatVersionV2:
+      raise newException(DeployManifestCodecError,
+        "non-canonical envelope: formatVersion 2 without a sealed section " &
+        "(a producer must emit the lowest version that expresses its content)")
     if result.hasSecrets:
       result.secrets.ephemeralPubKey = readPubKey(buf, pos)
       ensureBytes(buf.len - pos, reproSecrets.GcmNonceLen, "secrets nonce")

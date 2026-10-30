@@ -886,6 +886,8 @@ proc adaptSystemProfile*(p: ProfileIntent;
     result.projection = projectResources(addOnDebianProfile(), selected)
   for r in selected:
     result.profile.resources.add(buildSystemResource(r))
+  # Same cross-resource refusal as the text path (`parseSystemProfile`).
+  checkUnitStateConflicts(result.profile.resources)
 
 proc profileIntentToSystemProfile*(p: ProfileIntent;
                                    target: SystemPlanTarget): SystemProfile =

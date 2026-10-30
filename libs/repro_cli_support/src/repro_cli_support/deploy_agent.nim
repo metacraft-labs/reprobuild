@@ -275,12 +275,18 @@ proc runDeployAgentCommand*(args: seq[string]): int =
                                        outBuildActions: var seq[ProfileBuildAction]):
                                     bool {.gcsafe.} =
     {.cast(gcsafe).}:
-      let profilePath = stageProfileSources(
-        capturedStateDir / "deploy-agent", profileText, profileFiles)
+      let scratch = capturedStateDir / "deploy-agent"
+      let profilePath = stageProfileSources(scratch, profileText, profileFiles)
+      # The bundle is declared as compile input as well as observed: see
+      # `ProfileCompileOptions.declaredInputs`.
+      var bundlePaths: seq[string]
+      for f in profileFiles:
+        bundlePaths.add(scratch / f.path)
       result = resolveSystemProfileText(profilePath, profileText,
         capturedStateDir, "repro deploy-agent", outText,
         planCommand = "repro infra plan",
-        outBuildActions = addr outBuildActions, target = capturedTarget)
+        outBuildActions = addr outBuildActions, target = capturedTarget,
+        declaredInputs = bundlePaths)
 
   let deps = AgentDeps(
     apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,

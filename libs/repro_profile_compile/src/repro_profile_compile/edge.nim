@@ -178,6 +178,14 @@ type
     verbose*: bool
     forceRebuild*: bool
     reportObservedInputs*: bool
+    declaredInputs*: seq[string]
+      ## Files the caller KNOWS the compile reads, declared as inputs of the
+      ## compile edge in addition to what the monitor observes: the deploy
+      ## agent's staged profile bundle (RDMF v3 `profileFiles`), which the
+      ## profile `staticRead`s. The monitor records such a read on every
+      ## supported platform; the declaration is belt to that brace on a
+      ## host whose classifier has a gap (a missed read of a closure lock
+      ## would apply a stale closure and report success). Absolute paths.
 
   ProfileCompileError* = object of CatchableError
 
@@ -402,12 +410,15 @@ const ProfileCompileEnvPassthrough* =
 proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
                                 publicCliPath, workDir, repoRoot: string;
                                 weak: ContentDigest;
-                                verbose = false): BuildAction =
+                                verbose = false;
+                                declaredInputs: seq[string] = @[]): BuildAction =
   ## Build the COMPILE edge's `BuildAction`: the internal
   ## `__repro-compile-profile` helper, which runs `nim c` and links
   ## `binaryPath`.
   ##
-  ## Declared inputs: none. The dependency record is whatever io-mon observes
+  ## Declared inputs: none by default, plus whatever the caller names in
+  ## `declaredInputs` (`ProfileCompileOptions.declaredInputs`: the deploy
+  ## agent's staged bundle). The dependency record is whatever io-mon observes
   ## the helper, `nim` and the C toolchain read
   ## (`automaticMonitorGatheringPolicy`). There is no hand-written depfile:
   ## everything such a file could list, the monitor observes, and a list
@@ -447,6 +458,7 @@ proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
     # See `lockIdentityOutsideSolvedGraph`.
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = cwd,
+    inputs = declaredInputs,
     outputs = @[binaryPath],
     commandStatsId = "repro profile compile edge",
     cacheable = true,
@@ -667,7 +679,7 @@ proc compileProfileToRbpi*(profileRoot: string;
     nimcacheDir, opts.publicCliPath, opts.workDir, repoRoot,
     profileCompileWeakFingerprint(nimExe, opts.publicCliPath, binaryPath,
       cCompiler),
-    opts.verbose)
+    opts.verbose, opts.declaredInputs)
   let runAction = profileRunBuildAction(absProfile, binaryPath, intentPath,
     opts.workDir, profileRunWeakFingerprint(intentPath))
   var config = profileCompileEngineConfig(opts.stateDir, opts.publicCliPath)
