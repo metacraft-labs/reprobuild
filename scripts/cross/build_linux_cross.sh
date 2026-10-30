@@ -650,6 +650,14 @@ if [ "${#builder_path_hits[@]}" -gt 0 ]; then
   exit 1
 fi
 
+# The package catalog is pinned by revision in repro.lock; the staging step
+# only needs a git checkout that HOLDS that commit, and looks for the
+# workspace sibling relative to the cwd -- which is the export now, so name
+# the checkout beside the real one. The archive it stages is the pinned
+# revision whatever the checkout's HEAD is.
+export REPROBUILD_PACKAGES_ROOT="${REPROBUILD_PACKAGES_ROOT:-${repo_root}/../reprobuild-packages}"
+catalog_revision="$(grep -o 'name = "reprobuild-packages"[^}]*revision = "[0-9a-f]*"' \
+  "${repo_root}/repro.lock" | grep -o 'revision = "[0-9a-f]*"' | grep -o '[0-9a-f]\{40\}' || true)"
 bash scripts/release/stage_release_sources.sh "${stage}"
 version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' reprobuild.nimble)"
 pkg_name="reprobuild-${version}-linux-${archive_arch}"
@@ -662,6 +670,7 @@ pkg_name="reprobuild-${version}-linux-${archive_arch}"
   echo "build_mode=${build_mode}"
   echo "c_compiler=${clang_version} (${clang_bin})"
   echo "nim_fork=flake:nim-fork-src@$(locked_rev_of nim-fork-src)"
+  echo "catalog=reprobuild-packages@${catalog_revision:-unknown} (repro.lock)"
   for rec in "${source_records[@]}"; do echo "source ${rec}"; done
   grep -v '^#' "${sysroot}/.sysroot-info"
 } > "${stage}/share/repro/cross-build-info"
