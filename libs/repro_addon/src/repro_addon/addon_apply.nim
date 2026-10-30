@@ -72,6 +72,7 @@ import repro_infra/planner
 import repro_local_store/store
 
 import ./collision
+import ./addon_secrets
 import ./etc_write
 import ./fingerprint
 import ./generation0
@@ -1162,6 +1163,8 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   let current = if currentText.len > 0: parseSystemProfile(currentText)
                 else: SystemProfile()
   result.addOn = current.addOn
+  # An adopt changes no secret: the current generation's declarations stay.
+  result.secretFiles = current.secretFiles
   # Whether the stored profile carries an addOn stanza is the current
   # generation's; only a needed prefix (below) comes from the given one.
   result.addOn.declared = current.addOn.declared
@@ -1544,6 +1547,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                          previousUserText, adoptAddresses)
     else: parseSystemProfile(targetUserText)
   checkScope(user)
+  # --- Secrets (milestone A7, spec §10.3): everything the generation's
+  # `secrets.secretFile` declarations need -- a recipient key that passes
+  # its owner and mode check, a retained envelope it opens, an entry per
+  # declaration -- is checked here, before anything is observed or
+  # written; step 6 materialises them. A revert or a replay goes back to
+  # what was there and is not refused for it (step 6 reports instead).
+  let secretsLayout = defaultSecretsLayout()
+  if purpose notin ["revert", "replay"] and not opts.recordOnly:
+    checkSecretsAvailable(secretsLayout, user.secretFiles)
   var ownAddresses = initHashSet[string]()
   for r in own.resources: ownAddresses.incl(r.address)
   for r in user.resources:
@@ -1845,14 +1857,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         "collision report); nothing was written")
 
   let composed = SystemProfile(addOn: user.addOn,
-                               resources: own.resources & userResources)
+                               resources: own.resources & userResources,
+                               secretFiles: user.secretFiles)
   # What the infra apply gets: the composition minus the resources adopted
   # as they are that it could not leave untouched (``skipInfra``), and
   # minus any dependency on them.
   var skipped = initHashSet[string]()
   for p in plans:
     if p.skipInfra: skipped.incl(p.r.address)
-  var infraProfile = SystemProfile(addOn: user.addOn)
+  var infraProfile = SystemProfile(addOn: user.addOn,
+                                   secretFiles: user.secretFiles)
   for r in composed.resources:
     if r.address in skipped: continue
     var x = r
@@ -2022,10 +2036,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # earlier generation declared that are still owned because their removal
   # was left as drift. They leave the ledger when --reconcile-drift removes
   # them.
-  var stored = SystemProfile(addOn: user.addOn, resources: user.resources)
+  var stored = SystemProfile(addOn: user.addOn, resources: user.resources,
+                            secretFiles: user.secretFiles)
   for r in previousUser.resources:
     if r.address in keptAddresses and r.address notin wanted:
       stored.resources.add(r)
+      # A kept unit's credentials stay declared, so the stored text parses.
+      if r.kind == srkSystemdSystemUnit and r.suCredentials.len > 0:
+        for d in previousUser.secretFiles:
+          if d.service == credentialServiceOf(r.suName) and d notin stored.secretFiles:
+            stored.secretFiles.add(d)
 
   # --- The service transition list (spec §7.3). ---
   # In the composed profile's dependency order, so step 7 starts a unit
@@ -2577,6 +2597,22 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           hookSysctl.add((key: k, value: observeSysctlInHostNamespaces(k)))
       except CatchableError as ex:
         problems.add("step 6 (fragment tools): " & ex.msg)
+      # --- Step 6, secrets (milestone A7; ``addon_secrets``): the
+      # generation's declared secrets are materialised into the tmpfs
+      # before step 7 starts the units that load them, and what it no
+      # longer declares is removed. A revert that cannot materialise them
+      # still goes back (its units then fail to load their credentials,
+      # which the re-assert unit reports); any other switch reverts.
+      var credentialChanged: seq[string]
+      if not opts.recordOnly:
+        try:
+          credentialChanged = materialiseFromRetained(secretsLayout,
+            user.secretFiles, seamStateDir = stateDir)
+        except CatchableError as ex:
+          if purpose == "revert":
+            stderr.writeLine("repro-addon: step 6 (secrets): " & ex.msg)
+          else:
+            problems.add("step 6 (secrets): " & ex.msg)
       marker.step = ssFragmentTools
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-6")
@@ -2602,6 +2638,24 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                   not unitIsActive(r.suName) and
                   unitAliveness(r.suName) == uaEmpty:
                 startUnit(r.suName, opts.nonBlockingStarts)
+          # A unit reads its credentials when it starts: one that is
+          # running and whose secrets changed in step 6 is restarted, unless
+          # this step already (re)started it, or it is exclusive or holds
+          # its restarts (reported as pending, spec §7.3).
+          for r in composed.resources:
+            if r.kind != srkSystemdSystemUnit or r.suCredentials.len == 0 or
+                credentialServiceOf(r.suName) notin credentialChanged:
+              continue
+            var handled = false
+            for t in stepTransitions:
+              if t.unit == r.suName and t.verb in {tvStart, tvRestart, tvStopStart}:
+                handled = true
+            if handled or not unitIsActive(r.suName): continue
+            if r.suExclusive or r.suRestartHeld:
+              stderr.writeLine("repro-addon: " & r.suName & ": its " &
+                "credentials changed; restart pending")
+              continue
+            restartUnit(r.suName, opts.nonBlockingStarts)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
       marker.step = ssStart

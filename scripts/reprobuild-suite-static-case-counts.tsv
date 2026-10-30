@@ -33,6 +33,9 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	45
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	1
+libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	5
+libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
+libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	5
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	32
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	26
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
@@ -1074,9 +1077,12 @@ tests/e2e/addon/t_e2e_addon_exclusive_never_overlaps.nim	nim	1
 tests/e2e/addon/t_e2e_addon_gc_keeps_current_and_previous.nim	nim	1
 tests/e2e/addon/t_e2e_addon_hard_reset_at_every_step.nim	nim	1
 tests/e2e/addon/t_e2e_addon_net_sysctl_applies_in_host_namespace.nim	nim	1
+tests/e2e/addon/t_e2e_addon_no_plaintext_secret_on_disk.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
+tests/e2e/addon/t_e2e_addon_recipient_key_rotation.nim	nim	1
 tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim	nim	1
 tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim	nim	1
+tests/e2e/addon/t_e2e_addon_service_reads_only_its_credentials.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_switch_is_planned_exactly.nim	nim	1
 tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim	nim	1

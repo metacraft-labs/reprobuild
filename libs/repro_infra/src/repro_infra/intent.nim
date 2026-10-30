@@ -331,6 +331,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  exclusive = true")
     if r.suHealthCheck.len > 0:
       result.add("  healthCheck = " & renderScalar(r.suHealthCheck))
+    if r.suCredentials.len > 0:
+      result.add("  credentials = " & renderList(r.suCredentials))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))
@@ -493,15 +495,22 @@ proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
     result.add("  confirmTimeout = " & $settings.confirmTimeoutSec)
   result.add("}")
 
+proc renderSecretFileStanza*(d: SecretFileDecl): seq[string] =
+  ## One `secrets.secretFile` declaration (ReproOS-Add-On-Mode §10.3).
+  @[SecretFileStanzaTag & " {", "  service = " & renderScalar(d.service),
+    "  name = " & renderScalar(d.name), "}"]
+
 proc renderProfileText*(p: SystemProfile): string =
-  ## A whole profile as canonical text: the `addOn` stanza first, then
-  ## every resource in apply order. `parseSystemProfile(renderProfileText(p))`
+  ## A whole profile as canonical text: the `addOn` stanza first, the
+  ## `secrets.secretFile` declarations, then every resource in apply order. `parseSystemProfile(renderProfileText(p))`
   ## yields `p` again; the add-on composes the profile it applies this way
   ## rather than by concatenating text.
   var blocks: seq[string]
   let addOn = renderAddOnStanza(p.addOn)
   if addOn.len > 0:
     blocks.add(addOn.join("\n"))
+  for d in p.secretFiles:
+    blocks.add(renderSecretFileStanza(d).join("\n"))
   for r in p.resources:
     blocks.add(renderStanza(r).join("\n"))
   blocks.join("\n\n") & "\n"

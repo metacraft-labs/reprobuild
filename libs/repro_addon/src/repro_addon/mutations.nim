@@ -150,6 +150,21 @@
 ##                                            re-check keeps in place is
 ##                                            still stopped with the plan's
 ##                                            transitions
+## ``secrets-on-disk``                        secrets are materialised under
+##                                            ``/var/lib/repro/secrets`` (the
+##                                            root filesystem) and the tmpfs
+##                                            check is off
+## ``recipient-key-mode-unchecked``           the recipient key is used
+##                                            whatever its owner and mode
+## ``secrets-write-then-narrow``              a secret file is written by
+##                                            path (following a link at its
+##                                            temporary name) with the
+##                                            umask's mode, then narrowed
+## ``rotation-keeps-old-key``                 a rotation keeps the retired
+##                                            recipient key and still opens
+##                                            what is sealed to it (the
+##                                            rotation gate's negative
+##                                            control)
 ## =========================================  ==============================
 
 const
@@ -181,7 +196,11 @@ const
                           "addon-target-in-boot-order",
                           "current-remove-then-create",
                           "nofollow-write-skips-fsync",
-                          "kept-units-still-stopped"]
+                          "kept-units-still-stopped",
+                          "secrets-on-disk",
+                          "recipient-key-mode-unchecked",
+                          "secrets-write-then-narrow",
+                          "rotation-keeps-old-key"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

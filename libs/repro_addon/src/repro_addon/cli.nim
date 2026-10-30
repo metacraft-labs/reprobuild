@@ -11,6 +11,9 @@
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
 ##   repro system addon probe <healthCheck>
+##   repro system addon secret put --service S --name N [--target T] < secret
+##   repro system addon rotate-recipient-key
+##   repro system addon agent-tick --source <manifest>... [--target T]
 ##   repro system rollback [<generation>] [--reconcile-drift]
 ##   repro system addon fingerprint [--root R] [--no-live] [--out F]
 ##   repro system addon fingerprint diff <before> <after>
@@ -54,6 +57,7 @@ import ./health
 import ./preflight
 import ./reassert
 import ./seams
+import ./secrets_ops
 import ./static_tree
 import ./store_root
 import ./switch
@@ -82,6 +86,18 @@ commands:
   probe <healthCheck>
       Run one tcp: or http:// health check here (the confirm step runs it
       in the host's namespaces); exits 0 when it passes.
+  secret put --service S --name N [--target T] < secret
+      Seal the secret read from stdin to this host's recipient key as the
+      entry S/N of the retained envelope, and re-materialise the current
+      generation's secrets under /run/repro/secrets.
+  rotate-recipient-key
+      Generate the next recipient key and print its public half; the
+      current key is deleted when the first envelope sealed to the new
+      one opens.
+  agent-tick --source <manifest>... [--target T] [--allowed-signers F]
+      One deploy-agent tick: verify, accept the sealed section, apply the
+      profile through the switch. Exit 0, 1 (retryable) or 2 (an operator
+      must act; aoSecretsFailed among them).
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -336,6 +352,12 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
       return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
+    of "secret":
+      return runSecretPutCli(rest)
+    of "rotate-recipient-key":
+      return runRotateRecipientKeyCli(rest)
+    of "agent-tick":
+      return runAgentTickCli(rest)
     of "test-sleep":
       # Seam builds only (a hanging command in the store, for a gate);
       # every other build answers with a usage error.

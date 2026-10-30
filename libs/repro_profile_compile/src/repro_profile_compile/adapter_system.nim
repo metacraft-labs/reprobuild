@@ -319,7 +319,8 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suStopHeld: not fieldBool(r, "stopOnRemoval", true),
       suReloadIfChanged: fieldBool(r, "reloadIfChanged", false),
       suExclusive: fieldBool(r, "exclusive", false),
-      suHealthCheck: fieldString(r, "healthCheck"))
+      suHealthCheck: fieldString(r, "healthCheck"),
+      suCredentials: fieldList(r, "credentials"))
     if result.suHealthCheck.len > 0:
       discard parseHealthCheck(result.suHealthCheck)
     if result.suDropInName.len > 0 and result.suCollision != "dropIn":
@@ -937,10 +938,23 @@ proc adaptSystemProfile*(p: ProfileIntent;
           $MaxConfirmTimeoutSec & " seconds")
       result.profile.addOn.confirmTimeoutSec = p.addOn.confirmTimeoutSec
   for r in selected:
+    if r.kind == SecretFileStanzaTag:
+      # A declaration, not a resource (`SecretFileDecl`): it is carried
+      # beside the resources, as the text form's stanza is.
+      let d = SecretFileDecl(service: fieldString(r, "service"),
+                             name: fieldString(r, "name"))
+      for (what, v) in [("service", d.service), ("name", d.name)]:
+        if not isSafeSecretComponent(v):
+          raise newException(ValueError, SecretFileStanzaTag & " " & what &
+            " '" & v & "' must be one path segment of letters, digits, " &
+            "'.', '-' or '_', at most 64 bytes, not starting with '.'")
+      result.profile.secretFiles.add(d)
+      continue
     result.profile.resources.add(buildSystemResource(r))
   # Same cross-resource refusal as the text path (`parseSystemProfile`).
   checkUnitStateConflicts(result.profile.resources)
   checkPasswdPrimaryGroups(result.profile.resources)
+  checkSecretDeclarations(result.profile)
 
 proc profileIntentToSystemProfile*(p: ProfileIntent;
                                    target: SystemPlanTarget): SystemProfile =

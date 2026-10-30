@@ -775,6 +775,7 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             reloadIfChanged: bool = false;
                             exclusive: bool = false;
                             healthCheck: string = "";
+                            credentials: seq[string] = @[];
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
@@ -797,6 +798,12 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
   ## (exits 0); probes are loopback only. A check that has not passed
   ## within the profile's `confirmTimeout` makes the switch revert to the
   ## previous generation. Outside add-on mode the field is ignored.
+  ##
+  ## `credentials` names the secrets the unit reads (ReproOS Add-On Mode
+  ## spec §10.3): each must be declared with `secretFile(service = <the
+  ## unit's name without .service>, name = ...)`, and renders as
+  ## `LoadCredential=<name>:/run/repro/secrets/<service>/<name>`, so the
+  ## service reads it from `$CREDENTIALS_DIRECTORY`.
   ##
   ## `collision` is add-on mode's opt-in when a distribution package
   ## already provides a unit of this name (ReproOS Add-On Mode spec §4.3):
@@ -842,9 +849,34 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
       fields["exclusive"] = boolField(true)
     if healthCheck.len > 0:
       fields["healthCheck"] = strField(healthCheck)
+    if credentials.len > 0:
+      fields["credentials"] = listField(credentials)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,
+      dependsOn)
+
+template secretFile*(targetResources: var seq[ResourceIntent];
+                     service: string;
+                     name: string;
+                     address: string = "";
+                     dependsOn: seq[string] = @[]) =
+  ## A secret a service needs (ReproOS Add-On Mode spec §8.3, §10.3): the
+  ## sealed entry `<service>/<name>` of the host's sealed envelope is
+  ## materialised as `/run/repro/secrets/<service>/<name>` (a tmpfs,
+  ## created `0400` inside a `0700` directory) at every apply and at boot.
+  ## The secret never appears in the profile: it arrives only in the deploy
+  ## agent's sealed section, or through `repro system addon secret put` on
+  ## the host. A unit reads it by naming `name` in its `credentials`.
+  ##
+  ## Address default: `secrets.secretFile:<service>/<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["service"] = strField(service)
+    fields["name"] = strField(name)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("secrets.secretFile", service & "/" & name)
+    pushResource(targetResources, "secrets.secretFile", addr0, fields,
       dependsOn)
 
 template systemdSystemDropIn*(targetResources: var seq[ResourceIntent];

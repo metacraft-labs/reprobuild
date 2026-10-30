@@ -31,7 +31,9 @@
 ## that step), ``pre-write`` and ``mid-write`` (before the first and the
 ## second privileged write of steps 4-5), ``commit-envelope`` (the
 ## generation envelope is durable, `current` not moved yet) and, in the
-## ``current-remove-then-create`` mutation build, ``commit-current-removed``.
+## ``current-remove-then-create`` mutation build, ``commit-current-removed``;
+## ``secrets-mid-write`` (``addon_secrets.materialise``: the first secret
+## file of a materialisation is in place, the others are not).
 ## A switch that is a revert prefixes its points with ``revert:``, and a
 ## replay (a recovery) with ``replay:``.
 
