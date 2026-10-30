@@ -32,6 +32,21 @@
 ##     the same apply BUILDS LOCALLY — ``substitutedFromCache == false``
 ##     and the witness is written. Proves the feature is off-by-default
 ##     and the local-build fallback is intact.
+##   * Trust control: a consumer whose trusted producer cert is a
+##     DIFFERENT key than the one that published the entry must not
+##     substitute it -- it builds locally. An apply materialises
+##     substituted outputs with privilege, so an entry signed by a key
+##     nobody provisioned (an attacker can mint one in a second) must be
+##     a miss. Run against a dispatcher that trusts any signer, this
+##     control goes red.
+##   * No invented publisher: with no provisioned keypair the apply
+##     publishes nothing and never mints a key of its own (the
+##     auto-credential directory stays absent).
+##
+## The producer identity is provisioned explicitly
+## (``REPRO_BINARY_CACHE_KEY_PATH`` / ``_CERT_PATH``), and
+## ``REPRO_CACHES_CONFIG`` points at an empty file so the host's own
+## ``/etc/repro/caches.conf`` can never leak a real cache into the gate.
 ##
 ## The counts come from the REAL dispatcher executing REAL actions
 ## against the REAL cache server — they are not faked.
@@ -42,6 +57,7 @@ import repro_elevation
 import repro_infra
 import repro_profile
 import repro_profile_compile
+import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 const ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
 
@@ -140,10 +156,24 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         "cache server did not start listening on 127.0.0.1:" & $port
       let url = "http://127.0.0.1:" & $port
 
-      # Sandbox the auto-credential dir so the publisher's keygen never
-      # touches real user config.
+      # Sandbox the auto-credential dir: if anything tried to mint a
+      # producer key it would land here, and the last control asserts it
+      # never does.
       putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", tmpRoot / "cred")
       defer: delEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR")
+      # No ambient cache configuration: only what this gate provisions.
+      writeFile(tmpRoot / "caches.conf", "")
+      putEnv("REPRO_CACHES_CONFIG", tmpRoot / "caches.conf")
+      defer: delEnv("REPRO_CACHES_CONFIG")
+      # The provisioned producer identity (publisher of run 1, trusted by
+      # run 2 through the env cache's producer-cert back-compat rule).
+      discard peerAuth.loadOrGenerateKeypair(tmpRoot / "producer.cert",
+                                             tmpRoot / "producer.key")
+      putEnv("REPRO_BINARY_CACHE_KEY_PATH", tmpRoot / "producer.key")
+      putEnv("REPRO_BINARY_CACHE_CERT_PATH", tmpRoot / "producer.cert")
+      defer:
+        delEnv("REPRO_BINARY_CACHE_KEY_PATH")
+        delEnv("REPRO_BINARY_CACHE_CERT_PATH")
 
       # -------------------------------------------------------------------
       # RUN 1 — empty cache, URL set: build locally + publish.
@@ -198,6 +228,45 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
       # NO local build ran: the witness was never created (the shell did
       # not spawn on the substituted edge).
       check not fileExists(witness2)
+
+      # -------------------------------------------------------------------
+      # TRUST CONTROL — the consumer trusts a DIFFERENT producer key. The
+      # entry run 1 published is validly signed, but not by a key this
+      # consumer trusts: it must be a miss, and the edge builds locally.
+      # -------------------------------------------------------------------
+      discard peerAuth.loadOrGenerateKeypair(tmpRoot / "other.cert",
+                                             tmpRoot / "other.key")
+      putEnv("REPRO_BINARY_CACHE_KEY_PATH", tmpRoot / "other.key")
+      putEnv("REPRO_BINARY_CACHE_CERT_PATH", tmpRoot / "other.cert")
+      let cwd4 = tmpRoot / "cwd4"
+      let cacheRoot4 = tmpRoot / "engine-cache-4"
+      createDir(cwd4); createDir(cacheRoot4)
+      let ctx4 = FixtureContext(filePrefix: tmpRoot / "ctx4")
+      let disp4 = mkBuildActionDispatcher(cacheRoot4, ctx4)
+      let out4 = disp4(@[witnessShellAction("m4-edge", cwd4)], nil)
+      check out4.len == 1
+      check out4[0].ok
+      check not out4[0].substitutedFromCache       # untrusted signer: a miss
+      check not out4[0].cacheHit
+      check fileExists(cwd4 / WitnessRel)          # built locally instead
+
+      # -------------------------------------------------------------------
+      # NO INVENTED PUBLISHER — no provisioned keypair: the miss builds
+      # locally, nothing is published, and no key is minted.
+      # -------------------------------------------------------------------
+      delEnv("REPRO_BINARY_CACHE_KEY_PATH")
+      delEnv("REPRO_BINARY_CACHE_CERT_PATH")
+      let cwd5 = tmpRoot / "cwd5"
+      let cacheRoot5 = tmpRoot / "engine-cache-5"
+      createDir(cwd5); createDir(cacheRoot5)
+      let ctx5 = FixtureContext(filePrefix: tmpRoot / "ctx5")
+      let disp5 = mkBuildActionDispatcher(cacheRoot5, ctx5)
+      let out5 = disp5(@[witnessShellAction("m4-edge-unprovisioned", cwd5)], nil)
+      check out5.len == 1
+      check out5[0].ok
+      check not out5[0].substitutedFromCache
+      check fileExists(cwd5 / WitnessRel)
+      check not dirExists(tmpRoot / "cred")        # no producer key minted
 
       # -------------------------------------------------------------------
       # NEGATIVE CONTROL — URL UNSET, fresh cwd: build locally, 0 cache hits.

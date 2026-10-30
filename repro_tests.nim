@@ -443,6 +443,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_binary_cache_client_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_binary_cache_client/tests/t_archive_extract_refuses_writing_through_symlinks.nim",
+    binary: "build/test-bin/t_archive_extract_refuses_writing_through_symlinks",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_binary_cache_client_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim",
     binary: "build/test-bin/t_client_cli_prefix_substitute",
     defines: @[],

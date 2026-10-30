@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2425,
+    "nimTestBinaries": 2426,
     "pureUnitConsolidationGroups": 69,
     "pureUnitTests": 689,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2465
+    "testEntries": 2466
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1401,7 +1401,7 @@
       "integration": 1350,
       "platform/destructive": 146,
       "pure unit": 689,
-      "unclassified": 262
+      "unclassified": 263
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1609,9 +1609,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2425,
+    "nimTestBinaryCount": 2426,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2465
+    "testEntryCount": 2466
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8380,6 +8380,23 @@
       "source": "libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_archive_extract_refuses_writing_through_symlinks",
+      "class": "unclassified",
+      "classificationReason": "imports `dynlib`, which grants out-of-process reach (through `libs/repro_binary_cache_client/src/repro_binary_cache_client/compress.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client"
+      ],
+      "owner": "libs/repro_binary_cache_client",
+      "requiresReproBinary": false,
+      "source": "libs/repro_binary_cache_client/tests/t_archive_extract_refuses_writing_through_symlinks.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17971,6 +17988,7 @@
       "localDependencyShape": [
         "repro_elevation",
         "repro_infra",
+        "repro_peer_cache",
         "repro_profile",
         "repro_profile_compile"
       ],
