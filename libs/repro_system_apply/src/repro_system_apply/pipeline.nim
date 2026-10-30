@@ -82,6 +82,8 @@
 ## ----------------------------------------------------------------------
 
 import std/[algorithm, options, os, sequtils, strutils, tables, times]
+
+import repro_core/host_apply_lock
 from repro_core/link_target import readSymlinkTarget
 from repro_core/paths import extendedPath
 
@@ -1377,6 +1379,11 @@ proc planApplyRecord*(cfg: SystemConfig;
   var resolvedOpts = opts
   if resolvedOpts.stateDir.len == 0:
     resolvedOpts.stateDir = defaultStateDir()
+  # One system apply per host, whatever its state directory
+  # (``repro_core/host_apply_lock``), then the state directory's own lock.
+  var hostLock = acquireHostApplyLock("repro system apply (state " &
+    resolvedOpts.stateDir & ")")
+  defer: hostLock.release()
   var lock = acquireApplyLock(resolvedOpts.stateDir)
   try:
     discard repairPartialApply(resolvedOpts.stateDir, dryRun = false)

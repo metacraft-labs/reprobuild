@@ -25,6 +25,7 @@
 
 import std/[os, strutils, times]
 
+import repro_core/host_apply_lock
 import repro_elevation
 import repro_profile
 
@@ -542,6 +543,14 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## `refreshApplyLock` is a no-op when this process does not hold the
   ## lock (library tests, in-process drivers), so every beat is safe to
   ## issue unconditionally.
+  ##
+  ## The whole apply holds the host-wide apply lock
+  ## (``repro_core/host_apply_lock``): the per-state-directory lock above
+  ## does not stop a second apply that uses another state directory, and
+  ## the deploy agent's tick reaches this proc without taking it at all.
+  var hostLock = acquireHostApplyLock("repro infra apply (state " &
+    opts.stateDir & ")")
+  defer: hostLock.release()
   resetBrokerLaunchCount()
   refreshApplyLock(opts.stateDir)
 

@@ -44,6 +44,7 @@ when defined(posix):
   import std/posix
 
 import repro_binary_cache_client/http_pool
+import repro_core/file_lock
 
 import ./apt_index
 import ./apt_jammy
@@ -1157,43 +1158,44 @@ proc buildUnion(lock: AptClosureLock; memberRoots: seq[(string, string)];
 # and then on ``<store>/prefixes`` for the whole realisation, always in that
 # order. They are locks on the directories themselves, so no lock file lands
 # in the store or the cache. A realiser that waited re-checks the marker and
-# returns the prefix the other one published.
+# returns the prefix the other one published; one that waited past the
+# deadline refuses, naming the holder's PID. Whole applies are serialised by
+# the host-wide apply lock (``repro_core/host_apply_lock``); these locks are
+# defence in depth for any other writer of the store.
 
-when defined(posix):
-  proc c_flock(fd: cint; op: cint): cint {.importc: "flock",
-                                           header: "<sys/file.h>".}
-  var LockEx {.importc: "LOCK_EX", header: "<sys/file.h>".}: cint
-  var ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+const
+  AptRealisationLockDeadlineMs* = 2 * 60 * 60 * 1000
+    ## How long a realiser waits for another one to finish before it
+    ## refuses, naming the holder. Two hours covers realising a large
+    ## closure over a slow link on a Raspberry Pi; a holder still there
+    ## after that is wedged, and waiting longer only hides it.
 
-  proc lockDirectory(path: string): cint =
-    result = posix.open(path.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
-    if result < 0:
-      raiseOSError(osLastError(), "open " & path & " to lock it")
-    while c_flock(result, LockEx) != 0:
-      let err = osLastError()
-      if err.int32 != EINTR:
-        discard posix.close(result)
-        raiseOSError(err, "flock " & path)
+var aptRealisationLockBusyHook*: LockBusyHook = nil
+  ## Test seam: called when a realiser first finds a realisation lock held,
+  ## so a test can sequence a second realiser deterministically. Nil in
+  ## production.
 
-template withRealisationLocks(cacheDir, prefixesDir: string; body: untyped) =
-  when defined(posix):
-    let cacheFd = lockDirectory(cacheDir)
+template withRealisationLocks(cacheDir, prefixesDir: string;
+                              deadlineMs: int; body: untyped) =
+  var cacheLock = acquireExclusiveLockWithin(cacheDir, deadlineMs,
+    directory = true, onBusy = aptRealisationLockBusyHook)
+  try:
+    var storeLock = acquireExclusiveLockWithin(prefixesDir, deadlineMs,
+      directory = true, onBusy = aptRealisationLockBusyHook)
     try:
-      let storeFd = lockDirectory(prefixesDir)
-      try:
-        body
-      finally:
-        discard posix.close(storeFd)
+      body
     finally:
-      discard posix.close(cacheFd)
-  else:
-    body
+      releaseExclusiveFileLock(storeLock)
+  finally:
+    releaseExclusiveFileLock(cacheLock)
 
 proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
                         cacheDir: string;
                         fetch: AptDebFetcher = httpDebFetcher();
                         hostMachine = hostMachineName();
-                        retainDebCache = false): string =
+                        retainDebCache = false;
+                        lockDeadlineMs = AptRealisationLockDeadlineMs):
+                        string =
   ## Make the closure prefix exist and return its path (spec §8.3 item 4).
   ## Idempotent: a closure already realised is returned untouched, and a
   ## member realised by another closure is reused. Every write lands under
@@ -1226,7 +1228,7 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
     return
   createDir(storeRoot / "prefixes")
   privateDir(cacheDir)
-  withRealisationLocks(cacheDir, storeRoot / "prefixes"):
+  withRealisationLocks(cacheDir, storeRoot / "prefixes", lockDeadlineMs):
     # Another realiser may have finished this closure while we waited.
     if aptClosureRealised(storeRoot, lock):
       return

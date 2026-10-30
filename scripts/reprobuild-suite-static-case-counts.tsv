@@ -291,7 +291,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim	nim	
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	34
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	35
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
@@ -372,10 +372,11 @@ libs/repro_dsl_stdlib/tests/t_windows_monitor_artifacts.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_with_lock_file_block_scope.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim	nim	2
 libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim	nim	4
-libs/repro_elevation/tests/t_addon_apt_closure_ro_store_view.nim	nim	1
+libs/repro_elevation/tests/t_addon_apt_closure_ro_store_view.nim	nim	3
 libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21
+libs/repro_elevation/tests/t_passwd_user_driver_group_collision.nim	nim	3
 libs/repro_elevation/tests/t_sandbox_m1_fhssandbox_driver.nim	nim	37
-libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	397
+libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	398
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
 libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	35
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	13
@@ -431,9 +432,10 @@ libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
-libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
+libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	207
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
 libs/repro_infra/tests/t_system_profile_addon_fields.nim	nim	7
+libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim	nim	3
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3

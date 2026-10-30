@@ -31,6 +31,9 @@
 
 import std/[os, strutils, times]
 
+import repro_core/file_lock
+import repro_core/host_apply_lock
+
 import repro_infra
 import repro_local_store/store
 
@@ -124,6 +127,13 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   except CatchableError as e:
     return RecoveryOutcome(resolved: false,
       lines: @["the pending marker is unreadable: " & e.msg])
+  var hostLock: HostApplyLock
+  try:
+    hostLock = acquireHostApplyLock("add-on switch recovery")
+  except ELockTimeout as e:
+    return RecoveryOutcome(resolved: false,
+      lines: @["a switch is in progress; not touching it: " & e.msg])
+  defer: hostLock.release()
   let lock = takeLockForRecovery(stateDir, atBoot)
   if not lock.ok:
     return RecoveryOutcome(resolved: false, lines: @[lock.why])

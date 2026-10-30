@@ -33,6 +33,7 @@
 import std/[json, os, posix, strutils, times]
 
 import repro_core
+import repro_core/host_apply_lock
 import repro_infra
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/key_types
@@ -176,6 +177,11 @@ const
 
 proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  # The whole bootstrap holds the host-wide apply lock: it writes the store,
+  # /etc and the unit set before its generation-0 apply starts, and no other
+  # apply may change the host underneath it (``repro_core/host_apply_lock``).
+  var hostLock = acquireHostApplyLock("repro system addon bootstrap")
+  defer: hostLock.release()
   if opts.planDigest.len == 0:
     raise newException(AddonBootstrapError,
       "bootstrap needs --plan <digest>: run `repro system addon preflight` " &

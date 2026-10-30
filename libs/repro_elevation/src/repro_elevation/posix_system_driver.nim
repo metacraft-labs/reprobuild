@@ -1830,12 +1830,25 @@ proc applyEnvSystemVariable*(op: PrivilegedOperation):
 # passwd.user — useradd / usermod / userdel (Linux) or the macOS equiv.
 # ===========================================================================
 
+type
+  PasswdArgvRunner* = proc (exe: string; args: seq[string]):
+    tuple[output: string; code: int] {.closure, gcsafe.}
+
+var passwdArgvRunner*: PasswdArgvRunner = nil
+  ## Test seam for the passwd.user / passwd.group drivers: when set, every
+  ## account command (`getent`, `id`, `useradd`, `usermod`, `userdel`, ...)
+  ## goes to it instead of the host, so the driver's decisions -- which
+  ## argv it builds, what it refuses -- are tested without root and without
+  ## touching the host's accounts. Nil in production.
+
 when defined(linux) or defined(macosx):
   proc runArgv(exe: string; args: openArray[string]):
       tuple[output: string; code: int] =
     ## Run a typed argv. The argument LIST is built by the pure
     ## `build*Args` helpers from typed operation fields — no operator
     ## string is interpolated into a shell command.
+    if passwdArgvRunner != nil:
+      return passwdArgvRunner(exe, @args)
     var cmd = quoteShell(exe)
     for a in args:
       cmd.add(" ")

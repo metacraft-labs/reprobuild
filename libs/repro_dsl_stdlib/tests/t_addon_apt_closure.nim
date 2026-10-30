@@ -37,6 +37,7 @@ when defined(posix):
 import repro_dsl_stdlib/packages/apt_index
 import repro_dsl_stdlib/packages/apt_jammy
 import repro_dsl_stdlib/packages/apt_closure {.all.}
+import repro_core/file_lock
 from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 const ShaA = "a".repeat(64)
@@ -567,30 +568,91 @@ when defined(posix):
       if WIFEXITED(status): int(WEXITSTATUS(status)) else: 128
 
     test "two processes realising one closure into one store both succeed":
+      # Sequenced with pipes, not timing. A realises and stops inside its
+      # first download, with the ``.part`` file on disk. Only then is B
+      # started. B either reports that it found a realisation lock held (the
+      # lock works) or runs to completion without waiting (no lock: it has
+      # deleted A's in-flight download and published on its own). Only then
+      # is A let go. Without the lock, A then fails on the download B
+      # deleted, which is the rpi2 tick-2 failure.
       let root = scratch("concurrent")
       let (lock, urls) = buildDebs(root, @[
         fileDeb("svc", @[("usr/bin/svc", "svc-binary")]),
         fileDeb("libshared", @[("usr/lib/libshared.so.1", "lib")])])
       let store = root / "store"
       let cache = root / "cache"
-      # The first realiser holds each download in its ``.part`` file for a
-      # while, so the second arrives while one is in flight.
-      let slow: AptDebFetcher = proc (url: string; dest: string;
-                                       expectedSize: int64) =
+      var aReady, aGo: array[2, cint]
+      doAssert pipe(aReady) == 0 and pipe(aGo) == 0
+      var paused = false
+      let holdFirstDownload: AptDebFetcher = proc (url: string; dest: string;
+                                                   expectedSize: int64) =
         copyFile(urls[url], dest)
-        sleep(700)
-      let fast: AptDebFetcher = proc (url: string; dest: string;
-                                       expectedSize: int64) =
-        copyFile(urls[url], dest)
-      let a = realiseInChild(lock, store, cache, slow)
-      sleep(250)
-      let b = realiseInChild(lock, store, cache, fast)
+        if not paused:
+          paused = true
+          var c = 'p'
+          doAssert posix.write(aReady[1], addr c, 1) == 1
+          doAssert posix.read(aGo[0], addr c, 1) == 1
+      let a = realiseInChild(lock, store, cache, holdFirstDownload)
+      var c: char
+      doAssert posix.read(aReady[0], addr c, 1) == 1
+      var bState: array[2, cint]
+      doAssert pipe(bState) == 0
+      let b = fork()
+      doAssert b >= 0
+      if b == 0:
+        discard posix.close(bState[0])
+        let w = bState[1]
+        aptRealisationLockBusyHook = proc () {.closure, gcsafe.} =
+          var x = 'w'
+          discard posix.write(w, addr x, 1)
+        var code = 0
+        try:
+          discard realiseAptClosure(lock, store, cache,
+            localFetcher(urls, new int), hostMachine = "armv7l")
+        except CatchableError as ex:
+          stderr.writeLine("realiser B failed: " & ex.msg)
+          code = 1
+        exitnow(cint(code))
+      discard posix.close(bState[1])
+      var seen: char = '\0'
+      let n = posix.read(bState[0], addr seen, 1)
+      # n == 1, seen == 'w': B is waiting on A's lock. n == 0: B finished
+      # without ever waiting.
+      check n == 1 and seen == 'w'
+      c = 'g'
+      doAssert posix.write(aGo[1], addr c, 1) == 1
       check exitCodeOf(a) == 0
       check exitCodeOf(b) == 0
       check aptClosureRealised(store, lock)
       check readFile(aptClosurePrefixPath(store, lock) / "usr/bin/svc") ==
         "svc-binary"
       storeIsClean(store)
+
+    test "a realiser that cannot get the lock in time names the holder":
+      let root = scratch("lock-deadline")
+      let (lock, urls) = buildDebs(root, @[
+        fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
+      createDir(root / "cache")
+      var held = acquireExclusiveLockWithin(root / "cache", 0,
+        directory = true)
+      defer: releaseExclusiveFileLock(held)
+      let pid = fork()
+      doAssert pid >= 0
+      if pid == 0:
+        var code = 1
+        try:
+          discard realiseAptClosure(lock, root / "store", root / "cache",
+            localFetcher(urls, new int), hostMachine = "armv7l",
+            lockDeadlineMs = 300)
+        except ELockTimeout as e:
+          code = if ("pid " & $getppid()) in e.msg and
+                    getppid() in e.holderPids: 0 else: 2
+          if code != 0: stderr.writeLine("refusal: " & e.msg)
+        except CatchableError as e:
+          stderr.writeLine("unexpected: " & e.msg)
+        exitnow(cint(code))
+      check exitCodeOf(pid) == 0
+      check not aptClosureRealised(root / "store", lock)
 
     test "scratch left by a killed realisation is reclaimed by the next":
       let root = scratch("crashed")

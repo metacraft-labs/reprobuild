@@ -17,6 +17,8 @@
 ## `--accept-feature-destroy` is required and, if it is and the flag
 ## is absent, fail closed with `EFeatureDestroy` BEFORE any mutation.
 
+import repro_core/host_apply_lock
+
 import ./apply
 import ./errors
 import ./gen_envelope
@@ -163,6 +165,12 @@ proc runSystemRollback*(opts: SystemRollbackOptions): SystemRollbackOutcome =
   ##   * drift on rollback ALWAYS needs explicit confirmation, even
   ##     with `--reconcile-drift` — without `--reconcile-drift` the
   ##     rollback refuses, naming the drifted resources.
+  ##
+  ## Holds the host-wide apply lock from the first read of the active
+  ## generation to the end of the re-apply (``repro_core/host_apply_lock``).
+  var hostLock = acquireHostApplyLock("repro system rollback (state " &
+    opts.stateDir & ")")
+  defer: hostLock.release()
   let activeId = readCurrentGenerationId(opts.stateDir)
   if activeId.len == 0:
     raiseSystemStateDirInvalid(

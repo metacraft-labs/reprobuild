@@ -1918,6 +1918,20 @@ windows.registryValue { key = "HKLM\SOFTWARE\X" name = "v" }
     enforcePasswdDestroyGate(screenRollback(noUser.resources),
       acceptPasswdDestroy = false)
 
+suite "repro_infra: passwd.user primary group needs a sibling passwd.group":
+  test "an account listing its own name needs that group declared":
+    # `useradd --gid nut` is used only for a group the profile owns
+    # (System-Profile-And-Infra-Apply.md, passwd.user).
+    let user = SystemResource(kind: srkPasswdUser, address: "nutUser",
+      puName: "nut", puShell: "/usr/sbin/nologin", puGroups: @["nut"])
+    let group = SystemResource(kind: srkPasswdGroup, address: "nutGroup",
+      pgName: "nut")
+    expect ESystemProfileInvalid:
+      checkPasswdPrimaryGroups([user])
+    checkPasswdPrimaryGroups([group, user])
+    checkPasswdPrimaryGroups([SystemResource(kind: srkPasswdUser,
+      address: "deploy", puName: "deploy", puGroups: @["docker"])])
+
 suite "repro_infra: Phase C structural editor round-trip":
 
   test "add then remove a passwd.user stanza round-trips byte-identically":

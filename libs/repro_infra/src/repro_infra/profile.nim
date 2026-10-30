@@ -852,6 +852,25 @@ proc checkUnitStateConflicts*(resources: openArray[SystemResource]) =
         "(owned); drop the systemd.unitState resource — a unit the " &
         "profile writes is enabled through its own `enabled` field")
 
+proc checkPasswdPrimaryGroups*(resources: openArray[SystemResource]) =
+  ## A `passwd.user` that lists its own name in `groups` gets that group as
+  ## its primary group (`useradd --gid`), which the driver does only for a
+  ## group the profile itself declares: the profile must carry a
+  ## `passwd.group` of the same name (System-Profile-And-Infra-Apply.md,
+  ## `passwd.user`). Without it the account would join, as its primary, a
+  ## group that happens to exist on the host and that nothing in the
+  ## profile owns.
+  var groups: seq[string]
+  for r in resources:
+    if r.kind == srkPasswdGroup:
+      groups.add(r.pgName)
+  for r in resources:
+    if r.kind == srkPasswdUser and
+        r.puName in r.puGroups and r.puName notin groups:
+      raiseSystemProfileInvalid("passwd.user '" & r.puName & "' lists " &
+        "its own name in groups, which makes '" & r.puName & "' its " &
+        "primary group; declare passwd.group '" & r.puName & "' in the " &
+        "same profile, or drop it from groups")
 
 # ---------------------------------------------------------------------------
 # ReproOS add-on mode's profile surface (ReproOS-Add-On-Mode §4.3, §4.4):
@@ -1993,6 +2012,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
       res.dependsOn = parseDependsOn(kindTag, rawFields["depends_on"])
     result.resources.add(res)
   checkUnitStateConflicts(result.resources)
+  checkPasswdPrimaryGroups(result.resources)
 
 # ---------------------------------------------------------------------------
 # SystemResource -> typed PrivilegedOperation. A `destroy` flag flips

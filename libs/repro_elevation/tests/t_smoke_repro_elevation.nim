@@ -1509,6 +1509,20 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check canonicalPasswdUserStateMaskedBy(observed, wantsMore) !=
       canonicalPasswdUserDesired(wantsMore)
 
+  test "the declared set is authoritative: apply removes an undeclared group":
+    # The post-apply check is additive (macOS adds default groups nobody
+    # declared), but the apply itself is not: `usermod --groups` REPLACES
+    # the supplementary set with the declared one, so a group the account
+    # is in and the resource does not declare is dropped.
+    let desired = PasswdUserDesired(name: "nut", groups: @["nut"])
+    let observed = PasswdUserObservation(present: true, uid: "999",
+      primaryGroup: "nut", shell: "/usr/sbin/nologin",
+      groups: @["sudo"])
+    let diff = diffPasswdUser(desired, observed)
+    check diff.extraGroups == @["sudo"]
+    check passwdUserNeedsUpdate(diff)
+    check buildUsermodArgs(desired, diff) == @["--groups", "nut", "nut"]
+
   test "useradd takes an existing same-named group as the primary only when declared":
     # `useradd nut` with USERGROUPS_ENAB refuses when group `nut` exists
     # ("use -g"); rpi2 tick-1 at d7c86107b.

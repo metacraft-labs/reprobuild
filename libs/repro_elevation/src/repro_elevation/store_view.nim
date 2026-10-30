@@ -11,7 +11,21 @@
 ##
 ## The namespace belongs to the calling thread: ``unshare(CLONE_NEWNS)``
 ## implies ``CLONE_FS``, which a multi-threaded process may unshare only for
-## the calling thread. Call it on the thread that writes.
+## the calling thread. Call it on the thread that writes, and read the mount
+## table through ``/proc/thread-self``, which is that thread's view.
+##
+## Call it immediately before EVERY write, not once per process. The store's
+## read-only bind can appear in the middle of a process: bootstrap writes the
+## store while it is a plain directory, then starts generation 0's
+## ``repro-store.mount``, then writes again (registering the generation
+## root). A call made before the mount existed had nothing to do, so the
+## call after it must do the remount. That is why the check is "is the store
+## a read-only mount NOW", and why nothing is cached except the namespace.
+##
+## A store on a filesystem that is itself read-only (its superblock is
+## ``ro``: a read-only root, an ``iso9660`` or ``erofs`` image) is not a
+## read-only bind, and remounting the bind cannot make it writable. That is
+## refused with a message saying so, before anything is unshared.
 
 import std/[os, strutils]
 when defined(linux):
@@ -44,14 +58,29 @@ when defined(linux):
                                       header: "<sys/mount.h>".}
 
 proc isMountPoint*(path: string): bool =
-  ## True when ``path`` is the mount point of some entry in this
-  ## process's mount table.
+  ## True when ``path`` is the mount point of some entry in the calling
+  ## thread's mount table.
   when defined(linux):
-    for line in readFile("/proc/self/mountinfo").splitLines():
+    for line in readFile("/proc/thread-self/mountinfo").splitLines():
       let f = line.splitWhitespace()
       if f.len > 4 and f[4] == path:
         return true
   false
+
+proc superblockReadOnly*(path: string): bool =
+  ## True when the filesystem mounted at mount point ``path`` is read-only
+  ## in its superblock options (after the `` - `` separator of
+  ## ``mountinfo``), as opposed to a read-only per-mount flag on a bind.
+  ## The last matching entry wins: it is the one on top.
+  when defined(linux):
+    for line in readFile("/proc/thread-self/mountinfo").splitLines():
+      let f = line.splitWhitespace()
+      if f.len > 4 and f[4] == path:
+        let sep = f.find("-")
+        result = sep >= 0 and sep + 3 < f.len and
+          "ro" in f[sep + 3].split(',')
+  else:
+    discard path
 
 proc isReadOnlyMount*(path: string): bool =
   ## True when the filesystem view at ``path`` is mounted read-only.
@@ -91,15 +120,21 @@ proc enterWritableStoreView*(storeRoot: string) =
   ## no mount event leaks out of it) and the bind is remounted without
   ## ``MS_RDONLY`` there, keeping its other flags. Idempotent.
   when defined(linux):
-    if not dirExists(storeRoot) or not isMountPoint(storeRoot) or
-        not isReadOnlyMount(storeRoot):
+    if not dirExists(storeRoot) or not isReadOnlyMount(storeRoot):
       return
+    if not isMountPoint(storeRoot) or superblockReadOnly(storeRoot):
+      raise newException(OSError, storeRoot & " is on a read-only " &
+        "filesystem, not a read-only bind of itself; a private remount " &
+        "cannot make it writable. The add-on store needs a writable " &
+        "filesystem under the read-only bind (spec §5.1, §10.2)")
     if not privateNamespaceEntered:
       if c_unshare(CloneNewNs) != 0:
         raiseOSError(osLastError(), "unshare(CLONE_NEWNS) to write " &
           storeRoot)
       # Stop mount events propagating out of (or into) this namespace
-      # before changing anything in it.
+      # before changing anything in it. Until this succeeds the thread is
+      # in a namespace that still shares propagation with the host, so the
+      # view is not recorded as entered and no remount is attempted.
       if c_mount(nil, "/", nil, MsRec or MsPrivate, nil) != 0:
         raiseOSError(osLastError(), "make / private in the store view")
       privateNamespaceEntered = true

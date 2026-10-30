@@ -206,3 +206,75 @@ suite "Add-On apt closure: realised into a read-only store (spec §10.2)":
         check code == 0
         check aptClosureRealised(root / "store", lock)
       removeDir(root)
+
+when defined(linux):
+  proc inNamespaceChild(body: proc (): int): int =
+    ## Run ``body`` in a forked child that is root of its own user + mount
+    ## namespace; its return value is the child's exit code (77: no userns).
+    let pid = fork()
+    doAssert pid >= 0
+    if pid == 0:
+      var code = 0
+      try:
+        code = if enterTestNamespace(): body() else: 77
+      except CatchableError as ex:
+        stderr.writeLine("child failed: " & ex.msg)
+        code = 1
+      exitnow(cint(code))
+    var status: cint
+    doAssert waitpid(pid, status, 0) == pid
+    if WIFEXITED(status): int(WEXITSTATUS(status)) else: 128
+
+suite "Add-On store view: ordering and refusals (spec §10.2)":
+  test "a write after generation 0's read-only mount appears still succeeds":
+    # Bootstrap writes the store while it is a plain directory, then
+    # generation 0 mounts it read-only over itself, then bootstrap writes
+    # again. The second write must remount, not trust the first call.
+    when not defined(linux):
+      skip("the read-only bind and mount namespaces are Linux-only")
+    else:
+      let store = getTempDir() / ("t-addon-ro-order-" &
+        $getCurrentProcessId()) / "store"
+      createDir(store)
+      let code = inNamespaceChild(proc (): int =
+        enterWritableStoreView(store)          # plain directory: nothing to do
+        writeFile(store / "before-mount", "x")
+        bindReadOnly(store)                    # generation 0's mount
+        try:
+          writeFile(store / "unviewed", "x")
+          return 2                             # the bind was not read-only
+        except IOError, OSError: discard
+        enterWritableStoreView(store)
+        writeFile(store / "after-mount", "x")
+        0)
+      if code == 77:
+        skip("unprivileged user namespaces are disabled on this kernel")
+      else:
+        check code == 0
+        check fileExists(store / "after-mount")
+      removeDir(parentDir(store))
+
+  test "a store on a read-only filesystem (not a bind) is refused by name":
+    when not defined(linux):
+      skip("the read-only bind and mount namespaces are Linux-only")
+    else:
+      let store = getTempDir() / ("t-addon-ro-fs-" &
+        $getCurrentProcessId()) / "store"
+      createDir(store)
+      let code = inNamespaceChild(proc (): int =
+        # A filesystem whose superblock is read-only: what a store on an
+        # iso9660 or erofs image, or a read-only root, looks like.
+        doAssert c_mount("tmpfs", store.cstring, "tmpfs", MsRdOnly, nil) == 0
+        try:
+          enterWritableStoreView(store)
+          return 2
+        except OSError as e:
+          if "read-only filesystem, not a read-only bind" notin e.msg:
+            stderr.writeLine("wrong refusal: " & e.msg)
+            return 3
+        0)
+      if code == 77:
+        skip("unprivileged user namespaces are disabled on this kernel")
+      else:
+        check code == 0
+      removeDir(parentDir(store))

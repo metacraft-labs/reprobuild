@@ -62,6 +62,7 @@
 
 import std/[algorithm, options, os, sets, strutils, tables, times]
 
+import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
 import repro_elevation
 import repro_elevation/posix_system_driver
@@ -1363,6 +1364,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # One apply at a time per state directory (the same lock `repro infra
   # apply` takes). A caller that already holds it -- the full engine's CLI
   # -- is not asked to take it twice. A plan takes none: it writes nothing.
+  # And one apply at a time per HOST, whatever its state directory
+  # (``repro_core/host_apply_lock``), held across the whole switch, not
+  # only the infra apply inside it.
+  var hostLock: HostApplyLock
+  if not opts.planOnly:
+    hostLock = acquireHostApplyLock("add-on " &
+      (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
+      stateDir & ")")
+  defer: hostLock.release()
   var ownLock = false
   if not opts.planOnly and applyLockOwner(stateDir) != getCurrentProcessId():
     let acq = tryAcquireApplyLock(stateDir)

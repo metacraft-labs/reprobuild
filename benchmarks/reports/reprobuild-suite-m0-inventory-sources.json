@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2489,
+    "nimTestBinaries": 2491,
     "pureUnitConsolidationGroups": 72,
-    "pureUnitTests": 697,
+    "pureUnitTests": 698,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2529
+    "testEntries": 2531
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1448,8 +1448,8 @@
       "graph-fixture": 18,
       "integration": 1378,
       "platform/destructive": 155,
-      "pure unit": 697,
-      "unclassified": 281
+      "pure unit": 698,
+      "unclassified": 282
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1657,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2489,
+    "nimTestBinaryCount": 2491,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2529
+    "testEntryCount": 2531
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13045,6 +13045,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_test_support"
       ],
@@ -13052,7 +13053,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim",
       "sourceSuiteCount": 8,
-      "staticCaseCount": 34,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14514,8 +14515,8 @@
       "owner": "libs/repro_elevation",
       "requiresReproBinary": false,
       "source": "libs/repro_elevation/tests/t_addon_apt_closure_ro_store_view.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14534,6 +14535,23 @@
       "source": "libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_passwd_user_driver_group_collision",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_elevation"
+      ],
+      "owner": "libs/repro_elevation",
+      "requiresReproBinary": false,
+      "source": "libs/repro_elevation/tests/t_passwd_user_driver_group_collision.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14569,7 +14587,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_elevation/tests/t_smoke_repro_elevation.nim",
       "sourceSuiteCount": 42,
-      "staticCaseCount": 397,
+      "staticCaseCount": 398,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15664,8 +15682,8 @@
       "owner": "libs/repro_infra",
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
-      "sourceSuiteCount": 29,
-      "staticCaseCount": 206,
+      "sourceSuiteCount": 30,
+      "staticCaseCount": 207,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15701,6 +15719,26 @@
       "source": "libs/repro_infra/tests/t_system_profile_addon_fields.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_two_applies_with_different_state_dirs_never_overlap",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_elevation",
+        "repro_infra",
+        "repro_profile"
+      ],
+      "owner": "libs/repro_infra",
+      "requiresReproBinary": false,
+      "source": "libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
