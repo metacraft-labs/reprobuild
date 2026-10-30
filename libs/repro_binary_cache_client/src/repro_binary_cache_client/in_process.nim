@@ -351,6 +351,21 @@ proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
       ", wrote " & $writer.bytesWritten)
   result = writer.hasher.finalize()
 
+proc prefixArchiveDigestHex*(prefix: string): string =
+  ## BLAKE3 hex of the raw archive `publishInProcess` would write for
+  ## `prefix` — by the SAME planner and writer, so a consumer that packs its
+  ## present outputs with this gets the digest the publisher printed
+  ## (`expectedOutputDigest`), and not a near-identical archive from a
+  ## second implementation. The archive is written to a temporary file and
+  ## removed; only the digest is kept.
+  let plan = planPrefixArchive(prefix)
+  let temp = createTempFile("repro-prefix-digest-", ".rbcarc")
+  var f = temp.cfile
+  defer:
+    try: close(f) except CatchableError: discard
+    try: removeFile(temp.path) except CatchableError: discard
+  writeArchiveFile(plan, f).toHex()
+
 proc packPrefix*(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree. Same
   ## ``rbcarc-v2`` layout the CLI documents at the top of
@@ -432,20 +447,15 @@ type
 
 proc extractPrefixRaw(archive: openArray[byte]; outDir: string): seq[ExtractedEntry]
 
-proc extractPrefix*(archive: openArray[byte]; outDir: string): seq[ExtractedEntry] {.discardable.} =
-  ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
-  ## v2 preserves regular files, directory entries, and symbolic links;
-  ## v1 remains accepted so already-published cache entries keep working.
-  ## Raises ``IOError`` on a malformed / truncated archive.
-  ##
-  ## A zstd-compressed archive is decompressed first. The CAS stores each
-  ## payload exactly as its producer signed it, so a blob read back carries
-  ## no manifest to say which codec produced it -- but ``rbcarc`` begins with
-  ## ``RBCA`` and a zstd frame with its own magic, so the two never collide.
-  ## Sniffing here rather than at each call site means every consumer of a
-  ## substituted prefix -- the tool store, the provider-compile cache, the
-  ## build-action apply path, the CLI -- handles compressed entries without
-  ## knowing they exist.
+proc rawArchiveBytes*(archive: openArray[byte]): seq[byte] =
+  ## The raw ``rbcarc`` bytes of a payload as its producer wrote them:
+  ## ``archive`` itself, or its zstd frame decompressed. The CAS stores
+  ## each payload exactly as its producer signed it, so a blob read back
+  ## carries no manifest to say which codec produced it -- but ``rbcarc``
+  ## begins with ``RBCA`` and a zstd frame with its own magic, so the two
+  ## never collide. This is also the byte string whose BLAKE3 a profile
+  ## pins as ``expectedOutputDigest`` and ``repro cache publish`` prints:
+  ## one hash of one representation, whatever the transport did.
   if isZstdFrame(archive):
     var plain: seq[byte] = @[]
     let decomp =
@@ -466,8 +476,24 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string): seq[ExtractedEntr
       decomp.finish(sink)
     except DecompressError as e:
       raise newException(IOError, "rbcarc zstd decode failed: " & e.msg)
-    return extractPrefixRaw(plain, outDir)
-  extractPrefixRaw(archive, outDir)
+    return plain
+  @archive
+
+proc extractPrefix*(archive: openArray[byte]; outDir: string): seq[ExtractedEntry] {.discardable.} =
+  ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
+  ## v2 preserves regular files, directory entries, and symbolic links;
+  ## v1 remains accepted so already-published cache entries keep working.
+  ## Raises ``IOError`` on a malformed / truncated archive.
+  ##
+  ## A zstd-compressed archive is decompressed first. The CAS stores each
+  ## payload exactly as its producer signed it, so a blob read back carries
+  ## no manifest to say which codec produced it -- but ``rbcarc`` begins with
+  ## ``RBCA`` and a zstd frame with its own magic, so the two never collide.
+  ## Sniffing here rather than at each call site means every consumer of a
+  ## substituted prefix -- the tool store, the provider-compile cache, the
+  ## build-action apply path, the CLI -- handles compressed entries without
+  ## knowing they exist.
+  extractPrefixRaw(rawArchiveBytes(archive), outDir)
 
 proc refuseWriteThroughSymlink*(outDir, rel: string) =
   ## Raise unless writing the entry ``rel`` under ``outDir`` stays inside

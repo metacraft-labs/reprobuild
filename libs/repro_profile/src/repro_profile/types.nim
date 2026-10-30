@@ -65,6 +65,24 @@ type
     toolIdentityRefs*: seq[string]
     requiresElevation*: bool
     cacheable*: bool
+    substituteOnly*: bool
+      ## The edge is never built on this host: its outputs come from the
+      ## binary cache or the apply fails. For a host that cannot build
+      ## what it runs (a 32-bit ARM appliance), so a cache miss is a
+      ## refusal naming the edge instead of a compile the host cannot
+      ## finish. Requires ``expectedOutputDigest``: an edge whose bytes
+      ## only a publisher's signature vouches for is one every trusted
+      ## publisher could rewrite.
+    expectedOutputDigest*: string
+      ## ``blake3:<64 hex>`` of the edge's output archive (the raw
+      ## ``rbcarc`` the publisher packed, which is what the cache serves
+      ## and what the local outputs pack back to). When set, a
+      ## substitute is accepted only if the fetched archive hashes to it,
+      ## and outputs already present that hash to it are a hit without
+      ## any fetch. The profile that carries it is signed (the deploy
+      ## manifest), so the profile pins the bytes and the cache
+      ## publisher is transport, not authority. Empty: no pin (the
+      ## pre-existing behaviour for edges the host can build itself).
     rebootRequired*: bool
       ## Mirror of ``BuildActionDef.rebootRequired``: the edge's effect
       ## needs a restart before it takes hold. An edge that actually RAN

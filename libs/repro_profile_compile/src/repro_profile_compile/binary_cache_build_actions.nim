@@ -31,6 +31,31 @@
 ##     path once auto-generated a producer key and published every local
 ##     build, which made every applying host a publisher.
 ##
+## ## Substitute-only edges, and what a publisher is allowed to be
+##
+## A publisher's signature says who packed an archive, not what a profile
+## meant it to contain. For an edge the host can build itself that is
+## tolerable: the fallback is a local build of the same definition. For an
+## edge the host can NEVER build (`substituteOnly`: a 32-bit ARM appliance's
+## services) it is not — every key in the host's `trusted-public-keys` would
+## be a code authority over what the host runs (ReproOS-Add-On-Mode threat
+## model, G5: a thief of a publisher key must own nothing). So such an edge
+## carries `expectedOutputDigest = "blake3:<hex>"`, the digest of the raw
+## output archive, in the profile — which reaches the host inside the SIGNED
+## deploy manifest — and:
+##
+##   * a fetched archive is hashed BEFORE it is extracted and refused on a
+##     mismatch (the publisher is transport; the profile pins the bytes);
+##   * outputs already on disk that pack back to the digest are a hit with
+##     no fetch at all, so a converge tick that changes nothing does no
+##     network I/O and rewrites nothing (the CAS under the cache root is
+##     kept between ticks for the same reason);
+##   * a `substituteOnly` edge with no digest, or a cache miss on one, is a
+##     FAILED outcome naming the edge — never a local build, which the host
+##     could not finish, and never a silent skip.
+##
+## Binary-Caches.md §"Publishing for a host that cannot build".
+##
 ## Off-by-default: with no cache configured the dispatcher takes the
 ## unchanged local-build path.
 ##
@@ -40,11 +65,13 @@
 ## `apply_build_actions.weakFingerprintForProfileBuildAction`) into the
 ## key material. Two applies of the SAME profile against the SAME
 ## toolchain derive the SAME key, so the substituted outputs are
-## byte-identical to a local build (the cache is content-addressed).
+## byte-identical to a local build (and, for an edge that carries `expectedOutputDigest`, verified against the digest the signed profile pins — see "Substitute-only edges" below) (the cache is content-addressed).
 ## Any change to the action definition derives a DIFFERENT key, so a
 ## stale cache entry can never shadow a changed edge.
 
 import std/[os, sets, strutils]
+
+import blake3
 when defined(posix):
   import std/posix
   # std/posix does not export these on every target; take them from libc.
@@ -70,6 +97,9 @@ type
   SubstituteAttempt* = object
     ## Result of one `trySubstituteBuildAction` call.
     hit*: bool            ## true when the outputs were served from cache
+    verifiedPresent*: bool
+      ## true when the hit was the outputs already on disk, verified
+      ## against `expectedOutputDigest` — nothing was fetched or written.
     reason*: string       ## populated on a miss / error (diagnostic)
     trustRejected*: bool  ## the miss was a trust refusal, not an absent entry
     bytesFetched*: int64
@@ -440,6 +470,29 @@ proc outputsExist(action: ProfileBuildAction): bool =
 # Substitute-first + publish-on-miss.
 # ---------------------------------------------------------------------------
 
+proc archiveDigestTag*(archiveBytes: openArray[byte]): string =
+  ## `blake3:<hex>` of a raw `rbcarc` archive — the spelling
+  ## `expectedOutputDigest` takes, and what `repro cache publish` prints.
+  "blake3:" & blake3.digest(archiveBytes).toHex()
+
+proc localOutputsDigest*(action: ProfileBuildAction;
+                         stageDir: string): string =
+  ## Pack the edge's present outputs the way the publisher packs a prefix
+  ## and return their `archiveDigestTag`; "" when they cannot be staged.
+  ## The archive format is deterministic (sorted entries, modes, bytes),
+  ## so the same tree packs to the same digest on every host.
+  try:
+    removeDir(stageDir)
+    if not stagePrefixFromOutputs(action, stageDir):
+      return ""
+    # The publisher's own planner and writer, so this equals what
+    # `repro cache publish` printed for the same tree.
+    result = "blake3:" & prefixArchiveDigestHex(stageDir)
+  except CatchableError:
+    result = ""
+  finally:
+    try: removeDir(stageDir) except CatchableError: discard
+
 proc trySubstituteBuildAction*(action: ProfileBuildAction;
                                cfg: BuildActionCacheConfig;
                                scratchRoot: string): SubstituteAttempt =
@@ -450,15 +503,35 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
   ## falls back to a local build. Never raises — a cache problem must
   ## degrade to a local build, not abort the apply.
   result.hit = false
-  if not cfg.configured:
-    result.reason = "no binary cache configured"
-    return
   # Only edges with mappable in-cwd outputs are substitutable.
   if outputRelPaths(action).len == 0:
     result.reason = "action declares no cwd-relative outputs"
     return
+  if action.substituteOnly and action.expectedOutputDigest.len == 0:
+    # The profile compiler refuses this shape; a hand-written intent can
+    # still carry it, and it is refused here too (fail closed).
+    result.reason = "substitute-only edge " & action.id &
+      " pins no expectedOutputDigest; refusing to take its bytes from a " &
+      "publisher's word alone"
+    return
+  # Present outputs that pack back to the pinned digest ARE the result: no
+  # fetch, no rewrite. This is what makes a converge tick that changes
+  # nothing cost one hash instead of a download and a rewrite of every
+  # service's prefix.
+  if action.expectedOutputDigest.len > 0 and outputsExist(action):
+    let have = localOutputsDigest(action, scratchRoot / "present")
+    if have.len > 0 and have == action.expectedOutputDigest:
+      result.hit = true
+      result.verifiedPresent = true
+      return
+  if not cfg.configured:
+    result.reason = "no binary cache configured"
+    return
   let idy = buildActionCacheIdentity(action, scratchRoot)
   let entryHex = deriveCacheEntryKeyHex(idy)
+  # The CAS persists under the cache root between applies: a hit the
+  # next tick is then one manifest GET and a local hash, not a payload
+  # fetch (the extract scratch is per attempt and removed below).
   let store = scratchRoot / "store"
   let extractDir = scratchRoot / "extract"
   try:
@@ -485,6 +558,16 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
     var archiveBytes = newSeq[byte](archiveText.len)
     for i, ch in archiveText:
       archiveBytes[i] = byte(ch)
+    if action.expectedOutputDigest.len > 0:
+      # Hashed before a single byte is extracted: a publisher that signs
+      # the wrong bytes materialises nothing.
+      let got = archiveDigestTag(rawArchiveBytes(archiveBytes))
+      if got != action.expectedOutputDigest:
+        result.reason = "output digest mismatch for " & action.id &
+          ": the profile pins " & action.expectedOutputDigest &
+          ", the cache served " & got & " (signed by a trusted publisher, " &
+          "which is not the authority here); nothing was materialised"
+        return
     removeDir(extractDir)
     createDir(extractDir)
     let entries = extractPrefix(archiveBytes, extractDir)
@@ -500,7 +583,6 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
     result.reason = "substitute error for " & action.id & ": " & e.msg
   finally:
     try: removeDir(extractDir) except CatchableError: discard
-    try: removeDir(store) except CatchableError: discard
 
 proc publishBuildActionOutputs*(action: ProfileBuildAction;
                                 cfg: BuildActionCacheConfig;

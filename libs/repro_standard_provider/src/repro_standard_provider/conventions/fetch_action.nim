@@ -52,14 +52,6 @@ const
     ## (each Tier 2b convention's scratch root) so a ``repro clean``
     ## wipes both consistently.
 
-proc isCommitId*(revision: string): bool =
-  ## A full 40-hex SHA-1 object id (the only revision spelling that is not
-  ## a ref); `gitRevision` may be this or a tag / branch name.
-  if revision.len != 40: return false
-  for ch in revision:
-    if ch notin {'0' .. '9', 'a' .. 'f', 'A' .. 'F'}: return false
-  true
-
 proc fetchScratchPath*(projectRoot: string): string =
   projectRoot / FetchScratchSubdir
 
@@ -117,6 +109,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
     archiveUrl = spec.url)
   if spec.kind == dfkGitArchive:
     fetchToolRefs.add("git")
+    fetchToolRefs.add("ssh")   # a private repository is reached over ssh
   let shExe = findExe("sh")
   let escapedUrl = spec.url.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
@@ -152,27 +145,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
       # Shallow clone + archive. The git rev is verified by extracting
       # archive contents and then hashing the resulting tarball — the
       # archive's deterministic output makes the hash stable.
-      script.add("rm -rf \"" & escapedTarball & ".git\"; ")
-      if isCommitId(spec.gitRevision):
-        # A commit is not a ref, so `clone --branch` cannot name it. Fetch
-        # exactly that object instead (GitHub and every git since 2.5
-        # serve a reachable commit by id with `uploadpack.allowReachableSHA1InWant`),
-        # which is also the only form that pins a PRIVATE repository's
-        # revision without a tag: an archive URL is not available there.
-        script.add("git init -q \"" & escapedTarball & ".git\"; ")
-        script.add("git -C \"" & escapedTarball & ".git\" remote add origin \"" &
-          escapedUrl & "\"; ")
-        script.add("git -C \"" & escapedTarball & ".git\" fetch -q --depth 1 origin \"" &
-          escapedRev & "\"; ")
-        script.add("git -C \"" & escapedTarball & ".git\" checkout -q FETCH_HEAD; ")
-      else:
-        script.add("git clone --depth 1 ")
-        if escapedRev.len > 0:
-          script.add("--branch \"" & escapedRev & "\" ")
-        script.add("\"" & escapedUrl & "\" \"" & escapedTarball &
-          ".git\"; ")
-      script.add("(cd \"" & escapedTarball & ".git\" && git archive --format=tar HEAD > \"" &
-        escapedTarball & "\"); ")
+      script.add(gitArchiveFetchScript(escapedUrl, escapedRev, escapedTarball))
       case spec.hashAlg
       of dshaSha256:
         script.add("echo \"" & escapedHash & "  " & escapedTarball &

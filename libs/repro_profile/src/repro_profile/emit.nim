@@ -242,6 +242,9 @@ proc encodeBuildAction(b: ProfileBuildAction): string =
     (if b.cacheable: "true" else: "false")
   result.add ",\"rebootRequired\":" &
     (if b.rebootRequired: "true" else: "false")
+  result.add ",\"substituteOnly\":" &
+    (if b.substituteOnly: "true" else: "false")
+  result.add ",\"expectedOutputDigest\":" & encodeStr(b.expectedOutputDigest)
   result.add "}"
 
 proc emitProfileIntentJson*(p: ProfileIntent): string =
@@ -483,7 +486,14 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         # decodes with ``false``, which is the pre-existing behaviour
         # exactly -- no envelope had a reboot to report.
         rebootRequired: (if b.hasKey("rebootRequired"):
-                           b["rebootRequired"].getBool() else: false))
+                           b["rebootRequired"].getBool() else: false),
+        # Optional for the same reason: an envelope written before the
+        # substitute-only edge existed has neither, and decodes as an
+        # ordinary buildable edge, which is what it was.
+        substituteOnly: (if b.hasKey("substituteOnly"):
+                           b["substituteOnly"].getBool() else: false),
+        expectedOutputDigest: (if b.hasKey("expectedOutputDigest"):
+                                 b["expectedOutputDigest"].getStr() else: ""))
       for it in b["argv"]:
         ba.argv.add it.getStr()
       for it in b["deps"]:

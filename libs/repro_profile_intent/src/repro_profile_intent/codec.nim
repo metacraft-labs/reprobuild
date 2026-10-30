@@ -93,6 +93,8 @@ const
   KeyToolIdentityRefs = "toolIdentityRefs"
   KeyRequiresElevation = "requiresElevation"
   KeyCacheable    = "cacheable"
+  KeySubstituteOnly = "substituteOnly"
+  KeyExpectedOutputDigest = "expectedOutputDigest"
   KeyId           = "id"
   KeyBody         = "body"
   KeyPredicate    = "predicate"
@@ -300,7 +302,9 @@ proc encodeBuildAction(b: ProfileBuildAction): DynamicValue =
     entry(KeyCommandStatsId, cborText(b.commandStatsId)),
     entry(KeyToolIdentityRefs, encodeStringArray(b.toolIdentityRefs)),
     entry(KeyRequiresElevation, cborBool(b.requiresElevation)),
-    entry(KeyCacheable, cborBool(b.cacheable))])
+    entry(KeyCacheable, cborBool(b.cacheable)),
+    entry(KeySubstituteOnly, cborBool(b.substituteOnly)),
+    entry(KeyExpectedOutputDigest, cborText(b.expectedOutputDigest))])
 
 proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var acts: seq[DynamicValue] = @[]
@@ -591,6 +595,16 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
           KeyRequiresElevation),
         cacheable: expectBool(lookup(bEntries, KeyCacheable,
           "ProfileBuildAction"), KeyCacheable))
+      # Optional on decode: a cached envelope written before the
+      # substitute-only edge existed carries neither key and is an
+      # ordinary buildable edge, which is what it was.
+      var soFound, eodFound: bool
+      let soNode = lookupOpt(bEntries, KeySubstituteOnly, soFound)
+      if soFound:
+        ba.substituteOnly = expectBool(soNode, KeySubstituteOnly)
+      let eodNode = lookupOpt(bEntries, KeyExpectedOutputDigest, eodFound)
+      if eodFound:
+        ba.expectedOutputDigest = expectText(eodNode, KeyExpectedOutputDigest)
       for it in expectArray(lookup(bEntries, KeyArgv,
           "ProfileBuildAction"), KeyArgv):
         ba.argv.add expectText(it, KeyArgv)

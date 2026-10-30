@@ -24,6 +24,7 @@ import std/[os, strutils, unittest]
 import repro_project_dsl
 import repro_provider_runtime
 import repro_standard_provider/conventions/fetch_action
+import repro_project_dsl/shell_fetch
 
 package fetchActionPkg:
   fetch:

@@ -212,3 +212,60 @@ suite "repro infra cache-keys: the CLI prints the library's key":
     check localRun.exitCode == 0
     if bc_actions.localPlatformTriple("").cpu != "armv7":
       check ("entry-key: " & expected) notin localRun.output
+
+suite "repro infra cache-keys: platform flags are canonical and explicit":
+
+  test "a distribution's spelling of the CPU derives the cache's":
+    # `armhf` (Debian), `armv7l` (uname) and `armv7h` (Arch) all name the
+    # family the cache keys `armv7`; a key derived from the raw spelling
+    # would be one no host ever looks up.
+    for spelling in ["armhf", "armv7l", "armv7h", "ARMV7"]:
+      check cli_infra.canonicalPlatformCpu(spelling) == "armv7"
+    check cli_infra.canonicalPlatformCpu("amd64") == "x86_64"
+    check cli_infra.canonicalPlatformCpu("arm64") == "aarch64"
+
+  test "a CPU no host derives is refused by name":
+    for bad in ["unknown", "any", "", "mips", "armv6"]:
+      expect ValueError:
+        discard cli_infra.canonicalPlatformCpu(bad)
+
+  test "the CLI refuses an unknown CPU and canonicalises a known one":
+    let tmpRoot = createTempDir("infra-cache-keys-cpu-", "")
+    defer:
+      try: removeDir(tmpRoot) except CatchableError: discard
+    let stateDir = tmpRoot / "state"
+    let profilePath = tmpRoot / "profile" / "system.nim"
+    createDir(stateDir)
+    createDir(profilePath.parentDir)
+    writeFile(profilePath, ProfileTemplate)
+    let bad = runRepro(@["infra", "cache-keys", "--profile", profilePath,
+      "--state-dir", stateDir, "--platform-cpu=unknown"])
+    check bad.exitCode == 2
+    check "names no CPU family" in bad.output
+    let armhf = runRepro(@["infra", "cache-keys", "--profile", profilePath,
+      "--state-dir", stateDir, "--platform-cpu=armhf", "--platform-os=linux",
+      "--platform-abi=gnu", "--platform-libc="])
+    check armhf.exitCode == 0
+    check "platform: cpu=armv7 os=linux abi=gnu libc=" in armhf.output
+    let armv7 = runRepro(@["infra", "cache-keys", "--profile", profilePath,
+      "--state-dir", stateDir, "--platform-cpu=armv7", "--platform-os=linux",
+      "--platform-abi=gnu", "--platform-libc="])
+    # Same key either way: the spelling never reaches the identity.
+    var keyA, keyB: string
+    for line in armhf.output.splitLines():
+      if "entry-key:" in line: keyA = line
+    for line in armv7.output.splitLines():
+      if "entry-key:" in line: keyB = line
+    check keyA.len > 0 and keyA == keyB
+
+  test "an explicitly empty flag clears the host default":
+    # A musl host derives with an empty libc variant; `--platform-abi=`
+    # given empty must mean empty, not "keep this host's gnu".
+    var flags = cli_infra.InfraCliFlags()
+    flags.platformAbi = ""
+    flags.platformAbiGiven = true
+    let p = cli_infra.cacheKeysPlatform(flags, "")
+    check p.abi == ""
+    var untouched = cli_infra.InfraCliFlags()
+    check cli_infra.cacheKeysPlatform(untouched, "").abi ==
+      bc_actions.localPlatformTriple("").abi

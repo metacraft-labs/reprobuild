@@ -503,3 +503,150 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         checkBuiltLocally(applyOnce(tmpRoot, "publisher", "consumer-edge"))
         check manifestPublished(url, entryKeyHexFor("consumer-edge"))
         check not dirExists(autoCredDir)
+
+# ---------------------------------------------------------------------------
+# Substitute-only edges pin their bytes (Binary-Caches.md §"Publishing for a
+# host that cannot build"). A publisher's signature says who packed an
+# archive; `expectedOutputDigest` in the SIGNED profile says what it must
+# contain. These cases pin that:
+#   * a trusted publisher whose archive is not the pinned one is a MISS and
+#     materialises nothing (the publisher is transport, not authority);
+#   * the pinned archive is a hit;
+#   * outputs already on disk that hash to the pin are a hit with NO fetch —
+#     the cache may be unreachable; a converge tick that changes nothing does
+#     no network I/O;
+#   * a substitute-only edge never builds: on a miss it is a FAILED outcome
+#     and the shell did not run.
+# ---------------------------------------------------------------------------
+
+proc pinnedAction(id, cwd, digest: string; substituteOnly = false):
+    ProfileBuildAction =
+  result = witnessShellAction(id, cwd)
+  result.expectedOutputDigest = digest
+  result.substituteOnly = substituteOnly
+
+proc applyAction(root, tag: string; action: ProfileBuildAction): ApplyRun =
+  result.cwd = action.cwd
+  let cacheRoot = root / ("engine-cache-" & tag)
+  createDir(result.cwd); createDir(cacheRoot)
+  let ctx = FixtureContext(filePrefix: root / ("ctx-" & tag))
+  let disp = mkBuildActionDispatcher(cacheRoot, ctx)
+  let outs = disp(@[action], nil)
+  doAssert outs.len == 1, "dispatcher returned " & $outs.len & " outcomes"
+  result.outcome = outs[0]
+  result.shellRan = fileExists(result.cwd / WitnessRel)
+
+suite "substitute-only edges: the profile pins the bytes, not the publisher":
+
+  test "a trusted publisher's archive that is not the pinned one is a miss":
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-digest-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+        # The trusted publisher builds and publishes the REAL output.
+        usePublisher(conf, url, kpA)
+        let run1 = applyOnce(tmpRoot, "pub", "digest-edge")
+        checkBuiltLocally(run1)
+        let real = localOutputsDigest(witnessShellAction("digest-edge",
+          run1.cwd), tmpRoot / "stage-real")
+        check real.startsWith("blake3:") and real.len == 7 + 64
+        useConsumer(conf, url)
+        # A consumer whose profile pins a DIFFERENT digest: the entry is
+        # signed by a key it trusts and is still refused; nothing lands.
+        let wrong = "blake3:" & repeat('0', 64)
+        let cwdWrong = tmpRoot / "cwd-wrong"
+        let runWrong = applyAction(tmpRoot, "wrong",
+          pinnedAction("digest-edge", cwdWrong, wrong, substituteOnly = true))
+        check not runWrong.outcome.ok
+        check "output digest mismatch" in runWrong.outcome.diagnostic
+        check not runWrong.shellRan
+        check not fileExists(cwdWrong / OutRel)
+        # The same consumer pinning the REAL digest: a substitute.
+        let runRight = applyAction(tmpRoot, "right",
+          pinnedAction("digest-edge", tmpRoot / "cwd-right", real,
+                       substituteOnly = true))
+        if not runRight.outcome.ok:
+          echo "RIGHT DIAGNOSTIC: ", runRight.outcome.diagnostic
+        checkSubstituted(runRight)
+
+  test "present outputs that hash to the pin are a hit without a fetch":
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-present-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+        usePublisher(conf, url, kpA)
+        let run1 = applyOnce(tmpRoot, "pub", "present-edge")
+        checkBuiltLocally(run1)
+        let real = localOutputsDigest(witnessShellAction("present-edge",
+          run1.cwd), tmpRoot / "stage-real")
+        # The outputs are already in place from run1 (same cwd). Point the
+        # consumer at a cache that does not exist: a fetch would fail, so a
+        # hit here can only have come from the present bytes.
+        let deadConf = tmpRoot / "dead.conf"
+        writeCachesConf(deadConf, "http://127.0.0.1:9", @[kpA.pubHex])
+        useConsumer(deadConf, "http://127.0.0.1:9")
+        removeFile(run1.cwd / WitnessRel)
+        let again = applyAction(tmpRoot, "present",
+          pinnedAction("present-edge", run1.cwd, real, substituteOnly = true))
+        check again.outcome.ok
+        check again.outcome.cacheHit
+        # Verified present, not fetched: not counted as a substitution.
+        check not again.outcome.substitutedFromCache
+        check not again.shellRan
+        check readFile(run1.cwd / OutRel) == ExpectedPayload
+        # Tamper with the present output: the pin no longer matches, the
+        # dead cache cannot serve it, and the edge FAILS (never rebuilds).
+        writeFile(run1.cwd / OutRel, "tampered")
+        let tampered = applyAction(tmpRoot, "tampered",
+          pinnedAction("present-edge", run1.cwd, real, substituteOnly = true))
+        check not tampered.outcome.ok
+        check not tampered.shellRan
+        check readFile(run1.cwd / OutRel) == "tampered"
+
+  test "a substitute-only edge never builds: a miss is a failure naming the remedy":
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-subonly-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+        useConsumer(conf, url)
+        let run = applyAction(tmpRoot, "miss",
+          pinnedAction("never-published", tmpRoot / "cwd-miss",
+                       "blake3:" & repeat('1', 64), substituteOnly = true))
+        check not run.outcome.ok
+        check "substitute-only edge never-published" in run.outcome.diagnostic
+        check "repro infra cache-keys" in run.outcome.diagnostic
+        check not run.shellRan
+        # Control: the same edge WITHOUT substituteOnly builds locally — the
+        # refusal is the flag's, not a broken dispatcher.
+        let built = applyAction(tmpRoot, "ctl",
+          witnessShellAction("never-published", tmpRoot / "cwd-ctl"))
+        checkBuiltLocally(built)
+
+  test "a substitute-only edge without a pinned digest is refused, not trusted":
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-nopin-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+        usePublisher(conf, url, kpA)
+        checkBuiltLocally(applyOnce(tmpRoot, "pub", "nopin-edge"))
+        useConsumer(conf, url)
+        # The entry IS in the cache and IS trusted; the hand-built intent
+        # says substitute-only with no digest, and that is refused.
+        let run = applyAction(tmpRoot, "nopin",
+          pinnedAction("nopin-edge", tmpRoot / "cwd-nopin", "",
+                       substituteOnly = true))
+        check not run.outcome.ok
+        check "pins no expectedOutputDigest" in run.outcome.diagnostic
+        check not fileExists(tmpRoot / "cwd-nopin" / OutRel)

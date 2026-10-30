@@ -103,6 +103,7 @@ when defined(ssl):
   import wrappers/openssl
 
 import ../repro_binary_cache_client
+import repro_dsl_stdlib/packages_schema
 import ./in_process as inProcessArchive
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
@@ -337,7 +338,16 @@ proc parseIdentityFlags(flagArgs: seq[string]): PublishArgs =
       case p.key
       of "package-name": result.packageName = p.val
       of "package-version": result.packageVersion = p.val
-      of "platform-cpu": result.platformCpu = p.val
+      of "platform-cpu":
+        # Canonicalised to the family the cache keys by (`armhf` → `armv7`,
+        # `amd64` → `x86_64`); a token no host derives is refused, because
+        # an entry published under it could never be substituted.
+        let parsed = parsePlatformCpuToken(p.val)
+        if not parsed.ok or parsed.cpu == pcAny:
+          raise newException(ValueError,
+            "--platform-cpu '" & p.val & "' names no CPU family the " &
+            "binary cache keys by (x86_64, aarch64, armv7, x86)")
+        result.platformCpu = $parsed.cpu
       of "platform-os": result.platformOs = p.val
       of "platform-abi": result.platformAbi = p.val
       of "platform-libc": result.platformLibc = p.val

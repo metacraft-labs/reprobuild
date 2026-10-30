@@ -121,9 +121,15 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     resolvedUrl = "file://" &
       (projectRoot / resolvedUrl[5 .. ^1]).replace("\\", "/")
   let hashTools = @[sourceFetchHashTool(spec.hashAlg)]
-  let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+  var fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
     copiesDataFile = spec.kind == dfkDataFile,
     archiveUrl = resolvedUrl)
+  if spec.kind == dfkGitArchive:
+    # `ssh` as well as `git`: a private repository is reached over ssh (an
+    # https remote would need a credential helper, which is not a tool the
+    # edge can declare), and git execs `ssh` from the edge's PATH.
+    fetchToolRefs.add("git")
+    fetchToolRefs.add("ssh")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
@@ -132,7 +138,16 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
-  script.appendCurlDownload(tarball, resolvedUrl)
+  case spec.kind
+  of dfkGitArchive:
+    # A repository source (a private one has no archive URL): acquired as
+    # `git archive` of the pinned revision, by the shared script, and
+    # verified like any tarball below.
+    script.add(gitArchiveFetchScript(
+      resolvedUrl.replace("\"", "\\\""), spec.gitRevision.replace("\"", "\\\""),
+      escapedTarball))
+  else:
+    script.appendCurlDownload(tarball, resolvedUrl)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
