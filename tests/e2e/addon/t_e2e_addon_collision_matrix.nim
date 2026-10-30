@@ -23,6 +23,14 @@
 ##   unit of a drop-in) is refused when the profile is parsed, naming the
 ##   field: the driver and the observer derive the unit file's path from
 ##   the same text, and systemd would not load such a name.
+## - **[Install] links** (``systemctl enable`` acts on more than the unit):
+##   an ``Alias=cron.service`` is refused as ``EAddOnUnitShadows`` (the
+##   alias would be an /etc unit shadowing the package's); ``Also=`` naming
+##   a unit the profile does not own (``fixture-off.service``, a base unit
+##   left disabled) is refused; a unit with ``WantedBy``, ``UpheldBy`` and
+##   an alias of its own has all three links ledgered, and its removal
+##   takes exactly those away -- cron and ``fixture-base.service`` stay
+##   enabled, ``fixture-off.service`` stays disabled.
 ## - **unit search directories**: a managed prefix over
 ##   ``/etc/systemd/system.control/`` (where a file shadows a unit past the
 ##   unit class) is refused.
@@ -94,6 +102,10 @@
 ##   prefix and file are let through: the apply writes
 ##   ``/etc/systemd/system/cron.service`` and shadows the package's unit
 ##   (exit 0, red).
+## - ``REPRO_ADDON_MUTATION=install-targets-ignore-alias-also``: a unit's
+##   [Install] read for WantedBy/RequiredBy only. The Alias and Also rows
+##   are let through (cron shadowed, fixture-off enabled) and the alias and
+##   UpheldBy links go unledgered and survive the removal: red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_collision_matrix``).
 ## Bases: ``REPRO_ADDON_BASES`` (default here: debian-13-amd64,ubuntu-24.04-amd64).
@@ -362,6 +374,40 @@ Nice=5
 "
 }
 """
+  AliasShadow = """systemd.systemUnit {
+  name = "repro-fx-alias.service"
+  content = "[Service]
+ExecStart=/bin/sleep infinity
+
+[Install]
+WantedBy=multi-user.target
+Alias=cron.service
+"
+}
+"""
+  AlsoForeign = """systemd.systemUnit {
+  name = "repro-fx-also.service"
+  content = "[Service]
+ExecStart=/bin/sleep infinity
+
+[Install]
+WantedBy=multi-user.target
+Also=fixture-off.service
+"
+}
+"""
+  InstallOwn = """systemd.systemUnit {
+  name = "repro-fx-inst.service"
+  content = "[Service]
+ExecStart=/bin/sleep infinity
+
+[Install]
+WantedBy=multi-user.target
+UpheldBy=repro-fx-none.target
+Alias=repro-fx-inst-alias.service
+"
+}
+"""
   UnitSearchPrefix = """addOn {
   managedEtcPrefixes = ["/etc/systemd/system.control/"]
 }
@@ -412,6 +458,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     g.copyTo(g.runDir / "base.unit", "/etc/systemd/system/fixture-base.service")
     discard g.run("chmod 0644 /etc/systemd/system/fixture-base.service && " &
       "systemctl daemon-reload && systemctl enable --now fixture-base.service")
+    # A base unit with an [Install] section that the base leaves disabled:
+    # the Also= row must not enable it.
+    writeFile(g.runDir / "off.unit", BaseUnit.replace("base fixture the add-on adopts",
+                                                      "base fixture left disabled"))
+    g.copyTo(g.runDir / "off.unit", "/etc/systemd/system/fixture-off.service")
+    discard g.run("chmod 0644 /etc/systemd/system/fixture-off.service && " &
+      "systemctl daemon-reload")
     # The group the sysusers rows' fragment describes, part of the base:
     # adopting and reconciling the fragment must then create nothing.
     discard g.run("groupadd --system fxgrp")
@@ -769,6 +822,39 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          not g.run("systemctl show -p FragmentPath cron.service").contains("/etc/"), "")
     refused("unit-search-prefix", UnitSearchPrefix, "systemd loads units",
             "/etc/systemd/system.control/")
+
+    # --- Rows: [Install] links. ---
+    refused("install-alias-shadow", AliasShadow, "EAddOnUnitShadows", "cron.service")
+    step("install-alias-shadow: no alias link, cron is the package's",
+         g.sha256InGuest("/etc/systemd/system/cron.service") == "absent" and
+         not g.run("systemctl show -p FragmentPath cron.service").contains("/etc/"), "")
+    refused("install-also-foreign", AlsoForeign, "Also=fixture-off.service",
+            "fixture-off.service")
+    step("install-also-foreign: fixture-off.service is still disabled",
+         g.exec("systemctl is-enabled fixture-off.service").stdout.strip() == "disabled", "")
+    discard applied("install-own", InstallOwn)
+    block:
+      var links: seq[string]
+      for e in entriesFor(l, "systemUnit:repro-fx-inst.service"):
+        if e.class == lcInstallLink: links.add(e.path)
+      let want = ["/etc/systemd/system/multi-user.target.wants/repro-fx-inst.service",
+                  "/etc/systemd/system/repro-fx-none.target.upholds/repro-fx-inst.service",
+                  "/etc/systemd/system/repro-fx-inst-alias.service"]
+      var all = true
+      for w in want:
+        if w notin links: all = false
+      step("install-own: the WantedBy, UpheldBy and Alias links are all ledgered",
+           all and links.len == 3, links.join(" "))
+    discard applied("install-own-remove", Empty)
+    step("install-own-remove: exactly the add-on's links are gone; base enablement unchanged",
+         g.exec("test ! -e /etc/systemd/system/multi-user.target.wants/repro-fx-inst.service && " &
+                "test ! -e /etc/systemd/system/repro-fx-none.target.upholds/repro-fx-inst.service && " &
+                "test ! -L /etc/systemd/system/repro-fx-inst-alias.service").exitCode == 0 and
+         g.exec("systemctl is-enabled cron.service fixture-base.service").stdout.splitLines()[0 .. 1] ==
+           @["enabled", "enabled"] and
+         g.exec("systemctl is-enabled fixture-off.service").stdout.strip() == "disabled",
+         g.exec("ls -la /etc/systemd/system /etc/systemd/system/multi-user.target.wants; " &
+                "systemctl is-enabled cron.service fixture-base.service fixture-off.service").stdout)
 
     # --- Row: a foreign LOCAL diversion to the name the add-on would use. ---
     discard g.run("dpkg-divert --local --rename --divert /etc/issue.distrib --add /etc/issue")

@@ -30,7 +30,7 @@ libs/repro_addon/tests/t_addon_collision.nim	nim	35
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	16
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
-libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	41
+libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	43
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	37
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	29
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	26

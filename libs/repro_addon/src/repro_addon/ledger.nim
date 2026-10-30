@@ -465,6 +465,11 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
     of lcInstallLink:
       result.add(ExpectedRecord(component: fcEtc, key: e.path,
         value: "l 0777 0:0 -> " & e.linkTarget))
+      if parentDir(e.path) == "/etc/systemd/system":
+        # An `Alias=` link is itself a unit file name: systemd lists it
+        # with the state `alias` (`systemctl list-unit-files`).
+        result.add(ExpectedRecord(component: fcUnitFiles,
+          key: extractFilename(e.path), value: "alias"))
     of lcMount:
       result.add(ExpectedRecord(component: fcMounts, key: e.path, value: "*"))
     of lcDiversion:

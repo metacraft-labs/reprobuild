@@ -103,6 +103,12 @@
 ##                                            write-time re-check (the
 ##                                            ``PreWriteGuard``, destroys
 ##                                            included) is not installed
+## ``install-targets-ignore-alias-also``      a unit's ``[Install]`` is read
+##                                            for ``WantedBy`` and
+##                                            ``RequiredBy`` only: an
+##                                            ``Alias``, ``Also`` or
+##                                            ``UpheldBy`` is neither
+##                                            decided nor ledgered
 ## =========================================  ==============================
 
 const
@@ -123,7 +129,8 @@ const
                           "reassert-required-by-boot",
                           "reassert-skips-recovery",
                           "pause-before-write",
-                          "pause-before-write-no-recheck"]
+                          "pause-before-write-no-recheck",
+                          "install-targets-ignore-alias-also"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}
@@ -135,6 +142,7 @@ template mutated*(name: static string): bool =
   AddonMutation == name
 
 const TestPauseSeam* = AddonMutation in ["pause-before-write",
-                                         "pause-before-write-no-recheck"]
+                                         "pause-before-write-no-recheck",
+                          "install-targets-ignore-alias-also"]
   ## The write-time re-check gate's pause seam is compiled in (a test-only
   ## build; see the table above). False in every product build.
