@@ -70,6 +70,11 @@
 ##                                            state, so a pinned apply does
 ##                                            not see a unit that crashed
 ##                                            since the plan
+## ``partof-not-propagated``                  the plan leaves the stops and
+##                                            restarts systemd carries along
+##                                            ``PartOf=``/``BindsTo=``
+##                                            implicit (no confirmed
+##                                            stop-start of a dependent)
 ## ``reassert-required-by-boot``              the re-assert unit is wanted
 ##                                            by multi-user.target and
 ##                                            ``Requires=`` the store
@@ -124,6 +129,7 @@ const
                           "sysctl-in-apply-namespace",
                           "exclusive-exited-by-top-level-procs",
                           "plan-id-omits-unit-state",
+                          "partof-not-propagated",
                           "path-based-write-follows-links",
                           "scope-accepts-unnormalised-paths",
                           "reassert-required-by-boot",

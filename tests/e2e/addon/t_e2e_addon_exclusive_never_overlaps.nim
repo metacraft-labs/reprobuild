@@ -65,6 +65,11 @@
 ##   is read from the top-level ``cgroup.procs`` (empty for the delegated
 ##   instance) and unknowns count as exited: the delegated case starts its
 ##   successor beside the live instance: red.
+## - ``REPRO_ADDON_MUTATION=partof-not-propagated``: the plan leaves what
+##   systemd carries along ``PartOf=`` implicit: changing the anchor plans
+##   no stop-start of the exclusive dependent, the SIGTERM-ignoring
+##   instance is not refused, and the cooperative one is not shown
+##   restarted by the plan: red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_exclusive_never_overlaps``).
 ## Bases: ``REPRO_ADDON_BASES`` (default here: debian-13-amd64,ubuntu-24.04-amd64).
