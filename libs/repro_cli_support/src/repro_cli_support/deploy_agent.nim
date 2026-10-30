@@ -13,7 +13,8 @@
 ##     format),
 ##   * applies the highest valid sequence for ``--target`` via the M4
 ##     ``runInfraApply`` path (build-action outputs substituted from the
-##     binary cache when ``REPRO_BINARY_CACHE_URL`` is set).
+##     binary cache when ``caches.conf`` names one with its trusted keys;
+##     see Binary-Caches.md §"Apply-time substitution and publishing").
 ##
 ## Exit codes: 0 = applied OR already-converged OR waiting (nothing to do
 ## yet); 1 = apply failed / source error (retryable — the timer retries);
