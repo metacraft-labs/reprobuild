@@ -8105,7 +8105,7 @@ proc m9r14hProbeInstallMirrorLibrary*(recipeDir, depName: string): string =
   ## is NEVER re-built within the same dispatcher invocation, even when
   ## the per-process ``fromSourceResolvedRecipes`` cache was cleared
   ## (e.g. by a fresh ``executeBuildTarget`` call from a sub-recurse).
-  let mirrorRoot = recipeDir / ".repro" / "output" / "install" / "usr"
+  let mirrorRoot = recipeDir / installMirrorSubpath() / "usr"
   if not dirExists(extendedPath(mirrorRoot)):
     return ""
   let canon = m9r14dCanonicalizeName(depName)
@@ -8161,7 +8161,7 @@ proc m9r14hProbeInstallMirrorExecutable*(recipeDir, depName: string): string =
   ## Check the install-mirror for a compiled executable artifact.
   ## Probes `<recipeDir>/.repro/output/install/usr/bin/<depName>`
   ## (or with `.exe` on Windows).
-  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  let binDir = recipeDir / installMirrorSubpath() / "usr" / "bin"
   if not dirExists(extendedPath(binDir)):
     return ""
   let bareCandidate = binDir / depName
@@ -8177,7 +8177,7 @@ proc m9r14hInstallMirrorHasExecutable(recipeDir: string): bool =
   ## the ``binutils`` package exposes ``ld``, ``as``, and related tools.
   ## A populated final install-mirror bin directory is sufficient evidence
   ## that such a bootstrap package completed.
-  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  let binDir = recipeDir / installMirrorSubpath() / "usr" / "bin"
   if not dirExists(extendedPath(binDir)):
     return false
   for kind, unusedPath in walkDir(extendedPath(binDir)):
@@ -8214,22 +8214,24 @@ type
 # M9.R.14e.1 — from-source install-tree search-path discovery
 # ---------------------------------------------------------------------------
 
-const FromSourceInstallTreeRoots* = @[
-  # M9.R.14e.1 — installation tree probe roots for a from-source
-  # recipe's sibling install tree. Ordered most-specific first so the
-  # populator emits the M9.R.14e.2 staged-tree first when both layouts
-  # are present.
-  ".repro/output/install/usr",
-  ".repro/output/install",
-  "build/out/usr",
-  # M9.R.15e.11 — some autotools projects (Linux-PAM, glibc) hardcode
-  # libdir=/lib64 in their configure.ac regardless of --prefix, so the
-  # .so files install to ``<destdir>/lib64/`` (no ``/usr/`` segment).
-  # Add the bare destdir root so consumers' LIBRARY_PATH /
-  # CMAKE_PREFIX_PATH find ``<destdir>/lib64/libpam.so`` etc. The
-  # populator's lib + lib64 walk picks up files under either root.
-  "build/out",
-]
+proc fromSourceInstallTreeRoots*(): seq[string] =
+  ## M9.R.14e.1 — installation tree probe roots for a from-source
+  ## recipe's sibling install tree. Ordered most-specific first so the
+  ## populator emits the M9.R.14e.2 staged-tree first when both layouts
+  ## are present. A proc rather than a const since A15: the install mirror
+  ## is keyed by the target (``installMirrorSubpath``).
+  @[
+    installMirrorSubpath() & "/usr",
+    installMirrorSubpath(),
+    "build/out/usr",
+    # M9.R.15e.11 — some autotools projects (Linux-PAM, glibc) hardcode
+    # libdir=/lib64 in their configure.ac regardless of --prefix, so the
+    # .so files install to ``<destdir>/lib64/`` (no ``/usr/`` segment).
+    # Add the bare destdir root so consumers' LIBRARY_PATH /
+    # CMAKE_PREFIX_PATH find ``<destdir>/lib64/libpam.so`` etc. The
+    # populator's lib + lib64 walk picks up files under either root.
+    "build/out",
+  ]
 
 proc addUniquePath*(dst: var seq[string]; value: string) =
   ## Append ``value`` to ``dst`` when it isn't already present AND when
@@ -8249,7 +8251,7 @@ proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
   ## (no transitive walk). Extracted from ``populateFromSourceSearchPaths``
   ## so the M9.R.14f.1 transitive walk can call it per-node without
   ## re-entering the dep-discovery loop.
-  for root in FromSourceInstallTreeRoots:
+  for root in fromSourceInstallTreeRoots():
     let prefixRoot = recipeDir / root
     if not dirExists(extendedPath(prefixRoot)):
       continue
@@ -8751,7 +8753,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # Probe both the install-mirror and the build/out trees for the
     # canonical CMake-config locations.
     var probeRoots: seq[tuple[root: string, layout: string]] = @[]
-    for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+    for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
       let prefixRoot = recipeDir / prefixSubdir
       if dirExists(extendedPath(prefixRoot)):
         probeRoots.add((root: prefixRoot / "share", layout: "share"))
@@ -8797,7 +8799,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # check; PKG_CONFIG_PATH (built from the install-mirror via
     # ``addUniquePath`` in toolProfileFor) takes care of consumption.
     block pcWalk:
-      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
         let prefixRoot = recipeDir / prefixSubdir
         for pcSubdir in ["lib/pkgconfig", "lib64/pkgconfig",
                          "share/pkgconfig"]:
@@ -8819,7 +8821,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # executable, library, pkg-config file, or CMake config. A regular
     # file in the realized share tree is sufficient build evidence.
     block sharedDataWalk:
-      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
         let shareRoot = recipeDir / prefixSubdir / "share"
         if not dirExists(extendedPath(shareRoot)):
           continue
@@ -8833,7 +8835,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # etc/ssl/certs/ca-certificates.crt rather than an executable or
     # library. Treat a regular staged configuration file as build evidence.
     block configurationDataWalk:
-      for etcSubdir in [".repro/output/install/etc", "build/out/etc"]:
+      for etcSubdir in [installMirrorSubpath() & "/etc", "build/out/etc"]:
         let etcRoot = recipeDir / etcSubdir
         if not dirExists(extendedPath(etcRoot)):
           continue
@@ -8850,7 +8852,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # library file cannot satisfy a missing package.
     let depName = name.toLowerAscii
     block packageLibDataWalk:
-      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
         let prefixRoot = recipeDir / prefixSubdir
         for libSubdir in ["lib", "lib64"]:
           let libRoot = prefixRoot / libSubdir
@@ -8874,7 +8876,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # passwd, and libsubid, but no "shadow-utils" binary or library. The
     # install-mirror stamp is written only after the complete prefix has been
     # staged, so it is the package-level completion evidence for this shape.
-    let mirrorStamp = recipeDir / ".repro" / "output" / "install" /
+    let mirrorStamp = recipeDir / installMirrorSubpath() /
       ".m9r14e_2_install_mirror.stamp"
     if fileExists(extendedPath(mirrorStamp)):
       resolved = absolutePath(mirrorStamp)

@@ -704,6 +704,7 @@ libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emi
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5
 libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	3
 libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim	nim	2
+libs/repro_project_dsl/tests/t_install_mirror_target_root.nim	nim	4
 libs/repro_project_dsl/tests/t_l5_environment_reaches_the_service_argv.nim	nim	21
 libs/repro_project_dsl/tests/t_l8_contribution_operation_is_a_second_axis.nim	nim	35
 libs/repro_project_dsl/tests/t_l8_typed_service_facts_reach_the_dev_env_artifact.nim	nim	7

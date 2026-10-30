@@ -7670,6 +7670,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_project_dsl_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_install_mirror_target_root.nim",
+    binary: "build/test-bin/t_install_mirror_target_root",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_project_dsl_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_l5_environment_reaches_the_service_argv.nim",
     binary: "build/test-bin/t_l5_environment_reaches_the_service_argv",
     defines: @["reproProviderMode"],
