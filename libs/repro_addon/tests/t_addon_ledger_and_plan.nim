@@ -574,6 +574,6 @@ suite "the host-wide apply lock and the add-on's roots":
     # preflight requires every add-on root to be absent and the fingerprint
     # records them, so a lock file inside one (it once lived at
     # /run/repro/apply.lock) made every bootstrap refuse itself.
-    let lockPath = hostApplyLockPathFor(0, "", "/tmp")
+    let lockPath = hostApplyLockPathFor(true, "")
     for root in @AddonOwnedRoots & @AddonRootPaths:
       check not (lockPath == root or lockPath.startsWith(root & "/"))
