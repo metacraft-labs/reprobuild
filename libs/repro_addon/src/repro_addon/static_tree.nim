@@ -19,7 +19,7 @@
 ## rewritten atomically at every step boundary; a host that reboots
 ## mid-switch finds exactly the last step completed.
 
-import std/[algorithm, os, posix, strutils]
+import std/[algorithm, os, posix, strutils, times]
 
 import repro_core
 import repro_local_store/store
@@ -341,6 +341,36 @@ proc writePendingMarker*(stateDir: string; m: PendingMarker) =
   stamped.ownerBoot = currentBootId()
   createDir(parentDir(pendingMarkerPath(stateDir)))
   writeFileNoFollow(pendingMarkerPath(stateDir), stamped.render(), 0o600)
+
+proc markerOwnedByCaller*(m: PendingMarker; pid: int; bootId: string): bool =
+  ## Pure: the marker was written by process ``pid`` in the boot
+  ## ``bootId``. A caller holding the host apply lock exclusively asks
+  ## this, not "is the owner alive": the only switch that can be live
+  ## while the caller holds the lock is the caller itself, and an
+  ## unrelated process that reused a dead owner's PID (pid_max is 32768
+  ## on armv7) is alive too. Where the kernel has no boot id (macOS,
+  ## Windows) both sides are "" and the PID alone decides.
+  m.ownerPid > 0 and m.ownerPid == pid and m.ownerBoot == bootId
+
+proc bootTimeUnix*(): int64 =
+  ## The kernel's boot time (``btime`` in /proc/stat), 0 when unknown.
+  try:
+    for line in readFile("/proc/stat").splitLines():
+      if line.startsWith("btime "):
+        return parseBiggestInt(line[6 .. ^1].strip())
+  except CatchableError:
+    discard
+  0
+
+proc markerPredatesBoot*(stateDir: string; bootTime = bootTimeUnix()): bool =
+  ## True when the pending marker was last written before this boot, so no
+  ## process of this boot can be running its switch. False when either
+  ## time is unknown.
+  if bootTime <= 0: return false
+  try:
+    getLastModificationTime(pendingMarkerPath(stateDir)).toUnix() < bootTime
+  except OSError:
+    false
 
 proc markerOwnerLive*(m: PendingMarker): bool =
   ## True when the process that owns the switch is still running it: the

@@ -337,29 +337,65 @@ proc checkCurrent*(stateDir: string; r: var ReassertReport) =
     if e.class == lcUnit and e.collision == "replace":
       r.notes.add(e.unit & ": the add-on's /etc unit shadows the package's")
 
-proc installPendingSwitchGuard*(stateDir = DefaultStateDir) =
-  ## Make every `runInfraApply` on this host recover an interrupted switch
-  ## (the pending marker under ``stateDir``, its owner no longer running)
-  ## before it mutates anything, and refuse when recovery does not resolve
-  ## it. A marker whose owner is live belongs to the switch now running --
-  ## in practice the caller itself, the switch's own infra apply -- and is
-  ## left to it.
-  pendingSwitchGuard = proc (): tuple[ok: bool; why: string] {.closure,
-                                                              gcsafe.} =
+type
+  SwitchRecovery* = proc (stateDir: string): RecoveryOutcome {.closure,
+                                                              gcsafe.}
+    ## How the apply guard recovers a switch: `recoverPendingSwitch` in
+    ## production; a test seam records the call instead of driving
+    ## systemctl and /etc on the test machine.
+
+proc guardStateDirs*(applyStateDir: string): seq[string] =
+  ## Where an interrupted add-on switch's marker can be: the state
+  ## directory of the apply asking (an add-on bootstrapped with
+  ## `--state-dir X` is applied with X), the resolved system state
+  ## directory, and the default. Deduplicated, in that order.
+  for d in [applyStateDir, resolveSystemStateDir(), DefaultStateDir]:
+    if d.len > 0 and d notin result: result.add(d)
+
+proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
+                           pid = getCurrentProcessId();
+                           bootId = currentBootId()):
+    tuple[ok: bool; why: string] =
+  ## The apply-side check (§7.7), run with the host apply lock held. For
+  ## each pending marker: one written by this process, in this boot, is
+  ## the caller's own switch and is left to it. A marker an older build
+  ## wrote (no owner recorded) is recovered only when it predates this
+  ## boot; otherwise the old binary may still be running that switch, and
+  ## the apply refuses. Every other marker belongs to a switch that is
+  ## gone, whatever process now has its PID: it is recovered first, and
+  ## the apply refuses when recovery does not resolve it.
+  for dir in guardStateDirs(applyStateDir):
+    if not hasPendingMarker(dir): continue
+    var m = PendingMarker()
+    var readable = true
+    try:
+      m = readPendingMarker(dir)
+    except CatchableError:
+      readable = false
+    if readable:
+      if markerOwnedByCaller(m, pid, bootId):
+        continue
+      if m.ownerPid == 0 and not markerPredatesBoot(dir):
+        return (false, "the pending marker in " & dir & " records no " &
+          "owner (an older build wrote it) and was written during this " &
+          "boot, so its switch may still be running")
+    let rec = recover(dir)
+    if not (rec.resolved and not rec.deferred):
+      return (false, dir & ": " & rec.lines.join("; "))
+  (true, "")
+
+proc installPendingSwitchGuard*(recover: SwitchRecovery = nil) =
+  ## Make every `runInfraApply` on this host run `checkPendingSwitches`
+  ## before it mutates anything (ReproOS Add-On Mode §7.7).
+  var r = recover
+  if r == nil:
+    r = proc (dir: string): RecoveryOutcome {.closure, gcsafe.} =
+      {.cast(gcsafe).}:
+        recoverPendingSwitch(dir, atBoot = false)
+  pendingSwitchGuard = proc (applyStateDir: string):
+      tuple[ok: bool; why: string] {.closure, gcsafe.} =
     {.cast(gcsafe).}:
-      if not hasPendingMarker(stateDir):
-        return (true, "")
-      var owner = PendingMarker()
-      try:
-        owner = readPendingMarker(stateDir)
-      except CatchableError:
-        discard                     # unreadable: no live owner to defer to
-      if markerOwnerLive(owner):
-        return (true, "")
-      let rec = recoverPendingSwitch(stateDir, atBoot = false)
-      if rec.resolved and not rec.deferred:
-        return (true, "")
-      (false, rec.lines.join("; "))
+      checkPendingSwitches(applyStateDir, r)
 
 installPendingSwitchGuard()
 

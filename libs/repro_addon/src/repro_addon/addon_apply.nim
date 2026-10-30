@@ -1639,13 +1639,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # the host and state-directory locks it already holds (both are
     # re-entrant within the process), so an apply that wins the race with
     # the boot recovery does not leave the host half-switched until the
-    # next boot (§7.7). The add-on layer installs the guard for the
-    # default state directory; elsewhere, and when recovery does not
-    # resolve it, the apply refuses with nothing written.
+    # next boot (§7.7). The guard checks this apply's own state directory
+    # (an add-on bootstrapped with --state-dir is applied with it); when
+    # recovery does not resolve it, the apply refuses with nothing written.
     var why = "run `repro system addon recover` to finish or revert it first"
-    if pendingSwitchGuard != nil and
-        normalizedPath(stateDir) == normalizedPath(DefaultStateDir):
-      let g = pendingSwitchGuard()
+    if pendingSwitchGuard != nil:
+      let g = pendingSwitchGuard(stateDir)
       if not g.ok: why = "recovery did not resolve it: " & g.why
     if hasPendingMarker(stateDir):
       raise newException(AddonApplyError, "an interrupted switch is " &

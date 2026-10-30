@@ -526,8 +526,8 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
       inc result.locallyBuiltActionCount
 
 type
-  PendingSwitchGuard* = proc (): tuple[ok: bool; why: string] {.closure,
-                                                                 gcsafe.}
+  PendingSwitchGuard* = proc (applyStateDir: string):
+    tuple[ok: bool; why: string] {.closure, gcsafe.}
 
 var pendingSwitchGuard*: PendingSwitchGuard = nil
   ## Installed by the add-on layer (`repro_addon/reassert`), which owns the
@@ -578,7 +578,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # Applying on top of a half switch would bury it; the deploy agent would
   # otherwise keep doing exactly that until the next boot.
   if pendingSwitchGuard != nil:
-    let g = pendingSwitchGuard()
+    let g = pendingSwitchGuard(opts.stateDir)
     if not g.ok:
       raise newException(EPendingSwitch, "an interrupted add-on switch " &
         "is pending on this host and recovery did not resolve it; " &
