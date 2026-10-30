@@ -1,29 +1,27 @@
-## Every old spelling is still read, means exactly what its new spelling
-## means, and is never written.
+## Every retired workspace spelling is refused, not read — and refused with
+## the remedy, so an operator still on one is told what to change rather than
+## seeing a workspace silently lose its settings or state.
 ##
-## Workspace-Settings-Files.md §8 step 1 and Workspace-Branch-Roles.md §6 step
-## 1: before any workspace renames a file or rewrites a fragment, a `repro`
-## must ship that reads BOTH spellings and writes only the new ones, and be
-## pinned everywhere. Each fallback below is checked the same way — the old
-## spelling and the new spelling of the same content resolve to the same
-## value — and then a write after reading the old spelling is checked to
-## produce the new name:
+## Workspace-Settings-Files.md §8 step 4 and Workspace-Branch-Roles.md §6 step
+## 3 retire the old spellings once every workspace has migrated. Each is
+## checked here against the same content under the current spelling:
 ##
-## * the settings file: `.repro-workspace.toml` (`bootstrap.v1`) vs
-##   `repro-workspace.toml` (`settings.v1`), including discovery and the
-##   new name winning when both exist;
-## * the old file's `.repro-workspace-private.toml` companion, which must
-##   still supply `[manifest] private_url`;
-## * the state file: `.repro/workspace.toml` (`local.v1`) vs
-##   `.repro/workspace-state.toml` (`state.v1`) — a write after reading the
-##   old file creates the new file and leaves the old one byte-identical;
-## * the fragment: `repo.v1` `branch` vs `repo.v2` `mainline`.
+## * the settings file under its retired name (`bootstrap.v1`): discovery
+##   still stops at the directory that holds it — so the workspace is found
+##   and every command refuses THERE, naming the rename and the rewrite —
+##   instead of walking past it as if there were no settings at all; beside a
+##   current `repro-workspace.toml` it is inert. Its private companion is
+##   never read. The retired schema is refused under the current name too.
+## * the state file under its retired name (`local.v1`): every verb refuses
+##   with the remedy `repro health --fix`, which still migrates it (the one
+##   reader of the retired file); the writers refuse rather than start a
+##   second state file beside it.
+## * the fragment: `repo.v1` (`branch`) is refused at load naming
+##   `repo.v2` and `mainline`, and the writer emits only `repo.v2`.
 ##
-## Each fallback is its own test case, so removing one fails the case that
-## names it. The settings and state fallbacks are also driven through the
-## real `repro` binary (`workspace enable --default` reads the settings
-## file's default projects and writes the state file; `projects list
-## --enabled` reads the state file), so a CLI site that bypassed the shared
+## Each retired spelling is its own test case, so removing a refusal fails
+## the case that names it. The settings and state cases are also driven
+## through the real `repro` binary, so a CLI site that bypassed the shared
 ## discovery would fail here too.
 ##
 ## No mocks: real files in temporary directories, the real reader, writer
@@ -111,10 +109,10 @@ branch = "feature/x"
 feature_started = true
 """
 
+
 proc projectStub(name: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\nname = \"" &
-    name & "\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
-    "includes = [\n]\n"
+    name & "\"\n\nincludes = [\n]\n"
 
 proc workspaceWith(scratch, name: string): string =
   ## A workspace root whose own `projects/` declares alpha, beta and gamma.
@@ -139,24 +137,24 @@ proc enabledSet(root: string): seq[string] =
     if line.strip().len > 0:
       result.add(line.strip().split('\t')[0])
 
-proc sameSettings(a, b: WorkspaceSettings) =
-  # Both fixtures declare the per-workspace push-gateway opt-out, so equality
-  # here proves it is read from (and carried over from) either file.
-  check a.push_gateway == some("off")
-  check a.push_gateway == b.push_gateway
-  check a.projects == b.projects
-  check a.records == b.records
-  check a.develop == b.develop
-  check a.locking == b.locking
-  check a.foreign_env == b.foreign_env
-  check a.verify == b.verify
+proc refusalOf(body: proc ()): ref WorkspaceManifestParseError =
+  ## The structured refusal `body` raises; fails the test when it raises none.
+  try:
+    body()
+  except WorkspaceManifestParseError as e:
+    return e
+  checkpoint("expected a WorkspaceManifestParseError")
+  fail()
 
-suite "old names are read until retired":
+const settingsRemedy = "Rename it to `repro-workspace.toml`"
+const stateRemedy = "`repro health --fix`"
+
+suite "old names are refused once retired":
 
   setup:
     putEnv("REPRO_WORKSPACE_CONFIG", "")
 
-  test "fallback: the settings file's old name resolves like the new one":
+  test "retired: the settings file's old name is refused with the remedy":
     let scratch = createTempDir("repro-old-names-settings-", "")
     defer: removeDir(scratch)
     let fresh = workspaceWith(scratch, "fresh")
@@ -165,24 +163,20 @@ suite "old names are read until retired":
     writeFile(legacy / ".repro-workspace.toml", oldSettings)
 
     check findWorkspaceSettingsPath(fresh) == fresh / "repro-workspace.toml"
-    check findWorkspaceSettingsPath(legacy) == legacy / ".repro-workspace.toml"
-    # Discovery walks up from a subdirectory for both names.
+    # The retired name is not read as settings. It is not walked past either
+    # — the walk refuses at the directory holding it, from below it too.
     createDir(legacy / "sub" / "dir")
-    check findWorkspaceSettingsPath(legacy / "sub" / "dir") ==
-      legacy / ".repro-workspace.toml"
+    for start in [legacy, legacy / "sub" / "dir"]:
+      let e = refusalOf(proc () = discard findWorkspaceSettingsPath(start))
+      check e.path == legacy / ".repro-workspace.toml"
+      check settingsRemedy in e.innerMessage
+      check "[records]" in e.innerMessage
+    # It still marks the workspace root, so a command finds the workspace and
+    # refuses there rather than reporting that there is no workspace.
+    check findWorkspaceRoot(legacy / "sub" / "dir") == legacy
 
-    let s = readWorkspaceSettings(findWorkspaceSettingsPath(fresh))
-    let o = readWorkspaceSettings(findWorkspaceSettingsPath(legacy))
-    check s.schema == schemaWorkspaceSettingsV1
-    check o.schema == schemaWorkspaceBootstrapV1
-    sameSettings(s, o)
-    # The old `[manifest] branch` is also what the root mainline was read
-    # from — but only while that `[manifest]` store IS the root repo. When it
-    # names a separate record store the branch is the store's, not the root's.
-    check o.rootMainline(legacyStoreIsRoot = true) == some("latest")
-    check o.rootMainline(legacyStoreIsRoot = false) == none(string)
-
-    # Both in one directory: the new name wins.
+    # Beside the current file the retired one is inert: the current file
+    # governs.
     writeFile(legacy / "repro-workspace.toml",
       newSettings.replace("\"beta\"", "\"gamma\""))
     check findWorkspaceSettingsPath(legacy) == legacy / "repro-workspace.toml"
@@ -190,52 +184,63 @@ suite "old names are read until retired":
       @["gamma"]
     removeFile(legacy / "repro-workspace.toml")
 
-    # Through the binary: `enable --default` takes the default set from
-    # either file and records it in the NEW state file.
-    for root in [fresh, legacy]:
-      let res = repro(["workspace", "enable", "--default",
-        "--workspace-root=" & root])
-      if res.code != 0:
-        checkpoint(root & ": " & res.output)
-      check res.code == 0
-      check enabledSet(root) == @["beta"]
-      check fileExists(root / ".repro" / "workspace-state.toml")
-      check not fileExists(root / ".repro" / "workspace.toml")
+    # Through the binary: `enable --default` reads the default set from the
+    # current file, and refuses — naming the remedy, writing nothing — under
+    # the retired one.
+    let ok = repro(["workspace", "enable", "--default",
+      "--workspace-root=" & fresh])
+    if ok.code != 0:
+      checkpoint(ok.output)
+    check ok.code == 0
+    check enabledSet(fresh) == @["beta"]
+    let refused = repro(["workspace", "enable", "--default",
+      "--workspace-root=" & legacy])
+    checkpoint(refused.output)
+    check refused.code != 0
+    check ".repro-workspace.toml" in refused.output
+    check settingsRemedy in refused.output
+    check not fileExists(legacy / ".repro" / "workspace-state.toml")
 
-  test "fallback: the old settings file's private companion still applies":
+  test "retired: the old settings file's private companion is never read":
     let scratch = createTempDir("repro-old-names-private-", "")
     defer: removeDir(scratch)
-    let legacy = workspaceWith(scratch, "legacy")
-    writeFile(legacy / ".repro-workspace.toml", oldSettings)
-    writeFile(legacy / ".repro-workspace-private.toml", oldPrivateCompanion)
-    let o = readWorkspaceSettings(findWorkspaceSettingsPath(legacy))
-    check o.privateManifestUrl ==
-      some("git@git.example.invalid:acme/internal-manifests")
-    # The companion belongs to the OLD file only: beside the new file it is
-    # not read (`settings.v1` replaces it with named layers).
     let fresh = workspaceWith(scratch, "fresh")
     writeFile(fresh / "repro-workspace.toml", newSettings)
     writeFile(fresh / ".repro-workspace-private.toml", oldPrivateCompanion)
-    check readWorkspaceSettings(findWorkspaceSettingsPath(fresh)).privateManifestUrl.isNone
+    # A credential-bearing url is a named layer's, supplied by the local
+    # settings file; the old companion contributes no layer at all.
+    let s = readWorkspaceSettings(findWorkspaceSettingsPath(fresh))
+    check s.sharedLayers.len == 0
+    check s.localLayers.len == 0
+    check composeSettingsLayers(s).layers.len == 0
 
-  test "write after a settings fallback read: the new name and schema":
-    let scratch = createTempDir("repro-old-names-settings-write-", "")
+  test "retired: the old settings schema is refused under the current name":
+    let scratch = createTempDir("repro-old-names-settings-schema-", "")
     defer: removeDir(scratch)
-    let legacy = workspaceWith(scratch, "legacy")
-    writeFile(legacy / ".repro-workspace.toml", oldSettings)
-    let o = readWorkspaceSettings(findWorkspaceSettingsPath(legacy))
-    writeWorkspaceManifestFile(legacy / settingsFileName,
-      workspaceSettingsText(o))
-    check settingsFileName == "repro-workspace.toml"
-    check readFile(legacy / settingsFileName).startsWith(
+    let root = workspaceWith(scratch, "renamed-only")
+    writeFile(root / "repro-workspace.toml", oldSettings)
+    let e = refusalOf(proc () =
+      discard readWorkspaceSettings(root / "repro-workspace.toml"))
+    check e.keyPath == "schema"
+    check e.observedSchema == "reprobuild.workspace.bootstrap.v1"
+    check e.expectedSchema == schemaWorkspaceSettingsV1
+    check settingsRemedy in e.innerMessage
+    # What the renderer writes for the same policy is the current schema,
+    # and reads back.
+    var cfg = WorkspaceSettings()
+    cfg.records.url = some("https://git.example.invalid/acme/records.git")
+    cfg.records.branch = some("latest")
+    cfg.records.publish_locks = some(true)
+    cfg.projects.default = @["beta"]
+    writeWorkspaceManifestFile(root / settingsFileName,
+      workspaceSettingsText(cfg))
+    check readFile(root / settingsFileName).startsWith(
       "schema = \"reprobuild.workspace.settings.v1\"")
-    check findWorkspaceSettingsPath(legacy) == legacy / "repro-workspace.toml"
-    let n = readWorkspaceSettings(findWorkspaceSettingsPath(legacy))
-    check n.schema == schemaWorkspaceSettingsV1
-    sameSettings(n, o)
-    check readFile(legacy / ".repro-workspace.toml") == oldSettings
+    let n = readWorkspaceSettings(root / settingsFileName)
+    check n.records == cfg.records
+    check n.projects.default == @["beta"]
 
-  test "fallback: the state file's old name resolves like the new one":
+  test "retired: the state file's old name is refused, and health --fix migrates it":
     let scratch = createTempDir("repro-old-names-state-", "")
     defer: removeDir(scratch)
     let fresh = workspaceWith(scratch, "fresh")
@@ -243,22 +248,51 @@ suite "old names are read until retired":
     createDir(fresh / ".repro")
     createDir(legacy / ".repro")
     writeFile(fresh / ".repro" / "workspace-state.toml", newState)
-    writeFile(legacy / ".repro" / "workspace.toml", oldState)
+    let oldPath = legacy / ".repro" / "workspace.toml"
+    writeFile(oldPath, oldState)
 
     check workspaceTomlPath(fresh) == fresh / ".repro" / "workspace-state.toml"
-    check workspaceTomlPath(legacy) == legacy / ".repro" / "workspace.toml"
-    for root in [fresh, legacy]:
-      check isInitializedWorkspace(root)
-      check readWorkspaceProjects(root) == @["alpha", "gamma"]
-      check readWorkspaceBranch(root) == some("feature/x")
-      check readWorkspaceFeatureStarted(root)
-    check readWorkspaceLocal(workspaceTomlPath(fresh)).workspace ==
-      readWorkspaceLocal(workspaceTomlPath(legacy)).workspace
-    # Through the binary.
+    check readWorkspaceProjects(fresh) == @["alpha", "gamma"]
     check enabledSet(fresh) == @["alpha", "gamma"]
+    # Under the retired name the state is not read as "no state": every
+    # reader refuses, naming the file and the remedy.
+    for read in [proc () = discard workspaceTomlPath(legacy),
+                 proc () = discard readWorkspaceProjects(legacy),
+                 proc () = discard readWorkspaceBranch(legacy),
+                 proc () = discard isInitializedWorkspace(legacy)]:
+      let e = refusalOf(read)
+      check e.path == oldPath
+      check stateRemedy in e.innerMessage
+    # It still marks the workspace root.
+    check findWorkspaceRoot(legacy) == legacy
+    let listed = repro(["workspace", "projects", "list", "--enabled",
+      "--workspace-root=" & legacy])
+    checkpoint(listed.output)
+    check listed.code != 0
+    check stateRemedy in listed.output
+    # The shell prompt is the one reader that must not refuse: it renders on
+    # every prompt, so an unreadable state degrades the segment instead.
+    let prompt = repro(["prompt", "--workspace-root=" & legacy])
+    checkpoint(prompt.output)
+    check prompt.code == 0
+    check stateRemedy notin prompt.output
+
+    # `repro health --fix` is the one reader of the retired file: it moves the
+    # file to the current name, keeping its text, and the workspace reads the
+    # same state again.
+    let fixed = repro(["health", "--fix", "--offline",
+      "--workspace-root=" & legacy])
+    checkpoint(fixed.output)
+    check not fileExists(oldPath)
+    let newPath = legacy / ".repro" / "workspace-state.toml"
+    check fileExists(newPath)
+    check readFile(newPath).startsWith("schema = \"reprobuild.workspace.state.v1\"")
+    check "# Written by an older repro." in readFile(newPath)
+    check readWorkspaceLocal(newPath).workspace ==
+      readWorkspaceLocal(fresh / ".repro" / "workspace-state.toml").workspace
     check enabledSet(legacy) == @["alpha", "gamma"]
 
-  test "write after a state fallback read: the new name, the old file untouched":
+  test "retired: no writer starts a second state file beside the old name":
     let scratch = createTempDir("repro-old-names-state-write-", "")
     defer: removeDir(scratch)
     let legacy = workspaceWith(scratch, "legacy")
@@ -267,30 +301,22 @@ suite "old names are read until retired":
     let newPath = legacy / ".repro" / "workspace-state.toml"
     writeFile(oldPath, oldState)
 
-    # Library writer.
-    writeWorkspaceBranch(legacy, "", "feature/y")
-    check fileExists(newPath)
+    # Library writer: refused, nothing written.
+    let e = refusalOf(proc () = writeWorkspaceBranch(legacy, "alpha", "feature/y"))
+    check stateRemedy in e.innerMessage
+    check not fileExists(newPath)
     check readFile(oldPath) == oldState
-    let migrated = readFile(newPath)
-    check migrated.startsWith("schema = \"reprobuild.workspace.state.v1\"")
-    # Carried across from the old file, not re-rendered: the comment survives.
-    check "# Written by an older repro." in migrated
-    check readWorkspaceBranch(legacy) == some("feature/y")
-    check readWorkspaceProjects(legacy) == @["alpha", "gamma"]
-    check workspaceTomlPath(legacy) == newPath
 
-    # The binary writes the new file too, and the old one stays inert.
+    # The binary refuses too, and leaves both files as they were.
     let res = repro(["workspace", "enable", "beta",
       "--workspace-root=" & legacy])
-    if res.code != 0:
-      checkpoint(res.output)
-    check res.code == 0
-    check enabledSet(legacy) == @["alpha", "gamma", "beta"]
+    checkpoint(res.output)
+    check res.code != 0
+    check stateRemedy in res.output
+    check not fileExists(newPath)
     check readFile(oldPath) == oldState
-    check readWorkspaceLocal(newPath).workspace.projects ==
-      @["alpha", "gamma", "beta"]
 
-  test "fallback: a repo.v1 branch resolves like a repo.v2 mainline":
+  test "retired: a repo.v1 fragment is refused, and the writer emits repo.v2":
     let scratch = createTempDir("repro-old-names-fragment-", "")
     defer: removeDir(scratch)
     let v1 = scratch / "v1.toml"
@@ -299,16 +325,15 @@ suite "old names are read until retired":
       "name = \"w\"\npath = \"w\"\nbranch = \"dev\"\n")
     writeFile(v2, "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
       "name = \"w\"\npath = \"w\"\nmainline = \"dev\"\n")
-    let f1 = readRepoFragment(v1)
+    let e = refusalOf(proc () = discard readRepoFragment(v1))
+    check e.path == v1
+    check e.keyPath == "schema"
+    check "reprobuild.workspace.repo.v2" in e.innerMessage
+    check "`mainline`" in e.innerMessage
     let f2 = readRepoFragment(v2)
-    check f1.repo.mainlineBranch == some("dev")
-    check f1.repo.mainlineBranch == f2.repo.mainlineBranch
-    check f1.repo.roleDecls == f2.repo.roleDecls
+    check f2.repo.mainline == some("dev")
 
-    # Writing either record back produces the v1 spelling: neither declares
-    # anything repo.v1 cannot say (Workspace-Branch-Roles.md §6).
+    # Writing the record back produces the current spelling, byte for byte.
     let rewritten = scratch / "rewritten.toml"
-    writeWorkspaceManifestFile(rewritten, repoFragmentText(f1))
-    check readFile(rewritten) == readFile(v1)
     writeWorkspaceManifestFile(rewritten, repoFragmentText(f2))
-    check readFile(rewritten) == readFile(v1)
+    check readFile(rewritten) == readFile(v2)

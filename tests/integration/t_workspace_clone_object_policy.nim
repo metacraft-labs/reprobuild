@@ -7,8 +7,13 @@
 ## source borrowing its objects independently falsifies accidental inheritance
 ## of alternates: source and pools are removed before fsck on the result.
 ## Bootstrap/cold-init and branch cover independent clone orchestration paths.
-## Invalid flags must refuse before creating workspace state. Git and the CLI
-## are required, so missing prerequisites fail rather than weaken coverage.
+## A manifest layer pinned by `revision` in `repro-workspace.toml`
+## (Workspace-Settings-Files.md §3 — the per-layer pin that replaced the
+## retired bootstrap `[manifest] revision`) must refuse init when its checkout
+## cannot be put at, or is not at, the pin, on every attempt, and must land
+## exactly on the pin when it can. Invalid flags must refuse before creating
+## workspace state. Git and the CLI are required, so missing prerequisites
+## fail rather than weaken coverage.
 
 import std/[algorithm, json, os, osproc, strutils, tempfiles, unittest]
 
@@ -67,20 +72,19 @@ proc projectToml(libUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"ra5proj\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib.toml\",\n]\n"
 
 const libFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib"
 path = "lib"
 remote = "lib-origin"
 revision = "main"
-branch = "main"
+mainline = "main"
 """
 
 proc seedWorkspace(scratch, slug, libUrl: string): string =
@@ -190,7 +194,7 @@ suite "workspace clone object policy":
     discard requireGit(q(gitBin) & " -C " & q(manifest) & " -c user.name=Tester -c user.email=test@example.invalid commit -m fixture")
     let root = scratch / "root"
     createDir(root)
-    writeFile(root / ".repro-workspace.toml", "schema = \"reprobuild.workspace.bootstrap.v1\"\n[manifest]\nurl = \"" & fileUrl(
+    writeFile(root / "repro-workspace.toml", "schema = \"reprobuild.workspace.settings.v1\"\n[records]\nurl = \"" & fileUrl(
         manifest) &
       "\"\nbranch = \"main\"\n[projects]\ndefault = [\"ra5proj\"]\n")
     discard requireGit(q(gitBin) & " init -b main " & q(root))
@@ -229,18 +233,61 @@ suite "workspace clone object policy":
     check privateData["manifestClones"][0]["cloneObjects"].getStr() ==
       "private=" & expandFilename(scratch) / "relative-pool"
     check privateData["cloned"][0]["clonePoolRoot"].getStr() == expandFilename(scratch) / "relative-pool"
+    # A manifest layer pinned by `revision` (the settings mechanism that
+    # replaced the bootstrap `[manifest] revision`). The record store gives
+    # init its manifests; the layer is a second, pinned view of them.
     let refused = scratch / "untrusted-destination"
     createDir(refused)
-    writeFile(refused / ".repro-workspace.toml", "schema = \"reprobuild.workspace.bootstrap.v1\"\n[manifest]\nurl = \"" & fileUrl(manifest) &
-      "\"\nbranch = \"main\"\nrevision = \"" & repeat("0", 40) & "\"\n")
-    # A failed verification must not leave a manifest path a retry accepts.
-    for attempt in 0 .. 1:
-      let bad = runShell(shellCommand(@[reproBin, "workspace", "init", "ra5proj",
+    proc writePinnedLayer(pin: string) =
+      writeFile(refused / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n[records]\nurl = \"" &
+        fileUrl(manifest) & "\"\nbranch = \"main\"\n\n[[manifest]]\nurl = \"" &
+        fileUrl(manifest) & "\"\nvisibility = \"public\"\nrevision = \"" & pin &
+        "\"\n")
+    proc layerCheckouts(): seq[string] =
+      for kind, path in walkDir(refused / ".repro"):
+        if kind == pcDir and path.lastPathPart.startsWith("manifests-"):
+          result.add(path)
+    proc initPinned(): CmdResult =
+      runShell(shellCommand(@[reproBin, "workspace", "init", "ra5proj",
         "--workspace-root=" & refused, "--clone-objects=none"]))
+    # 1. A pin the source cannot resolve refuses, and a failed attempt must
+    #    not leave a layer checkout a retry accepts.
+    writePinnedLayer(repeat("0", 40))
+    for attempt in 0 .. 1:
+      let bad = initPinned()
       checkpoint(bad.output)
       check bad.code != 0
-      check "pinned manifest revision" in bad.output
-      check not dirExists(refused / ".repro/manifests")
+      check fileUrl(manifest) in bad.output
+      check layerCheckouts().len == 0
+    # 2. A pin the source resolves is where the layer lands.
+    let firstPin = requireGit(q(gitBin) & " -C " & q(manifest) &
+      " rev-parse HEAD").strip()
+    writePinnedLayer(firstPin)
+    let good = initPinned()
+    checkpoint(good.output)
+    check good.code == 0
+    let pinnedCheckouts = layerCheckouts()
+    check pinnedCheckouts.len == 1
+    if pinnedCheckouts.len == 1:
+      check requireGit(q(gitBin) & " -C " & q(pinnedCheckouts[0]) &
+        " rev-parse HEAD").strip() == firstPin
+    # 3. Moving the pin past the existing checkout refuses on every attempt:
+    #    the checkout is verified against the pin each time, never accepted
+    #    because it exists.
+    writeFile(manifest / "PIN-MOVED", "second manifest commit\n")
+    discard requireGit(q(gitBin) & " -C " & q(manifest) & " add -A")
+    discard requireGit(q(gitBin) & " -C " & q(manifest) &
+      " -c user.name=Tester -c user.email=test@example.invalid commit -m moved")
+    let secondPin = requireGit(q(gitBin) & " -C " & q(manifest) &
+      " rev-parse HEAD").strip()
+    writePinnedLayer(secondPin)
+    for attempt in 0 .. 1:
+      let moved = initPinned()
+      checkpoint(moved.output)
+      check moved.code != 0
+      check "is not at its pinned revision" in moved.output
+      check secondPin in moved.output
     removeDir(root)
     removeDir(manifest)
     removeDir(origin)

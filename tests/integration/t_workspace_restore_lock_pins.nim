@@ -66,8 +66,8 @@ suite "workspace restore at recorded pins":
       writeFile(origin / "content", "new manifest tip\n")
       tips.add(commit(origin, "tip"))
       writeFile(metadata / "repos" / (name & ".toml"),
-        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\nname = \"" & name &
-        "\"\npath = \"" & name & "\"\nremote = \"local\"\nbranch = \"dev\"\n")
+        "schema = \"reprobuild.workspace.repo.v2\"\n[repo]\nname = \"" & name &
+        "\"\npath = \"" & name & "\"\nremote = \"local\"\nmainline = \"dev\"\n")
       if name == "lib-a":
         let fragment = metadata / "repos" / (name & ".toml")
         writeFile(fragment, readFile(fragment).replace("remote = \"local\"",
@@ -78,7 +78,7 @@ suite "workspace restore at recorded pins":
       writeFile(metadata / "projects" / (project & ".toml"),
         "schema = \"reprobuild.workspace.project.v1\"\nincludes = " & includes &
         "\n[project]\nname = \"" & project &
-            "\"\ndefault_revision = \"dev\"\ntrunk = \"dev\"\n" &
+            "\"\n" &
         "[[remote]]\nname = \"local\"\nfetch = \"file://" & scratch & "\"\n")
     let record = scratch / "record.toml"
     writeFile(record, lock(first[0], first[1]))
@@ -232,10 +232,10 @@ suite "workspace restore at recorded pins":
     let rootCommit = commit(rootOrigin, "root pinned")
     let originalA = readFile(metadata / "repos" / "lib-a.toml")
     writeFile(metadata / "repos" / "root.toml",
-      "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\nname = \"root\"\npath = \".\"\nremote = \"local\"\nbranch = \"dev\"\n")
+      "schema = \"reprobuild.workspace.repo.v2\"\n[repo]\nname = \"root\"\npath = \".\"\nremote = \"local\"\nmainline = \"dev\"\n")
     writeFile(metadata / "projects" / "root.toml",
       "schema = \"reprobuild.workspace.project.v1\"\nincludes = [\"repos/lib-a.toml\", \"repos/root.toml\"]\n" &
-      "[project]\nname = \"root\"\ndefault_revision = \"dev\"\ntrunk = \"dev\"\n" &
+      "[project]\nname = \"root\"\n" &
       "[[remote]]\nname = \"local\"\nfetch = \"file://" & scratch & "\"\n")
     # Put the root member after its child in the manifest to prove execution
     # reorders checkouts safely while preserving membership.

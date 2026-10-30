@@ -1,6 +1,6 @@
 ## Workspace-Membership-Model.md step 2 — RESOLUTION of the membership model:
-## `members`, repo-sets, `url-prefixes/`, per-binding url prefixes, and
-## `branch`.
+## `members`, repo-sets, `url-prefixes/`, per-binding url prefixes, and a
+## fragment's `mainline`.
 ##
 ## Everything here is additive. The load-bearing assertion is the LAST one: an
 ## unconverted project — old `includes` paths, a project-level `[[remote]]`
@@ -35,8 +35,8 @@
 ##      inexpressible, because one shared `name` could only ever compose
 ##      `<other-prefix>/<same-name>`.
 ##   7. The primary binding is always the local git remote `origin`.
-##   8. `branch` wins over `revision` when both are present; `revision` still
-##      resolves alone.
+##   8. `revision` wins over `mainline` for where the checkout SITS when both
+##      are present; the mainline supplies the revision when nothing pins one.
 ##   9. An UNCONVERTED project resolves identically to before — the regression
 ##      guard described above.
 ##
@@ -75,7 +75,7 @@ proc repoSet(root, name: string; memberSets: openArray[string] = [];
 
 proc repoFragment(root, name, body: string) =
   writeManifest(root, "repos" / (name & ".toml"),
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" & body)
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" & body)
 
 proc findRepo(resolved: ResolvedProject; path: string): ResolvedRepo =
   for repo in resolved.repos:
@@ -95,7 +95,7 @@ suite "membership model — resolution":
       repoFragment(root, name,
         "name = \"" & name & "\"\n" &
         "path = \"" & name & "\"\n" &
-        "branch = \"dev\"\n" &
+        "mainline = \"dev\"\n" &
         "url_prefix = \"metacraft-labs\"\n")
     repoSet(root, "shared-infrastructure",
       memberRepos = ["infra", "garm", "metacraft-dev-guidelines"])
@@ -131,7 +131,7 @@ suite "membership model — resolution":
     for name in ["a", "b", "c", "d"]:
       repoFragment(root, name,
         "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-        "branch = \"dev\"\nurl_prefix = \"acme\"\n")
+        "mainline = \"dev\"\nurl_prefix = \"acme\"\n")
     repoSet(root, "first", memberRepos = ["a", "b"])
     repoSet(root, "second", memberRepos = ["c"])
     # `member_repos` is written FIRST in the manifest and names `d`. If
@@ -178,10 +178,10 @@ suite "membership model — resolution":
     repoFragment(root, "metacraft-dev-guidelines",
       "name = \"metacraft-dev-guidelines\"\n" &
       "path = \"metacraft-dev-guidelines\"\n" &
-      "branch = \"latest\"\n" &
+      "mainline = \"latest\"\n" &
       "url_prefix = \"metacraft-labs\"\n")
     repoFragment(root, "app",
-      "name = \"app\"\npath = \"app\"\nbranch = \"dev\"\n" &
+      "name = \"app\"\npath = \"app\"\nmainline = \"dev\"\n" &
       "url_prefix = \"metacraft-labs\"\n")
     repoSet(root, "left", memberRepos = ["metacraft-dev-guidelines", "app"])
     repoSet(root, "right", memberRepos = ["metacraft-dev-guidelines"])
@@ -198,7 +198,7 @@ suite "membership model — resolution":
 
     # A genuine disagreement about one path is a refusal, not a winner.
     repoFragment(root, "app-fork",
-      "name = \"app\"\npath = \"app\"\nbranch = \"dev\"\n" &
+      "name = \"app\"\npath = \"app\"\nmainline = \"dev\"\n" &
       "url_prefix = \"metacraft-labs\"\n" &
       "url_suffix = \"app-fork\"\n")
     repoSet(root, "right-conflicting", memberRepos = ["app-fork"])
@@ -224,14 +224,14 @@ suite "membership model — resolution":
     repoFragment(root, "reprobuild-cmake",
       "name = \"reprobuild-cmake\"\n" &
       "path = \"reprobuild-cmake\"\n" &
-      "branch = \"reprobuild\"\n" &
+      "mainline = \"reprobuild\"\n" &
       "url_prefix = \"metacraft-labs\"\n" &
       "remotes = [{ name = \"upstream\", url_prefix = \"kitware\", " &
         "url_suffix = \"CMake\" }]\n")
     # And the other half of splitting `name`: identity stops carrying URL
     # structure. `0install/0install` was the NAME; now it is the suffix.
     repoFragment(root, "0install",
-      "name = \"0install\"\npath = \"0install\"\nbranch = \"master\"\n" &
+      "name = \"0install\"\npath = \"0install\"\nmainline = \"master\"\n" &
       "url_prefix = \"github\"\n" &
       "url_suffix = \"0install/0install\"\n")
     repoSet(root, "forks", memberRepos = ["reprobuild-cmake", "0install"])
@@ -261,10 +261,10 @@ suite "membership model — resolution":
     # under `member_repos` it is the fragment. Nothing is arbitrated, so
     # nothing depends on which rule won.
     repoFragment(root, "tools",
-      "name = \"tools\"\npath = \"tools\"\nbranch = \"dev\"\n" &
+      "name = \"tools\"\npath = \"tools\"\nmainline = \"dev\"\n" &
       "url_prefix = \"acme\"\n")
     repoFragment(root, "tools-helper",
-      "name = \"tools-helper\"\npath = \"tools-helper\"\nbranch = \"dev\"\n" &
+      "name = \"tools-helper\"\npath = \"tools-helper\"\nmainline = \"dev\"\n" &
       "url_prefix = \"acme\"\n")
     repoSet(root, "tools", memberRepos = ["tools-helper"])
     repoSet(root, "top", memberSets = ["tools"], memberRepos = ["tools"])
@@ -290,12 +290,12 @@ suite "membership model — resolution":
       # see t_sync_honours_branch_and_revision_together for why a fragment
       # legitimately wants both, and for the end-to-end proof that the pin
       # reaches the checkout.
-      "branch = \"dev\"\n" &
+      "mainline = \"dev\"\n" &
       "revision = \"v1.2.3\"\n")
     repoFragment(root, "lib-b",
       "name = \"lib-b\"\npath = \"lib-b\"\n" &
       "url_prefix = \"acme\"\n" &
-      "revision = \"main\"\n")
+      "mainline = \"main\"\n")
     repoSet(root, "libs", memberRepos = ["lib-a", "lib-b"])
     # The membership keys sit BEFORE `[project]`. This is the TOML trap the
     # model's "Consequences" section describes, and it is not fully gone for
@@ -317,7 +317,7 @@ suite "membership model — resolution":
     # is what keeps a branch-only fragment resolving to a legal `--branch`
     # argument.
     let b = findRepo(resolved, "lib-b")
-    check b.branch == ""
+    check b.branch == "main"
     check b.revision == "main"
 
   test "t_unconverted_project_resolves_unchanged":
@@ -327,22 +327,25 @@ suite "membership model — resolution":
     # PATHS, a project-level `[[remote]]` table, `revision`, a
     # `remotes = [{ name, remote }]` binding list, a `.git` fetch base that
     # `getFetchUrl` uses verbatim, and NO `url-prefixes/` directory at all.
+    # Every fragment declares its mainline: that is the fragment schema, and
+    # orthogonal to the URL spellings under test here.
     repoFragment(root, "lib-a",
       "name = \"lib-a\"\npath = \"lib-a\"\nremote = \"acme\"\n" &
-      "revision = \"v1.2.3\"\n")
+      "mainline = \"dev\"\nrevision = \"v1.2.3\"\n")
     repoFragment(root, "lib-b",
-      "name = \"lib-b\"\npath = \"lib-b\"\n")
+      "name = \"lib-b\"\npath = \"lib-b\"\nmainline = \"dev\"\n")
     repoFragment(root, "vendored",
-      "name = \"vendored\"\npath = \"vendored\"\nremote = \"one-off\"\n")
+      "name = \"vendored\"\npath = \"vendored\"\nremote = \"one-off\"\n" &
+      "mainline = \"dev\"\n")
     repoFragment(root, "forked",
-      "name = \"forked\"\npath = \"forked\"\n" &
+      "name = \"forked\"\npath = \"forked\"\nmainline = \"dev\"\n" &
       "remotes = [{ name = \"origin\", remote = \"acme\" }, " &
         "{ name = \"upstream\", remote = \"other\" }]\n")
     writeManifest(root, "projects" / "legacy.toml",
       "schema = \"reprobuild.workspace.project.v1\"\n\n" &
       "[project]\nname = \"legacy\"\n" &
-      "default_revision = \"dev\"\ndefault_remote = \"acme\"\n" &
-      "trunk = \"dev\"\n\n" &
+      "default_remote = \"acme\"\n" &
+      "\n" &
       "[[remote]]\nname = \"acme\"\n" &
       "fetch = \"https://git.example.invalid/acme\"\n\n" &
       "[[remote]]\nname = \"other\"\n" &
@@ -354,20 +357,21 @@ suite "membership model — resolution":
 
     let resolved = resolveProject(root / "projects" / "legacy.toml")
     check resolved.projectName == "legacy"
-    check resolved.defaultRevision == "dev"
-    check resolved.trunk == "dev"
+    # The project names no branch: the workspace branch is the root
+    # repository's mainline, and this fixture's root declares none.
+    check resolved.workspaceMainline == ""
     check resolved.repos.len == 4
 
     let a = findRepo(resolved, "lib-a")
     check a.projectRemote == "acme"
     check a.fetchUrl == "https://git.example.invalid/acme/lib-a"
     check a.revision == "v1.2.3"
-    check a.branch == ""
+    check a.branch == "dev"
     check a.remotes.len == 1
     check a.remotes[0].localName == "origin"
 
     # No `remote` on the fragment: the project's `default_remote` applies, and
-    # the project's `default_revision` supplies the revision.
+    # the fragment's own mainline supplies the revision.
     let b = findRepo(resolved, "lib-b")
     check b.projectRemote == "acme"
     check b.fetchUrl == "https://git.example.invalid/acme/lib-b"

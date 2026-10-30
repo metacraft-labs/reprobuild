@@ -21266,6 +21266,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_retired_branch_role_spellings_are_unknown.nim",
+    binary: "build/test-bin/t_retired_branch_role_spellings_are_unknown",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for c in cases():"),
+  TestSpec(
     source: "tests/integration/t_role_validation_refused_through_repro.nim",
     binary: "build/test-bin/t_role_validation_refused_through_repro",
     defines: @[],
@@ -26139,8 +26150,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
-    source: "tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim",
-    binary: "build/test-bin/t_repo_fragment_writer_emits_v1_when_v1_can_say_it",
+    source: "tests/unit/t_repo_fragment_writer_emits_only_repo_v2.nim",
+    binary: "build/test-bin/t_repo_fragment_writer_emits_only_repo_v2",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

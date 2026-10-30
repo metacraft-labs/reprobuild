@@ -76,8 +76,8 @@ proc reproBinary(): string =
     "reprobuild.apps.repro")
 
 proc repoFragment(name, path, revision: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-    "[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+    "[repo]\nmainline = \"main\"\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & path & "\"\n" &
     "remote = \"acme\"\n" &
@@ -85,8 +85,8 @@ proc repoFragment(name, path, revision: string): string =
 
 proc projectFile(name: string; includes: openArray[string]): string =
   result = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"" & name & "\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"" & name & "\"\n" &
+    "\n" &
     "[[remote]]\nname = \"acme\"\nfetch = \"" & FetchBase & "\"\n\n" &
     "includes = [\n"
   for inc in includes:
@@ -237,7 +237,7 @@ suite "workspace sets resolve — the closure of a requested set, as data":
     # `resolve` does not read the active-set record, so the diagnostic must
     # not attribute the conflict to it (the `[<file>] at key ...` prefix that
     # `enable`'s refusal carries names `.repro/workspace.toml`).
-    check not conflict["message"].getStr.contains("workspace.toml")
+    check not conflict["message"].getStr.contains("workspace-state.toml")
     check treeSnapshot(fx.workspaceRoot) == before
 
     # Without --json the refusal is a diagnostic on stderr, still exit 1.
@@ -246,7 +246,7 @@ suite "workspace sets resolve — the closure of a requested set, as data":
     check human.stdout.len == 0
     check human.stderr.contains("repro workspace projects resolve: ")
     check human.stderr.contains("checkout path 'shared'")
-    check not human.stderr.contains("workspace.toml")
+    check not human.stderr.contains("workspace-state.toml")
 
   test "t_workspace_sets_resolve_error_and_usage_exits":
     let fx = setupFixture("errors")

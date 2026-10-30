@@ -14504,7 +14504,7 @@ proc consumeReportFlag*(arg: string; spec: var ReportSpec): bool =
 proc workspaceReportDir*(workspaceRoot: string): string =
   ## Conventional home for workspace-wide report artifacts. Reports are
   ## derived output, so they live under the WORKSPACE ROOT's disposable
-  ## ``.repro/build/`` tree rather than beside the ``.repro/workspace.toml``
+  ## ``.repro/build/`` tree rather than beside the ``.repro/workspace-state.toml``
   ## metadata. Note this is deliberately the workspace root's build dir and
   ## NOT ``<workspaceRoot>/<repo>/.repro/build/`` — the per-project build dir
   ## that resolves relative to a module path. Nesting disambiguates; no path
@@ -23435,12 +23435,12 @@ proc enumerateParticipatingReposStrict(workspaceRoot: string):
   let explicitGitRoot = gitTopLevel(workspaceRoot)
   let rootIsItsOwnRepo = explicitGitRoot.len > 0 and
     sameFile(explicitGitRoot, workspaceRoot)
-  # DECLARES a workspace — i.e. carries ``.repro/workspace.toml``, whether
+  # DECLARES a workspace — i.e. carries ``.repro/workspace-state.toml``, whether
   # that file lists ``[[manifest]]`` layers or only records the active
   # project. This, and NOT "the directory happens to hold ``projects/`` and
   # ``repos/``", is what separates a workspace root from the manifest lock
   # backend, which has the manifest-shaped directories and no
-  # ``.repro/workspace.toml``.
+  # ``.repro/workspace-state.toml``.
   #
   # The distinction is load-bearing. A single guard — "an explicitly targeted
   # Git worktree is a single-repo hook target" — used to run FIRST, ahead of
@@ -28206,9 +28206,7 @@ type
       ## The enclosing workspace, normalised; "" when there is none.
     rootPreference: seq[string]
       ## The preference of the workspace ROOT repository, from the settings
-      ## file (§3.4): ``[workspace]`` of a ``settings.v1`` file, or the
-      ## mainline the old ``.repro-workspace.toml`` declares for a root that
-      ## is its own record store.
+      ## file's ``[workspace]`` (§3.4).
     membershipResolved: bool
       ## Whether ``project`` holds a DECLARED membership (a manifest checkout
       ## or a compositional workspace state file). A committed-lock-only
@@ -29516,10 +29514,13 @@ proc committedLockDerivedProject(workspaceRoot: string):
         if n notin repos[rootIdx].depends:
           repos[rootIdx].depends.add(n)
     if rootName.len == 0: rootName = "workspace"
+    # A committed-lock-only workspace has no settings file to declare the
+    # root's mainline, so the project's default workspace branch is the ref
+    # its own committed lock records for the root (else ``HEAD``) — what the
+    # lock says, not an inference from a remote.
     return some(ResolvedProject(
       projectName: rootName,
-      defaultRevision: rootRevision,
-      trunk: (if rootRef.len > 0: rootRef else: "HEAD"),
+      workspaceMainline: (if rootRef.len > 0: rootRef else: "HEAD"),
       repos: repos,
       projectFile: lockP))
 
@@ -29551,8 +29552,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
     depends: dependsOn)
   some(ResolvedProject(
     projectName: repoName,
-    defaultRevision: revision,
-    trunk: trunk,
+    workspaceMainline: trunk,
     repos: @[repo] & nestedDeps,
     projectFile: committedLockPath(root)))
 
@@ -35942,7 +35942,7 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
 proc resolveDevelopWorkspacePrimary(
     workspaceRoot: string): ResolvedProject =
   ## M22 reuses the M9/M10 dispatch rule. Composer wins when
-  ## ``.repro/workspace.toml`` declares layers; otherwise we look up the
+  ## ``.repro/workspace-state.toml`` declares layers; otherwise we look up the
   ## single recorded project name (via the M13 metadata-only
   ## workspace.toml) or fall back to a single ``projects/*.toml`` if
   ## exactly one exists. A workspace with no resolvable project surfaces
@@ -35981,8 +35981,7 @@ proc resolveDevelopWorkspacePrimary(
       return resolveProject(candidates[0])
   raise newException(ValueError,
     "`repro develop` could not resolve a project from workspace root '" &
-      workspaceRoot & "' (no .repro/workspace-state.toml or older " &
-      ".repro/workspace.toml, and no single " &
+      workspaceRoot & "' (no .repro/workspace-state.toml, and no single " &
       "projects/*.toml at the workspace root)")
 
 proc resolveDevelopWorkspaceProject(
@@ -41110,10 +41109,8 @@ proc gitRemoteOriginUrl(identity: GitToolIdentity; repoPath: string): string =
   else:
     ""
 
-const stateFileWording = "`.repro/workspace-state.toml` (or the older " &
-    "`.repro/workspace.toml`)"
-  ## How diagnostics name the per-checkout state file while both names are
-  ## read (Workspace-Settings-Files.md §8 step 1).
+const stateFileWording = "`.repro/workspace-state.toml`"
+  ## How diagnostics name the per-checkout state file.
 
 type
   NoActiveProjectSetError* = object of ValueError
@@ -41185,11 +41182,9 @@ proc noProjectSetError*(workspaceRoot, opLabel: string;
 
 proc findBootstrapConfigPath(workspaceRoot: string): string =
   ## Locate the workspace settings file: ``REPRO_WORKSPACE_CONFIG`` when set,
-  ## else ``repro-workspace.toml`` — or, until the old name is retired, the
-  ## old host bootstrap config ``.repro-workspace.toml`` — in
-  ## ``workspaceRoot`` or the nearest ancestor that has one, the new name
-  ## winning within one directory (Workspace-Settings-Files.md §6). Returns
-  ## the empty string when there is none. The one implementation is
+  ## else ``repro-workspace.toml`` in ``workspaceRoot`` or the nearest
+  ## ancestor that has one (Workspace-Settings-Files.md §6). Returns the
+  ## empty string when there is none. The one implementation is
   ## ``findWorkspaceSettingsPath``; this name is kept for the many call sites.
   findWorkspaceSettingsPath(workspaceRoot)
 
@@ -41200,8 +41195,7 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ## Resolution order for the manifest URL/branch:
   ##   1. explicit ``--manifest-url`` / ``--manifest-branch`` (RA-11 flags);
   ##   2. the workspace settings file's record store (``repro-workspace.toml``
-  ##      ``[records] url`` / ``branch``, or the old ``.repro-workspace.toml``
-  ##      ``[manifest] url`` / ``branch`` it maps from), found through
+  ##      ``[records] url`` / ``branch``), found through
   ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo;
   ##   3. the host repo's own ``remote.origin.url``.
   ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
@@ -41233,11 +41227,9 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
         args.manifestUrl = cfg.records.url.get("")
         if cfg.records.branch.isSome and args.manifestBranch.len == 0:
           args.manifestBranch = cfg.records.branch.get()
-      if args.privateManifestUrl.len == 0 and cfg.privateManifestUrl.isSome:
-        args.privateManifestUrl = cfg.privateManifestUrl.get()
       # RA-17 — resolve the manifest-provenance trust anchor from the config's
-      # ``[manifest] revision`` + ``[verify]`` table. Paths in
-      # ``allowed_signers`` are resolved relative to the config's directory.
+      # ``[verify]`` table. Paths in ``allowed_signers`` are resolved relative
+      # to the config's directory.
       # The resulting spec is a no-op unless the config opts into
       # verification. (A flat-layout root clones no manifest repository, so
       # there is nothing for it to verify.)
@@ -41639,7 +41631,7 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
   ## thing an arriving agent reads.
   ##
   ## The content is derived from exactly two sources, and from no disk
-  ## evidence: the ACTIVE SET recorded in ``.repro/workspace.toml`` (what this
+  ## evidence: the ACTIVE SET recorded in ``.repro/workspace-state.toml`` (what this
   ## workspace is for), and the manifests that define those entries (what they
   ## contain). Checkout state is deliberately NOT consulted — a project can be
   ## enabled before its repos are cloned and a stale checkout can outlive a
@@ -42026,7 +42018,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # checkout already exists.
   resolveBootstrapConfig(args)
   let manifestsDir = manifestsRoot(args.workspaceRoot) / "projects"
-  # A compositional ``.repro/workspace.toml`` (one or more ``[[manifest]]``
+  # A compositional ``.repro/workspace-state.toml`` (one or more ``[[manifest]]``
   # layers, M8/M25 semantics) IS the manifest configuration: the composer
   # (``resolveWorkspaceInitProject`` → ``composeManifestLayersFromFile*``)
   # clones each layer URL itself, so such a workspace has no on-disk
@@ -42193,9 +42185,9 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # M13: record the active workspace branch in .repo/workspace.toml so
   # downstream commands (``repro workspace status``, M14 ``repro branch``,
   # M15 ``repro switch``) can read it back as a single source of truth.
-  # The branch value is the declared workspace default (explicit project
-  # trunk, otherwise the root repository's mainline); when neither exists,
-  # retain the historical fallback to ``defaultRevision``. We only write when
+  # The branch value is the declared workspace default: the root repository's
+  # resolved mainline (Workspace-Branch-Roles.md §3.4). With none declared,
+  # nothing is recorded. We only write when
   # we have a meaningful value AND no clone failures (writing on a half-broken init would record a
   # branch the workspace cannot honor). The write is idempotent — if the
   # composer mode already produced a workspace.toml with a branch, this
@@ -42207,13 +42199,11 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     # IT. "This directory is an initialized workspace" is not a fact about
     # branches, and the branch write below is the only thing that used to
     # write the file — so an init that had no branch value left a fully
-    # working workspace with no ``.repro/workspace.toml`` at all.
+    # working workspace with no ``.repro/workspace-state.toml`` at all.
     #
-    # That is reachable rather than theoretical: ``trunk`` and
-    # ``default_revision`` are both ``Option`` fields of ``[project]``, so a
-    # manifest whose repo fragments each pin their own ``revision`` needs
-    # neither. Measured against the previous engine with exactly such a
-    # manifest — both repos cloned, exit 0, ``.repro/`` created, ``repro
+    # That is reachable rather than theoretical: a workspace whose settings
+    # declare no root mainline has no workspace branch to record. Measured
+    # against an earlier engine with exactly such a manifest — both repos cloned, exit 0, ``.repro/`` created, ``repro
     # hooks ensure`` then installing ten hooks across two repos, and no
     # ``workspace.toml`` anywhere. Every predicate that asks for the marker
     # answered "not a workspace" for a workspace that plainly was one, which
@@ -42247,10 +42237,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       except WorkspaceManifestParseError as e:
         stderr.writeLine(
           "workspace init: could not record the workspace marker: " & e.msg)
-    let branchValue =
-      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
-      elif resolved.defaultRevision.len > 0: resolved.defaultRevision
-      else: ""
+    let branchValue = resolved.defaultWorkspaceBranch
     if branchValue.len > 0:
       try:
         writeWorkspaceBranch(args.workspaceRoot,
@@ -42467,8 +42454,8 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
   ##      name) — ALWAYS a new NAMED directory, NEVER cwd or an ancestor;
   ##   3. clone the root repo into that directory;
   ##   4. run the existing ``executeWorkspaceInit`` rooted in that directory,
-  ##      which reads the cloned ``.repro-workspace.toml`` host bootstrap
-  ##      config, bootstraps the manifest cache (RA-11), verifies provenance
+  ##      which reads the cloned ``repro-workspace.toml`` settings file,
+  ##      bootstraps the manifest cache (RA-11), verifies provenance
   ##      (RA-17), and syncs the member repos.
   ## Ends by pointing the user at ``repro health``.
   let parsed = parseColdStartInitArgs(args)
@@ -42523,7 +42510,7 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
     return 1
 
   # (4) Run the existing in-workspace init rooted in the cloned directory. It
-  # reads the cloned ``.repro-workspace.toml`` (host bootstrap config), clones
+  # reads the cloned ``repro-workspace.toml`` (the settings file), clones
   # the manifest into the bootstrap cache, verifies provenance if configured,
   # and syncs the declared member repos — we DO NOT duplicate that logic.
   var innerArgs = @["--workspace-root=" & destAbs]
@@ -43109,9 +43096,21 @@ type
       ## The role (`mainline`, `unstable`, a custom role); "" when none.
     flag: string
       ## The spelling the operator typed (`--unstable`, `--to=unstable`,
-      ## `--from-mainlines`), for diagnostics about the command line itself.
+      ## `--from=unstable`), for diagnostics about the command line itself.
       ## Reports never carry it: a shorthand and its `--to=` spelling must
       ## produce byte-identical reports (§4.1), so they name `role` only.
+
+proc retiredFlagHint(arg: string): string =
+  ## The suffix an "unsupported flag" error carries when ``arg`` is a RETIRED
+  ## spelling, naming what replaced it; "" for any other flag. The flag still
+  ## fails as unknown — this only saves the operator a search for the new
+  ## name.
+  let name = if '=' in arg: arg[0 ..< arg.find('=')] else: arg
+  case name
+  of "--from-mainlines":
+    " (a retired spelling; use `--from=mainline`, or its shorthand " &
+      "`--mainline`)"
+  else: ""
 
 proc branchRolesUsage(msg: string) =
   raise newException(BranchRolesUsageError, msg)
@@ -43168,6 +43167,28 @@ proc requireDeclaredRole(workspaceRoot, role, roleFlag: string) =
       (if roleSettings.path.len > 0: roleSettings.path
        else: "repro-workspace.toml, which this workspace does not have") &
       ")")
+
+proc requireRoleDeclaringWorkspace(workspaceRoot, role, roleFlag: string) =
+  ## Refuse a role in a workspace whose repos can declare none: one that
+  ## resolves its membership from its committed lock alone (no manifests, no
+  ## settings layers), whose repos therefore carry no branch roles at all
+  ## (Workspace-Branch-Roles.md §3.3: roles are declared in fragments and
+  ## profiles). A usage error (exit 2) before anything is fetched, like an
+  ## undeclared role: nothing in this workspace declares the role asked for,
+  ## and inferring a branch for it is what the roles model forbids. Mirrors
+  ## the order of ``resolveWorkspaceProjectShared``: a workspace whose
+  ## settings compose layers, or that carries manifests, resolves from them.
+  if role.len == 0:
+    return
+  if isCompositionalWorkspaceToml(workspaceRoot) or
+      hasResolvedManifestCheckout(workspaceRoot) or
+      not hasCommittedLockWorkspaceMarker(workspaceRoot):
+    return
+  branchRolesUsage(roleFlag & "=" & role & " needs branch roles, and this " &
+    "workspace declares none: it resolves from its committed lock (" &
+    committedLockPath(workspaceRoot) & ") without manifests, so no repo " &
+    "has a declared mainline for '" & role & "' to resolve to. Name a " &
+    "branch instead of a role")
 
 proc roleFallbackText(r: ResolvedRole): string =
   ## §4.4's text annotation of a role reconcile/switch/cut: the branch
@@ -43319,7 +43340,7 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   ## before Reprobuild's native-layout cutover. That migration recorded the
   ## active project set in ``.repo/workspace.toml`` and its completion marker
   ## in ``.repo/.repro-migration-complete``; the later native layout moved
-  ## canonical metadata to ``.repro/workspace.toml`` and membership to the
+  ## canonical metadata to ``.repro/workspace-state.toml`` and membership to the
   ## workspace root.
   ##
   ## Keep native layout authoritative. This helper supplies ONLY the primary
@@ -43327,7 +43348,8 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   ##   * native root-level membership is present;
   ##   * both legacy artifacts are regular, non-symlink files;
   ##   * the completion marker has the exact producer-written body;
-  ##   * the legacy metadata passes the strict WorkspaceLocal reader; and
+  ##   * the legacy metadata passes the strict state reader in its migration
+  ##     form (``readStateFileForMigration``: that tool wrote ``local.v1``); and
   ##   * that project exists in native root-level membership.
   ##
   ## It never composes or resolves content from ``.repo/manifests``. A stray
@@ -43346,8 +43368,11 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
       return ""
     if getFileInfo(metadata, followSymlink = false).kind != pcFile:
       return ""
+    # repo-workspaces v2.10 wrote this file in the state file's earliest
+    # schema (`local.v1`), which only the migration reader still accepts; it
+    # is read here for its project name and nothing else.
     let recorded =
-      readWorkspaceLocal(absolutePath(metadata)).workspace.project
+      readStateFileForMigration(absolutePath(metadata)).workspace.project
     if recorded.len == 0:
       return ""
     let projectFile = nativeProjects / (recorded & ".toml")
@@ -43377,7 +43402,7 @@ proc noNameableProjectError(workspaceRoot, opLabel: string;
   ## default) both diagnostics are byte-identical to what they were.
   ##
   ## WHAT WAS WRONG WITH THE ONE MESSAGE. It named the two things that were
-  ## ABSENT -- "requires either `.repro/workspace.toml` or a <project>
+  ## ABSENT -- "requires either `.repro/workspace-state.toml` or a <project>
   ## argument; neither was present at <root>" -- and said nothing about the
   ## thing that was PRESENT and decisive: membership manifest data at that very
   ## root. For the repository that reaches this most often BOTH remedies it
@@ -43545,7 +43570,7 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs;
     command: string): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
   ## (collapsed from the former per-op copies). Same dispatch rule as M9:
-  ## prefer ``.repro/workspace.toml`` when it
+  ## prefer ``.repro/workspace-state.toml`` when it
   ## declares at least one ``[[manifest]]`` layer (composer mode),
   ## otherwise look up the named project / variant under
   ## ``projects/``. A metadata-only workspace.toml (M13 — only
@@ -45566,7 +45591,7 @@ proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
 #   1. built-in default  — a bare public repo ⇒ the in-repo committed lock.
 #   2. system config     — IT-maintained (REPROBUILD_SYSTEM_CONFIG / /etc/…).
 #   3. user dotfiles     — REPROBUILD_USER_CONFIG / ~/.config/reprobuild/.
-#   4. parent workspace  — the ``.repro-workspace.toml`` ``[locking]`` table.
+#   4. parent workspace  — the ``repro-workspace.toml`` ``[locking]`` table.
 #   5. VCS-private dir   — ``<git-common-dir>/repro/config.toml`` (never pushed).
 #
 # Each non-built-in layer is a ``reprobuild.config.v1`` file that may carry
@@ -45727,8 +45752,7 @@ proc composeForeignEnvAutoLoad*(projectRoot: string; gitBin = ""):
   for path in [systemConfigPath(), userConfigPath()]:
     if path.len > 0 and fileExists(extendedPath(path)):
       foldForeignEnvLayer(readReprobuildConfig(path).foreign_env, result)
-  # Layer 4 — the parent workspace's settings file (`repro-workspace.toml`,
-  # or the old `.repro-workspace.toml`).
+  # Layer 4 — the parent workspace's settings file (`repro-workspace.toml`).
   let bootstrapPath = findBootstrapConfigPath(root)
   if bootstrapPath.len > 0:
     foldForeignEnvLayer(readWorkspaceSettings(bootstrapPath).foreign_env,
@@ -45800,7 +45824,7 @@ proc composeLockingRouting*(workspaceRoot: string; gitBin = ""):
     ComposedRouting =
   ## HL-1 — fold the configuration layers (§4.1) into one composed routing
   ## table, in INCREASING precedence order. The parent-workspace layer (4) is
-  ## the existing single-file ``.repro-workspace.toml`` ``[locking]`` read, so
+  ## the existing single-file ``repro-workspace.toml`` ``[locking]`` read, so
   ## a workspace with only that table composes to exactly those routes and
   ## resolves identically to the pre-HL-1 behavior.
   result = ComposedRouting(routes: @[])
@@ -45809,7 +45833,7 @@ proc composeLockingRouting*(workspaceRoot: string; gitBin = ""):
   readConfigLayerRoutes(systemConfigPath(), clkSystem, root, result.routes)
   # Layer 3 — user dotfiles.
   readConfigLayerRoutes(userConfigPath(), clkUserDotfiles, root, result.routes)
-  # Layer 4 — parent ``.repro-workspace.toml`` ``[locking]`` table.
+  # Layer 4 — parent ``repro-workspace.toml`` ``[locking]`` table.
   let bootstrap = loadLockingRouting(root)
   if bootstrap.route.len > 0:
     let bootstrapSource = findBootstrapConfigPath(root)
@@ -46067,7 +46091,7 @@ proc recordRoutedParticipation*(workspaceRoot: string;
   ## system → dotfiles → parent workspace → VCS-private) resolves each repo to
   ## its ``(tier, backend)`` and records participation; an unrouted private
   ## repo raises ``StoreRoutingError``. A workspace whose only routes are the
-  ## ``.repro-workspace.toml`` ``[locking]`` table composes to exactly those
+  ## ``repro-workspace.toml`` ``[locking]`` table composes to exactly those
   ## routes, so its result is byte-identical to the pre-HL-1 single-table read.
   let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
   if not composed.hasExplicitRoutes: return @[]
@@ -49372,7 +49396,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
           "' but could not re-key .repro/develop-overrides.toml (" & err.msg &
           "); any develop override naming the old path is now stale")
     #
-    #    `.repro/workspace.toml`'s local state is keyed by PROJECT, not by
+    #    `.repro/workspace-state.toml`'s local state is keyed by PROJECT, not by
     #    checkout path, so a rename does not strand it. The sibling ignore set
     #    needs no special handling either: its managed block names the old
     #    path and `refreshWorkspaceSiblingIgnoresBestEffort` is already wired
@@ -50529,17 +50553,11 @@ type
     repos*: seq[MainlineSyncEntry]
     exitCode*: int
 
-proc roleBranchOf(e: MainlineSyncEntry): string =
-  if e.resolvedRole.isSome: e.resolvedRole.get().branch else: ""
-
 proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   result = newJObject()
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["role"] = %report.role
-  # Pre-role marker of this report kind, kept beside `role` until the old
-  # spellings are retired: true exactly when the role is the mainline.
-  result["mainline"] = %(report.role == "mainline")
   result["dryRun"] = %report.dryRun
   result["flavor"] = %report.flavor
   var repos = newJArray()
@@ -50551,10 +50569,6 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
     obj["path"] = %e.path
     obj["branch"] = %e.branch
     obj.addRoleFields(e.resolvedRole, report.role)
-    # The pre-role name of `roleBranch` (Workspace-Branch-Roles.md §4.4),
-    # carried with the same value until the old spellings are retired so a
-    # consumer written against `--mainline` keeps reading it.
-    obj["mainlineBranch"] = %e.roleBranchOf()
     obj["outcome"] = %e.outcome
     obj["action"] = %e.action
     obj["headBefore"] = %e.headBefore
@@ -50714,8 +50728,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     var obs: MainlineSyncObservation
     # The role was resolved when the manifest loaded, from declarations only
     # (`ResolvedRepo.roles`, `roles.nim`); nothing below re-resolves it from
-    # what the remote has. A repo that resolves no role (a legacy fragment
-    # pinning only a `revision`) keeps an empty branch and is refused.
+    # what the remote has. Every repo resolves one: a workspace whose repos
+    # declare no roles was refused before this point
+    # (`requireRoleDeclaringWorkspace`).
     obs.role = args.role
     let roleResolved = repo.roles.findRole(args.role)
     if roleResolved.isSome:
@@ -51095,6 +51110,7 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
     # §4.4: a role this workspace does not declare is a usage error, decided
     # before anything is fetched.
     requireDeclaredRole(parsed.workspaceRoot, parsed.role, "--to")
+    requireRoleDeclaringWorkspace(parsed.workspaceRoot, parsed.role, "--to")
   except BranchRolesUsageError as err:
     stderr.writeLine("repro sync: " & err.msg)
     return 2
@@ -51197,8 +51213,8 @@ type
     profile*: string
     roles*: seq[ResolvedRole]
       ## Every role, or only the requested one. Empty when the repo resolves
-      ## no mainline (a legacy `repo.v1` fragment pinning only `revision`);
-      ## `diagnostic` then says so.
+      ## no roles at all — a workspace resolved from its committed lock
+      ## declares none; `diagnostic` then says so.
     diagnostic*: string
 
   BranchRolesReport* = object
@@ -51210,7 +51226,7 @@ type
       ## The roles printed, in resolution order.
     hasRoot*: bool
       ## Whether `root` is reported: only with no selector, and only when a
-      ## `settings.v1` file can declare the root's roles (§3.4).
+      ## settings file can declare the root's roles (§3.4).
     root*: BranchRolesEntry
     repos*: seq[BranchRolesEntry]
 
@@ -51266,18 +51282,13 @@ proc pickRoles(roles: seq[ResolvedRole]; role: string): seq[ResolvedRole] =
 proc workspaceRootRolesEntry(workspaceRoot, role: string):
     tuple[present: bool; entry: BranchRolesEntry] =
   ## The workspace ROOT repository's roles (§3.4), from the settings file's
-  ## `[workspace]`. Only a `settings.v1` file can declare them; the old
-  ## `.repro-workspace.toml`, or no settings file, yields no entry. A
-  ## `settings.v1` file that declares no root mainline is reported on the
-  ## entry, not raised: the member repos still resolve, and a query should
-  ## show what it can.
+  ## `[workspace]`. No settings file yields no entry. A settings file that
+  ## declares no root mainline is reported on the entry, not raised: the
+  ## member repos still resolve, and a query should show what it can.
   let path = findWorkspaceSettingsPath(workspaceRoot)
-  if path.len == 0 or not fileExists(path) or
-      extractFilename(path) == legacySettingsFileName:
+  if path.len == 0 or not fileExists(path):
     return
   let settings = readWorkspaceSettings(path)
-  if settings.isLegacySettings:
-    return
   result.present = true
   result.entry.name = "(root)"
   result.entry.path = "."
@@ -51319,9 +51330,9 @@ proc executeWorkspaceBranchRoles(parsed: WorkspaceBranchRolesArgs):
     var entry = BranchRolesEntry(name: repo.name, path: repo.path,
       profile: repo.profile, roles: pickRoles(repo.roles, parsed.role))
     if repo.roles.len == 0:
-      entry.diagnostic = "no mainline declared (" & repo.fragmentPath &
-        " is a repo.v1 fragment that pins only a revision), so no role " &
-        "resolves"
+      entry.diagnostic = "no roles declared: this workspace resolves from " &
+        "its committed lock (" & resolved.projectFile & "), which declares " &
+        "no branch roles"
     result.repos.add(entry)
 
 proc toJsonNode(r: ResolvedRole): JsonNode =
@@ -52111,10 +52122,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     report.exitCode = 0
     # On full success, record the converged branch in workspace metadata
     # so downstream commands read a coherent active branch (mirrors init).
-    let branchValue =
-      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
-      elif resolved.defaultRevision.len > 0: resolved.defaultRevision
-      else: ""
+    let branchValue = resolved.defaultWorkspaceBranch
     if branchValue.len > 0:
       try:
         writeWorkspaceBranch(args.workspaceRoot,
@@ -52665,7 +52673,7 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
   ##   1. The explicit ``--record-store-root`` flag (M16 callers,
   ##      multi-tier setups).
   ##   2. The first ``[[manifest]]`` layer in
-  ##      ``.repro/workspace.toml`` (composer mode). For ``local_path``
+  ##      ``.repro/workspace-state.toml`` (composer mode). For ``local_path``
   ##      layers the path is taken verbatim (relative to the
   ##      workspace root); for ``url`` layers it's the on-disk
   ##      checkout the composer materialised at
@@ -56064,7 +56072,7 @@ proc enclosingWorkspaceRoot*(startPath: string;
   ## repo to ITSELF and never reaches the workspace above it. The strict lock
   ## writer then refuses the directory it was handed —
   ##
-  ##   `repro workspace lock` requires either `.repro/workspace.toml` or a
+  ##   `repro workspace lock` requires either `.repro/workspace-state.toml` or a
   ##   <project> argument; neither was present at <repo>
   ##
   ## — and because post-commit is non-blocking by design that refusal is
@@ -56072,7 +56080,7 @@ proc enclosingWorkspaceRoot*(startPath: string;
   ## report naming the failure is filed under the REPO's own ``.repro/`` where
   ## nothing looks for it.
   ##
-  ## So the nearest ancestor carrying ``.repro/workspace.toml`` or a resolved
+  ## So the nearest ancestor carrying ``.repro/workspace-state.toml`` or a resolved
   ## manifest checkout wins. Only when there is no such ancestor does the
   ## manifest-optional marker (MO-2, a committed ``repro.lock``) decide, and
   ## then the nearest one wins — a standalone committed-lock repo really is its
@@ -56085,7 +56093,7 @@ proc enclosingWorkspaceRoot*(startPath: string;
   ## one carries ``projects/`` and so, taken alone, looks like "a resolved
   ## manifest checkout". Accepting it made a push of a declared layer resolve
   ## the layer as its own workspace, and the gate refused with the
-  ## "requires either `.repro/workspace.toml`" error instead of running the
+  ## "requires either `.repro/workspace-state.toml`" error instead of running the
   ## layer checks (the public-lock visibility stage) that exist for exactly
   ## that push. Such a candidate is skipped, so the walk reaches the
   ## workspace that owns the ``.repro/`` it sits in.
@@ -56141,7 +56149,7 @@ proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string 
 #   ``<workspace>/.repro/workspace/<verb>-report.json``
 #     -> ``<workspace>/.repro/build/reports/<verb>-report.json``
 #   "A report is derived output, so it belongs in the disposable
-#    ``.repro/build/`` tree rather than beside the ``.repro/workspace.toml``
+#    ``.repro/build/`` tree rather than beside the ``.repro/workspace-state.toml``
 #    marker."
 #
 # NOT TIDINESS. ``.repro/workspace/`` is where the DURABLE state lives — the
@@ -57605,7 +57613,7 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   # ``projects/``/``repos/`` and is not a workspace). We use the canonical
   # ``isInitializedWorkspace`` marker (resolved manifest checkout OR a
   # ``workspace.toml``) rather than a bare
-  # ``fileExists(.repro/workspace.toml)`` so a workspace that resolves
+  # ``fileExists(.repro/workspace-state.toml)`` so a workspace that resolves
   # from a single ``projects/*.toml`` (no metadata-only workspace.toml
   # yet) still runs, while a genuine non-workspace skips silently. A
   # commit must never be blocked by hook failure, so this always exits 0.
@@ -61161,8 +61169,8 @@ proc runManifestRefreshHookCommand*(hookName: string;
     # initialised .repro): nothing to refresh. Log once so the operator
     # can correlate; never raise.
     appendManifestRefreshLog(timestamp & " " & hookName &
-      " skipped: no workspace state file (.repro/workspace-state.toml or " &
-      "the older .repro/workspace.toml) at " & workspaceRoot)
+      " skipped: no workspace state file (.repro/workspace-state.toml) at " &
+      workspaceRoot)
     reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
@@ -61774,8 +61782,9 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
 
 type
   ManifestLayerLocation* = object
-    ## One entry per ``[[manifest]]`` layer declared in
-    ## ``.repo/workspace.toml``. ``absPath`` is the on-disk directory
+    ## One entry per manifest layer the workspace composes — the root
+    ## repository's base layer, then the settings files' ``[[manifest]]``
+    ## layers. ``absPath`` is the on-disk directory
     ## that owns the layer's project files and (for the first layer)
     ## the lock files. ``visibility`` is the tier declared on the
     ## ``[[manifest]]`` entry. ``provenance`` is the URL or local-path
@@ -67550,8 +67559,8 @@ const
 
 proc workspaceDeclaresGatewayOff(workspaceRoot: string): bool =
   ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` at the top level of
-  ## the workspace settings file (``repro-workspace.toml``, or the old
-  ## ``.repro-workspace.toml``), read through the typed settings reader — the
+  ## the workspace settings file (``repro-workspace.toml``), read through the
+  ## typed settings reader — the
   ## one source of truth for that file, which also refuses any value §7.4
   ## does not define, naming the file and the key.
   ##
@@ -68433,10 +68442,11 @@ proc looksLikeCommitOid(value: string): bool =
 
 proc declaredMainlineBranch(resolved: ResolvedProject;
     repoName: string): string =
-  ## The branch the MANIFEST declares this repo's mainline to be: the repo
-  ## fragment's ``branch``, else its ``revision`` when that names a branch
-  ## rather than a pin, else the declared workspace default (explicit project
-  ## trunk, otherwise the root's mainline). Returns "" when the
+  ## The branch the MANIFEST declares this repo's mainline to be: the repo's
+  ## resolved ``mainline`` (a fragment always resolves one), else — for a repo
+  ## of a committed-lock-only workspace, which resolves no roles — its
+  ## ``revision`` when that names a branch rather than a pin, else the
+  ## project's default workspace branch. Returns "" when the
   ## manifest declares nothing — the caller must not infer one, because a
   ## blanket refusal justified by an inference is exactly the shape that
   ## teaches operators to reach for ``--no-verify``.
@@ -68488,44 +68498,19 @@ proc declaredRoleBranches(resolved: ResolvedProject;
     result.addDirectlyDeclaredRoles(repo.roles)
     break
 
-proc legacyRecordStoreIsRoot(settings: WorkspaceSettings;
-    rootOriginUrl: string): bool =
-  ## Whether the record store an old ``.repro-workspace.toml`` names in
-  ## ``[manifest]`` is the workspace ROOT repository itself — the only case in
-  ## which that table's ``branch`` is the root's mainline (``rootMainline``).
-  ## An absent ``[manifest] url`` names the root. A declared URL is compared
-  ## with the root's ``origin`` by repository identity
-  ## (``canonicalRemoteIdentity``), not by spelling: ``https://h/o/r.git`` and
-  ## ``git@h:o/r`` are one repository. A root with no ``origin`` URL cannot be
-  ## shown to BE the store, so a declared store URL then counts as separate.
-  if settings.records.url.isNone:
-    return true
-  let origin = rootOriginUrl.strip()
-  origin.len > 0 and canonicalRemoteIdentity(origin) ==
-    canonicalRemoteIdentity(settings.records.url.get())
-
-proc rootDeclaredRoleBranches(settings: WorkspaceSettings;
-    rootOriginUrl: string): seq[tuple[role, branch: string]] =
+proc rootDeclaredRoleBranches(settings: WorkspaceSettings):
+    seq[tuple[role, branch: string]] =
   ## Every branch a DECLARED role of the workspace ROOT repository names
   ## (Workspace-Branch-Roles.md §3.4), mainline first, in the shape of
-  ## ``declaredRoleBranches``. Under ``settings.v1``: the mainline and every
-  ## other role ``[workspace]``, the profile it names or the default profile
-  ## declares directly (``resolveRootRoles``). Under the old
-  ## ``.repro-workspace.toml``, which can declare nothing but a mainline: its
-  ## ``[manifest] branch`` when the record store it names is the root itself
-  ## (``rootMainline``, ``legacyRecordStoreIsRoot``).
+  ## ``declaredRoleBranches``: the mainline and every other role
+  ## ``[workspace]``, the profile it names or the default profile declares
+  ## directly (``resolveRootRoles``).
   ##
-  ## Empty when nothing is declared — including a ``settings.v1`` file whose
+  ## Empty when nothing is declared — including a settings file whose
   ## ``[workspace]`` names no mainline, which ``resolveRootRoles`` reports as
   ## an error to the commands that need one. The root's ``origin/HEAD`` is
   ## never read: a refusal justified by an inference is the shape that
   ## teaches operators to reach for ``--no-verify``.
-  if settings.isLegacySettings:
-    let declared = rootMainline(settings,
-      legacyRecordStoreIsRoot(settings, rootOriginUrl))
-    if declared.isSome and declared.get().strip().len > 0:
-      result.add((role: "mainline", branch: declared.get().strip()))
-    return
   var roles: seq[ResolvedRole]
   try:
     roles = resolveRootRoles(settings)
@@ -68546,10 +68531,11 @@ proc refPreferenceFrom(unstable, mainline: string): seq[string] =
 proc rolePreferenceOf(resolved: ResolvedProject;
     repo: ResolvedRepo): seq[string] =
   ## A member repo's ``ref`` preference: its resolved ``unstable`` branch,
-  ## then its resolved ``mainline`` branch. A legacy ``repo.v1`` fragment that
-  ## resolves no roles of its own still has the mainline every other consumer
-  ## reads for it (``declaredMainlineBranch``: a branch-shaped ``revision``,
-  ## else the project's ``trunk``), and its ``unstable`` falls back to that.
+  ## then its resolved ``mainline`` branch. A repo of a committed-lock-only
+  ## workspace resolves no roles; it still has the mainline every other
+  ## consumer reads for it (``declaredMainlineBranch``: a branch-shaped
+  ## ``revision``, else the ref the committed lock records for the root), and
+  ## its ``unstable`` falls back to that.
   if repo.roles.len > 0:
     let unstable = repo.roles.findRole("unstable")
     let mainline = repo.roles.findRole("mainline")
@@ -68559,13 +68545,10 @@ proc rolePreferenceOf(resolved: ResolvedProject;
   refPreferenceFrom("", declaredMainlineBranch(resolved, repo.name))
 
 proc rootRolePreference(workspaceRoot: string): seq[string] =
-  ## The workspace ROOT repository's ``ref`` preference (§3.4): under a
-  ## ``settings.v1`` file, ``[workspace]``'s resolved ``unstable`` then
-  ## ``mainline`` (``resolveRootRoles``); under the old
-  ## ``.repro-workspace.toml``, which can declare nothing but a mainline, that
-  ## mainline (``rootMainline``) when its record store is the root itself.
-  ## Empty with no settings file, or one that declares no root roles. The
-  ## root's ``origin/HEAD`` is never read as its mainline.
+  ## The workspace ROOT repository's ``ref`` preference (§3.4):
+  ## ``[workspace]``'s resolved ``unstable`` then ``mainline``
+  ## (``resolveRootRoles``). Empty with no settings file, or one that declares
+  ## no root roles. The root's ``origin/HEAD`` is never read as its mainline.
   ##
   ## ``ref`` is advisory, so a settings file that cannot be read contributes
   ## no preference here rather than failing the lock write; every command
@@ -68576,19 +68559,6 @@ proc rootRolePreference(workspaceRoot: string): seq[string] =
     return
   try:
     let settings = readWorkspaceSettings(path)
-    if settings.isLegacySettings:
-      var originUrl = ""
-      let gitBin = findExe("git")
-      if gitBin.len > 0:
-        let r = execCmdEx(quoteShell(gitBin) & " -C " &
-          quoteShell(workspaceRoot) & " remote get-url origin",
-          options = {poUsePath}, env = scrubbedGitRepositoryEnv())
-        if r.exitCode == 0: originUrl = r.output.strip()
-      let mainline = rootMainline(settings,
-        legacyRecordStoreIsRoot(settings, originUrl))
-      if mainline.isSome:
-        result = refPreferenceFrom("", mainline.get().strip())
-      return
     let roles = resolveRootRoles(settings)
     let unstable = roles.findRole("unstable")
     let mainline = roles.findRole("mainline")
@@ -69819,28 +69789,18 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # root's mainline from it), and only this one clause is applied — the root
   # gets no wider rewrite policy than a member's.
   #
-  # The old `.repro-workspace.toml` is read only when it parses: resolving a
-  # manifest has never depended on that file (`workspaceRoleSettings`), and a
-  # root push must not start failing on it. A `settings.v1` file is read in
-  # full by membership resolution already, so a read failure here refuses.
+  # The settings file is read in full by membership resolution already, so a
+  # read failure here refuses.
   if currentIsWorkspaceFrameworkRepo and currentRepoName.len == 0 and
       parsed.pushedRefsPath.len > 0:
     let settingsPath = findWorkspaceSettingsPath(parsed.workspaceRoot)
     if settingsPath.len > 0 and fileExists(settingsPath):
-      let isLegacyFile =
-        extractFilename(settingsPath) == legacySettingsFileName
-      var settingsRead = false
-      var settings: WorkspaceSettings
-      try:
-        settings = readWorkspaceSettings(settingsPath)
-        settingsRead = true
-      except CatchableError:
-        if not isLegacyFile: raise
-      if settingsRead:
+      let settings = readWorkspaceSettings(settingsPath)
+      block:
         let origin = gitRunPlain(identity,
           ["-C", parsed.currentRepo, "remote", "get-url", "origin"])
         let originUrl = if origin.code == 0: origin.output.strip() else: ""
-        let rootRoles = rootDeclaredRoleBranches(settings, originUrl)
+        let rootRoles = rootDeclaredRoleBranches(settings)
         if rootRoles.len > 0 and originUrl.len > 0:
           let rootOutgoing = evaluateOutgoingCurrent(identity.binaryPath,
             parsed.currentRepo, parsed.pushedRefsPath, parsed.hookRemoteName,
@@ -70795,7 +70755,14 @@ proc executeCheckPrePush(parsed: CheckArgs;
         let tierLabel =
           if tiers.len > 0: visibilitySetLabel(tiers)
           else: "<undeclared>"
-        let layerProv = currentLayer.get().provenance
+        # A url layer is named by its url; a local layer by its absolute
+        # directory, because the path it was declared with is relative to the
+        # workspace root (the root's own base layer is literally ".").
+        let layerProv =
+          if currentLayer.get().sourceUrl.len > 0 or
+              currentLayer.get().absPath.len == 0:
+            currentLayer.get().provenance
+          else: currentLayer.get().absPath
         result.failures.add(CheckFailure(
           repo: lockedRepo.path,
           property: "lock_references_private_repo",
@@ -70918,8 +70885,7 @@ proc perBackendPublishTargets(parsed: CheckArgs; recordStoreRoot: string;
 proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## MO-14 — central lock PUBLICATION is OPT-IN. Return true ONLY when the host
   ## settings file explicitly sets `[records] publish_locks = true`
-  ## (`repro-workspace.toml`; the old `.repro-workspace.toml` spelled it
-  ## `[manifest] publish_locks`). Absent config file, absent key, or an
+  ## (`repro-workspace.toml`). Absent config file, absent key, or an
   ## explicit `false` all mean COMMITTED-LOCK-ONLY: the pre-push gate still
   ## writes/refreshes and passes, but must NOT publish to the central manifest
   ## repo. Any read/parse error is treated as "not enabled" (fail closed toward
@@ -70931,8 +70897,7 @@ proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## step, which sits outside the gate's error translation.
   # Resolve the config the SAME way ``loadLockingRouting`` resolves the
   # ``[locking]`` table (``findBootstrapConfigPath``: ``REPRO_WORKSPACE_CONFIG``
-  # override → ``<workspaceRoot>/repro-workspace.toml`` (or the old
-  # ``.repro-workspace.toml``) → ancestors), since
+  # override → ``<workspaceRoot>/repro-workspace.toml`` → ancestors), since
   # ``publish_locks`` lives in that very file.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0: return false
@@ -73666,7 +73631,7 @@ type
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
   ## ``repro workspace status`` argv parser. The single optional
   ## positional is the project name (only required when no
-  ## ``.repro/workspace.toml`` is present — same dispatch rule as
+  ## ``.repro/workspace-state.toml`` is present — same dispatch rule as
   ## M10's sync and M11's lock commands). Optional flags:
   ##   ``--workspace-root=PATH``
   ##   ``--tool-provisioning=path|nix|tarball|scoop``
@@ -74064,8 +74029,6 @@ type
     project*: string
     workspaceRoot*: string
     projectFile*: string
-    defaultRevision*: string
-    trunk*: string
     repos*: seq[WorkspaceListRepoEntry]
     exitCode*: int
 
@@ -74074,8 +74037,6 @@ proc toJsonNode*(report: WorkspaceListReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["projectFile"] = %report.projectFile
-  result["defaultRevision"] = %report.defaultRevision
-  result["trunk"] = %report.trunk
   var repos = newJArray()
   for entry in report.repos:
     var obj = newJObject()
@@ -74094,8 +74055,7 @@ proc toJsonNode*(report: WorkspaceListReport): JsonNode =
   result["exitCode"] = %report.exitCode
 
 proc renderListTextLines*(report: WorkspaceListReport): seq[string] =
-  result.add("workspace list: project=" & report.project &
-    (if report.trunk.len > 0: " trunk=" & report.trunk else: ""))
+  result.add("workspace list: project=" & report.project)
   for entry in report.repos:
     var line = "workspace list: " & entry.path & " name=" & entry.name &
       " remote=" & entry.remote & " revision=" & entry.revision
@@ -74189,8 +74149,6 @@ proc executeWorkspaceList(args: WorkspaceListArgs): WorkspaceListReport =
   let resolved = resolveWorkspaceListProject(args)
   report.project = resolved.projectName
   report.projectFile = resolved.projectFile
-  report.defaultRevision = resolved.defaultRevision
-  report.trunk = resolved.trunk
   for repo in resolved.repos:
     report.repos.add(WorkspaceListRepoEntry(
       name: repo.name,
@@ -76077,8 +76035,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # 12b. The state file and the local settings file
   #      (Workspace-Settings-Files.md §4, §5, §8 step 2).
   #
-  #      ``workspace-state-file``: the old ``.repro/workspace.toml`` still in
-  #      use or left over, or ``[[manifest]]`` layers in
+  #      ``workspace-state-file``: the state file still under its retired
+  #      name, or left over beside the current one, or ``[[manifest]]`` layers in
   #      ``.repro/workspace-state.toml`` (every other verb refuses that file).
   #      ``--fix`` moves the file and the layers — and it runs BEFORE the
   #      diagnosis (``runHealthCommand``), because a state file carrying
@@ -76119,7 +76077,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy:
           (if skew:
              "inspect " & workspaceStatePath(parsed.workspaceRoot) & " and " &
-               legacyWorkspaceStatePath(parsed.workspaceRoot) & ", keep the " &
+               retiredWorkspaceStatePath(parsed.workspaceRoot) & ", keep the " &
                "right content in the first, remove the second, then `" &
                self & " health --fix`"
            else: self & " health --fix"),
@@ -76882,7 +76840,7 @@ proc renderManifestsTextLines*(report: WorkspaceManifestsReport):
         report.workspaceTomlPath)
     else:
       result.add("workspace manifests: no workspace metadata " &
-        "(no .repro/workspace-state.toml or older .repro/workspace.toml at " &
+        "(no .repro/workspace-state.toml at " &
         report.workspaceRoot & ")")
     return
   result.add("workspace manifests: project=" & report.project &
@@ -77908,16 +77866,15 @@ type
       ## Fork form only: ``source_head`` when the source checkout supplied the
       ## branch point, ``declared_checkout`` when the repo was absent there and
       ## the target's normally-materialized checkout supplied it,
-      ## ``mainline_head`` under ``--from=<role>`` / ``--from-mainlines`` (the
-      ## tip of the branch the requested role resolved to supplied it, whichever
-      ## of the two the repo is).
+      ## ``mainline_head`` under ``--from=<role>`` or a shorthand (the tip of
+      ## the branch the requested role resolved to supplied it, whichever of
+      ## the two the repo is).
     roleBranch*: string
       ## Fork form under ``--from=<role>`` only: the branch the
       ## ``mainline_head`` baseline was read from — ``dev`` in one repo and
       ## ``latest`` in the next, since roles resolve per repo. Empty when the
       ## baseline came from elsewhere, so a report never asserts a role branch
-      ## nothing consulted. Reported as ``roleBranch`` and, until the old
-      ## spellings are retired, also as ``mainlineBranch``.
+      ## nothing consulted. Reported as ``roleBranch``.
     resolvedRole*: Option[ResolvedRole]
       ## The requested role's resolution for this repo (§4.4's
       ## ``resolvedRole`` / ``fallbackPath``); ``none`` when no role was
@@ -77948,8 +77905,8 @@ type
     form*: string
     branch*: string
     role*: string
-      ## Fork form under ``--from=<role>`` (or a shorthand, or
-      ## ``--from-mainlines``): the role every repo was cut from. "" otherwise.
+      ## Fork form under ``--from=<role>`` (or a shorthand): the role every
+      ## repo was cut from. "" otherwise.
     recordedBranch*: string
     repos*: seq[BranchRepoEntry]
     exitCode*: int
@@ -78003,9 +77960,6 @@ proc toJsonNode*(report: BranchReport): JsonNode =
       # for when there was one.
       obj.addRoleFields(entry.resolvedRole, report.role)
       obj["roleBranch"] = %entry.roleBranch
-    # The pre-role name of `roleBranch`, kept with the same value until the
-    # old spellings are retired.
-    obj["mainlineBranch"] = %entry.roleBranch
     obj["publication"] = %entry.publication
     obj["sourceBranch"] = %entry.sourceBranch
     repos.add(obj)
@@ -78156,9 +78110,8 @@ type
       ## inherited set, which is how a developer forks a narrower (or wider)
       ## slice than they currently have checked out.
     fromRole: RoleChoice
-      ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2), a shorthand, or
-      ## WV-7 ``--from-mainlines`` (``--from=mainline``, kept as an alias until
-      ## the old spellings are retired) — take the repo SET from this
+      ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2) or a shorthand —
+      ## take the repo SET from this
       ## workspace and every repo's STARTING COMMIT from the branch that role
       ## resolves to in that repo, rather than from its source checkout's
       ## HEAD. The two are separable, and a fork that wants "the repos I have,
@@ -78167,7 +78120,7 @@ type
       ## WV-7 ``--fetch`` (the default) / ``--no-fetch`` — whether the declared
       ## mainlines are refreshed before they are read. Default-on for the same
       ## reason as on ``repro switch``: "branch off trunk" means the trunk that
-      ## exists now. Only consulted under ``--from-mainlines``; giving it
+      ## exists now. Only consulted under ``--from=<role>``; giving it
       ## without that flag is a usage error rather than a silent no-op.
     preflightRefusal: string
       ## WV-6 / WV-7 — a guard that fired during parsing (an unusable
@@ -78214,7 +78167,7 @@ proc resolveInvokedWorkspaceRoot(explicit: string): string =
   ## `repro switch` work from inside a member repo — which is where a developer
   ## actually stands. Taking the cwd verbatim made them the only workspace-wide
   ## verbs that had to be run from the root, and the failure was obscure: the
-  ## member repo has no `.repro/workspace.toml`, so the error talked about
+  ## member repo has no `.repro/workspace-state.toml`, so the error talked about
   ## missing metadata rather than about where you were.
   ##
   ## Falls back to the cwd when no ancestor is a workspace, preserving the
@@ -78226,8 +78179,8 @@ proc resolveInvokedWorkspaceRoot(explicit: string): string =
   if ascended.len > 0: ascended else: absolutePath(here)
 
 proc cutsFromRole(parsed: BranchArgs): bool =
-  ## Whether the fork cuts every repo from a branch ROLE (``--from=<role>``,
-  ## a shorthand, ``--from-mainlines``) rather than from the source HEADs.
+  ## Whether the fork cuts every repo from a branch ROLE (``--from=<role>``
+  ## or a shorthand) rather than from the source HEADs.
   parsed.fromRole.role.len > 0
 
 proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
@@ -78275,15 +78228,6 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       explicitBranch = valueFromFlag(args, i, "--branch")
     elif arg == "--existing-branch":
       result.existingBranch = true
-    elif arg == "--from-mainlines":
-      # The pre-role spelling of ``--from=mainline``: the same role, so it
-      # conflicts with a different role exactly as a shorthand would.
-      var j = 0
-      let alias = ["--from=mainline"]
-      discard consumeBranchRoleFlag(alias, j, result.fromRole, verb,
-        roleFlag = "--from")
-      if result.fromRole.role == "mainline":
-        result.fromRole.flag = "--from-mainlines"
     elif consumeBranchRoleFlag(args, i, result.fromRole, verb,
         roleFlag = "--from"):
       # ``--from=<role>`` or a shorthand (§4.2).
@@ -78322,7 +78266,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
-        "unsupported `" & verb & "` flag: " & arg)
+        "unsupported `" & verb & "` flag: " & arg & retiredFlagHint(arg))
     elif result.forkPath.len == 0:
       result.forkPath = arg
     else:
@@ -78346,7 +78290,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
           "`--unpublished` / `--projects` / `--from=<role>` (or a " &
-          "shorthand, or `--from-mainlines`) / `--fetch` require a " &
+          "shorthand) / `--fetch` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
     return
@@ -78357,8 +78301,8 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   if fetchGiven and not result.cutsFromRole:
     raise newException(ValueError,
       "`" & (if result.fetch: "--fetch" else: "--no-fetch") &
-        "` needs `--from=<role>` (or a shorthand such as `--mainline`, or " &
-        "`--from-mainlines`): it decides whether the role branches are " &
+        "` needs `--from=<role>` (or a shorthand such as `--mainline`): " &
+        "it decides whether the role branches are " &
         "refreshed before the new branch is cut from them, and a fork that " &
         "cuts from the source workspace's own HEADs fetches nothing to " &
         "decide about")
@@ -78370,7 +78314,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   # likely to be typed by accident. Failing loudly beats producing a nested
   # workspace that only misbehaves later.
   # WV-7 — ``--existing-branch`` fixes the branch point at a branch that already
-  # exists, so there is no starting commit left for ``--from-mainlines`` to
+  # exists, so there is no starting commit left for ``--from=<role>`` to
   # choose. This is a contradiction rather than a precedence question; letting
   # either win silently would materialize a workspace somewhere the operator did
   # not ask for.
@@ -78837,7 +78781,7 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
     echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
       "[--include-changes] [--unpublished=refuse|carry|declared] " &
       "[--projects=A,B] [--from=<role> | --mainline | --unstable | " &
-      "--staging | --stable | --production | --lts | --from-mainlines] " &
+      "--staging | --stable | --production | --lts] " &
       "[--fetch|--no-fetch] " &
       "[--workspace-root=PATH] [--json] [--write-report[=PATH]]"
     echo "  (no argument)     print the current workspace branch"
@@ -78860,7 +78804,6 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
     echo "                    toward the mainline"
     echo "  --mainline, --unstable, --staging, --stable, --production, --lts"
     echo "                    shorthands for --from=<role>"
-    echo "  --from-mainlines  the older spelling of --from=mainline"
     echo "  --fetch           refresh those role branches first (the default);"
     echo "  --no-fetch        cut from the role refs already on disk"
     echo ""
@@ -79057,10 +79000,6 @@ type
     croDivergedRefused    ## Target branch and its upstream both moved.
                           ## `switch` never repoints a branch, so this is a
                           ## refusal, not a reset.
-    croNoMainlineRefused  ## A role was requested but the fragment resolves
-                          ## no role at all: a legacy ``repo.v1`` fragment
-                          ## pinning only a ``revision``. Retired with
-                          ## ``repo.v1`` reading.
     croNoRoleRef          ## The branch the requested role resolved to is
                           ## absent locally AND on the remote. A refusal,
                           ## never a fallback to another branch
@@ -79124,7 +79063,6 @@ proc switchOutcomeTag(outcome: SwitchRepoOutcome): string =
   of croAlreadyOnBranch: "already_on_branch"
   of croFastForwarded: "fast_forwarded"
   of croDivergedRefused: "diverged_refused"
-  of croNoMainlineRefused: "no_mainline_branch_refused"
   of croNoRoleRef: "no_role_ref"
   of croDirtyRefused: "dirty_refused"
   of croBranchMissingRefused: "branch_missing_refused"
@@ -79391,8 +79329,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   type
     RepoStateKind = enum
       rsReadyLocal, rsReadyFetchAndTrack, rsAlreadyOnBranch,
-      rsBranchMissing, rsDirty, rsProbeFailed, rsDiverged, rsNoMainlineBranch,
-      rsNoRoleRef
+      rsBranchMissing, rsDirty, rsProbeFailed, rsDiverged, rsNoRoleRef
     RepoState = object
       kind: RepoStateKind
       repo: ResolvedRepo
@@ -79465,26 +79402,17 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     state.repoPath = parsed.workspaceRoot / repo.path
     # ``--to=<role>``: the target is the branch the role resolved to for this
     # repo when the manifest loaded — from declarations only, never from what
-    # the remote has (Workspace-Branch-Roles.md §2.2). A legacy fragment that
-    # declares only a ``revision`` pin resolves no role, so it has no branch to
-    # aim at; that is an operator-fixable manifest gap, named rather than
-    # skipped (CLI/switch.md §"--mainline").
+    # the remote has (Workspace-Branch-Roles.md §2.2). Every repo resolves
+    # one: a workspace whose repos declare no roles was refused before this
+    # point (``requireRoleDeclaringWorkspace``).
     if byRole:
       state.resolvedRole = repo.roles.findRole(parsed.role.role)
+      doAssert state.resolvedRole.isSome,
+        "switch: repo '" & repo.path & "' resolved no '" & parsed.role.role &
+          "' role"
     state.target =
       if not byRole: parsed.branchName
-      elif state.resolvedRole.isSome: state.resolvedRole.get().branch
-      else: ""
-    if byRole and state.target.len == 0:
-      state.kind = rsNoMainlineBranch
-      state.reason = "repo '" & repo.path &
-        "' declares no `branch` in its manifest fragment" &
-        (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
-        " — every role falls back to that mainline, so `--to=" &
-        parsed.role.role & "` has no branch to target. Add a `branch` to " &
-        "the fragment, or name a branch explicitly instead of a role."
-      states.add(state)
-      continue
+      else: state.resolvedRole.get().branch
     if not dirExists(state.repoPath / ".git"):
       state.kind = rsProbeFailed
       state.reason = "no on-disk checkout at '" & state.repoPath &
@@ -79637,18 +79565,16 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   var missingCount = 0
   var probeFailures = 0
   var divergedCount = 0
-  var noMainlineCount = 0
   for state in states:
     case state.kind
     of rsDirty: inc dirtyCount
     of rsBranchMissing, rsNoRoleRef: inc missingCount
     of rsProbeFailed: inc probeFailures
     of rsDiverged: inc divergedCount
-    of rsNoMainlineBranch: inc noMainlineCount
     else: discard
 
   if probeFailures > 0 or dirtyCount > 0 or missingCount > 0 or
-      divergedCount > 0 or noMainlineCount > 0:
+      divergedCount > 0:
     # Refuse-and-report path: mutate nothing, surface the per-repo
     # classification. ``rsReadyLocal`` / ``rsReadyFetchAndTrack`` repos
     # report ``ready_*`` (the work was scheduled-then-cancelled by the
@@ -79685,10 +79611,6 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         entry.newBranch = state.previousBranch
       of rsDiverged:
         entry.outcome = switchOutcomeTag(croDivergedRefused)
-        entry.diagnostic = state.reason
-        entry.newBranch = state.previousBranch
-      of rsNoMainlineBranch:
-        entry.outcome = switchOutcomeTag(croNoMainlineRefused)
         entry.diagnostic = state.reason
         entry.newBranch = state.previousBranch
       of rsReadyLocal:
@@ -80145,6 +80067,8 @@ proc runSwitchCommand*(args: openArray[string]): int =
     # §4.4: a role this workspace does not declare is a usage error, decided
     # before anything is fetched.
     requireDeclaredRole(parsed.workspaceRoot, parsed.role.role, "--to")
+    requireRoleDeclaringWorkspace(parsed.workspaceRoot, parsed.role.role,
+      "--to")
   except BranchRolesUsageError as err:
     stderr.writeLine("repro switch: " & err.msg)
     return 2
@@ -80346,7 +80270,7 @@ proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
   ## everything else (and the case of no config / empty list) defaults to
   ## binary. The config is located with the same ``findBootstrapConfigPath``
   ## resolution ``init`` uses (``REPRO_WORKSPACE_CONFIG`` or an ancestor
-  ## ``.repro-workspace.toml``).
+  ## ``repro-workspace.toml``).
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return false
@@ -80355,6 +80279,17 @@ proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
     if prefix.len > 0 and remoteUrl.startsWith(prefix):
       return true
   false
+
+proc defaultProfileMainline(rs: RoleSettings): string =
+  ## The mainline the workspace's default profile declares (§3.2), or "" when
+  ## there is no default profile or it declares none. A fragment naming no
+  ## profile and no mainline of its own resolves its mainline from here.
+  if rs.defaultProfile.isNone:
+    return ""
+  for (name, decls) in rs.profiles:
+    if name == rs.defaultProfile.get():
+      return decls.mainline.get("")
+  ""
 
 proc cloneAddSibling(workspaceRoot, repoPath, fetchUrl, revision: string;
                      identity: GitToolIdentity):
@@ -80412,10 +80347,24 @@ proc executeAdd(parsed: AddArgs): AddReport =
   if mode == amPolicy:
     mode = if policyDevelop: amDevelop else: amBinary
 
+  # The branch a new fragment follows is its `mainline`
+  # (Workspace-Branch-Roles.md §3.1): `--revision` when it names a branch;
+  # else the workspace default profile's mainline, which the fragment then
+  # inherits without restating it; else `main`, the long-standing default of
+  # this verb. A `--revision` that is a commit id is a pin BESIDE that
+  # mainline, never a mainline itself.
+  let revisionIsPin =
+    parsed.revision.len > 0 and looksLikeCommitOid(parsed.revision)
+  let profileMainline =
+    defaultProfileMainline(workspaceRoleSettings(parsed.workspaceRoot))
+  let fragmentMainline =
+    if parsed.revision.len > 0 and not revisionIsPin: parsed.revision
+    elif profileMainline.len > 0: ""
+    else: "main"
   let revision =
     if parsed.revision.len > 0: parsed.revision
-    elif resolved.defaultRevision.len > 0: resolved.defaultRevision
-    else: "main"
+    elif fragmentMainline.len > 0: fragmentMainline
+    else: profileMainline
 
   case mode
   of amPolicy:
@@ -80523,20 +80472,17 @@ proc executeAdd(parsed: AddArgs): AddReport =
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
     let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
-    # Omit `revision` when the fragment would inherit exactly the same value
-    # from the project's `default_revision`; a redundant pin freezes the repo
-    # on the day it was added and silently stops tracking the project's
-    # branch. The key is written only when the caller asked for a specific
-    # revision (`--revision` is an explicit pin, even if it happens to name
-    # the current default) or when there is no `default_revision` to inherit
-    # and `revision` therefore has to be stated.
-    let pinRevision =
-      parsed.revision.len > 0 or resolved.defaultRevision.len == 0
+    # `revision` is written only for a commit pin: a branch is the
+    # fragment's `mainline`, and a redundant pin would freeze the repo on the
+    # day it was added and silently stop it tracking that branch.
     if not fileExists(fragmentAbs):
       writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
         repo: RepoBody(name: parsed.target, path: repoPath,
           remote: some(remoteName),
-          revision: (if pinRevision: some(revision) else: none(string))))))
+          mainline: (if fragmentMainline.len > 0: some(fragmentMainline)
+                     else: none(string)),
+          revision: (if revisionIsPin: some(parsed.revision)
+                     else: none(string))))))
     result.declarationChanged = projectDoc.appendInclude(fragmentRel)
     projectDoc.saveManifestDoc()
     # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
@@ -81286,12 +81232,11 @@ proc forkRoleFor(resolved: ResolvedProject; repo: ResolvedRepo; role: string;
   ## repo resolved when the manifest loaded (``ResolvedRepo.roles``, from
   ## declarations only — the one resolver in ``roles.nim``).
   ##
-  ## A legacy ``repo.v1`` fragment that resolves no mainline of its own still
-  ## has the mainline ``repro branch`` has always read for it — a
-  ## branch-shaped ``revision``, else the project's ``trunk``
-  ## (``declaredMainlineBranch``, CLI/branch.md §"--from-mainlines") — and
-  ## every role falls back to that, through the same resolver. ``none`` when
-  ## there is no mainline at all.
+  ## A repo of a committed-lock-only workspace resolves no roles; it still has
+  ## the mainline ``repro branch`` reads for it — a branch-shaped
+  ## ``revision``, else the ref the committed lock records for the root
+  ## (``declaredMainlineBranch``) — and every role falls back to that,
+  ## through the same resolver. ``none`` when there is no mainline at all.
   if repo.roles.len > 0:
     return repo.roles.findRole(role)
   resolveRoleFromMainline(roleSettings,
@@ -81337,7 +81282,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## replaces that set outright for the new workspace only; the source's
   ## membership is never edited either way.
   ##
-  ## WV-7 ``--from-mainlines`` separates the two things a fork takes from the
+  ## WV-7 ``--from=<role>`` separates the two things a fork takes from the
   ## workspace it runs in: it keeps the repo SET and replaces every baseline
   ## with that repo's manifest-declared mainline tip, so the new workspace is a
   ## fresh deviation from trunk holding exactly the repos you have here.
@@ -81523,18 +81468,17 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       else:
         state.mainlineUndeclared = true
         state.mainlineDiagnostic = "no mainline is declared for '" &
-          repo.path & "': its manifest fragment" &
-          (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
-          " sets no `branch`, its `revision` is a pin rather than a branch, " &
-          "and the project declares no `trunk`. `--from=" &
-          parsed.fromRole.role & "` reads the manifest, and every role falls " &
-          "back to the mainline — declare `branch` in the fragment, or drop " &
-          "the flag to branch from this workspace's own HEADs"
+          repo.path & "': it declares no branch roles, its `revision` is a " &
+          "pin rather than a branch, and the workspace declares no root " &
+          "mainline. `--from=" & parsed.fromRole.role & "` reads the " &
+          "declarations, and every role falls back to the mainline — " &
+          "declare one, or drop the flag to branch from this workspace's " &
+          "own HEADs"
     if not dirExists(state.srcPath / ".git"):
       state.sourcePresent = false
       if not parsed.existingBranch:
         # The baseline comes from the TARGET checkout either way; under
-        # ``--from-mainlines`` it is that checkout's mainline ref rather than
+        # ``--from=<role>`` it is that checkout's role branch ref rather than
         # the revision the manifest/lock materialized.
         state.baselineSource =
           if parsed.cutsFromRole: "mainline_head" else: "declared_checkout"
@@ -81570,7 +81514,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     #
     # Skipped under ``--existing-branch``: there the branch point comes from a
     # branch that already exists on a remote, so there is no source HEAD being
-    # propagated and nothing to judge. WV-7 ``--from-mainlines`` skips it for
+    # propagated and nothing to judge. WV-7 ``--from=<role>`` skips it for
     # the same reason — the branch point is a mainline tip, which is a commit
     # that is on a remote by construction. Leaving ``publicationAsked`` false
     # keeps the report's ``publication`` field EMPTY rather than asserting a
@@ -81645,81 +81589,33 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # The ROOT repo carries the membership manifests, so cutting it from a stale
     # local state while every member repo starts at trunk would hand back a
     # workspace whose bill of materials disagrees with its contents. Its
-    # mainline is a declaration too (Workspace-Branch-Roles.md §3.4):
-    #
-    #   * ``repro-workspace.toml`` (``settings.v1``): resolved from
-    #     ``[workspace]`` — its ``mainline``, else its profile's, else the
-    #     default profile's — and NOTHING else. A settings file that declares
-    #     no root mainline is refused naming the file and
-    #     ``workspace.mainline``; the root repo's ``origin/HEAD`` is never
-    #     consulted, because inferring a mainline from it is the inference the
-    #     roles model forbids for every repo, the root included.
-    #   * the old ``.repro-workspace.toml`` (``bootstrap.v1``), or no settings
-    #     file at all: unchanged — ``[manifest] branch`` when ``[manifest]
-    #     url`` is absent or names the root repo itself, else ``origin/HEAD``.
-    #     Neither can declare ``[workspace]``, so §3.4's rule has nothing to
-    #     read there; it takes over when the workspace migrates to the new
-    #     file, and the fallback goes when the old name is retired.
-    #
-    # The requested role then resolves from that: under ``settings.v1`` by
-    # the ordinary procedure over ``[workspace]`` (``resolveRootRoles``); under
-    # the old file, which can declare nothing but a mainline, every role
-    # falls back to that mainline (``resolveRoleFromMainline``).
+    # mainline is a declaration too (Workspace-Branch-Roles.md §3.4),
+    # resolved from ``repro-workspace.toml``'s ``[workspace]`` — its
+    # ``mainline``, else its profile's, else the default profile's — and
+    # NOTHING else. A settings file that declares no root mainline is refused
+    # naming the file and ``workspace.mainline``, and so is a workspace with
+    # no settings file: the root repo's ``origin/HEAD`` is never consulted,
+    # because inferring a mainline from it is the inference the roles model
+    # forbids for every repo, the root included. The requested role then
+    # resolves from ``[workspace]`` by the ordinary procedure
+    # (``resolveRootRoles``).
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
-    var rootDeclaresRoles = false
     if bootstrapPath.len > 0:
       # A settings file that exists but does not parse raises the strict
-      # reader's diagnostic: falling through to ``origin/HEAD`` would cut the
-      # root from a branch other than the one the file declares.
+      # reader's diagnostic.
       let settings = readWorkspaceSettings(bootstrapPath)
-      # ``[manifest]`` in an old file names the RECORD STORE. Its branch is
-      # the root's mainline only when that store is the root repo; when it is
-      # a separate repository (the split Workspace-Manifests.md requires), the
-      # branch belongs to the store and the root has none of that name.
-      # Compared by repository identity (``canonicalRemoteIdentity``), not by
-      # spelling: ``https://h/o/r.git`` and ``git@h:o/r`` are one repository.
-      # A root without an ``origin`` URL cannot be shown to BE the store, so a
-      # declared store URL then counts as separate.
-      var legacyStoreIsRoot = settings.records.url.isNone
-      if settings.isLegacySettings and not legacyStoreIsRoot:
-        let originUrl = gitRunPlain(identity,
-          ["-C", parsed.workspaceRoot, "remote", "get-url", "origin"])
-        legacyStoreIsRoot = legacyRecordStoreIsRoot(settings,
-          if originUrl.code == 0: originUrl.output else: "")
-      if settings.isLegacySettings:
-        let declared = rootMainline(settings, legacyStoreIsRoot)
-        if declared.isSome:
-          rootRoleBranch = declared.get().strip()
-      else:
-        rootDeclaresRoles = true
-        try:
-          rootRole = resolveRootRoles(settings).findRole(parsed.fromRole.role)
-          if rootRole.isSome:
-            rootRoleBranch = rootRole.get().branch
-        except WorkspaceManifestParseError as err:
-          rootRoleRefusal = err.msg
-    if rootRoleBranch.len == 0 and not rootDeclaresRoles:
-      let headRef = gitRunPlain(identity,
-        ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
-         "refs/remotes/origin/HEAD"])
-      if headRef.code == 0:
-        let value = headRef.output.strip()
-        rootRoleBranch =
-          if value.startsWith("origin/"): value["origin/".len .. ^1]
-          else: value
-    if not rootDeclaresRoles and rootRoleBranch.len > 0:
-      rootRole = resolveRoleFromMainline(sourceRoleSettings, rootRoleBranch,
-        parsed.fromRole.role)
-      if rootRole.isSome:
-        rootRoleBranch = rootRole.get().branch
+      try:
+        rootRole = resolveRootRoles(settings).findRole(parsed.fromRole.role)
+        if rootRole.isSome:
+          rootRoleBranch = rootRole.get().branch
+      except WorkspaceManifestParseError as err:
+        rootRoleRefusal = err.msg
     if rootRoleBranch.len == 0 and rootRoleRefusal.len == 0:
       rootRoleRefusal = "the workspace root '" & parsed.workspaceRoot &
         "' declares no mainline: it has no `" & settingsFileName & "` to " &
-        "declare `[workspace] mainline` in, the old `.repro-workspace.toml` " &
-        "(if any) sets no `[manifest] branch` for a record store that is the " &
-        "root repo itself, and the root repo has no `origin/HEAD` to read one " &
-        "from. Declare `[workspace] mainline` in `" & settingsFileName &
-        "`, or drop `--from=" & parsed.fromRole.role & "`"
+        "declare `[workspace] mainline` in, and the root repo's mainline is " &
+        "never inferred from its remote. Declare `[workspace] mainline` in `" &
+        settingsFileName & "`, or drop `--from=" & parsed.fromRole.role & "`"
 
   if parsed.cutsFromRole and parsed.fetch:
     var fetchActions: seq[BuildAction]
@@ -82062,7 +81958,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     result.exitCode = if anyProbeFailed: 1 else: 2
     return
 
-  # Helper for WV-7 --from-mainlines target repo matching
+  # Helper for WV-7 --from=<role> target repo matching
   proc matchSourceState(targetRepo: ResolvedRepo;
                         states: openArray[ForkSourceState];
                         used: var HashSet[int]): int =
@@ -82198,8 +82094,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       if ts.roleBranch.len == 0:
         ts.probeFailed = true
         ts.probeReason = "no mainline is declared for '" & targetRepo.path & "': " &
-          "its manifest fragment sets no `branch`, its `revision` is a pin rather than a branch, " &
-          "and the project declares no `trunk`"
+          "it declares no branch roles, its `revision` is a pin rather than a branch, " &
+          "and the workspace declares no root mainline"
         targetBaselineProbeFailed = true
         targetStates.add(ts)
         continue
@@ -82315,7 +82211,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         gitForkBranchAction(rootActionId, identity,
           branchName = parsed.branchName,
           sourceRepoPath = parsed.workspaceRoot,
-          # WV-7 — under ``--from-mainlines`` the root repo is cut from its own
+          # WV-7 — under ``--from=<role>`` the root repo is cut from its own
           # declared mainline, so the membership manifests do not lag the
           # members they declare.
           targetSha =
@@ -82555,7 +82451,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # The fork is a WORKSPACE ROOT, and the first thing anything arriving in it
   # reads is the index its `AGENTS.md` / `CLAUDE.md` `@import`s. Without this
   # the forked directory carries its parent's project set in
-  # `.repro/workspace.toml` and no index at all, so every agent entering the
+  # `.repro/workspace-state.toml` and no index at all, so every agent entering the
   # fork is told the workspace is uninitialized. Placed after the metadata
   # writers because it reads what they just recorded.
   refreshWorkspaceProjectsIndexBestEffort(parsed.forkPath, "repro branch")
@@ -91010,7 +90906,7 @@ proc readPromptState(workspaceRoot: string): PromptState =
   ## defensive: a missing or malformed cache degrades to a partial segment
   ## rather than raising (the prompt must never break the user's shell).
   result.inWorkspace = true
-  # Active branch — from ``.repro/workspace.toml`` (filesystem read, no git).
+  # Active branch — from ``.repro/workspace-state.toml`` (filesystem read, no git).
   try:
     let branchOpt = readWorkspaceBranch(workspaceRoot)
     if branchOpt.isSome:
@@ -91156,6 +91052,17 @@ proc parsePromptArgs(args: openArray[string]): PromptArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
+proc promptRootIsInitialized(root: string): bool =
+  ## ``isInitializedWorkspace`` for the prompt, which must never raise. A root
+  ## whose state cannot be read — a malformed state file, or one still under
+  ## its retired name, which every OTHER verb refuses with its remedy — IS an
+  ## initialized workspace: the segment degrades to ``[ws]`` rather than
+  ## breaking the shell (CLI/prompt.md: "each read is defensive").
+  try:
+    isInitializedWorkspace(root)
+  except WorkspaceManifestParseError:
+    true
+
 proc runPromptCommand*(args: openArray[string]): int =
   ## ``repro prompt`` — print a compact ambient workspace-state segment for
   ## a shell prompt / statusline. Reads ONLY cheap cached state (no
@@ -91163,7 +91070,7 @@ proc runPromptCommand*(args: openArray[string]): int =
   ## safe to drop into any prompt unconditionally. Read-only: no side
   ## effects, never blocks on the network.
   ##
-  ## Workspace notices (state-file skew, skipped settings layers) are
+  ## Workspace notices (skipped settings layers) are
   ## suppressed for the whole render (``withoutWorkspaceNotices``): they are
   ## stderr output the prompt did not ask for, printed on EVERY render, and
   ## computing them reads and decodes the settings files — neither fits a
@@ -91181,12 +91088,12 @@ proc runPromptCommand*(args: openArray[string]): int =
   withoutWorkspaceNotices:
     let root =
       if parsed.explicitWorkspaceRoot:
-        if isInitializedWorkspace(parsed.workspaceRoot):
+        if promptRootIsInitialized(parsed.workspaceRoot):
           parsed.workspaceRoot
         else: ""
       else:
         let found = ascendToWorkspaceRoot(parsed.workspaceRoot)
-        if found.len > 0 and isInitializedWorkspace(found): found else: ""
+        if found.len > 0 and promptRootIsInitialized(found): found else: ""
     if root.len == 0:
       # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
       # requirement — safe to call unconditionally with no shell guards).
@@ -93039,7 +92946,7 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## NOT ``resolveInvokedWorkspaceRoot`` on its own, and the difference is
   ## load-bearing rather than cosmetic. That helper stops at the nearest
   ## ancestor satisfying ``isInitializedWorkspace``, which is true of a
-  ## directory carrying **either** a workspace shell (``.repro/workspace.toml``)
+  ## directory carrying **either** a workspace shell (``.repro/workspace-state.toml``)
   ## **or**, by MO-2, a committed ``repro.lock`` of its own. A participating
   ## repo of a multi-repo workspace normally has both a committed lock and
   ## siblings one level up — so the generic ascent stops at the REPO, resolves
@@ -93054,7 +92961,7 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## inert knob, arrived at from a different direction.
   ##
   ## So the workspace SHELL wins when there is one: walk up looking for
-  ## ``.repro/workspace.toml`` first, and only fall back to the generic marker
+  ## ``.repro/workspace-state.toml`` first, and only fall back to the generic marker
   ## when no ancestor carries one (the manifest-optional, single-repo case that
   ## MO-2 marker exists for).
   ## The ascent itself now lives in ``workspaceShellFirstRoot``, which
@@ -99656,7 +99563,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     except WorkspaceProjectSetConflictError as exc:
       status = "conflict"
       # The INNER message, not `msg`: `msg` carries a "[<file>] at key ..."
-      # prefix written for `enable`, which names `.repro/workspace.toml` /
+      # prefix written for `enable`, which names `.repro/workspace-state.toml` /
       # `workspace.projects` — the active-set record. `resolve` never consults
       # that record, so the prefix would misattribute the conflict. The inner
       # message already names the path, both sources and the differing facts.
@@ -99806,8 +99713,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     var templateSource = "--template"
     if templateName.len == 0 and not noTemplate:
       templateName = readDefaultTemplateFromHostConfig(workspaceRoot)
-      # Name the file the default actually came from — `repro-workspace.toml`,
-      # or the old `.repro-workspace.toml` still read during the rename.
+      # Name the file the default actually came from.
       let configName = extractFilename(findBootstrapConfigPath(workspaceRoot))
       templateSource =
         (if configName.len > 0: configName else: settingsFileName) &
@@ -99846,12 +99752,10 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     # would invite the next entry into whichever happened to be there.
     #
     # A new repo-set carries only a name and its membership — no
-    # `default_revision` / `default_remote`, which would make a member resolve
-    # differently depending on who referenced it. A new project carries no
-    # remotes and no `default_revision` either: revision is lock territory, and
-    # a stub that kept emitting it would re-seed the field every manifest
-    # conversion deletes. `trunk` stays: it is live data with no other
-    # declaration site (`repro branch`, `repro switch`, `workspace init`).
+    # `default_remote`, which would make a member resolve differently
+    # depending on who referenced it. A new project carries no remotes and
+    # names no branch: each repo's branch is its own `mainline`, and the
+    # workspace branch is the root repository's (repro-workspace.toml).
     writeWorkspaceManifestFile(fileAbs,
       if addDir == "repo-sets":
         repoSetText(RepoSetManifest(schema: schemaRepoSetV1,
@@ -99859,7 +99763,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
           member_sets: seed.memberSets, member_repos: seed.memberRepos))
       else:
         projectManifestText(ProjectManifest(schema: schemaProjectManifestV1,
-          project: ProjectBody(name: name, trunk: some("main")),
+          project: ProjectBody(name: name),
           member_sets: seed.memberSets, member_repos: seed.memberRepos)))
     var paths = @[fileRel]
     if desc.len > 0:
@@ -100144,7 +100048,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # a half-converted manifest repo shows what is there rather than a
         # blank column for every converted fragment.
         remote = m.repo.url_prefix.get(m.repo.remote.get(""))
-        revision = m.repo.revision.get(m.repo.mainlineBranch.get(""))
+        revision = m.repo.revision.get(m.repo.mainline.get(""))
       except CatchableError as err:
         # Still listed — this listing is the remedy other diagnostics point
         # at for a fragment the reader refuses (an escaping checkout path) —
@@ -100297,8 +100201,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       if revision.len > 0 and existing.repo.revision.get("") != revision:
         conflicts.add("revision (" & existing.repo.revision.get("(inherited)") &
           " vs " & revision & ")")
-      if branch.len > 0 and existing.repo.mainlineBranch.get("") != branch:
-        conflicts.add("mainline (" & existing.repo.mainlineBranch.get("(none)") &
+      if branch.len > 0 and existing.repo.mainline.get("") != branch:
+        conflicts.add("mainline (" & existing.repo.mainline.get("(none)") &
           " vs " & branch & ")")
       if conflicts.len > 0:
         stderr.writeLine("repro workspace repos add: '" & repo &
@@ -100307,17 +100211,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           " directly if the declaration itself should change")
         return 1
 
-    # Workspace-Membership-Model.md — "every repo fragment declares its own
-    # branch … written once per repo, by hand, when the repo is added". A NEW
-    # fragment with neither `--branch` nor `--revision` would declare neither
-    # key, and this is where that has to be caught.
-    #
-    # It used to resolve anyway, by inheriting the project's
-    # `default_revision` — which is precisely the collection-level default the
-    # model removes, and the reason a fragment declaring nothing was writable
-    # in the first place. With that field gone from the stub, the same input
-    # writes a fragment that resolves to an empty revision: an invalid state,
-    # authored silently, discovered by whoever syncs next.
+    # Workspace-Branch-Roles.md §3.3 — every repo resolves a `mainline`: its
+    # fragment's own, or the one the workspace default profile supplies. A NEW
+    # fragment without `--branch` (written as `mainline`) in a workspace whose
+    # default profile supplies none would not load, and this is where that
+    # has to be caught. `--revision` alone does not fill it: a commit pin sits
+    # BESIDE a mainline, it is not one.
     #
     # The branch is NOT inferred to fill the gap. Deriving it from the remote's
     # default was considered and rejected: measured across this workspace the
@@ -100329,26 +100228,31 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     # Placed before the first write of ANY file — ahead of the url-prefix
     # minting in the loop below — so a refused `add` leaves nothing behind, and
     # ahead of the remote probe so it costs no network round trip.
-    if not fragmentExisted and branch.len == 0 and revision.len == 0:
+    if not fragmentExisted and branch.len == 0 and
+        defaultProfileMainline(workspaceRoleSettings(workspaceRoot)).len == 0:
       stderr.writeLine("repro workspace repos add: " & repo &
         ": --branch is required when declaring a new repo")
-      stderr.writeLine("  Every repo fragment declares the branch it tracks. " &
-        "There is no workspace default and none is inferred, so a fragment " &
-        "that names no branch has no checkout to resolve to.")
+      stderr.writeLine("  Every repo fragment declares the branch it tracks " &
+        "as its `mainline`, unless the workspace's `[workspace] " &
+        "default_profile` supplies one, which this workspace's does not. " &
+        "None is inferred, so a fragment that names no branch has no " &
+        "checkout to resolve to.")
       stderr.writeLine("  Add the branch this repo's mainline lives on, e.g.:")
       stderr.writeLine("    repro workspace repos add " & repo &
         " --remote=" & remote & " --branch=dev")
-      stderr.writeLine("  Use --revision=<commit> INSTEAD only to pin a " &
-        "vendored source tree to an exact commit, or alongside --branch to " &
+      stderr.writeLine("  Add --revision=<commit> alongside --branch to " &
         "say \"tracks <branch>, sits at <commit>\".")
       stderr.writeLine("  Nothing was written.")
       return 2
 
-    # `--branch` is validated the same way `--revision` always was, and for the
-    # same reason: a manifest naming a branch that does not exist authors fine
-    # and fails at sync time on everyone else's machine.
-    let requestedRef = if branch.len > 0: branch else: revision
-    if requestedRef.len > 0 and not fragmentExisted:
+    # `--branch` and `--revision` are each validated against the remote, for
+    # the same reason: a manifest naming a branch or a pin that does not exist
+    # authors fine and fails at sync time on everyone else's machine. Both are
+    # checked when both are given — "tracks <branch>, sits at <commit>" is the
+    # pinned form now that a pin always sits beside a mainline.
+    for requestedRef in [branch, revision]:
+      if requestedRef.len == 0 or fragmentExisted:
+        continue
       let check = remoteRevisionState(gitBin, remote, requestedRef)
       if check.state == rrsMissing:
         stderr.writeLine("repro workspace repos add: '" & requestedRef &
@@ -100385,12 +100289,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            # `--branch` is the mainline. The writer picks the schema: v1
-            # (`branch`) unless the fragment needs v2 (Branch-Roles §6), so a
-            # `repro` that predates v2 keeps reading the workspace.
+            # `--branch` is the mainline (Branch-Roles §3.1).
             repo: RepoBody(name: repo, path: effectivePath,
               mainline: (if branch.len > 0: some(branch) else: none(string)),
-              revision: (if branch.len == 0 and revision.len > 0: some(revision)
+              # A pin sits beside the mainline: written whenever given, as
+              # the project path below writes it.
+              revision: (if revision.len > 0: some(revision)
                          else: none(string)),
               url_prefix: some(plan.prefixName),
               # `url_suffix` is written only when it differs from `name` — the

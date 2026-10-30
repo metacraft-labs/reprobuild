@@ -29,15 +29,14 @@ suite "health disjoint local branches":
     writeFile(ws / "projects/lib-a.toml", """schema = "reprobuild.workspace.project.v1"
 [project]
 name = "lib-a"
-default_revision = "main"
-trunk = "main"
 [[remote]]
 name = "origin"
 fetch = "ORIGIN"
 includes = ["repos/lib-a.toml"]
 """.replace("ORIGIN", root / "origin.git"))
-    writeFile(ws / "repos/lib-a.toml", """schema = "reprobuild.workspace.repo.v1"
+    writeFile(ws / "repos/lib-a.toml", """schema = "reprobuild.workspace.repo.v2"
 [repo]
+mainline = "main"
 name = "lib-a"
 path = "lib-a"
 remote = "origin"

@@ -143,19 +143,18 @@ proc projectToml(coreUrl, teamUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"team-origin\"\nfetch = \"" & teamUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n  \"repos/team-lib.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc committedLock(url, sha: string): string =
   "schema = \"reprobuild.solved-graph-lock.v2\"\n\n" &
@@ -222,16 +221,16 @@ suite "NF-1: an unreadable workspace refuses; it never answers empty":
         discard requireGit(q(gitBin) & " clone " &
           q("file://" & scratch / ("origin-" & name & ".git")) & " " &
           q(ws / name))
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\n" &
         "project = \"mix\"\n" &
         "branch = \"main\"\n")
       writeFile(ws / "repro.lock",
         committedLock("file://" & coreOrigin, coreSha))
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n")
 
       createDir(ws / ".git" / "repro")

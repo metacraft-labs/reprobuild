@@ -1940,6 +1940,7 @@ tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_reproos_uki_through_the_cvm_path.nim	nim	8
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
 tests/integration/t_reseal_on_generation_switch.nim	nim	4
+tests/integration/t_retired_branch_role_spellings_are_unknown.nim	nim	1
 tests/integration/t_role_validation_refused_through_repro.nim	nim	1
 tests/integration/t_roles_resolve_from_settings_committed_at_the_revision.nim	nim	1
 tests/integration/t_rp1_provider_compile_edge_materializes.nim	nim	1
@@ -2148,7 +2149,7 @@ tests/integration/t_workspace_manifests_resolve_reprobuild_project.nim	nim	4
 tests/integration/t_workspace_manifests_resolve_variant_overrides_revision.nim	nim	6
 tests/integration/t_workspace_manifests_snapshot_round_trip.nim	nim	5
 tests/integration/t_workspace_manifests_variant_manifest_round_trip.nim	nim	5
-tests/integration/t_workspace_manifests_workspace_local_round_trip.nim	nim	5
+tests/integration/t_workspace_manifests_workspace_local_round_trip.nim	nim	7
 tests/integration/t_workspace_marker_accepts_committed_lock_only_repo.nim	nim	1
 tests/integration/t_workspace_membership_enable_disable.nim	nim	4
 tests/integration/t_workspace_metadata_branch_round_trips_through_reader.nim	nim	5
@@ -2362,7 +2363,7 @@ tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_manifest_editor_edge_cases.nim	nim	28
-tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim	nim	5
+tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim	nim	6
 tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
 tests/unit/t_manifest_editor_places_a_new_scalar_with_the_scalars.nim	nim	1
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
@@ -2386,7 +2387,7 @@ tests/unit/t_recipe_constraint_reader.nim	nim	33
 tests/unit/t_recipe_lock_consistency_check.nim	nim	23
 tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
-tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim	nim	5
+tests/unit/t_repo_fragment_writer_emits_only_repo_v2.nim	nim	5
 tests/unit/t_repo_relocation_move_ordering.nim	nim	10
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
 tests/unit/t_role_falls_back_toward_mainline.nim	nim	3

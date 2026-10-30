@@ -235,8 +235,8 @@ proc prepareCase(): Dss72Case =
   result.tempRoot = createTempDir("repro-dss72-cli-", "")
   result.workspaceRoot = result.tempRoot / "ws"
   createDir(result.workspaceRoot / ".repro")
-  writeFile(result.workspaceRoot / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n" &
+  writeFile(result.workspaceRoot / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n" &
     "\n[workspace]\nproject = \"dss72-integration\"\n")
   result.offlineProject = result.workspaceRoot / OfflinePackage
   result.issuerProject = result.workspaceRoot / IssuerPackage

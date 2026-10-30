@@ -411,9 +411,9 @@ suite "a committed lock does not depend on which worktree refreshed it":
         origin
 
       proc fragment(name: string; depends: seq[string]): string =
-        result = "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+        result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
           "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-          "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+          "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
         if depends.len > 0:
           result.add("depends = [")
           for i, d in depends:
@@ -428,8 +428,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
       createDir(workspace / "projects")
       createDir(workspace / "repos")
       var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n"
+        "[project]\nname = \"app\"\n" &
+        "\n"
       for (name, origin) in origins:
         project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
           fileUrl(origin) & "\"\n\n")

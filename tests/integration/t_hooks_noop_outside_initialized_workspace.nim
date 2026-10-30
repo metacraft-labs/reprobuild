@@ -169,8 +169,7 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"lib-a\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-c-origin\"\nfetch = \"" & libCUrl & "\"\n\n" &
@@ -181,33 +180,33 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libCFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
 remote = "lib-c-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -641,7 +640,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check dirExists(store.path / "repos")
       check dirExists(store.path / "locks")
       check not fileExists(store.path / ".repro" / "workspace-state.toml") and
-        not fileExists(store.path / ".repro" / "workspace.toml")
+        not fileExists(store.path / ".repro" / "workspace-state.toml")
       check not fileExists(store.path / "repro.lock")
 
       # Real managed hooks, installed by the real installer into the store
@@ -769,7 +768,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       writeFile(root / "repos" / "lib-a.toml", libAFragmentToml)
       writeFile(root / "repos" / "lib-b.toml", libBFragmentToml)
       check not fileExists(root / ".repro" / "workspace-state.toml") and
-        not fileExists(root / ".repro" / "workspace.toml")
+        not fileExists(root / ".repro" / "workspace-state.toml")
 
       let inited = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "lib-a",
@@ -878,7 +877,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       # canonical marker, and the tree is clean.
       check dirExists(plain / ".repro")
       check not fileExists(plain / ".repro" / "workspace-state.toml") and
-        not fileExists(plain / ".repro" / "workspace.toml")
+        not fileExists(plain / ".repro" / "workspace-state.toml")
       check not fileExists(plain / "repro.lock")
       check not isInitializedWorkspace(plain)
       check not hasResolvedManifestCheckout(plain)
@@ -1019,9 +1018,9 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
         check dirExists(store.path / "locks")
         check fileExists(store.path / "projects" / "lib-a.toml")
         check not fileExists(store.path / ".repro" / "workspace-state.toml") and
-          not fileExists(store.path / ".repro" / "workspace.toml")
+          not fileExists(store.path / ".repro" / "workspace-state.toml")
         check not fileExists(store.path / "repro-workspace.toml") and
-          not fileExists(store.path / ".repro-workspace.toml")
+          not fileExists(store.path / "repro-workspace.toml")
         check not fileExists(store.path / "repro.lock")
         check porcelain(gitBin, store.path) == ""
         check reproShellListing(store.path) == shellBefore

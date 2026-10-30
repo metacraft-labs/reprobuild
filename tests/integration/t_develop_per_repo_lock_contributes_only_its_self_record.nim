@@ -262,7 +262,7 @@ proc lockDoc(deps: string): string =
 
 proc projectToml(libaUrl, libbUrl, libcUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\nname = \"ws\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+  "[project]\nname = \"ws\"\n\n" &
   "[[remote]]\nname = \"liba-origin\"\nfetch = \"" & libaUrl & "\"\n\n" &
   "[[remote]]\nname = \"libb-origin\"\nfetch = \"" & libbUrl & "\"\n\n" &
   "[[remote]]\nname = \"libc-origin\"\nfetch = \"" & libcUrl & "\"\n\n" &
@@ -270,8 +270,8 @@ proc projectToml(libaUrl, libbUrl, libcUrl: string): string =
   "\n  \"repos/libc.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-  "[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+  "[repo]\nmainline = \"main\"\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &

@@ -202,7 +202,7 @@ proc projectToml(fx: Fixture): string =
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"mainline-sync-fixture\"\n" &
-    "default_revision = \"main\"\n\n"
+    "\n"
   for s in fx.specs:
     result.add("[[remote]]\nname = \"" & s.name & "-origin\"\nfetch = \"" &
       fileUrl(fx.originOf(s.name)) & "\"\n\n")
@@ -212,9 +212,9 @@ proc projectToml(fx: Fixture): string =
   result.add("]\n")
 
 proc fragmentToml(s: RepoSpec): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\nname = \"" & s.name & "\"\npath = \"" & s.name & "\"\n" &
-  "remote = \"" & s.name & "-origin\"\nbranch = \"" & s.mainline & "\"\n"
+  "remote = \"" & s.name & "-origin\"\nmainline = \"" & s.mainline & "\"\n"
 
 proc setupFixture(gitBin, slug: string; specs: seq[RepoSpec]): Fixture =
   result.scratch = createTempDir("repro-sync-mainline-" & slug & "-", "")
@@ -253,6 +253,19 @@ proc entryByName(report: JsonNode; name: string): JsonNode =
     if e["name"].getStr() == name:
       return e
   newJNull()
+
+proc checkRoleEntry(report, entry: JsonNode; branch: string) =
+  ## §4.4's role fields for a `--mainline` (`--to=mainline`) entry: the role
+  ## requested, the role whose declaration supplied the branch, the branch
+  ## reconciled with, and an empty fallback path (declared directly) — and
+  ## none of the retired pre-role spellings, on the entry or the report.
+  check report["role"].getStr() == "mainline"
+  check not report.hasKey("mainline")
+  check entry["role"].getStr() == "mainline"
+  check entry["resolvedRole"].getStr() == "mainline"
+  check entry["roleBranch"].getStr() == branch
+  check entry["fallbackPath"].len == 0
+  check not entry.hasKey("mainlineBranch")
 
 const oneRepo = @[RepoSpec(name: "prod", mainline: "dev")]
 
@@ -316,7 +329,7 @@ suite "repro sync --mainline":
       check report["exitCode"].getInt() == 0
       let e = entryByName(report, "prod")
       check e["outcome"].getStr() == "fast_forwarded"
-      check e["mainlineBranch"].getStr() == "dev"
+      checkRoleEntry(report, e, "dev")
       check e["branch"].getStr() == "feature-x"
       # The branch actually advanced to the mainline tip.
       check headSha(gitBin, repoPath) == trunkTip
@@ -459,9 +472,9 @@ suite "repro sync --mainline":
 
       let report = readReport(fx)
       check report["exitCode"].getInt() == 0
-      check entryByName(report, "prod")["mainlineBranch"].getStr() == "dev"
-      check entryByName(report, "specs")["mainlineBranch"].getStr() == "latest"
-      check entryByName(report, "infra")["mainlineBranch"].getStr() == "live"
+      checkRoleEntry(report, entryByName(report, "prod"), "dev")
+      checkRoleEntry(report, entryByName(report, "specs"), "latest")
+      checkRoleEntry(report, entryByName(report, "infra"), "live")
       for i, s in fx.specs:
         check entryByName(report, s.name)["outcome"].getStr() == "fast_forwarded"
         # Each landed on ITS OWN trunk, not on a single shared branch name.
@@ -792,7 +805,7 @@ suite "repro sync --mainline":
     require report["repos"].len == 2
     for i in 0 .. 1:
       let s = fx.specs[i]
-      check entryByName(report, s.name)["mainlineBranch"].getStr() == s.mainline
+      checkRoleEntry(report, entryByName(report, s.name), s.mainline)
       check entryByName(report, s.name)["outcome"].getStr() == "fast_forwarded"
       check headSha(gitBin, fx.workspaceRoot / s.name) == tips[i]
     for i in 2 .. 3:

@@ -4,11 +4,13 @@
 ## project. Asserts:
 ##
 ##   1. ``repro workspace init`` writes the active branch into
-##      ``.repro/workspace.toml`` under ``[workspace].branch``. The
-##      branch value is the resolver's ``trunk`` field (the manifest's
-##      documented default branch — ``main`` in this fixture).
+##      ``.repro/workspace-state.toml`` under ``[workspace].branch``. The
+##      branch value is the project's default workspace branch: the
+##      workspace ROOT repository's declared mainline, read from
+##      ``repro-workspace.toml`` ``[workspace] mainline`` (``main`` in this
+##      fixture). The retired project-level ``trunk`` key used to supply it.
 ##   2. ``repro workspace status`` (without a positional project)
-##      still works: the metadata-only workspace.toml written by init
+##      still works: the metadata-only state file written by init
 ##      supplies the project name to the dispatch helper, and the
 ##      reported ``activeBranch`` comes from the M13 metadata field
 ##      (not the M12 live-HEAD heuristic).
@@ -78,9 +80,7 @@ proc projectTomlWithRemotes(libAUrl, libBUrl: string): string =
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
-    "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "name = \"myproject\"\n\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "includes = [\n" &
@@ -89,23 +89,23 @@ proc projectTomlWithRemotes(libAUrl, libBUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 # ---- fixture builder ------------------------------------------------------
@@ -142,6 +142,11 @@ proc setupFixture(gitBin, slug: string): M13Fixture =
       fileUrl(libBOrigin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
+  # The workspace root's own mainline — the project's default workspace
+  # branch, which ``workspace init`` records.
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[workspace]\nmainline = \"main\"\n")
   result.workspaceRoot = workspaceRoot
 
 proc cleanupScratch(path: string) =
@@ -172,8 +177,8 @@ suite "M13 — workspace branch survives init and status":
         checkpoint("output: " & res.output)
       check res.code == 0
 
-      # The metadata-only workspace.toml must now exist with the
-      # resolver's trunk recorded as the active branch.
+      # The metadata-only state file must now exist with the root's
+      # declared mainline recorded as the active branch.
       let tomlPath = fx.workspaceRoot / ".repro" / "workspace-state.toml"
       check fileExists(tomlPath)
 
@@ -261,8 +266,8 @@ suite "M13 — workspace branch survives init and status":
         fx.workspaceRoot / ".repro" / "workspace-state.toml")
 
       # Second invocation must NOT clobber the metadata. The
-      # workspace.toml bytes round-trip identically when the
-      # resolver's trunk hasn't changed (the writer is
+      # state file bytes round-trip identically when the root's
+      # declared mainline hasn't changed (the writer is
       # deterministic).
       let res2 = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "myproject",

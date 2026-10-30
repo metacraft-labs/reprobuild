@@ -112,8 +112,8 @@ proc prepareCase(): L7Case =
   # workspace IDENTITY rather than degrading to the checkout path. The
   # degradation is correct behaviour and L4 measures it; here it would
   # make the test measure the degradation instead of the registry.
-  writeFile(result.workspaceRoot / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n" &
+  writeFile(result.workspaceRoot / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n" &
     "\n[workspace]\nproject = \"l7-integration\"\n")
   for i in 1 .. 3:
     let project = result.workspaceRoot / ("p" & $i)

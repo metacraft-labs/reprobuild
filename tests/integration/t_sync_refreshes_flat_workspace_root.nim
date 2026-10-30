@@ -70,9 +70,9 @@ proc publishMove(fx: RenameFixture; gitBin, rootOrigin: string): string =
   discard gitIn(gitBin, admin, "config user.email tester@example.invalid")
   discard gitIn(gitBin, admin, "config user.name \"Rename Tester\"")
   writeFile(admin / "repos" / "widget.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"widget\"\npath = \"moved/widget\"\n" &
-    "url_prefix = \"local\"\nbranch = \"main\"\n\n" &
+    "url_prefix = \"local\"\nmainline = \"main\"\n\n" &
     "[extensions]\npreviously = [{ path = \"widget\" }]\n")
   discard gitIn(gitBin, admin, "commit -am \"move widget under moved/\"")
   discard gitIn(gitBin, admin, "push origin main")

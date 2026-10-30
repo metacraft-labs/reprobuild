@@ -21,8 +21,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "reprobuild"
-default_revision = "main"
-trunk = "main"
+default_remote = "metacraft-labs"
 
 [[remote]]
 name = "metacraft-labs"
@@ -57,7 +56,6 @@ const missingProjectNameToml = """
 schema = "reprobuild.workspace.project.v1"
 
 [project]
-default_revision = "main"
 """
 
 # A manifest written against a NEWER schema than this build knows. The real
@@ -110,10 +108,8 @@ suite "M5 — ProjectManifest round-trip":
     let p = readProjectManifest(path)
     check p.schema == "reprobuild.workspace.project.v1"
     check p.project.name == "reprobuild"
-    check p.project.default_revision.isSome
-    check p.project.default_revision.get() == "main"
-    check p.project.trunk.isSome
-    check p.project.trunk.get() == "main"
+    check p.project.default_remote.isSome
+    check p.project.default_remote.get() == "metacraft-labs"
     check p.remote.len == 2
     check p.remote[0].name == "metacraft-labs"
     check p.remote[0].fetch == "https://github.com/metacraft-labs"

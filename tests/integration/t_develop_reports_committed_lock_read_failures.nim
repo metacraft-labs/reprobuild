@@ -179,16 +179,16 @@ suite "develop reports present committed-lock failures":
     createDir(manifests / "repos")
     writeFile(manifests / "projects" / "ws.toml",
       "schema = \"reprobuild.workspace.project.v1\"\n" &
-      "[project]\nname = \"ws\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n" &
+      "[project]\nname = \"ws\"\n" &
       "[[remote]]\nname = \"core-origin\"\nfetch = \"" & fileUrl(core) & "\"\n" &
       "[[remote]]\nname = \"producer-origin\"\nfetch = \"" & fileUrl(repo) & "\"\n" &
       "includes = [\"repos/core.toml\", \"repos/producer.toml\"]\n")
     for (name, path, remote) in [("core", "core", "core-origin"),
                                  ("producer", "nested/producer", "producer-origin")]:
       writeFile(manifests / "repos" / (name & ".toml"),
-        "schema = \"reprobuild.workspace.repo.v1\"\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n" &
         "[repo]\nname = \"" & name & "\"\npath = \"" & path &
-        "\"\nremote = \"" & remote & "\"\nrevision = \"main\"\n")
+        "\"\nremote = \"" & remote & "\"\nmainline = \"main\"\n")
     writeWorkspaceBranch(root, project = "ws", branch = "main")
     # The root's independent accessible record keeps the union nonempty even
     # when the other participating checkout cannot be traversed.

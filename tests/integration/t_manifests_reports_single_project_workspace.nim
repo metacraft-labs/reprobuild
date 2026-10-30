@@ -55,7 +55,7 @@ suite "regression — manifests reports single-project workspace accurately":
       createDir(manifestsRoot / "projects")
       writeFile(manifestsRoot / "projects" / "solo.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"solo\"\ndefault_revision = \"main\"\n\n" &
+        "[project]\nname = \"solo\"\n\n" &
         "includes = []\n")
 
       # Single-project (metadata-only) workspace.toml — present, but no

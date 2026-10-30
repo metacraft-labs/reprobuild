@@ -110,9 +110,9 @@ const
     ## unrelated to `app`.
 
 proc fragment(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+    "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
 
 proc seed(fx: Nf2Fixture; name: string): string =
   ## A bare origin and a published clone at `ws/<name>`. Every repo carries a
@@ -224,8 +224,8 @@ proc setupOwnDepsFixture(label: string): Nf2Fixture =
   createDir(result.ws / "projects")
   createDir(result.ws / "repos")
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"own\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"own\"\n" &
+    "\n"
   for name in OwnRepos:
     project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
       originUrl(result, name) & "\"\n\n")
@@ -235,8 +235,8 @@ proc setupOwnDepsFixture(label: string): Nf2Fixture =
   project.add("]\n")
   writeFile(result.ws / "projects" / "own.toml", project)
   createDir(result.ws / ".repro")
-  writeFile(result.ws / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.ws / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"own\"\nbranch = \"main\"\n")
 
   # `third` gets a second published commit, `other` pins it there, and the

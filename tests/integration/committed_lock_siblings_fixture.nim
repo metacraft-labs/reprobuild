@@ -58,9 +58,9 @@ proc headOf*(fx: SiblingFixture; repo: string): string =
   fx.git(repo, "rev-parse HEAD").strip()
 
 proc fragment(name: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+    "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
   if depends.len > 0:
     result.add("depends = [")
     for i, d in depends:
@@ -99,8 +99,8 @@ proc setupSiblingFixture*(label: string): SiblingFixture =
   createDir(result.ws / "projects")
   createDir(result.ws / "repos")
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"app\"\n" &
+    "\n"
   for (name, origin) in result.origins:
     project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
       fileUrl(origin) & "\"\n\n")

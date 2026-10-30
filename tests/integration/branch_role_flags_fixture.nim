@@ -176,8 +176,8 @@ proc setupRoleWorkspace*(slug: string; withAgents = true): RoleWorkspace =
     q(result.root))
   gitIdentity(gitBin, result.root)
   createDir(result.root / ".repro")
-  writeFile(result.root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
   for (name, mainline) in [("core", "main"), ("docs", "latest")]:

@@ -81,8 +81,8 @@ proc seedWorkspace(root: string) =
   ## — NO git repos are created. The cache is written AFTER the marker so its
   ## mtime is the newer of the two and the segment renders as fresh.
   createDir(root / ".repro")
-  writeFile(root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n" &
+  writeFile(root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n" &
     "[workspace]\n" &
     "project = \"demo\"\n" &
     "branch = \"feat-x\"\n")

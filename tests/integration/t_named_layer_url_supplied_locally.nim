@@ -75,8 +75,8 @@ proc projectToml(includes: openArray[string]): string =
     "includes = [\n"
   for inc in includes:
     result.add("  \"" & inc & "\",\n")
-  result.add("]\n\n[project]\nname = \"demo\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n[[remote]]\nname = \"acme\"\n" &
+  result.add("]\n\n[project]\nname = \"demo\"\n" &
+    "\n[[remote]]\nname = \"acme\"\n" &
     "fetch = \"https://git.example.invalid/acme\"\n")
 
 proc fragmentToml(name: string): string =

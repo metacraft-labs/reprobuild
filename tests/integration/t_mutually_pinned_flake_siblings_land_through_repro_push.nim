@@ -192,9 +192,9 @@ proc writeCoreFlake(fx: Fixture; appPin, otherPin: string) =
     "      }\n    }\n  },\n  \"root\": \"root\",\n  \"version\": 7\n}\n")
 
 proc repoToml(name: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+    "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
   if depends.len > 0:
     result.add("depends = [\"" & depends.join("\", \"") & "\"]\n")
 
@@ -236,7 +236,7 @@ proc setup(slug: string; libDependsOnCore = true;
   createDir(result.manifests / "projects")
   createDir(result.manifests / "repos")
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n"
+    "[project]\nname = \"app\"\n\n"
   for name in Repos:
     project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
       fx.url(name) & "\"\n\n")
@@ -268,8 +268,8 @@ proc setup(slug: string; libDependsOnCore = true;
       q(fx.dir(name)))
     fx.configure(fx.dir(name))
   writeWorkspaceBranch(result.workspace, project = "app", branch = "main")
-  writeFile(result.workspace / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n[manifest]\n" &
+  writeFile(result.workspace / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n[records]\n" &
     "url = \"" & fileUrl(fx.scratch / "manifest.git") & "\"\n" &
     "publish_locks = true\n")
   fx.writeCoreFlake(fx.seedOf("app"), fx.seedOf("other"))

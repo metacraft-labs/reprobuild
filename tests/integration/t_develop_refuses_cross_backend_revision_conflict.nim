@@ -90,18 +90,17 @@ proc projectToml(sharedUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"shared-origin\"\nfetch = \"" & sharedUrl & "\"\n\n" &
   "includes = [\n  \"repos/shared.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc committedLock(url, sha: string): string =
   "schema = \"reprobuild.solved-graph-lock.v2\"\n\n" &
@@ -138,9 +137,9 @@ proc buildWorkspace(gitBin, scratch, origin, name, lockSha,
   cloneInto(gitBin, origin, ws / "shared")
   writeWorkspaceBranch(ws, project = "mix", branch = "main")
   writeFile(ws / "repro.lock", committedLock(fileUrl(origin), lockSha))
-  writeFile(ws / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(ws / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"https://example.invalid/manifests.git\"\n\n" &
     "[locking]\n" &
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &

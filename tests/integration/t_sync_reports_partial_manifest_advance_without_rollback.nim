@@ -8,11 +8,14 @@
 ##   1. A bare manifest-host repo seeded with a project that declares ONE
 ##      participating repo ``lib-x`` whose remote points at an
 ##      UNREACHABLE ``file://`` URL (a path that does not exist). The
-##      workspace uses composer mode (``[[manifest]]`` ``url``) so the
-##      manifest repo itself is a refreshable layer.
-##   2. The layer is pre-cloned into the workspace's
-##      ``.repro/manifests-0-<sanitized>`` directory at the FIRST manifest
-##      commit.
+##      workspace's ``repro-workspace.toml`` declares it as a ``[[manifest]]``
+##      ``url`` layer (Workspace-Settings-Files.md §3), so the manifest repo
+##      itself is a refreshable layer composed after the root base layer;
+##      ``.repro/workspace-state.toml`` records only the project and branch.
+##   2. A first ``pull`` materialises the layer into the workspace's
+##      ``.repro/manifests-<i>-<sanitized>`` directory at the FIRST manifest
+##      commit (the test reads that directory from the pull report, picking
+##      the entry whose provenance is the layer's url).
 ##   3. The bare manifest-host is then advanced by a SECOND commit. So
 ##      when ``pull`` runs, its manifest-refresh step fast-forwards the
 ##      in-tree layer from commit#1 → commit#2 (the manifest ADVANCES).
@@ -78,19 +81,18 @@ proc projectTomlBody(unreachableUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"x-origin\"\nfetch = \"" & unreachableUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-x.toml\",\n]\n"
 
 const libXTomlBody = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-x"
 path = "lib-x"
 remote = "x-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc seedBareWithFiles(gitBin, scratch, barePath: string;
@@ -110,15 +112,18 @@ proc seedBareWithFiles(gitBin, scratch, barePath: string;
     q(barePath))
 
 proc writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl: string) =
+  ## The state file records the project and branch; the manifest layer is
+  ## declared where layers live, in the shared settings file.
   let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
-  let body =
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
+  writeFile(dotRepo / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n")
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
     "[[manifest]]\n" &
     "url = \"" & layerUrl & "\"\n" &
-    "visibility = \"public\"\nbranch = \"main\"\n"
-  writeFile(dotRepo / "workspace.toml", body)
+    "visibility = \"public\"\nbranch = \"main\"\n")
 
 suite "RA-11 — partial manifest advance is reported, never rolled back":
 
@@ -143,15 +148,16 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       ])
       let layerUrl = fileUrl(manifestBare)
 
-      # 2. Workspace + workspace.toml declaring the manifest layer; clone
+      # 2. Workspace state + settings file declaring the manifest layer; clone
       #    the bare into the canonical layer dir at commit#1.
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
       writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl)
-      # The composer/refresh naming for layer 0 is
-      # ``manifests-0-<sanitized-url>`` under the tool-owned ``.repro``
-      # directory. Drive the FIRST pull to materialise the layer, then read
-      # the reported layer path instead of duplicating the sanitizer here.
+      # The composer/refresh naming for a url layer is
+      # ``manifests-<i>-<sanitized-url>`` under the tool-owned ``.repro``
+      # directory, where ``<i>`` counts the root base layer. Drive the FIRST
+      # pull to materialise the layer, then read the reported layer path
+      # instead of duplicating the sanitizer here.
       #
       # First pull: materialises the layer at commit#1 (composer clones it),
       # and fails on the unreachable lib-x clone.
@@ -159,7 +165,7 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
         reproBin, "workspace", "pull", "--write-report",
         "--workspace-root=" & workspaceRoot,
       ]))
-      # The layer now exists in .repro/manifests-0-*; locate it from the
+      # The layer now exists in .repro/manifests-<i>-*; locate it from the
       # structured report emitted by the command under test.
       var layerDir = ""
       let firstReportPath = workspaceRoot / ".repro" / "build" / "reports" /
@@ -167,8 +173,10 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       check fileExists(firstReportPath)
       if fileExists(firstReportPath):
         let firstReport = parseFile(firstReportPath)
+        checkpoint("first pull report layers: " &
+          $firstReport["manifestLayers"])
         for layer in firstReport["manifestLayers"]:
-          if layer["index"].getInt() == 0:
+          if layer["provenance"].getStr() == layerUrl:
             layerDir = layer["layerPath"].getStr()
       check layerDir.len > 0
       let commit1 = headSha(gitBin, layerDir)
@@ -180,8 +188,8 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
         " " & q(seedWork))
       gitConfig(gitBin, seedWork)
       writeFile(seedWork / "repos" / "lib-y.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-        "[repo]\nname = \"lib-y\"\npath = \"lib-y\"\nrevision = \"main\"\n")
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+        "[repo]\nname = \"lib-y\"\npath = \"lib-y\"\nmainline = \"main\"\n")
       discard requireGit(q(gitBin) & " -C " & q(seedWork) & " add -A")
       discard requireGit(q(gitBin) & " -C " & q(seedWork) &
         " commit -m \"second manifest commit\"")

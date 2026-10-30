@@ -119,7 +119,7 @@ proc seedBareRepo(gitBin, scratch, barePath: string) =
 proc projectToml(fetch, repo: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\nincludes = [\"repos/" &
     repo & ".toml\"]\n\n[project]\nname = \"demo\"\n" &
-    "default_revision = \"main\"\ntrunk = \"main\"\n\n[[remote]]\n" &
+    "\n[[remote]]\n" &
     "name = \"acme\"\nfetch = \"" & fetch & "\"\n"
 
 proc fragmentToml(name: string): string =
@@ -309,7 +309,7 @@ suite "a malformed settings file is an error":
         "--no-sync", "--workspace-root=" & freshRoot]),
         freshRoot / "repro-workspace.toml", "manifest[0].bogus")
       check not fileExists(stateFile(freshRoot))
-      check not fileExists(freshRoot / ".repro" / "workspace.toml")
+      check not fileExists(freshRoot / ".repro" / "workspace-state.toml")
 
       # Leg 3 — a TOML syntax error in the shared file.
       let syntaxRoot = recordedRoot("syntax")

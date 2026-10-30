@@ -16,12 +16,16 @@
 ## the ``StoreRoutingError`` message (naming the repo, its tier, and the
 ## ``[[locking.route]]`` / ``apply_if`` remedy).
 ##
-## Fixture (built ``./build/bin/repro``, black-box): a two-layer composer
-## workspace via ``.repro/workspace.toml`` with local_path manifest layers —
-##   - a PUBLIC layer contributing ``pub`` (wvPublic);
-##   - a PRIVATE layer (``visibility = "private"``) contributing ``secret``
-##     (wvPersonal) — the private-tier repo with NO route.
-## A ``.repro-workspace.toml`` ``[locking]`` route covers ONLY ``pub``.
+## Fixture (built ``./build/bin/repro``, black-box): a composer workspace
+## whose ``.repro/workspace-state.toml`` records the project, with two
+## local_path manifest layers declared in the settings files
+## (Workspace-Settings-Files.md §3–§4) after the root base layer —
+##   - a PUBLIC layer, shared in ``repro-workspace.toml``, contributing ``pub``
+##     (wvPublic);
+##   - a PRIVATE layer (``visibility = "private"``), one person's in
+##     ``repro-workspace.local.toml``, contributing ``secret`` (wvPersonal) —
+##     the private-tier repo with NO route.
+## The ``repro-workspace.toml`` ``[locking]`` route covers ONLY ``pub``.
 ##
 ## Assertions:
 ##   1. The gate REFUSES (exit 2) — never a silent exit 0.
@@ -102,8 +106,7 @@ proc publicProjectToml(pubUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"pub-origin\"\nfetch = \"" & pubUrl & "\"\n\n" &
   "includes = [\n  \"repos/pub.toml\",\n]\n"
 
@@ -111,19 +114,18 @@ proc privateProjectToml(secretUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"secret-origin\"\nfetch = \"" & secretUrl & "\"\n\n" &
   "includes = [\n  \"repos/secret.toml\",\n]\n"
 
 proc repoFragment(name, remote: string; depends: seq[string] = @[]): string =
   result =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & remote & "\"\n" &
-    "revision = \"main\"\n"
+    "mainline = \"main\"\n"
   if depends.len > 0:
     var quoted: seq[string]
     for d in depends: quoted.add("\"" & d & "\"")
@@ -177,28 +179,35 @@ suite "HL-7 — unrouted private repo refuses loudly":
       cloneInto(gitBin, pubOrigin, ws / "pub")
       cloneInto(gitBin, secretOrigin, ws / "secret")
 
-      # ``.repro/workspace.toml`` — the composer-mode workspace with a PUBLIC
-      # layer and a PRIVATE (``visibility = "private"``) layer. Repos from the
-      # private layer inherit the ``wvPersonal`` tier.
+      # The composer-mode workspace: the state file records the project, the
+      # shared settings file declares the PUBLIC layer and the local one the
+      # PRIVATE (``visibility = "private"``) layer. Repos from the private
+      # layer inherit the ``wvPersonal`` tier.
       createDir(ws / ".repro")
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n\n" &
-        "[[manifest]]\n" &
-        "local_path = \"" & tomlBasicString(publicLayer) & "\"\n" &
-        "visibility = \"public\"\nbranch = \"main\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+        "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n")
+      writeFile(ws / "repro-workspace.local.toml",
+        "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
         "[[manifest]]\n" &
         "local_path = \"" & tomlBasicString(privateLayer) & "\"\n" &
-        "visibility = \"private\"\nbranch = \"main\"\n")
+        "visibility = \"private\"\n")
+      # The shared settings file's head: the record store and the PUBLIC
+      # layer. Both cases below append their own ``[locking]`` table.
+      let sharedSettingsHead =
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
+        "url = \"https://example.invalid/manifests.git\"\n\n" &
+        "[[manifest]]\n" &
+        "local_path = \"" & tomlBasicString(publicLayer) & "\"\n" &
+        "visibility = \"public\"\n\n"
 
       # ---- the [locking] route covers ONLY the public repo -------------
       # A route EXISTS (so the routed gate path runs), but ``secret`` (private)
       # is declared in NO backend-supplying layer.
       let committedStoreDir = ws / "committed-store"
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
-        "url = \"https://example.invalid/manifests.git\"\n\n" &
+      writeFile(ws / "repro-workspace.toml",
+        sharedSettingsHead &
         "[locking]\n" &
         "route = [{ visibility = \"public\", backend = \"committed-file\", " &
         "path = \"committed-store\", repos = [\"pub\"] }]\n")
@@ -248,10 +257,8 @@ suite "HL-7 — unrouted private repo refuses loudly":
         discard committedStoreDir  # (public store dir referenced above)
         let personalDb = scratch / "personal-db"
         createDir(personalDb)
-        writeFile(ws / ".repro-workspace.toml",
-          "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-          "[manifest]\n" &
-          "url = \"https://example.invalid/manifests.git\"\n\n" &
+        writeFile(ws / "repro-workspace.toml",
+          sharedSettingsHead &
           "[locking]\n" &
           "route = [" &
           "{ visibility = \"public\", backend = \"committed-file\", " &

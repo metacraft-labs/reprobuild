@@ -24,7 +24,7 @@
 ##     active.
 ##   - `projectFile` carries the absolute path of the variant file, so
 ##     `repro workspace status` can say "active variant: …".
-## Everything else — `defaultRevision`, `trunk`, the per-fragment
+## Everything else — `workspaceMainline`, the per-fragment
 ## `ResolvedRepo` records — is inherited from the base unchanged, then
 ## mutated only where an override explicitly targets it.
 ##
@@ -92,7 +92,7 @@ export roles
 type
   WorkspaceVisibility* = enum
     ## The four documented visibility tiers a manifest layer may declare
-    ## in `.repro/workspace.toml` (see Workspace-And-Develop-Mode.md
+    ## in the workspace settings files (see Workspace-And-Develop-Mode.md
     ## §"Workspace Composition and Manifest Layers"). The enum is shared
     ## between M6's single-project resolver (which uses the default
     ## `wvPublic` because no layer information is attached) and M8's
@@ -192,10 +192,9 @@ type
       ## under `[branch-roles.<name>]`, resolved for this repo: the branch, the
       ## role whose declaration supplied it, and the fallback path
       ## (Workspace-Branch-Roles.md §2–§3). Resolved from declarations only —
-      ## never from what the remote has. Empty exactly when no mainline
-      ## resolves, which only a legacy `repo.v1` fragment may do (a `repo.v2`
-      ## fragment that resolves no mainline fails manifest load). Look a role
-      ## up with `findRole(repo.roles, "<role>")`.
+      ## never from what the remote has. Never empty for a repo read from a
+      ## fragment: one that resolves no mainline fails manifest load (§3.3).
+      ## Look a role up with `findRole(repo.roles, "<role>")`.
     profile*: string
       ## The profile the roles were resolved through: the one the fragment
       ## names, else the workspace default profile when one applied; "" for
@@ -279,11 +278,10 @@ type
     ## A flat view of one `projects/<project>.toml` after include
     ## expansion and default application.
     projectName*: string
-    defaultRevision*: string
-    trunk*: string
     workspaceMainline*: string
       ## The root repository's resolved mainline, supplied by workspace
-      ## settings rather than inferred from any member repository.
+      ## settings rather than inferred from any member repository. It is the
+      ## project's default workspace branch (`defaultWorkspaceBranch`).
     repos*: seq[ResolvedRepo]
     projectFile*: string
     # Test-Certificates TC-9d: no certificate policy is resolved here any
@@ -293,13 +291,11 @@ type
     # (`refuseLegacyCertificatesTable`).
 
 proc defaultWorkspaceBranch*(project: ResolvedProject): string =
-  ## The declared workspace branch default: explicit legacy project trunk,
-  ## otherwise the root repository's mainline. Recorded feature state and
-  ## unanimous live branches belong to callers' active-branch derivation.
-  ## defaultRevision remains a checkout revision, not a workspace declaration;
-  ## only init/pull retain their historical last-resort fallback to it.
-  if project.trunk.len > 0: project.trunk
-  else: project.workspaceMainline
+  ## The declared workspace branch default (Workspace-Branch-Roles.md §3.4):
+  ## the root repository's resolved mainline, "" when the settings declare
+  ## none. Recorded feature state and unanimous live branches belong to
+  ## callers' active-branch derivation.
+  project.workspaceMainline
 
 const
   defaultRepoVcs* = "git"
@@ -1002,7 +998,6 @@ type
     urlPrefixes: Table[string, string]
       ## `url-prefixes/<name>.toml`: name -> url.
     defaultRemote: string
-    defaultRevision: string
     ownerLabel: string
       ## How a diagnostic refers to the manifest carrying the remote table —
       ## "the project" for M6, "the base project" for M7's variant composer.
@@ -1183,44 +1178,33 @@ proc resolveFragment(ctx: FragmentContext; fragmentRel: string;
   # manifest but bound nothing, which reads as protected while floating.
   #
   # The mainline is RESOLVED (Workspace-Branch-Roles.md §3.3), not just read:
-  # the fragment's own `mainline` (v1: `branch`), else the profile it names,
-  # else the workspace default profile. It is resolved together with every
-  # other role, from declarations alone — nothing here asks the remote which
+  # the fragment's own `mainline`, else the profile it names, else the
+  # workspace default profile. It is resolved together with every other
+  # role, from declarations alone — nothing here asks the remote which
   # branches exist (§2.2). A profile-supplied mainline supplies `revision`
   # exactly as a fragment-declared one does: both are declarations of the
-  # same thing, and the project's `default_revision` is what a profile
-  # mainline replaces (§6 step 2), so it only applies when neither exists.
+  # same thing.
   let roleDecls = fragment.repo.roleDecls
-  let isV2 = fragment.schema == schemaRepoFragmentV2
   validateDeclarerRoles(ctx.roles, roleDecls, fragmentAbs, fragment.schema,
-    "repo", if isV2: "mainline" else: "branch")
+    "repo", "mainline")
   let declarers = fragmentDeclarers(ctx.roles, roleDecls, fragment.repo.profile,
     fragmentAbs, fragment.schema)
   for d in declarers:
     if d.kind in {rdkProfile, rdkDefaultProfile}:
       result.profile = d.profile
   result.roles = resolveRoleSet(ctx.roles, declarers)
-  if result.roles.len == 0 and isV2:
+  if result.roles.len == 0:
     # §3.3: a repo with no mainline is a manifest error at load, not a
     # per-command refusal — no command can do anything sensible with it.
-    # Legacy `repo.v1` fragments are exempt: before the roles model a v1
-    # fragment could omit `branch` and resolve through `revision` /
-    # `default_revision`, and the dual-read release keeps reading them as
-    # they always resolved until `repo.v1` is retired.
     raiseManifestError(fragmentAbs, "repo.mainline", fragment.schema,
       fragment.schema, noMainlineMessage(ctx.roles, declarers,
         "repo '" & fragment.repo.name & "'"))
-  let fragmentBranch =
-    if result.roles.len > 0: result.roles.findRole("mainline").get().branch
-    else: ""
+  let fragmentBranch = result.roles.findRole("mainline").get().branch
   let fragmentRevision =
     if fragment.repo.revision.isSome: fragment.repo.revision.get() else: ""
   result.branch = fragmentBranch
-  if fragmentBranch.len > 0 or fragmentRevision.len > 0:
-    result.revision =
-      if fragmentRevision.len > 0: fragmentRevision else: fragmentBranch
-  else:
-    result.revision = ctx.defaultRevision
+  result.revision =
+    if fragmentRevision.len > 0: fragmentRevision else: fragmentBranch
 
   result.vcs =
     if fragment.repo.vcs.isSome and fragment.repo.vcs.get().len > 0:
@@ -1409,37 +1393,20 @@ proc workspaceRoleSettings*(workspaceRoot: string): RoleSettings =
   ## The profiles, custom roles and default profile of the settings file that
   ## governs `workspaceRoot` (`findWorkspaceSettingsPath`: the
   ## `REPRO_WORKSPACE_CONFIG` file, else the nearest `repro-workspace.toml`
-  ## or `.repro-workspace.toml` at or above it). Empty when there is none.
+  ## at or above it). Empty when there is none.
   ##
-  ## The old `.repro-workspace.toml` (`bootstrap.v1`) cannot declare profiles
-  ## or custom roles, so it contributes an empty view and is NOT parsed here:
-  ## resolving a manifest never depended on that file, and starting to fail
-  ## on it would change how every unmigrated workspace resolves. A
-  ## `settings.v1` file is read in full, and its §3.5 role rules are checked
-  ## by that read (`validateRoleSettings`), so a settings file whose roles
-  ## cannot resolve fails manifest load.
-  let path = findWorkspaceSettingsPath(workspaceRoot)
-  if path.len == 0 or not fileExists(path):
-    # `REPRO_WORKSPACE_CONFIG` naming a file that does not exist means "no
-    # settings file" (Workspace-Settings-Files.md §6).
-    return RoleSettings()
-  if extractFilename(path) == legacySettingsFileName:
-    return RoleSettings(path: path)
-  block:
-    # An explicitly configured file may be in either schema; only the
-    # schema line decides. A file that does not even parse is reported by
-    # the full read below, naming the file.
-    var schema = ""
-    try:
-      let tree = decodeTree(path, readFile(path), schemaWorkspaceSettingsV1)
-      if not tree.isNil and "schema" in tree.tableVal and
-          tree.tableVal["schema"].kind == TomlKind.String:
-        schema = tree.tableVal["schema"].stringVal
-    except WorkspaceManifestParseError, IOError, OSError:
-      discard
-    if schema == schemaWorkspaceBootstrapV1:
-      return RoleSettings(path: path)
+  ## The file is read in full, and its §3.5 role rules are checked by that
+  ## read (`validateRoleSettings`), so a settings file whose roles cannot
+  ## resolve fails manifest load — and so does a workspace whose settings file
+  ## still carries its retired name, which `findWorkspaceSettingsPath`
+  ## refuses with the remedy.
+  var path = ""
   try:
+    path = findWorkspaceSettingsPath(workspaceRoot)
+    if path.len == 0 or not fileExists(path):
+      # `REPRO_WORKSPACE_CONFIG` naming a file that does not exist means "no
+      # settings file" (Workspace-Settings-Files.md §6).
+      return RoleSettings()
     roleSettingsFrom(readWorkspaceSettings(path))
   except WorkspaceManifestParseError as err:
     # Only inside ``toleratingMalformedWorkspaceFiles`` (``repro health``),
@@ -1448,7 +1415,7 @@ proc workspaceRoleSettings*(workspaceRoot: string): RoleSettings =
     # resolve fails manifest load.
     if not setAsideMalformedWorkspaceFile(err, mwkSettings):
       raise
-    RoleSettings(path: path)
+    RoleSettings(path: if path.len > 0: path else: err.path)
 
 proc manifestRoleSettings*(manifestFile: string): RoleSettings =
   ## `workspaceRoleSettings` for the manifest repository holding
@@ -1471,20 +1438,16 @@ proc sourceRoleSettings*(source: ManifestSource): RoleSettings =
   ## * A git-revision source — the `repro-workspace.toml` committed at THAT
   ##   revision, read through the source, never the working tree's: the
   ##   profiles and custom roles a fragment names at a revision are the ones
-  ##   declared at the same revision. None committed, or only an old
-  ##   `bootstrap.v1` file under that name: an empty view. A committed
-  ##   `settings.v1` file whose roles do not validate fails the resolution,
-  ##   naming its display path.
+  ##   declared at the same revision. None committed: an empty view. A
+  ##   committed settings file whose roles do not validate fails the
+  ##   resolution, naming its display path.
   if source.resolvedCommit.len == 0:
     return workspaceRoleSettings(source.displayRoot)
   let display = source.displayPath(settingsFileName)
   let content = source.readText(settingsFileName)
   if content.isNone:
     return RoleSettings()
-  let settings = decodeWorkspaceSettingsContent(display, content.get())
-  if settings.isNone:
-    return RoleSettings(path: display)
-  roleSettingsFrom(settings.get())
+  roleSettingsFrom(decodeWorkspaceSettingsContent(display, content.get()))
 
 # ---- entry points -----------------------------------------------------------
 #
@@ -1518,10 +1481,6 @@ proc resolveProjectAt*(source: ManifestSource; projectRel: string;
   result.projectFile = absProject
   result.projectName = project.project.name
   result.workspaceMainline = roles.workspaceMainline
-  if project.project.default_revision.isSome:
-    result.defaultRevision = project.project.default_revision.get()
-  if project.project.trunk.isSome:
-    result.trunk = project.project.trunk.get()
   # Test-Certificates TC-9d — the `[certificates]` table is no longer read.
   # Ignoring it would turn a `required` into `off` without a word, so a
   # manifest that still carries it does not load.
@@ -1550,7 +1509,6 @@ proc resolveProjectAt*(source: ManifestSource; projectRel: string;
     remotes: remotes,
     urlPrefixes: loadUrlPrefixesAt(source),
     defaultRemote: defaultRemoteName,
-    defaultRevision: result.defaultRevision,
     ownerLabel: "the project",
     source: source,
     roles: roles)
@@ -1664,7 +1622,6 @@ proc resolveRepoSetAt*(source: ManifestSource; setRel: string;
     remotes: initTable[string, string](),
     urlPrefixes: loadUrlPrefixesAt(source),
     defaultRemote: "",
-    defaultRevision: "",
     ownerLabel: "the repo-set",
     source: source,
     roles: roles)
@@ -1799,7 +1756,7 @@ proc resolveVariantAt*(source: ManifestSource; variantRel: string;
   ##   - `projectName` carries the variant's `[variant].name`.
   ##   - `projectFile` carries the display path of the variant file (its
   ##     absolute path for a directory source).
-  ## All other fields (`defaultRevision`, `trunk`, `repos[*]`) are
+  ## All other fields (`workspaceMainline`, `repos[*]`) are
   ## inherited from the base, mutated only where an override or extra
   ## include explicitly touches them.
   ##
@@ -1852,7 +1809,6 @@ proc resolveVariantAt*(source: ManifestSource; variantRel: string;
     remotes: remotes,
     urlPrefixes: loadUrlPrefixesAt(source),
     defaultRemote: defaultRemoteName,
-    defaultRevision: result.defaultRevision,
     ownerLabel: "the base project",
     source: source,
     roles: roles)

@@ -131,12 +131,12 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
   requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
 
 proc repoFragment(name, remote: string; tags: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & remote & "\"\n" &
-    "revision = \"main\"\n"
+    "mainline = \"main\"\n"
   if tags.len > 0:
     result.add("tags = [\"" & tags.join("\", \"") & "\"]\n")
 
@@ -190,8 +190,7 @@ suite "DS-7: exact-name selectors refuse a name that matches nothing":
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
         "[project]\n" &
         "name = \"" & name & "\"\n" &
-        "default_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "\n" &
         remoteBlock &
         "includes = [\n  \"repos/" & includes.join(".toml\",\n  \"repos/") &
         ".toml\",\n]\n"
@@ -211,15 +210,15 @@ suite "DS-7: exact-name selectors refuse a name that matches nothing":
           q(ws / name))
 
       createDir(ws / ".repro")
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\n" &
         "project = \"alpha\"\n" &
         "projects = [\"alpha\", \"beta\"]\n" &
         "branch = \"main\"\n")
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"team\", backend = \"git-checkout\", " &

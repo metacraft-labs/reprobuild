@@ -103,20 +103,19 @@ proc projectToml(coreUrl, secretUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"secret-origin\"\nfetch = \"" & secretUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n  \"repos/secret-lib.toml\",\n]\n"
 
 proc repoFragment(name, remote: string; participation = ""): string =
   result =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & remote & "\"\n" &
-    "revision = \"main\"\n"
+    "mainline = \"main\"\n"
   if participation.len > 0:
     result.add("participation = \"" & participation & "\"\n")
 
@@ -165,9 +164,9 @@ proc buildWorkspace(gitBin, scratch, coreOrigin, secretOrigin, extraOrigin,
   writeWorkspaceBranch(ws, project = "mix", branch = "main")
   writeFile(ws / "repro.lock", committedLock(
     fileUrl(coreOrigin), coreSha, fileUrl(extraOrigin), extraSha))
-  writeFile(ws / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(ws / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"https://example.invalid/manifests.git\"\n\n" &
     "[locking]\n" &
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &

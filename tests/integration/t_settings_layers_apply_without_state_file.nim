@@ -26,10 +26,13 @@
 ##      file — composing is a read.
 ##   2. `repro workspace manifests --json` enumerates the composed layer stack
 ##      (the root base layer and `partner`) with no state file.
-##   3. Old workspaces are untouched: a root carrying only the OLD
-##      `.repro-workspace.toml` (bootstrap.v1, which declares no layers) and
-##      no state resolves `workspace list demo` to exactly the output of the
-##      same root with no settings file at all, and prints nothing on stderr.
+##   3. A settings file that declares no layer changes nothing: a root whose
+##      `repro-workspace.toml` carries only `[records]` and no state resolves
+##      `workspace list demo` to exactly the output of the same root with no
+##      settings file at all, and prints nothing on stderr. A root carrying
+##      the settings file only under its RETIRED name (`.repro-workspace.toml`,
+##      bootstrap.v1) is not read as "no settings": `workspace list demo` is
+##      refused, naming the file and its replacement, and writes nothing.
 ##   4. Materializing verbs check out what a layer adds. A root (no state)
 ##      whose `projects/demo.toml` declares repo `core`, and whose
 ##      `repro-workspace.toml` declares a `local_path` layer whose own
@@ -37,14 +40,19 @@
 ##      `repro ws enable demo` clones `core` AND `extra`, and a following
 ##      unscoped `repro sync --dry-run` plans no clone of `extra`.
 ##   5. Same root, fresh copy: `repro sync demo` clones `extra`.
-##   6. Same, with the layer recorded in a LEGACY state file
-##      (`.repro/workspace.toml`, `local.v1` `[[manifest]]`) instead of the
-##      settings file: `repro sync demo` clones `extra`.
+##   6. Same, with the layer recorded in the state file under its RETIRED
+##      name and schema (`.repro/workspace.toml`, `local.v1` `[[manifest]]`):
+##      `repro sync demo` refuses, naming `repro health --fix` and cloning
+##      nothing; after `repro health --fix` (which moves the layer to
+##      `repro-workspace.local.toml`, §8 step 2) `repro sync demo` clones
+##      `extra`.
 ##
 ##   7–10. Scoping by names that are not a project every layer declares
-##      (state-file layered root: project `demo` = root `core` + layer
-##      `extra`, root-only project `other` = `solo`, root variant `demo-v`
-##      based on `demo`; and a fresh settings-file root whose layer alone
+##      (a root WITH state — `workspace-state.toml` recording `demo` — whose
+##      `repro-workspace.local.toml` declares the layer: project `demo` =
+##      root `core` + layer `extra`, root-only project `other` = `solo`, root
+##      variant `demo-v` based on `demo`; and a fresh settings-file root
+##      (no state) whose layer alone
 ##      declares `lonly` = `lr`): `sync demo-v --dry-run` plans the variant's
 ##      one repo; `sync other --dry-run` plans 0 repos (the active project does
 ##      not include `solo`); `sync nosuch` is an unknown project; `sync lonly`
@@ -57,11 +65,15 @@
 ##      `ws enable other` resolves fully and clones the root's `solo`;
 ##      `sync other`, `workspace list other` and `ws status` work; `demo` still
 ##      gets the partner's `pextra`.
-##   12. Mixed workspace (state-file layer `../statelayer` + settings-file
-##      layer `../partner`, both declaring only `demo`): `workspace list demo`
-##      unions all three layers; `ws enable other` reports the state-file
-##      layer's M8 refusal ("does not declare project 'other'") and never
-##      blames the settings-file layer.
+##   12. Both settings files (shared layer `../partner` + personal layer
+##      `../statelayer`, both declaring only `demo`): while `../statelayer`
+##      is still recorded in the state file, `workspace list demo` refuses
+##      (the state file carries no layers) naming `repro health --fix`; once
+##      `--fix` has moved it to `repro-workspace.local.toml`, `workspace list
+##      demo` unions all three layers and `ws enable other` blames neither
+##      layer — the per-project additivity holds for both files, and the M8
+##      rule that a state-file layer must declare the project is gone with
+##      the state-file layers.
 ##
 ## What each assertion guards. `"partner-lib" in names` (leg 1) is the one
 ## that fails when the routing gate (`isCompositionalWorkspaceToml`) composes
@@ -81,8 +93,10 @@
 ## composer (leg 7), or when a name no layer declares is not reported as
 ## unknown (leg 9). Legs 11–12 fail when settings-file layers are composed
 ## strictly (enable reports "could not resolve", list/sync/status of `other`
-## error) and, the other way round, when state-file layers become additive
-## (leg 12's M8 error disappears).
+## error) — for the shared file's layers (leg 11) and the local file's
+## (leg 12). The refusal assertions of legs 3, 6 and 12 fail when a retired
+## file (settings file name, state file name, layers in the state file) is
+## silently read as absent, or read as what it used to mean.
 ##
 ## No mocks. Skip rule: skip only when `git` is missing from PATH (the partner
 ## layer is a real repository the real composer clones).
@@ -142,8 +156,8 @@ proc projectToml(includes: openArray[string]): string =
     "includes = [\n"
   for inc in includes:
     result.add("  \"" & inc & "\",\n")
-  result.add("]\n\n[project]\nname = \"demo\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n[[remote]]\nname = \"acme\"\n" &
+  result.add("]\n\n[project]\nname = \"demo\"\n" &
+    "\n[[remote]]\nname = \"acme\"\n" &
     "fetch = \"https://git.example.invalid/acme\"\n")
 
 proc fragmentToml(name: string): string =
@@ -170,7 +184,7 @@ proc seedBareRepo(gitBin, scratch, barePath: string) =
 proc remoteProjectToml(fetch, repo: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\nincludes = [\"repos/" &
     repo & ".toml\"]\n\n[project]\nname = \"demo\"\n" &
-    "default_revision = \"main\"\ntrunk = \"main\"\n\n[[remote]]\n" &
+    "\n[[remote]]\n" &
     "name = \"acme\"\nfetch = \"" & fetch & "\"\n"
 
 proc seedClonableLayeredRoot(root, layer, fetch: string) =
@@ -192,6 +206,12 @@ proc isCheckout(dir: string): bool =
 
 const layerSettings = "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
   "[[manifest]]\nlocal_path = \"../layer\"\nvisibility = \"public\"\n"
+  ## A shared settings file declaring the `../layer` layer.
+
+const localLayerSettings =
+  "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+  "[[manifest]]\nlocal_path = \"../layer\"\nvisibility = \"public\"\n"
+  ## The same layer declared in one person's local settings file.
 
 suite "settings layers apply without a state file":
 
@@ -251,15 +271,15 @@ suite "settings layers apply without a state file":
       check doc["layers"].len == 2
       check manifests.stderr.count(skipMarker) == 1
 
-      # Leg 3 — an OLD workspace (bootstrap.v1 only, no layers, no state)
-      # resolves exactly as a root with no settings file at all.
+      # Leg 3 — a settings file declaring no layer (only `[records]`; no
+      # state) resolves exactly as a root with no settings file at all.
       let plain = scratch / "plain"
       seedRoot(plain)
       let legacy = scratch / "legacy"
       seedRoot(legacy)
-      writeFile(legacy / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\nurl = \"https://git.example.invalid/acme/records.git\"\n" &
+      writeFile(legacy / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\nurl = \"https://git.example.invalid/acme/records.git\"\n" &
         "branch = \"latest\"\n")
       let plainList = runRepro(["workspace", "list", "demo",
         "--workspace-root=" & plain])
@@ -272,6 +292,21 @@ suite "settings layers apply without a state file":
         plainList.stdout.replace(plain, "<root>")
       check legacyList.stderr == ""
       check not dirExists(legacy / ".repro")
+      # ...while the settings file under its RETIRED name is refused with the
+      # remedy, never read as "no settings" (which would drop its policy).
+      let retired = scratch / "retired"
+      seedRoot(retired)
+      writeFile(retired / ".repro-workspace.toml",
+        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+        "[manifest]\nurl = \"https://git.example.invalid/acme/records.git\"\n" &
+        "branch = \"latest\"\n")
+      let retiredList = runRepro(["workspace", "list", "demo",
+        "--workspace-root=" & retired])
+      checkpoint("retired settings stderr: " & retiredList.stderr)
+      check retiredList.code != 0
+      check ".repro-workspace.toml" in retiredList.stderr
+      check "Rename it to `repro-workspace.toml`" in retiredList.stderr
+      check not dirExists(retired / ".repro")
 
       # Legs 4-6 — materializing verbs check out the repos a layer adds.
       let remotes = scratch / "remotes"
@@ -307,7 +342,11 @@ suite "settings layers apply without a state file":
       check isCheckout(syncRoot / "core")
       check isCheckout(syncRoot / "extra")
 
-      # Leg 6 — `sync demo` with the layer in a legacy state file.
+      # Leg 6 — the layer recorded in the state file under its RETIRED name
+      # and schema. `sync demo` refuses with the remedy and clones nothing;
+      # `repro health --fix` moves the file and its layer
+      # (Workspace-Settings-Files.md §8 step 2), and then `sync demo` clones
+      # what the layer adds.
       let stateRoot = scratch / "state" / "ws"
       seedClonableLayeredRoot(stateRoot, scratch / "state" / "layer", fetch)
       createDir(stateRoot / ".repro")
@@ -316,6 +355,20 @@ suite "settings layers apply without a state file":
         "[workspace]\nproject = \"demo\"\n\n" &
         "[[manifest]]\nlocal_path = \".\"\nvisibility = \"public\"\n\n" &
         "[[manifest]]\nlocal_path = \"../layer\"\nvisibility = \"public\"\n")
+      let stateRefused = runRepro(["sync", "demo",
+        "--workspace-root=" & stateRoot])
+      checkpoint("retired state sync demo: " & stateRefused.stdout &
+        stateRefused.stderr)
+      check stateRefused.code != 0
+      check "repro health --fix" in stateRefused.stderr
+      check not dirExists(stateRoot / "core")
+      check not dirExists(stateRoot / "extra")
+      let stateFixed = runRepro(["health", "--fix", "--offline",
+        "--workspace-root=" & stateRoot])
+      checkpoint("health --fix: " & stateFixed.stdout & stateFixed.stderr)
+      check not fileExists(stateRoot / ".repro" / "workspace.toml")
+      check fileExists(stateRoot / ".repro" / "workspace-state.toml")
+      check fileExists(stateRoot / "repro-workspace.local.toml")
       let stateSynced = runRepro(["sync", "demo",
         "--workspace-root=" & stateRoot])
       checkpoint("state sync demo: " & stateSynced.stdout & stateSynced.stderr)
@@ -344,12 +397,16 @@ suite "settings layers apply without a state file":
         remoteProjectToml(fetch, "lr").replace("name = \"demo\"",
           "name = \"lonly\""))
       writeFile(scopeLayer / "repos" / "lr.toml", fragmentToml("lr"))
+      # This root records state (the active project `demo`), and its layer
+      # is one person's, in the local settings file beside a shared file
+      # that declares none.
       createDir(scopeRoot / ".repro")
-      writeFile(scopeRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"demo\"\n\n" &
-        "[[manifest]]\nlocal_path = \".\"\nvisibility = \"public\"\n\n" &
-        "[[manifest]]\nlocal_path = \"../layer\"\nvisibility = \"public\"\n")
+      writeFile(scopeRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+        "[workspace]\nproject = \"demo\"\n")
+      writeFile(scopeRoot / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n")
+      writeFile(scopeRoot / "repro-workspace.local.toml", localLayerSettings)
 
       # Leg 7 — a VARIANT of the composed project scopes from the root, as
       # before: the variant's base is the root's `demo` (core).
@@ -398,8 +455,8 @@ suite "settings layers apply without a state file":
       check not dirExists(laterRoot / "core")
 
       # Legs 11-12 — settings-file layers are additive per project
-      # (Workspace-Settings-Files.md §4 "Layers are additive per project");
-      # layers listed in the legacy state file keep the M8 rule.
+      # (Workspace-Settings-Files.md §4 "Layers are additive per project"),
+      # in the shared file and the local one alike.
       seedBareRepo(gitBin, scratch, remotes / "pextra")
       proc seedPartnerRoot(root, partner: string) =
         ## `root`: project `demo` = `core`, project `other` = `solo`.
@@ -455,8 +512,9 @@ suite "settings layers apply without a state file":
       checkpoint("ws status: " & status.stdout & status.stderr)
       check status.code == 0
 
-      # Leg 12 — mixed: a state-file layer lacking the project still fails the
-      # composition (M8), a settings-file layer lacking it does not.
+      # Leg 12 — both settings files: a layer still recorded in the state
+      # file is refused with the remedy; moved to the local settings file,
+      # it composes additively like the shared file's layer.
       let mixedRoot = scratch / "mixed" / "ws"
       seedPartnerRoot(mixedRoot, scratch / "mixed" / "partner")
       let stateLayer = scratch / "mixed" / "statelayer"
@@ -466,24 +524,41 @@ suite "settings layers apply without a state file":
         remoteProjectToml(fetch, "extra"))
       writeFile(stateLayer / "repos" / "extra.toml", fragmentToml("extra"))
       createDir(mixedRoot / ".repro")
-      writeFile(mixedRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(mixedRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"demo\"\n\n" &
-        "[[manifest]]\nlocal_path = \".\"\nvisibility = \"public\"\n\n" &
         "[[manifest]]\nlocal_path = \"../statelayer\"\n" &
         "visibility = \"public\"\n")
+      let layersInState = runRepro(["workspace", "list", "demo", "--json",
+        "--workspace-root=" & mixedRoot])
+      checkpoint("layers in state: " & layersInState.stdout &
+        layersInState.stderr)
+      check layersInState.code != 0
+      check "the state file carries no `[[manifest]]` layers" in
+        layersInState.stderr
+      check "repro health --fix" in layersInState.stderr
+      let mixedFixed = runRepro(["health", "--fix", "--offline",
+        "--workspace-root=" & mixedRoot])
+      checkpoint("mixed health --fix: " & mixedFixed.stdout & mixedFixed.stderr)
+      check fileExists(mixedRoot / "repro-workspace.local.toml")
+      check "../statelayer" in readFile(mixedRoot / "repro-workspace.local.toml")
+      check "[[manifest]]" notin
+        readFile(mixedRoot / ".repro" / "workspace-state.toml")
       let mixedDemo = runRepro(["workspace", "list", "demo", "--json",
         "--workspace-root=" & mixedRoot])
       checkpoint("mixed list demo: " & mixedDemo.stdout & mixedDemo.stderr)
       check mixedDemo.code == 0
-      check repoNames(mixedDemo.stdout) == @["core", "extra", "pextra"]
+      # §4 order: the root, then the shared file's layers, then the local
+      # file's — so the moved `../statelayer` now composes LAST.
+      check repoNames(mixedDemo.stdout) == @["core", "pextra", "extra"]
       # `ws enable other` composes the NAMED project across the layers (a
       # verb with state composes the recorded project for `list`), so it is
-      # where the per-layer rule shows: the state-file layer's M8 refusal is
-      # reported, and the settings-file partner layer is not blamed.
+      # where the per-layer rule shows: neither the local file's layer nor
+      # the shared file's is blamed for not declaring `other`.
       let mixedOther = runRepro(["workspace", "enable", "other", "--no-sync",
         "--workspace-root=" & mixedRoot])
       checkpoint("mixed enable other: " & mixedOther.stdout & mixedOther.stderr)
-      check "manifest layer '../statelayer' does not declare project 'other'" in
-        mixedOther.stderr
+      check mixedOther.code == 0
+      check "could not resolve" notin mixedOther.stderr
+      check "'../statelayer' does not declare" notin mixedOther.stderr
       check "'../partner' does not declare" notin mixedOther.stderr

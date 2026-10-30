@@ -140,13 +140,13 @@ proc setupRewriteFixture(gitBin, slug: string;
   createDir(result.workspaceRoot / "projects")
   createDir(result.workspaceRoot / "repos")
   writeFile(result.workspaceRoot / "repos" / "lib.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"lib\"\npath = \"lib\"\nremote = \"lib-origin\"\n" &
-    "revision = \"main\"\n")
+    "mainline = \"main\"\n")
   writeFile(result.workspaceRoot / "projects" / "myproject.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"myproject\"\n" &
-    "default_revision = \"main\"\ntrunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-origin\"\nfetch = \"" &
     fileUrl(result.originPath) & "\"\n\nincludes = [\n  \"repos/lib.toml\",\n]\n")
 

@@ -76,12 +76,12 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
 
 proc fragmentToml(name, remoteName: string; depends: seq[string]): string =
   result =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & remoteName & "\"\n" &
-    "revision = \"main\"\n"
+    "mainline = \"main\"\n"
   if depends.len > 0:
     var quoted: seq[string]
     for d in depends: quoted.add("\"" & d & "\"")
@@ -114,7 +114,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   # Project manifest: all four repos included, each with a remote.
   var pt =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"demo\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n"
+    "[project]\nname = \"demo\"\n\n"
   for i, n in repoNames:
     pt.add("[[remote]]\nname = \"" & n & "-origin\"\nfetch = \"" &
       fileUrl(origins[i]) & "\"\n\n")
@@ -144,8 +144,8 @@ proc setupFixture(gitBin, slug: string): Fixture =
     cloneInto(gitBin, origins[i], workspaceRoot / n)
 
   createDir(workspaceRoot / ".repro")
-  writeFile(workspaceRoot / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nbranch = \"main\"\n")
   result.workspaceRoot = workspaceRoot
 

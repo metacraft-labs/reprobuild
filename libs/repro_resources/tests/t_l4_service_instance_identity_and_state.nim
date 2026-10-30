@@ -177,8 +177,8 @@ proc writeWorkspace(root, project: string) =
   ## path while claiming to measure the identity one. Reconstructed from
   ## the reader's own requirement rather than from memory.
   createDir(root / ".repro")
-  writeFile(root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\n" &
     "project = \"" & project & "\"\n")
 
@@ -219,7 +219,7 @@ proc buildScratchTree() =
   writeWorkspace(wsA, WorkspaceProject)
   writeWorkspace(wsB, WorkspaceProject)
   createDir(wsNoId / ".repro")
-  writeFile(wsNoId / ".repro" / "workspace.toml", "not valid toml ===\n")
+  writeFile(wsNoId / ".repro" / "workspace-state.toml", "not valid toml ===\n")
   createDir(store)
   # Identical rendered configuration in the two checkouts; a different
   # one in the sibling project, which is what makes the `derived`

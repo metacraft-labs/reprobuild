@@ -121,8 +121,8 @@ proc commit(fx: Fixture; gitBin, path, label: string): string =
 
 proc projectToml(fx: Fixture): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "[project]\nname = \"app\"\n" &
+  "\n" &
   "[[remote]]\nname = \"app-origin\"\nfetch = \"" & fileUrl(fx.appBare) &
     "\"\n\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & fileUrl(fx.libBare) &
@@ -135,9 +135,9 @@ proc projectToml(fx: Fixture): string =
     "\"repos/core.toml\", \"repos/other.toml\"]\n"
 
 proc repoToml(name, remote: string; depends: seq[string] = @[]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & remote & "\"\nrevision = \"main\"\n"
+    "remote = \"" & remote & "\"\nmainline = \"main\"\n"
   if depends.len > 0:
     result.add("depends = [")
     for i, dep in depends:
@@ -146,9 +146,9 @@ proc repoToml(name, remote: string; depends: seq[string] = @[]): string =
     result.add("]\n")
 
 proc repoTomlWithLocalRemote(name, projectRemote, localRemote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
   "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-  "remote = \"" & localRemote & "\"\nrevision = \"main\"\n" &
+  "remote = \"" & localRemote & "\"\nmainline = \"main\"\n" &
   "remotes = [\n  { name = \"" & localRemote & "\", remote = \"" &
     projectRemote & "\" },\n]\n"
 
@@ -211,9 +211,9 @@ proc setup(gitBin, slug: string; customCoreRemote = false): Fixture =
   # `[manifest] publish_locks = true` a passing gate writes the record and
   # does NOT publish it, so every "the lock reached the manifest bare" check
   # below would be asking for something this workspace never enabled.
-  writeFile(result.workspace / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(result.workspace / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"" & fileUrl(result.manifestBare) & "\"\n" &
     "publish_locks = true\n")
   result.manifestPrePushLog = result.scratch / "manifest-pre-push.log"

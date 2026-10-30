@@ -245,19 +245,19 @@ proc initializeSingleRepoWorkspace(fx: var Fixture) =
   let manifestBare = fx.scratch / "manifests.git"
   createDir(manifests / "projects")
   createDir(manifests / "repos")
-  writeFile(fx.scratch / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(fx.scratch / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
   writeFile(manifests / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n[[remote]]\nname = \"origin\"\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n[[remote]]\nname = \"origin\"\n" &
     "fetch = \"" & fx.origin.replace('\\', '/') & "\"\n\n" &
     "includes = [\"repos/app.toml\"]\n")
   writeFile(manifests / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"repo\"\nremote = \"origin\"\n" &
-    "revision = \"main\"\n")
+    "mainline = \"main\"\n")
   discard require(q(fx.gitBin) & " init --bare -b main " & q(manifestBare))
   discard require(q(fx.gitBin) & " init -b main " & q(manifests))
   discard require(q(fx.gitBin) & " -C " & q(manifests) &

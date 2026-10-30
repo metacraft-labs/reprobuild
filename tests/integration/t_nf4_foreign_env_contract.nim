@@ -112,8 +112,8 @@ suite "nf4_foreign_env_contract":
       let root = createTempDir("repro-resolver-pipes-", "")
       defer: removeDir(root)
       createDir(root / ".repro")
-      writeFile(root / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n")
+      writeFile(root / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n")
       var worker = startProcess(getAppFilename(), args =
         ["--resolver-worker", root, mode], options = {poStdErrToStdOut})
       defer:

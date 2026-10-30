@@ -68,6 +68,8 @@ import repro_core                            # writeString / writeU32Le
 import repro_project_dsl                     # DslServiceDef / ServiceScope
 import repro_workspace_manifests/lock_paths  # encodeLockPathSegment
 import repro_workspace_manifests/reader      # readWorkspaceLocal
+import repro_workspace_manifests/retired_names # refuseRetiredStateFile
+from repro_core/workspace_root import StateFileName
 
 const
   ServiceIdentityDigestTag = "reprobuild.service-identity.v1"
@@ -111,13 +113,13 @@ type
       ## The consuming project's root. Canonicalised on the way in.
     workspaceRoot*: string
       ## The workspace root this project sits under — the directory
-      ## carrying `.repro/workspace.toml`. Empty when there is none.
+      ## carrying `.repro/workspace-state.toml`. Empty when there is none.
     workspaceId*: string
       ## THE WORKSPACE IDENTITY, which is deliberately not invented here.
       ## `Local-Daemons-And-Control-Plane.md` already keys daemon sessions
       ## partly on "workspace identity when available", and the workspace
       ## manifests already carry exactly one such name: `[workspace]
-      ## project` in `.repro/workspace.toml` — the PRIMARY project of the
+      ## project` in `.repro/workspace-state.toml` — the PRIMARY project of the
       ## active set, which `WorkspaceBody.project` is required to be
       ## non-empty for. That is the notion reused.
       ##
@@ -130,7 +132,7 @@ type
       ## can say WHY rather than only that it happened.
       ##
       ## This field exists because of a measured near-miss in this
-      ## milestone's own test fixture. A `.repro/workspace.toml` written
+      ## milestone's own test fixture. A `.repro/workspace-state.toml` written
       ## with the wrong `schema` value was rejected by
       ## `readWorkspaceLocal`, the rejection was swallowed, and `scope
       ## workspace` quietly narrowed to the checkout -- which is a
@@ -439,13 +441,16 @@ proc discoverServiceScopeContext*(projectRoot: string): ServiceScopeContext =
   ## Fill a `ServiceScopeContext` from a real filesystem.
   ##
   ## The workspace is found by walking UP from the project root for a
-  ## directory carrying `.repro/workspace.toml` — the same file, and the
-  ## same "declares a workspace" test, that `repro hooks ensure --vcs`
-  ## uses to tell a workspace root from a checkout that merely holds
-  ## manifest-shaped data. Its `[workspace] project` is the workspace
-  ## identity (see `ServiceScopeContext.workspaceId`).
+  ## directory carrying the workspace state file
+  ## `.repro/workspace-state.toml` — the same file, and the same "declares a
+  ## workspace" test, that `repro hooks ensure --vcs` uses to tell a
+  ## workspace root from a checkout that merely holds manifest-shaped data.
+  ## Its `[workspace] project` is the workspace identity (see
+  ## `ServiceScopeContext.workspaceId`). A directory recording its state only
+  ## under the retired name is refused with the remedy
+  ## (`retired_names.refuseRetiredStateFile`), not walked past.
   ##
-  ## A `workspace.toml` that cannot be read is treated as a workspace
+  ## A state file that cannot be read is treated as a workspace
   ## with NO identity rather than as no workspace: the root is real, so
   ## `workspace` scope degrades by one step instead of two, and the
   ## degradation message says which.
@@ -455,7 +460,9 @@ proc discoverServiceScopeContext*(projectRoot: string): ServiceScopeContext =
     return
   var dir = result.projectRoot
   while true:
-    let candidate = dir / ".repro" / "workspace.toml"
+    let candidate = dir / ".repro" / StateFileName
+    if not fileExists(candidate):
+      discard refuseRetiredStateFile(dir)
     if fileExists(candidate):
       result.workspaceRoot = dir
       try:
@@ -497,7 +504,7 @@ proc resolveServiceScope*(scope: ServiceScope;
       result.degraded = true
       result.degradation =
         "`scope workspace` fell back to the workspace ROOT PATH `" &
-        ctx.workspaceRoot & "`: its `.repro/workspace.toml` declares no " &
+        ctx.workspaceRoot & "`: its `.repro/workspace-state.toml` declares no " &
         "readable `[workspace] project`, which is the workspace identity " &
         "this scope keys on" &
         (if ctx.workspaceIdUnreadable.len > 0:
@@ -521,7 +528,7 @@ proc resolveServiceScope*(scope: ServiceScope;
     result.degradation =
       "`scope workspace` DEGRADED TO `scope project` (`" &
       ctx.projectRoot & "`): no ancestor of the project root carries " &
-      "`.repro/workspace.toml`, so there is no workspace to be one " &
+      "`.repro/workspace-state.toml`, so there is no workspace to be one " &
       "instance per. The service is not shared beyond this project."
   of sscUser:
     if ctx.user.len > 0:

@@ -122,15 +122,15 @@ proc writeMembershipManifests(root: string) =
   createDir(root / "repos")
   writeFile(root / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n" &
     "[[remote]]\nname = \"origin\"\n" &
     "fetch = \"https://example.invalid/app.git\"\n\n" &
     "includes = [\"repos/app.toml\"]\n")
   writeFile(root / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"origin\"\nrevision = \"main\"\n")
+    "remote = \"origin\"\nmainline = \"main\"\n")
 
 proc runRepro(reproBin, cwd: string; args: openArray[string]):
     tuple[code: int; output: string] =
@@ -224,7 +224,7 @@ suite "no-project-set refusals name the remedy":
       writeFile(empty / "repro-workspace.toml", MinimalSettings)
       commitAll(gitBin, empty, "settings file")
       check not fileExists(empty / ".repro" / "workspace-state.toml")
-      check not fileExists(empty / ".repro" / "workspace.toml")
+      check not fileExists(empty / ".repro" / "workspace-state.toml")
 
       for verb in verbs:
         checkRefusalTeachesRemedy(verb.label & "(empty)",
@@ -248,7 +248,7 @@ suite "no-project-set refusals name the remedy":
       commitAll(gitBin, workspace, "membership")
       createDir(workspace / ".repro")
       check not fileExists(workspace / ".repro" / "workspace-state.toml")
-      check not fileExists(workspace / ".repro" / "workspace.toml")
+      check not fileExists(workspace / ".repro" / "workspace-state.toml")
 
       for verb in verbs:
         checkRefusalTeachesRemedy(verb.label & "(workspace)",
@@ -285,7 +285,7 @@ suite "no-project-set refusals name the remedy":
         checkpoint("workspace enable output: " & enabled.output)
       check enabled.code == 0
       check fileExists(workspace / ".repro" / "workspace-state.toml") or
-        fileExists(workspace / ".repro" / "workspace.toml")
+        fileExists(workspace / ".repro" / "workspace-state.toml")
       let listed = runRepro(reproBin, workspace, ["workspace", "list"])
       if listed.code != 0:
         checkpoint("workspace list after enable: " & listed.output)
