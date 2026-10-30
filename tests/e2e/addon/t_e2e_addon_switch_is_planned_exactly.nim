@@ -18,6 +18,14 @@
 ##   makes), so links, copies, the static tree link, the sysctl values
 ##   and the retained account are all exactly what the ledger says.
 ##
+## Every apply is pinned to its plan (``--plan <add-on plan-id>``), and
+## the pin is falsified once: before generation 3, a unit the plan saw
+## active crashes between the plan and the pinned apply, which refuses
+## with ``EPlanStale`` (exit 3) and writes nothing (the fingerprint is
+## unchanged). The transition sections are read with the strict parser
+## (an unknown verb fails the gate) and compared with the ``exclusive``
+## flag.
+##
 ## The switch's materialisation is checked too: a managed ``/etc`` file
 ## is a link into ``/etc/repro/static``, which is a link into the store;
 ## unit files, sysusers and tmpfiles fragments are regular files; and a
@@ -212,7 +220,25 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if not g.bootstrapAddon(repro, step): return fails
     var f = g.takeFingerprint(repro)
     var l = g.ledgerOf()
+    proc planIdIn(text: string): string =
+      for line in text.splitLines():
+        if line.startsWith("add-on plan-id: "):
+          return line["add-on plan-id: ".len .. ^1].strip()
     for gen in generations:
+      if gen.name == "g3-dependency-only":
+        # The pinned plan goes stale: a unit it saw active crashes.
+        let stalePlan = g.planProfile(repro, gen.name & "-stale", gen.profile)
+        let staleId = planIdIn(stalePlan.stdout)
+        step("g3: the plan prints an add-on plan id", staleId.len == 32, stalePlan.stdout)
+        discard g.run("systemctl kill -s KILL repro-fixture-b.service; sleep 1; true")
+        let crashed = g.takeFingerprint(repro)
+        let st = g.applyProfile(repro, gen.name & "-stale", gen.profile, " --plan " & staleId)
+        step("g3: the pinned apply refuses with EPlanStale after the unit crashed",
+             st.exitCode == 3 and "stale" in st.stderr, "exit " & $st.exitCode & "\n" & st.stdout & st.stderr)
+        let id = identityReport(crashed, g.takeFingerprint(repro))
+        step("g3: the stale apply wrote nothing", id.ok, id.text)
+        discard g.run("systemctl reset-failed repro-fixture-b.service; systemctl start repro-fixture-b.service")
+        f = g.takeFingerprint(repro)
       let pl = g.planProfile(repro, gen.name, gen.profile)
       step(gen.name & ": plan", pl.exitCode == 0, pl.stdout & pl.stderr)
       let planned = parseTransitions(pl.stdout)
@@ -227,7 +253,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "\nexpected " & $gen.expected & " leave " & $gen.leave & "\n" & pl.stdout)
       let cursor = g.journalCursor()
       let pidA = g.exec("systemctl show -p MainPID --value repro-fixture-a.service").stdout.strip()
-      let ap = g.applyProfile(repro, gen.name, gen.profile)
+      let pinned = planIdIn(pl.stdout)
+      step(gen.name & ": the plan prints an add-on plan id", pinned.len == 32, pl.stdout)
+      let ap = g.applyProfile(repro, gen.name, gen.profile, " --plan " & pinned)
       step(gen.name & ": apply", ap.exitCode == 0, ap.stdout & ap.stderr)
       # The apply prints the same list the plan did.
       let applied = parseTransitions(ap.stdout)
@@ -235,7 +263,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            applied.len == planned.len and (block:
              var same = true
              for i in 0 ..< min(applied.len, planned.len):
-               if applied[i].unit != planned[i].unit or applied[i].verb != planned[i].verb:
+               if applied[i].unit != planned[i].unit or applied[i].verb != planned[i].verb or
+                   applied[i].exclusive != planned[i].exclusive:
                  same = false
              same), ap.stdout)
       # The journal: every fixture unit's state changes equal the list.

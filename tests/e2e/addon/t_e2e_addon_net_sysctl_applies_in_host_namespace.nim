@@ -5,12 +5,18 @@
 ## (what the agent's apply unit will be, spec §9.1; here ``systemd-run``
 ## stands in for it). ``net.*`` keys are per network namespace, so a
 ## ``sysctl -w`` from there would set a throwaway namespace's copy; the
-## switch applies the fragments by restarting the host's own
-## ``systemd-sysctl.service`` and observes the values by a transient unit
-## in the host's namespaces (spec §7.2 step 6, threat model G35). The gate
-## reads the host's values over SSH afterwards: they changed, and the
-## values the apply reports as observed equal them. Removing the resources
-## restores the base values.
+## switch applies each changed fragment by the host's own
+## ``systemd-sysctl <fragment>``, run as a transient unit in the host's
+## namespaces, and observes the values the same way (spec §7.2 step 6,
+## threat model G35). The gate reads the host's values over SSH
+## afterwards: they changed, and the values the apply reports as observed
+## equal them. Removing the resources restores the base values.
+##
+## Boot-time precedence (spec §4.3, §7.2 step 6): a base fragment that
+## sorts after the add-on's ``90-repro-*`` (here ``99-zz-repro-fixture.conf``)
+## or ``/etc/sysctl.conf`` assigning one of the keys another value would
+## put that value back at every boot; the plan refuses the resource
+## (exit 2), naming the file, and nothing is written.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=sysctl-in-apply-namespace``):
 ## the switch runs ``systemd-sysctl`` on the fragments in the apply's own
@@ -111,6 +117,27 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("cat /proc/sys/net/core/somaxconn").strip() == somaxBefore, "")
     let d2 = deltaReport(f1, g.takeFingerprint(repro), l1, g.ledgerOf())
     step("fingerprint diff == ledger delta after removal", d2.ok, d2.text)
+    # A base assignment applied after the add-on's fragment: refused.
+    let fb = g.takeFingerprint(repro)
+    discard g.run("printf 'net.core.somaxconn = 1234\\n' > /etc/sysctl.d/99-zz-repro-fixture.conf")
+    let late = g.applyProfile(repro, "sysctl-late", Profile)
+    step("a later base fragment assigning the key refuses the plan (exit 2), naming it",
+         late.exitCode == 2 and "99-zz-repro-fixture.conf" in late.stderr and
+         "net.core.somaxconn" in late.stderr, "exit " & $late.exitCode & "\n" & late.stdout & late.stderr)
+    discard g.run("rm -f /etc/sysctl.d/99-zz-repro-fixture.conf")
+    discard g.run("if [ -e /etc/sysctl.conf ]; then cp -a /etc/sysctl.conf /root/sysctl.conf.repro-bak; fi; " &
+      "printf 'net.ipv4.ip_forward = 0\\n' >> /etc/sysctl.conf")
+    let conf = g.applyProfile(repro, "sysctl-conf", Profile)
+    step("an /etc/sysctl.conf assignment of the key refuses the plan (exit 2), naming it",
+         conf.exitCode == 2 and "/etc/sysctl.conf" in conf.stderr and
+         "net.ipv4.ip_forward" in conf.stderr, "exit " & $conf.exitCode & "\n" & conf.stdout & conf.stderr)
+    discard g.run("if [ -e /root/sysctl.conf.repro-bak ]; then mv /root/sysctl.conf.repro-bak /etc/sysctl.conf; " &
+      "else rm -f /etc/sysctl.conf; fi")
+    let ib = identityReport(fb, g.takeFingerprint(repro))
+    step("the refused plans wrote nothing", ib.ok, ib.text)
+    step("the host's values are still the base's",
+         g.run("cat /proc/sys/net/ipv4/ip_forward").strip() == fwdBefore and
+         g.run("cat /proc/sys/net/core/somaxconn").strip() == somaxBefore, "")
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
   except CatchableError as e:
