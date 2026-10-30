@@ -153,9 +153,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     g.copyTo(g.runDir / "gen3.profile", "/root/addon/gen3.profile")
     let cur2 = g.run("cat /var/lib/repro/system/current 2>/dev/null || readlink /var/lib/repro/system/current").strip()
     let a3 = g.exec(repro & " infra apply --profile /root/addon/gen3.profile")
-    step("an unmanaged kind is refused", a3.exitCode == 1 and
-         "linux.sysctl" in a3.stderr and "nothing was applied" in a3.stderr,
-         a3.stdout & a3.stderr)
+    # (incus exec merges the guest's stderr into stdout; ssh keeps them apart.)
+    let a3Out = a3.stdout & a3.stderr
+    step("an unmanaged kind is refused", a3.exitCode != 0 and
+         "linux.sysctl" in a3Out and "nothing was applied" in a3Out,
+         "exit " & $a3.exitCode & "\n" & a3.stdout & a3.stderr)
     let f3b = g.takeFingerprint(repro)
     let unchanged = identityReport(f3, f3b)
     step("the refused apply wrote nothing", unchanged.ok, unchanged.text)
@@ -175,6 +177,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "repro-addon.sh" in unDrift.stdout,
          unDrift.stdout & unDrift.stderr & "\nledger kept: " & $ledgerKept &
          " file kept: " & $fileKept)
+    # The kept ledger describes what is still owned: the objects the first
+    # uninstall did undo (the diversion, the units) are no longer in it.
+    let kept = g.exec("cat /var/lib/repro/system/addon-ledger").stdout
+    step("the kept ledger lists only what is still owned",
+         "\ndiversion\t" notin kept and "repro-addon.target" notin kept and
+         "repro-addon.sh" in kept, kept)
     discard g.run("cp -p /root/addon/profile.d.orig /etc/profile.d/repro-addon.sh")
 
     let un = g.exec(repro & " system addon uninstall")

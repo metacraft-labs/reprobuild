@@ -5161,6 +5161,44 @@ proc appendActionResultRecord*(cache: var ActionCache;
   {.cast(gcsafe).}:
     cache.writePerEdgeRecord(installed)
 
+proc refreshRestoredOutputs*(cache: var ActionCache;
+                             record: ActionResultRecord;
+                             outputRoot = ""): ActionResultRecord =
+  ## Rewrite `record` so its output state describes the files a restore just
+  ## wrote, and return it.
+  ##
+  ## A record's output metadata and witnesses (size, mtime, inode change
+  ## time, link target, tree digest) are observed where the action RAN. A
+  ## restore from the CAS -- a local restore-mode hit, or a record installed
+  ## from a LAN peer whose outputs the installer verified and wrote -- puts
+  ## the recorded bytes at the declared paths in fresh inodes, so from then
+  ## on the record describes the producer's files and not the ones on this
+  ## host. The in-place consultation (Incremental-Invalidation.md §"Minimum
+  ## check set" Step 3.3, `outputStateMismatch`) compares against the live
+  ## files and would reject the record on every warm build, re-executing an
+  ## unchanged edge: a record installed from a peer was never reusable in
+  ## place. The bytes are the recorded ones -- the materialization verified
+  ## every blob -- so re-observing the outputs is exactly what
+  ## `recordActionResult` does after an execution, and the record keeps its
+  ## fingerprints, its blobs and its execution-observation mark.
+  ##
+  ## An output the restore did not put on disk (an optional output the
+  ## record names but that is absent) keeps its recorded state.
+  result = record
+  for i in 0 ..< result.outputs.len:
+    let source = materialPath(outputRoot, result.outputs[i].path)
+    let live = fingerprintMetadata(source)
+    if live.kind == ffkMissing:
+      continue
+    let observed = observeOutputWitness(source, live)
+    result.outputs[i].metadata = live
+    result.outputs[i].changeTimeNs = observed.changeTimeNs
+    result.outputs[i].linkTarget = observed.linkTarget
+    result.outputs[i].treeDigest = observed.treeDigest
+    result.outputs[i].hasTreeDigest = observed.hasTreeDigest
+  result.observedExecution = cache.observedExecutionOf(record)
+  cache.writePerEdgeRecord(result)
+
 proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
     seq[ActionResultRecord] =
   ## Full-record candidate set for one edge, ordered OLDEST→NEWEST so the

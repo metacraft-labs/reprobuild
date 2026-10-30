@@ -71,6 +71,7 @@ type
     ## Result of one `trySubstituteBuildAction` call.
     hit*: bool            ## true when the outputs were served from cache
     reason*: string       ## populated on a miss / error (diagnostic)
+    trustRejected*: bool  ## the miss was a trust refusal, not an absent entry
     bytesFetched*: int64
 
 proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
@@ -80,10 +81,16 @@ proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
   resolveTrustedCacheConfig()
 
 proc shouldPublishBuildActionOutputs*(cfg: BuildActionCacheConfig): bool =
-  ## Whether a freshly built edge's outputs are published back. Only a host
-  ## configured as a publisher (cache configured AND an operator-supplied
-  ## keypair present) publishes; every other host is a pure consumer.
-  cfg.configured and cfg.keypairOk and cfg.publishEndpoint.len > 0
+  ## Whether a freshly built edge's outputs are published back. Three things
+  ## must hold: a cache is configured, an operator-supplied keypair is
+  ## present, AND the apply was explicitly opted in to publishing
+  ## (``REPRO_APPLY_PUBLISH=1``, see ``caches_config.ApplyPublishOptInVar``).
+  ## The keypair alone is not enough: it is also the ``repro build``
+  ## publisher's, and a developer shell that exports it must not turn a
+  ## ``sudo -E repro infra apply`` into a fleet-wide publisher. Every other
+  ## host is a pure consumer.
+  cfg.configured and cfg.keypairOk and cfg.publishEndpoint.len > 0 and
+    applyPublishOptedIn()
 
 # ---------------------------------------------------------------------------
 # Content-addressable cache identity for a build-action edge.
@@ -249,12 +256,31 @@ proc isSubstitutable*(action: ProfileBuildAction): bool =
 proc collectFilesUnder(root, rel: string; acc: var seq[string]) =
   ## Append every regular file under `root/rel` as a `root`-relative
   ## path. `rel` may name a file or a directory.
+  ##
+  ## Raises `IOError` on a symbolic link anywhere in the tree, including a
+  ## link to a directory. The old walk yielded link-to-file entries and
+  ## silently DID NOT DESCEND into link-to-directory entries, so a tree
+  ## carrying `lib -> ../real-lib` published as a prefix with no `lib/` at
+  ## all: a partial prefix that substitutes cleanly and runs without its
+  ## libraries. An outputs archive holds regular files only (the
+  ## substitute side refuses links too), so a producer tree with a link is
+  ## refused, loudly, rather than published without it.
   let abs = root / rel
+  if symlinkExists(abs):
+    raise newException(IOError,
+      "declared output " & rel & " is a symbolic link; an outputs " &
+      "archive holds regular files only, so this edge is not published")
   if fileExists(abs):
     acc.add(rel.replace('\\', '/'))
   elif dirExists(abs):
-    for path in walkDirRec(abs, yieldFilter = {pcFile, pcLinkToFile},
-                           relative = true):
+    for path in walkDirRec(abs,
+                           yieldFilter = {pcFile, pcLinkToFile, pcLinkToDir},
+                           followFilter = {pcDir}, relative = true):
+      if symlinkExists(abs / path):
+        raise newException(IOError,
+          "declared output " & rel & " contains a symbolic link (" &
+          (rel / path).replace('\\', '/') & "); an outputs archive holds " &
+          "regular files only, so this edge is not published")
       acc.add((rel / path).replace('\\', '/'))
 
 proc stagePrefixFromOutputs(action: ProfileBuildAction;
@@ -445,6 +471,10 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
     if not res.ok or res.outcomes.len == 0:
       result.reason = "cache miss for " & entryHex &
         (if res.reason.len > 0: ": " & res.reason else: "")
+      # The walk's trust refusal wording (`closure_walk.fetchAndVerifyManifest`
+      # / `compat_check` gate 6) is the signal the dispatcher reports per
+      # edge: an entry existed and was refused, which is not a plain miss.
+      result.trustRejected = "not trusted" in res.reason
       return
     let rootOutcome = res.outcomes[^1]
     if rootOutcome.casPath.len == 0 or not fileExists(rootOutcome.casPath):
@@ -483,9 +513,9 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
   ## is ever generated here.
   if not shouldPublishBuildActionOutputs(cfg):
     return (ok: false,
-            reason: "publish skipped: this host is not configured as a " &
-              "cache publisher (REPRO_BINARY_CACHE_KEY_PATH / " &
-              "REPRO_BINARY_CACHE_CERT_PATH)")
+            reason: "publish skipped: this apply is not an opted-in " &
+              "publisher (REPRO_APPLY_PUBLISH=1 with " &
+              "REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH)")
   let stageDir = scratchRoot / "publish-stage"
   try:
     removeDir(stageDir)

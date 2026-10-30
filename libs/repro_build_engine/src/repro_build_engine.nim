@@ -21278,6 +21278,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 cas.materializeActionCacheOutputs(lookup.record, action.cwd)
                 fileMetadataCache.clear()
                 finishStat("repro cache restore", restoreStart)
+                # The record now describes the producer's inodes, not the
+                # files the restore wrote; refresh it so the next in-place
+                # consultation on this host reuses them (a record installed
+                # from a peer was otherwise rejected on every warm build).
+                lookup.record = cache.refreshRestoredOutputs(lookup.record,
+                  action.cwd)
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
@@ -21329,6 +21335,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 cas.materializeActionCacheOutputs(lookup.record, action.cwd)
                 fileMetadataCache.clear()
                 finishStat("repro cache restore", restoreStart)
+                # The record now describes the producer's inodes, not the
+                # files the restore wrote; refresh it so the next in-place
+                # consultation on this host reuses them (a record installed
+                # from a peer was otherwise rejected on every warm build).
+                lookup.record = cache.refreshRestoredOutputs(lookup.record,
+                  action.cwd)
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)

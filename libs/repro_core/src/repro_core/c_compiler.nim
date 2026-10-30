@@ -79,6 +79,14 @@ proc sanitizeStaticExec(val: string): string =
 # Windows gets its compiler from the bootstrap or from `REPRO_BOOTSTRAP_CC`.
 when defined(windows):
   const BuiltCCompilerPath* = ""
+elif defined(reproBuiltCCompiler):
+  # A cross build names the compiler explicitly -- or, with an empty value,
+  # names none: the C compiler that produced an image for another machine is
+  # a path on the BUILD host, meaningless on the one the image runs on, and
+  # baking it in would both mislead `fallbackCCompiler` there and leave a
+  # build-host path in the installed image (`scripts/cross/build_linux_cross.sh`).
+  const reproBuiltCCompiler {.strdefine.} = ""
+  const BuiltCCompilerPath* = reproBuiltCCompiler
 else:
   const BuiltCCompilerPath* =
     sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
