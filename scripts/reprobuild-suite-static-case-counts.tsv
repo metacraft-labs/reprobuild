@@ -565,7 +565,7 @@ libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
-libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	1
+libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	4
 libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim	nim	8
 libs/repro_profile_compile/tests/t_smoke_apply_integration.nim	nim	4
 libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7

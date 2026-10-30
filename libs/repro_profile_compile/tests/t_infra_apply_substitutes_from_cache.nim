@@ -1,62 +1,64 @@
 ## Windows-Runner-Binary-Cache-Deploy M4 — apply substitutes build-action
-## outputs from the binary cache instead of building them locally.
+## outputs from the binary cache instead of building them locally — and
+## does so only under the R1 trust anchors, publishing only from a host
+## configured as a publisher.
 ##
-## This is the M4 gate. It proves that `repro infra apply`'s build-action
-## dispatcher (``repro_profile_compile.mkBuildActionDispatcher``, the same
-## closure ``runInfraApply`` injects into ``ApplyOptions.buildActionDispatcher``)
-## PREFERS fetching a build-action's OUTPUTS from a real
-## ``repro-binary-cache`` server (``bakBinaryCacheSubstitute`` machinery)
-## over running the local build, WHEN a cache is configured
-## (``REPRO_BINARY_CACHE_URL`` set) AND the cache holds that output.
+## This is the M4 gate plus its trust controls. It drives `repro infra
+## apply`'s build-action dispatcher
+## (``repro_profile_compile.mkBuildActionDispatcher``, the same closure
+## ``runInfraApply`` injects into ``ApplyOptions.buildActionDispatcher``,
+## and which ``repro deploy-agent`` reaches through ``runInfraApply``).
 ##
-## It is a genuine, non-weak gate:
+## No mocks. Every case runs against:
 ##
-##   * A REAL ``repro-binary-cache`` server subprocess binds 127.0.0.1
-##     (the M1/M2 machinery). No stub, no in-memory fake.
-##   * The build action runs a REAL ``/bin/sh`` process whose ONLY
-##     side effect visible to the assertions is (a) the declared output
-##     file under ``cwd`` AND (b) a "witness" marker file OUTSIDE the
-##     outputs that the shell touches EVERY time it runs. The witness is
-##     how we prove "built locally" vs "served from cache" honestly: a
-##     substituted edge never spawns the shell, so the witness is not
-##     re-touched.
-##   * Run 1 (EMPTY cache): the action builds locally + publishes its
-##     output. Asserted: ``substitutedFromCache == false`` and the
-##     witness was written (the shell ran).
-##   * Run 2 (FRESH cwd, FRESH engine cache root, cache now populated):
-##     the output is SUBSTITUTED. Asserted: ``substitutedFromCache ==
-##     true``, ``cacheHit == true``, the materialised output is
-##     BYTE-IDENTICAL to run 1's, AND the witness is ABSENT (the shell
-##     never ran — proof it came from the cache, not a local build).
-##   * Negative control (``REPRO_BINARY_CACHE_URL`` UNSET, fresh cwd):
-##     the same apply BUILDS LOCALLY — ``substitutedFromCache == false``
-##     and the witness is written. Proves the feature is off-by-default
-##     and the local-build fallback is intact.
-##   * Trust control: a consumer whose trusted producer cert is a
-##     DIFFERENT key than the one that published the entry must not
-##     substitute it -- it builds locally. An apply materialises
-##     substituted outputs with privilege, so an entry signed by a key
-##     nobody provisioned (an attacker can mint one in a second) must be
-##     a miss. Run against a dispatcher that trusts any signer, this
-##     control goes red.
-##   * No invented publisher: with no provisioned keypair the apply
-##     publishes nothing and never mints a key of its own (the
-##     auto-credential directory stays absent).
+##   * a REAL ``repro-binary-cache`` server subprocess on 127.0.0.1 (the
+##     M1/M2 machinery), and
+##   * a build action that runs a REAL ``/bin/sh`` whose only side effects
+##     are (a) the declared output under ``cwd`` and (b) a "witness" file
+##     OUTSIDE the outputs that the shell touches every time it runs. A
+##     substituted edge never spawns the shell, so the witness is the
+##     honest "built locally" vs "served from cache" signal.
 ##
-## The producer identity is provisioned explicitly
-## (``REPRO_BINARY_CACHE_KEY_PATH`` / ``_CERT_PATH``), and
-## ``REPRO_CACHES_CONFIG`` points at an empty file so the host's own
-## ``/etc/repro/caches.conf`` can never leak a real cache into the gate.
+## The cache configuration is the real ``caches.conf`` mechanism, pinned to
+## a scratch file through ``REPRO_CACHES_CONFIG`` so the host's own
+## ``/etc/repro/caches.conf`` (fleet hosts render one) cannot leak in.
 ##
-## The counts come from the REAL dispatcher executing REAL actions
-## against the REAL cache server — they are not faked.
+## Cases:
+##
+##   1. M4 gate. A PUBLISHER (operator-supplied keypair A) builds and
+##      publishes; a CONSUMER whose ``caches.conf`` anchors A substitutes the
+##      output byte-identically without spawning the shell. Negative control:
+##      no cache configured builds locally (off-by-default).
+##   2. UNTRUSTED SIGNER. The entry is signed by A; a consumer that anchors
+##      only B builds locally. Positive control in the same case: the same
+##      consumer anchoring A hits, so the rejection is the trust gate and not
+##      a missing entry.
+##   3. NO ANCHORS. A cache configured with no ``trusted-public-keys``, and
+##      the back-compat ``REPRO_BINARY_CACHE_URL`` with no producer cert,
+##      are both misses against the same validly signed entry.
+##   4. CONSUMER NEVER PUBLISHES. A host with a cache configured (including
+##      ``REPRO_BINARY_CACHE_URL``, the old trigger) but no keypair builds a
+##      miss locally, generates no key (the auto-credential directory stays
+##      absent) and publishes nothing (the server has no manifest for the
+##      entry). Positive control: the same apply with the keypair configured
+##      does publish, so the "no manifest" check can see a publish.
+##
+## Non-vacuity: before this gate was amended the dispatcher substituted
+## through ``SubstituteEndpoint(trustedSigners: @[])`` without
+## ``enforceTrust`` and auto-generated a publisher keypair. Against that
+## code case 2 and case 3 hit (an untrusted entry materialises) and case 4
+## finds a generated key and a published manifest — each case fails.
 
-import std/[os, osproc, net, random, strutils, tempfiles, unittest]
+import std/[httpclient, os, osproc, net, random, strutils, tempfiles, unittest]
 
+import repro_binary_cache_client
+import repro_test_support/reasoned_skip
 import repro_elevation
 import repro_infra
 import repro_profile
 import repro_profile_compile
+import repro_profile_compile/binary_cache_build_actions
+
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 const ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
@@ -105,10 +107,10 @@ proc witnessShellAction(id, cwd: string): ProfileBuildAction =
   ##
   ## CRITICAL for the M4 key: the argv uses ONLY cwd-RELATIVE paths, so
   ## the action definition (hence the content-addressable cache key) is
-  ## IDENTICAL across the run-1 and run-2 cwds. A cwd-baked absolute
-  ## path in argv would make the key per-run and the substitute would
-  ## never hit. The broker runs the process with ``cwd`` as its working
-  ## directory, so the relative paths resolve under the right root.
+  ## IDENTICAL across cwds. A cwd-baked absolute path in argv would make
+  ## the key per-run and the substitute would never hit. The broker runs
+  ## the process with ``cwd`` as its working directory, so the relative
+  ## paths resolve under the right root.
   ##
   ## ``requiresElevation = true`` routes the spawn through the in-process
   ## broker fast path, which does NOT require a monitor CLI (a
@@ -130,165 +132,253 @@ proc witnessShellAction(id, cwd: string): ProfileBuildAction =
     requiresElevation: true,
     cacheable: true)
 
+# ---------------------------------------------------------------------------
+# Cache environment. Every case sets the whole of it, so no case inherits
+# another's configuration or the host's.
+# ---------------------------------------------------------------------------
+
+const CacheEnvVars = [
+  "REPRO_CACHES_CONFIG", "REPRO_BINARY_CACHE_URL",
+  "REPRO_BINARY_CACHE_KEY_PATH", "REPRO_BINARY_CACHE_CERT_PATH",
+  "REPRO_BINARY_CACHE_SCOPE", "REPRO_BINARY_CACHE_AUTO_CRED_DIR",
+  "REPRO_CACHE_DISABLE"]
+
+proc clearCacheEnv() =
+  for v in CacheEnvVars:
+    delEnv(v)
+
+type
+  Keypair = object
+    keyPath, certPath, pubHex: string
+
+proc makeKeypair(dir: string): Keypair =
+  ## A real ECDSA-P256 producer keypair on disk, in the format an operator
+  ## hands to ``REPRO_BINARY_CACHE_KEY_PATH`` / ``_CERT_PATH``. The cert file
+  ## is the bare public-key hex, which is also what ``caches.conf`` takes.
+  createDir(dir)
+  result.keyPath = dir / "producer.key"
+  result.certPath = dir / "producer.cert"
+  discard peerAuth.loadOrGenerateKeypair(result.certPath, result.keyPath)
+  result.pubHex = readFile(result.certPath).strip()
+  doAssert result.pubHex.len == 130
+
+proc writeCachesConf(path, url: string; trusted: seq[string]) =
+  ## Render the R1 ``caches.conf`` an operator (or the nixos-modules
+  ## renderer) writes: one cache, its URL and its anchors. An empty
+  ## ``trusted`` writes a cache with NO ``trusted-public-keys`` line.
+  var text = "[fleet]\nurl = \"" & url & "\"\n"
+  if trusted.len > 0:
+    text.add("trusted-public-keys = \"" & trusted.join(", ") & "\"\n")
+  text.add("priority = 20\n")
+  writeFile(path, text)
+
+proc useConsumer(confPath: string; url = "") =
+  ## A consumer host: caches come only from ``confPath``, no keypair. A
+  ## non-empty ``url`` also sets ``REPRO_BINARY_CACHE_URL`` to the same
+  ## cache, as a host that exports it does. The rejection cases set it so
+  ## they exercise the trust gate on every revision of the dispatcher: the
+  ## pre-fix dispatcher consulted the cache only when that variable was set,
+  ## and without it a "miss" there would prove nothing about trust.
+  clearCacheEnv()
+  putEnv("REPRO_CACHES_CONFIG", confPath)
+  if url.len > 0:
+    putEnv("REPRO_BINARY_CACHE_URL", url)
+
+proc usePublisher(confPath, url: string; kp: Keypair) =
+  ## A host the operator made a publisher: same cache config, plus the
+  ## publish endpoint and an existing keypair.
+  useConsumer(confPath, url)
+  putEnv("REPRO_BINARY_CACHE_KEY_PATH", kp.keyPath)
+  putEnv("REPRO_BINARY_CACHE_CERT_PATH", kp.certPath)
+
+type
+  ApplyRun = object
+    outcome: BuildActionApplyOutcome
+    cwd: string
+    shellRan: bool
+
+proc applyOnce(root, tag, actionId: string): ApplyRun =
+  ## One apply of a single build-action edge in a FRESH cwd with a FRESH
+  ## engine cache root, so an engine-local action-cache hit is impossible
+  ## and only the binary cache can supply the output without a build.
+  result.cwd = root / ("cwd-" & tag)
+  let cacheRoot = root / ("engine-cache-" & tag)
+  createDir(result.cwd); createDir(cacheRoot)
+  let ctx = FixtureContext(filePrefix: root / ("ctx-" & tag))
+  let disp = mkBuildActionDispatcher(cacheRoot, ctx)
+  let outs = disp(@[witnessShellAction(actionId, result.cwd)], nil)
+  doAssert outs.len == 1, "dispatcher returned " & $outs.len & " outcomes"
+  result.outcome = outs[0]
+  if not result.outcome.ok:
+    echo "APPLY ", tag, " DIAGNOSTIC: ", result.outcome.diagnostic
+  result.shellRan = fileExists(result.cwd / WitnessRel)
+
+proc entryKeyHexFor(actionId: string): string =
+  ## The binary-cache key the dispatcher derives for ``actionId``. The key
+  ## is cwd-independent, so any cwd gives the same answer.
+  deriveCacheEntryKeyHex(buildActionCacheIdentity(
+    witnessShellAction(actionId, getTempDir()), ""))
+
+proc manifestPublished(url, entryHex: string): bool =
+  ## Ask the real server whether ANY signer published an entry under this
+  ## key. 200 = present, 404 = absent; anything else is a test failure.
+  let client = newHttpClient(timeout = 10_000)
+  defer: client.close()
+  let resp = client.request(url & "/manifests/" & entryHex, httpMethod = HttpGet)
+  let code = resp.code.int
+  doAssert code in [200, 404],
+    "unexpected status " & $code & " probing manifest " & entryHex
+  code == 200
+
+template checkBuiltLocally(run: ApplyRun) =
+  ## A template, not a proc, so a failed `check` fails the enclosing test.
+  let r = run
+  check r.outcome.ok
+  check not r.outcome.substitutedFromCache
+  check not r.outcome.cacheHit
+  check r.shellRan
+  check readFile(r.cwd / OutRel) == ExpectedPayload
+
+template checkSubstituted(run: ApplyRun) =
+  let r = run
+  check r.outcome.ok
+  check r.outcome.substitutedFromCache
+  check r.outcome.cacheHit
+  check not r.shellRan
+  check readFile(r.cwd / OutRel) == ExpectedPayload
+
+template withCacheServer(tmpPrefix: string; body: untyped) =
+  ## Starts a real cache server in a fresh temp tree and exposes ``tmpRoot``
+  ## and ``url`` to ``body``. The cache env is cleared on the way out so no
+  ## case leaks into the next.
+  let tmpRoot {.inject.} = createTempDir(tmpPrefix, "")
+  let port = pickPort()
+  let serverRoot = tmpRoot / "server-store"
+  createDir(serverRoot)
+  let srvProc = startServer(serverRoot, port)
+  try:
+    # Hard requirement: the server MUST be listening before any apply, or
+    # the substitute/publish would spuriously miss. 300 x 50 ms tolerates
+    # a slow first bind.
+    doAssert waitForListener(port),
+      "cache server did not start listening on 127.0.0.1:" & $port
+    let url {.inject.} = "http://127.0.0.1:" & $port
+    body
+  finally:
+    clearCacheEnv()
+    try: srvProc.terminate() except CatchableError: discard
+    try: srvProc.close() except CatchableError: discard
+    try: removeDir(tmpRoot) except CatchableError: discard
+
 suite "M4 — repro infra apply substitutes build-action outputs from cache":
 
   test "t_infra_apply_substitutes_from_cache":
     when not (defined(linux) or defined(macosx)):
-      skip()
+      skip("the build action is a /bin/sh script and the cache server a POSIX subprocess; no Windows arm")
     else:
       check fileExists(ServerBinary)
+      withCacheServer("m4-substitute-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
 
-      let tmpRoot = createTempDir("m4-substitute-", "")
-      defer:
-        try: removeDir(tmpRoot) except CatchableError: discard
+        # RUN 1 — empty cache, publisher host: build locally + publish.
+        usePublisher(conf, url, kpA)
+        let run1 = applyOnce(tmpRoot, "1", "m4-edge")
+        checkBuiltLocally(run1)
+        check readFile(run1.cwd / WitnessRel).len == 1
+        check manifestPublished(url, entryKeyHexFor("m4-edge"))
 
-      let port = pickPort()
-      let serverRoot = tmpRoot / "server-store"
-      createDir(serverRoot)
-      let srvProc = startServer(serverRoot, port)
-      defer:
-        try: srvProc.terminate() except CatchableError: discard
-        try: srvProc.close() except CatchableError: discard
-      # Hard requirement: the server MUST be listening before either
-      # apply run, or the substitute/publish would spuriously miss. A
-      # 15 s window (300 x 50 ms) tolerates a slow first bind.
-      doAssert waitForListener(port),
-        "cache server did not start listening on 127.0.0.1:" & $port
-      let url = "http://127.0.0.1:" & $port
+        # RUN 2 — consumer anchoring A, cache populated: SUBSTITUTE, and
+        # the output is byte-identical to the local build of run 1.
+        useConsumer(conf, url)
+        let run2 = applyOnce(tmpRoot, "2", "m4-edge")
+        checkSubstituted(run2)
+        check readFile(run2.cwd / OutRel) == readFile(run1.cwd / OutRel)
 
-      # Sandbox the auto-credential dir: if anything tried to mint a
-      # producer key it would land here, and the last control asserts it
-      # never does.
-      putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", tmpRoot / "cred")
-      defer: delEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR")
-      # No ambient cache configuration: only what this gate provisions.
-      writeFile(tmpRoot / "caches.conf", "")
-      putEnv("REPRO_CACHES_CONFIG", tmpRoot / "caches.conf")
-      defer: delEnv("REPRO_CACHES_CONFIG")
-      # The provisioned producer identity (publisher of run 1, trusted by
-      # run 2 through the env cache's producer-cert back-compat rule).
-      discard peerAuth.loadOrGenerateKeypair(tmpRoot / "producer.cert",
-                                             tmpRoot / "producer.key")
-      putEnv("REPRO_BINARY_CACHE_KEY_PATH", tmpRoot / "producer.key")
-      putEnv("REPRO_BINARY_CACHE_CERT_PATH", tmpRoot / "producer.cert")
-      defer:
-        delEnv("REPRO_BINARY_CACHE_KEY_PATH")
-        delEnv("REPRO_BINARY_CACHE_CERT_PATH")
+        # NEGATIVE CONTROL — no cache configured at all: build locally.
+        useConsumer(tmpRoot / "no-such-caches.conf")
+        let run3 = applyOnce(tmpRoot, "3", "m4-edge")
+        checkBuiltLocally(run3)
 
-      # -------------------------------------------------------------------
-      # RUN 1 — empty cache, URL set: build locally + publish.
-      # -------------------------------------------------------------------
-      let cwd1 = tmpRoot / "cwd1"
-      let cacheRoot1 = tmpRoot / "engine-cache-1"
-      let witness1 = cwd1 / WitnessRel
-      createDir(cwd1); createDir(cacheRoot1)
+  test "an entry signed by a key the cache does not anchor is a miss":
+    when not (defined(linux) or defined(macosx)):
+      skip("the build action is a /bin/sh script and the cache server a POSIX subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-untrusted-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let kpB = makeKeypair(tmpRoot / "key-b")
+        let confA = tmpRoot / "caches-a.conf"
+        let confB = tmpRoot / "caches-b.conf"
+        writeCachesConf(confA, url, @[kpA.pubHex])
+        writeCachesConf(confB, url, @[kpB.pubHex])
 
-      putEnv("REPRO_BINARY_CACHE_URL", url)
-      let ctx1 = FixtureContext(filePrefix: tmpRoot / "ctx1")
-      let disp1 = mkBuildActionDispatcher(cacheRoot1, ctx1)
-      let pba1 = witnessShellAction("m4-edge", cwd1)
-      let out1 = disp1(@[pba1], nil)
+        usePublisher(confA, url, kpA)
+        checkBuiltLocally(applyOnce(tmpRoot, "producer", "untrusted-edge"))
+        check manifestPublished(url, entryKeyHexFor("untrusted-edge"))
 
-      check out1.len == 1
-      if not out1[0].ok:
-        echo "RUN1 DIAGNOSTIC: ", out1[0].diagnostic
-      check out1[0].ok
-      check not out1[0].substitutedFromCache      # built locally
-      check not out1[0].cacheHit
-      check fileExists(cwd1 / OutRel)
-      check readFile(cwd1 / OutRel) == ExpectedPayload
-      # The shell RAN on run 1 (local build) — witness present + non-empty.
-      check fileExists(witness1)
-      check readFile(witness1).len == 1
-      let run1Bytes = readFile(cwd1 / OutRel)
+        # The consumer anchors only B. The entry is validly signed — by A.
+        useConsumer(confB, url)
+        checkBuiltLocally(applyOnce(tmpRoot, "anchors-b", "untrusted-edge"))
 
-      # -------------------------------------------------------------------
-      # RUN 2 — FRESH cwd + FRESH engine cache, cache populated: SUBSTITUTE.
-      # -------------------------------------------------------------------
-      let cwd2 = tmpRoot / "cwd2"
-      let cacheRoot2 = tmpRoot / "engine-cache-2"
-      let witness2 = cwd2 / WitnessRel
-      createDir(cwd2); createDir(cacheRoot2)
+        # Positive control: anchoring A, the very same entry substitutes.
+        useConsumer(confA, url)
+        checkSubstituted(applyOnce(tmpRoot, "anchors-a", "untrusted-edge"))
 
-      # URL still set. Fresh cwd (no local output), fresh engine cache
-      # (no engine action-cache hit possible), witness2 does not exist.
-      let ctx2 = FixtureContext(filePrefix: tmpRoot / "ctx2")
-      let disp2 = mkBuildActionDispatcher(cacheRoot2, ctx2)
-      let pba2 = witnessShellAction("m4-edge", cwd2)
-      let out2 = disp2(@[pba2], nil)
+  test "a cache with no trust anchors is never substituted from":
+    when not (defined(linux) or defined(macosx)):
+      skip("the build action is a /bin/sh script and the cache server a POSIX subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-unanchored-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let confA = tmpRoot / "caches-a.conf"
+        let confNone = tmpRoot / "caches-none.conf"
+        writeCachesConf(confA, url, @[kpA.pubHex])
+        writeCachesConf(confNone, url, @[])
 
-      check out2.len == 1
-      check out2[0].ok
-      # THE M4 ASSERTION: served from the binary cache, not built locally.
-      check out2[0].substitutedFromCache
-      check out2[0].cacheHit
-      # Byte-identical to run 1's locally-built output.
-      check fileExists(cwd2 / OutRel)
-      check readFile(cwd2 / OutRel) == run1Bytes
-      # NO local build ran: the witness was never created (the shell did
-      # not spawn on the substituted edge).
-      check not fileExists(witness2)
+        usePublisher(confA, url, kpA)
+        checkBuiltLocally(applyOnce(tmpRoot, "producer", "unanchored-edge"))
+        check manifestPublished(url, entryKeyHexFor("unanchored-edge"))
 
-      # -------------------------------------------------------------------
-      # TRUST CONTROL — the consumer trusts a DIFFERENT producer key. The
-      # entry run 1 published is validly signed, but not by a key this
-      # consumer trusts: it must be a miss, and the edge builds locally.
-      # -------------------------------------------------------------------
-      discard peerAuth.loadOrGenerateKeypair(tmpRoot / "other.cert",
-                                             tmpRoot / "other.key")
-      putEnv("REPRO_BINARY_CACHE_KEY_PATH", tmpRoot / "other.key")
-      putEnv("REPRO_BINARY_CACHE_CERT_PATH", tmpRoot / "other.cert")
-      let cwd4 = tmpRoot / "cwd4"
-      let cacheRoot4 = tmpRoot / "engine-cache-4"
-      createDir(cwd4); createDir(cacheRoot4)
-      let ctx4 = FixtureContext(filePrefix: tmpRoot / "ctx4")
-      let disp4 = mkBuildActionDispatcher(cacheRoot4, ctx4)
-      let out4 = disp4(@[witnessShellAction("m4-edge", cwd4)], nil)
-      check out4.len == 1
-      check out4[0].ok
-      check not out4[0].substitutedFromCache       # untrusted signer: a miss
-      check not out4[0].cacheHit
-      check fileExists(cwd4 / WitnessRel)          # built locally instead
+        # caches.conf names the cache but anchors no key.
+        useConsumer(confNone, url)
+        checkBuiltLocally(applyOnce(tmpRoot, "conf-no-keys",
+                                    "unanchored-edge"))
 
-      # -------------------------------------------------------------------
-      # NO INVENTED PUBLISHER — no provisioned keypair: the miss builds
-      # locally, nothing is published, and no key is minted.
-      # -------------------------------------------------------------------
-      delEnv("REPRO_BINARY_CACHE_KEY_PATH")
-      delEnv("REPRO_BINARY_CACHE_CERT_PATH")
-      let cwd5 = tmpRoot / "cwd5"
-      let cacheRoot5 = tmpRoot / "engine-cache-5"
-      createDir(cwd5); createDir(cacheRoot5)
-      let ctx5 = FixtureContext(filePrefix: tmpRoot / "ctx5")
-      let disp5 = mkBuildActionDispatcher(cacheRoot5, ctx5)
-      let out5 = disp5(@[witnessShellAction("m4-edge-unprovisioned", cwd5)], nil)
-      check out5.len == 1
-      check out5[0].ok
-      check not out5[0].substitutedFromCache
-      check fileExists(cwd5 / WitnessRel)
-      check not dirExists(tmpRoot / "cred")        # no producer key minted
+        # Back-compat env cache: URL only, no producer cert to anchor.
+        useConsumer(tmpRoot / "no-such-caches.conf")
+        putEnv("REPRO_BINARY_CACHE_URL", url)
+        checkBuiltLocally(applyOnce(tmpRoot, "env-no-cert",
+                                    "unanchored-edge"))
 
-      # -------------------------------------------------------------------
-      # NEGATIVE CONTROL — URL UNSET, fresh cwd: build locally, 0 cache hits.
-      # -------------------------------------------------------------------
-      delEnv("REPRO_BINARY_CACHE_URL")
-      let cwd3 = tmpRoot / "cwd3"
-      let cacheRoot3 = tmpRoot / "engine-cache-3"
-      let witness3 = cwd3 / WitnessRel
-      createDir(cwd3); createDir(cacheRoot3)
+        # Positive control: the entry is there and substitutable.
+        useConsumer(confA, url)
+        checkSubstituted(applyOnce(tmpRoot, "anchors-a", "unanchored-edge"))
 
-      let ctx3 = FixtureContext(filePrefix: tmpRoot / "ctx3")
-      let disp3 = mkBuildActionDispatcher(cacheRoot3, ctx3)
-      let pba3 = witnessShellAction("m4-edge", cwd3)
-      let out3 = disp3(@[pba3], nil)
+  test "a consumer host generates no key and publishes nothing on a miss":
+    when not (defined(linux) or defined(macosx)):
+      skip("the build action is a /bin/sh script and the cache server a POSIX subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-consumer-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let confA = tmpRoot / "caches-a.conf"
+        writeCachesConf(confA, url, @[kpA.pubHex])
+        let autoCredDir = tmpRoot / "auto-cred"
 
-      check out3.len == 1
-      check out3[0].ok
-      # Off-by-default: NOT substituted, built locally.
-      check not out3[0].substitutedFromCache
-      check not out3[0].cacheHit
-      check fileExists(cwd3 / OutRel)
-      check readFile(cwd3 / OutRel) == ExpectedPayload
-      # The shell RAN (local build) — witness present.
-      check fileExists(witness3)
-      check readFile(witness3).len == 1
+        # A consumer with the cache fully configured — caches.conf AND the
+        # REPRO_BINARY_CACHE_URL that used to switch publishing on — but no
+        # keypair. The auto-credential dir is redirected into the sandbox so
+        # a generated key would be seen here and never touch real config.
+        useConsumer(confA, url)
+        putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", autoCredDir)
+        checkBuiltLocally(applyOnce(tmpRoot, "consumer", "consumer-edge"))
+        check not dirExists(autoCredDir)
+        check not manifestPublished(url, entryKeyHexFor("consumer-edge"))
+
+        # Positive control: the same apply on a publisher host does publish,
+        # so the probe above can see a publish when one happens.
+        usePublisher(confA, url, kpA)
+        putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", autoCredDir)
+        checkBuiltLocally(applyOnce(tmpRoot, "publisher", "consumer-edge"))
+        check manifestPublished(url, entryKeyHexFor("consumer-edge"))
+        check not dirExists(autoCredDir)

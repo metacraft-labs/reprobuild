@@ -18022,17 +18022,19 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_binary_cache_client",
         "repro_elevation",
         "repro_infra",
         "repro_peer_cache",
         "repro_profile",
-        "repro_profile_compile"
+        "repro_profile_compile",
+        "repro_test_support"
       ],
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
