@@ -46,11 +46,32 @@ foreign_preload_variable() {
 }
 
 foreign_preload_is_own_shim() {
-  # Reprobuild's own monitor shim, under any of its build names.
+  # Reprobuild's own monitor shim, under any of its build names. A basename
+  # match is a convenience classifier for what to keep, not a trust decision:
+  # a library that merely carries the name is not thereby monitored or
+  # trusted, and the engine's evidence grading judges every preload by what
+  # it does.
   case "${1##*/}" in
     librepro_monitor_shim*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+foreign_preload_kept_value() {
+  # What `strip_foreign_preload` leaves in the variable: the kept entries,
+  # joined, or empty. Computed without changing the environment.
+  local var value entry
+  var="$(foreign_preload_variable)"
+  value="${!var:-}"
+  [[ -n "${value}" ]] || return 0
+  local -a entries kept=()
+  IFS=': ' read -r -a entries <<< "${value}"
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    foreign_preload_is_own_shim "${entry}" && kept+=("${entry}")
+  done
+  (( ${#kept[@]} > 0 )) || return 0
+  (IFS=:; printf '%s' "${kept[*]}")
 }
 
 strip_foreign_preload() {
@@ -109,7 +130,16 @@ foreign_preload_guard() {
     printf '  from a shell the library is not loaded into, or turn its propagation off.\n' >&2
     return 1
   fi
-  printf '  Re-executing the suite in a shell started without %s.\n' "${var}" >&2
   export REPRO_FOREIGN_PRELOAD_REEXEC=1
+  local kept
+  kept="${!var:-}"
+  if [[ -n "${kept}" ]]; then
+    # Our own shim stays preloaded: the new shell starts with exactly the
+    # kept entries, so the foreign library is gone and the shim is not.
+    printf '  Re-executing the suite in a shell started with %s=%s.\n' \
+      "${var}" "${kept}" >&2
+    exec env "${var}=${kept}" "${BASH}" "$0" "$@"
+  fi
+  printf '  Re-executing the suite in a shell started without %s.\n' "${var}" >&2
   exec env -u "${var}" "${BASH}" "$0" "$@"
 }

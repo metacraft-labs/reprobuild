@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2459,
-    "pureUnitConsolidationGroups": 71,
-    "pureUnitTests": 696,
+    "nimTestBinaries": 2460,
+    "pureUnitConsolidationGroups": 72,
+    "pureUnitTests": 697,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2499
+    "testEntries": 2500
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -434,6 +434,20 @@
         "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
         "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
         "libs/repro_local_store/tests/t_store_optimise_dedup.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim",
+        "libs/repro_local_store/tests/t_refresh_restored_outputs.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1434,7 +1448,7 @@
       "graph-fixture": 18,
       "integration": 1363,
       "platform/destructive": 153,
-      "pure unit": 696,
+      "pure unit": 697,
       "unclassified": 269
     },
     "graphOwnedTestArtifacts": [
@@ -1643,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2459,
+    "nimTestBinaryCount": 2460,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2499
+    "testEntryCount": 2500
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16401,6 +16415,24 @@
       "source": "libs/repro_local_store/tests/t_prefix_owning_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_refresh_restored_outputs",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_refresh_restored_outputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -43636,7 +43668,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_run_tests_strips_foreign_preload.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
