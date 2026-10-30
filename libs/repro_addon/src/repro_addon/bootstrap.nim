@@ -31,6 +31,7 @@ import repro_core
 import repro_infra
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/key_types
+import repro_deploy_agent/secrets
 
 import ./addon_apply
 import ./fingerprint
@@ -65,7 +66,6 @@ const
   AgentDir* = "/var/lib/repro/agent"
   RecipientKeyPath* = AgentDir & "/recipient.key"
   RecipientPubPath* = AgentDir & "/recipient.pub"
-  KeyFileMarker = "ecdsa-p256:"
 
 var ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
 
@@ -96,21 +96,23 @@ proc createExclusive(path, content: string; mode: int) =
     discard posix.close(fd)
 
 proc generateRecipientKey*(): string =
-  ## Generate the host's secrets recipient key pair. Returns the public key
-  ## (hex, uncompressed). The private key is written in the format the
-  ## deploy agent's ``--secrets-key`` loads, and round-tripped through that
-  ## loader before bootstrap continues.
-  let kp = peerAuth.generateKeypair()
-  const keyMode = when mutated("recipient-key-0644"): 0o644 else: 0o400
-  createExclusive(RecipientKeyPath,
-                  KeyFileMarker & hexOf(kp.privateKey) & "\n", keyMode)
-  createExclusive(RecipientPubPath, hexOf(kp.publicKey) & "\n", 0o444)
-  let back = peerAuth.loadPrivateKeyFile(RecipientKeyPath)
-  if peerAuth.derivePublicKey(back) != kp.publicKey:
-    raise newException(AddonBootstrapError,
-      "the recipient key written to " & RecipientKeyPath &
-      " does not load back to the generated key")
-  hexOf(kp.publicKey)
+  ## Generate the host's secrets recipient key pair through the deploy
+  ## agent's own keygen (``ensureRecipientKeyFile``: created ``0400`` from
+  ## the start, published by a no-clobber link, never replacing an existing
+  ## key). Returns the public key (hex, uncompressed). The preflight required
+  ## the agent directory to be absent, so a key that already exists here is
+  ## someone else's and bootstrap refuses rather than adopting it.
+  let key = ensureRecipientKeyFile(RecipientKeyPath)
+  if not key.created:
+    raise newException(AddonBootstrapError, RecipientKeyPath &
+      " already existed; the preflight saw no " & AgentDir)
+  when mutated("recipient-key-0644"):
+    # FALSIFYING MUTATION (see mutations.nim): a bootstrap that leaves the
+    # recipient key group- and world-readable.
+    discard posix.chmod(RecipientKeyPath.cstring, Mode(0o644))
+  createExclusive(RecipientPubPath, peerAuth.publicKeyHex(key.publicKey) & "\n",
+                  0o444)
+  peerAuth.publicKeyHex(key.publicKey)
 
 proc rootEntry(path, kindHint: string): LedgerEntry =
   let st = statOwner(path)
@@ -169,7 +171,7 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     # cache publisher under a key nobody provisioned.
     let pub = peerAuth.generateKeypair()
     createExclusive(AgentDir / "cache-publisher.key",
-                    KeyFileMarker & hexOf(pub.privateKey) & "\n", 0o400)
+                    peerAuth.privateKeyFileText(pub.privateKey), 0o400)
   for k in [RecipientKeyPath, RecipientPubPath]:
     let st = statOwner(k)
     entries.add(LedgerEntry(class: lcKey, path: k, sha256: sha256OfFile(k),
