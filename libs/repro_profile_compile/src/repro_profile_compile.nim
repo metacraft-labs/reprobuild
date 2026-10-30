@@ -27,6 +27,7 @@ import ./repro_profile_compile/helper
 import ./repro_profile_compile/platforms
 import ./repro_profile_compile/adapter_home
 import ./repro_profile_compile/adapter_system
+import ./repro_profile_compile/addon_realisation
 import ./repro_profile_compile/resource_scope
 import ./repro_profile_compile/data_expansion
 import ./repro_profile_compile/infra_apply_broker
@@ -125,6 +126,15 @@ export adapter_home.profileIntentToHomeProfile
 export adapter_home.buildActivityElement
 export adapter_system.profileIntentToSystemProfile
 export adapter_system.renderSystemProfileToText
+# System-scope host selection and the add-on realisation (ReproOS add-on
+# mode): the planned host, its selection, and the `add-on-debian` profile.
+export adapter_system.SystemRealisation
+export adapter_system.SystemPlanTarget
+export adapter_system.SystemAdaptation
+export adapter_system.systemPlanTarget
+export adapter_system.defaultSystemPlanTarget
+export adapter_system.adaptSystemProfile
+export addon_realisation
 
 # One resource-scope classification for both adapters.
 export resource_scope.ResourceScope

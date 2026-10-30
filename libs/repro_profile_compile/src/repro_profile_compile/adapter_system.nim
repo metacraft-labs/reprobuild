@@ -9,10 +9,14 @@
 ## This adapter builds a `SystemProfile` value that is BYTE-EQUIVALENT
 ## — under the apply pipeline's reads — to what `parseSystemProfile`
 ## would have produced from the equivalent legacy text. Only
-## system-scope resource kinds appear in the resulting profile;
-## activities, config, and hosts are no-ops (the system parser has no
-## syntax for those blocks — `system.nim` profiles are bare resource
-## stanzas).
+## system-scope resource kinds appear in the resulting profile, and only
+## those that apply on the planned host: system scope selects per host as
+## home scope does -- runtime predicates and `activity <name>:` blocks,
+## the activities chosen by the home profile's host registry
+## (`adaptSystemProfile`, spec ReproOS-Add-On-Mode §8.2). For an add-on
+## host every selected field is classified by the `add-on-debian`
+## realisation profile (`addon_realisation`). The output is still bare
+## resource stanzas: selection happens here, before the M69 text.
 ##
 ## Resource-kind mapping (macro side -> apply parser side):
 ##
@@ -22,12 +26,15 @@
 ## Phase A constructor names are themselves derived from the M69
 ## `SystemResourceKind` string-enum values.
 
-import std/[algorithm, strutils, tables]
+import std/[algorithm, sets, strutils, tables]
 
 import repro_elevation
 import repro_profile
 import repro_infra
+import repro_home_intent
 import ./resource_scope
+import ./adapter_home
+import ./addon_realisation
 
 proc fieldString(r: ResourceIntent; key: string;
                  default: string = ""): string =
@@ -661,68 +668,168 @@ proc systemResourceLabel(r: ResourceIntent): string =
   ## one, the way the planner's other diagnostics name a resource.
   r.kind & (if r.address.len > 0: " `" & r.address & "`" else: "")
 
-proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
-  ## Build a `SystemProfile` value equivalent to what
-  ## `parseSystemProfile(text)` would return for the same logical
-  ## profile. Activities, config, and hosts are no-ops at system scope
-  ## (the M69 parser has no syntax for them — `system.nim` is bare
-  ## resource stanzas).
+type
+  SystemRealisation* = enum
+    ## How the selected resources are realised on the planned host.
+    srFull = "full"
+      ## The host's whole system is this configuration's (ReproOS, or a host
+      ## the registry does not mark): every system-scope kind the planner
+      ## knows is applied as is.
+    srAddOnDebian = "add-on-debian"
+      ## ReproOS add-on mode on a Debian-family distribution: every field is
+      ## classified by the `add-on-debian` realisation profile
+      ## (`addon_realisation`), and an invalid one is `EAddOnOutOfScope`.
+
+  SystemPlanTarget* = object
+    ## The host a system profile is planned for. System scope selects per
+    ## host exactly as home scope does (spec ReproOS-Add-On-Mode §8.2): the
+    ## runtime predicates of guarded resources are evaluated against `facts`,
+    ## and an activity-scoped resource is planned only when `activities`
+    ## enables its activity.
+    facts*: HostContext
+      ## The planned host: its name (`facts.host`, the resolved identity) and
+      ## platform facts.
+    activities*: HashSet[string]
+      ## The system activities the host enables: `default` plus what its
+      ## host-registry entry selects (`host_system.enabledSystemActivities`).
+    realisation*: SystemRealisation
+
+  SystemAdaptation* = object
+    ## The adapter's result for one target.
+    profile*: SystemProfile
+      ## The resources the target gets, in declaration order.
+    projection*: Projection
+      ## `srAddOnDebian` only: the classification of every field of every
+      ## selected resource -- the plan reports the ignored ones.
+
+proc systemPlanTarget*(host: string; activities: HashSet[string];
+                       realisation = srFull): SystemPlanTarget =
+  ## A target for `host` on the running machine: the platform facts are the
+  ## running machine's (`currentHostContext`), the name is `host` (the
+  ## identity the command resolved, which may differ from the OS hostname).
+  result.facts = currentHostContext()
+  if host.len > 0:
+    result.facts.host = host
+  result.activities = activities
+  if DefaultSystemActivity notin result.activities:
+    result.activities.incl DefaultSystemActivity
+  result.realisation = realisation
+
+proc defaultSystemPlanTarget*(host = ""): SystemPlanTarget =
+  ## The target of a plan that reads no host registry: the running machine
+  ## (named `host` when given), the `default` system activity only, realised
+  ## in full -- what `repro infra` did for a host the registry does not
+  ## declare before system scope had host selection, and still does.
+  systemPlanTarget(host, toHashSet([DefaultSystemActivity]))
+
+proc activityBodyHasPackages(body: seq[ActivityElement]): bool =
+  for el in body:
+    case el.kind
+    of aekPackageRef:
+      return true
+    of aekWhenGuard:
+      if activityBodyHasPackages(el.guardedBody):
+        return true
+
+proc adaptSystemProfile*(p: ProfileIntent;
+                         target: SystemPlanTarget): SystemAdaptation =
+  ## Build the `SystemProfile` `target` gets from the compiled system
+  ## profile `p`: equivalent to what `parseSystemProfile(text)` would return
+  ## for the resources that apply on the target.
   ##
-  ## Mapping:
-  ##   ProfileIntent.resources (system-scope kinds) ->
-  ##     seq[SystemResource] with SystemResourceKind tags + per-kind fields.
-  ##   A resource of any other kind is refused, naming it (see below).
-  # GM4: data-file rows expand into ACTIVITIES, which system scope does not
-  # have. Ignoring the `data:` section would leave its rows declared but
-  # never applied while the run reports success (Core-Invariants.md
-  # §Unrecognised Input Is Rejected, Not Skipped); refuse instead.
+  ## Selection (spec ReproOS-Add-On-Mode §8.2, the home rule): a resource
+  ## under a runtime predicate (`when linux():`, `when host() == "x":`)
+  ## applies where the predicate holds on `target.facts`, and a resource in
+  ## `activity <name>:` applies where `target.activities` enables the
+  ## activity. Both are decided by ONE walker, the home planner's
+  ## `applicableResourceEntries`, so the two scopes cannot disagree.
+  ##
+  ## Refusals (Core-Invariants.md §Unrecognised Input Is Rejected, Not
+  ## Skipped): a declaration system scope does not apply is refused, naming
+  ## it, rather than left out -- data files, catalogs, `stow:` claims,
+  ## package references in activities, a `hosts:` block (system activities
+  ## are selected by the home profile's host registry), a home-scope or
+  ## unknown resource kind, a resource of an undeclared activity, and a
+  ## target that enables an activity the profile does not declare. For an
+  ## add-on target every selected resource is then projected through the
+  ## `add-on-debian` profile (`EAddOnOutOfScope` on an invalid field).
+  # GM4: data-file rows expand into ACTIVITIES' package references, which
+  # system scope does not apply. Ignoring the `data:` section would leave its
+  # rows declared but never applied while the run reports success.
   if p.dataFiles.len > 0:
     raise newException(ValueError,
       "system profiles do not read plan-time data files (`data:` declares " &
-      p.dataFiles.join(", ") & "); data rows expand into activities, " &
-      "which only home profiles have")
+      p.dataFiles.join(", ") & "); data rows expand into activity package " &
+      "references, which only home profiles apply")
   # System profiles carry no package references yet, so there is nothing
   # an imported contribution catalog could reach; accepting the section
-  # would make it look effective (Core-Invariants.md §Unrecognised Input Is
-  # Rejected, Not Skipped).
+  # would make it look effective.
   if p.catalogImports.len > 0:
     raise newException(ValueError,
       "system profiles do not import contribution catalogs (`catalogs:` " &
       "declares " & p.catalogImports.join(", ") & "); catalogs serve " &
       "package references, which only home profiles have")
   # GM11: a `stow:` block claims `stow/` packages, which only a home apply
-  # materializes; a system profile has no stow tree to scope, so the block
-  # would look effective and do nothing (Core-Invariants.md §Unrecognised
-  # Input Is Rejected, Not Skipped).
+  # materializes.
   if p.stowScopes.len > 0:
     raise newException(ValueError,
       "system profiles have no `stow/` tree: activity `" &
       p.stowScopes[0].activity & "` claims stow package `" &
       p.stowScopes[0].package & "`; declare `stow:` blocks in the home " &
       "profile")
-  # GM10: who manages a host's system is an attribute of the host registry,
-  # which is the home profile's `hosts:` (Gradual-Nix-To-Reprobuild-
-  # Migration.md §Hosts). `repro infra` reads it from there; a `system:`
-  # key in a system profile's own `hosts:` would be read by nothing and
-  # look effective, so it is refused (Core-Invariants.md §Unrecognised Input
-  # Is Rejected, Not Skipped).
-  if p.systemManagedElsewhere.len > 0:
+  # The host registry is the home profile's `hosts:` (Gradual-Nix-To-
+  # Reprobuild-Migration.md §Hosts): it says how a host's system is managed
+  # (GM10, add-on mode) and which system activities it selects (§8.2). A
+  # `hosts:` block in a system profile would be a second registry that
+  # nothing reads, so it is refused rather than ignored.
+  if p.hostSystems.len > 0 or p.hosts.len > 0:
     var hosts: seq[string]
-    for h in p.systemManagedElsewhere.keys:
+    for h in p.hosts.keys:
       hosts.add h
+    for h in p.hostSystems.keys:
+      if h notin hosts:
+        hosts.add h
     hosts.sort()
     raise newException(ValueError,
-      "a system profile's `hosts:` cannot say who manages a host's system " &
-      "(`system: managedElsewhere` for " & hosts.join(", ") & "); declare " &
-      "it in the home profile's `hosts:` registry, which `repro infra " &
-      "plan` / `apply` read")
-  for r in p.resources:
+      "a system profile's `hosts:` (" & hosts.join(", ") & ") would be a " &
+      "second host registry that nothing reads; declare each host in the " &
+      "home profile's `hosts:` registry, which `repro infra plan` / " &
+      "`apply` read -- `system: managedElsewhere(...)`, `system: addOn`, or " &
+      "`system: {mode: addOn, activities: [...]}` to select system " &
+      "activities")
+  # An activity's package references are home scope's; the system planner
+  # applies resources only, so a package listed in a system activity would
+  # look installed and never be.
+  var declaredActivities: seq[string]
+  for act in p.activities:
+    declaredActivities.add act.name
+    if activityBodyHasPackages(act.body):
+      raise newException(ValueError,
+        "system profile activity `" & act.name & "` lists package " &
+        "references; the system planner applies only the activity's " &
+        "`resources:`. Declare packages in the home profile")
+  # The selection must name activities the profile has. `default` is always
+  # enabled and needs no `activity default:` block (a profile without one
+  # simply has no resources in it).
+  var undeclared: seq[string]
+  for a in target.activities:
+    if a != DefaultSystemActivity and a notin declaredActivities:
+      undeclared.add a
+  if undeclared.len > 0:
+    undeclared.sort()
+    raise newException(ValueError,
+      "host `" & target.facts.host & "` selects system activit" &
+      (if undeclared.len == 1: "y " else: "ies ") & undeclared.join(", ") &
+      " (host registry `system:` entry), which the system profile does " &
+      "not declare (declared: " &
+      (if declaredActivities.len > 0: declaredActivities.join(", ")
+       else: "none") & ")")
+  var nodes: seq[IntentNode]
+  for i, r in p.resources:
     # A resource the system planner does not apply is refused, naming it,
-    # rather than left out. Leaving it out is how the `pkg.homebrewCask`
-    # resources a macOS system profile declared were never installed by
-    # `repro infra apply` while it reported success (Core-Invariants.md
-    # §Unrecognised Input Is Rejected, Not Skipped). The home adapter
-    # refuses the converse; both read `resource_scope.resourceScope`.
+    # rather than left out -- whether or not it is selected on this host:
+    # the declaration is misplaced everywhere. The home adapter refuses the
+    # converse; both read `resource_scope.resourceScope`.
     case resourceScope(r.kind)
     of rsSystem:
       discard
@@ -736,30 +843,41 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
       raise newException(ValueError,
         "system profile resource " & systemResourceLabel(r) & " has a " &
         "kind that neither the home nor the system planner applies")
-    # A runtime guard (`when linux():` around a resource, GM3) is
-    # evaluated by the HOME planner. System scope has no host selection
-    # (no activities, no per-host evaluation of predicates) and whether it
-    # gets one is undecided, so the system path would apply a guarded
-    # system resource on every host; refuse, naming the resource and the
-    # guard, instead of dropping the guard.
-    if r.guard.expr.len > 0:
+    # GM9's rule: an activity-scoped resource names a declared activity; an
+    # unknown one would be planned on no host at all.
+    if r.activity.len > 0 and r.activity notin declaredActivities:
       raise newException(ValueError,
-        "system-scope resource " & r.kind &
-        (if r.address.len > 0: " `" & r.address & "`" else: "") &
-        " is under a runtime predicate `" & r.guard.expr & "`; system " &
-        "profiles do not evaluate runtime predicates (system scope has no " &
-        "host selection) -- use a compile-time `when defined(...)` for " &
-        "system-scope resources")
-    # GM9: activities are a home-profile layer. A system profile has none to
-    # select, so an activity-scoped system resource would apply on every
-    # host; refuse instead of dropping the scope.
-    if r.activity.len > 0:
-      raise newException(ValueError,
-        "system-scope resource " & r.kind &
-        (if r.address.len > 0: " `" & r.address & "`" else: "") &
-        " belongs to activity `" & r.activity & "`; system profiles have " &
-        "no activities to select it with")
-    result.resources.add(buildSystemResource(r))
+        "system profile resource " & systemResourceLabel(r) & " belongs " &
+        "to activity `" & r.activity & "`, which the profile does not " &
+        "declare (declared: " &
+        (if declaredActivities.len > 0: declaredActivities.join(", ")
+         else: "none") & ")")
+    nodes.add guardedBy(r.guard, IntentNode(kind: nkResourceEntry,
+      resourceKind: r.kind, resourceAddress: r.address,
+      resourceIntentOrdinal: i + 1, resourceActivity: r.activity))
+  var selected: seq[ResourceIntent]
+  for entry in applicableResourceEntries(nodes, target.facts,
+      target.activities):
+    selected.add p.resources[entry.resourceIntentOrdinal - 1]
+  case target.realisation
+  of srFull:
+    discard
+  of srAddOnDebian:
+    result.projection = projectResources(addOnDebianProfile(), selected)
+  for r in selected:
+    result.profile.resources.add(buildSystemResource(r))
+
+proc profileIntentToSystemProfile*(p: ProfileIntent;
+                                   target: SystemPlanTarget): SystemProfile =
+  ## The resources `target` gets (`adaptSystemProfile`), without the
+  ## projection report.
+  adaptSystemProfile(p, target).profile
+
+proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
+  ## The resources the running machine gets when no host registry selects
+  ## anything (`defaultSystemPlanTarget`): runtime predicates evaluated for
+  ## this machine, the `default` system activity only, realised in full.
+  profileIntentToSystemProfile(p, defaultSystemPlanTarget())
 
 # ---------------------------------------------------------------------------
 # `SystemProfile -> text` round-tripper.

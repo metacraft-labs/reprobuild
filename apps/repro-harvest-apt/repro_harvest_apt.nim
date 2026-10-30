@@ -62,7 +62,7 @@
 ## ``repro`` binary — its sha256 is the C2 ``harvesterRevision`` input
 ## the foreign_common composer feeds into the catalog identity.
 
-import std/[options, os, strutils, tables]
+import std/[options, os, strutils, tables, times]
 
 import blake3
 
@@ -286,7 +286,7 @@ proc fetchAndVerifyIndexes(client: FetchClient; spec: AptSourceSpec;
   ## otherwise the key bundle), then fetch each component's ``Packages``
   ## index and check it against the SHA-256 the signed payload lists.
   stderr.writeLine "fetch: ", inReleaseUrl(spec)
-  let inRel = fetchUrl(client, inReleaseUrl(spec))
+  let inRel = fetchUrl(client, inReleaseUrl(spec), maxBytes = MaxInReleaseBytes)
   result.inReleaseSha256 = sha256HexStr(inRel.bytes)
   var payload = ""
   if insecure:
@@ -301,6 +301,10 @@ proc fetchAndVerifyIndexes(client: FetchClient; spec: AptSourceSpec;
     payload = verification.payload
     stderr.writeLine "InRelease verified via " & $verification.backend &
       " (signer=" & verification.signerKeyId & ")"
+    # Anti-replay: a correctly signed but stale InRelease (an archive that
+    # has moved on, or a mirror frozen by an attacker) is refused once its
+    # own Valid-Until has passed. Snapshot archives omit the field.
+    enforceValidUntil(payload, now().utc)
 
   for component in components:
     # Try xz first, fall back to gz, then plain uncompressed Packages.
@@ -323,7 +327,7 @@ proc fetchAndVerifyIndexes(client: FetchClient; spec: AptSourceSpec;
       pkgRel = component & "/binary-" & arch & "/Packages.xz"
     let pkgUrl = spec.suiteBaseUrl & "/" & pkgRel
     stderr.writeLine "fetch: ", pkgUrl
-    let pkgFetch = fetchUrl(client, pkgUrl)
+    let pkgFetch = fetchUrl(client, pkgUrl, maxBytes = MaxPackagesIndexBytes)
     let actual = sha256HexStr(pkgFetch.bytes)
     if expectedSha.len > 0 and actual != expectedSha:
       raise newException(SignatureVerificationError,

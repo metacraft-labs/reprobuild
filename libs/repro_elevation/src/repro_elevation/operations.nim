@@ -2279,18 +2279,16 @@ proc operationValidationError*(op: PrivilegedOperation): string =
         "' is not a safe single-segment unit file name"
     if op.suAptClosureLock.len > 0 and not op.suDestroy:
       # The broker realises whatever the lock pins, as root, so the lock
-      # must parse and the unit must bind exactly the prefix it pins: a
-      # frame whose content and lock disagree is refused before any write.
+      # must parse and the unit must pass every refusal of the renderer
+      # (``checkUnitForAptClosure``) with the closure's lines present and
+      # binding exactly the prefix the lock pins: a frame whose content and
+      # lock disagree is refused before any write.
       try:
-        let lock = parseAptClosureLock(op.suAptClosureLock)
-        let bindLine = aptClosureUnitDirectives(
-          aptClosurePrefixPath(AddOnSystemStoreRoot, lock))[0]
-        if bindLine notin op.suContent.splitLines():
-          return "systemd.systemUnit '" & op.suName &
-            "' content does not carry its closure binding '" &
-            bindLine & "'"
-      except EAptClosureLock as ex:
-        return "systemd.systemUnit '" & op.suName & "': " & ex.msg
+        checkUnitForAptClosureLock(op.suContent, op.suAptClosureLock,
+          unitName = op.suName)
+      except EAptClosureLock, EAptClosureUnit:
+        return "systemd.systemUnit '" & op.suName & "': " &
+          getCurrentExceptionMsg()
   of pokLaunchdSystemDaemon:
     if not isSafeDaemonLabel(op.sdaLabel):
       return "launchd.systemDaemon label '" & op.sdaLabel &

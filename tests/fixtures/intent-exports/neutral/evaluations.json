@@ -233,7 +233,9 @@
       ],
       "system": {
         "managed": "elsewhere",
-        "managedBy": "example-org/infra"
+        "managedBy": "example-org/infra",
+        "mode": "managedElsewhere",
+        "activities": []
       }
     },
     "aarch64-linux": {
@@ -463,7 +465,9 @@
       ],
       "system": {
         "managed": "elsewhere",
-        "managedBy": "example-org/infra"
+        "managedBy": "example-org/infra",
+        "mode": "managedElsewhere",
+        "activities": []
       }
     },
     "x86_64-darwin": {
@@ -700,7 +704,9 @@
       ],
       "system": {
         "managed": "elsewhere",
-        "managedBy": "example-org/infra"
+        "managedBy": "example-org/infra",
+        "mode": "managedElsewhere",
+        "activities": []
       }
     },
     "aarch64-darwin": {
@@ -943,7 +949,9 @@
       ],
       "system": {
         "managed": "elsewhere",
-        "managedBy": "example-org/infra"
+        "managedBy": "example-org/infra",
+        "mode": "managedElsewhere",
+        "activities": []
       }
     },
     "x86_64-windows": {
@@ -1148,7 +1156,9 @@
       ],
       "system": {
         "managed": "elsewhere",
-        "managedBy": "example-org/infra"
+        "managedBy": "example-org/infra",
+        "mode": "managedElsewhere",
+        "activities": []
       }
     },
     "aarch64-windows": {
@@ -1353,7 +1363,9 @@
       ],
       "system": {
         "managed": "elsewhere",
-        "managedBy": "example-org/infra"
+        "managedBy": "example-org/infra",
+        "mode": "managedElsewhere",
+        "activities": []
       }
     }
   },
@@ -1609,7 +1621,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "aarch64-linux": {
@@ -1857,7 +1873,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "x86_64-darwin": {
@@ -2112,7 +2132,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "aarch64-darwin": {
@@ -2373,7 +2397,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "x86_64-windows": {
@@ -2590,7 +2618,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     },
     "aarch64-windows": {
@@ -2807,7 +2839,11 @@
       ],
       "system": {
         "managed": "here",
-        "managedBy": null
+        "managedBy": null,
+        "mode": "full",
+        "activities": [
+          "default"
+        ]
       }
     }
   },
@@ -2829,6 +2865,2818 @@
     },
     "aarch64-windows": {
       "undeclaredHost": true
+    }
+  },
+  "rpi": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "rpi",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-linux-x86-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm5/linux.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "linux = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm5/linux.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default"
+        ]
+      }
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "rpi",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm5/linux.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "linux = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm5/linux.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default"
+        ]
+      }
+    },
+    "x86_64-darwin": {
+      "target": "x86_64-darwin",
+      "host": "rpi",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/Library/Preferences/gm5.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "mac = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/Library/Preferences/gm5.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos and not linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "pkg.homebrewCask",
+          "address": "pkg.homebrewCask:gm5-cask",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "gm5-cask"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos",
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "osxkeychain"
+          },
+          "guard": "macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default"
+        ]
+      }
+    },
+    "aarch64-darwin": {
+      "target": "aarch64-darwin",
+      "host": "rpi",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-mac-arm-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/Library/Preferences/gm5.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "mac = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/Library/Preferences/gm5.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos and not linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "pkg.homebrewCask",
+          "address": "pkg.homebrewCask:gm5-cask",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "gm5-cask"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos",
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "osxkeychain"
+          },
+          "guard": "macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default"
+        ]
+      }
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "rpi",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-windows-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default"
+        ]
+      }
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "rpi",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-windows-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default"
+        ]
+      }
+    }
+  },
+  "validator": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "validator",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-linux-x86-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm5/linux.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "linux = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm5/linux.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default",
+          "web",
+          "backup"
+        ]
+      }
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "validator",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm5/linux.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "linux = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm5/linux.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default",
+          "web",
+          "backup"
+        ]
+      }
+    },
+    "x86_64-darwin": {
+      "target": "x86_64-darwin",
+      "host": "validator",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/Library/Preferences/gm5.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "mac = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/Library/Preferences/gm5.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos and not linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "pkg.homebrewCask",
+          "address": "pkg.homebrewCask:gm5-cask",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "gm5-cask"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos",
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "osxkeychain"
+          },
+          "guard": "macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default",
+          "web",
+          "backup"
+        ]
+      }
+    },
+    "aarch64-darwin": {
+      "target": "aarch64-darwin",
+      "host": "validator",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-mac-arm-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "llvm",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/Library/Preferences/gm5.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "mac = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/Library/Preferences/gm5.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos and not linux",
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "pkg.homebrewCask",
+          "address": "pkg.homebrewCask:gm5-cask",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "gm5-cask"
+            }
+          },
+          "dependsOn": [],
+          "guard": "macos",
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "osxkeychain"
+          },
+          "guard": "macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default",
+          "web",
+          "backup"
+        ]
+      }
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "validator",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-windows-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default",
+          "web",
+          "backup"
+        ]
+      }
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "validator",
+      "activities": [
+        "default",
+        "cli"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "cmake",
+          "version": "3.0.0-gm5-pin",
+          "binaries": [
+            "cmake"
+          ],
+          "activity": "default"
+        },
+        {
+          "name": "gm5-windows-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "ripgrep",
+          "version": "",
+          "binaries": [],
+          "activity": "cli"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.local/bin/gm5-hello",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "#!/bin/sh\necho hello\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": true
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.local/bin/gm5-hello"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0755"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.ssh/gm5-secret",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "s\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.ssh/gm5-secret"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0600"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userPath",
+          "address": "env.userPath:~/.local/bin, ~/gm5/bin",
+          "fields": {
+            "entries": {
+              "kind": "string",
+              "value": "~/.local/bin, ~/gm5/bin"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm5",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm5"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM5=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "libsecret"
+          },
+          "guard": "not macos"
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null,
+        "mode": "addOn",
+        "activities": [
+          "default",
+          "web",
+          "backup"
+        ]
+      }
     }
   }
 }

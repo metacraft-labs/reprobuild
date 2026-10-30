@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "selection": {
     "host": "m1",
     "hostDeclared": true,
@@ -151,6 +151,12 @@
       "m1": [
         "desktop",
         "laptop"
+      ],
+      "rpi": [
+        "cli"
+      ],
+      "validator": [
+        "cli"
       ]
     },
     "resources": [
@@ -417,9 +423,24 @@
     ],
     "buildActions": [],
     "adapterPreference": {},
-    "systemManagedElsewhere": {
+    "hostSystems": {
       "m1": {
-        "managedBy": "example-org/infra"
+        "mode": "managedElsewhere",
+        "managedBy": "example-org/infra",
+        "activities": []
+      },
+      "rpi": {
+        "mode": "addOn",
+        "managedBy": null,
+        "activities": []
+      },
+      "validator": {
+        "mode": "addOn",
+        "managedBy": null,
+        "activities": [
+          "web",
+          "backup"
+        ]
       }
     }
   },
@@ -433,17 +454,17 @@
   },
   "provenance": {
     "repro": {
-      "version": "0.2.6",
-      "sourceRevision": "ccf6320d3657cc426c1220f823d448fbe11e72b3-dirty"
+      "version": "0.2.18",
+      "sourceRevision": "116298c031670446fa6689901729e83cfe98b3c8-dirty"
     },
     "hostSource": "env",
     "profile": {
       "root": "home.nim",
-      "digest": "fef66cd3699d01344456fdff3c5704e1a517b76e5dcd839dfbc75e0662e1ccb5",
+      "digest": "06a38153ffe4a2e671b07425392a55abc0b1cc19ccfefdd4255586a0a4a975a0",
       "inputs": [
         {
           "path": "home.nim",
-          "blake3": "f03cd33bbc82001aa7775d65d6967004918a02c1adc14b305ea5598310de9430"
+          "blake3": "b725dd0ef07872ecdec85d85b6cfb8b5b78458b3d81fbed9482814f13c7847ed"
         }
       ]
     },

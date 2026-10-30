@@ -48,9 +48,20 @@ import ./nix_lib_support
 const
   FixtureRoot = ProjectRoot / "tests" / "fixtures" / "intent-exports"
   Hosts = ["m1", "home-pc", "server"]
+    ## Evaluated in every case. A case may declare more (`caseHosts`).
   Systems = ["x86_64-linux", "aarch64-linux", "x86_64-darwin",
              "aarch64-darwin", "x86_64-windows", "aarch64-windows"]
   UpdateEnvVar = "REPRO_UPDATE_INTENT_FIXTURES"
+
+proc caseHosts(name: string): seq[string] =
+  ## The hosts evaluated for case `name`: `Hosts`, plus the `neutral`
+  ## case's two add-on hosts (ReproOS add-on mode: `rpi` says `system:
+  ## addOn`, `validator` the block form selecting system activities), so the
+  ## Nix library's reading of `evaluation.system` is compared for every
+  ## mode.
+  result = @Hosts
+  if name == "neutral":
+    result.add @["rpi", "validator"]
 
 proc caseDirs(): seq[string] =
   for kind, path in walkDir(FixtureRoot):
@@ -83,6 +94,7 @@ when defined(linux) or defined(macosx):
         @["compile-time", "concerns", "neutral"]
       for dir in cases:
         let name = dir.extractFilename
+        let hosts = caseHosts(name)
         let sb = newProfileSandbox("gm5-intent-" & name,
           readFile(dir / "profile" / "home.nim"))
         defer: sb.dispose()
@@ -127,7 +139,7 @@ when defined(linux) or defined(macosx):
 
           # 2. Reprobuild's evaluations equal the committed ones.
           evaluations = newJObject()
-          for host in Hosts:
+          for host in hosts:
             evaluations[host] = newJObject()
             for system in Systems:
               let r = sb.runRepro(["home", "export", "--format", "json",
@@ -146,7 +158,7 @@ when defined(linux) or defined(macosx):
           if update:
             writeFile(evaluationsFile, evaluations.pretty(2) & "\n")
           let committed = parseFile(evaluationsFile)
-          for host in Hosts:
+          for host in hosts:
             for system in Systems:
               checkpoint(name & ": committed " & host & " @ " & system)
               check committed[host][system] == evaluations[host][system]
@@ -187,9 +199,9 @@ when defined(linux) or defined(macosx):
                 else lib.evaluateExport doc system host;
             }) args.systems);
           }) args.hosts)
-          """, %*{"snapshot": snapshot, "hosts": Hosts, "systems": Systems})
+          """, %*{"snapshot": snapshot, "hosts": hosts, "systems": Systems})
         var refused, evaluated, undeclared = 0
-        for host in Hosts:
+        for host in hosts:
           for system in Systems:
             let want = evaluations[host][system]
             checkpoint(name & ": nix " & host & " @ " & system & "\n  nix: " &
@@ -225,6 +237,24 @@ when defined(linux) or defined(macosx):
             check e["packages"].len > 0
             check e["resources"].len > 0
             check e["configOverrides"].len > 0
+        if name == "neutral":
+          # GM10 + add-on mode: every value of `system:` reaches every
+          # evaluation -- and, through step 3, the Nix library -- with its
+          # mode and system-activity selection. The modes differ, so "every
+          # host the same" cannot pass.
+          for system in Systems:
+            check evaluations["m1"][system]["system"] == %*{
+              "managed": "elsewhere", "managedBy": "example-org/infra",
+              "mode": "managedElsewhere", "activities": []}
+            check evaluations["home-pc"][system]["system"] == %*{
+              "managed": "here", "managedBy": nil, "mode": "full",
+              "activities": ["default"]}
+            check evaluations["rpi"][system]["system"] == %*{
+              "managed": "here", "managedBy": nil, "mode": "addOn",
+              "activities": ["default"]}
+            check evaluations["validator"][system]["system"] == %*{
+              "managed": "here", "managedBy": nil, "mode": "addOn",
+              "activities": ["default", "web", "backup"]}
         if name == "concerns":
           # GM7: the hosts that declare `applies:` carry it in every
           # evaluation, with each package's concern; the one that declares

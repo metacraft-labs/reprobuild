@@ -39,12 +39,16 @@
 ## render the unit offline and the host realises exactly the path the unit
 ## names.
 
-import std/[algorithm, httpclient, os, sequtils, sets, strutils, tables, times]
+import std/[algorithm, os, sequtils, sets, strutils, tables, tempfiles, uri]
 when defined(posix):
   import std/posix
 
+import repro_binary_cache_client/http_pool
+
 import ./apt_index
 import ./apt_jammy
+
+export apt_jammy.AptExtractError
 
 export apt_index.AptClosureError
 
@@ -56,7 +60,7 @@ const
   AptClosureLockHeader* = "repro-apt-closure-lock v1"
     ## First line of every lock. A future incompatible format changes this.
 
-  AptClosureRealiserVersion* = "1"
+  AptClosureRealiserVersion* = "2"
     ## Part of the closure identity. Bump it whenever the realiser changes
     ## the BYTES or LAYOUT it writes (hardening, folding, union rules), so a
     ## prefix written by an older realiser is never mistaken for a new one.
@@ -95,6 +99,11 @@ type
 
   EAptClosureUnit* = object of CatchableError
     ## The unit cannot carry a closure binding (spec §8.3 item 5).
+
+  EAptClosureHost* = object of CatchableError
+    ## The lock's architecture does not run on this host.
+    lockArchitecture*: string
+    hostMachine*: string
 
 # ---------------------------------------------------------------------------
 # Lock model
@@ -479,48 +488,141 @@ proc aptClosureRealised*(storeRoot: string; lock: AptClosureLock): bool =
   fileExists(marker) and readFile(marker) == closureMarkerText(lock)
 
 # ---------------------------------------------------------------------------
+# Host architecture
+# ---------------------------------------------------------------------------
+
+proc hostMachineName*(): string =
+  ## ``uname -m`` of the running kernel (``armv7l``, ``aarch64``,
+  ## ``x86_64``, ...); ``""`` when it cannot be read.
+  when defined(posix):
+    var u: Utsname
+    if uname(u) != 0: return ""
+    result = $cast[cstring](addr u.machine[0])
+  else:
+    ""
+
+proc debianArchitectureRunsOn*(debArch, machine: string): bool =
+  ## Whether binaries of Debian architecture ``debArch`` execute on a kernel
+  ## reporting ``machine``. A 64-bit kernel runs its 32-bit userland
+  ## (Raspberry Pi OS 32-bit on a Pi 4 reports ``aarch64`` for ``armhf``),
+  ## so the relation is one-to-many; an unknown pair is ``false``.
+  case debArch
+  of "armhf", "armel": machine in ["armv6l", "armv7l", "armv8l", "aarch64"]
+  of "arm64": machine == "aarch64"
+  of "amd64": machine == "x86_64"
+  of "i386": machine in ["i386", "i486", "i586", "i686", "x86_64"]
+  of "riscv64": machine == "riscv64"
+  of "ppc64el": machine == "ppc64le"
+  of "s390x": machine == "s390x"
+  else: false
+
+# ---------------------------------------------------------------------------
 # Fetching
 # ---------------------------------------------------------------------------
 
 type
-  AptDebFetcher* = proc (url: string; dest: string) {.closure.}
-    ## Write the bytes at ``url`` to ``dest``; raise on failure. Injected so
-    ## a caller can supply its own transport; verification never depends on
-    ## it.
+  AptDebFetcher* = proc (url: string; dest: string; expectedSize: int64)
+    {.closure.}
+    ## Write the bytes at ``url`` to ``dest``, refusing to write more than
+    ## ``expectedSize`` of them; raise on failure. Injected so a caller can
+    ## supply its own transport; verification never depends on it.
 
-proc httpDebFetcher*(timeoutMs = 120_000): AptDebFetcher =
-  ## Plain ``std/httpclient`` download (follows redirects). ``https://``
-  ## needs a ``-d:ssl`` build; ``http://`` does not, and is safe here
-  ## because every byte is checked against the lock.
-  result = proc (url: string; dest: string) =
-    let client = newHttpClient(timeout = timeoutMs,
-      userAgent = "reprobuild-apt-closure/" & AptClosureRealiserVersion)
+proc downloadBounded*(url, dest: string; maxBytes: int64;
+                      expectedSize = -1'i64; timeoutMs = 30_000;
+                      maxRedirects = 5): int64 =
+  ## Stream ``url`` into ``dest`` and return the byte count. The body is
+  ## never read past ``maxBytes`` (or past ``expectedSize`` when that is
+  ## smaller): a ``Content-Length`` above the cap is refused before the body
+  ## is read, a body without one is refused at the first byte past it, and a
+  ## ``Content-Length`` that differs from ``expectedSize`` is refused. So a
+  ## hostile or broken server cannot fill the disk of the host the
+  ## privileged apply runs on (spec §8.3 item 2). Redirects are followed up
+  ## to ``maxRedirects`` times. ``https://`` needs a ``-d:ssl`` build and is
+  ## refused with a message saying so otherwise. Raises ``IOError``.
+  let cap =
+    if expectedSize >= 0 and expectedSize < maxBytes: expectedSize
+    else: maxBytes
+  let pool = newHttpPool(maxConnections = 1, receiveTimeoutMs = timeoutMs)
+  defer: pool.close()
+  var buf = newSeq[byte](256 * 1024)
+  var current = url
+  for hop in 0 .. maxRedirects:
+    var f = open(dest, fmWrite)
+    var written = 0'i64
+    var writeFailed = false
+    let onChunk: StreamChunkCallback = proc (chunk: openArray[byte])
+        {.gcsafe.} =
+      if chunk.len > 0 and not writeFailed:
+        if f.writeBuffer(unsafeAddr chunk[0], chunk.len) != chunk.len:
+          writeFailed = true
+        written += int64(chunk.len)
+    var resp: StreamResponse
     try:
-      # ``getContent`` rather than ``downloadFile``: on a redirect (how
-      # snapshot.debian.org serves every pool file) ``downloadFile`` reads
-      # the 302's HTML body as the next status line and fails with
-      # "invalid http version". A member is at most tens of MB.
-      writeFile(dest, client.getContent(url))
-    finally:
-      client.close()
+      resp = pool.streamGet(current, onChunk, buf, maxBodyBytes = cap)
+    except HttpError as ex:
+      f.close()
+      removeFile(dest)
+      raise newException(IOError, ex.msg)
+    f.close()
+    if writeFailed:
+      removeFile(dest)
+      raise newException(IOError, "writing " & dest & " failed")
+    if resp.statusCode in [301, 302, 303, 307, 308] and resp.location.len > 0:
+      current = $combine(parseUri(current), parseUri(resp.location))
+      removeFile(dest)
+      continue
+    if resp.statusCode < 200 or resp.statusCode >= 300:
+      removeFile(dest)
+      raise newException(IOError, "HTTP " & $resp.statusCode & " for " &
+        current)
+    if expectedSize >= 0 and resp.contentLength >= 0 and
+        resp.contentLength != expectedSize:
+      removeFile(dest)
+      raise newException(IOError, "Content-Length " & $resp.contentLength &
+        " of " & current & " is not the expected " & $expectedSize)
+    return written
+  removeFile(dest)
+  raise newException(IOError, "more than " & $maxRedirects &
+    " redirects from " & url)
+
+proc httpDebFetcher*(timeoutMs = 30_000): AptDebFetcher =
+  ## The production fetcher: ``downloadBounded`` capped at the lock's size.
+  result = proc (url: string; dest: string; expectedSize: int64) =
+    discard downloadBounded(url, dest, maxBytes = expectedSize,
+      expectedSize = expectedSize, timeoutMs = timeoutMs)
 
 proc debUrl*(lock: AptClosureLock; d: AptLockedDeb): string =
   lock.archive & "/" & d.filename
+
+proc privateDir(path: string) =
+  ## Create ``path`` (if needed) and make it accessible to its owner only.
+  createDir(path)
+  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec})
 
 proc ensureVerifiedDeb(lock: AptClosureLock; d: AptLockedDeb;
                        cacheDir: string; fetch: AptDebFetcher): string =
   ## Return a path to a ``.deb`` whose size and SHA-256 equal the lock's.
   ## A cached file is re-verified on every use; a mismatching cache entry is
   ## discarded and fetched again; a mismatching download is a refusal.
-  createDir(cacheDir)
+  ##
+  ## The file is hashed here and read again by the unpacker. That is safe
+  ## because the cache directory is private to the realising user (0700;
+  ## root on an Add-On host) and this process is the only writer to it
+  ## between the two reads.
+  privateDir(cacheDir)
   result = cacheDir / (d.sha256 & ".deb")
+  # Leftovers of an interrupted earlier fetch of this member.
+  for kind, p in walkDir(cacheDir):
+    if kind == pcFile and p.extractFilename.startsWith(d.sha256 &
+        ".deb.part-"):
+      removeFile(p)
   if fileExists(result):
     if getFileSize(result) == d.size and sha256OfFile(result) == d.sha256:
       return
     removeFile(result)
   let part = result & ".part-" & $getCurrentProcessId()
   try:
-    fetch(debUrl(lock, d), part)
+    fetch(debUrl(lock, d), part, d.size)
   except CatchableError as ex:
     if fileExists(part): removeFile(part)
     raise newException(IOError, "fetching " & debUrl(lock, d) &
@@ -541,52 +643,360 @@ proc ensureVerifiedDeb(lock: AptClosureLock; d: AptLockedDeb;
   moveFile(part, result)
 
 # ---------------------------------------------------------------------------
-# Unpacking and the union
+# Unpacking: an in-process tar reader with the store's policy
 # ---------------------------------------------------------------------------
+#
+# The realiser does not hand ``data.tar`` to the host ``tar``. What a tar
+# implementation does with an absolute name, a ``..`` component, a hard link
+# to a path outside the tree, a symlink followed by a path through it, a
+# device node, or a setuid bit depends on the implementation, its version and
+# whether it runs as root (GNU tar as root restores owners and setuid bits).
+# The store needs one answer that does not depend on the host, so the policy
+# is here, applied to the ustar/pax/GNU stream Debian's ``dpkg-deb`` writes:
+#
+#   * names are relative, with no empty, ``.`` or ``..`` component after the
+#     leading ``./`` is dropped; an absolute name is a refusal;
+#   * nothing is written through a symbolic link, the entry itself included
+#     (the same rule as the binary-cache archive extractor);
+#   * a hard link names a regular file already extracted from this archive;
+#   * only regular files, directories, symlinks and hard links exist; a
+#     device node, FIFO, socket or any other type is a refusal;
+#   * modes are normalised: directories and executables ``0755``, other
+#     files ``0644``. No setuid, setgid, sticky, group- or world-writable
+#     bit is ever written, and the archive's owners are not restored.
+#
+# https://www.gnu.org/software/tar/manual/html_node/Standard.html
+# https://pubs.opengroup.org/onlinepubs/9699919799/utilities/pax.html#tag_20_92_13_03
 
-proc tempSibling(final: string; tag: string): string =
-  ## A scratch directory beside ``final`` (same filesystem, so the final
-  ## ``moveDir`` is a rename and hard links are possible).
-  parentDir(final) / (".tmp-" & tag & "-" & $getCurrentProcessId() & "-" &
-    $epochTime().int64)
+const TarBlock = 512
 
-proc hardenTree(root: string) =
-  ## Clear setuid/setgid and refuse special files. A ``.deb`` from the
-  ## essential set carries setuid binaries (``su``, ``mount``); a second,
-  ## world-reachable setuid copy in the store would be a privilege
-  ## escalation path, and nothing a service runs needs the bit (its
-  ## privileges come from the unit). Device nodes and FIFOs have no place in
-  ## a package's data tree.
-  for path in walkDirRec(root, yieldFilter = {pcFile, pcDir, pcLinkToFile,
-                                              pcLinkToDir},
-                         followFilter = {pcDir}):
-    let info = getFileInfo(path, followSymlink = false)
-    discard info
-    when defined(posix):
+type
+  TarEntryKind = enum
+    tekFile, tekDir, tekSymlink, tekHardlink, tekRefused
+
+  TarHeader = object
+    name: string
+    linkName: string
+    mode: int
+    size: int64
+    typeflag: char
+
+proc raiseTar(pkg, msg: string) {.noreturn.} =
+  var e = newException(AptExtractError, "apt closure: " & pkg & ": " & msg)
+  e.debPath = pkg
+  raise e
+
+proc tarField(hdr: string; offset, len: int): string =
+  ## A NUL-terminated field.
+  result = hdr[offset ..< offset + len]
+  let nul = result.find('\0')
+  if nul >= 0: result.setLen(nul)
+
+proc tarNumber(hdr: string; offset, len: int; pkg: string): int64 =
+  ## An octal field, or GNU base-256 when the high bit of the first byte is
+  ## set.
+  let raw = hdr[offset ..< offset + len]
+  if raw.len > 0 and (ord(raw[0]) and 0x80) != 0:
+    result = 0
+    for i in 1 ..< raw.len:
+      if result > (high(int64) shr 8): raiseTar(pkg, "numeric field overflow")
+      result = (result shl 8) or int64(ord(raw[i]))
+    return
+  result = 0
+  var seen = false
+  for c in raw:
+    if c in {'0'..'7'}:
+      if result > (high(int64) shr 3): raiseTar(pkg, "numeric field overflow")
+      result = result * 8 + int64(ord(c) - ord('0'))
+      seen = true
+    elif c in {' ', '\0'}:
+      if seen: break
+    else:
+      raiseTar(pkg, "malformed numeric field '" & raw.escape() & "'")
+
+proc tarChecksumOk(hdr: string): bool =
+  var stored = 0'i64
+  var seen = false
+  for c in hdr[148 ..< 156]:
+    if c in {'0'..'7'}:
+      stored = stored * 8 + int64(ord(c) - ord('0'))
+      seen = true
+    elif seen:
+      break
+  var unsignedSum = 0'i64
+  var signedSum = 0'i64
+  for i in 0 ..< TarBlock:
+    let b = if i >= 148 and i < 156: ord(' ') else: ord(hdr[i])
+    unsignedSum += int64(b)
+    signedSum += int64(cast[int8](uint8(b)))
+  stored == unsignedSum or stored == signedSum
+
+proc normaliseTarName(pkg, raw: string; what: string): seq[string] =
+  ## Components of an archive name after the policy above; empty for the
+  ## archive's root entry (``./``).
+  if raw.startsWith("/"):
+    raiseTar(pkg, what & " '" & raw & "' is an absolute path")
+  for comp in raw.split('/'):
+    if comp.len == 0 or comp == ".": continue
+    if comp == "..":
+      raiseTar(pkg, what & " '" & raw & "' has a '..' component")
+    result.add(comp)
+
+proc refuseThroughSymlink(outDir: string; comps: seq[string]; pkg,
+                          raw: string) =
+  ## No existing component of the entry's path may be a symbolic link, the
+  ## entry itself included.
+  var cur = outDir
+  for c in comps:
+    cur = cur / c
+    if symlinkExists(cur):
+      raiseTar(pkg, "entry '" & raw & "' would be written through the " &
+        "symbolic link '" & cur.relativePath(outDir) & "'")
+
+proc parsePaxRecords(payload: string; pkg: string; path, linkPath: var string;
+                     size: var int64; sizeSet: var bool) =
+  ## ``<len> <key>=<value>\n`` records of a pax extended header.
+  var pos = 0
+  while pos < payload.len:
+    var recLen = 0
+    var p = pos
+    while p < payload.len and payload[p] in {'0'..'9'}:
+      recLen = recLen * 10 + (ord(payload[p]) - ord('0'))
+      inc p
+    if p >= payload.len or payload[p] != ' ' or recLen <= 0 or
+        pos + recLen > payload.len:
+      raiseTar(pkg, "malformed pax header record")
+    let rec = payload[p + 1 ..< pos + recLen]
+    let eq = rec.find('=')
+    if eq > 0:
+      let key = rec[0 ..< eq]
+      var value = rec[eq + 1 .. ^1]
+      if value.endsWith("\n"): value.setLen(value.len - 1)
+      case key
+      of "path": path = value
+      of "linkpath": linkPath = value
+      of "size":
+        try:
+          size = parseBiggestInt(value)
+          sizeSet = true
+        except ValueError:
+          raiseTar(pkg, "malformed pax size '" & value & "'")
+      else: discard
+    pos += recLen
+
+proc readTarBlock(f: File; pkg: string; into: var string): bool =
+  ## Read one 512-byte block; false at a clean end of file.
+  into.setLen(TarBlock)
+  let n = f.readBuffer(addr into[0], TarBlock)
+  if n == 0: return false
+  if n != TarBlock: raiseTar(pkg, "truncated tar stream")
+  true
+
+proc skipTarPayload(f: File; size: int64; pkg: string) =
+  let blocks = (size + TarBlock - 1) div TarBlock
+  if blocks > 0:
+    let pos = f.getFilePos() + blocks * TarBlock
+    if pos > f.getFileSize(): raiseTar(pkg, "truncated tar payload")
+    f.setFilePos(pos)
+
+proc readTarPayload(f: File; size: int64; pkg: string): string =
+  ## The payload of a small (header-like) entry.
+  if size > 1024 * 1024: raiseTar(pkg, "oversized tar header payload")
+  result = newString(int(size))
+  if size > 0 and f.readBuffer(addr result[0], int(size)) != int(size):
+    raiseTar(pkg, "truncated tar payload")
+  let pad = (TarBlock - int(size mod TarBlock)) mod TarBlock
+  if pad > 0:
+    var scratch = newString(pad)
+    if f.readBuffer(addr scratch[0], pad) != pad:
+      raiseTar(pkg, "truncated tar padding")
+
+proc copyTarFile(f: File; size: int64; dest: string; pkg: string) =
+  var o = open(dest, fmWrite)
+  try:
+    var remaining = size
+    var buf = newString(256 * 1024)
+    while remaining > 0:
+      let want = int(min(int64(buf.len), remaining))
+      let n = f.readBuffer(addr buf[0], want)
+      if n != want: raiseTar(pkg, "truncated tar file payload for " & dest)
+      if o.writeBuffer(addr buf[0], n) != n:
+        raise newException(IOError, "writing " & dest & " failed")
+      remaining -= int64(n)
+  finally:
+    o.close()
+  let pad = (TarBlock - int(size mod TarBlock)) mod TarBlock
+  if pad > 0:
+    var scratch = newString(pad)
+    if f.readBuffer(addr scratch[0], pad) != pad:
+      raiseTar(pkg, "truncated tar padding")
+
+const
+  DirMode = {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec,
+             fpOthersRead, fpOthersExec}                        ## 0755
+  FileMode = {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead} ## 0644
+
+proc unpackDebTar*(tarPath, outDir, pkg: string) =
+  ## Unpack the plain tar at ``tarPath`` into the existing, empty, private
+  ## directory ``outDir`` under the policy in the comment above. ``pkg``
+  ## names the package in diagnostics. Raises ``AptExtractError``.
+  var f = open(tarPath, fmRead)
+  defer: f.close()
+  var hdr = newString(TarBlock)
+  var pendingName = ""
+  var pendingLink = ""
+  var pendingSize = -1'i64
+  var zeroBlocks = 0
+  while readTarBlock(f, pkg, hdr):
+    if hdr.allIt(it == '\0'):
+      inc zeroBlocks
+      if zeroBlocks >= 2: break
+      continue
+    zeroBlocks = 0
+    if not tarChecksumOk(hdr):
+      raiseTar(pkg, "tar header checksum mismatch (not a tar stream)")
+    var h: TarHeader
+    h.name = tarField(hdr, 0, 100)
+    h.mode = int(tarNumber(hdr, 100, 8, pkg))
+    h.size = tarNumber(hdr, 124, 12, pkg)
+    h.typeflag = hdr[156]
+    h.linkName = tarField(hdr, 157, 100)
+    let magic = hdr[257 ..< 263]
+    if magic == "ustar\0":
+      let prefix = tarField(hdr, 345, 155)
+      if prefix.len > 0: h.name = prefix & "/" & h.name
+    case h.typeflag
+    of 'L':
+      pendingName = readTarPayload(f, h.size, pkg)
+      let nul = pendingName.find('\0')
+      if nul >= 0: pendingName.setLen(nul)
+      continue
+    of 'K':
+      pendingLink = readTarPayload(f, h.size, pkg)
+      let nul = pendingLink.find('\0')
+      if nul >= 0: pendingLink.setLen(nul)
+      continue
+    of 'x':
+      var sizeSet = false
+      parsePaxRecords(readTarPayload(f, h.size, pkg), pkg, pendingName,
+        pendingLink, pendingSize, sizeSet)
+      continue
+    of 'g':
+      discard readTarPayload(f, h.size, pkg)
+      continue
+    else: discard
+    if pendingName.len > 0: h.name = pendingName
+    if pendingLink.len > 0: h.linkName = pendingLink
+    if pendingSize >= 0: h.size = pendingSize
+    pendingName = ""
+    pendingLink = ""
+    pendingSize = -1
+    let kind = case h.typeflag
+      of '0', '\0', '7': tekFile
+      of '5': tekDir
+      of '2': tekSymlink
+      of '1': tekHardlink
+      else: tekRefused
+    if kind == tekRefused:
+      raiseTar(pkg, "entry '" & h.name & "' has type '" & $h.typeflag &
+        "' (device, FIFO, socket or extension); only files, directories " &
+        "and links are allowed")
+    let comps = normaliseTarName(pkg, h.name, "entry")
+    if comps.len == 0:
+      # The archive root (``./``): nothing to create.
+      if kind != tekDir:
+        raiseTar(pkg, "entry '" & h.name & "' names the extraction root")
+      skipTarPayload(f, h.size, pkg)
+      continue
+    refuseThroughSymlink(outDir, comps, pkg, h.name)
+    let dst = outDir / comps.join("/")
+    let parent = parentDir(dst)
+    if not dirExists(parent):
+      createDir(parent)
+      var p = parent
+      while p.len > outDir.len:
+        setFilePermissions(p, DirMode)
+        p = parentDir(p)
+    case kind
+    of tekDir:
+      if symlinkExists(dst) or fileExists(dst):
+        raiseTar(pkg, "entry '" & h.name & "' is a directory where a " &
+          "file or link was already extracted")
+      createDir(dst)
+      setFilePermissions(dst, DirMode)
+      skipTarPayload(f, h.size, pkg)
+    of tekFile:
+      if symlinkExists(dst) or dirExists(dst):
+        raiseTar(pkg, "entry '" & h.name & "' is a file where a " &
+          "directory or link was already extracted")
+      copyTarFile(f, h.size, dst, pkg)
+      setFilePermissions(dst,
+        if (h.mode and 0o111) != 0: DirMode else: FileMode)
+    of tekSymlink:
+      if h.linkName.len == 0:
+        raiseTar(pkg, "symlink '" & h.name & "' has an empty target")
+      if symlinkExists(dst) or dirExists(dst) or fileExists(dst):
+        raiseTar(pkg, "entry '" & h.name & "' is a symlink where " &
+          "something was already extracted")
+      createSymlink(h.linkName, dst)
+      skipTarPayload(f, h.size, pkg)
+    of tekHardlink:
+      let targetComps = normaliseTarName(pkg, h.linkName,
+        "hard link target of '" & h.name & "'")
+      if targetComps.len == 0:
+        raiseTar(pkg, "hard link '" & h.name & "' targets the root")
+      refuseThroughSymlink(outDir, targetComps, pkg, h.linkName)
+      let target = outDir / targetComps.join("/")
+      if symlinkExists(target) or not fileExists(target):
+        raiseTar(pkg, "hard link '" & h.name & "' targets '" & h.linkName &
+          "', which is not a regular file extracted from this archive")
+      if symlinkExists(dst) or dirExists(dst) or fileExists(dst):
+        raiseTar(pkg, "entry '" & h.name & "' is a hard link where " &
+          "something was already extracted")
+      createHardlink(target, dst)
+      skipTarPayload(f, h.size, pkg)
+    of tekRefused: discard
+
+proc verifyHardenedTree*(root: string; pkg: string) =
+  ## Refuse (``AptExtractError``) unless every entry under ``root`` meets
+  ## the store's policy: regular files, directories and symlinks only; no
+  ## setuid, setgid, sticky, group- or world-writable bit. ``unpackDebTar``
+  ## never writes anything else, so this is the invariant check a mutation
+  ## of the unpacker fails, not a repair pass.
+  when defined(posix):
+    for path in walkDirRec(root, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+                                                pcLinkToDir},
+                           followFilter = {pcDir}):
       var st: Stat
       if lstat(path.cstring, st) != 0:
         raise newException(OSError, "lstat failed for " & path)
-      # As root, tar restores the archive's owners (``root:shadow`` and
-      # the like), whose ids need not mean the same on the host. The store
-      # is root's; ownership is normalised to 0:0.
-      if geteuid() == 0 and (st.st_uid != 0 or st.st_gid != 0):
-        if lchown(path.cstring, 0, 0) != 0:
-          raise newException(OSError, "lchown failed for " & path)
-      if S_ISLNK(st.st_mode) or S_ISDIR(st.st_mode):
-        continue
-      # getFileInfo reports regular and special files alike as pcFile;
-      # the mode bits tell them apart.
-      if not S_ISREG(st.st_mode):
-        raise newException(IOError,
-          "apt closure: special file in package data: " & path)
+      if S_ISLNK(st.st_mode): continue
+      if not (S_ISREG(st.st_mode) or S_ISDIR(st.st_mode)):
+        raiseTar(pkg, "special file in the unpacked tree: " & path)
       let mode = st.st_mode.cint
-      if (mode and (S_ISUID or S_ISGID)) != 0:
-        if chmod(path.cstring,
-            Mode(mode and not (S_ISUID or S_ISGID) and 0o7777)) != 0:
-          raise newException(OSError, "chmod failed for " & path)
+      if (mode and (S_ISUID or S_ISGID or S_ISVTX or S_IWGRP or
+                    S_IWOTH)) != 0:
+        raiseTar(pkg, "unpacked entry has mode " & toOct(mode and 0o7777, 4) &
+          ": " & path)
+
+proc tempSibling(final: string; tag: string): string =
+  ## A fresh, owner-only (0700) scratch directory beside ``final`` (same
+  ## filesystem, so the final ``moveDir`` is a rename and hard links are
+  ## possible). Its name is unique, not pid-and-second based.
+  createTempDir(".tmp-" & tag & "-", "", parentDir(final))
+
+proc publishPrefix(tmp, final: string) =
+  ## Make the filled scratch directory world-readable and rename it into
+  ## place, replacing a prefix without a valid marker (an interrupted
+  ## earlier attempt).
+  setFilePermissions(tmp, DirMode)
+  if dirExists(final):
+    removeDir(final)
+  moveDir(tmp, final)
 
 proc realiseDeb(lock: AptClosureLock; d: AptLockedDeb; storeRoot: string;
-                cacheDir: string; fetch: AptDebFetcher): string =
+                cacheDir: string; fetch: AptDebFetcher;
+                retainDebCache: bool): string =
   result = aptDebPrefixPath(storeRoot, d)
   let marker = result / DebPrefixMarker
   if fileExists(marker) and readFile(marker) == d.sha256 & "\n":
@@ -594,18 +1004,26 @@ proc realiseDeb(lock: AptClosureLock; d: AptLockedDeb; storeRoot: string;
   let deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
   createDir(parentDir(result))
   let tmp = tempSibling(result, "apt-deb")
-  createDir(tmp)
+  let scratch = tempSibling(result, "apt-deb-tar")
   try:
-    extractDebDataInto(deb, tmp, noSameOwner = true)
-    hardenTree(tmp)
+    let tarPath = scratch / "data.tar"
+    extractDebDataMemberToTar(deb, tarPath)
+    unpackDebTar(tarPath, tmp, d.name)
+    removeDir(scratch)
+    verifyHardenedTree(tmp, d.name)
     writeFile(tmp / DebPrefixMarker, d.sha256 & "\n")
-    if dirExists(result):
-      # A prefix without a valid marker is an interrupted earlier attempt.
-      removeDir(result)
-    moveDir(tmp, result)
+    setFilePermissions(tmp / DebPrefixMarker, FileMode)
+    publishPrefix(tmp, result)
   except CatchableError:
     if dirExists(tmp): removeDir(tmp)
+    if dirExists(scratch): removeDir(scratch)
     raise
+  if not retainDebCache:
+    # The prefix now carries the member; the archive has nothing more to
+    # give, and keeping it would grow the cache by one copy of every member
+    # ever realised.
+    try: removeFile(deb)
+    except OSError: discard
 
 const
   KeptTopLevel = ["usr", "etc"]
@@ -678,7 +1096,9 @@ proc buildUnion(lock: AptClosureLock; memberRoots: seq[(string, string)];
       of pcDir:
         if symlinkExists(dst): conflict("is a symlink and a directory")
         if fileExists(dst): conflict("is a file and a directory")
-        createDir(dst)
+        if not dirExists(dst):
+          createDir(dst)
+          setFilePermissions(dst, DirMode)
       of pcLinkToFile, pcLinkToDir:
         let linkTarget = expandSymlink(src)
         if symlinkExists(dst):
@@ -701,7 +1121,9 @@ proc buildUnion(lock: AptClosureLock; memberRoots: seq[(string, string)];
 
 proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
                         cacheDir: string;
-                        fetch: AptDebFetcher = httpDebFetcher()): string =
+                        fetch: AptDebFetcher = httpDebFetcher();
+                        hostMachine = hostMachineName();
+                        retainDebCache = false): string =
   ## Make the closure prefix exist and return its path (spec §8.3 item 4).
   ## Idempotent: a closure already realised is returned untouched, and a
   ## member realised by another closure is reused. Every write lands under
@@ -709,25 +1131,40 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
   ## sibling is filled and then renamed, with the completion marker written
   ## last, so an interrupted run leaves nothing a later run would trust.
   ##
+  ## ``hostMachine`` is the kernel's machine name the closure must be able
+  ## to run on; a lock for another architecture is refused
+  ## (``EAptClosureHost``). Pass ``""`` to stage a closure for a different
+  ## host (a test, or a build box preparing a store for another machine).
+  ## Each member's cached ``.deb`` is deleted once its prefix exists unless
+  ## ``retainDebCache`` is set (spec §8.3 item 7).
+  ##
   ## Raises ``EAptClosureVerify`` (download does not match the lock),
   ## ``EAptClosureConflict`` (two members disagree on a path),
-  ## ``AptExtractError`` (malformed archive) or ``IOError``/``OSError``.
+  ## ``AptExtractError`` (malformed or refused archive content) or
+  ## ``IOError``/``OSError``.
   validateAptClosureLock(lock)
+  if hostMachine.len > 0 and
+      not debianArchitectureRunsOn(lock.architecture, hostMachine):
+    var e = newException(EAptClosureHost,
+      "apt closure: the lock is for " & lock.architecture &
+      ", which does not run on this " & hostMachine & " host")
+    e.lockArchitecture = lock.architecture
+    e.hostMachine = hostMachine
+    raise e
   result = aptClosurePrefixPath(storeRoot, lock)
   if aptClosureRealised(storeRoot, lock):
     return
   var members: seq[(string, string)] = @[]
   for d in lock.debs:
-    members.add((d.name, realiseDeb(lock, d, storeRoot, cacheDir, fetch)))
+    members.add((d.name, realiseDeb(lock, d, storeRoot, cacheDir, fetch,
+      retainDebCache)))
   createDir(parentDir(result))
   let tmp = tempSibling(result, "apt-closure")
-  createDir(tmp)
   try:
     buildUnion(lock, members, tmp)
     writeFile(tmp / ClosurePrefixMarker, closureMarkerText(lock))
-    if dirExists(result):
-      removeDir(result)
-    moveDir(tmp, result)
+    setFilePermissions(tmp / ClosurePrefixMarker, FileMode)
+    publishPrefix(tmp, result)
   except CatchableError:
     if dirExists(tmp): removeDir(tmp)
     raise
@@ -746,55 +1183,118 @@ proc raiseUnit(unitName, msg: string) {.noreturn.} =
     (if unitName.len > 0: "'" & unitName & "' " else: "") &
     "cannot carry a package(apt) closure: " & msg)
 
-proc bindTargets(value: string): seq[string] =
-  ## Destinations named by a ``Bind[ReadOnly]Paths=`` value.
+proc pathTouchesUsr(p: string): bool =
+  ## ``/usr`` itself or anything under it.
+  var t = p
+  while t.len > 1 and t.endsWith("/"): t.setLen(t.len - 1)
+  t == "/usr" or t.startsWith("/usr/")
+
+proc mountDestinations(key, value: string): seq[string] =
+  ## The paths a mount directive's value names in the unit's namespace:
+  ## the destination of a ``src[:dst[:opts]]`` bind, the path of a
+  ## ``path[:opts]`` tmpfs, the path of an inaccessible entry. Leading
+  ## ``-``/``+`` flags are dropped.
   for tok in value.splitWhitespace():
     var t = tok
-    if t.len > 0 and t[0] in {'-', '+'}: t = t[1 .. ^1]
+    while t.len > 0 and t[0] in {'-', '+'}: t = t[1 .. ^1]
     let parts = t.split(':')
-    if parts.len >= 2 and parts[1].len > 0: result.add(parts[1])
-    elif parts.len >= 1: result.add(parts[0])
+    if parts.len == 0 or parts[0].len == 0: continue
+    if key in ["BindPaths", "BindReadOnlyPaths"]:
+      result.add(if parts.len >= 2 and parts[1].len > 0: parts[1]
+                 else: parts[0])
+    else:
+      result.add(parts[0])
+
+proc checkUnitForAptClosure*(content: string; prefix: string;
+                             unitName = ""; rendered = false) =
+  ## The refusals of spec §8.3 item 5, raised as ``EAptClosureUnit``:
+  ##
+  ## * no ``[Service]`` section;
+  ## * a command line (``Exec*=``) naming ``reprobuild-sandbox-launcher``,
+  ##   whose user namespace is what drops ``CAP_NET_RAW`` and device access;
+  ## * ``RootDirectory=`` or ``RootImage=``, under which ``/usr`` is not the
+  ##   closure's;
+  ## * ``BindPaths=``, ``BindReadOnlyPaths=`` or ``InaccessiblePaths=``
+  ##   with an empty value, which resets the list systemd has built so far
+  ##   and would drop the closure's own lines;
+  ## * a bind, ``TemporaryFileSystem=`` or ``InaccessiblePaths=`` whose
+  ##   destination is ``/usr`` or under it, other than the closure's own
+  ##   bind line.
+  ##
+  ## With ``rendered`` the content must also carry the closure's two lines,
+  ## the bind exactly once; this is what the broker checks on a frame
+  ## before it realises the lock the frame carries.
+  ##
+  ## Lines starting with ``#`` or ``;`` are systemd comments and are not
+  ## read (a commented-out ``RootDirectory=`` is not a refusal).
+  let directives = aptClosureUnitDirectives(prefix)
+  var serviceSeen = false
+  var bindLines = 0
+  var preloadLines = 0
+  let contentLines = content.split('\n')
+  for i in 0 ..< contentLines.len:
+    let l = contentLines[i].strip()
+    if l.len == 0 or l[0] in {'#', ';'}: continue
+    if l == "[Service]": serviceSeen = true
+    if l == directives[0]:
+      inc bindLines
+      continue
+    if l == directives[1]:
+      inc preloadLines
+      continue
+    let eq = l.find('=')
+    if eq <= 0: continue
+    let key = l[0 ..< eq].strip()
+    let value = l[eq + 1 .. ^1].strip()
+    if key.startsWith("Exec") and "reprobuild-sandbox-launcher" in value:
+      raiseUnit(unitName, "line " & $(i + 1) & " runs " &
+        "reprobuild-sandbox-launcher; name the binary directly")
+    case key
+    of "RootDirectory", "RootImage":
+      raiseUnit(unitName, "line " & $(i + 1) & " sets " & key)
+    of "BindPaths", "BindReadOnlyPaths", "InaccessiblePaths":
+      if value.len == 0:
+        raiseUnit(unitName, "line " & $(i + 1) & " is an empty " & key &
+          "=, which resets the list and would drop the closure's binding")
+      for dst in mountDestinations(key, value):
+        if pathTouchesUsr(dst):
+          raiseUnit(unitName, "line " & $(i + 1) & " " & key &
+            " names " & dst & ", which the closure provides")
+    of "TemporaryFileSystem":
+      for dst in mountDestinations(key, value):
+        if pathTouchesUsr(dst):
+          raiseUnit(unitName, "line " & $(i + 1) & " mounts a tmpfs on " &
+            dst & ", which would hide the closure")
+    else: discard
+  if not serviceSeen:
+    raiseUnit(unitName, "it has no [Service] section")
+  if rendered:
+    if bindLines != 1:
+      raiseUnit(unitName, "its content carries the closure's bind line " &
+        $bindLines & " times, not once: " & directives[0])
+    if preloadLines < 1:
+      raiseUnit(unitName, "its content lacks " & directives[1])
+  elif bindLines > 0 or preloadLines > 0:
+    raiseUnit(unitName, "it already carries the closure's own lines")
 
 proc renderUnitWithAptClosure*(content: string; prefix: string;
                                unitName = ""): string =
   ## Return ``content`` with ``aptClosureUnitDirectives(prefix)`` inserted
-  ## right after its ``[Service]`` header. Refuses (``EAptClosureUnit``) a
-  ## unit with no ``[Service]`` section; one whose command lines name
-  ## ``reprobuild-sandbox-launcher`` (the closure replaces that wrapper, and
-  ## the wrapper's user namespace is what drops ``CAP_NET_RAW`` and device
-  ## access); one that already binds ``/usr``; and one that changes the
-  ## root (``RootDirectory=``/``RootImage=``), under which ``/usr`` would
-  ## not be the closure's.
+  ## right after its ``[Service]`` header, after ``checkUnitForAptClosure``
+  ## has accepted it. The result passes the ``rendered`` check.
   if prefix.len == 0 or not prefix.startsWith("/") or ':' in prefix or
       ' ' in prefix or '%' in prefix:
     raiseUnit(unitName, "prefix '" & prefix & "' is not a plain absolute path")
-  var serviceLine = -1
-  let lines = content.split('\n')
-  for i, raw in lines:
-    let l = raw.strip()
-    if l == "[Service]" and serviceLine < 0:
-      serviceLine = i
-    if l.startsWith("Exec") and "reprobuild-sandbox-launcher" in l:
-      raiseUnit(unitName, "line " & $(i + 1) & " runs " &
-        "reprobuild-sandbox-launcher; name the binary directly")
-    let eq = l.find('=')
-    if eq > 0:
-      let key = l[0 ..< eq].strip()
-      let value = l[eq + 1 .. ^1]
-      if key in ["BindPaths", "BindReadOnlyPaths"]:
-        for t in bindTargets(value):
-          if t.strip(chars = {'/'}, leading = false) == "/usr":
-            raiseUnit(unitName, "line " & $(i + 1) & " already binds /usr")
-      if key in ["RootDirectory", "RootImage"]:
-        raiseUnit(unitName, "line " & $(i + 1) & " sets " & key)
-  if serviceLine < 0:
-    raiseUnit(unitName, "it has no [Service] section")
+  checkUnitForAptClosure(content, prefix, unitName, rendered = false)
   var outLines: seq[string] = @[]
-  for i, l in lines:
+  var inserted = false
+  for l in content.split('\n'):
     outLines.add(l)
-    if i == serviceLine:
+    if not inserted and l.strip() == "[Service]":
       for d in aptClosureUnitDirectives(prefix): outLines.add(d)
-  outLines.join("\n")
+      inserted = true
+  result = outLines.join("\n")
+  checkUnitForAptClosure(result, prefix, unitName, rendered = true)
 
 proc renderUnitForAptClosureLock*(content, lockText: string;
                                   storeRoot = AddOnSystemStoreRoot;
@@ -804,3 +1304,13 @@ proc renderUnitForAptClosureLock*(content, lockText: string;
   let lock = parseAptClosureLock(lockText)
   renderUnitWithAptClosure(content, aptClosurePrefixPath(storeRoot, lock),
     unitName)
+
+proc checkUnitForAptClosureLock*(content, lockText: string;
+                                 storeRoot = AddOnSystemStoreRoot;
+                                 unitName = "") =
+  ## The broker's check: ``content`` is a rendered unit bound to exactly the
+  ## prefix ``lockText`` pins. Raises ``EAptClosureLock`` or
+  ## ``EAptClosureUnit``.
+  let lock = parseAptClosureLock(lockText)
+  checkUnitForAptClosure(content, aptClosurePrefixPath(storeRoot, lock),
+    unitName, rendered = true)

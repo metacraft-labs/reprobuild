@@ -21,6 +21,7 @@ import std/[algorithm, tables]
 
 import cbor
 import repro_profile/types
+from repro_profile/host_system import hostSystemDeclProblem
 
 import ./envelope
 import ./errors
@@ -64,13 +65,18 @@ const
     ## a block-form `hosts:` entry's `applies:`). Optional; omitted when no
     ## host declares, so a profile without a declaration encodes exactly as
     ## before. Envelope schema 7.
-  KeySystemManagedElsewhere = "systemManagedElsewhere"
-    ## GM10: the hosts whose system scope is managed elsewhere
-    ## (`ProfileIntent.systemManagedElsewhere`): a map host -> map, the inner
-    ## map carrying `"managedBy"` (text) only when the entry names a manager.
-    ## Optional; omitted when no host says so, so a profile without the
-    ## attribute encodes exactly as before. Envelope schema 9.
+  KeyHostSystems  = "hostSystems"
+    ## GM10 + add-on mode: the hosts whose `hosts:` entry has a `system:` key
+    ## (`ProfileIntent.hostSystems`): a map host -> map carrying `"mode"`
+    ## (text: `managedElsewhere` or `addOn`), `"managedBy"` (text) only when
+    ## the entry names a manager, and `"activities"` (array of text) only
+    ## when an add-on entry selects system activities. Optional; omitted when
+    ## no host entry has the key, so a profile without the attribute encodes
+    ## exactly as before. Envelope schema 11 (it replaced schema 9's
+    ## `"systemManagedElsewhere"` map, which could not say `addOn`).
+  KeyMode         = "mode"
   KeyManagedBy    = "managedBy"
+  KeySystemActivities = "activities"
   KeyStowScopes   = "stowScopes"
     ## GM11: the activities' stow claims (`ProfileIntent.stowScopes`): an
     ## array of maps with `"package"` and `"activity"` (text) and, under a
@@ -323,15 +329,18 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
     entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
   if p.hostApplies.len > 0:
     entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
-  if p.systemManagedElsewhere.len > 0:
+  if p.hostSystems.len > 0:
     var hostEntries: seq[DynamicMapEntry] = @[]
-    for host, pointer in p.systemManagedElsewhere:
-      var inner: seq[DynamicMapEntry] = @[]
-      if pointer.len > 0:
-        inner.add entry(KeyManagedBy, cborText(pointer))
+    for host, decl in p.hostSystems:
+      var inner = @[entry(KeyMode, cborText($decl.mode))]
+      if decl.managedBy.len > 0:
+        inner.add entry(KeyManagedBy, cborText(decl.managedBy))
+      if decl.activities.len > 0:
+        inner.add entry(KeySystemActivities,
+          encodeStringArray(decl.activities))
       hostEntries.add entry(host, cborMap(inner))
     hostEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
-    entries.add entry(KeySystemManagedElsewhere, cborMap(hostEntries))
+    entries.add entry(KeyHostSystems, cborMap(hostEntries))
   if p.stowScopes.len > 0:
     # Declaration order is kept (an array): it is the order diagnostics
     # name the claims in.
@@ -627,17 +636,41 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   let haNode = lookupOpt(entries, KeyHostApplies, haFound)
   if haFound:
     result.hostApplies = decodeHosts(haNode)
-  # GM10: the system-management attribute is OPTIONAL on the wire (absent
-  # when no host's system is managed elsewhere).
-  var smeFound = false
-  let smeNode = lookupOpt(entries, KeySystemManagedElsewhere, smeFound)
-  if smeFound:
-    for e in expectMap(smeNode, KeySystemManagedElsewhere):
-      var pointerFound = false
-      let pointerNode = lookupOpt(expectMap(e.value, KeySystemManagedElsewhere),
-        KeyManagedBy, pointerFound)
-      result.systemManagedElsewhere[e.key] =
-        if pointerFound: expectText(pointerNode, KeyManagedBy) else: ""
+  # GM10 + add-on mode: the system-management attribute is OPTIONAL on the
+  # wire (absent when no host entry has a `system:` key). An entry with an
+  # unknown mode, or one the `profile` macro could not have produced
+  # (`hostSystemDeclProblem`), is refused as corrupt -- never read as
+  # "managed here".
+  var hsFound = false
+  let hsNode = lookupOpt(entries, KeyHostSystems, hsFound)
+  if hsFound:
+    for e in expectMap(hsNode, KeyHostSystems):
+      let inner = expectMap(e.value, KeyHostSystems)
+      var modeFound, pointerFound, actsFound = false
+      let modeNode = lookupOpt(inner, KeyMode, modeFound)
+      if not modeFound:
+        raiseRbpiCorrupt("body", KeyHostSystems & "." & e.key &
+          " has no `" & KeyMode & "`")
+      var decl: HostSystemDecl
+      let modeText = expectText(modeNode, KeyMode)
+      case modeText
+      of $hsmManagedElsewhere: decl.mode = hsmManagedElsewhere
+      of $hsmAddOn: decl.mode = hsmAddOn
+      else:
+        raiseRbpiCorrupt("body", KeyHostSystems & "." & e.key &
+          " has an unknown mode `" & modeText & "`")
+      let pointerNode = lookupOpt(inner, KeyManagedBy, pointerFound)
+      if pointerFound:
+        decl.managedBy = expectText(pointerNode, KeyManagedBy)
+      let actsNode = lookupOpt(inner, KeySystemActivities, actsFound)
+      if actsFound:
+        for it in expectArray(actsNode, KeySystemActivities):
+          decl.activities.add expectText(it, KeySystemActivities)
+      let problem = hostSystemDeclProblem(decl)
+      if problem.len > 0:
+        raiseRbpiCorrupt("body", KeyHostSystems & "." & e.key & ": " &
+          problem)
+      result.hostSystems[e.key] = decl
   # GM11: the stow claims are OPTIONAL on the wire (absent when no activity
   # claims a stow package). A malformed claim is refused as corrupt.
   var ssFound = false

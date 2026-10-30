@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 10'u16           ## Current envelope schema version.
+  RbpiSchemaVersion* = 11'u16           ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -104,6 +104,13 @@ const
     ##     an activity's ``stow:`` block claims. Bumped because a build that
     ##     did not know the key would materialize a claimed package on every
     ##     host, including the ones that do not select its activity.
+    ##  11 (ReproOS add-on mode): the GM10 ``"systemManagedElsewhere"`` map
+    ##     becomes the three-valued ``"hostSystems"`` map (host -> map with
+    ##     ``"mode"`` text -- ``managedElsewhere`` or ``addOn`` -- an optional
+    ##     ``"managedBy"`` text and an optional ``"activities"`` array of
+    ##     text, the system activities an add-on entry selects). Bumped
+    ##     because a schema-10 reader would decode an add-on host as one whose
+    ##     whole system is managed here, and plan or switch it as such.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

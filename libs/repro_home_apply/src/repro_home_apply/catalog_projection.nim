@@ -233,15 +233,31 @@ proc canonicalFile(path: string): string =
     except OSError: absolutePath(path)
   resolved.replace('\\', '/')
 
-proc recordsComeFrom(use: InterfaceToolUse; module: string): bool =
-  ## Whether the projection carries a realization written in ``module``, or
-  ## none at all. A workspace project named like the package would take the
-  ## ``uses:`` before the catalog (``usesImportCode``'s order); the synthetic
-  ## recipe lives in the state directory, where that should never happen,
-  ## and this is the check that it did not.
-  ##
-  ## Only the definition's own (in-package) realizations are compared: a
-  ## contribution an imported catalog registers is written in that catalog.
+proc isStdlibFile(path: string): bool =
+  ## Whether ``path`` is a module of the stdlib every recipe compiles
+  ## against (``repro_dsl_stdlib``). The extraction compiles the synthetic
+  ## recipe against the reprobuild sources it runs from, so the directory
+  ## varies (a checkout, an installed package's source root) and only the
+  ## path from the stdlib's source directory down is stable.
+  when defined(reproMutations):
+    # Falsifying-mutation harness for the gate that holds this rule: with
+    # the variable set, a stdlib definition counts as a shadowing project.
+    if getEnv("REPRO_A6_MUTATE_STDLIB_FILE") == "1":
+      return false
+  "/repro_dsl_stdlib/src/repro_dsl_stdlib/" in path.replace('\\', '/')
+
+proc ownRecordFiles(use: InterfaceToolUse; name: string): seq[string] =
+  ## The files of ``use``'s own (in-package) realizations, canonicalised and
+  ## deduplicated, minus those written in the stdlib. A contribution an
+  ## imported catalog registers is written in that catalog and is not
+  ## counted; neither is a stdlib definition of the same canonical package
+  ## (``util-linux`` has one, ``repro_dsl_stdlib/packages/m9r28_longtail``,
+  ## with a Nix realization): every recipe compiles against the stdlib, so
+  ## such a definition shadows nothing -- it realizes the reference beside
+  ## the catalog definition, exactly as it does in a recipe that names the
+  ## package. ``name`` is what the records belong to, for the caller's
+  ## diagnostics.
+  discard name
   var files: seq[string] = @[]
   for r in use.tarballProvisioning:
     if r.contributor.len == 0: files.add(r.location.file)
@@ -249,13 +265,22 @@ proc recordsComeFrom(use: InterfaceToolUse; module: string): bool =
     if r.contributor.len == 0: files.add(r.location.file)
   for r in use.scoopProvisioning:
     if r.contributor.len == 0: files.add(r.location.file)
-  if files.len == 0:
-    return true
-  let wanted = canonicalFile(module)
   for file in files:
-    if canonicalFile(file) == wanted:
-      return true
-  false
+    if isStdlibFile(file):
+      continue
+    let c = canonicalFile(file)
+    if c notin result:
+      result.add c
+
+proc recordsComeFrom(use: InterfaceToolUse; name, module: string): bool =
+  ## Whether the projection of ``name`` carries a realization written in
+  ## ``module``, or none of its own at all (``ownRecordFiles``). A workspace
+  ## project named like the package would take the ``uses:`` before the
+  ## catalog (``usesImportCode``'s order); the synthetic recipe lives in the
+  ## state directory, where that should never happen, and this is the check
+  ## that it did not.
+  let files = ownRecordFiles(use, name)
+  files.len == 0 or canonicalFile(module) in files
 
 proc hasRecords(use: InterfaceToolUse): bool =
   use.tarballProvisioning.len > 0 or use.nixProvisioning.len > 0 or
@@ -316,11 +341,12 @@ proc extractCatalogGroup(packages: seq[CatalogPackage]; root, scratchDir,
         if isBundledStdlibSelector(pkg.name) or isRegisteredPackage(pkg.name) or
             hasRecords(use):
           catalog.uses[pkg.name] = use
-      elif not recordsComeFrom(use, pkg.module):
+      elif not recordsComeFrom(use, pkg.name, pkg.module):
         catalog.failures[pkg.name] = "the catalog definition of '" &
           pkg.name & "' (" & pkg.module & ") was not what the synthetic " &
           "recipe imported; a project named '" & pkg.name & "' beside " &
-          dir & " took the reference"
+          dir & " took the reference (its realizations are written in " &
+          ownRecordFiles(use, pkg.name).join(", ") & ")"
       else:
         catalog.uses[pkg.name] = use
       break

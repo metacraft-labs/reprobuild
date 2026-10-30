@@ -14,7 +14,7 @@
 ##    on encode, so identical inputs must produce byte-identical
 ##    output and reversed input order must produce the same wire.
 
-import std/[strutils, tables, unittest]
+import std/[sets, strutils, tables, unittest]
 
 import repro_profile
 import repro_profile_intent
@@ -382,51 +382,85 @@ suite "ProfileIntent CBOR body round-trip":
     check q.hostApplies["home-pc"].len == 0
     check decodeProfileIntentFromBytes(plain).hostApplies.len == 0
 
-  test "systemManagedElsewhere round-trips (RBPI and JSON), absent when empty":
-    # GM10 (envelope schema 9): the hosts whose system scope is managed
-    # elsewhere, with the optional pointer. A profile without one encodes
-    # exactly as a schema-8 profile did -- no key, in either encoding.
+  test "hostSystems round-trips (RBPI and JSON), absent when empty":
+    # GM10 + add-on mode (envelope schema 11): how each declared host's
+    # system scope is managed -- elsewhere, with the optional pointer, or in
+    # add-on mode, with the optional system activities. A profile without one
+    # encodes exactly as before -- no key, in either encoding.
     var p: ProfileIntent
     p.name = "sme"
     p.hosts["infra-host"] = @["default"]
     p.hosts["distro-host"] = @["default"]
     p.hosts["home-pc"] = @["default"]
+    p.hosts["rpi"] = @["default"]
+    p.hosts["validator"] = @["default"]
     let plain = encodeProfileIntentToBytes(p)
     var plainText = ""
     for b in plain: plainText.add char(b)
-    check "systemManagedElsewhere" notin plainText
-    check "systemManagedElsewhere" notin emitProfileIntentJson(p)
-    check decodeProfileIntentFromBytes(plain).systemManagedElsewhere.len == 0
-    p.systemManagedElsewhere["infra-host"] = "example-org/infra"
-    p.systemManagedElsewhere["distro-host"] = ""
+    check "hostSystems" notin plainText
+    check "hostSystems" notin emitProfileIntentJson(p)
+    check decodeProfileIntentFromBytes(plain).hostSystems.len == 0
+    p.hostSystems["infra-host"] = HostSystemDecl(mode: hsmManagedElsewhere,
+      managedBy: "example-org/infra")
+    p.hostSystems["distro-host"] = HostSystemDecl(mode: hsmManagedElsewhere)
+    p.hostSystems["rpi"] = HostSystemDecl(mode: hsmAddOn)
+    p.hostSystems["validator"] = HostSystemDecl(mode: hsmAddOn,
+      activities: @["ethereum_validator", "host_baseline"])
     let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
-    check q.systemManagedElsewhere.len == 2
-    check q.systemManagedElsewhere["infra-host"] == "example-org/infra"
-    check q.systemManagedElsewhere["distro-host"] == ""
-    check not q.systemManagedElsewhere.hasKey("home-pc")
+    check q.hostSystems == p.hostSystems
+    check not q.hostSystems.hasKey("home-pc")
     let js = emitProfileIntentJson(p)
-    check js.contains("\"systemManagedElsewhere\":{\"distro-host\":" &
-      "{\"managedBy\":null},\"infra-host\":{\"managedBy\":" &
-      "\"example-org/infra\"}}")
+    check js.contains("\"hostSystems\":{\"distro-host\":" &
+      "{\"mode\":\"managedElsewhere\",\"managedBy\":null,\"activities\":[]}," &
+      "\"infra-host\":{\"mode\":\"managedElsewhere\",\"managedBy\":" &
+      "\"example-org/infra\",\"activities\":[]},\"rpi\":{\"mode\":\"addOn\"," &
+      "\"managedBy\":null,\"activities\":[]},\"validator\":{\"mode\":" &
+      "\"addOn\",\"managedBy\":null,\"activities\":[\"ethereum_validator\"," &
+      "\"host_baseline\"]}}")
     let r = parseProfileIntentJson(js)
-    check r.systemManagedElsewhere == p.systemManagedElsewhere
+    check r.hostSystems == p.hostSystems
     # The lookup every reader uses.
     let m = systemManagementFor(r, "infra-host")
-    check m.declared and m.managedElsewhere and
+    check m.declared and m.managedElsewhere and m.mode == mmManagedElsewhere and
       m.managedBy == "example-org/infra"
     let n = systemManagementFor(r, "distro-host")
     check n.managedElsewhere and n.managedBy == ""
     let h = systemManagementFor(r, "home-pc")
-    check h.declared and not h.managedElsewhere
+    check h.declared and not h.managedElsewhere and h.mode == mmFull
+    check enabledSystemActivities(h) == toHashSet(["default"])
+    let a = systemManagementFor(r, "rpi")
+    check a.isAddOn and a.systemActivities.len == 0
+    check enabledSystemActivities(a) == toHashSet(["default"])
+    let v = systemManagementFor(r, "validator")
+    check v.isAddOn and v.systemActivities == @["ethereum_validator",
+      "host_baseline"]
+    check enabledSystemActivities(v) == toHashSet(["default",
+      "ethereum_validator", "host_baseline"])
     check not systemManagementFor(r, "nowhere").declared
+    check systemManagementFor(r, "nowhere").mode == mmFull
     # A malformed JSON entry is refused, never read as "managed here".
-    for bad in ["{\"systemManagedElsewhere\":{\"x\":\"repo\"}}",
-                "{\"systemManagedElsewhere\":{\"x\":{}}}",
-                "{\"systemManagedElsewhere\":{\"x\":{\"managedBy\":1}}}",
-                "{\"systemManagedElsewhere\":[]}"]:
+    for bad in ["{\"hostSystems\":{\"x\":\"repo\"}}",
+                "{\"hostSystems\":{\"x\":{}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\"}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"here\",\"managedBy\":null,\"activities\":[]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\",\"managedBy\":\"r\",\"activities\":[]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"managedElsewhere\",\"managedBy\":null,\"activities\":[\"a\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\",\"managedBy\":null,\"activities\":[\"default\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"managedElsewhere\",\"managedBy\":1,\"activities\":[]}}}",
+                "{\"hostSystems\":[]}"]:
       let doc = js[0 ..< js.len - 1] & "," & bad[1 ..< bad.len - 1] & "}"
       expect ValueError:
         discard parseProfileIntentJson(doc)
+    # The RBPI reader refuses the same impossible declarations as corrupt
+    # (the encoder writes whatever it is handed, so it can produce them).
+    for impossible in [HostSystemDecl(mode: hsmAddOn, managedBy: "r"),
+                       HostSystemDecl(mode: hsmAddOn, activities: @["default"]),
+                       HostSystemDecl(mode: hsmManagedElsewhere,
+                         activities: @["a"])]:
+      var bad = p
+      bad.hostSystems["rpi"] = impossible
+      expect ERbpiCorrupt:
+        discard decodeProfileIntentFromBytes(encodeProfileIntentToBytes(bad))
 
   test "stowScopes round-trip (RBPI and JSON), absent when empty":
     # GM11 (envelope schema 10): the stow packages activities claim, in

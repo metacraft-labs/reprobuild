@@ -103,6 +103,11 @@ type
       ## the body length is then determined by the chunked-framing.
     bytesReceived*: int64
     chunked*: bool
+    location*: string
+      ## The ``Location`` header of a 3xx response, verbatim; ``""``
+      ## otherwise. ``streamGet`` does not follow redirects itself (a
+      ## redirect target is the caller's policy), so a caller that wants
+      ## them loops on this.
 
 const
   DefaultMaxConnections = 16
@@ -388,7 +393,8 @@ proc drainUntilClose(sock: Socket;
 proc streamGet*(pool: HttpPool; url: string;
                 callback: StreamChunkCallback;
                 reuseBuffer: var seq[byte];
-                extraHeaders: seq[(string, string)] = @[]):
+                extraHeaders: seq[(string, string)] = @[];
+                maxBodyBytes = -1'i64):
                   StreamResponse =
   ## Issues ``GET url`` and pipes the response body through ``callback``
   ## as bytes arrive. ``reuseBuffer`` is the receive ring buffer — the
@@ -396,6 +402,13 @@ proc streamGet*(pool: HttpPool; url: string;
   ## so we don't allocate per substitute. Returns the response
   ## descriptor; ``bytesReceived`` lets the caller assert the wire-size
   ## against the manifest's declared payload size.
+  ##
+  ## ``maxBodyBytes`` (when non-negative) bounds a 2xx body: a
+  ## ``Content-Length`` above it is refused before a byte of the body is
+  ## read, and a chunked or unterminated body is refused at the first byte
+  ## past it. Either refusal is an ``HttpError`` raised from inside the
+  ## drain, so the connection is dropped, not reused. The callback never
+  ## sees a byte beyond the cap.
   let parsed = parseTarget(url)
   let conn = pool.leaseConnection(parsed.host, parsed.port, parsed.secure)
   var reusable = false
@@ -422,6 +435,7 @@ proc streamGet*(pool: HttpPool; url: string;
     let (statusCode, headers) =
       readHeaders(conn.sock, pool.receiveTimeoutMs)
     resp.statusCode = statusCode
+    resp.location = headerValue(headers, "location")
 
     let teRaw = headerValue(headers, "transfer-encoding").toLowerAscii()
     let connHdr = headerValue(headers, "connection").toLowerAscii()
@@ -435,20 +449,33 @@ proc streamGet*(pool: HttpPool; url: string;
     # reusable. We surface the status code to the caller; the caller
     # decides whether to act on the bytes.
     if resp.statusCode >= 200 and resp.statusCode < 300:
+      if maxBodyBytes >= 0 and resp.contentLength > maxBodyBytes:
+        raise newException(HttpError, "response body of " &
+          $resp.contentLength & " bytes exceeds the " & $maxBodyBytes &
+          "-byte cap for " & url)
+      var received = 0'i64
+      let cappedCallback: StreamChunkCallback =
+        if maxBodyBytes < 0: callback
+        else: (proc(chunk: openArray[byte]) {.gcsafe.} =
+          received += int64(chunk.len)
+          if received > maxBodyBytes:
+            raise newException(HttpError, "response body exceeds the " &
+              $maxBodyBytes & "-byte cap for " & url)
+          callback(chunk))
       if resp.chunked:
         resp.bytesReceived = drainChunked(
-          conn.sock, reuseBuffer, callback, pool.receiveTimeoutMs)
+          conn.sock, reuseBuffer, cappedCallback, pool.receiveTimeoutMs)
         reusable = not connHdr.contains("close")
       elif resp.contentLength >= 0:
         resp.bytesReceived = drainContentLength(
-          conn.sock, resp.contentLength, reuseBuffer, callback,
+          conn.sock, resp.contentLength, reuseBuffer, cappedCallback,
           pool.receiveTimeoutMs)
         reusable = not connHdr.contains("close")
       else:
         # No content-length, no chunked => drain until close. Not
         # reusable.
         resp.bytesReceived = drainUntilClose(
-          conn.sock, reuseBuffer, callback, pool.receiveTimeoutMs)
+          conn.sock, reuseBuffer, cappedCallback, pool.receiveTimeoutMs)
         reusable = false
     else:
       # Drain error body into a throwaway buffer so the connection stays

@@ -226,7 +226,12 @@ let
     );
   refusalTests =
     expectTrue "readIntent refuses an unknown schemaVersion" (
-      refusedSnapshot "schema5" (neutral // { schemaVersion = 5; })
+      refusedSnapshot "schema6" (neutral // { schemaVersion = 6; })
+    )
+    # ReproOS add-on mode: a schema-4 document cannot say a host is an
+    # add-on host, so its add-on hosts would read as managed here in full.
+    ++ expectTrue "readIntent refuses the previous schemaVersion (4)" (
+      refusedSnapshot "schema4" (neutral // { schemaVersion = 4; })
     )
     # GM10: a schema-3 document cannot say a host's system is managed
     # elsewhere, so a reader that acts on the attribute must not take its
@@ -659,7 +664,8 @@ let
   # says, for every declared host of every intent fixture (whose evaluations
   # are Reprobuild's own, `evaluations.json`), and refuses what readIntent
   # refuses. The neutral fixture declares m1's system managed elsewhere
-  # (`example-org/infra`) and home-pc's managed here, so both answers occur.
+  # (`example-org/infra`), home-pc's managed here and rpi and validator
+  # add-on hosts, so every answer occurs.
   systemManagementTests =
     concatMap (
       name:
@@ -689,37 +695,147 @@ let
       host = "m1";
       managed = "elsewhere";
       managedBy = "example-org/infra";
+      mode = "managedElsewhere";
+      activities = [ ];
     } (reprobuildLib.hostSystemManagement { document = neutral; host = "m1"; })
-    ++ expect "hostSystemManagement: the neutral fixture's home-pc is managed here" {
+    ++ expect "hostSystemManagement: the neutral fixture's home-pc is managed here, in full" {
       host = "home-pc";
       managed = "here";
       managedBy = null;
+      mode = "full";
+      activities = [ "default" ];
     } (reprobuildLib.hostSystemManagement { document = neutral; host = "home-pc"; })
-    ++ expectTrue "hostSystemManagement refuses the previous schemaVersion (3)" (
+    # ReproOS add-on mode: an add-on host is managed "here", but its mode
+    # is `addOn` -- the base is its distribution's, and a system switch that
+    # takes "here" to mean "the whole system" must not run on it.
+    ++ expect "hostSystemManagement: the neutral fixture's rpi is an add-on host (default only)" {
+      host = "rpi";
+      managed = "here";
+      managedBy = null;
+      mode = "addOn";
+      activities = [ "default" ];
+    } (reprobuildLib.hostSystemManagement { document = neutral; host = "rpi"; })
+    ++ expect "hostSystemManagement: the neutral fixture's validator selects system activities" {
+      host = "validator";
+      managed = "here";
+      managedBy = null;
+      mode = "addOn";
+      activities = [
+        "default"
+        "web"
+        "backup"
+      ];
+    } (reprobuildLib.hostSystemManagement { document = neutral; host = "validator"; })
+    # A schema-4 document cannot say `addOn`: its add-on hosts would read as
+    # managed here in full. Refused, by readIntent and hostSystemManagement.
+    ++ expectTrue "hostSystemManagement refuses the previous schemaVersion (4)" (
       fails (reprobuildLib.hostSystemManagement {
-        document = neutral // { schemaVersion = 3; };
+        document = neutral // { schemaVersion = 4; };
         host = "home-pc";
       })
     )
-    ++ expectTrue "hostSystemManagement refuses a malformed entry" (
+    ++ expectTrue "hostSystemManagement refuses a schema-4 document's systemManagedElsewhere shape" (
       fails (reprobuildLib.hostSystemManagement {
-        document = neutral // {
-          intent = neutral.intent // {
+        document = (removeAttrs neutral [ "schemaVersion" ]) // {
+          schemaVersion = 4;
+          intent = (removeAttrs neutral.intent [ "hostSystems" ]) // {
             systemManagedElsewhere = {
-              "home-pc" = "example-org/infra";
+              "m1" = {
+                managedBy = "example-org/infra";
+              };
             };
           };
         };
         host = "m1";
       })
     )
+  ++ concatMap (
+      bad:
+      expectTrue "hostSystemManagement refuses a malformed entry: ${bad.why}" (
+        fails (reprobuildLib.hostSystemManagement {
+          document = neutral // {
+            intent = neutral.intent // {
+              hostSystems = neutral.intent.hostSystems // {
+                "home-pc" = bad.entry;
+              };
+            };
+          };
+          host = "m1";
+        })
+      )
+    ) [
+      {
+        why = "a bare string";
+        entry = "example-org/infra";
+      }
+      {
+        why = "no mode";
+        entry = {
+          managedBy = null;
+          activities = [ ];
+        };
+      }
+      {
+        why = "an unknown mode";
+        entry = {
+          mode = "here";
+          managedBy = null;
+          activities = [ ];
+        };
+      }
+      {
+        why = "an add-on entry naming a manager";
+        entry = {
+          mode = "addOn";
+          managedBy = "x";
+          activities = [ ];
+        };
+      }
+      {
+        why = "an add-on entry listing default";
+        entry = {
+          mode = "addOn";
+          managedBy = null;
+          activities = [ "default" ];
+        };
+      }
+      {
+        why = "an add-on entry listing an activity twice";
+        entry = {
+          mode = "addOn";
+          managedBy = null;
+          activities = [
+            "web"
+            "web"
+          ];
+        };
+      }
+      {
+        why = "a managedElsewhere entry selecting activities";
+        entry = {
+          mode = "managedElsewhere";
+          managedBy = null;
+          activities = [ "web" ];
+        };
+      }
+      {
+        why = "an empty pointer";
+        entry = {
+          mode = "managedElsewhere";
+          managedBy = "";
+          activities = [ ];
+        };
+      }
+    ]
     ++ expectTrue "hostSystemManagement refuses an entry for an undeclared host" (
       fails (reprobuildLib.hostSystemManagement {
         document = neutral // {
           intent = neutral.intent // {
-            systemManagedElsewhere = neutral.intent.systemManagedElsewhere // {
+            hostSystems = neutral.intent.hostSystems // {
               "gm10-nowhere" = {
+                mode = "addOn";
                 managedBy = null;
+                activities = [ ];
               };
             };
           };
@@ -729,14 +845,16 @@ let
     )
     # The evaluation refuses the same malformed table rather than reading
     # the host as managed here.
-    ++ expectTrue "readIntent refuses a malformed systemManagedElsewhere" (
+    ++ expectTrue "readIntent refuses a malformed hostSystems" (
       refusedSnapshot "malformed-system" (
         neutral
         // {
           intent = neutral.intent // {
-            systemManagedElsewhere = {
+            hostSystems = {
               "m1" = {
+                mode = "managedElsewhere";
                 managedBy = "";
+                activities = [ ];
               };
             };
           };

@@ -32,6 +32,8 @@ import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
 import repro_addon/addon_apply as addon_apply
 import repro_addon/cli as addon_cli
+import repro_infra/host_base
+import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
 from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 
@@ -47,9 +49,11 @@ from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 # edit it byte-for-byte preserving comments and formatting.
 # ---------------------------------------------------------------------------
 
-proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
+proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
+    target: SystemPlanTarget = defaultSystemPlanTarget()):
     tuple[compiled: bool; text: string; cached: bool; compileError: string;
-          adaptError: string; buildActions: seq[ProfileBuildAction]] =
+          adaptError: string; buildActions: seq[ProfileBuildAction];
+          projection: Projection] =
   ## Run the Phase C build-engine edge against `profilePath`, decode
   ## the RBPI artifact, and render the adapted `SystemProfile` back
   ## into the canonical declarative text the M69 lib's APIs consume.
@@ -83,11 +87,19 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
   ## action edges leave this seq empty — the apply driver skips the
   ## dispatcher entirely when empty (see ``dispatchBuildActions``).
   ##
-  ## A profile that compiles but that the system adapter refuses (e.g. a
-  ## runtime guard on a system-scope resource, which system scope cannot
-  ## evaluate) sets `result.adaptError` instead of `result.compileError`:
-  ## the operator is told the profile cannot be used as a system profile,
-  ## not that it failed to compile.
+  ## `target` is the host being planned and what its host-registry entry
+  ## selects (`infra_host_registry.systemPlanTargetFor`): runtime
+  ## predicates are evaluated for it, its system activities select
+  ## activity-scoped resources, and an add-on target projects every
+  ## selected field through the `add-on-debian` realisation profile
+  ## (`result.projection`). The default is the running machine with the
+  ## `default` activity, realised in full -- a plan with no registry.
+  ##
+  ## A profile that compiles but that the system adapter refuses for this
+  ## target (a home-scope resource, an undeclared activity, an
+  ## `EAddOnOutOfScope` field) sets `result.adaptError` instead of
+  ## `result.compileError`: the operator is told the profile cannot be used
+  ## as a system profile for this host, not that it failed to compile.
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
     # Guarded like every internal-verb spawn: the compile wraps its actions
@@ -111,8 +123,9 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
     result.compileError = err.msg
     return
   try:
-    let sp = profileIntentToSystemProfile(intent)
-    result.text = renderSystemProfileToText(sp)
+    let adapted = adaptSystemProfile(intent, target)
+    result.text = renderSystemProfileToText(adapted.profile)
+    result.projection = adapted.projection
   except CatchableError as err:
     result.adaptError = err.msg
     return
@@ -124,7 +137,9 @@ proc resolveSystemProfileText*(profilePath: string;
                                commandName: string;
                                outText: var string;
                                planCommand = "";
-                               outBuildActions: ptr seq[ProfileBuildAction] = nil):
+                               outBuildActions: ptr seq[ProfileBuildAction] = nil;
+                               target: SystemPlanTarget = defaultSystemPlanTarget();
+                               outProjection: ptr Projection = nil):
     bool =
   ## Drive the Phase F3 compile path for a `system.nim`. Sets `outText`
   ## to the canonical text rendered from the adapted profile when the
@@ -153,11 +168,13 @@ proc resolveSystemProfileText*(profilePath: string;
   ## come from inferring failure from absent output instead of from an
   ## actual error.
   discard originalText  # retained for caller compatibility; see docstring
-  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir)
+  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target)
   if outcome.compiled:
     outText = outcome.text
     if outBuildActions != nil:
       outBuildActions[] = outcome.buildActions
+    if outProjection != nil:
+      outProjection[] = outcome.projection
     return true
   if outcome.adaptError.len > 0:
     stderr.writeLine(commandName & ": " & profilePath & " compiled, but " &
@@ -383,9 +400,14 @@ proc parseInfraFlags(args: openArray[string]):
 
 proc gateHostSystemManagement(flags: InfraCliFlags; host, profilePath,
                               stateDir, command: string;
-                              verdict: var HostRegistryVerdict): bool =
+                              verdict: var HostRegistryVerdict;
+                              target: var SystemPlanTarget): bool =
   ## Read the host registry (`infra_host_registry`) and refuse a host whose
-  ## system is managed elsewhere. Runs BEFORE the system profile is
+  ## system is managed elsewhere, or whose registry mode disagrees with the
+  ## base it runs (`checkHostSystemMode`, `EAddOnModeMismatch`; an add-on
+  ## host on a base without a realisation profile is
+  ## `EAddOnUnsupportedBase`). On success `target` is the system-scope
+  ## target the registry selects (`systemPlanTargetFor`). Runs BEFORE the system profile is
   ## compiled and before any plan, lock or generation is written, so a
   ## refused host leaves the state directory as it was. Returns false (after
   ## printing why) when the command must stop. `host` is the command's
@@ -402,6 +424,16 @@ proc gateHostSystemManagement(flags: InfraCliFlags; host, profilePath,
   let refusal = managedElsewhereRefusal(verdict, command)
   if refusal.len > 0:
     stderr.writeLine(refusal)
+    return false
+  let base = observeHostBase()
+  try:
+    checkHostSystemMode(verdict, base)
+    target = systemPlanTargetFor(verdict, base)
+  except EAddOn as e:
+    stderr.writeLine(command & ": refusing host " & host & ": " & e.msg)
+    stderr.writeLine("  host registry : " &
+      (if verdict.registryPath.len > 0: verdict.registryPath else: "none"))
+    stderr.writeLine("  observed base : " & describeHostBase(base))
     return false
   true
 
@@ -422,16 +454,19 @@ proc runInfraPlan(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro infra plan", host):
     return 2
   var registry: HostRegistryVerdict
+  var target: SystemPlanTarget
   if not gateHostSystemManagement(flags, host, profilePath, stateDir,
-      "repro infra plan", registry):
+      "repro infra plan", registry, target):
     return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
   # failure exits non-zero with a uniform actionable error.
   var profileText: string
+  var projection: Projection
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro infra plan", profileText,
-      planCommand = "repro infra plan"):
+      planCommand = "repro infra plan", target = target,
+      outProjection = addr projection):
     return 1
   ensureSystemStateDir(stateDir)
   # M82 Phase C: pass the state dir so the planner can read the
@@ -448,6 +483,9 @@ proc runInfraPlan(args: openArray[string]): int =
   echo "  profile : " & profilePath
   echo "  host    : " & host
   echo "  registry: " & describeRegistry(registry)
+  echo "  system  : " & describeSystemTarget(target)
+  for e in ignoredEntries(projection):
+    echo "  ignored : " & describeEntry(e)
   let hostNote = recordedHostNote(stateDir, host)
   if hostNote.len > 0:
     echo "  note    : " & hostNote
@@ -545,8 +583,9 @@ proc runInfraApply(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro infra apply", host):
     return 2
   var registry: HostRegistryVerdict
+  var target: SystemPlanTarget
   if not gateHostSystemManagement(flags, host, profilePath, stateDir,
-      "repro infra apply", registry):
+      "repro infra apply", registry, target):
     return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
@@ -556,7 +595,7 @@ proc runInfraApply(args: openArray[string]): int =
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro infra apply", profileText,
       planCommand = "repro infra plan",
-      outBuildActions = addr profileBuildActions):
+      outBuildActions = addr profileBuildActions, target = target):
     return 1
 
   var planId = flags.planId
@@ -635,6 +674,7 @@ proc runInfraApply(args: openArray[string]): int =
   echo "  plan-id      : " & applyResult.planId
   echo "  host         : " & host
   echo "  registry     : " & describeRegistry(registry)
+  echo "  system       : " & describeSystemTarget(target)
   if hostNote.len > 0:
     echo "  note         : " & hostNote
   echo "  generation   : " & applyResult.generationId
@@ -879,8 +919,9 @@ proc runSystemSync(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro system sync", host):
     return 2
   var registry: HostRegistryVerdict
+  var target: SystemPlanTarget
   if not gateHostSystemManagement(flags, host, profilePath, stateDir,
-      "repro system sync", registry):
+      "repro system sync", registry, target):
     return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
@@ -890,7 +931,7 @@ proc runSystemSync(args: openArray[string]): int =
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro system sync", profileText,
       planCommand = "repro infra plan",
-      outBuildActions = addr profileBuildActions):
+      outBuildActions = addr profileBuildActions, target = target):
     return 1
   if not takeInfraApplyLock(stateDir, "repro system sync", flags):
     return 1
@@ -931,6 +972,7 @@ proc runSystemSync(args: openArray[string]): int =
   echo "repro system sync"
   echo "  host         : " & host
   echo "  registry     : " & describeRegistry(registry)
+  echo "  system       : " & describeSystemTarget(target)
   if hostNote.len > 0:
     echo "  note         : " & hostNote
   echo "  generation   : " & applyResult.generationId
@@ -1002,9 +1044,12 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
   if not resolveInfraHost(flags, "repro system rollback", host):
     return 2
   var registry: HostRegistryVerdict
+  # The rollback re-applies a recorded generation, so it needs the gate's
+  # refusals (managed elsewhere, mode mismatch) but not its selection.
+  var unusedTarget: SystemPlanTarget
   if not gateHostSystemManagement(flags, host,
       systemProfilePathOrCreate(flags, stateDir), stateDir,
-      "repro system rollback", registry):
+      "repro system rollback", registry, unusedTarget):
     return 1
   let hostNote = recordedHostNote(stateDir, host)
   if not takeInfraApplyLock(stateDir, "repro system rollback", flags):
