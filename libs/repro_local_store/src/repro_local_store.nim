@@ -6320,6 +6320,12 @@ proc removeEntry(entry: CacheEntryRef): bool =
   except OSError:
     false
 
+proc removeCacheEntry*(entry: CacheEntryRef): bool =
+  ## `removeEntry` for the store's budget GC
+  ## (`repro_local_store/budget_gc`), which evicts entries by last use
+  ## across the whole store root rather than through `runRetentionGc`.
+  removeEntry(entry)
+
 proc runRetentionGc*(cache: ActionCache;
                      policy: RetentionGcPolicy): RetentionGcReport =
   ## Two passes, in this order and never the other:

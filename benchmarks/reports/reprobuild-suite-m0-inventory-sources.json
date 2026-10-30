@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2516,
+    "nimTestBinaries": 2517,
     "pureUnitConsolidationGroups": 72,
-    "pureUnitTests": 700,
+    "pureUnitTests": 701,
     "staticallyDetectedRuntimeCompilerFlowTests": 132,
-    "testEntries": 2556
+    "testEntries": 2557
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -451,7 +451,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -462,7 +462,8 @@
       "sources": [
         "libs/repro_local_store/tests/t_input_access_sidecar.nim",
         "libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim",
-        "libs/repro_local_store/tests/t_retention_gc.nim"
+        "libs/repro_local_store/tests/t_retention_gc.nim",
+        "libs/repro_local_store/tests/t_store_budget_gc.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1449,7 +1450,7 @@
       "graph-fixture": 18,
       "integration": 1392,
       "platform/destructive": 159,
-      "pure unit": 700,
+      "pure unit": 701,
       "unclassified": 287
     },
     "graphOwnedTestArtifacts": [
@@ -1658,9 +1659,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2516,
+    "nimTestBinaryCount": 2517,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2556
+    "testEntryCount": 2557
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16933,6 +16934,25 @@
       "source": "libs/repro_local_store/tests/t_sqlite_smoke.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_budget_gc",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_budget_gc.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -499,6 +499,7 @@ libs/repro_local_store/tests/t_published_trace_record.nim	nim	9
 libs/repro_local_store/tests/t_refresh_restored_outputs.nim	nim	2
 libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
+libs/repro_local_store/tests/t_store_budget_gc.nim	nim	12
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
