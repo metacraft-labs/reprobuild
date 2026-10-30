@@ -324,6 +324,10 @@ proc confirmExited*(units: openArray[string]; successor: string) =
   ## must have an empty control group. Not stopped here: a predecessor
   ## alive now is one the plan did not stop, so the apply refuses.
   for u in units:
+    when mutated("unmanaged-predecessor-not-refused"):
+      # The falsifying mutation drops every predecessor protection: only
+      # the successor's own group is checked.
+      if u != successor: continue
     let alive = unitAliveness(u)
     if alive != uaEmpty:
       raise newAddOnExclusiveOverlap(successor, (if u == successor:

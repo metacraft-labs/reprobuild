@@ -476,9 +476,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r9d.exitCode == 0 and "stop-start\trepro-fixture-excl-s.service" in r9d.stdout and
          "pauses repro-fixture-excl-s.socket" in r9d.stdout, r9d.stdout & r9d.stderr)
     step("g9d: the socket step 2 paused is listening again, the idle unit not started",
-         g.run("systemctl is-active repro-fixture-excl-s.socket").strip() == "active" and
+         g.exec("systemctl is-active repro-fixture-excl-s.socket").stdout.strip() == "active" and
          g.exec("systemctl is-active repro-fixture-excl-s.service").stdout.strip() != "active",
          g.run("systemctl status --no-pager repro-fixture-excl-s.socket; true"))
+    # Whatever the outcome, the next cases need the socket listening.
+    discard g.run("systemctl start repro-fixture-excl-s.socket; true")
     # The socket is the test's scaffolding, not the add-on's: take it away
     # (its queued connections would start the service again whenever it
     # stops, which a later removal of the exclusive service rightly

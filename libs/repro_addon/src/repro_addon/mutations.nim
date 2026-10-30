@@ -87,7 +87,9 @@
 ## ``unmanaged-predecessor-not-refused``      an unmanaged predecessor that
 ##                                            runs, is enabled or can be
 ##                                            triggered does not refuse the
-##                                            plan
+##                                            plan, and no predecessor's
+##                                            group is confirmed empty
+##                                            before a start
 ## ``exclusive-planned-by-active-state``      exclusive units are planned by
 ##                                            ``ActiveState`` alone and no
 ##                                            group is confirmed empty before
