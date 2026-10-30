@@ -401,6 +401,41 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
           action, ""))
         check not manifestPublished(url, entry)  # and nothing left the host
 
+  test "a publisher refuses to stage an output tree that contains a link to a file":
+    when not (defined(linux) or defined(macosx)):
+      skip("symbolic links and the /bin/sh build action are POSIX; no Windows arm")
+    else:
+      withCacheServer("m4-filelink-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let confA = tmpRoot / "caches-a.conf"
+        writeCachesConf(confA, url, @[kpA.pubHex])
+        usePublisher(confA, url, kpA)
+        # The directory case above leaves a link to a DIRECTORY, which the
+        # old walk silently skipped. A link to a FILE was yielded by that
+        # walk as `pcLinkToFile` and copied through -- a different branch of
+        # the same guard, so it gets its own control: `bin/tool` is a link
+        # to a regular file outside the declared tree.
+        let cwd = tmpRoot / "cwd-filelink"
+        createDir(cwd)
+        let action = ProfileBuildAction(
+          id: "filelink-edge",
+          argv: @["/bin/sh", "-c",
+            "mkdir -p bin real; printf tool > real/tool; " &
+            "ln -s ../real/tool bin/tool; printf x > bin/other"],
+          cwd: cwd, outputs: @["bin"],
+          commandStatsId: "m4.filelink.write",
+          requiresElevation: true, cacheable: true)
+        let cacheRoot = tmpRoot / "engine-cache-filelink"
+        createDir(cacheRoot)
+        let disp = mkBuildActionDispatcher(cacheRoot,
+          FixtureContext(filePrefix: tmpRoot / "ctx-filelink"))
+        let outs = disp(@[action], nil)
+        check outs.len == 1
+        check outs[0].ok
+        check symlinkExists(cwd / "bin" / "tool")
+        check not manifestPublished(url, deriveCacheEntryKeyHex(
+          buildActionCacheIdentity(action, "")))
+
   test "a caches.conf that cannot be parsed configures no cache":
     when not (defined(linux) or defined(macosx)):
       skip("the build action is a /bin/sh script and the cache server a POSIX subprocess; no Windows arm")
