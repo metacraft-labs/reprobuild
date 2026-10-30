@@ -1697,6 +1697,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_addon_platform_dispatch.nim",
+    binary: "build/test-bin/t_addon_platform_dispatch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_audit_holds_at_the_gate_rate.nim",
     binary: "build/test-bin/t_audit_holds_at_the_gate_rate",
     defines: @[],

@@ -32,8 +32,11 @@ import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
-import repro_addon/addon_apply as addon_apply
-import repro_addon/cli as addon_cli
+# Add-on mode owns Linux filesystem and ledger operations. Keep those imports
+# out of the portable engine; ordinary system/infra commands still exist here.
+when defined(linux):
+  import repro_addon/addon_apply as addon_apply
+  import repro_addon/cli as addon_cli
 import repro_infra/host_base
 import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
@@ -704,29 +707,30 @@ proc runInfraApply(args: openArray[string]): int =
     return 1
   defer: releaseApplyLock(stateDir)
 
-  # ReproOS add-on mode: on a host the add-on was bootstrapped on, every
-  # generation is the add-on's own objects plus this profile, and the
-  # ownership ledger decides what may be removed. A plain infra apply here
-  # would bypass the ledger, so the apply goes through the add-on layer.
-  if addon_apply.isAddonHost(stateDir):
-    if profileBuildActions.len > 0:
-      stderr.writeLine("repro infra apply: this is an add-on host, and " &
-        "add-on generations do not carry build actions yet; the profile " &
-        "declares " & $profileBuildActions.len)
-      return 2
-    try:
-      let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
-        stateDir: stateDir, hostIdentity: host, userProfileText: profileText))
-      echo "repro infra apply (add-on): generation " & r.generationId &
-        " (previous " & r.previousGenerationId & "), applied " &
-        $r.infra.appliedCount & ", removed " & $r.removed.len
-      return 0
-    except addon_apply.AddonDriftError as e:
-      stderr.writeLine("repro infra apply: " & e.msg)
-      return 1
-    except CatchableError as e:
-      stderr.writeLine("repro infra apply: " & e.msg)
-      return 1
+  when defined(linux):
+    # ReproOS add-on mode: on a host the add-on was bootstrapped on, every
+    # generation is the add-on's own objects plus this profile, and the
+    # ownership ledger decides what may be removed. A plain infra apply here
+    # would bypass the ledger, so the apply goes through the add-on layer.
+    if addon_apply.isAddonHost(stateDir):
+      if profileBuildActions.len > 0:
+        stderr.writeLine("repro infra apply: this is an add-on host, and " &
+          "add-on generations do not carry build actions yet; the profile " &
+          "declares " & $profileBuildActions.len)
+        return 2
+      try:
+        let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
+          stateDir: stateDir, hostIdentity: host, userProfileText: profileText))
+        echo "repro infra apply (add-on): generation " & r.generationId &
+          " (previous " & r.previousGenerationId & "), applied " &
+          $r.infra.appliedCount & ", removed " & $r.removed.len
+        return 0
+      except addon_apply.AddonDriftError as e:
+        stderr.writeLine("repro infra apply: " & e.msg)
+        return 1
+      except CatchableError as e:
+        stderr.writeLine("repro infra apply: " & e.msg)
+        return 1
 
   var opts: ApplyOptions
   opts.stateDir = stateDir
@@ -1311,7 +1315,12 @@ proc runSystemCommand*(args: seq[string]): int =
     of "history": return runSystemHistory(rest)
     of "rollback": return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
-    of "addon": return addon_cli.runAddonCli(rest)
+    of "addon":
+      when defined(linux):
+        return addon_cli.runAddonCli(rest)
+      else:
+        stderr.writeLine("repro system addon: supported only on Linux")
+        return 2
     else:
       stderr.writeLine("repro system: unknown subcommand: " & sub)
       return 2
