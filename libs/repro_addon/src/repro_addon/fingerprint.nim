@@ -188,6 +188,10 @@ const
     "systemd-localed.service",     # localectl backend (D-Bus, idle exit)
     "packagekit.service",          # PackageKit (Ubuntu; D-Bus, exits after
                                    # five idle minutes)
+    "snapd.service",               # snapd (Ubuntu; socket-activated, exits
+                                   # when idle -- measured: active at one
+                                   # fingerprint and gone at the next, ten
+                                   # minutes later, in the A5 reset gate)
   ]
 
   VolatileUnitPrefixes* = [
