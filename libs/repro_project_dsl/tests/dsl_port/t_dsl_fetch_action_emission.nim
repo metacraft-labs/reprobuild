@@ -133,3 +133,42 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check not argvJoined.contains("tar -xf")
     check action.toolIdentityRefs ==
       @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "cp"]
+
+  test "a git archive pinned to a commit id fetches the object, not a branch":
+    # `gitRevision` was documented as "tag / commit", but the emitted script
+    # only ever spelled `git clone --branch <rev>`, which no git accepts for
+    # a commit id. A private repository has no archive URL, so a commit id
+    # is the one spelling that pins its revision; the script must fetch
+    # exactly that object.
+    let scratch = getTempDir() / "t_dsl_fetch_git_commit_emission_scratch"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    defer:
+      removeDir(scratch)
+    const commit = "23960db5e22b46357ffb93c71db141e3414bbd63"
+    let byCommit = DslFetchSpec(
+      packageName: "gitCommitPkg", kind: dfkGitArchive,
+      url: "https://github.com/example/private",
+      gitRevision: commit, hashAlg: dshaSha256,
+      hashHex: "f36aacc95d23cd8cd8205ed200901aec82e730c1a552d74d1b6d8961f1a5fdb1",
+      extractStrip: 0)
+    let script = inlineArgvOf(emitFetchAction(scratch, "gitCommitPkg",
+      byCommit)).join(" ")
+    check script.contains("git init -q")
+    check script.contains("fetch -q --depth 1 origin \"" & commit & "\"")
+    check script.contains("checkout -q FETCH_HEAD")
+    check script.contains("git archive --format=tar HEAD")
+    check not script.contains("--branch")
+    # A tag keeps the clone form: the two spellings are distinguished by
+    # shape (40 hex digits), so a tag that happens to be 40 characters of
+    # other text still clones.
+    var byTag = byCommit
+    byTag.gitRevision = "v1.2.3"
+    let tagScript = inlineArgvOf(emitFetchAction(scratch, "gitCommitPkg",
+      byTag)).join(" ")
+    check tagScript.contains("git clone --depth 1 --branch \"v1.2.3\"")
+    check not tagScript.contains("FETCH_HEAD")
+    check isCommitId(commit)
+    check not isCommitId("v1.2.3")
+    check not isCommitId("23960db5e22b46357ffb93c71db141e3414bbd6g")

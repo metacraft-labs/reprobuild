@@ -37,6 +37,25 @@
 ## missed must fail here rather than be quietly downloaded. `--locked` is
 ## the companion — it refuses to update `Cargo.lock`, so the build cannot
 ## silently resolve something other than what was pinned.
+##
+## ## Cross-compiling, and workspace members
+##
+## `target` names a Rust target triple other than the host's; both cargo
+## steps then carry `--target`. The target's standard library has to be in
+## rustc's sysroot (`lib/rustlib/<triple>/`): the recipe declares a toolchain
+## that has it (reprobuild-packages assembles one per target from the
+## host `rustc` and upstream's `rust-std-<version>-<triple>` component).
+## `zigCross = true` makes zig the target's C toolchain and linker through
+## `adapters/cross_zig`: a wrapper-writing edge is emitted and the cargo
+## edges get the `CC_<triple>` / `CARGO_TARGET_<TRIPLE>_*` environment that
+## points at it. A `--target` without `zigCross` leaves the C toolchain to
+## the recipe's own `extraEnv`.
+##
+## `package` selects one member of a virtual workspace (`cargo build -p`),
+## and `installPath` is that member's directory within the source tree
+## (`cargo install --path <src>/<installPath>`): a workspace root has no
+## `[package]`, so `cargo install --path <src>` on it fails.
+## Language-Conventions/Rust.md §"Cross-compiling".
 
 import std/[options, os, strutils]
 
@@ -45,6 +64,7 @@ import repro_project_dsl/cargo_vendor
 
 import ../types/package_result
 import ../packages/cargo as cargo_module
+import ../adapters/cross_zig
 
 const
   FetchScratchSubdir = ".repro/fetch"
@@ -143,7 +163,11 @@ proc cargo_package*(srcDir = "src";
                     profile = "release";
                     features: seq[string] = @[];
                     noDefaultFeatures = false;
-                    extraEnv: seq[(string, string)] = @[]):
+                    extraEnv: seq[(string, string)] = @[];
+                    target = "";
+                    zigCross = false;
+                    package = "";
+                    installPath = ""):
     CargoPackageResult =
   ## Fetch → vendor → build → install, for an upstream crate.
   ##
@@ -191,6 +215,24 @@ proc cargo_package*(srcDir = "src";
   let featureList = features.join(",")
   let releaseProfile = profile == "release"
 
+  # The cross C toolchain. Its wrappers are written by their own edge, and
+  # the environment below is what makes cargo, rustc and the `cc` crate use
+  # them; `zigCross` without a `target` is a contradiction and is refused.
+  if zigCross and target.len == 0:
+    raise newException(ValueError,
+      "cargo_package: zigCross = true needs a target triple")
+  var env = extraEnv
+  var compileAfter: seq[BuildActionDef] = @[]
+  if vendorEdge.id.len > 0:
+    compileAfter.add(vendorEdge)
+  if zigCross:
+    let wrapperDir = zigCrossWrapperDir(
+      (if projectRoot.len > 0: projectRoot else: "."), target)
+    env.add(zigCrossCargoEnv(target, wrapperDir))
+    if projectRoot.len > 0:
+      compileAfter.add(emitZigCrossWrappersAction(projectRoot, pkgName,
+        target))
+
   var compileEdge = cargo_module.cargo.build(
     locked = true,
     release = releaseProfile,
@@ -199,8 +241,10 @@ proc cargo_package*(srcDir = "src";
     features = featureList,
     manifestPath = manifestPath,
     targetDir = targetDir,
-    after = (if vendorEdge.id.len > 0: @[vendorEdge] else: @[]),
-    extraEnv = extraEnv)
+    package = package,
+    target = target,
+    after = compileAfter,
+    extraEnv = env)
 
   # The source tree is an INPUT, not a write target: cargo writes into
   # `--target-dir`, and a recipe whose build mutated the extracted source
@@ -226,11 +270,13 @@ proc cargo_package*(srcDir = "src";
     noTrack = true,
     noDefaultFeatures = noDefaultFeatures,
     features = featureList,
-    path = extractedRel,
+    path = (if installPath.len > 0: extractedRel / installPath
+            else: extractedRel),
     root = installRoot,
     targetDir = targetDir,
+    target = target,
     after = @[compileEdge],
-    extraEnv = extraEnv)
+    extraEnv = env)
   if projectRoot.len > 0:
     setRegisteredActionDeclaredOutputs(installEdge.id, @[effectiveDestdir])
     setRegisteredActionReadOnlyRoots(installEdge.id,
