@@ -714,6 +714,23 @@ proc normalizeGroupSet(groups: openArray[string]): seq[string] =
       result.add(n)
   result.sort()
 
+proc memberGroups(observed: PasswdUserObservation;
+                  desired: openArray[string]): seq[string] =
+  ## The groups ``observed`` is a member of, as far as a declaration of
+  ## ``desired`` is concerned: its supplementary groups, plus its primary
+  ## group when that group is declared. A user whose primary group is
+  ## ``nut`` is a member of ``nut``; ``id -nG`` lists such a group once, and
+  ## ``parsePasswdObservation`` files it as the primary only, so without
+  ## this a declared group that is also the primary would read as missing
+  ## forever (reprobuild-pm issue
+  ## 2026-10-30-addon-passwd-user-primary-group-digest-mismatch).
+  result = normalizeGroupSet(observed.groups)
+  let primary = observed.primaryGroup.strip()
+  if primary.len > 0 and primary notin result and
+      primary in normalizeGroupSet(desired):
+    result.add(primary)
+    result.sort()
+
 type
   PasswdUserDiff* = object
     ## The result of comparing a desired `passwd.user` against the
@@ -745,7 +762,7 @@ proc diffPasswdUser*(desired: PasswdUserDesired;
      desired.shell.strip() != observed.shell.strip():
     result.shellDiffers = true
   let want = normalizeGroupSet(desired.groups)
-  let have = normalizeGroupSet(observed.groups)
+  let have = memberGroups(observed, want)
   for g in want:
     if g notin have:
       result.missingGroups.add(g)
@@ -831,7 +848,7 @@ proc canonicalPasswdUserStateMaskedBy*(observed: PasswdUserObservation;
     if desired.shell.len > 0: observed.shell else: "*"
   let desiredSet = normalizeGroupSet(desired.groups)
   var groupsMasked: seq[string]
-  for g in normalizeGroupSet(observed.groups):
+  for g in memberGroups(observed, desiredSet):
     if g in desiredSet:
       groupsMasked.add(g)
   "user:present;uid=*" &
@@ -845,10 +862,28 @@ proc canonicalPasswdUserStateMaskedBy*(observed: PasswdUserObservation;
 # and never interpolates an operator string into a shell line.
 # ---------------------------------------------------------------------------
 
-proc buildUseraddArgs*(desired: PasswdUserDesired): seq[string] =
+type
+  EUseraddGroupCollision* = object of ValueError
+    ## A group named like the new account exists and the resource does not
+    ## declare membership in it.
+
+proc buildUseraddArgs*(desired: PasswdUserDesired;
+                       sameNameGroupExists = false): seq[string] =
   ## Build the `useradd` argv for creating a new account. `--system`
   ## is deliberately NOT forced — a `passwd.user` resource may
   ## declare an ordinary login account.
+  ##
+  ## `sameNameGroupExists` reports whether a group named like the account
+  ## exists already, typically because a `passwd.group` of the same name
+  ## was applied first. With `USERGROUPS_ENAB yes` (the Debian default)
+  ## `useradd` would try to create that group as the account's private
+  ## group and refuse ("group nut exists - if you want to add this user to
+  ## that group, use -g"). When the resource declares membership in the
+  ## group, it becomes the account's primary group (`--gid`), which is the
+  ## user-private-group layout `adduser --system --group` produces. When it
+  ## does not, joining an existing group the profile never named would
+  ## grant access nobody declared, so it is refused
+  ## (`EUseraddGroupCollision`).
   result.add(desired.name)
   if desired.homeDir.len > 0:
     result.add("--home-dir")
@@ -857,7 +892,17 @@ proc buildUseraddArgs*(desired: PasswdUserDesired): seq[string] =
   if desired.shell.len > 0:
     result.add("--shell")
     result.add(desired.shell)
-  let groups = normalizeGroupSet(desired.groups)
+  var groups = normalizeGroupSet(desired.groups)
+  if sameNameGroupExists:
+    let name = desired.name.strip()
+    if name notin groups:
+      raise newException(EUseraddGroupCollision, "a group named '" & name &
+        "' already exists and passwd.user '" & name & "' does not declare " &
+        "membership in it; declare it in the account's groups to make it " &
+        "the account's primary group, or remove the group")
+    result.add("--gid")
+    result.add(name)
+    groups.delete(groups.find(name))
   if groups.len > 0:
     result.add("--groups")
     result.add(groups.join(","))

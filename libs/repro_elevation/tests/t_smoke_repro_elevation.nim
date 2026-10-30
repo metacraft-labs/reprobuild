@@ -1485,6 +1485,44 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check canonicalPasswdUserStateMaskedBy(observed, desired) !=
       canonicalPasswdUserDesired(desired)
 
+  test "a declared group that is also the primary group counts as membership":
+    # rpi2, 2026-10-30, reprobuild d7c86107b: `passwdGroup("nut")` plus
+    # `passwdUser("nut", extraGroups = @["nut"])`. The account's primary
+    # group is `nut`; `id -nG nut` prints `nut` once, the parser files it
+    # as the primary, and the declared group read as missing forever --
+    # the post-apply re-probe failed closed on every tick.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["nut"])
+    let observed = parsePasswdObservation(
+      "nut:x:999:1002::/nonexistent:/usr/sbin/nologin", "nut", "nut")
+    check observed.groups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, desired) ==
+      canonicalPasswdUserDesired(desired)
+    check not passwdUserNeedsUpdate(diffPasswdUser(desired, observed))
+    # A primary group the resource does not declare still does not count
+    # as a declared supplementary group, and one missing declared group
+    # is still drift.
+    let wantsMore = PasswdUserDesired(name: "nut", groups: @["dialout", "nut"])
+    let d = diffPasswdUser(wantsMore, observed)
+    check d.missingGroups == @["dialout"]
+    check d.extraGroups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, wantsMore) !=
+      canonicalPasswdUserDesired(wantsMore)
+
+  test "useradd takes an existing same-named group as the primary only when declared":
+    # `useradd nut` with USERGROUPS_ENAB refuses when group `nut` exists
+    # ("use -g"); rpi2 tick-1 at d7c86107b.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["dialout", "nut"])
+    check buildUseraddArgs(desired, sameNameGroupExists = true) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--gid", "nut",
+        "--groups", "dialout"]
+    check buildUseraddArgs(desired) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--groups", "dialout,nut"]
+    expect EUseraddGroupCollision:
+      discard buildUseraddArgs(PasswdUserDesired(name: "nut"),
+        sameNameGroupExists = true)
+
   test "parsePasswdObservation: primary group filtered out of supplementary set":
     # Debian / Ubuntu's `useradd reprotest --groups users` (with the
     # default `USERGROUPS_ENAB=yes`) creates a per-user primary

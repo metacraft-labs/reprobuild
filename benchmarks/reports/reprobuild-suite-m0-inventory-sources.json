@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2483,
+    "nimTestBinaries": 2484,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 697,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2523
+    "testEntries": 2524
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1447,7 +1447,7 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1376,
-      "platform/destructive": 154,
+      "platform/destructive": 155,
       "pure unit": 697,
       "unclassified": 278
     },
@@ -1657,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2483,
+    "nimTestBinaryCount": 2484,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2523
+    "testEntryCount": 2524
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13034,8 +13034,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 32,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 34,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14466,6 +14466,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_apt_closure_ro_store_view",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_elevation",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_elevation",
+      "requiresReproBinary": false,
+      "source": "libs/repro_elevation/tests/t_addon_apt_closure_ro_store_view.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_m2_nixos_darwin_modules",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -14515,7 +14534,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_elevation/tests/t_smoke_repro_elevation.nim",
       "sourceSuiteCount": 42,
-      "staticCaseCount": 395,
+      "staticCaseCount": 397,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
