@@ -34,6 +34,7 @@ const
   SystemctlCandidates* = ["/usr/bin/systemctl", "/bin/systemctl"]
   DpkgDivertCandidates* = ["/usr/bin/dpkg-divert", "/usr/sbin/dpkg-divert"]
   DpkgQueryCandidates* = ["/usr/bin/dpkg-query"]
+  SystemdRunCandidates* = ["/usr/bin/systemd-run", "/bin/systemd-run"]
 
 proc fixedToolEnv(): StringTableRef =
   ## The whole environment a host tool sees. ``PATH`` is set because some
@@ -102,3 +103,32 @@ proc runSystemctl*(args: openArray[string]): HostToolResult =
   var argv = @[exe]
   for a in args: argv.add(a)
   runHostTool(argv)
+
+proc runInHostNamespaces*(argv: openArray[string]): HostToolResult =
+  ## Run ``argv`` as a transient unit of the host's systemd and return its
+  ## output: PID 1 spawns it in the host's namespaces whatever namespaces
+  ## this process is confined to (the apply unit's ``PrivateNetwork=yes``,
+  ## spec §9.1). ``net.*`` sysctls are per network namespace, so every
+  ## read and write of one goes this way (spec §7.2 step 6, threat model
+  ## G35).
+  let exe = resolveHostTool(SystemdRunCandidates)
+  if exe.len == 0:
+    raise newException(HostToolMissing, "systemd-run not found at " &
+      SystemdRunCandidates.join(" or "))
+  var full = @[exe, "--quiet", "--wait", "--pipe", "--collect",
+               "--service-type=exec", "--"]
+  for a in argv: full.add(a)
+  runHostTool(full)
+
+proc sysctlKeyPath*(key: string): string =
+  ## ``/proc/sys/<key with dots as slashes>``.
+  "/proc/sys/" & key.replace('.', '/')
+
+proc readHostSysctl*(key: string): string =
+  ## The host's effective value of ``key`` (whitespace collapsed), read by
+  ## a transient unit in the host's namespaces; "" when unreadable.
+  try:
+    let r = runInHostNamespaces(["/bin/cat", sysctlKeyPath(key)])
+    if r.exitCode != 0: "" else: r.output.splitWhitespace().join(" ")
+  except HostToolMissing:
+    ""

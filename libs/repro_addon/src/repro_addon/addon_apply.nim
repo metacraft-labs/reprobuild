@@ -1192,6 +1192,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for p in plans:
     if p.form == "link":
       treeFiles.add(StaticFile(path: p.targetPath, content: p.content))
+  # A link-form object left in place as drift keeps the bytes it has now:
+  # its link must still resolve after the flip, or "left in place" would
+  # mean "destroyed".
+  for e in keptEntries:
+    if e.isLink and fileExists(e.path):
+      treeFiles.add(StaticFile(path: e.path, content: readFile(e.path)))
   result.staticTree = staticTreePath(treeFiles)
 
   if opts.planOnly:

@@ -60,11 +60,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       trees.add(g.run("readlink /etc/repro/static").strip())
     step("vacuity guard: five distinct static trees",
          trees.len == 5 and (block:
-           var distinct = true
+           var allDifferent = true
            for i in 0 ..< trees.len:
              for j in i + 1 ..< trees.len:
-               if trees[i] == trees[j]: distinct = false
-           distinct), $trees)
+               if trees[i] == trees[j]: allDifferent = false
+           allDifferent), $trees)
     let status = g.run(repro & " system addon status")
     step("every generation is a store root before retention",
          status.count("\n  ") >= 6, status)   # gen 0 + five

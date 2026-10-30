@@ -38,21 +38,26 @@ import ./addon_testbed
 const
   LogPath = "/var/log/repro-fixture-exclusive.log"
   # Logs `start <id> <uptime>` and, on SIGTERM, `stop <id> <uptime>`.
-  Script = """#!/bin/sh
+  # (`@LOG@` is substituted below: a Nim triple-quoted literal swallows a
+  # leading newline, so splicing the path with `&` would glue the next line
+  # onto the redirect target.)
+  ScriptTemplate = """#!/bin/sh
 id="$1"
 now() { cut -d' ' -f1 /proc/uptime; }
-echo "start $id $(now)" >> """ & LogPath & """
-trap 'echo "stop $id $(now)" >> """ & LogPath & """; exit 0' TERM
+echo "start $id $(now)" >> @LOG@
+trap 'echo "stop $id $(now)" >> @LOG@; exit 0' TERM
 while :; do sleep 0.2; done
 """
   # Ignores SIGTERM; systemd gives up after TimeoutStopSec without a KILL.
-  StubbornScript = """#!/bin/sh
+  StubbornTemplate = """#!/bin/sh
 id="$1"
 now() { cut -d' ' -f1 /proc/uptime; }
-echo "start $id $(now)" >> """ & LogPath & """
+echo "start $id $(now)" >> @LOG@
 trap '' TERM
 while :; do sleep 0.2; done
 """
+  Script = ScriptTemplate.replace("@LOG@", LogPath)
+  StubbornScript = StubbornTemplate.replace("@LOG@", LogPath)
 
 proc exclusiveUnit(id: string; script = "/usr/local/bin/repro-fixture-exclusive";
                    extra = ""): string =

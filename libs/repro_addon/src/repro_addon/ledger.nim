@@ -29,6 +29,7 @@ import std/[algorithm, os, posix, sets, strutils, tables]
 
 import ./etc_write
 import ./fingerprint
+import ./host_exec
 
 type
   LedgerClass* = enum
@@ -231,17 +232,12 @@ proc statOwner*(path: string): tuple[ok: bool; mode, owner: string] =
     return (false, "", "")
   (true, toOct(int(st.st_mode) and 0o7777, 4), $st.st_uid & ":" & $st.st_gid)
 
-proc sysctlKeyPath*(key: string): string =
-  ## ``/proc/sys/<key with dots as slashes>``.
-  "/proc/sys/" & key.replace('.', '/')
-
 proc readLiveSysctl*(key: string): string =
-  ## The kernel's current value of ``key`` as the fingerprint spells it
-  ## (whitespace collapsed), "" when unreadable. NOTE: read from THIS
-  ## process's namespaces; the switch observes ``net.*`` keys from the
-  ## host's namespaces instead (spec §7.2 step 6).
-  try: readFile(sysctlKeyPath(key)).splitWhitespace().join(" ")
-  except IOError, OSError: ""
+  ## The host's current value of ``key`` as the fingerprint spells it,
+  ## read from the host's namespaces (``readHostSysctl``): a ``net.*`` key
+  ## read from inside the apply unit's own network namespace is not the
+  ## host's (spec §7.2 step 6, threat model G35). "" when unreadable.
+  readHostSysctl(key)
 
 proc observeDrift*(e: LedgerEntry): string =
   ## "" when the object is exactly as the ledger recorded it, otherwise a
