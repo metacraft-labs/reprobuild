@@ -115,16 +115,19 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     r = g.applyProfile(repro, "p2", profile(@["canary", "put"]))
     step("a profile declaring the put secret applies", r.exitCode == 0,
          r.stdout & r.stderr)
-    let c2hex = g.run("od -An -v -tx1 /run/repro/secrets/canary-web/put | " &
-                      "tr -d ' \\n'").strip()
+    # Read back from wherever this build materialises (the
+    # `secrets-on-disk` mutation build puts it on the root filesystem).
+    let c2hex = g.exec("f=/run/repro/secrets/canary-web/put; " &
+      "[ -e $f ] || f=/var/lib/repro/secrets/canary-web/put; " &
+      "od -An -v -tx1 $f | tr -d ' \\n'").stdout.strip()
     var c2 = ""
     for i in countup(0, c2hex.len - 2, 2): c2.add(char(parseHexInt(c2hex[i .. i + 1])))
     step("the put secret is 32 bytes and the service read it",
          c2.len == 32 and g.proof("put") == sha256Hex(c2), $c2.len)
-    let modes = g.run("stat -c '%a %U %n' /run/repro/secrets " &
+    let modes = g.exec("stat -c '%a %U %n' /run/repro/secrets " &
       "/run/repro/secrets/canary-web /run/repro/secrets/canary-web/canary " &
       "/run/repro/secrets/canary-web/put; findmnt -no FSTYPE -T " &
-      "/run/repro/secrets")
+      "/run/repro/secrets").stdout
     step("secrets: directories 0700 root, files 0400 root, on a tmpfs",
          "700 root /run/repro/secrets\n" in modes and
          "700 root /run/repro/secrets/canary-web\n" in modes and

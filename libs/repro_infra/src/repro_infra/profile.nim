@@ -735,7 +735,15 @@ proc parseDependsOn(kindTag, raw: string): seq[ResourceDependency] =
     result.add((kind: depKind, name: depName))
 
 const
-  SecretsRunRoot* = "/run/repro/secrets"
+  SecretsMutation {.strdefine: "reproAddonMutation".} = ""
+    ## The add-on's compile-time falsifying mutations (``repro_addon/
+    ## mutations``): ``secrets-on-disk`` moves the secrets root onto the
+    ## root filesystem consistently -- materialiser and ``LoadCredential=``
+    ## alike -- so the services still run and only the disk scan can tell.
+  SecretsRunRoot* = when SecretsMutation == "secrets-on-disk":
+                      "/var/lib/repro/secrets"
+                    else:
+                      "/run/repro/secrets"
     ## Where the add-on materialises plaintext secrets (a tmpfs, §10.3).
   SecretsOrderingUnit* = "repro-addon-reassert.service"
     ## The unit that re-materialises secrets at boot (§7.7 step 3). A

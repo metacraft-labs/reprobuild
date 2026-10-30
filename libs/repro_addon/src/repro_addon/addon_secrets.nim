@@ -141,10 +141,12 @@ proc defaultSecretsLayout*(): SecretsLayout =
   ## The add-on host's layout (spec §5.3, §10.3).
   when mutated("secrets-on-disk"):
     # FALSIFYING MUTATION (e2e_addon_no_plaintext_secret_on_disk): the
-    # plaintext goes to a directory on the root filesystem, and the tmpfs
-    # check that would refuse it is off.
+    # plaintext goes to a directory on the root filesystem
+    # (``SecretsRunRoot`` is /var/lib/repro/secrets in this build, for the
+    # units' LoadCredential= too), and the tmpfs check that would refuse it
+    # is off.
     SecretsLayout(agentDir: "/var/lib/repro/agent",
-                  runDir: "/var/lib/repro/secrets", owner: 0,
+                  runDir: SecretsRunRoot, owner: 0,
                   requireTmpfs: false)
   else:
     SecretsLayout(agentDir: "/var/lib/repro/agent", runDir: SecretsRunRoot,
