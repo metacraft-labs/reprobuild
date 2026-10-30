@@ -28,8 +28,10 @@
 ## or builtin record crosses hosts; until then it was evidenced by a make
 ## depfile it wrote, which the engine now keeps local). On a platform where
 ## io-mon cannot prove detached-descendant quiescence (`NoTreeLifetimeGuard`,
-## macOS) no monitored edge is published, so the build round trip is skipped
-## there with that reason.
+## macOS) no monitored edge is published, so the build exchange is not
+## exercised there; the TLS handshake, identity and stranger checks still
+## run (the independent verification of M17 chunk 2 kept them: the chunk had
+## skipped the whole case there).
 ##
 ## MOCK POLICY — none: real loopback sockets, real BearSSL, real
 ## certificates on disk, the real build engine and disk stores.
@@ -42,7 +44,6 @@ import repro_cli_support/peer_cache_wiring
 import repro_hash
 import repro_local_store
 import repro_peer_cache
-import repro_test_support/reasoned_skip
 from repro_test_support import prepareMonitorTools, ReprobuildRepoRoot
 from repro_test_support/descendant_guard_expectations import
   NoTreeLifetimeGuard
@@ -114,44 +115,48 @@ suite "peer-cache TLS through the CLI/daemon wiring":
     check fileExists(config.tlsKeyPath)
 
   test "two trusting nodes serve a build over TLS; a stranger is refused":
+    let base = createTempDir("m0-tls-", "")
+    var hosts: seq[PeerCacheHost] = @[]
+    defer:
+      for host in hosts:
+        host.stop()
+      removeDir(base)
+    let cfgA0 = tlsConfigFor(base / "a")
+    let cfgB0 = tlsConfigFor(base / "b")
+    let cfgC0 = tlsConfigFor(base / "c")
+    for cfg in [cfgA0, cfgB0, cfgC0]:
+      discard loadOrCreateHostIdentity(cfg.tlsCertPath, cfg.tlsKeyPath)
+    cfgA0.trust(cfgB0, "b")
+    cfgB0.trust(cfgA0, "a")
+    cfgC0.trust(cfgA0, "a")       # C trusts A, but A does not trust C
+
+    let hostA = startPeerCacheHost(cfgA0, nodeId('A'),
+      cacheRoot = base / "a-cache")
+    hosts.add(hostA)
+    check hostA.server.trustMode == tmTls
+    check hostA.server.listenAddr == "127.0.0.1"   # declared: loopback
+    let seedA = "127.0.0.1:" & $int(hostA.actualPort)
+    let hostB = startPeerCacheHost(tlsConfigFor(base / "b", seedA),
+      nodeId('B'), cacheRoot = base / "b-cache")
+    hosts.add(hostB)
+    # The identity is the certificate's, not the caller-supplied id.
+    check hostA.selfPeerId == derivePeerIdFromPublicKey(
+      loadCertAndKey(cfgA0.tlsCertPath, cfgA0.tlsKeyPath).keypair.publicKey)
+    check hostB.client.tlsConnsByPeerId.hasKey(hostA.selfPeerId)
+    check hostB.client.connections.len == 0      # no plaintext connection
+
+    # The build exchange needs a record a node may publish: a monitored one.
+    # Where io-mon cannot prove detached-descendant quiescence
+    # (`NoTreeLifetimeGuard`, macOS) every monitored capture fails closed,
+    # and since the owner decision of 2026-10-29 a depfile-evidenced record
+    # does not cross hosts either (Edge-Derived-Identities.md §3.4 item 1
+    # rider), so there it is not exercised. The TLS checks around it -- the
+    # handshake, the certificate-derived identity, and the stranger's
+    # refusal -- do not depend on it and run everywhere.
     if NoTreeLifetimeGuard:
-      skip("io-mon cannot prove detached-descendant quiescence on this " &
-        "platform, so every monitored capture fails closed and no monitored " &
-        "edge is published; since the owner decision of 2026-10-29 a " &
-        "depfile-evidenced edge does not cross hosts either " &
-        "(Edge-Derived-Identities.md §3.4 item 1 rider), so this build has " &
-        "nothing to exchange here")
+      checkpoint("build exchange not exercised: no monitored edge is " &
+        "published on this platform")
     else:
-      let base = createTempDir("m0-tls-", "")
-      var hosts: seq[PeerCacheHost] = @[]
-      defer:
-        for host in hosts:
-          host.stop()
-        removeDir(base)
-      let cfgA0 = tlsConfigFor(base / "a")
-      let cfgB0 = tlsConfigFor(base / "b")
-      let cfgC0 = tlsConfigFor(base / "c")
-      for cfg in [cfgA0, cfgB0, cfgC0]:
-        discard loadOrCreateHostIdentity(cfg.tlsCertPath, cfg.tlsKeyPath)
-      cfgA0.trust(cfgB0, "b")
-      cfgB0.trust(cfgA0, "a")
-      cfgC0.trust(cfgA0, "a")       # C trusts A, but A does not trust C
-
-      let hostA = startPeerCacheHost(cfgA0, nodeId('A'),
-        cacheRoot = base / "a-cache")
-      hosts.add(hostA)
-      check hostA.server.trustMode == tmTls
-      check hostA.server.listenAddr == "127.0.0.1"   # declared: loopback
-      let seedA = "127.0.0.1:" & $int(hostA.actualPort)
-      let hostB = startPeerCacheHost(tlsConfigFor(base / "b", seedA),
-        nodeId('B'), cacheRoot = base / "b-cache")
-      hosts.add(hostB)
-      # The identity is the certificate's, not the caller-supplied id.
-      check hostA.selfPeerId == derivePeerIdFromPublicKey(
-        loadCertAndKey(cfgA0.tlsCertPath, cfgA0.tlsKeyPath).keypair.publicKey)
-      check hostB.client.tlsConnsByPeerId.hasKey(hostA.selfPeerId)
-      check hostB.client.connections.len == 0      # no plaintext connection
-
       # Producer A builds and publishes.
       let wsA = base / "ws-a"
       let wsB = base / "ws-b"
@@ -186,14 +191,14 @@ suite "peer-cache TLS through the CLI/daemon wiring":
       check hostA.server.memoRequestsServed >= 2
       check hostA.server.tlsHandshakeRejectedCount == 0
 
-      # Stranger C: its certificate is not among A's anchors.
-      let hostC = startPeerCacheHost(tlsConfigFor(base / "c", seedA),
-        nodeId('C'), cacheRoot = base / "c-cache")
-      hosts.add(hostC)
-      for _ in 0 ..< 40:
-        if hostA.server.tlsHandshakeRejectedCount > 0: break
-        hostA.tick(25)
-      check hostA.server.tlsHandshakeRejectedCount >= 1
-      check not hostC.client.isConnected(hostA.selfPeerId)
-      check (waitFor hostC.client.requestSelectors(
-        blobDigestFromBytes(weakFingerprintFromText("x").bytes))).len == 0
+    # Stranger C: its certificate is not among A's anchors.
+    let hostC = startPeerCacheHost(tlsConfigFor(base / "c", seedA),
+      nodeId('C'), cacheRoot = base / "c-cache")
+    hosts.add(hostC)
+    for _ in 0 ..< 40:
+      if hostA.server.tlsHandshakeRejectedCount > 0: break
+      hostA.tick(25)
+    check hostA.server.tlsHandshakeRejectedCount >= 1
+    check not hostC.client.isConnected(hostA.selfPeerId)
+    check (waitFor hostC.client.requestSelectors(
+      blobDigestFromBytes(weakFingerprintFromText("x").bytes))).len == 0
