@@ -32,7 +32,8 @@
 ## second privileged write of steps 4-5), ``commit-envelope`` (the
 ## generation envelope is durable, `current` not moved yet) and, in the
 ## ``current-remove-then-create`` mutation build, ``commit-current-removed``.
-## A switch that is a revert prefixes its points with ``revert:``.
+## A switch that is a revert prefixes its points with ``revert:``, and a
+## replay (a recovery) with ``replay:``.
 
 import std/os
 when defined(reproAddonTestSeams):

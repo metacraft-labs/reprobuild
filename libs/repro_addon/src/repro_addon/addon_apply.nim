@@ -1502,8 +1502,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     replayPlan = readPendingPlan(stateDir)
   let replaying = opts.replay
   # A revert's seam points are named apart, so a gate can stop the revert
-  # of a failed switch rather than the switch itself.
-  let seamPrefix = if purpose == "revert": "revert:" else: ""
+  # of a failed switch rather than the switch itself; so are a replay's,
+  # so a recovery never stops at a point meant for the switch it recovers
+  # (the pause request that switch consumed need not have reached the disk
+  # before the reset: the seams never sync).
+  let seamPrefix = if replaying: "replay:"
+                   elif purpose == "revert": "revert:"
+                   else: ""
   let ownText =
     if replaying: replayPlan.targetOwnText
     elif opts.ownProfileText.len > 0: opts.ownProfileText
