@@ -1,14 +1,14 @@
 ## R2 boot integration test.
 ##
 ## Boots the R2 reproos-iso recipe's produced ISO under a transient
-## Hyper-V Gen-2 UEFI VM via vm-harness's ``bootFromMedia`` primitive,
+## Hyper-V Gen-2 UEFI VM via gosti's ``bootFromMedia`` primitive,
 ## then captures the COM1 serial stream and asserts that the kernel
 ## reaches userspace (the Debian-installer-on-serial path produces a
 ## distinctive banner line that the test matches on).
 ##
 ## This is a Tier-2 reprobuild integration test: it depends on the R2
 ## recipe's output (``recipes/reproos-iso/build/reproos.iso``) and on
-## vm-harness as the boot-orchestration library. The vm-harness Tier-1
+## gosti as the boot-orchestration library. The gosti Tier-1
 ## generic primitives stay generic; the "ReproOS-specific" assertions
 ## live here.
 ##
@@ -19,7 +19,7 @@
 ## - The R2 ISO has not been built (``recipes/reproos-iso/build/``
 ##   missing or empty).
 ##
-## Override the ISO location via ``$VMH_REPROOS_ISO``.
+## Override the ISO location via ``$GOSTI_REPROOS_ISO``.
 
 import std/[os, osproc, strutils, tables, times]
 
@@ -38,10 +38,10 @@ const PlatformSkipReason =
   "t_r2_iso_boot: Windows host required (Hyper-V backend)"
 
 const SiblingSkipReason =
-  "t_r2_iso_boot: vm-harness sibling unavailable"
+  "t_r2_iso_boot: gosti sibling unavailable"
 
-when defined(vmHarnessAvailable):
-  import vm_harness
+when defined(gostiAvailable):
+  import gosti
 
   # ---------------------------------------------------------------------------
   # Probe helpers.
@@ -64,8 +64,8 @@ when defined(vmHarnessAvailable):
 
   proc findReproosIso(): string =
     ## Look for the R2 ISO at the recipe's default output path, then at
-    ## the published-evidence dir, then at $VMH_REPROOS_ISO.
-    let envOverride = getEnv("VMH_REPROOS_ISO")
+    ## the published-evidence dir, then at $GOSTI_REPROOS_ISO.
+    let envOverride = getEnv("GOSTI_REPROOS_ISO")
     if envOverride.len > 0 and fileExists(envOverride):
       return envOverride
     var candidates: seq[string] = @[
@@ -196,16 +196,16 @@ when defined(vmHarnessAvailable):
           if iso.len == 0:
             skip("R2 reproos.iso not found. Build it with " &
                  "`bash tests/reproducibility/t_r2_iso_reproducibility.sh` " &
-                 "(inside repro-debian WSL) or set VMH_REPROOS_ISO=<path>")
+                 "(inside repro-debian WSL) or set GOSTI_REPROOS_ISO=<path>")
           else:
             let suffix = $(epochTime() * 1000.0).int64.toHex().toLowerAscii()
             let vmName = "repro-test-boot-r2-" & suffix[suffix.len - 8 .. ^1]
             let perVmDir =
-              getTempDir() / "vm-harness-e2e-r2-iso-boot" / vmName
+              getTempDir() / "gosti-e2e-r2-iso-boot" / vmName
             echo "[info] booting ISO: ", iso
             runBootScenario(backend, iso, perVmDir, vmName)
 else:
-  # vm-harness (../vm-harness) is an optional Windows-only sibling. When it
+  # gosti (../gosti) is an optional Windows-only sibling. When it
   # is absent the boot scenario cannot be compiled, so the case is declared
   # as a skip rather than left undeclared — the previous ``echo`` +
   # ``quit(0)`` here made the binary an opaque exit-0 PASS

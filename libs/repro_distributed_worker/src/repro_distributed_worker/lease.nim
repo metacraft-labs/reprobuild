@@ -515,6 +515,13 @@ when defined(linux):
     if spec.cgroupPath.len > 0 and not cleanup:
       buf.kv("cgroup", spec.cgroupPath)
     let pid = c_repro_lease_spawn(buf.cstring, cint(buf.len))
+    if pid == -ENOTSUP:
+      # `c/repro_lease_linux.c` has no backend for this CPU (no derived
+      # seccomp floor), and refuses every lease rather than run one
+      # unconfined.
+      outcome.error = "execution leases are not supported on this " &
+        "architecture (" & hostCPU & "): no confinement backend"
+      return -1
     if pid < 0:
       outcome.error = "lease launcher refused its configuration (errno " &
         $(-pid) & ")"

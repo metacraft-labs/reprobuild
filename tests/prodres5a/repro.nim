@@ -14,7 +14,7 @@
 ## ``container(address, image, cpus)`` type-checked against THIS schema at its
 ## macro expansion, WITHOUT the driver crossing.
 ##
-## Renaming the ``cpus`` attr / the ``vm_harness.container`` typeId here shifts
+## Renaming the ``cpus`` attr / the ``gosti.container`` typeId here shifts
 ## the exported schema and is a COMPILE break at any stale consumer bind.
 
 import repro_project_dsl
@@ -44,7 +44,7 @@ proc cApply(inst: ResourceInstance; action: ResourceActionKind;
 let containerDriver = ResourceProviderDriver(
   identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile

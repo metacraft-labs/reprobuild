@@ -156,6 +156,9 @@ proc runDeployAgent(stateDir, cacheRoot, manifestPath, signersPath: string):
   # Keep the tick off any binary cache the developer's shell configured —
   # this gate is about the resolver seam, not about substitution.
   childEnv.del("REPRO_BINARY_CACHE_URL")
+  # The apply-time substitute also reads caches.conf, so point the child at
+  # one that does not exist: a host /etc/repro/caches.conf must not reach it.
+  childEnv["REPRO_CACHES_CONFIG"] = cacheRoot / "no-caches.conf"
   # A per-case action-cache root so a previous run cannot decide the
   # outcome of this one.
   childEnv["REPROBUILD_ACTION_CACHE_ROOT"] = cacheRoot / "action-cache"

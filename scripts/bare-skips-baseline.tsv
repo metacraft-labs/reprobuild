@@ -118,7 +118,6 @@ libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a c
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a failed edge is audited as an error with its diagnostic	1
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	every counted resource is audited; the two populations stay apart	1
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	the planner's drift baseline ignores build-action records	1
-libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	t_infra_apply_substitutes_from_cache	1
 libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
 libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
 libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	depends_on references undeclared package — rejected	1

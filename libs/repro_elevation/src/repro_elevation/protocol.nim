@@ -342,6 +342,7 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.suContent)
     body.writeBool(op.suEnabled)
     body.writeBool(op.suDestroy)
+    body.writeString(op.suAptClosureLock)
   of pokLaunchdSystemDaemon:
     body.writeString(op.sdaLabel)
     body.writeU32Le(uint32(op.sdaProgramArgs.len))
@@ -394,6 +395,9 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.sysctlValue)
     body.writeString(op.sysctlFilename)
     body.writeBool(op.sysctlDestroy)
+  of pokLinuxDpkgDiversion:
+    body.writeString(op.ddPath)
+    body.writeBool(op.ddDestroy)
   of pokLinuxUdevRule:
     body.writeString(op.udevName)
     body.writeString(op.udevContent)
@@ -638,6 +642,7 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.suContent = readString(body, pos)
     result.operation.suEnabled = readBool(body, pos, "suEnabled")
     result.operation.suDestroy = readBool(body, pos, "suDestroy")
+    result.operation.suAptClosureLock = readString(body, pos)
   of pokLaunchdSystemDaemon:
     result.operation = PrivilegedOperation(kind: pokLaunchdSystemDaemon,
       address: address)
@@ -712,6 +717,11 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.sysctlValue = readString(body, pos)
     result.operation.sysctlFilename = readString(body, pos)
     result.operation.sysctlDestroy = readBool(body, pos, "sysctlDestroy")
+  of pokLinuxDpkgDiversion:
+    result.operation = PrivilegedOperation(kind: pokLinuxDpkgDiversion,
+      address: address)
+    result.operation.ddPath = readString(body, pos)
+    result.operation.ddDestroy = readBool(body, pos, "ddDestroy")
   of pokLinuxUdevRule:
     result.operation = PrivilegedOperation(kind: pokLinuxUdevRule,
       address: address)

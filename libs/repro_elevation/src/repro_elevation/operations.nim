@@ -20,6 +20,8 @@
 
 import std/[strutils]
 
+import repro_dsl_stdlib/packages/apt_closure
+
 import ./errors
 import ./os_system_parse
 import ./posix_system_parse
@@ -331,6 +333,15 @@ type
       ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
       ## mount-namespace bubblewrap creates are MECHANISM (the privilege
       ## needed to bind-mount without root), not an isolation policy.
+    pokLinuxDpkgDiversion = "linux.dpkgDiversion"
+      ## A local dpkg diversion of a package-owned path (ReproOS add-on
+      ## mode): `dpkg-divert --local --rename --divert <path>.distrib
+      ## --add <path>` moves the package's file aside, so dpkg installs
+      ## every later version of it at `<path>.distrib` and the path itself
+      ## is free for a file the profile owns. The destroy direction is
+      ## `dpkg-divert --local --rename --remove <path>`, which moves the
+      ## package's file back. Debian and Ubuntu only (refused where dpkg is
+      ## absent). See dpkg-divert(1).
     pokInlineExecCall = "reprobuild.inlineExecCall"
       ## Windows-System-Resources Phase E: the cross-cutting privileged
       ## execution of an `inlineExecCall(...)` build-graph edge tagged
@@ -527,6 +538,11 @@ type
       suContent*: string
       suEnabled*: bool
       suDestroy*: bool
+      suAptClosureLock*: string
+        ## A `package(apt)` closure lock (`repro-apt-closure-lock v1`), or
+        ## "". When set, `suContent` is the RENDERED unit (it already binds
+        ## the closure prefix) and the driver realises the closure into
+        ## `/repro/store` before writing it. ReproOS Add-On Mode §8.3.
     of pokLaunchdSystemDaemon:
       ## Write `/Library/LaunchDaemons/<sdaLabel>.plist` and
       ## `launchctl bootstrap system`. `sdaProgramArgs` is the daemon
@@ -742,6 +758,11 @@ type
       darwinModuleName*: string
       darwinModuleContent*: string
       darwinModuleDestroy*: bool
+    of pokLinuxDpkgDiversion:
+      ## Divert `ddPath` (absolute, below `/etc/` or `/usr/local/etc/`)
+      ## to `ddPath & ".distrib"`. `ddDestroy` selects the removal.
+      ddPath*: string
+      ddDestroy*: bool
     of pokLinuxFhsSandbox:
       ## Launch `fsbBinPath` under bubblewrap with the M0-locked
       ## transparency-posture invocation shape:
@@ -1064,6 +1085,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
+  of pokLinuxDpkgDiversion: true
   of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
@@ -1106,6 +1128,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
+  of $pokLinuxDpkgDiversion: pokLinuxDpkgDiversion
   of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
@@ -2254,6 +2277,18 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not isSafeUnitName(op.suName):
       return "systemd.systemUnit name '" & op.suName &
         "' is not a safe single-segment unit file name"
+    if op.suAptClosureLock.len > 0 and not op.suDestroy:
+      # The broker realises whatever the lock pins, as root, so the lock
+      # must parse and the unit must pass every refusal of the renderer
+      # (``checkUnitForAptClosure``) with the closure's lines present and
+      # binding exactly the prefix the lock pins: a frame whose content and
+      # lock disagree is refused before any write.
+      try:
+        checkUnitForAptClosureLock(op.suContent, op.suAptClosureLock,
+          unitName = op.suName)
+      except EAptClosureLock, EAptClosureUnit:
+        return "systemd.systemUnit '" & op.suName & "': " &
+          getCurrentExceptionMsg()
   of pokLaunchdSystemDaemon:
     if not isSafeDaemonLabel(op.sdaLabel):
       return "launchd.systemDaemon label '" & op.sdaLabel &
@@ -2525,6 +2560,21 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.darwinModuleName.endsWith(".nix"):
       return "macos.darwinSystemModule name '" & op.darwinModuleName &
         "' must end with '.nix' (Nix module convention)"
+  of pokLinuxDpkgDiversion:
+    # A diversion is limited to the same roots `fs.systemFile` may write:
+    # the file the profile puts at the diverted path is an `fs.systemFile`,
+    # so a diversion anywhere else would be a diversion nothing may fill.
+    if not op.ddPath.startsWith("/") or "/../" in op.ddPath or
+        op.ddPath.endsWith("/..") or op.ddPath.endsWith("/"):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' must be an absolute file path without '..' segments"
+    if not (op.ddPath.startsWith("/etc/") or
+            op.ddPath.startsWith("/usr/local/etc/")):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' is outside /etc/ and /usr/local/etc/"
+    for c in op.ddPath:
+      if c in {'\0', '\n', '\r'}:
+        return "linux.dpkgDiversion path contains a control character"
   of pokLinuxFhsSandbox:
     # `fsbBinPath` must be a POSIX absolute path (leading `/`). The
     # driver does NOT canonicalize — `..` collapse / symlink resolve

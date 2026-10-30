@@ -95,4 +95,4 @@ suite "slice 1: resource-type registry":
       discard lookupResourceType("does.not.exist")
     expect KeyError:
       discard lookupResourceType("")
-    check not isResourceTypeRegistered("vm_harness.container")
+    check not isResourceTypeRegistered("gosti.container")

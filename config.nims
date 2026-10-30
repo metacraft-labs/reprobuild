@@ -417,6 +417,9 @@ for libName in [
   "repro_homebrew_adapter",
   "repro_elevation",
   "repro_infra",
+  # ReproOS add-on mode: fingerprint, preflight, bootstrap, uninstall and
+  # the add-on layer over `repro infra apply` on a distribution-owned host.
+  "repro_addon",
   "repro_interface_artifacts",
   "repro_dev_env_artifacts",
   "repro_dev_env_activation",
@@ -687,8 +690,8 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   ## ``optional = true`` says a checkout is EXPECTED to be able to lack this
   ## package, so its report reads as a note rather than a warning. It is for
   ## packages whose absence the tree already tolerates -- today only
-  ## ``VM_HARNESS_SRC``, which ``config.nims`` itself guards with
-  ## ``vmHarnessAvailable`` further down, and which no Nix execution surface
+  ## ``GOSTI_SRC``, which ``config.nims`` itself guards with
+  ## ``gostiAvailable`` further down, and which no Nix execution surface
   ## exports. The distinction is about how surprising the absence is, not
   ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
   ## for why nothing here refuses.
@@ -835,27 +838,27 @@ addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
 # exists, so removing the duplicate loses no resolution and restores the
 # policy.
 
-# R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
+# R2: gosti lives in the sibling ``D:/metacraft/gosti/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
-# (tests/integration/t_r2_iso_boot.nim) imports ``vm_harness`` to drive
+# (tests/integration/t_r2_iso_boot.nim) imports ``gosti`` to drive
 # the bootFromMedia/captureSerial/expectLine primitives against the
-# Hyper-V Gen-2 UEFI backend. Prefer $VM_HARNESS_SRC, then the
+# Hyper-V Gen-2 UEFI backend. Prefer $GOSTI_SRC, then the
 # sibling-repo checkout.
-addPackagePath("VM_HARNESS_SRC", [
-  ".." / "vm-harness" / "src",
-], "vm_harness.nim", optional = true)
+addPackagePath("GOSTI_SRC", [
+  ".." / "gosti" / "src",
+], "gosti.nim", optional = true)
 
-# Define ``vmHarnessAvailable`` only when the optional vm-harness sibling is
+# Define ``gostiAvailable`` only when the optional gosti sibling is
 # actually present. The R2/R9 boot integration tests guard their
-# ``import vm_harness`` on this symbol so they skip-compile when the sibling is
+# ``import gosti`` on this symbol so they skip-compile when the sibling is
 # absent, instead of hard-failing the whole test-build. A missing optional
 # sibling must skip, not be fatal (Workspace-alignment RA-23;
 # Interactive-UX-And-Progress.md Principle 2).
 block:
-  let vmhEnv = getEnv("VM_HARNESS_SRC")
-  if (vmhEnv.len > 0 and repoFileExists(vmhEnv / "vm_harness.nim")) or
-     repoFileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
-    switch("define", "vmHarnessAvailable")
+  let gostiEnv = getEnv("GOSTI_SRC")
+  if (gostiEnv.len > 0 and repoFileExists(gostiEnv / "gosti.nim")) or
+     repoFileExists(".." / "gosti" / "src" / "gosti.nim"):
+    switch("define", "gostiAvailable")
 
 # Lib subdirectories to probe under a system prefix. The order matters:
 # `lib` covers the default + Debian-multiarch case (Debian/Ubuntu install
@@ -915,6 +918,7 @@ proc libMatchesTargetArch(libFile: string): bool =
     if hostCPU == "amd64": 0x3E'u32         # EM_X86_64
     elif hostCPU == "arm64": 0xB7'u32       # EM_AARCH64
     elif hostCPU == "i386": 0x03'u32        # EM_386
+    elif hostCPU == "arm": 0x28'u32         # EM_ARM (32-bit armhf/armel)
     else: 0'u32
   let targetCpuType =
     if hostCPU == "amd64": 0x01000007'u32   # CPU_TYPE_X86_64
@@ -960,11 +964,25 @@ proc libMatchesTargetArch(libFile: string): bool =
         return true
     false
 
-proc holdsLibrary(libDir, dylibName: string; targetArchOnly: bool): bool =
-  ## Whether `libDir/dylibName` exists and -- when `targetArchOnly` -- is a
-  ## file the target's loader can map (see `libMatchesTargetArch`).
-  let path = libDir / dylibName
-  repoFileExists(path) and (not targetArchOnly or libMatchesTargetArch(path))
+proc dirHoldsLibrary(libDir: string; dylibNames: openArray[string];
+                     targetArchOnly: bool): bool =
+  ## Whether `libDir` holds one of `dylibNames` -- and, when
+  ## `targetArchOnly`, none of them built for another architecture.
+  ##
+  ## The directory is judged as a whole because the names are alternatives
+  ## for ONE `-l`: a static archive (`libsqlite3.a`) cannot be classified
+  ## from its header and is accepted on its own, so judging name by name let
+  ## the archive vouch for a directory whose `libsqlite3.so` was foreign --
+  ## and the linker, which prefers the shared object, then took that. A
+  ## cross-compile to armhf on an x86-64 Nix host linked the store's x86-64
+  ## SQLite that way.
+  result = false
+  for dylibName in dylibNames:
+    let path = libDir / dylibName
+    if repoFileExists(path):
+      if targetArchOnly and not libMatchesTargetArch(path):
+        return false
+      result = true
 
 proc firstExistingPrefixLibDir(prefix: string;
                                dylibNames: openArray[string];
@@ -974,9 +992,8 @@ proc firstExistingPrefixLibDir(prefix: string;
   ## `prefix/lib64`, and the two common Debian-multiarch triples.
   for libSub in LibSubdirs:
     let candidate = prefix / libSub
-    for dylibName in dylibNames:
-      if holdsLibrary(candidate, dylibName, targetArchOnly):
-        return candidate
+    if dirHoldsLibrary(candidate, dylibNames, targetArchOnly):
+      return candidate
   ""
 
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
@@ -1050,9 +1067,8 @@ proc firstExistingLibDir(candidates: openArray[string];
     # standard lib subdirectories so a candidate like `/usr` resolves
     # whether the host is `/usr/lib`, `/usr/lib64`, or a Debian-multiarch
     # triple.
-    for dylibName in dylibNames:
-      if holdsLibrary(path, dylibName, targetArchOnly):
-        return path
+    if dirHoldsLibrary(path, dylibNames, targetArchOnly):
+      return path
     let resolved = firstExistingPrefixLibDir(path, dylibNames, targetArchOnly)
     if resolved.len > 0:
       return resolved

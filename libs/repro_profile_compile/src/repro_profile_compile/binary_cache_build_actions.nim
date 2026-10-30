@@ -3,20 +3,36 @@
 ##
 ## M3b did the client-seed analog (substitute-first / build-from-source
 ## on miss) for the Windows client bootstrap. M4 is the apply-time
-## analog: when `repro infra apply` runs a profile that carries
-## build-action edges (extract this zip, run this config script, ...),
-## and a binary cache is configured (`REPRO_BINARY_CACHE_URL` set), the
-## apply PREFERS fetching each edge's OUTPUTS from the cache
-## (`bakBinaryCacheSubstitute`) instead of building them locally. On a
-## cache MISS (or when no cache is configured) it falls back to the
-## existing local build, then publishes the freshly-built outputs back
-## under the same content-addressable key so a subsequent fresh apply
-## hits.
+## analog: when `repro infra apply` (or `repro deploy-agent`, which runs
+## the same apply) runs a profile that carries build-action edges
+## (extract this zip, run this config script, ...), and a binary cache is
+## configured, the apply PREFERS fetching each edge's OUTPUTS from the
+## cache (`bakBinaryCacheSubstitute`) instead of building them locally.
+## On a cache MISS (or when no cache is configured) it falls back to the
+## existing local build.
 ##
-## Off-by-default: when `REPRO_BINARY_CACHE_URL` is unset,
-## `resolveBuildActionCacheConfig` returns `configured = false` and the
-## dispatcher takes the unchanged local-build path — behaviour is
-## byte-identical to pre-M4 `repro infra apply`.
+## Trust (Reprobuild-Binary-Cache-Fleet R1; Binary-Caches.md "Apply-time
+## substitution and publishing"). The configuration is the shared
+## `caches_config.resolveTrustedCacheConfig`, the same one the
+## provider-compile cache and `repro cache substitute` use:
+##
+##   * Substitution reads the caches in `caches.conf`
+##     (`/etc/repro/caches.conf`, then the per-user file, or only
+##     `REPRO_CACHES_CONFIG`), plus the back-compat `REPRO_BINARY_CACHE_URL`
+##     cache. Every endpoint enforces its `trusted-public-keys`: an entry
+##     signed by any other key is a MISS, and a cache with no trusted key
+##     is never substituted from. This path once built its endpoint by hand
+##     with an empty signer list and no trust enforcement, which accepted an
+##     entry signed by whatever key the manifest itself carried.
+##   * Publish-on-miss happens only on a host the operator made a
+##     publisher, by pointing `REPRO_BINARY_CACHE_KEY_PATH` and
+##     `REPRO_BINARY_CACHE_CERT_PATH` at an existing keypair. A host that
+##     was not given a key never generates one and never publishes. This
+##     path once auto-generated a producer key and published every local
+##     build, which made every applying host a publisher.
+##
+## Off-by-default: with no cache configured the dispatcher takes the
+## unchanged local-build path.
 ##
 ## Content-addressable key: the cache identity for a build-action edge
 ## folds the action's weak fingerprint (id + argv + cwd + outputs +
@@ -29,9 +45,13 @@
 ## stale cache entry can never shadow a changed edge.
 
 import std/[os, strutils]
+when defined(posix):
+  import std/posix
+  # std/posix does not export these on every target; take them from libc.
+  var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+  var oCloExec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
 
 import repro_binary_cache_client
-import repro_binary_cache_client/engine_publisher as bcEnginePublisher
 import repro_build_engine
 import repro_hash
 
@@ -41,21 +61,11 @@ import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types as
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 type
-  BuildActionCacheConfig* = object
-    ## Resolved binary-cache configuration for the action-edge half of
-    ## an apply. `configured = false` (the default when
-    ## `REPRO_BINARY_CACHE_URL` is unset) turns the whole M4 path off:
-    ## the dispatcher builds locally, exactly as before.
-    configured*: bool
-    endpoint*: string
-    keyPath*: string
-    certPath*: string
-    keypairOk*: bool
-      ## True when a signing keypair (env-supplied or auto-generated)
-      ## is available. Publish-on-miss needs it; a false value means we
-      ## can still SUBSTITUTE (verification only needs the server's
-      ## signature) but cannot PUBLISH — a cache miss then builds
-      ## locally without re-populating the cache (loud, non-fatal).
+  BuildActionCacheConfig* = TrustedCacheConfig
+    ## Resolved binary-cache configuration for the action-edge half of an
+    ## apply. `configured = false` turns the whole M4 path off: the
+    ## dispatcher builds locally, exactly as before. `keypairOk` gates
+    ## publish-on-miss and is true only for an operator-supplied keypair.
 
   SubstituteAttempt* = object
     ## Result of one `trySubstituteBuildAction` call.
@@ -64,40 +74,16 @@ type
     bytesFetched*: int64
 
 proc resolveBuildActionCacheConfig*(): BuildActionCacheConfig =
-  ## Read `REPRO_BINARY_CACHE_URL` (+ key/cert paths). When the URL is
-  ## unset the cache is NOT configured and the result's other fields are
-  ## empty — the dispatcher's local-build path is unchanged. When the
-  ## URL is set we resolve a signing keypair the same way the engine's
-  ## `BinaryCachePublisher` does: env-supplied key/cert if both exist,
-  ## otherwise an auto-generated ECDSA-P256 keypair under the per-OS
-  ## config dir. A keypair failure is non-fatal (substitute still works;
-  ## publish-on-miss is skipped).
-  let url = getEnv("REPRO_BINARY_CACHE_URL", "")
-  if url.len == 0:
-    result.configured = false
-    return
-  result.configured = true
-  result.endpoint = url
-  let env = bcEnginePublisher.readPublisherEnv()
-  var keyPath = env.keyPath
-  var certPath = env.certPath
-  let envPathsUsable = keyPath.len > 0 and certPath.len > 0 and
-    fileExists(keyPath) and fileExists(certPath)
-  if envPathsUsable:
-    result.keyPath = keyPath
-    result.certPath = certPath
-    result.keypairOk = true
-  else:
-    let dir = bcEnginePublisher.defaultAutoCredentialDir()
-    var resolvedKey, resolvedCert: string
-    let outcome = bcEnginePublisher.ensureAutoProducerKeypair(
-      dir, resolvedKey, resolvedCert)
-    if outcome.ok:
-      result.keyPath = resolvedKey
-      result.certPath = resolvedCert
-      result.keypairOk = true
-    else:
-      result.keypairOk = false
+  ## Resolve substitution trust and publish credentials once per dispatch.
+  ## See the module header: endpoints come from `caches.conf` with their
+  ## trust anchors enforced, and a publish keypair is never generated.
+  resolveTrustedCacheConfig()
+
+proc shouldPublishBuildActionOutputs*(cfg: BuildActionCacheConfig): bool =
+  ## Whether a freshly built edge's outputs are published back. Only a host
+  ## configured as a publisher (cache configured AND an operator-supplied
+  ## keypair present) publishes; every other host is a pure consumer.
+  cfg.configured and cfg.keypairOk and cfg.publishEndpoint.len > 0
 
 # ---------------------------------------------------------------------------
 # Content-addressable cache identity for a build-action edge.
@@ -235,19 +221,97 @@ proc stagePrefixFromOutputs(action: ProfileBuildAction;
     copyFileWithPermissions(src, dst)
   return true
 
-proc materialisePrefixIntoCwd(action: ProfileBuildAction;
-                              extractedDir: string) =
-  ## Copy every file under `extractedDir` (a freshly-extracted rbcarc
-  ## prefix) back under the action's `cwd`, byte-identically, preserving
-  ## permissions (so the exec bit the archive carried survives).
+proc isDeclaredOutput(rel: string; declared: openArray[string]): bool =
+  ## True when the cwd-relative `rel` IS a declared output, or lies below a
+  ## declared output directory. Compared component-wise, so `bin2/x` is not
+  ## below a declared `bin`.
+  for d in declared:
+    let dd = d.strip(leading = false, chars = {'/'})
+    if rel == dd or rel.startsWith(dd & "/"):
+      return true
+  false
+
+proc writeFileNoFollow(dstDir, name: string; data: string; mode: set[FilePermission]) =
+  ## Write `data` to `dstDir/name` without ever following a symbolic link:
+  ## the bytes go to a fresh temporary file created with
+  ## `O_CREAT|O_EXCL|O_NOFOLLOW` in the same directory, which is then renamed
+  ## over the destination. `rename(2)` replaces a link at the destination
+  ## rather than writing through it.
+  let final = dstDir / name
+  let tmp = dstDir / ("." & name & ".repro-substitute-" & $getCurrentProcessId())
+  when defined(posix):
+    let fd = posix.open(tmp.cstring,
+      O_WRONLY or O_CREAT or O_EXCL or oNoFollow or oCloExec, 0o600.Mode)
+    if fd < 0:
+      raiseOSError(osLastError(), "cannot create " & tmp)
+    var off = 0
+    try:
+      while off < data.len:
+        let n = posix.write(fd, unsafeAddr data[off], data.len - off)
+        if n < 0:
+          raiseOSError(osLastError(), "cannot write " & tmp)
+        off += n
+    finally:
+      discard posix.close(fd)
+  else:
+    writeFile(tmp, data)
+  try:
+    setFilePermissions(tmp, mode)
+    moveFile(tmp, final)
+  except CatchableError:
+    try: removeFile(tmp) except CatchableError: discard
+    raise
+
+proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
+                               extractedDir: string) =
+  ## Copy the action's DECLARED outputs from `extractedDir` (a freshly
+  ## extracted rbcarc prefix) back under the action's `cwd`, byte-identically,
+  ## preserving permissions (so the exec bit the archive carried survives).
+  ##
+  ## The archive comes from a cache, so it is treated as hostile even after
+  ## its signature checked out, and the copy runs inside a privileged apply:
+  ##
+  ##   * Only declared outputs are copied. A file the action did not declare
+  ##     (`.git/hooks/post-checkout`, a shell profile) refuses the whole
+  ##     substitution rather than landing in the working directory.
+  ##   * The archive may carry no symbolic link. The publisher stages outputs
+  ##     with `copyFileWithPermissions`, which dereferences links, so an honest
+  ##     outputs archive holds regular files only; a link would make this copy
+  ##     read whatever it points at (a secret) into the outputs.
+  ##   * The destination is written without following links: no existing
+  ##     component of the destination path may be a link, and each file is
+  ##     created fresh and renamed into place.
+  ##
+  ## Any refusal raises `IOError`; the caller turns it into a cache miss and
+  ## builds locally. Validation of every member happens before anything is
+  ## written, so a refused archive writes nothing.
   let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
                 else: getCurrentDir())
-  for path in walkDirRec(extractedDir, yieldFilter = {pcFile, pcLinkToFile},
-                         relative = true):
+  let declared = outputRelPaths(action)
+  var members: seq[string] = @[]
+  for path in walkDirRec(extractedDir,
+                         yieldFilter = {pcFile, pcLinkToFile, pcLinkToDir},
+                         followFilter = {pcDir}, relative = true):
+    let rel = path.replace(DirSep, '/')
     let src = extractedDir / path
-    let dst = cwdAbs / path
+    if symlinkExists(src):
+      raise newException(IOError,
+        "substituted outputs carry a symbolic link (" & rel &
+        "); an outputs archive holds regular files only")
+    if not isDeclaredOutput(rel, declared):
+      raise newException(IOError,
+        "substituted outputs carry " & rel &
+        ", which the action does not declare as an output")
+    members.add(rel)
+  for rel in members:
+    refuseWriteThroughSymlink(cwdAbs, rel)
+  for rel in members:
+    let dst = cwdAbs / rel
     createDir(parentDir(dst))
-    copyFileWithPermissions(src, dst)
+    refuseWriteThroughSymlink(cwdAbs, rel)
+    writeFileNoFollow(parentDir(dst), extractFilename(dst),
+                      readFile(extractedDir / rel),
+                      getFilePermissions(extractedDir / rel))
 
 proc outputsExist(action: ProfileBuildAction): bool =
   ## True when every mappable declared output is present on disk under
@@ -289,9 +353,11 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
   let extractDir = scratchRoot / "extract"
   try:
     createDir(store)
-    let endpoint = SubstituteEndpoint(
-      baseUrl: cfg.endpoint, trustedSigners: @[], priority: 0)
-    let res = substituteInProcess(entryHex, store, @[endpoint])
+    # The configured endpoints, NOT one built here: each carries its
+    # `caches.conf` trust anchors with `enforceTrust` set, so an entry
+    # signed by an unanchored key (or served by a cache with no anchors)
+    # is rejected before any payload byte is fetched and reads as a miss.
+    let res = substituteInProcess(entryHex, store, cfg.endpoints)
     if not res.ok or res.outcomes.len == 0:
       result.reason = "cache miss for " & entryHex &
         (if res.reason.len > 0: ": " & res.reason else: "")
@@ -327,12 +393,15 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
   ## Publish a freshly-built edge's OUTPUTS to the binary cache under
   ## the same content-addressable key `trySubstituteBuildAction` reads.
   ## Best-effort: any failure returns `ok = false` with a reason but
-  ## MUST NOT abort the apply — the box already converged locally. When
-  ## no signing keypair is available (`cfg.keypairOk == false`) we skip
-  ## publishing entirely.
-  if not cfg.configured or not cfg.keypairOk:
+  ## MUST NOT abort the apply — the box already converged locally. A host
+  ## that is not configured as a publisher (no operator-supplied keypair,
+  ## see `shouldPublishBuildActionOutputs`) publishes nothing, and no key
+  ## is ever generated here.
+  if not shouldPublishBuildActionOutputs(cfg):
     return (ok: false,
-            reason: "publish skipped (no cache / no signing keypair)")
+            reason: "publish skipped: this host is not configured as a " &
+              "cache publisher (REPRO_BINARY_CACHE_KEY_PATH / " &
+              "REPRO_BINARY_CACHE_CERT_PATH)")
   let stageDir = scratchRoot / "publish-stage"
   try:
     removeDir(stageDir)
@@ -341,12 +410,19 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
               reason: "no publishable outputs staged for " & action.id)
     let idy = buildActionCacheIdentity(action, scratchRoot)
     let entryHex = deriveCacheEntryKeyHex(idy)
+    # `loadOrGenerateKeypair` GENERATES when a file is missing. The resolver
+    # saw both files, but re-check here so a key removed since then is a
+    # skipped publish rather than a freshly minted producer identity.
+    if not (fileExists(cfg.keyPath) and fileExists(cfg.certPath)):
+      return (ok: false,
+              reason: "publish skipped: the configured publisher keypair " &
+                "is no longer present")
     let keypair = peerAuth.loadOrGenerateKeypair(cfg.certPath, cfg.keyPath)
     let pubReq = PublishInProcessRequest(
       entryKeyHex: entryHex,
       prefixDir: stageDir,
       identity: idy,
-      endpoint: cfg.endpoint,
+      endpoint: cfg.publishEndpoint,
       keypair: keypair)
     let pubRes = publishInProcess(pubReq)
     if pubRes.ok:

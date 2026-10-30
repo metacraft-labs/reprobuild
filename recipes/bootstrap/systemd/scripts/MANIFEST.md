@@ -157,7 +157,7 @@ The boot-smoke test lives at:
 Run with:
 ```powershell
 . D:/metacraft/env.ps1
-nim c --path:D:/metacraft/vm-harness/src `
+nim c --path:D:/metacraft/gosti/src `
   -o:D:/metacraft/reprobuild/build/r9-build/t_r9_systemd_boot.exe `
   D:/metacraft/reprobuild/tests/integration/t_r9_systemd_boot.nim
 D:/metacraft/reprobuild/build/r9-build/t_r9_systemd_boot.exe

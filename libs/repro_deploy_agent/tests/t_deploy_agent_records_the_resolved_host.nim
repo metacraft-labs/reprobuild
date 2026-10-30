@@ -136,6 +136,9 @@ proc baseEnv(f: Fixture): StringTableRef =
   result.del("HOSTNAME")
   result.del("COMPUTERNAME")
   result.del("REPRO_BINARY_CACHE_URL")
+  # The apply-time substitute also reads caches.conf; a host
+  # /etc/repro/caches.conf must not reach the agent under test.
+  result["REPRO_CACHES_CONFIG"] = f.cacheRoot / "no-caches.conf"
   result["REPROBUILD_ACTION_CACHE_ROOT"] = f.cacheRoot / "action-cache"
 
 proc runRepro(f: Fixture; args: seq[string]; env: StringTableRef): AgentRun =

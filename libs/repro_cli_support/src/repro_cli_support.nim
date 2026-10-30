@@ -506,6 +506,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n       " &
           programName &
+      " deploy-agent keygen --secrets-key <FILE>\n       " &
+          programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
       " attest expect --image PATH [--out PATH | --check PATH]\n       " &
@@ -16315,7 +16317,7 @@ proc buildStateGroupDesired*(lease: RunEdgeLease;
 proc anyMemberUnlinked(desired: seq[ResourceInstance]): bool =
   ## True when ANY member of the desired group's graph has a ``typeId`` whose
   ## driver is NOT registered in this process — i.e. an OUT-OF-TREE resource
-  ## (a vm-harness Incus type the ``repro`` CLI does not link). The synthetic
+  ## (a gosti Incus type the ``repro`` CLI does not link). The synthetic
   ## run-edge-consumer type is always linked, so a group whose real members are
   ## all in-tree returns false and keeps the in-process fast path.
   for inst in desired:
@@ -16358,7 +16360,7 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ##   * ALL members linked (an in-tree ``stateGroup`` / the N2 hermitic mock)
   ##     — the IN-PROCESS ``reconcileResources(store)`` fast path, byte-identical
   ##     to N2.
-  ##   * ANY member OUT-OF-TREE (a vm-harness Incus type the ``repro`` CLI does
+  ##   * ANY member OUT-OF-TREE (a gosti Incus type the ``repro`` CLI does
   ##     not link) — the PROVIDER-SESSION path
   ##     ``reconcileResourcesViaSession(store)``, the same artifact-backed
   ##     resolver the L5 daemon reaper uses via ``buildLeaseReapTransport``. The
@@ -27663,7 +27665,7 @@ proc resolveProducerTypedContract*(selector: string;
       # re-running the lift edge (replaces the RP5a re-extract-per-consumer path).
       # The stub is written to the scratch tree (the extract runner emits it) but
       # the typed-contract projection reads only the artifact.
-      # TI2 (separate-module producer — the RP5c2 vm-harness shape): if the
+      # TI2 (separate-module producer — the RP5c2 gosti shape): if the
       # producer's ``repro.nim`` NAMES a separate resource module via a
       # ``resourceModule "<path>": path "<dir>" …`` surface entry, thread that
       # module + its extra ``--path``s into the lift so the cached artifact's
@@ -27785,7 +27787,7 @@ proc resourceAttrsTypeName*(typeId: string): string =
 
 proc resourceWrapperProcName*(typeId: string): string =
   ## The synthesised consumer-side typed wrapper proc name — the LAST dotted
-  ## segment of the ``typeId`` (e.g. ``vm_harness.container`` → ``container``),
+  ## segment of the ``typeId`` (e.g. ``gosti.container`` → ``container``),
   ## dash-sanitised. This is the ``producer.<wrapper>(address, attrs…)`` verb a
   ## consumer binds. Derived from the ``typeId`` (part of the exported
   ## contract) so it stays stable across the interface boundary without adding
@@ -27915,7 +27917,7 @@ proc gotoDefinitionInProducerContract*(contract: ProducerTypedContract;
   ## RP8 go-to-definition over an ALREADY-RESOLVED producer typed contract.
   ## Given a public ``symbol`` reference — a resource-type wrapper name (the
   ## last dotted ``typeId`` segment, e.g. ``container`` for
-  ## ``vm_harness.container``) or the full ``typeId`` itself; a resource
+  ## ``gosti.container``) or the full ``typeId`` itself; a resource
   ## attribute name (e.g. ``cpus``); or a public executable / command name —
   ## return the producer's DEFINITION ``SourceLocation`` (file + line) read from
   ## the interface artifact's preserved location. The producer's driver/impl is

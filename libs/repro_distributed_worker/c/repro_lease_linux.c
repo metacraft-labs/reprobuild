@@ -119,6 +119,28 @@
  * appends JSON lines to `report`, then _exit()s with the child's status.
  */
 #ifdef __linux__
+#if !defined(__x86_64__) && !defined(__aarch64__)
+/*
+ * NO LEASE BACKEND FOR THIS ARCHITECTURE (e.g. 32-bit ARM). The floor's
+ * seccomp allow-list (`repro_lease_floor_syscalls.h`) and its audit-arch
+ * check are derived for x86_64 and aarch64 only, and confinement without
+ * them is not confinement. So every lease is REFUSED here -- fail closed --
+ * rather than this file failing to compile and taking every other feature
+ * of the binary that links it down with it. `repro_lease_spawn` answers
+ * -ENOTSUP, which the Nim caller reports as an unsupported architecture;
+ * the probes answer "absent", so the worker role refuses to start (it
+ * requires pidfd_getfd) and names the missing capability.
+ */
+#include <errno.h>
+int repro_lease_spawn(const char *buf, int len) {
+  (void)buf; (void)len;
+  return -ENOTSUP;
+}
+int repro_lease_supported(void) { return -1; }
+int repro_lease_pidfd_supported(void) { return 0; }
+int repro_lease_userns_supported(void) { return 0; }
+int repro_lease_memfd_noexec_supported(void) { return 0; }
+#else /* x86_64 or aarch64: the real launcher */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -1899,4 +1921,5 @@ int repro_lease_memfd_noexec_supported(void) {
   close(fd);
   return 1;
 }
+#endif /* x86_64 or aarch64 */
 #endif /* __linux__ */

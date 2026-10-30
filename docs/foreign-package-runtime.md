@@ -200,3 +200,178 @@ number of `mount(2)` calls.
 | End-to-end realize-time helper | `libs/repro_local_store/src/repro_local_store/sandbox_manifest.nim::materializeSandboxManifest`     |
 | Unit tests                     | `libs/repro_local_store/tests/t_c3_sandbox_manifest.nim`                                            |
 | Integration tests              | `tests/integration/foreign_packages/t_c3_*.sh`                                                      |
+
+## System units: native binding
+
+The launcher above is for an operator's own tools. A **system service** that
+runs a foreign package — a Debian daemon on a Debian or Raspberry Pi OS host
+whose services Reprobuild manages on top of the distribution — does not use
+it. The launcher's unprivileged user
+namespace is the problem: a process inside it has no capabilities in the
+host's namespace, so `CAP_NET_RAW` (an ICMP prober), root or group access to
+USB device nodes (a UPS driver), `DynamicUser=` and `LoadCredential=` all stop
+meaning what systemd says they mean. Instead, the unit's own mount namespace
+does the work. systemd creates one for any unit with a bind directive, and
+the unit gets two lines:
+
+```ini
+[Service]
+BindReadOnlyPaths=/repro/store/prefixes/apt-closure-<root>/<version>-<hash16>/usr:/usr
+InaccessiblePaths=-/etc/ld.so.preload
+ExecStart=/usr/bin/prometheus-blackbox-exporter ...
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_RAW
+```
+
+### The closure lock
+
+`repro-harvest-apt --emit-lock` resolves a closure against a signed archive
+and writes a `repro-apt-closure-lock v1` file:
+
+```sh
+repro-harvest-apt \
+  --source 'apt:{prometheus-node-exporter,prometheus-blackbox-exporter}@raspbian/trixie' \
+  --archive http://raspbian.raspberrypi.com/raspbian \
+  --keyring recipes/catalog/foreign/apt/keys/archives/raspbian-archive-keyring.gpg \
+  --arch armhf --components main \
+  --emit-lock apt-locks/exporters.lock
+```
+
+- `InRelease` is verified against the one keyring given with `--keyring`
+  (apt's `Signed-By=`). The verdict is read from gpg's `--status-fd` lines,
+  not its exit code: it needs `GOODSIG` and `VALIDSIG` and none of
+  `EXPKEYSIG`, `REVKEYSIG`, `EXPSIG`, `BADSIG`, `ERRSIG`, `NO_PUBKEY`,
+  `KEYEXPIRED` or `KEYREVOKED`, because gpg 2.4 exits 0 for a good signature
+  by an expired key. The signed `Valid-Until` is enforced (a stale but
+  correctly signed `InRelease` is refused; snapshot archives carry none),
+  each `Packages` index is checked against the SHA-256 the signed `InRelease`
+  lists, and each member's SHA-256 and size are taken from that index. The
+  lock records all of it. Index downloads are streamed with a size cap.
+- The members are the `Depends:`/`Pre-Depends:` closure of the roots plus the
+  archive's `Essential: yes` set, which every Debian package may assume
+  ([Debian Policy §3.8](https://www.debian.org/doc/debian-policy/ch-binary.html#essential-packages)).
+  `--no-essential` leaves that set out. An alternative resolves to a package
+  already in the closure when there is one, then to the first that exists. A
+  virtual package resolves to its provider with the highest `Priority:`.
+- The archive need not have a snapshot service. A Raspbian archive drops
+  superseded `.deb`s, so the lock is the pin, and it is committed next to the
+  profile that reads it.
+- Keyrings for the archives used so far live in
+  `recipes/catalog/foreign/apt/keys/archives/`, with their fingerprints and
+  sources in that directory's `README.md`.
+
+A profile attaches the lock to a unit:
+
+```nim
+systemdSystemUnit(name = "prometheus-blackbox-exporter.service",
+  content = blackboxUnit,
+  aptClosureLock = staticRead("apt-locks/exporters.lock"))
+```
+
+### Realisation
+
+On apply, the privileged driver realises the closure before it writes the
+unit (`apt_closure.realiseAptClosure`):
+
+0. The lock's architecture must run on the host (`armhf` on `armv7l` or
+   `aarch64`, `amd64` on `x86_64`, ...); any other pairing is a refusal.
+1. Each member is streamed into `/var/cache/repro/apt/<sha256>.deb` (a
+   directory private to the realising user) with the lock's size as a hard
+   cap: a `Content-Length` above it, or one that differs from the lock's
+   size, is refused before the body is read, and a body without one is cut
+   off at the cap. The file is then checked against the lock's size and
+   SHA-256. A mismatch is a refusal; a cached file is checked again every
+   time it is used. `https://` archives need a `-d:ssl` build and are
+   refused with that message otherwise.
+2. Each member's `data.tar.*` is decompressed with the host `xz`, `gzip`
+   or `zstd` and unpacked once, by Reprobuild's own tar reader, into
+   `/repro/store/prefixes/apt-deb-<name>/<version>-<hash16>/`. The host
+   `tar` is not used: what it does with a hostile entry depends on its
+   version and on whether it runs as root (GNU tar as root restores setuid
+   bits and owners). The reader's policy is fixed:
+   - an absolute name or a `..` component is a refusal, not stripped;
+   - nothing is written through a symbolic link the archive created, the
+     entry itself included;
+   - a hard link must name a regular file already extracted from the same
+     archive;
+   - device nodes, FIFOs, sockets and every other entry type are refused;
+   - modes are normalised to `0755` (directories and executables) and
+     `0644`: no setuid, setgid, sticky, group- or world-writable bit is
+     written, and owners are not restored (files belong to the realising
+     user, root on a host).
+   No maintainer script runs; `dpkg` and `apt` are never invoked; nothing
+   is written to `/usr`. A second pass (`verifyHardenedTree`) refuses the
+   prefix if any entry violates the mode or type policy.
+3. The closure is a hard-link union of its members at
+   `/repro/store/prefixes/apt-closure-<first root>/<version>-<hash16>/`.
+   Only `usr/` and `etc/` are kept, and pre-merged-`/usr` top-level
+   `bin`/`sbin`/`lib*` directories are folded into `usr/`. Two members that
+   ship different bytes at the same path are a refusal, and so is a path
+   that would be written through another member's symlink.
+4. Both levels are filled in a fresh `0700` temporary sibling, made `0755`
+   and renamed into place, with the completion marker written last.
+5. Once a member's prefix exists its cached `.deb` is deleted (the prefix
+   supersedes it), so the cache holds only in-flight downloads. Prefixes no
+   longer named by any generation are the store GC's (Add-On spec §5.2,
+   milestone A4); nothing deletes them yet.
+
+The closure's `<hash16>` depends only on the realiser version, the
+architecture and the member digests. The planner therefore renders the unit
+offline, and the host realises exactly the path the unit names. In an epoch,
+`:` is written `_`, because `:` separates a `BindReadOnlyPaths=` source from
+its target.
+
+### How the daemon finds its libraries
+
+The unit's `/usr` *is* the closure's `/usr`. The base system's
+`/lib → usr/lib`, `/bin → usr/bin` and `/sbin → usr/sbin` links (merged
+`/usr`, as on every supported Debian base) resolve into it. A Debian
+binary's interpreter (`/lib/ld-linux-armhf.so.3` on armhf) is therefore the
+closure's loader, which finds the closure's `libc` and libraries through the
+host's `/etc/ld.so.cache` or, on a miss, its built-in multiarch directories.
+Both resolve to `/usr/lib/<triplet>/` inside the closure. No `RPATH` is
+rewritten and no `LD_LIBRARY_PATH` is set.
+
+`/etc/ld.so.preload` names host libraries. Raspberry Pi OS preloads
+`libarmmem-${PLATFORM}.so` from its own archive, and inside the closure view
+the loader would print an error on every exec. `InaccessiblePaths=` hides the
+file, and the `-` prefix makes the line a no-op on hosts without it.
+
+### What the service sees, and what it does not
+
+| Path | Comes from |
+|---|---|
+| `/usr` (and `/bin`, `/lib`, `/sbin` through the base's links) | the closure, read-only |
+| `/etc`, `/var`, `/run`, `/home`, `/tmp` | the host, governed by the unit's own sandboxing |
+| `$CREDENTIALS_DIRECTORY` (`LoadCredential=`) | systemd |
+| `/dev` nodes | the host, subject to `DeviceAllow=` / `PrivateDevices=` |
+
+- The package's shipped configuration under `etc/` stays in the prefix for
+  reference and is never bound. The profile writes the service's `/etc`
+  files itself, for example with `fsSystemFile`.
+- Host NSS modules are not in the closure. `files` is part of glibc. A
+  service that resolves a `DynamicUser=` name through `nss-systemd` needs
+  `libnss-systemd` among its roots.
+- A unit takes at most one closure. Name every daemon of a unit as a root of
+  that unit's closure.
+- The renderer refuses a unit with no `[Service]` section; a unit whose
+  command lines name `reprobuild-sandbox-launcher`; a unit that sets
+  `RootDirectory=` or `RootImage=`; an empty `BindPaths=`,
+  `BindReadOnlyPaths=` or `InaccessiblePaths=` (an empty assignment resets
+  the list systemd has built, dropping the closure's own lines); and any
+  bind, `TemporaryFileSystem=` or `InaccessiblePaths=` whose destination is
+  `/usr` or under it. Comment lines (`#`, `;`) are not read. The broker
+  applies the same refusals to the rendered unit it receives, and requires
+  the closure's bind line exactly once, before it realises the lock.
+
+| concern | file |
+|---|---|
+| Lock, resolution, realiser, unit binding | `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/apt_closure.nim` |
+| `.deb` data-member decompression | `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/apt_jammy.nim::extractDebDataMemberToTar` |
+| In-process tar reader and its policy | `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/apt_closure.nim::unpackDebTar` |
+| Bounded download | `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/apt_closure.nim::downloadBounded` (over `repro_binary_cache_client/http_pool`) |
+| gpg status verdict | `apps/repro-harvest-apt/src/repro_harvest_apt/signature.nim::gpgStatusVerdict` |
+| Lock generation (`--emit-lock`) | `apps/repro-harvest-apt/repro_harvest_apt.nim` |
+| Unit rendering at plan time | `libs/repro_infra/src/repro_infra/profile.nim::renderedSystemUnitContent` |
+| Realisation at apply time | `libs/repro_elevation/src/repro_elevation/posix_system_driver.nim::applySystemdSystemUnit` |
+| Tests | `libs/repro_dsl_stdlib/tests/t_addon_apt_closure*.nim`, `libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim`, `apps/repro-harvest-apt/tests/t_c2_signature.nim` |

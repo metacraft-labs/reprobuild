@@ -65,6 +65,28 @@ bootstrap:
 hcr-agent-lib: bootstrap
     ./build/bin/repro build --tool-provisioning=path --daemon=off .#hcr-agent-lib
 
+# ReproOS add-on mode. `addon-static` builds the musl-static add-on `repro`
+# for the named architectures (amd64 arm64 armhf) and writes its published
+# SHA256SUMS under build/addon/. The `e2e_addon_*` recipes are the add-on's
+# acceptance gates: each runs in disposable guests it creates and destroys
+# (KVM for amd64, TCG for arm64/armhf). Bases: REPRO_ADDON_BASES; falsifying
+# runs: REPRO_ADDON_MUTATION=<name> (the gate must then fail); the Incus
+# inner loop: REPRO_ADDON_BACKEND=incus. See scripts/run_addon_gate.sh.
+addon-static *ARCHES="amd64 arm64 armhf":
+    bash ./scripts/build_addon_static.sh {{ARCHES}}
+
+e2e_addon_bootstrap_uninstall_byte_identity:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
+
+e2e_addon_preflight_is_zero_write:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_preflight_is_zero_write
+
+e2e_addon_bootstrap_changes_nothing_preexisting:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
+
+e2e_addon_bootstrap_installs_anchors_and_private_recipient_key:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key
+
 test-hcr-native-library-prerequisite:
     nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
 

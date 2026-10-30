@@ -5,7 +5,7 @@
 ## This is the N3 half N2 deferred: the N2 bridge (``reconcileConsumedStateGroups``)
 ## drove the IN-PROCESS ``reconcileResources``, which hard-errors on a member
 ## ``typeId`` whose driver the ``repro`` CLI does not link. Real topology
-## ``stateGroup`` members are vm-harness Incus resources whose drivers are NOT
+## ``stateGroup`` members are gosti Incus resources whose drivers are NOT
 ## linked; this test proves the bridge now routes such a group to the
 ## session-backed ``reconcileResourcesViaSession(store)`` while the always-linked
 ## synthetic run-edge-consumer runs in-process, in ONE pass, so the consumer's

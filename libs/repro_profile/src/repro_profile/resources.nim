@@ -767,13 +767,27 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             name: string;
                             content: string;
                             enabled: bool = true;
+                            aptClosureLock: string = "";
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
+  ## A system unit under `/etc/systemd/system/`.
+  ##
+  ## `aptClosureLock` attaches a `package(apt, ...)` closure: the text of a
+  ## `repro-apt-closure-lock v1` (`repro-harvest-apt --emit-lock`, usually
+  ## read with `staticRead`). The apply realises the closure into
+  ## `/repro/store/prefixes/` and the installed unit gains
+  ## `BindReadOnlyPaths=<closure>/usr:/usr` (plus
+  ## `InaccessiblePaths=-/etc/ld.so.preload`) in its `[Service]` section,
+  ## so `ExecStart=/usr/bin/<daemon>` runs the closure's binary natively
+  ## and `AmbientCapabilities=`, `DynamicUser=`, `LoadCredential=` and
+  ## `DeviceAllow=` keep their meaning. ReproOS Add-On Mode spec §8.3.
   block:
     var fields = initTable[string, FieldValue]()
     fields["name"] = strField(name)
     fields["content"] = strField(content)
     fields["enabled"] = boolField(enabled)
+    if aptClosureLock.len > 0:
+      fields["aptClosureLock"] = strField(aptClosureLock)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,
