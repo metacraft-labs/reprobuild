@@ -26,8 +26,11 @@
 ##    the fixture has no systemd to bring the network and sshd up.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=preflight-writes``): a
-## preflight that writes one file under ``/var/lib``. Under the
-## write-protected disk it fails, so step 1 goes red.
+## preflight that writes one file under ``/var/lib`` and swallows the error
+## when it cannot. Under the write-protected disk the write fails silently
+## and the hash stays identical, so only the read-write leg (step 2b: no
+## file on the root filesystem newer than a marker) turns the gate red --
+## which is why that leg exists.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_preflight_is_zero_write``).
 ##
@@ -122,6 +125,21 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let rwDigest = planDigestOf(rw.stdout)
       step("plan digest is the same read-only and read-write",
            rwDigest == roDigest, "ro " & roDigest & " rw " & rwDigest)
+    # 2b. The writes the hash cannot see: on the read-write disk, every file
+    # on the root filesystem modified after a marker while the preflight
+    # ran must be none. One SSH session, so the login's own accounting
+    # writes precede the marker and the logout's follow the find. The
+    # pruned trees are runtime and log state the base writes on its own.
+    let newer = g.exec("touch /run/addon-marker && sleep 1 && " &
+      repro & " system addon preflight >/dev/null 2>&1; " &
+      "find / -xdev \\( -path /proc -o -path /sys -o -path /dev -o -path /run " &
+      "-o -path /tmp -o -path /var/log -o -path /var/lib/systemd/timesync " &
+      "-o -path /root/.cache -o -path /var/lib/apt/lists \\) -prune -o " &
+      "-newer /run/addon-marker -print")
+    step("the preflight modified no file on the root filesystem",
+         newer.exitCode == 0 and newer.stdout.strip().len == 0,
+         if newer.stdout.strip().len == 0: "(nothing newer than the marker)"
+         else: newer.stdout & newer.stderr)
 
     # 3a. A foreign /etc/repro.
     discard g.run("mkdir /etc/repro")

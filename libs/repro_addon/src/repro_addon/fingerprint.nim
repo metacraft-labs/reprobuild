@@ -450,10 +450,16 @@ proc hexToAddress(hex: string; v6: bool): string =
     groups.add(toHex(bytes[2 * i] * 256 + bytes[2 * i + 1], 4).toLowerAscii())
   "[" & groups.join(":") & "]"
 
-proc parseProcNet*(text, proto: string): seq[tuple[key, value: string]] =
+proc parseProcNet*(text, proto: string;
+                   ephemeralLo = 0, ephemeralHi = 0): seq[tuple[key, value: string]] =
   ## Listening sockets from one ``/proc/net/<proto>`` table. TCP: state
   ## ``0A`` (LISTEN). UDP: state ``07`` with a zero remote address, i.e.
-  ## bound and unconnected -- a server socket, not an in-flight query.
+  ## bound and unconnected -- a server socket, not an in-flight query --
+  ## except one bound inside the kernel's ephemeral range
+  ## ``[ephemeralLo, ephemeralHi]`` (``net.ipv4.ip_local_port_range``): a
+  ## resolver or DHCP client that bound an unconnected UDP socket to a
+  ## port the kernel chose is a transient client, and the port it got is
+  ## what makes two reads differ. A server listens on a port it chose.
   ## Key ``<proto> <addr>:<port>``; repeated binds (SO_REUSEPORT) are
   ## counted in the value.
   let v6 = proto.endsWith("6")
@@ -470,13 +476,14 @@ proc parseProcNet*(text, proto: string): seq[tuple[key, value: string]] =
     let remote = f[2].split(':')
     let state = f[3]
     if local.len != 2 or remote.len != 2: continue
+    let port = parseHexInt(local[1])
     let listening =
       if proto.startsWith("tcp"): state == "0A"
       else: state == "07" and remote[1] == "0000" and
-            remote[0].allCharsInSet({'0'})
+            remote[0].allCharsInSet({'0'}) and
+            not (ephemeralHi > 0 and port >= ephemeralLo and port <= ephemeralHi)
     if not listening: continue
-    let key = proto & " " & hexToAddress(local[0], v6) & ":" &
-              $parseHexInt(local[1])
+    let key = proto & " " & hexToAddress(local[0], v6) & ":" & $port
     if key notin counts: order.add(key)
     counts.inc(key)
   for k in order:
@@ -653,10 +660,18 @@ proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
     collectSysctl(result)
     collectFileComponent(result, fcMounts,
                          parseMountinfo(readFile("/proc/self/mountinfo")))
+    var ephLo, ephHi = 0
+    try:
+      let r = readFile("/proc/sys/net/ipv4/ip_local_port_range").splitWhitespace()
+      if r.len == 2:
+        ephLo = parseInt(r[0]); ephHi = parseInt(r[1])
+    except IOError, OSError, ValueError:
+      discard
     for proto in ["tcp", "tcp6", "udp", "udp6"]:
       let p = "/proc/net/" & proto
       if fileExists(p):
-        collectFileComponent(result, fcListeners, parseProcNet(readFile(p), proto))
+        collectFileComponent(result, fcListeners,
+                             parseProcNet(readFile(p), proto, ephLo, ephHi))
   result.normalise()
 
 # ---------------------------------------------------------------------------

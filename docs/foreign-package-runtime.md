@@ -312,8 +312,11 @@ unit (`apt_closure.realiseAptClosure`):
    and renamed into place, with the completion marker written last.
 5. Once a member's prefix exists its cached `.deb` is deleted (the prefix
    supersedes it), so the cache holds only in-flight downloads. Prefixes no
-   longer named by any generation are the store GC's (Add-On spec §5.2,
-   milestone A4); nothing deletes them yet.
+   longer named by any generation belong to the store's garbage collector:
+   each generation registers the prefixes it runs from as a store root, and
+   a prefix no root holds becomes collectable once the retention window
+   (never the current or previous generation) has passed. Nothing deletes
+   them yet.
 
 The closure's `<hash16>` depends only on the realiser version, the
 architecture and the member digests. The planner therefore renders the unit
