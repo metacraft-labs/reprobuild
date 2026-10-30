@@ -2448,10 +2448,16 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -n "$leaf" ] || continue
   # A registered leaf may be the workspace checkout itself, or a nested repo.
   # Prefer the workspace's marker; plain-git trees retain the sibling fallback.
+  # The settings and state files' RETIRED names mark a workspace here too:
+  # repro refuses to work in such a root until it is migrated, but its
+  # checkouts still borrow from this pool, and a missed parent means objects
+  # they need are not retained.
   workspace=$leaf
   marked=0
   while [ "$workspace" != / ] && [ "$workspace" != . ]; do
-    if [ -f "$workspace/.repro-workspace.toml" ] ||
+    if [ -f "$workspace/repro-workspace.toml" ] ||
+       [ -f "$workspace/.repro/workspace-state.toml" ] ||
+       [ -f "$workspace/.repro-workspace.toml" ] ||
        [ -f "$workspace/.repro/workspace.toml" ]; then
       dirname "$workspace"
       marked=1
