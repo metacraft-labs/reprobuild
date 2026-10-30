@@ -18,6 +18,8 @@
 
 import std/[algorithm, strutils, tables]
 
+import ./mutations
+
 type
   TransitionVerb* = enum
     tvStart = "start"
@@ -343,7 +345,12 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
         reason: why & " (reloadIfChanged)"))
     else:
       starts.add(Transition(unit: f.unit, verb: tvRestart, reason: why))
-  propagateStops(stops & starts, facts)
+  when mutated("partof-not-propagated"):
+    # The falsifying mutation of the propagation: the plan leaves what
+    # systemd carries along PartOf=/BindsTo= implicit.
+    stops & starts
+  else:
+    propagateStops(stops & starts, facts)
 
 proc propagateDependencyChanges*(facts: var seq[UnitFacts];
                                  dependsOn: Table[string, seq[string]]) =

@@ -289,9 +289,19 @@ proc ownObjectPaths*(objects: seq[OwnObject]): seq[string] =
   result.sort()
 
 proc installTargets*(unitContent: string): seq[tuple[kind, target: string]] =
-  ## The ``[Install]`` directives of a unit: ``WantedBy`` / ``RequiredBy``
-  ## (a symlink in ``<target>.wants`` / ``.requires``) and ``Alias`` (a
-  ## symlink with the alias name). Space-separated lists are split.
+  ## Every ``[Install]`` directive of a unit (systemd.unit(5) "[Install]
+  ## Section Options", systemd 252-260): ``WantedBy`` / ``RequiredBy`` /
+  ## ``UpheldBy`` (a symlink in ``<target>.wants`` / ``.requires`` /
+  ## ``.upholds``), ``Alias`` (a symlink with the alias name), and the two
+  ## that make ``systemctl enable`` do more than link this unit: ``Also``
+  ## (enable those units too) and ``DefaultInstance`` (the instance a
+  ## template is enabled as). Space-separated lists are split; the caller
+  ## decides what each kind may do.
+  when mutated("install-targets-ignore-alias-also"):
+    const known = ["WantedBy", "RequiredBy"]
+  else:
+    const known = ["WantedBy", "RequiredBy", "UpheldBy", "Alias", "Also",
+                   "DefaultInstance"]
   var inInstall = false
   for raw in unitContent.splitLines():
     let line = raw.strip()
@@ -303,7 +313,7 @@ proc installTargets*(unitContent: string): seq[tuple[kind, target: string]] =
     let eq = line.find('=')
     if eq < 0: continue
     let key = line[0 ..< eq].strip()
-    if key in ["WantedBy", "RequiredBy", "Alias"]:
+    if key in known:
       for v in line[eq + 1 .. ^1].splitWhitespace():
         result.add((kind: key, target: v))
 

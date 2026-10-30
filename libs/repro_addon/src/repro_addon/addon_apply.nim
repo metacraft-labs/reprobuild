@@ -414,6 +414,9 @@ proc installLinkPaths*(unit, content: string): seq[tuple[link, dir: string]] =
     of "RequiredBy":
       let d = SystemdUnitDir / (t.target & ".requires")
       result.add((link: d / unit, dir: d))
+    of "UpheldBy":
+      let d = SystemdUnitDir / (t.target & ".upholds")
+      result.add((link: d / unit, dir: d))
     of "Alias":
       result.add((link: SystemdUnitDir / t.target, dir: SystemdUnitDir))
     else: discard
@@ -1029,16 +1032,17 @@ proc systemctlOrRaise(args: openArray[string]) =
 proc restoreUnitState*(e: LedgerEntry; driver: CollisionDriver) =
   ## After the add-on's unit file left (restored or removed), put the unit
   ## back in the state the base had it: a `replace`d package unit that was
-  ## enabled and active stays so, now from the package's file; an adopted
-  ## hand-written unit the add-on enabled is disabled again. Runs after
-  ## `daemon-reload`.
+  ## enabled and active stays so, now from the package's file. Runs after
+  ## `daemon-reload`, and after the install links the add-on made for the
+  ## unit were removed: an adopted hand-written unit the add-on enabled is
+  ## disabled by that. Never `systemctl disable`, which would also remove
+  ## links the base made (its [Install] may name units the add-on does
+  ## not own).
   let now = driver.unitProvision(e.unit)
   let nowEnabled = now.unitFileState in ["enabled", "enabled-runtime"]
   if e.baseUnitState == "enabled" and not nowEnabled and
       now.loadState == "loaded":
     systemctlOrRaise(["enable", "--", e.unit])
-  elif e.baseUnitState != "enabled" and nowEnabled:
-    systemctlOrRaise(["disable", "--", e.unit])
   if e.baseActiveState == "active" and now.loadState == "loaded":
     # The running instance is the add-on's definition; restart it from
     # the base's file.
@@ -1132,7 +1136,9 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   let current = if currentText.len > 0: parseSystemProfile(currentText)
                 else: SystemProfile()
   result.addOn = current.addOn
-  result.addOn.declared = current.addOn.declared or given.addOn.declared
+  # Whether the stored profile carries an addOn stanza is the current
+  # generation's; only a needed prefix (below) comes from the given one.
+  result.addOn.declared = current.addOn.declared
   var wanted = initHashSet[string]()
   for a in addresses: wanted.incl(a)
   for r in current.resources:
@@ -1156,6 +1162,7 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
           narrowest = pfx
       if narrowest.len > 0:
         result.addOn.managedEtcPrefixes.add(narrowest)
+        result.addOn.declared = true
     if not found:
       raise newException(AddonApplyError, "cannot adopt " & a &
         ": the profile declares no resource with that address")
@@ -1242,6 +1249,70 @@ proc recordRolledBack(stateDir, attempt, backTo, asGeneration, why: string;
     diagnostic: (if healthFailed: "confirm failed: " else: "") & why &
       " -> back to " & backTo & " as " & asGeneration,
     recordClass: AuditClassLiveState))
+
+proc decideInstall(driver: CollisionDriver; r: SystemResource;
+                   ownedLinks: HashSet[string];
+                   enabledUnits: HashSet[string];
+                   targets: var seq[PlannedTarget]) =
+  ## The ``[Install]`` section of an enabled unit, through the decision
+  ## table (spec §4.3 unit rows). ``systemctl enable`` does more than link
+  ## the unit under its targets:
+  ##
+  ## - ``Alias=`` creates ``/etc/systemd/system/<alias>`` -- a unit of that
+  ##   name. It is decided as a unit target: a package unit of that name is
+  ##   ``EAddOnUnitShadows`` unless the resource opted into ``replace``; a
+  ##   masked, transient, generated or local one, a foreign diversion, or
+  ##   anything already at the path that the ledger does not hold as this
+  ##   resource's link refuses; the guard re-checks it before the write.
+  ## - ``Also=`` enables other units too, links the add-on would neither
+  ##   own nor ledger: refused unless it names a unit this profile itself
+  ##   declares enabled.
+  ## - ``DefaultInstance=`` enables a template as an instance whose links
+  ##   the add-on does not derive: refused.
+  ##
+  ## ``WantedBy``/``RequiredBy``/``UpheldBy`` links are the unit's own
+  ## (``installLinkPaths``) and are ledgered after the apply.
+  if not r.suEnabled: return
+  let dot = r.suName.rfind('.')
+  let suffix = if dot >= 0: r.suName[dot .. ^1] else: ""
+  for t in installTargets(r.suContent):
+    case t.kind
+    of "DefaultInstance":
+      raise newException(AddonCollisionError, "refusing " & r.address &
+        ": [Install] DefaultInstance=" & t.target & " enables a template " &
+        "instance whose links the add-on does not derive; declare the " &
+        "instance's unit instead")
+    of "Also":
+      if t.target notin enabledUnits:
+        raise newException(AddonCollisionError, "refusing " & r.address &
+          ": [Install] Also=" & t.target & " would enable " & t.target &
+          ", which this profile does not declare as an enabled unit; " &
+          "`systemctl enable` would change the enablement of a unit the " &
+          "add-on does not own")
+    of "Alias":
+      let err = systemdUnitNameError("[Install] Alias of " & r.suName, t.target)
+      if err.len > 0:
+        raise newException(AddonCollisionError, "refusing " & r.address &
+          ": " & err)
+      if not t.target.endsWith(suffix):
+        raise newException(AddonCollisionError, "refusing " & r.address &
+          ": [Install] Alias=" & t.target & " is not a " & suffix &
+          " name (systemd requires an alias of the unit's own type)")
+      let path = unitPath(t.target)
+      if path in ownedLinks:
+        continue          # the alias link this resource already holds
+      if leafNoFollow(path).kind != lkAbsent:
+        raise newException(AddonDriftError, "EDrift: " & path & " (" &
+          r.address & ", [Install] Alias=" & t.target & ") already exists " &
+          "and the ledger does not hold it as this unit's alias; an alias " &
+          "would replace it")
+      let inp = DecisionInputs(address: r.address, kind: tkUnit,
+        unit: t.target,
+        collision: (if r.suCollision == "replace": "replace" else: ""))
+      let (dec, obs) = decide(driver, inp, path)
+      targets.add(plannedTarget(r.address, inp, path, dec, obs))
+    else:
+      discard
 
 proc recordingRefusals(inner: PreWriteGuard;
                        refused: var HashSet[string]): PreWriteGuard =
@@ -1467,6 +1538,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       observation: dec.observation, verdict: $dec.verdict, reason: dec.reason))
     targets.add(targetFor(r.address, inp, p.targetPath, dec, obs, saved))
     plans.add(p)
+  var enabledUnits = initHashSet[string]()   # units this profile enables
+  for r in own.resources & userResources:
+    if r.kind == srkSystemdSystemUnit and r.suEnabled:
+      enabledUnits.incl(r.suName)
   for i in 0 ..< userResources.len:
     var r = userResources[i]
     var p = ResourcePlan(r: r)
@@ -1534,6 +1609,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if saved.found: dec = savedDecision(saved.plan)
     else: (dec, obs) = decide(driver, inp, path)
     decisions[r.address] = dec
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+      var ownedLinks = initHashSet[string]()
+      for e in previous.entries:
+        if e.resource == r.address and e.class == lcInstallLink:
+          ownedLinks.incl(e.path)
+      decideInstall(driver, r, ownedLinks, enabledUnits, targets)
     if r.kind == srkLinuxSysusersEntry and p.accountBefore.len > 0 and
         not inp.ledgerOwns:
       # Spec §4.1: an existing account of the same name with a different
@@ -2126,9 +2207,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                            orchestrated: true)
 
   let transitions = result.transitions
-  var disableOnRemoval: seq[string]
+  var disableOnRemoval: seq[tuple[unit: string; links: seq[string]]]
   for r in removedUnits:
-    disableOnRemoval.add(r.suName)
+    var links: seq[string]
+    for e in previous.entries:
+      if e.resource == r.address and e.class == lcInstallLink:
+        links.add(e.path)
+    disableOnRemoval.add((unit: r.suName, links: links))
   var changedSysctl: seq[string]
   for p in plans:
     if p.r.kind == srkLinuxSysctl and p.verdict != $cvNoOp and not p.skipInfra:

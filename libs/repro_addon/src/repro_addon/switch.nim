@@ -37,6 +37,8 @@ import std/[algorithm, os, sets, strutils, tables, times]
 import repro_infra/addon_diagnostics
 import repro_local_store/store
 
+import repro_elevation/nofollow_write
+
 import ./generation0
 import ./host_exec
 import ./ledger
@@ -316,12 +318,16 @@ type
     ## to disable (``"disable:" & unit``), before it acts, so the pending
     ## marker never misses one that a crash or a refusal interrupts.
 
-proc runPreStop*(ts: seq[Transition]; disable: openArray[string];
+proc runPreStop*(ts: seq[Transition];
+                 disable: openArray[tuple[unit: string; links: seq[string]]];
                  onStop: PreStopObserver = nil): PreStopResult =
   ## Step 2: the transition list's stops, exclusive ones first and
-  ## confirmed, then ``disable`` for the units this generation removes
-  ## (their files are about to go, so their [Install] links go with them
-  ## while systemd can still read the unit). A ``stop-start`` unit's
+  ## confirmed, then the units this generation removes are disabled by
+  ## removing exactly the [Install] links the ledger says the add-on made
+  ## for them (``links``), each relative to its parent's descriptor. Never
+  ## ``systemctl disable``: that re-reads the unit's [Install] section and
+  ## removes every link it names, including a link the base made for a
+  ## unit the add-on does not own (an ``Also=`` or an alias it shares). A ``stop-start`` unit's
   ## active triggers (sockets, timers, paths) are stopped first, so they
   ## cannot start its old definition again before step 7. Last, every
   ## exclusive unit step 7 will start is checked with its predecessors,
@@ -359,10 +365,11 @@ proc runPreStop*(ts: seq[Transition]; disable: openArray[string];
     for t in startEntries(ts):
       if t.exclusive and t.verb in {tvStart, tvStopStart}:
         confirmExited(@[t.unit] & t.predecessors, t.unit)
-  for u in disable:
-    note("disable:" & u)
-    try: disableUnit(u)
-    except SwitchError: discard   # already disabled, or static
+  for d in disable:
+    note("disable:" & d.unit)
+    for l in d.links:
+      try: discard removeLeafNoFollow(l)
+      except CatchableError: discard   # already gone, or not a leaf
 
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
                notRunning: openArray[string] = []) =

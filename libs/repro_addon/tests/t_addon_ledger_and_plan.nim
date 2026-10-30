@@ -3,7 +3,9 @@
 ## pure fact parsers.
 ##
 ## No mocks: pure functions over real value types and captured file
-## contents. The end-to-end behaviour -- a real bootstrap's fingerprint
+## contents. One substitution: the unlisted-removal test plans against a
+## fixture dpkg database and answers ``systemctl show`` with "not-found"
+## (the build host has no guest systemd); it runs the real plan path. The end-to-end behaviour -- a real bootstrap's fingerprint
 ## diff equalling its ledger's delta -- is the VM gates' job
 ## (``tests/e2e/addon``).
 
@@ -12,7 +14,7 @@ import std/[json, os, posix, strutils, tables, unittest]
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_profile
-import repro_addon/[addon_apply, fingerprint, generation0, ledger, preflight, store_root]
+import repro_addon/[addon_apply, collision, fingerprint, generation0, ledger, preflight, store_root]
 import repro_elevation/posix_system_parse
 import repro_binary_cache_client/caches_config
 
@@ -172,6 +174,18 @@ suite "generation 0":
       @[(kind: "WantedBy", target: "a.target"), (kind: "WantedBy", target: "b.target"),
         (kind: "Alias", target: "x.service")]
     check mountWhere("[Mount]\nWhat=/a\nWhere=/repro/store\n") == "/repro/store"
+
+  test "every [Install] directive is read, and the links enable creates are derived":
+    let u = "[Install]\nWantedBy=a.target\nRequiredBy=b.target\nUpheldBy=c.target\n" &
+      "Alias=y.service\nAlso=z.service\nDefaultInstance=i\n"
+    check installTargets(u).len == 6
+    let links = installLinkPaths("x.service", u)
+    var paths: seq[string]
+    for l in links: paths.add(l.link)
+    check paths == @["/etc/systemd/system/a.target.wants/x.service",
+                     "/etc/systemd/system/b.target.requires/x.service",
+                     "/etc/systemd/system/c.target.upholds/x.service",
+                     "/etc/systemd/system/y.service"]
 
 suite "preflight facts":
   test "os-release values are unquoted":
@@ -496,3 +510,37 @@ suite "repro system adopt is scoped to the addressed resource":
     check r2.addOn.managedEtcPrefixes == @["/etc/app/"]
     expect AddonApplyError:
       discard scopedAdoptProfile(given, current, ["systemFile:/etc/nowhere"])
+
+suite "removal by ledger: a resource with no ledger entry is never removed":
+  test "the unlisted branch: listed as unlisted, neither destroyed nor restored":
+    # A committed profile can name a resource the ledger holds nothing of
+    # (an older release's partial apply, or a ledger an operator repaired).
+    # Seeded directly: the previous operator profile declares c.conf, the
+    # ledger has no entry for it, a same-named file exists. A plan that
+    # drops the resource must report it unlisted and decide no removal --
+    # the file is not the add-on's. (Plan only: no root, nothing written.)
+    let state = getTempDir() / ("repro-addon-unlisted-" & $getCurrentProcessId())
+    let etc = getTempDir() / ("repro-addon-unlisted-etc-" & $getCurrentProcessId())
+    removeDir(state); removeDir(etc)
+    createDir(state / "addon")
+    defer:
+      removeDir(state)
+      removeDir(etc)
+    writeFile(state / "addon" / "own.profile", "")
+    writeFile(state / "addon" / "user.profile",
+      "addOn {\n  managedEtcPrefixes = [\"/etc/repro-unlisted-fixture/\"]\n}\n\n" &
+      "fs.systemFile {\n  path = \"/etc/repro-unlisted-fixture/c.conf\"\n" &
+      "  content = \"c\"\n}\n")
+    writeLedger(state / "addon-ledger", Ledger(generation: "g1"))
+    createDir(etc / "var/lib/dpkg/info")
+    writeFile(etc / "var/lib/dpkg/status", "")
+    let d = newDpkgDriver(etc, proc(u: string): UnitProvision {.gcsafe.} =
+      UnitProvision(loadState: "not-found"))
+    let r = runAddonApply(AddonApplyOptions(stateDir: state,
+      userProfileText: "addOn {\n  managedEtcPrefixes = " &
+        "[\"/etc/repro-unlisted-fixture/\"]\n}\n",
+      planOnly: true, driver: d))
+    check r.unlisted == @["systemFile:/etc/repro-unlisted-fixture/c.conf"]
+    check r.removed.len == 0
+    check "unlisted\tsystemFile:/etc/repro-unlisted-fixture/c.conf\t" &
+          "systemFile:/etc/repro-unlisted-fixture/c.conf" in r.ledgerDiff

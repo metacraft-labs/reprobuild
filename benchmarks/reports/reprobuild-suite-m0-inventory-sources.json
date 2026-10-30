@@ -8135,8 +8135,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
-      "sourceSuiteCount": 14,
-      "staticCaseCount": 41,
+      "sourceSuiteCount": 15,
+      "staticCaseCount": 43,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

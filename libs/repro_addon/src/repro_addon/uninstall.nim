@@ -3,8 +3,8 @@
 ## Reverses everything the ledger records, in the order the add-on's
 ## specification fixes:
 ##
-## 1. stop and disable the add-on's units (which removes their install
-##    links and, for ``repro-store.mount``, unmounts the store);
+## 1. stop the add-on's units (for ``repro-store.mount`` that unmounts the
+##    store); their install links are the ledger's, removed in step 2;
 ## 2. remove the units and drop-ins (and any install link ``disable``
 ##    left), restoring an adopted or replaced unit from the bytes the
 ##    ledger preserved;
@@ -218,7 +218,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     if u.collision in ["replace", "adopt", "reconcile"]:
       handBack.add(u)
     elif fileExists(u.path):
-      systemctlOrRecord(["disable", "--now", u.unit], result)
+      # Stopped, then disabled by removing exactly its ledgered install
+      # links in step 2 -- never `systemctl disable`, which would also
+      # remove links the base made for units the add-on does not own.
+      systemctlOrRecord(["stop", "--", u.unit], result)
 
   # 2. Units and drop-ins, and any install link `disable` did not remove.
   for li in byClass[lcInstallLink]:

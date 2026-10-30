@@ -126,7 +126,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     discard g.run("printf 'foreign\\n' > " & Dir & "/c.conf")
     var f = g.takeFingerprint(repro)
 
-    # gen2: a leaves unchanged (removed); c leaves unlisted (kept).
+    # gen2: a leaves unchanged (removed); c, never in a committed profile
+    # and never ledgered, is left alone.
     let a2 = g.applyProfile(repro, "gen2", Gen2)
     let l2 = g.ledgerOf()
     step("gen2: a removed; c, which the ledger does not list, kept",
