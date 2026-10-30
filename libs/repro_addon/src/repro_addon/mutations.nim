@@ -195,6 +195,19 @@
 ##                                            what is sealed to it (the
 ##                                            rotation gate's negative
 ##                                            control)
+## ``apt-hook-without-timeout``               the apt hook runs the
+##                                            verification with no
+##                                            deadline, so a hung one
+##                                            stalls dpkg
+## ``apt-hook-without-exit0``                 the apt hook exits with the
+##                                            verification's status, so a
+##                                            failing or timed-out one
+##                                            fails apt
+## ``base-coupling-unflagged``                no unit is ever flagged
+##                                            base-coupled
+## ``base-matrix-unchecked``                  an apply against a base
+##                                            outside the supported matrix
+##                                            is not refused
 ## =========================================  ==============================
 
 const
@@ -236,7 +249,11 @@ const
                           "rotation-not-reconciled",
                           "recipient-key-mode-unchecked",
                           "secrets-write-then-narrow",
-                          "rotation-keeps-old-key"]
+                          "rotation-keeps-old-key",
+                          "apt-hook-without-timeout",
+                          "apt-hook-without-exit0",
+                          "base-coupling-unflagged",
+                          "base-matrix-unchecked"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

@@ -120,7 +120,9 @@ proc deployAgentExitCode*(kind: AgentOutcomeKind): int =
   # manifest. A secrets failure is deliberately NOT `1`: retrying on the timer
   # will not fix a wrong recipient key or a missing --secrets-key, and grouping
   # it with the retryable failures would bury it in a loop that never converges.
-  of aoRejected, aoAmbiguous, aoSecretsFailed: 2
+  # An unsupported base (a release upgrade the matrix does not cover yet)
+  # is the same class: no retry changes the host's distribution.
+  of aoRejected, aoAmbiguous, aoSecretsFailed, aoUnsupportedBase: 2
 
 proc toJsonNode*(rec: TickStatusRecord): JsonNode =
   %*{

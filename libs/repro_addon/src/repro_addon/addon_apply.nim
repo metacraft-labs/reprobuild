@@ -73,6 +73,7 @@ import repro_local_store/store
 
 import ./collision
 import ./addon_secrets
+import ./base_identity
 import ./etc_write
 import ./fingerprint
 import ./generation0
@@ -176,6 +177,11 @@ type
       ## switch's own choice for a replay.
     secretsFromGeneration*: string
       ## A rollback: the generation whose envelope copy it materialises.
+    baseIdentity*: Option[BaseIdentity]
+      ## The base, observed by the caller instead of read from this host:
+      ## a hermetic test planning over a fixture tree on a build host
+      ## whose own base is not in the matrix. ``none`` (every product
+      ## caller) observes the host.
     nonBlockingStarts*: bool
       ## Queue step 7's jobs without waiting for them (``--no-block``): a
       ## recovery at boot, which must never wait on the boot transaction.
@@ -211,6 +217,9 @@ type
                                    ## computed from (``planIdOf``)
     confirm*: ConfirmOutcome       ## step 8 (§7.5): the health checks
     healthChecks*: seq[UnitHealthCheck]
+    baseIdentity*: BaseIdentity    ## the base observed at plan time (§7.4)
+    previousBase*: BaseIdentity    ## the one the current generation recorded
+    baseChanges*: seq[string]      ## what changed between the two (§7.9)
 
 const
   DefaultStateDir* = "/var/lib/repro/system"
@@ -1689,9 +1698,32 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # re-observation before each write still sees a package installed since
   # the plan, without re-reading every file list for every operation.
   let driver = if opts.driver != nil: opts.driver else: detectCollisionDriver()
+  # --- The base (A10; spec §7.4, §7.9): observed at plan time, recorded
+  # with the generation, and gated by the supported matrix before anything
+  # is observed or written. A replay or a revert finishes or undoes a
+  # switch already under way and is never refused for the base.
+  block:
+    var planned = own.resources
+    planned.add(user.resources)
+    result.baseIdentity =
+      if opts.baseIdentity.isSome: opts.baseIdentity.get()
+      else: observeBaseIdentity(previous, planned, driver)
+    if committedPrevious.len > 0:
+      result.previousBase = readGenerationBase(
+        generationDir(stateDir, committedPrevious))
+    result.baseChanges = baseIdentityChanges(result.previousBase,
+                                             result.baseIdentity)
+    if purpose notin ["revert", "replay"] and not opts.recordOnly:
+      checkSupportedBase(result.baseIdentity)
+  let baseIdentityText = renderBaseIdentity(result.baseIdentity)
   # A package that arrived since the add-on took a unit name (spec §4.3):
   # reported on every plan and apply as actionable drift.
   for why in newlyShadowedVendorUnits(previous, driver):
+    result.drift.add(why)
+  # A package installed or upgraded since that owns a ledger path (spec
+  # §7.6, §7.8): the apt hook reported it; every plan and apply reports it
+  # as actionable drift, naming the package.
+  for why in newOwnerFindings(previous, driver):
     result.drift.add(why)
   let newDriver: DriverFactory = proc(): CollisionDriver = driver
   var dropIns = initHashSet[string]()
@@ -2387,6 +2419,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     inputs.add("ledger\t" & sha256Hex(render(previous)))
     inputs.add("reconcile\t" & $opts.reconcileDrift)
     inputs.add("adopt\t" & opts.adoptAddresses.join(","))
+    inputs.add("base\t" & sha256Hex(baseIdentityText))
     for t in targets:
       inputs.add("target\t" & t.address & "\t" & t.path & "\t" &
         t.observation & "\t" & t.observedSha256 & "\t" & $t.verdict)
@@ -2943,6 +2976,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         writeFileAtomic(gd / AddonOwnProfileName, ownText, 0o600)
         writeFileAtomic(gd / AddonUserProfileName,
                         renderProfileText(storedNow), 0o600)
+        # The base it was applied on (spec §7.4).
+        writeFileAtomic(gd / BaseIdentityFileName, baseIdentityText, 0o644)
       seamPause(stateDir, seamPrefix & "step-8")
       problems
 

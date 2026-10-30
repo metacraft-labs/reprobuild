@@ -26,6 +26,7 @@ libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	ni
 libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
+libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	11
 libs/repro_addon/tests/t_addon_collision.nim	nim	35
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	23
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
@@ -297,6 +298,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_history.nim	nim	
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_status.nim	nim	7
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim	nim	1
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_action.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	35
@@ -1073,16 +1075,19 @@ tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
 tests/bundles/bundle_repro_solver_pure_unit.nim	nim	82
 tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	1
 tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	1
+tests/e2e/addon/t_e2e_addon_apt_hook_never_blocks_dpkg.nim	nim	1
 tests/e2e/addon/t_e2e_addon_base_boots_without_store.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_uninstall_byte_identity.nim	nim	1
 tests/e2e/addon/t_e2e_addon_collision_matrix.nim	nim	1
 tests/e2e/addon/t_e2e_addon_confirm_or_revert.nim	nim	1
+tests/e2e/addon/t_e2e_addon_debian_12_to_13_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_divert_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_exclusive_never_overlaps.nim	nim	1
 tests/e2e/addon/t_e2e_addon_gc_keeps_current_and_previous.nim	nim	1
 tests/e2e/addon/t_e2e_addon_hard_reset_at_every_step.nim	nim	1
+tests/e2e/addon/t_e2e_addon_hook_reports_new_file_on_ledger_path.nim	nim	1
 tests/e2e/addon/t_e2e_addon_net_sysctl_applies_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_no_plaintext_secret_on_disk.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
@@ -1093,8 +1098,11 @@ tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_follow_generations.nim	nim	1
 tests/e2e/addon/t_e2e_addon_service_reads_only_its_credentials.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
+tests/e2e/addon/t_e2e_addon_survives_point_upgrades.nim	nim	1
 tests/e2e/addon/t_e2e_addon_switch_is_planned_exactly.nim	nim	1
 tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim	nim	1
+tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
+tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	1

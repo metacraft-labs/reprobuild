@@ -49,6 +49,8 @@ import repro_local_store/store as local_store
 
 import ./addon_apply
 import ./addon_rollback
+import ./apt_hook
+import ./base_identity
 import ./bootstrap
 import ./collision
 import ./fingerprint
@@ -77,7 +79,10 @@ commands:
   uninstall [--keep-store]
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
-      Compare every ledger object with the host (report only).
+      Compare every ledger object with the host (report only). --after-dpkg
+      (the apt hook): also report packages that now own ledger paths and
+      changed vendor units, record findings in the journal and the hook's
+      event log, and always exit 0.
   reassert [--boot]
       Finish or revert an interrupted switch, check the current generation
       (static tree, store objects, ledger digests) and report ok, drift or
@@ -331,6 +336,10 @@ proc runAddonCli*(args: seq[string]): int =
       for a in rest:
         if a in ["--boot", "--after-dpkg"]: reportOnly = true
         else: raise newException(ValueError, "unknown option " & a)
+      if "--after-dpkg" in rest:
+        # The apt hook (spec §7.8): ledger digests, new package owners of
+        # ledger paths, changed vendor units; recorded, always exit 0.
+        return runAfterDpkgCli()
       if reportOnly:
         # Report-only callers (the boot unit, the apt hook) must never fail
         # whatever invoked them, so nothing here may raise or exit non-zero.
@@ -476,6 +485,17 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   ## the sysctl values observed from the host's namespaces too.
   result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
     renderTransitions(r.transitions)
+  if r.baseIdentity.id.len > 0:
+    # The base the plan was computed against (§7.4) and, after a
+    # distribution upgrade, what changed since the current generation (§7.9).
+    result.add("base: " & describeBase(r.baseIdentity) & " (identity " &
+      baseIdentityDigest(r.baseIdentity)[0 ..< 16] & ", in the supported " &
+      "matrix)\n")
+    if r.baseChanges.len > 0:
+      result.add("base changed since generation " & r.previousGenerationId &
+        " (" & describeBase(r.previousBase) & "):\n")
+      for c in r.baseChanges: result.add("  " & c & "\n")
+    result.add(renderReleaseUpgradeChecklist(r.baseIdentity))
   if r.planId.len > 0:
     result.add("add-on plan-id: " & r.planId & "\n")
   if r.staticTree.len > 0:

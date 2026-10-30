@@ -168,6 +168,34 @@ e2e_addon_refused_recovery_keeps_its_record:
 e2e_addon_net_sysctl_applies_in_host_namespace:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace
 
+# Milestone A10: living under apt and distribution release upgrades. The
+# upgrade gates run against the time-shifted snapshot mirror
+# (tests/e2e/addon/snapshot_mirror.nim), from images published before the
+# point release they cross.
+e2e_addon_survives_point_upgrades:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-20260706-amd64,debian-13-20260831-amd64,ubuntu-24.04-20251213-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_survives_point_upgrades
+
+e2e_addon_hook_reports_new_file_on_ledger_path:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_hook_reports_new_file_on_ledger_path
+
+e2e_addon_unattended_upgrades_week:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-20260831-amd64,ubuntu-24.04-20251213-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_unattended_upgrades_week
+
+e2e_addon_debian_12_to_13_release_upgrade:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_debian_12_to_13_release_upgrade
+
+e2e_addon_ubuntu_24_04_to_26_04_release_upgrade:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade
+
+e2e_addon_apt_hook_never_blocks_dpkg:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_apt_hook_never_blocks_dpkg
+
+t_addon_apt_hook_and_base_identity:
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity apt-hook-without-timeout
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity apt-hook-without-exit0
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity base-coupling-unflagged
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity base-matrix-unchecked
+
 test-hcr-native-library-prerequisite:
     nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
 

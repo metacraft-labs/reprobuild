@@ -9,12 +9,12 @@
 ## diff equalling its ledger's delta -- is the VM gates' job
 ## (``tests/e2e/addon``).
 
-import std/[json, os, posix, strutils, tables, unittest]
+import std/[json, options, os, posix, strutils, tables, unittest]
 
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_profile
-import repro_addon/[addon_apply, collision, fingerprint, generation0, ledger, preflight, store_root]
+import repro_addon/[addon_apply, base_identity, collision, fingerprint, generation0, ledger, preflight, store_root]
 import repro_elevation/posix_system_parse
 import repro_elevation/nofollow_write
 import repro_core/host_apply_lock
@@ -143,8 +143,11 @@ suite "generation 0":
   test "the apt hook can never fail dpkg":
     for o in objs:
       if o.path == AptHookPath:
-        check "|| true" in o.content
+        # Bounded, never executing a missing binary, always exit 0
+        # (the hook's behaviour is run in t_addon_apt_hook_and_base_identity).
+        check "/usr/bin/timeout -k 5 60 " in o.content
         check "if [ -x " in o.content
+        check o.content.strip().endsWith("exit 0\"; };")
 
   test "the re-assert unit is off the base's boot path and has no network":
     for o in objs:
@@ -541,7 +544,10 @@ suite "removal by ledger: a resource with no ledger entry is never removed":
     let r = runAddonApply(AddonApplyOptions(stateDir: state,
       userProfileText: "addOn {\n  managedEtcPrefixes = " &
         "[\"/etc/repro-unlisted-fixture/\"]\n}\n",
-      planOnly: true, driver: d))
+      planOnly: true, driver: d,
+      # The build host is not a matrix base; the plan is over a fixture.
+      baseIdentity: some(BaseIdentity(id: "debian", versionId: "13",
+                                      architecture: "amd64"))))
     check r.unlisted == @["systemFile:/etc/repro-unlisted-fixture/c.conf"]
     check r.removed.len == 0
     check "unlisted\tsystemFile:/etc/repro-unlisted-fixture/c.conf\t" &

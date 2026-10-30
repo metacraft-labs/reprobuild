@@ -17,8 +17,8 @@
 ##   matches its digest. It never re-applies on drift, and it has no
 ##   network;
 ## - the apt hook ``/etc/apt/apt.conf.d/90repro-addon``: a report-only
-##   ``DPkg::Post-Invoke`` that can never fail a dpkg run, even when the
-##   binary it names is missing;
+##   ``DPkg::Post-Invoke`` that can never fail or stall a dpkg run, even when
+##   the binary it names is missing, fails or hangs (``aptHookCommand``);
 ## - ``/etc/profile.d/repro-addon.sh``: the add-on's ``repro`` on ``PATH``
 ##   (appended). The profile DSL's ``addOnToolPath()`` writes a file of its
 ##   own, ``/etc/profile.d/repro-addon-tools.sh`` (``repro_profile``
@@ -259,15 +259,73 @@ proc secretsUnit(reproExe: string): string =
   "[Install]\n" &
   "WantedBy=repro-addon.target\n"
 
-proc aptHook(reproExe: string): string =
-  # Report-only by construction: the whole hook is one shell command that
-  # tests for the binary and ends in ``|| true``, so a missing store, a
-  # missing binary or a failing verification can never fail dpkg or
-  # unattended-upgrades.
+const
+  AptHookTimeoutSeconds* = 60
+    ## How long the apt hook lets one verification run (spec §7.8). At the
+    ## deadline ``timeout(1)`` sends SIGTERM to the verification's process
+    ## group, and SIGKILL five seconds later.
+  AptHookLogPath* = "/var/lib/repro/system/addon/apt-hook.log"
+    ## The hook's event log: one line per event, ``<UTC time> <kind>
+    ## <detail>``. The wrapper appends ``verify-missing``,
+    ## ``verify-failed`` and ``verify-timeout``; the verification appends
+    ## its findings (``apt_hook.nim``). Plain text, not JSON, because the
+    ## wrapper is a shell command inside an apt.conf string, which cannot
+    ## carry a double quote.
+  AptHookTimeoutTool* = "/usr/bin/timeout"   ## coreutils (Essential)
+  AptHookLoggerTool* = "/usr/bin/logger"     ## bsdutils (Essential)
+
+proc aptHookCommand*(reproExe: string;
+                     timeoutSeconds = AptHookTimeoutSeconds;
+                     logPath = AptHookLogPath;
+                     timeoutTool = AptHookTimeoutTool;
+                     loggerTool = AptHookLoggerTool): string =
+  ## The shell command of the ``DPkg::Post-Invoke`` hook (apt runs it with
+  ## ``/bin/sh -c``). Report-only by construction (threat model G19, T39):
+  ##
+  ## - the verification runs under ``timeout``, so a hung one ends at the
+  ##   deadline and dpkg -- or ``unattended-upgrades`` -- goes on;
+  ## - a missing binary (the store unreadable or gone) is never executed;
+  ## - every outcome other than a clean exit is recorded, in the journal
+  ##   (``logger``) and in the hook's event log, and the command ends in
+  ##   ``exit 0`` whatever happened.
+  ##
+  ## It uses no double quote and no backslash: apt.conf(5) strings carry
+  ## neither. Everything but ``reproExe`` is a parameter only for the
+  ## hermetic test, which runs this very command on a build host whose
+  ## tools live elsewhere; generation 0 uses the defaults.
+  let t = $timeoutSeconds
+  let run =
+    when mutated("apt-hook-without-timeout"):
+      # FALSIFYING MUTATION: no deadline; a hung verification stalls dpkg.
+      "$r system addon verify --after-dpkg; c=$?"
+    else:
+      timeoutTool & " -k 5 " & t & " $r system addon verify " &
+        "--after-dpkg; c=$?"
+  when mutated("apt-hook-without-exit0"):
+    # FALSIFYING MUTATION: the verification's status is the hook's, so a
+    # failing or timed-out verification fails dpkg's caller.
+    "r=" & reproExe & "; if [ -x $r ]; then " & timeoutTool &
+      " -k 5 " & t & " $r system addon verify --after-dpkg; fi"
+  else:
+    "r=" & reproExe & "; l=" & logPath & "; " &
+      "if [ -x $r ]; then " & run & "; else c=missing; fi; " &
+      "case $c in 0) ;; missing) k=verify-missing ;; " &
+      "124|137) k=verify-timeout ;; *) k=verify-failed ;; esac; " &
+      "if [ $c != 0 ]; then " &
+      loggerTool & " -t repro-addon-apt-hook -p user.warning " &
+      "repro-addon apt hook: $k exit=$c timeout=" & t & "s 2>/dev/null; " &
+      "echo $(date -u +%Y-%m-%dT%H:%M:%SZ) $k exit=$c timeout=" & t &
+      "s >> $l 2>/dev/null; fi; exit 0"
+
+proc aptHook*(reproExe: string): string =
+  ## ``/etc/apt/apt.conf.d/90repro-addon`` (spec §7.8).
   "// Reprobuild add-on: report-only verification after every dpkg run.\n" &
-  "// It never fails dpkg: the command always exits 0.\n" &
-  "DPkg::Post-Invoke { \"if [ -x " & reproExe & " ]; then " & reproExe &
-    " system addon verify --after-dpkg || true; fi\"; };\n"
+  "// It never fails or stalls dpkg: the verification is bounded by a\n" &
+  "// " & $AptHookTimeoutSeconds & " s timeout and the command always " &
+    "exits 0; a missing, failing or\n" &
+  "// hung verification is recorded in the journal and in " &
+    AptHookLogPath & ".\n" &
+  "DPkg::Post-Invoke { \"" & aptHookCommand(reproExe) & "\"; };\n"
 
 proc profileD(reproExe: string): string =
   let bindir = reproExe[0 ..< reproExe.rfind('/')]

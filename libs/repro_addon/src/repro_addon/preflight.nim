@@ -108,9 +108,16 @@ const
     SupportedBase(id: "debian", versionId: "13", note: "supported"),
     SupportedBase(id: "raspbian", versionId: "13", note: "supported"),
     SupportedBase(id: "ubuntu", versionId: "24.04", note: "supported"),
+    # Ubuntu 26.04 joins the matrix with the 24.04 -> 26.04 release-upgrade
+    # gate that covers it (spec §6.1, milestone A10).
+    SupportedBase(id: "ubuntu", versionId: "26.04", note: "supported"),
     SupportedBase(id: "debian", versionId: "12",
                   note: "release-upgrade source"),
   ]
+
+  SupportedBaseList* = "debian 13, raspbian 13, ubuntu 24.04, ubuntu 26.04; " &
+                       "debian 12 as release-upgrade source"
+    ## The matrix as one phrase, for refusals.
 
   SupportedArchitectures* = ["amd64", "arm64", "armhf"]
 
@@ -587,8 +594,7 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   result.add("distribution", baseNote.len > 0,
     if baseNote.len > 0: id & " " & versionId & " (" & baseNote & ")"
     else: "ID=" & id & " VERSION_ID=" & versionId &
-          " is not in the add-on base matrix (debian 13, raspbian 13, " &
-          "ubuntu 24.04; debian 12 as release-upgrade source)")
+          " is not in the add-on base matrix (" & SupportedBaseList & ")")
 
   # Architecture of the userspace.
   let arch = userspaceArchitecture()
