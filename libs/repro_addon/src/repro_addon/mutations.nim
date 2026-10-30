@@ -57,8 +57,14 @@
 ## ``sysctl-in-apply-namespace``              sysctl fragments are applied
 ##                                            by running systemd-sysctl in
 ##                                            the apply's own namespaces
-##                                            instead of restarting the
-##                                            host's systemd-sysctl.service
+##                                            instead of as a transient
+##                                            unit in the host's
+## ``exclusive-exited-by-top-level-procs``    an exclusive unit counts as
+##                                            exited when the top-level
+##                                            ``cgroup.procs`` of its group
+##                                            is empty, and an unreadable
+##                                            group as exited (a delegated
+##                                            child group goes unseen)
 ## ``path-based-write-follows-links``         the drivers write managed
 ##                                            files with a path-based
 ##                                            ``open``, following any link
@@ -82,6 +88,7 @@ const
                           "observer-checks-path-text-only",
                           "exclusive-as-plain-restart",
                           "sysctl-in-apply-namespace",
+                          "exclusive-exited-by-top-level-procs",
                           "path-based-write-follows-links",
                           "scope-accepts-unnormalised-paths"]
 

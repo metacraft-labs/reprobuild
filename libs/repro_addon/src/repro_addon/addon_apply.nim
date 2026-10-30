@@ -60,7 +60,7 @@
 ## The plan's three add-on sections (spec §7.1) are in the result: the
 ## ledger diff, the collision report, and the service transition list.
 
-import std/[algorithm, os, sets, strutils, tables, times]
+import std/[algorithm, options, os, sets, strutils, tables, times]
 
 import repro_dsl_stdlib/packages/apt_closure
 import repro_elevation
@@ -80,6 +80,7 @@ import ./mutations
 import ./static_tree
 import ./store_root
 import ./switch
+import ./sysctl_precedence
 import ./transitions
 
 export AddonDriftError, AddonCollisionError, EAddOnExclusiveOverlap
@@ -115,9 +116,17 @@ type
       ## not even under the state directory.
     driver*: CollisionDriver
       ## The collision observer; ``nil`` selects the host's.
-    retention*: RetentionPolicy
+    retention*: Option[RetentionPolicy]
       ## Which generations keep their store roots after this commit
-      ## (spec §5.2); zero values mean the default (last 5 or 30 days).
+      ## (spec §5.2); ``none`` means the default (last 5 or 30 days).
+      ## ``some(RetentionPolicy(keepGenerations: 0, keepDays: 0))`` keeps
+      ## only what is always kept: the current and the previous
+      ## generation, and any generation a running managed unit runs from.
+    planId*: string
+      ## ``--plan <id>``: the add-on plan id ``repro infra plan`` printed
+      ## (``planIdOf``). The apply recomputes it from what it observes now
+      ## and refuses with ``EPlanStale`` before anything is written when
+      ## the two differ (spec §7.1). Empty: no pin.
 
   AddonApplyResult* = object
     generationId*: string
@@ -139,6 +148,9 @@ type
       ## the host's namespaces after step 6.
     retentionDropped*: seq[string] ## generations whose store roots the
                                    ## retention policy released
+    planId*: string                ## the add-on plan id (spec §7.1): the
+                                   ## digest of everything the plan was
+                                   ## computed from (``planIdOf``)
 
 const
   DefaultStateDir* = "/var/lib/repro/system"
@@ -172,6 +184,27 @@ proc userProfilePath*(stateDir: string): string = addonDir(stateDir) / "user.pro
 proc preservedDir*(stateDir: string): string = addonDir(stateDir) / "preserved"
 proc generationLedgerPath*(stateDir, generationId: string): string =
   stateDir / "generations" / generationId / "addon-ledger"
+
+proc generationUnitLookup*(stateDir: string): GenerationUnitLookup =
+  ## A unit's definition (its ledger digest) in a generation's own ledger,
+  ## for retention (``switch.generationsHeldBy``). A ledger that is
+  ## missing or unreadable is reported as not found, which keeps the
+  ## generation.
+  var cache = initTable[string, Ledger]()
+  var missing = initHashSet[string]()
+  result = proc(generationId, unit: string):
+      tuple[ledgerFound, unitFound: bool; sha256: string] =
+    if generationId in missing: return (false, false, "")
+    if generationId notin cache:
+      try:
+        cache[generationId] = readLedger(generationLedgerPath(stateDir, generationId))
+      except CatchableError:
+        missing.incl(generationId)
+        return (false, false, "")
+    for e in cache[generationId].entries:
+      if e.class == lcUnit and e.unit == unit:
+        return (true, true, e.sha256)
+    (true, false, "")
 
 proc isAddonHost*(stateDir = DefaultStateDir): bool =
   ## An add-on host is one whose state directory holds the ledger copy.
@@ -942,6 +975,11 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
       raise newException(AddonApplyError, "cannot adopt " & a &
         ": the profile declares no resource with that address")
 
+proc planIdOf*(inputs: openArray[string]): string =
+  ## The add-on plan id: the first 32 hex digits of the SHA-256 of the
+  ## plan's observation records, one per line.
+  sha256Hex(inputs.join("\n") & "\n")[0 ..< 32]
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -984,7 +1022,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if fileExists(ledgerCopyPath(stateDir)): readLedger(ledgerCopyPath(stateDir))
     else: Ledger()
   result.previousLedger = previous
-  result.previousGenerationId = previous.generation
+  # The generation `current` names, not the ledger copy's: a switch that
+  # failed after its writes leaves the copy describing the host under the
+  # id it would have committed, which is no generation at all. Retention
+  # and the pending marker speak of committed generations only.
+  let committedPrevious = readCurrentGenerationId(stateDir)
+  result.previousGenerationId = committedPrevious
   let previousUserText =
     if fileExists(userProfilePath(stateDir)): readFile(userProfilePath(stateDir))
     else: ""
@@ -1024,6 +1067,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     let why = keptPathRefusal(previous, targetPathOf(r))
     if why.len > 0:
       raise newException(AddonCollisionError, "refusing " & r.address & ": " & why)
+    if r.kind == srkLinuxSysctl:
+      # A base fragment applied after the add-on's would put its own
+      # value back at every boot (spec §4.3, §7.2 step 6).
+      let clash = sysctlPrecedenceRefusal(r.sysctlKey, r.sysctlValue,
+                                          targetPathOf(r))
+      if clash.len > 0:
+        raise newException(AddonCollisionError, "refusing " & r.address &
+          ": " & clash)
 
   var prevForm = initTable[string, string]()  # target path -> link / copy
   for e in previous.entries:
@@ -1423,26 +1474,34 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var facts: seq[UnitFacts]
   var unitDeps = initTable[string, seq[string]]()
   var factUnits = initHashSet[string]()
+  proc observed(f: var UnitFacts) =
+    ## The one place a unit's running state is read for the plan: systemd's
+    ## ActiveState, and -- for an exclusive unit -- the control group's
+    ## population (§7.3: "confirmed exited" is the group, not the state).
+    ## Both are pinned by the plan id.
+    f.activeState = readUnitProvision(f.unit).activeState
+    f.active = f.activeState == "active"
+    f.alive = if f.exclusive: unitAliveness(f.unit) else: uaEmpty
   for r in removedUnits:
-    let u = readUnitProvision(r.suName)
-    facts.add(UnitFacts(unit: r.suName, address: r.address, owned: true,
-      removed: true, active: u.activeState == "active",
-      exclusive: isExclusiveUnit(r), stopHeld: r.suStopHeld))
+    var f = UnitFacts(unit: r.suName, address: r.address, owned: true,
+      removed: true, exclusive: isExclusiveUnit(r), stopHeld: r.suStopHeld)
+    observed(f)
+    facts.add(f)
     factUnits.incl(r.suName)
   for idx in order:
     let r = composed.resources[idx]
     case r.kind
     of srkSystemdSystemUnit:
       let p = plans[planByAddress[r.address]]
-      let u = readUnitProvision(r.suName)
       let rendered = renderedSystemUnitContent(r)
       var f = UnitFacts(unit: r.suName, address: r.address, owned: true,
-        active: u.activeState == "active", enabled: r.suEnabled,
+        enabled: r.suEnabled,
         exclusive: isExclusiveUnit(r) or
           (r.suName in prevUnits and
            unitContentDeclaresExclusive(readFile(prevUnits[r.suName].path))),
         restartHeld: r.suRestartHeld, reloadIfChanged: r.suReloadIfChanged,
         stopHeld: r.suStopHeld)
+      observed(f)
       f.isNew = r.suName notin prevUnits
       let closureMissing = r.suAptClosureLock.len > 0 and
         not aptClosureRealised(AddOnSystemStoreRoot,
@@ -1451,6 +1510,32 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         prevUnits[r.suName].sha256 != sha256Hex(rendered) or
         p.verdict in [$cvCreate, $cvUpdate, $cvReconcile, $cvReplace]
       f.dropInsChanged = r.suName in dropInsChangedFor
+      if f.exclusive:
+        f.predecessors = conflictsServices(rendered)
+        # The units that can activate it (sockets, timers, paths): a
+        # stop-start pauses the active ones (§7.3).
+        for t in unitProperty(r.suName, "TriggeredBy").splitWhitespace():
+          if readUnitProvision(t).activeState == "active":
+            f.triggers.add(t)
+        for pred in f.predecessors:
+          # A predecessor the add-on does not own is never stopped or
+          # disabled by it; while it runs or is enabled, the successor
+          # cannot start without overlapping it (now, or at the next
+          # boot), so the plan refuses (§7.3).
+          if pred in prevUnits: continue
+          let pv = readUnitProvision(pred)
+          let alive = unitAliveness(pred)
+          when not mutated("exclusive-as-plain-restart"):
+            if pv.activeState == "active" or alive != uaEmpty or
+                pv.unitFileState in ["enabled", "enabled-runtime", "linked",
+                                     "linked-runtime", "alias"]:
+              raise newAddOnExclusiveOverlap(r.suName, "its predecessor " &
+                pred & " (named in its Conflicts=) is not the add-on's and " &
+                "is " & pv.activeState & " with its control group " &
+                $alive & " and unit-file state " &
+                (if pv.unitFileState.len > 0: pv.unitFileState
+                 else: "unknown") &
+                "; stop and disable it, then apply again")
       for dep in r.dependsOn:
         let depAddress = addressByKey.getOrDefault(dep.kind & ":" & dep.name)
         if depAddress.len == 0: continue
@@ -1461,10 +1546,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       facts.add(f)
       factUnits.incl(r.suName)
     of srkSystemdUnitState:
-      let u = readUnitProvision(r.usName)
-      facts.add(UnitFacts(unit: r.usName, address: r.address,
-        unitState: true, active: u.activeState == "active",
-        desiredActive: r.usRunning))
+      var f = UnitFacts(unit: r.usName, address: r.address,
+        unitState: true, desiredActive: r.usRunning)
+      observed(f)
+      facts.add(f)
       factUnits.incl(r.usName)
     else:
       discard
@@ -1473,20 +1558,50 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for p in plans:
     if p.r.kind == srkSystemdSystemDropIn and p.r.diUnit notin factUnits and
         p.r.diUnit in dropInsChangedFor:
-      let u = readUnitProvision(p.r.diUnit)
-      facts.add(UnitFacts(unit: p.r.diUnit, address: p.r.address,
-        active: u.activeState == "active", dropInsChanged: true,
-        restartHeld: p.r.diRestartHeld))
+      var f = UnitFacts(unit: p.r.diUnit, address: p.r.address,
+        dropInsChanged: true, restartHeld: p.r.diRestartHeld)
+      observed(f)
+      facts.add(f)
       factUnits.incl(p.r.diUnit)
   for r in removed:
     if r.kind == srkSystemdSystemDropIn and r.diUnit notin factUnits:
-      let u = readUnitProvision(r.diUnit)
-      facts.add(UnitFacts(unit: r.diUnit, address: r.address,
-        active: u.activeState == "active", dropInsChanged: true,
-        restartHeld: r.diRestartHeld))
+      var f = UnitFacts(unit: r.diUnit, address: r.address,
+        dropInsChanged: true, restartHeld: r.diRestartHeld)
+      observed(f)
+      facts.add(f)
       factUnits.incl(r.diUnit)
   propagateDependencyChanges(facts, unitDeps)
   result.transitions = planTransitions(facts)
+
+  # --- The plan id (spec §7.1): everything the plan was computed from. ---
+  # The profile texts, the ledger it compared against, every target's
+  # observation and every unit's observed state (with an exclusive unit's
+  # control group and its predecessors'). A pinned apply recomputes it from
+  # what it observes now and refuses before anything is written when they
+  # differ: a unit that crashed, was started or was left alive since the
+  # plan would otherwise get a transition nobody reviewed.
+  block:
+    var inputs: seq[string]
+    inputs.add("own\t" & sha256Hex(ownText))
+    inputs.add("user\t" & sha256Hex(opts.userProfileText))
+    inputs.add("ledger\t" & sha256Hex(render(previous)))
+    inputs.add("reconcile\t" & $opts.reconcileDrift)
+    inputs.add("adopt\t" & opts.adoptAddresses.join(","))
+    for t in targets:
+      inputs.add("target\t" & t.address & "\t" & t.path & "\t" &
+        t.observation & "\t" & t.observedSha256 & "\t" & $t.verdict)
+    for f in facts:
+      inputs.add("unit\t" & f.unit & "\t" & f.activeState & "\t" & $f.alive &
+        "\t" & f.triggers.join(","))
+      for pred in f.predecessors:
+        inputs.add("predecessor\t" & pred & "\t" &
+          readUnitProvision(pred).activeState & "\t" & $unitAliveness(pred))
+    result.planId = planIdOf(inputs)
+  if opts.planId.len > 0 and opts.planId != result.planId:
+    raisePlanStale(opts.planId, @["the add-on observations the plan was " &
+      "computed from changed (the profile, the ledger, a target's " &
+      "ownership or content, or a unit's state); they now give plan " &
+      result.planId])
 
   # --- The static tree (spec §7.2 step 1): every link-form object. ---
   var treeFiles: seq[StaticFile]
@@ -1521,7 +1636,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       closurePaths.add(realiseAptClosure(
         parseAptClosureLock(p.r.suAptClosureLock), AddOnSystemStoreRoot,
         AddOnAptDebCacheDir))
-  var marker = PendingMarker(fromGeneration: previous.generation,
+  var marker = PendingMarker(fromGeneration: committedPrevious,
     newStatic: treePath, previousStatic: previousStatic, step: ssRealise,
     status: "in-progress")
   writePendingMarker(stateDir, marker)
@@ -1594,6 +1709,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       why.join("; ")
   var hookSysctl: seq[tuple[key, value: string]]
   var hookGeneration = ""
+  var paused: seq[string]      # triggers step 2 stopped; step 7 restarts
 
   proc beforeSet(planId: string) {.gcsafe.} =
     ## Steps 2 and 3: pre-stop, then flip. A refusal here (an exclusive
@@ -1601,7 +1717,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     {.cast(gcsafe).}:
       marker.planId = planId
       writePendingMarker(stateDir, marker)
-      marker.stopped = runPreStop(transitions, disableOnRemoval)
+      let pre = runPreStop(transitions, disableOnRemoval)
+      paused = pre.paused
+      marker.stopped = pre.paused & pre.stopped
       marker.step = ssPreStop
       writePendingMarker(stateDir, marker)
       flipStatic(treePath)
@@ -1637,7 +1755,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       # generation is not started.
       if clean and problems.len == 0:
         try:
-          runStart(transitions)
+          runStart(transitions, paused)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
       marker.step = ssStart
@@ -1815,7 +1933,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     raise newException(AddonApplyError,
       (if infraError.len > 0: infraError else: "the switch did not " &
        "complete cleanly") & "\nthe generation was not committed; " &
-      "`current` still names " & previous.generation &
+      "`current` still names " & committedPrevious &
       " and the pending marker at " & pendingMarkerPath(stateDir) &
       " records the step reached")
 
@@ -1834,11 +1952,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       if found.found: prefixIds.add(found.row.prefixId)
   registerGenerationRoot(result.generationId, prefixIds)
   releasePendingRoot()
-  let retention = if opts.retention.keepGenerations == 0 and
-                     opts.retention.keepDays == 0: DefaultRetention
-                  else: opts.retention
+  # The current generation is this one; the previous is what `current`
+  # named before (never an uncommitted attempt's id); and a generation a
+  # running managed unit may still run from is kept too (spec §5.2).
   result.retentionDropped = pruneGenerationRoots(result.generationId,
-    previous.generation, retention)
+    committedPrevious, opts.retention.get(DefaultRetention),
+    running = runningManagedUnits(newLedger),
+    lookup = generationUnitLookup(stateDir))
   marker.step = ssCommit
   writePendingMarker(stateDir, marker)
   clearPendingMarker(stateDir)

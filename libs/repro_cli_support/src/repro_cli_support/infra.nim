@@ -774,9 +774,12 @@ proc runInfraApply(args: openArray[string]): int =
           "declares " & $profileBuildActions.len)
         return 2
       try:
+        # `--plan` on an add-on host pins the add-on plan id the plan
+        # printed ("add-on plan-id"); the apply refuses with EPlanStale
+        # when what it observes now gives another (spec §7.1).
         let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
           stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
-          reconcileDrift: flags.reconcileDrift))
+          reconcileDrift: flags.reconcileDrift, planId: planId))
         stdout.write(addon_cli.renderAddonSections(r))
         echo "repro infra apply (add-on): generation " & r.generationId &
           " (previous " & r.previousGenerationId & "), applied " &
@@ -787,6 +790,11 @@ proc runInfraApply(args: openArray[string]): int =
             " object(s) left in place as actionable drift")
           return 1
         return 0
+      except EPlanStale as e:
+        stderr.writeLine("repro infra apply: " & e.msg)
+        for a in e.drifted:
+          stderr.writeLine("  drifted: " & a)
+        return 3
       except EAddOn as e:
         stderr.writeLine("repro infra apply: " & e.msg)
         return 2

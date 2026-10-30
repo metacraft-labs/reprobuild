@@ -267,6 +267,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let root = freshRoot(\"rpi2\")"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim",
+    binary: "build/test-bin/t_addon_switch_exclusive_retention",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"repro-addon-round2-\" & $getCurre..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_switch_planning.nim",
     binary: "build/test-bin/t_addon_switch_planning",
     defines: @[],

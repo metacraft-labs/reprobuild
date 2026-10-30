@@ -18,7 +18,7 @@
 ##   repro system addon selfcheck-write <path>
 ##   repro system adopt <address> --profile <file>
 ##   repro infra plan --profile <file>
-##   repro infra apply --profile <file> [--reconcile-drift]
+##   repro infra apply --profile <file> [--reconcile-drift] [--plan <add-on plan-id>]
 ##                                [--keep-generations N] [--keep-days D]
 ##   repro store gc [--grace-seconds N] | roots | list
 ##
@@ -26,7 +26,7 @@
 ## error or a refusal decided before anything was written (an incompatible
 ## host, a plan digest that does not match).
 
-import std/[os, strutils]
+import std/[options, os, strutils]
 
 import std/algorithm
 
@@ -91,8 +91,9 @@ related (add-on hosts):
       Claim the object a declared resource targets as it is, writing nothing.
   repro infra plan --profile <file>
       The ledger diff, collision report and service transition list of
-      applying <file>; writes nothing.
-  repro infra apply --profile <file> [--reconcile-drift]
+      applying <file>, and the add-on plan-id that `--plan` pins; writes
+      nothing.
+  repro infra apply --profile <file> [--reconcile-drift] [--plan <add-on plan-id>]
                     [--keep-generations N] [--keep-days D]
       Apply an add-on generation through the switch.
   repro store gc [--grace-seconds N] | roots | list
@@ -185,6 +186,16 @@ proc previousGenerationOf*(stateDir, current: string): string =
     readGenerationEnvelope(pointerPath(stateDir, current)).previousGenerationId
   except CatchableError:
     ""
+
+proc retentionCount(value, flag: string): int =
+  ## A retention bound: a non-negative integer (0 keeps only what is
+  ## always kept).
+  try:
+    result = parseInt(value)
+  except ValueError:
+    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
+  if result < 0:
+    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
 
 proc selfcheckManagedWrite*(path: string): string =
   ## Exercise the system-file driver's write at ``path`` the way the
@@ -342,15 +353,17 @@ proc runAddonCli*(args: seq[string]): int =
       while i < rest.len:
         let a = rest[i]
         if a == "--keep-generations" or a.startsWith("--keep-generations="):
-          policy.keepGenerations = parseInt(takeValue(rest, i, "--keep-generations"))
+          policy.keepGenerations = retentionCount(takeValue(rest, i, "--keep-generations"), "--keep-generations")
         elif a == "--keep-days" or a.startsWith("--keep-days="):
-          policy.keepDays = parseInt(takeValue(rest, i, "--keep-days"))
+          policy.keepDays = retentionCount(takeValue(rest, i, "--keep-days"), "--keep-days")
         else:
           raise newException(ValueError, "unknown option " & a)
         inc i
       let current = readCurrentGenerationId(DefaultStateDir)
       let previous = previousGenerationOf(DefaultStateDir, current)
-      let dropped = pruneGenerationRoots(current, previous, policy)
+      let dropped = pruneGenerationRoots(current, previous, policy,
+        running = runningManagedUnits(readLedger(ledgerCopyPath(DefaultStateDir))),
+        lookup = generationUnitLookup(DefaultStateDir))
       stdout.write("kept: " & current & " (current)" &
         (if previous.len > 0: ", " & previous & " (previous)" else: "") & "\n")
       stdout.write("released store roots (" & $dropped.len & "):\n")
@@ -371,6 +384,8 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   ## the sysctl values observed from the host's namespaces too.
   result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
     renderTransitions(r.transitions)
+  if r.planId.len > 0:
+    result.add("add-on plan-id: " & r.planId & "\n")
   if r.staticTree.len > 0:
     result.add("static tree: " & r.staticTree & "\n")
   if r.sysctlObserved.len > 0:
@@ -444,7 +459,8 @@ proc runAddonGeneration(verb: string; args: seq[string];
   ## that failed or left actionable drift, 0 otherwise.
   var profile = ""
   var reconcile = false
-  var retention: RetentionPolicy
+  var retention = none(RetentionPolicy)
+  var planId = ""
   var i = 0
   try:
     while i < args.len:
@@ -454,9 +470,15 @@ proc runAddonGeneration(verb: string; args: seq[string];
       elif a == "--reconcile-drift" or a == "--accept-drift":
         reconcile = true
       elif a == "--keep-generations" or a.startsWith("--keep-generations="):
-        retention.keepGenerations = parseInt(takeValue(args, i, "--keep-generations"))
+        var p = retention.get(DefaultRetention)
+        p.keepGenerations = retentionCount(takeValue(args, i, "--keep-generations"), "--keep-generations")
+        retention = some(p)
       elif a == "--keep-days" or a.startsWith("--keep-days="):
-        retention.keepDays = parseInt(takeValue(args, i, "--keep-days"))
+        var p = retention.get(DefaultRetention)
+        p.keepDays = retentionCount(takeValue(args, i, "--keep-days"), "--keep-days")
+        retention = some(p)
+      elif a == "--plan" or a.startsWith("--plan="):
+        planId = takeValue(args, i, "--plan")
       elif a == "--no-preview":
         discard          # an add-on apply always converges without preview
       else:
@@ -471,7 +493,7 @@ proc runAddonGeneration(verb: string; args: seq[string];
     let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
       hostIdentity: readHostname(), userProfileText: readFile(profile),
       reconcileDrift: reconcile, adoptAddresses: adopt, planOnly: planOnly,
-      retention: retention))
+      retention: retention, planId: planId))
     stdout.write(renderAddonSections(r))
     if planOnly:
       stdout.write("plan only: nothing was written\n")
@@ -491,6 +513,11 @@ proc runAddonGeneration(verb: string; args: seq[string];
   except ValueError as e:
     stderr.write(verb & ": " & e.msg & "\n")
     2
+  except EPlanStale as e:
+    # Exit 3, as `repro infra apply` does for a stale plain plan.
+    stderr.write(verb & ": " & e.msg & "\n")
+    for d in e.drifted: stderr.write("  drifted: " & d & "\n")
+    3
   except EAddOn as e:
     stderr.write(verb & ": " & e.msg & "\n")
     2
