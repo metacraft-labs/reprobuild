@@ -475,23 +475,39 @@ proc archiveDigestTag*(archiveBytes: openArray[byte]): string =
   ## `expectedOutputDigest` takes, and what `repro cache publish` prints.
   "blake3:" & blake3.digest(archiveBytes).toHex()
 
-proc localOutputsDigest*(action: ProfileBuildAction;
-                         stageDir: string): string =
-  ## Pack the edge's present outputs the way the publisher packs a prefix
-  ## and return their `archiveDigestTag`; "" when they cannot be staged.
-  ## The archive format is deterministic (sorted entries, modes, bytes),
-  ## so the same tree packs to the same digest on every host.
+proc localOutputsDigest*(action: ProfileBuildAction): string =
+  ## The `archiveDigestTag` of the edge's present outputs, hashed IN PLACE
+  ## under `cwd` by the publisher's own planner and writer restricted to
+  ## the declared outputs (`prefixSubsetArchiveDigestHex`), so it equals
+  ## what `repro cache publish` printed for the same tree and costs one
+  ## read of the outputs: no copy to a scratch tree, no temporary archive
+  ## (which on an SD-card appliance was ~40 MB of writes per converge
+  ## tick). "" when the outputs are absent or cannot be hashed (a symbolic
+  ## link among them, which the publisher refuses too).
+  let rels = outputRelPaths(action)
+  if rels.len == 0 or not outputsExist(action):
+    return ""
+  let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
+                else: getCurrentDir())
   try:
-    removeDir(stageDir)
-    if not stagePrefixFromOutputs(action, stageDir):
-      return ""
-    # The publisher's own planner and writer, so this equals what
-    # `repro cache publish` printed for the same tree.
-    result = "blake3:" & prefixArchiveDigestHex(stageDir)
+    "blake3:" & prefixSubsetArchiveDigestHex(cwdAbs, rels)
   except CatchableError:
-    result = ""
-  finally:
-    try: removeDir(stageDir) except CatchableError: discard
+    ""
+
+proc removeDeclaredOutputs(action: ProfileBuildAction) =
+  ## Remove the edge's declared outputs under `cwd` before a substituted
+  ## archive is materialised, so the tree afterwards is exactly the
+  ## archive's. Without this a file that is not in the archive (a stray
+  ## dropped into the prefix, a member of an earlier version) survives
+  ## every materialisation, the present-outputs check never matches the
+  ## pin again, and every converge tick downloads and rewrites the prefix
+  ## while reporting a hit.
+  let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
+                else: getCurrentDir())
+  for rel in outputRelPaths(action):
+    let p = cwdAbs / rel
+    if dirExists(p): removeDir(p)
+    elif fileExists(p) or symlinkExists(p): removeFile(p)
 
 proc trySubstituteBuildAction*(action: ProfileBuildAction;
                                cfg: BuildActionCacheConfig;
@@ -519,7 +535,7 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
   # nothing cost one hash instead of a download and a rewrite of every
   # service's prefix.
   if action.expectedOutputDigest.len > 0 and outputsExist(action):
-    let have = localOutputsDigest(action, scratchRoot / "present")
+    let have = localOutputsDigest(action)
     if have.len > 0 and have == action.expectedOutputDigest:
       result.hit = true
       result.verifiedPresent = true
@@ -571,11 +587,27 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
     removeDir(extractDir)
     createDir(extractDir)
     let entries = extractPrefix(archiveBytes, extractDir)
+    # Replace the declared output trees wholesale: what is under `cwd`
+    # afterwards is the archive and nothing else (see
+    # `removeDeclaredOutputs`).
+    removeDeclaredOutputs(action)
     materialisePrefixIntoCwd(action, extractDir, entries)
     if not outputsExist(action):
       result.reason = "substituted archive did not materialise the " &
         "declared outputs for " & action.id
       return
+    if action.expectedOutputDigest.len > 0:
+      # What landed must hash to the pin too — the same check the next
+      # tick's present-outputs shortcut makes — or this tick would report
+      # a hit that the next one cannot confirm, and the download would
+      # repeat every tick.
+      let landed = localOutputsDigest(action)
+      if landed != action.expectedOutputDigest:
+        result.reason = "materialised outputs of " & action.id &
+          " hash to " & landed & ", not the pinned " &
+          action.expectedOutputDigest & " (an undeclared file under the " &
+          "output tree, or an archive that holds more than the outputs)"
+        return
     result.hit = true
     result.bytesFetched = rootOutcome.bytesFetched
   except CatchableError as e:

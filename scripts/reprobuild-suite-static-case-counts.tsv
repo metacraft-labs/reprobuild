@@ -287,7 +287,7 @@ libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	32
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
-libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	11
+libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
@@ -583,7 +583,7 @@ libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
-libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	12
+libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	13
 libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim	nim	8
 libs/repro_profile_compile/tests/t_smoke_apply_integration.nim	nim	4
 libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
