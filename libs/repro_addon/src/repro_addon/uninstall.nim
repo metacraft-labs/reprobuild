@@ -126,8 +126,9 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
           removeOwned(f, result)
           handled.incl(f.path)
       if fileExists(dv.path) or symlinkExists(dv.path):
-        result.drift.add(dv.path & ": a file the ledger does not own sits " &
-          "on the diverted path; the diversion is left in place")
+        result.drift.add(dv.path & ": the file on the diverted path is not " &
+          "the one the ledger recorded (it drifted, or is not the add-on's); " &
+          "the diversion is left in place until the path is free")
         continue
       let exe = resolveHostTool(DpkgDivertCandidates)
       if exe.len == 0:

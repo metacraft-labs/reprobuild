@@ -129,12 +129,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # on the root filesystem modified after a marker while the preflight
     # ran must be none. One SSH session, so the login's own accounting
     # writes precede the marker and the logout's follow the find. The
-    # pruned trees are runtime and log state the base writes on its own.
+    # pruned trees are the API filesystems, runtime state (/run, /tmp), the
+    # journal and syslog (/var/log) and timesyncd's clock file, each of
+    # which the base writes on its own during any session.
     let newer = g.exec("touch /run/addon-marker && sleep 1 && " &
       repro & " system addon preflight >/dev/null 2>&1; " &
       "find / -xdev \\( -path /proc -o -path /sys -o -path /dev -o -path /run " &
       "-o -path /tmp -o -path /var/log -o -path /var/lib/systemd/timesync " &
-      "-o -path /root/.cache -o -path /var/lib/apt/lists \\) -prune -o " &
+      "\\) -prune -o " &
       "-newer /run/addon-marker -print")
     step("the preflight modified no file on the root filesystem",
          newer.exitCode == 0 and newer.stdout.strip().len == 0,

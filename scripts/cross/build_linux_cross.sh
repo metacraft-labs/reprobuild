@@ -34,6 +34,11 @@
 #                        repro, reprobuild and nim are linked into --bin-links
 #   --install-prefix DIR install prefix on the target (default /usr/local/repro)
 #   --bin-links DIR      directory for the PATH links (default /usr/local/bin)
+#   --cold-plan-loop N   after --install, run N cold `repro infra plan`s of a
+#                        trivial system profile on the target and report every
+#                        non-zero exit (scripts/cross/cold_plan_loop.sh): the
+#                        measurement that an intermittent crash in the profile
+#                        compile is gone
 #
 # Environment:
 #   REPROBUILD_BUILD_MODE  release (default here: the output is an installed
@@ -134,6 +139,7 @@ entrypoints=""
 skip_nim=0
 declare -A source_overrides=()
 install=0
+cold_plan_loop=0
 install_prefix=/usr/local/repro
 bin_links=/usr/local/bin
 while [ "$#" -gt 0 ]; do
@@ -160,6 +166,8 @@ while [ "$#" -gt 0 ]; do
     --install-prefix=*) install_prefix="${1#--install-prefix=}"; shift ;;
     --bin-links) bin_links="$2"; shift 2 ;;
     --bin-links=*) bin_links="${1#--bin-links=}"; shift ;;
+    --cold-plan-loop) cold_plan_loop="$2"; shift 2 ;;
+    --cold-plan-loop=*) cold_plan_loop="${1#--cold-plan-loop=}"; shift ;;
     -h|--help) usage ;;
     *) echo "build_linux_cross: unknown argument: $1" >&2; usage ;;
   esac
@@ -169,6 +177,13 @@ done
 # install on used to fail after a full build.
 if [ "${install}" = 1 ] && [ "${fetch_requested}" != 1 ]; then
   echo "build_linux_cross: --install needs --fetch-sysroot-from (the host to install on)" >&2
+  exit 64
+fi
+case "${cold_plan_loop}" in
+  ''|*[!0-9]*) echo "build_linux_cross: --cold-plan-loop needs a count" >&2; exit 64 ;;
+esac
+if [ "${cold_plan_loop}" -gt 0 ] && [ "${install}" != 1 ]; then
+  echo "build_linux_cross: --cold-plan-loop runs on the host --install installed to; add --install" >&2
   exit 64
 fi
 [ -f libs/repro_project_dsl/src/repro_project_dsl.nim ] || {
@@ -348,10 +363,13 @@ src_root="${build_root}/source"
 echo "build_linux_cross: exporting the tree to ${src_root}"
 rm -rf "${src_root}"
 mkdir -p "${src_root}"
-# Tracked files plus untracked ones that are not ignored (a script being
-# added), as the checkout has them now; `build/`, caches and the like are
-# ignored and stay behind. A tracked file deleted in the worktree is skipped.
-git -C "${repo_root}" ls-files -z -c -o --exclude-standard |
+# TRACKED files only, as the checkout has them now, so the export is exactly
+# what `source_revision` describes: `scripts/source_revision.sh` marks the
+# revision `-dirty` for modified or deleted tracked files, and an untracked
+# file is neither in HEAD nor in that mark -- exporting it would ship code
+# the recorded revision does not account for. A tracked file deleted in the
+# worktree is skipped (and makes the revision `-dirty`).
+git -C "${repo_root}" ls-files -z -c |
   (cd "${repo_root}" && tar --null -T - --ignore-failed-read -cf - 2>/dev/null) |
   tar -C "${src_root}" -xf -
 
@@ -380,21 +398,25 @@ locked_rev_of() {
     jq -r --arg n "$1" '.locks.nodes[$n].locked.rev // "unlocked"'
 }
 describe_source() {
-  # How a directory came to be: a git checkout's revision (and whether it is
-  # dirty), or the flake input it is the store copy of.
-  local dir="$1" input="$2" rev
-  case "${dir}" in
-    /nix/store/*) printf 'flake:%s@%s' "${input}" "$(locked_rev_of "${input}")" ;;
-    *)
-      if rev="$(git -C "${dir}" rev-parse HEAD 2>/dev/null)"; then
-        if [ -n "$(git -C "${dir}" status --porcelain 2>/dev/null)" ]; then
-          rev="${rev}-dirty"
-        fi
-        printf 'git:%s' "${rev}"
-      else
-        printf 'unversioned'
-      fi ;;
-  esac
+  # How a directory came to be. The flake's own copy (what the devShell
+  # attribute named) is the locked input and its revision. Anything else --
+  # every `--source` override, store path or not: a store path the caller
+  # named is NOT the locked input, whatever its name looks like -- is a git
+  # checkout's revision (and whether it is dirty), or `unversioned`, with the
+  # path itself so the record says what was compiled in.
+  local dir="$1" input="$2" pinned="$3" rev
+  if [ "${pinned}" = pinned ]; then
+    printf 'flake:%s@%s' "${input}" "$(locked_rev_of "${input}")"
+    return
+  fi
+  if rev="$(git -C "${dir}" rev-parse HEAD 2>/dev/null)"; then
+    if [ -n "$(git -C "${dir}" status --porcelain 2>/dev/null)" ]; then
+      rev="${rev}-dirty"
+    fi
+    printf 'git:%s path:%s' "${rev}" "${dir}"
+  else
+    printf 'unversioned path:%s' "${dir}"
+  fi
 }
 source_records=()
 rm -rf "${build_root}/src"
@@ -406,10 +428,12 @@ for row in "${pinned_sources[@]}"; do
     [ -d "${from}" ] || { echo "build_linux_cross: --source ${var}=${from}: no such directory" >&2; exit 64; }
     from="$(cd "${from}" && pwd)"
     note=" (override)"
+    pinned=override
   else
     from="$(nix eval --raw "${repo_root}#devShells.${host_system}.default.${var}" 2>/dev/null || true)"
     [ -n "${from}" ] || { echo "build_linux_cross: the dev shell declares no ${var}; cannot pin it" >&2; exit 1; }
     note=""
+    pinned=pinned
   fi
   # The variable may name the tree's `src/` rather than its root; copy the
   # root, so the copy has the layout the installed one has.
@@ -419,7 +443,7 @@ for row in "${pinned_sources[@]}"; do
   mkdir -p "$(dirname "${dest}")"
   cp -a --no-preserve=mode "${tree}" "${dest}"
   chmod -R u+w "${dest}"
-  source_records+=("${var}=${rel}${suffix} $(describe_source "${tree}" "${input}")${note}")
+  source_records+=("${var}=${rel}${suffix} $(describe_source "${tree}" "${input}" "${pinned}")${note}")
   export "${var}=${dest}${suffix}"
 done
 for rec in "${source_records[@]}"; do echo "build_linux_cross: source ${rec}"; done
@@ -737,4 +761,9 @@ if libc.renameat2(AT_FDCWD, sys.argv[1].encode(), AT_FDCWD, sys.argv[2].encode()
       exit 1
     fi" < "${out}/${pkg_name}.tar.gz"
   echo "build_linux_cross: installed at ${install_prefix} on the target"
+  if [ "${cold_plan_loop}" -gt 0 ]; then
+    loop_args=(--repro "${bin_links}/repro" --count "${cold_plan_loop}")
+    [ -n "${ssh_program}" ] && loop_args+=(--ssh "${ssh_program}")
+    bash "${repo_root}/scripts/cross/cold_plan_loop.sh" "${loop_args[@]}" "${fetch_from}"
+  fi
 fi
