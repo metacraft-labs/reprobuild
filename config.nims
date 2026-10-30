@@ -915,6 +915,7 @@ proc libMatchesTargetArch(libFile: string): bool =
     if hostCPU == "amd64": 0x3E'u32         # EM_X86_64
     elif hostCPU == "arm64": 0xB7'u32       # EM_AARCH64
     elif hostCPU == "i386": 0x03'u32        # EM_386
+    elif hostCPU == "arm": 0x28'u32         # EM_ARM (32-bit armhf/armel)
     else: 0'u32
   let targetCpuType =
     if hostCPU == "amd64": 0x01000007'u32   # CPU_TYPE_X86_64
@@ -960,11 +961,25 @@ proc libMatchesTargetArch(libFile: string): bool =
         return true
     false
 
-proc holdsLibrary(libDir, dylibName: string; targetArchOnly: bool): bool =
-  ## Whether `libDir/dylibName` exists and -- when `targetArchOnly` -- is a
-  ## file the target's loader can map (see `libMatchesTargetArch`).
-  let path = libDir / dylibName
-  repoFileExists(path) and (not targetArchOnly or libMatchesTargetArch(path))
+proc dirHoldsLibrary(libDir: string; dylibNames: openArray[string];
+                     targetArchOnly: bool): bool =
+  ## Whether `libDir` holds one of `dylibNames` -- and, when
+  ## `targetArchOnly`, none of them built for another architecture.
+  ##
+  ## The directory is judged as a whole because the names are alternatives
+  ## for ONE `-l`: a static archive (`libsqlite3.a`) cannot be classified
+  ## from its header and is accepted on its own, so judging name by name let
+  ## the archive vouch for a directory whose `libsqlite3.so` was foreign --
+  ## and the linker, which prefers the shared object, then took that. A
+  ## cross-compile to armhf on an x86-64 Nix host linked the store's x86-64
+  ## SQLite that way.
+  result = false
+  for dylibName in dylibNames:
+    let path = libDir / dylibName
+    if repoFileExists(path):
+      if targetArchOnly and not libMatchesTargetArch(path):
+        return false
+      result = true
 
 proc firstExistingPrefixLibDir(prefix: string;
                                dylibNames: openArray[string];
@@ -974,9 +989,8 @@ proc firstExistingPrefixLibDir(prefix: string;
   ## `prefix/lib64`, and the two common Debian-multiarch triples.
   for libSub in LibSubdirs:
     let candidate = prefix / libSub
-    for dylibName in dylibNames:
-      if holdsLibrary(candidate, dylibName, targetArchOnly):
-        return candidate
+    if dirHoldsLibrary(candidate, dylibNames, targetArchOnly):
+      return candidate
   ""
 
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
@@ -1050,9 +1064,8 @@ proc firstExistingLibDir(candidates: openArray[string];
     # standard lib subdirectories so a candidate like `/usr` resolves
     # whether the host is `/usr/lib`, `/usr/lib64`, or a Debian-multiarch
     # triple.
-    for dylibName in dylibNames:
-      if holdsLibrary(path, dylibName, targetArchOnly):
-        return path
+    if dirHoldsLibrary(path, dylibNames, targetArchOnly):
+      return path
     let resolved = firstExistingPrefixLibDir(path, dylibNames, targetArchOnly)
     if resolved.len > 0:
       return resolved
