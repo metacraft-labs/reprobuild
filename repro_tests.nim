@@ -2643,6 +2643,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_core_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_core/tests/t_bounded_lock_refuses_at_its_deadline_on_every_platform.nim",
+    binary: "build/test-bin/t_bounded_lock_refuses_at_its_deadline_on_every_platform",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_core_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_core/tests/t_deps_refresh_check.nim",
     binary: "build/test-bin/t_deps_refresh_check",
     defines: @[],

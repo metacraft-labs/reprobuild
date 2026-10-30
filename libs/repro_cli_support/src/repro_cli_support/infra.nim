@@ -1459,9 +1459,12 @@ proc runSystemCommand*(args: seq[string]): int =
     of "rollback":
       # An add-on host rolls back through the add-on switch (ReproOS
       # Add-On Mode §7.5): its generations are the add-on's own objects
-      # plus the operator's profile, not a whole-system profile.
-      if addon_apply.isAddonHost(resolveSystemStateDir()):
-        return addon_cli.runAddonRollbackCli(rest)
+      # plus the operator's profile, not a whole-system profile. Add-on
+      # mode manages Linux hosts only (its §1), so on any other target the
+      # ordinary system rollback is the only one, as in `infra plan/apply`.
+      when defined(linux):
+        if addon_apply.isAddonHost(resolveSystemStateDir()):
+          return addon_cli.runAddonRollbackCli(rest)
       return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
     of "addon":

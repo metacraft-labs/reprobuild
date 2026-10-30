@@ -709,7 +709,13 @@ proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
       let finalMode = managedCopyMode(kind, mode, defaultMode)
       # Root: owned by 0:0 explicitly (a process's group need not be 0).
       # Anyone else (the unprivileged unit tests) owns what it creates.
-      let owner = if geteuid() == 0: 0 else: -1
+      # Every caller is Linux-only; the guard mirrors the `geteuid` import
+      # so the module still compiles for its Windows drivers, where a POSIX
+      # owner means nothing and nothing is chowned.
+      when defined(linux) or defined(macosx):
+        let owner = if geteuid() == 0: 0 else: -1
+      else:
+        let owner = -1
       writeFileNoFollow(path, content, finalMode, uid = owner, gid = owner)
   except SymlinkOnPath as e:
     raiseProtocol(what & " refuses to write through a symbolic link: " &

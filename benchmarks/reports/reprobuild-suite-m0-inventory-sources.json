@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2504,
+    "nimTestBinaries": 2505,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 700,
     "staticallyDetectedRuntimeCompilerFlowTests": 132,
-    "testEntries": 2544
+    "testEntries": 2545
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1448,7 +1448,7 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1383,
-      "platform/destructive": 158,
+      "platform/destructive": 159,
       "pure unit": 700,
       "unclassified": 285
     },
@@ -1658,9 +1658,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2504,
+    "nimTestBinaryCount": 2505,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2544
+    "testEntryCount": 2545
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10926,7 +10926,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_addon_platform_dispatch.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12282,6 +12282,23 @@
       "source": "libs/repro_core/tests/t_ambient_execution_external_import.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_bounded_lock_refuses_at_its_deadline_on_every_platform",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_bounded_lock_refuses_at_its_deadline_on_every_platform.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
