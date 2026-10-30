@@ -44,7 +44,7 @@
 ## Any change to the action definition derives a DIFFERENT key, so a
 ## stale cache entry can never shadow a changed edge.
 
-import std/[os, strutils]
+import std/[os, sets, strutils]
 when defined(posix):
   import std/posix
   # std/posix does not export these on every target; take them from libc.
@@ -165,8 +165,17 @@ proc buildActionCacheIdentity*(action: ProfileBuildAction;
 
 proc outputRelPaths(action: ProfileBuildAction): seq[string] =
   ## Normalise the action's declared outputs to cwd-relative POSIX-style
-  ## paths. An absolute output under `cwd` is made relative; an output
-  ## that already is relative is kept as-is.
+  ## paths. An absolute output under `cwd` is made relative; a relative one
+  ## is normalised (`./out.bin` is `out.bin`, `a/../b` is `b`); the working
+  ## directory itself (`.`, or an absolute path equal to `cwd`) becomes the
+  ## empty string, the prefix below which every member lies. An output that
+  ## resolves outside `cwd` is skipped, as before: the caller treats an empty
+  ## set as "not substitutable".
+  ##
+  ## Normalising matters because the substitute copy compares archive
+  ## members against these paths; `./out.bin` spelled in a profile is the
+  ## same output as `out.bin`, and treating it as a different string refused
+  ## a substitutable edge.
   let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
                 else: getCurrentDir())
   for o in action.outputs:
@@ -176,11 +185,13 @@ proc outputRelPaths(action: ProfileBuildAction): seq[string] =
       if oAbs.startsWith(cwdAbs & $DirSep) or oAbs == cwdAbs:
         rel = relativePath(oAbs, cwdAbs)
       else:
-        # Output outside cwd — cannot map into a cwd-rooted prefix.
-        # Signal by skipping; the caller treats an empty rel-set as
-        # "not substitutable" and falls back to a local build.
         continue
-    result.add(rel.replace('\\', '/'))
+    rel = normalizedPath(rel).replace(DirSep, '/')
+    if rel == "." or rel == "":
+      rel = ""
+    elif rel == ".." or rel.startsWith("../"):
+      continue
+    result.add(rel.strip(leading = false, chars = {'/'}))
 
 proc collectFilesUnder(root, rel: string; acc: var seq[string]) =
   ## Append every regular file under `root/rel` as a `root`-relative
@@ -221,13 +232,23 @@ proc stagePrefixFromOutputs(action: ProfileBuildAction;
     copyFileWithPermissions(src, dst)
   return true
 
-proc isDeclaredOutput(rel: string; declared: openArray[string]): bool =
+proc isDeclaredOutput(rel: string; declared: openArray[string];
+                      archiveDirs: HashSet[string]): bool =
   ## True when the cwd-relative `rel` IS a declared output, or lies below a
-  ## declared output directory. Compared component-wise, so `bin2/x` is not
-  ## below a declared `bin`.
+  ## declared output that the archive itself carries as a directory entry
+  ## (`archiveDirs`). Compared component-wise, so `bin2/x` is not below a
+  ## declared `bin`; an empty declared path is the working directory and
+  ## admits every member.
+  ##
+  ## The directory-entry requirement is what keeps a declared *file* output
+  ## a file: the publisher packs a declared output directory with an explicit
+  ## directory entry, so an archive whose only trace of `out.bin` is a member
+  ## `out.bin/x` did not come from an action whose `out.bin` was a directory,
+  ## and must not turn the declared file into one.
   for d in declared:
-    let dd = d.strip(leading = false, chars = {'/'})
-    if rel == dd or rel.startsWith(dd & "/"):
+    if d.len == 0 or rel == d:
+      return true
+    if rel.startsWith(d & "/") and d in archiveDirs:
       return true
   false
 
@@ -240,22 +261,27 @@ proc writeFileNoFollow(dstDir, name: string; data: string; mode: set[FilePermiss
   let final = dstDir / name
   let tmp = dstDir / ("." & name & ".repro-substitute-" & $getCurrentProcessId())
   when defined(posix):
+    # O_EXCL|O_NOFOLLOW: a planted link or file at the staging name makes
+    # the open fail (nothing is followed, nothing removed), and the
+    # substitution is refused.
     let fd = posix.open(tmp.cstring,
       O_WRONLY or O_CREAT or O_EXCL or oNoFollow or oCloExec, 0o600.Mode)
     if fd < 0:
       raiseOSError(osLastError(), "cannot create " & tmp)
-    var off = 0
-    try:
-      while off < data.len:
-        let n = posix.write(fd, unsafeAddr data[off], data.len - off)
-        if n < 0:
-          raiseOSError(osLastError(), "cannot write " & tmp)
-        off += n
-    finally:
-      discard posix.close(fd)
   else:
     writeFile(tmp, data)
+  # From here on the staging file is ours: every failure removes it.
   try:
+    when defined(posix):
+      var off = 0
+      try:
+        while off < data.len:
+          let n = posix.write(fd, unsafeAddr data[off], data.len - off)
+          if n < 0:
+            raiseOSError(osLastError(), "cannot write " & tmp)
+          off += n
+      finally:
+        discard posix.close(fd)
     setFilePermissions(tmp, mode)
     moveFile(tmp, final)
   except CatchableError:
@@ -263,7 +289,8 @@ proc writeFileNoFollow(dstDir, name: string; data: string; mode: set[FilePermiss
     raise
 
 proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
-                               extractedDir: string) =
+                               extractedDir: string;
+                               entries: openArray[ExtractedEntry]) =
   ## Copy the action's DECLARED outputs from `extractedDir` (a freshly
   ## extracted rbcarc prefix) back under the action's `cwd`, byte-identically,
   ## preserving permissions (so the exec bit the archive carried survives).
@@ -288,6 +315,10 @@ proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
   let cwdAbs = (if action.cwd.len > 0: absolutePath(action.cwd)
                 else: getCurrentDir())
   let declared = outputRelPaths(action)
+  var archiveDirs = initHashSet[string]()
+  for e in entries:
+    if e.kind == aekDirectory:
+      archiveDirs.incl(e.path)
   var members: seq[string] = @[]
   for path in walkDirRec(extractedDir,
                          yieldFilter = {pcFile, pcLinkToFile, pcLinkToDir},
@@ -298,7 +329,7 @@ proc materialisePrefixIntoCwd*(action: ProfileBuildAction;
       raise newException(IOError,
         "substituted outputs carry a symbolic link (" & rel &
         "); an outputs archive holds regular files only")
-    if not isDeclaredOutput(rel, declared):
+    if not isDeclaredOutput(rel, declared, archiveDirs):
       raise newException(IOError,
         "substituted outputs carry " & rel &
         ", which the action does not declare as an output")
@@ -372,8 +403,8 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
       archiveBytes[i] = byte(ch)
     removeDir(extractDir)
     createDir(extractDir)
-    extractPrefix(archiveBytes, extractDir)
-    materialisePrefixIntoCwd(action, extractDir)
+    let entries = extractPrefix(archiveBytes, extractDir)
+    materialisePrefixIntoCwd(action, extractDir, entries)
     if not outputsExist(action):
       result.reason = "substituted archive did not materialise the " &
         "declared outputs for " & action.id

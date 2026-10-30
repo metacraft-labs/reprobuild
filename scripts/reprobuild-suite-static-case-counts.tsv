@@ -49,7 +49,7 @@ libs/repro_binary_cache_client/tests/t_a3_p1_cache_key.nim	nim	10
 libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim	nim	3
 libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
-libs/repro_binary_cache_client/tests/t_archive_extract_refuses_writing_through_symlinks.nim	nim	8
+libs/repro_binary_cache_client/tests/t_archive_extract_refuses_writing_through_symlinks.nim	nim	10
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
 libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	13
 libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim	nim	1
@@ -566,7 +566,7 @@ libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim
 libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim	7
 libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
-libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	5
+libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
