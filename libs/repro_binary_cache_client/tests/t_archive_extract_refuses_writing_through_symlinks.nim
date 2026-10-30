@@ -18,7 +18,7 @@
 ##
 ## No mocks: real files, real symlinks, the real extractor.
 
-import std/[os, unittest]
+import std/[os, strutils, unittest]
 
 import ../src/repro_binary_cache_client
 
@@ -116,3 +116,42 @@ suite "rbcarc extraction never writes through a symlink":
     check expandSymlink(t.outDir / "lib/libfoo.so") == "libfoo.so.1"
     check readFile(t.outDir / "lib/libfoo.so") == "ELF\0lib"
     check readFile(t.outDir / "bin/tool") == "#!/bin/sh\n"
+
+suite "all-or-nothing extraction for the substitute command":
+  test "a refused archive leaves no partial output":
+    let t = freshTree("atomic-refused")
+    defer: removeDir(t.root)
+    let target = t.root / "result"
+    let bytes = archive([
+      (path: "ok.txt", kind: KindFile, mode: 0o644'u32, body: "fine\n"),
+      (path: "d", kind: KindSymlink, mode: 0'u32, body: t.outside),
+      (path: "d/x", kind: KindFile, mode: 0o644'u32, body: "pwned\n")])
+    expect IOError:
+      extractPrefixInto(bytes, target)
+    check not dirExists(target)          # no partial tree, not even ok.txt
+    check entriesUnder(t.outside).len == 0
+    for kind, p in walkDir(t.root):
+      check ".repro-extract-" notin p    # the staging directory is gone
+
+  test "a non-empty output directory is refused":
+    let t = freshTree("atomic-nonempty")
+    defer: removeDir(t.root)
+    writeFile(t.outDir / "existing", "keep\n")
+    let bytes = archive([
+      (path: "new.txt", kind: KindFile, mode: 0o644'u32, body: "x")])
+    expect IOError:
+      extractPrefixInto(bytes, t.outDir)
+    check readFile(t.outDir / "existing") == "keep\n"
+    check not fileExists(t.outDir / "new.txt")
+
+  test "positive control: an honest archive lands complete":
+    let t = freshTree("atomic-ok")
+    defer: removeDir(t.root)
+    let target = t.root / "result"
+    let bytes = archive([
+      (path: "bin/tool", kind: KindFile, mode: 0o755'u32, body: "#!/bin/sh\n"),
+      (path: "lib/libx.so", kind: KindSymlink, mode: 0'u32, body: "libx.so.1"),
+      (path: "lib/libx.so.1", kind: KindFile, mode: 0o644'u32, body: "elf")])
+    extractPrefixInto(bytes, target)
+    check readFile(target / "bin/tool") == "#!/bin/sh\n"
+    check expandSymlink(target / "lib/libx.so") == "libx.so.1"

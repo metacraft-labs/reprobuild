@@ -6137,6 +6137,7 @@ proc soMatchesHostArch(libFile: string): bool =
     EM_386 = 0x03'u16
     EM_X86_64 = 0x3E'u16
     EM_AARCH64 = 0xB7'u16
+    EM_ARM = 0x28'u16
     CPU_TYPE_X86_64 = 0x01000007'u32
     CPU_TYPE_ARM64 = 0x0100000C'u32
     hostIs64 = sizeof(pointer) == 8
@@ -6144,6 +6145,7 @@ proc soMatchesHostArch(libFile: string): bool =
       when hostCPU == "amd64": EM_X86_64
       elif hostCPU == "arm64": EM_AARCH64
       elif hostCPU == "i386": EM_386
+      elif hostCPU == "arm": EM_ARM
       else: 0'u16
     hostCpuType =
       when hostCPU == "amd64": CPU_TYPE_X86_64
@@ -6242,12 +6244,21 @@ const InterfaceLibSubdirs = [
   ## a `-L` search must probe (plain `lib`, `lib64`, Debian-multiarch triples)
   ## so a bare prefix like `/usr` resolves regardless of host layout.
 
-proc holdsLibrary(libDir, dylibName: string; hostArchOnly: bool): bool =
-  ## Whether `libDir/dylibName` exists and — when `hostArchOnly` — is a file
-  ## this host's loader can map (see `soMatchesHostArch`).
-  let path = libDir / dylibName
-  fileExists(extendedPath(path)) and
-    (not hostArchOnly or soMatchesHostArch(path))
+proc dirHoldsLibrary(libDir: string; dylibNames: openArray[string];
+                     hostArchOnly: bool): bool =
+  ## Mirror of `config.nims`'s `dirHoldsLibrary`: whether `libDir` holds one
+  ## of `dylibNames` -- and, when `hostArchOnly`, none of them built for
+  ## another architecture (see `soMatchesHostArch`). The names are
+  ## alternatives for one `-l`, so a static archive, which the header check
+  ## cannot classify, must not vouch for a directory whose shared object is
+  ## foreign: the linker prefers the shared object.
+  result = false
+  for dylibName in dylibNames:
+    let path = libDir / dylibName
+    if fileExists(extendedPath(path)):
+      if hostArchOnly and not soMatchesHostArch(path):
+        return false
+      result = true
 
 proc firstExistingPrefixLibDir(prefix: string;
                                dylibNames: openArray[string];
@@ -6256,9 +6267,8 @@ proc firstExistingPrefixLibDir(prefix: string;
   ## absolute libdir under `prefix` that holds one of `dylibNames`, or "".
   for libSub in InterfaceLibSubdirs:
     let candidate = prefix / libSub
-    for dylibName in dylibNames:
-      if holdsLibrary(candidate, dylibName, hostArchOnly):
-        return candidate
+    if dirHoldsLibrary(candidate, dylibNames, hostArchOnly):
+      return candidate
   ""
 
 proc firstExistingLibDir(candidates: openArray[string];
@@ -6277,9 +6287,8 @@ proc firstExistingLibDir(candidates: openArray[string];
     let path = candidate.strip()
     if path.len == 0:
       continue
-    for dylibName in dylibNames:
-      if holdsLibrary(path, dylibName, hostArchOnly):
-        return path
+    if dirHoldsLibrary(path, dylibNames, hostArchOnly):
+      return path
     let resolved = firstExistingPrefixLibDir(path, dylibNames, hostArchOnly)
     if resolved.len > 0:
       return resolved

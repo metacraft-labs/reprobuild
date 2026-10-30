@@ -1025,6 +1025,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkMacosDarwinSystemModule:
       pairs.add(("name", quoteSystemValue(r.darwinModuleName)))
       pairs.add(("content", quoteSystemValue(r.darwinModuleContent)))
+    of srkLinuxDpkgDiversion:
+      pairs.add(("path", quoteSystemValue(r.ddPath)))
     of srkLinuxFhsSandbox:
       pairs.add(("binPath", quoteSystemValue(r.fsbBinPath)))
       pairs.add(("fhsTrees", renderListLiteral(r.fsbFhsTreeRoots)))

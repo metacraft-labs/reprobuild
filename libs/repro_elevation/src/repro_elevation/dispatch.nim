@@ -110,7 +110,7 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule, pokLinuxNixosSystemModule,
-     pokMacosDarwinSystemModule, pokLinuxFhsSandbox:
+     pokMacosDarwinSystemModule, pokLinuxFhsSandbox, pokLinuxDpkgDiversion:
     posixSystemDesiredDigestHex(op)
   of pokInlineExecCall:
     # Windows-System-Resources Phase E: an inline-exec edge has no
@@ -194,6 +194,8 @@ proc reobserve*(ctx: FixtureContext;
       observePosixOsHostname(op)
   of pokLinuxSysctl:
     observeLinuxSysctl(op)
+  of pokLinuxDpkgDiversion:
+    observeLinuxDpkgDiversion(op)
   of pokLinuxUdevRule:
     observeLinuxUdevRule(op)
   of pokLinuxPolkitRule:
@@ -283,6 +285,8 @@ proc applyOne(ctx: FixtureContext;
       result = applyPosixOsHostname(op)
   of pokLinuxSysctl:
     result = applyLinuxSysctl(op)
+  of pokLinuxDpkgDiversion:
+    result = applyLinuxDpkgDiversion(op)
   of pokLinuxUdevRule:
     result = applyLinuxUdevRule(op)
   of pokLinuxPolkitRule:
@@ -389,6 +393,7 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokPasswdUser and op.puDestroy) or
     (op.kind == pokLinuxSysctl and op.sysctlDestroy) or
     (op.kind == pokLinuxUdevRule and op.udevDestroy) or
+    (op.kind == pokLinuxDpkgDiversion and op.ddDestroy) or
     (op.kind == pokLinuxPolkitRule and op.polkitDestroy) or
     (op.kind == pokLinuxTmpfilesRule and op.tmpfilesDestroy) or
     (op.kind == pokLinuxSudoersRule and op.sudoersDestroy) or

@@ -1029,7 +1029,7 @@ proc runAttestLaunch(opts: AttestCliOptions; env: CloudEnvLookup): int =
       stderr.writeLine("repro attest launch: --now is " &
         opts.leaseNow.escape() & " and it is read as whole seconds")
       return AttestExitUsage
-  var leaseTtl = DefaultLeaseTtlSeconds
+  var leaseTtl = int64(DefaultLeaseTtlSeconds)
   if opts.leaseTtlSeconds.len > 0:
     try:
       leaseTtl = parseBiggestInt(opts.leaseTtlSeconds)
@@ -1051,7 +1051,7 @@ proc runAttestLaunch(opts: AttestCliOptions; env: CloudEnvLookup): int =
                 else: opts.leaseOut.parentDir)
     try:
       holder = acquireCloudLease(openCloudLeaseStore(root), spec,
-        delayed(initDuration(seconds = int(leaseTtl))), leaseNow, leaseRate)
+        delayed(initDuration(seconds = leaseTtl)), leaseNow, leaseRate)
     except CloudLeaseError as err:
       stderr.writeLine("repro attest launch: " & err.msg)
       return AttestExitUsage
@@ -1173,7 +1173,7 @@ proc runAttestReap(opts: AttestCliOptions; env: CloudEnvLookup): int =
         opts.leaseNow.escape() & " and it is read as whole seconds")
       return AttestExitUsage
 
-  var interval = DefaultReapIntervalSeconds
+  var interval = int64(DefaultReapIntervalSeconds)
   if opts.reapInterval.len > 0:
     try:
       interval = parseBiggestInt(opts.reapInterval)
@@ -1196,7 +1196,7 @@ proc runAttestReap(opts: AttestCliOptions; env: CloudEnvLookup): int =
   # surprise on a command line and is not what a `oneshot` unit wants
   # either. `--sweeps` overrides both, and zero is refused because a
   # sweep that never runs is not a sweep.
-  var sweeps = 1
+  var sweeps = 1'i64
   if opts.reapInterval.len > 0: sweeps = 0    # until it is stopped
   if opts.reapSweeps.len > 0:
     try:
@@ -1237,7 +1237,7 @@ proc runAttestReap(opts: AttestCliOptions; env: CloudEnvLookup): int =
         stdout.write("provider-tool: " & resolvedProgram & "\n")
         stdout.write("provider-tool-search-path: " & resolvedFrom & "\n")
   var failures = 0
-  var swept = 0
+  var swept = 0'i64
   while sweeps == 0 or swept < sweeps:
     let now = (if hasStated: stated else: getTime().toUnix)
     try:

@@ -154,9 +154,12 @@ proc encodeWindowsDirectPatchBundle*(
   let entriesOffset = int(WindowsDirectPatchHeaderBytes)
   let regionOffset = alignUp(entriesOffset +
     bundle.functionEntryOffsets.len * 4, 16)
+  # The u32 bounds are compared in 64 bits: `int(high(uint32))` does not
+  # exist where `int` is 32 bits wide (armhf), and there no `int` can exceed
+  # it, so the comparison is simply false rather than a compile error.
   if bundle.regionBytes.len > high(int) - regionOffset or
-      regionOffset > int(high(uint32)) or
-      bundle.regionBytes.len > int(high(uint32)):
+      int64(regionOffset) > int64(high(uint32)) or
+      int64(bundle.regionBytes.len) > int64(high(uint32)):
     raise newException(ValueError, "Windows patch bundle is too large")
   let total = regionOffset + bundle.regionBytes.len
   result = newSeq[byte](total)

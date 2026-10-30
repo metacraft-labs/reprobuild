@@ -30,6 +30,8 @@ import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
+import repro_addon/addon_apply as addon_apply
+import repro_addon/cli as addon_cli
 from repro_home_intent/host_identity import selectHost, EHostIdentity
 from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 
@@ -570,6 +572,30 @@ proc runInfraApply(args: openArray[string]): int =
     return 1
   defer: releaseApplyLock(stateDir)
 
+  # ReproOS add-on mode: on a host the add-on was bootstrapped on, every
+  # generation is the add-on's own objects plus this profile, and the
+  # ownership ledger decides what may be removed. A plain infra apply here
+  # would bypass the ledger, so the apply goes through the add-on layer.
+  if addon_apply.isAddonHost(stateDir):
+    if profileBuildActions.len > 0:
+      stderr.writeLine("repro infra apply: this is an add-on host, and " &
+        "add-on generations do not carry build actions yet; the profile " &
+        "declares " & $profileBuildActions.len)
+      return 2
+    try:
+      let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
+        stateDir: stateDir, hostIdentity: host, userProfileText: profileText))
+      echo "repro infra apply (add-on): generation " & r.generationId &
+        " (previous " & r.previousGenerationId & "), applied " &
+        $r.infra.appliedCount & ", removed " & $r.removed.len
+      return 0
+    except addon_apply.AddonDriftError as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 1
+    except CatchableError as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 1
+
   var opts: ApplyOptions
   opts.stateDir = stateDir
   opts.hostIdentity = host
@@ -1100,7 +1126,7 @@ proc runSystemCommand*(args: seq[string]): int =
   ## commands), alongside the Phase-A `audit` reader.
   if args.len == 0:
     stderr.writeLine("usage: repro system {add | remove | list | why | " &
-      "sync | history | rollback | audit} ...")
+      "sync | history | rollback | audit | addon} ...")
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -1114,6 +1140,7 @@ proc runSystemCommand*(args: seq[string]): int =
     of "history": return runSystemHistory(rest)
     of "rollback": return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
+    of "addon": return addon_cli.runAddonCli(rest)
     else:
       stderr.writeLine("repro system: unknown subcommand: " & sub)
       return 2
