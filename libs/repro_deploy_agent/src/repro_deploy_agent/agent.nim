@@ -32,7 +32,7 @@
 ## ``runInfraApply``. This mirrors the Linux agent's ``DeployAgentDependencies``
 ## seam (fetch/run/query process runners injected for tests).
 
-import std/[algorithm, httpclient, os, strutils, uri]
+import std/[algorithm, httpclient, os, streams, strutils, uri]
 
 when defined(ssl):
   import std/net
@@ -232,16 +232,40 @@ proc defaultHttpGet(url: string; timeoutMs: int):
                      "this binary is HTTP-only")
     var client = newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
   try:
-    let resp = client.get(url)
+    # `request`, not `get`: `get` reads the whole body before returning,
+    # and the cap below has to be applied BEFORE the body is held in
+    # memory. The response's headers are available first; the body is
+    # then read from its stream in bounded pieces.
+    let resp = client.request(url, httpMethod = HttpGet)
     if resp.code == Http404:
       return (ok: false, missing: true, body: @[], error: "404")
     if not resp.code.is2xx:
       return (ok: false, missing: false, body: @[],
               error: "HTTP " & $resp.code)
-    let bodyStr = resp.body
-    var bytes = newSeq[byte](bodyStr.len)
-    for i, ch in bodyStr:
-      bytes[i] = byte(ch)
+    if resp.headers.hasKey("Content-Length"):
+      var declared = 0
+      try:
+        declared = parseInt(resp.headers["Content-Length"])
+      except ValueError:
+        return (ok: false, missing: false, body: @[],
+                error: "unparseable Content-Length header")
+      if declared > MaxDeployManifestBytes:
+        return (ok: false, missing: false, body: @[],
+                error: "manifest body of " & $declared & " bytes exceeds " &
+                  "the " & $MaxDeployManifestBytes & "-byte cap")
+    var bytes: seq[byte]
+    var chunk = newString(64 * 1024)
+    while true:
+      let n = resp.bodyStream.readData(addr chunk[0], chunk.len)
+      if n <= 0: break
+      if bytes.len + n > MaxDeployManifestBytes:
+        return (ok: false, missing: false, body: @[],
+                error: "manifest body exceeds the " &
+                  $MaxDeployManifestBytes & "-byte cap")
+      let at = bytes.len
+      bytes.setLen(at + n)
+      for i in 0 ..< n:
+        bytes[at + i] = byte(chunk[i])
     return (ok: true, missing: false, body: bytes, error: "")
   except CatchableError as e:
     return (ok: false, missing: false, body: @[], error: e.msg)

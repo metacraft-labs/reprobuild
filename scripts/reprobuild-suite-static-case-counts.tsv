@@ -265,13 +265,14 @@ libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	21
 libs/repro_daemon_core/tests/t_ipc_endpoint_is_bounded_to_the_socket_address_limit.nim	nim	4
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	19
 libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim	nim	6
-libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
+libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	4
 libs/repro_deploy_agent/tests/t_deploy_agent_records_the_resolved_host.nim	nim	3
 libs/repro_deploy_agent/tests/t_deploy_agent_secret_files_are_private_and_never_follow_links.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
-libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	4
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	6
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim	nim	5
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_profile_file_paths_corpus.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_recipient_keygen.nim	nim	11
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_history.nim	nim	17
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_records_tick_status.nim	nim	7
@@ -570,7 +571,7 @@ libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim
 libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim	7
 libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
-libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	7
+libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	8
 libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
@@ -584,8 +585,8 @@ libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	ni
 libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	96
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	41
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
-libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim	nim	6
-libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim	nim	4
+libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim	nim	7
+libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim	nim	5
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	35
 libs/repro_project_dsl/tests/dsl_port/t_dsl_activity_surface_is_typed.nim	nim	16

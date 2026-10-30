@@ -664,6 +664,23 @@ proc checkAddOnToolResource*(r: SystemResource) =
     raiseSystemProfileInvalid("linux.addOnTool '" & r.atCommand & "': " &
       getCurrentExceptionMsg())
 
+proc checkUnitStateConflicts*(resources: openArray[SystemResource]) =
+  ## A unit name may not be declared both as a `systemd.unitState` (a unit
+  ## the add-on does NOT own) and as a `systemd.systemUnit` (one it writes):
+  ## the two would converge the same unit from opposite ownership stances
+  ## (ReproOS Add-On Mode §4.1). Both profile paths call this once the
+  ## resource list is complete.
+  var owned: seq[string]
+  for r in resources:
+    if r.kind == srkSystemdSystemUnit:
+      owned.add(r.suName)
+  for r in resources:
+    if r.kind == srkSystemdUnitState and r.usName in owned:
+      raiseSystemProfileInvalid("unit '" & r.usName & "' is declared both " &
+        "as systemd.unitState (not owned) and as systemd.systemUnit " &
+        "(owned); drop the systemd.unitState resource — a unit the " &
+        "profile writes is enabled through its own `enabled` field")
+
 proc stanzaBounds(clean: string):
     seq[tuple[head, brace, close: int]] =
   ## The stanzas of comment-stripped text, as offsets: where the kind tag
@@ -704,20 +721,27 @@ proc stanzaBounds(clean: string):
     result.add((head: pos, brace: braceIdx, close: closeIdx))
     pos = closeIdx + 1
 
-proc systemProfileStanzaLineSpans*(text: string):
+proc systemProfileStanzaLineSpans*(text: string;
+                                   lineEnding = "\n"):
     seq[tuple[startLine, endLine: int]] =
   ## The 0-based line of each stanza's kind tag and of its closing `}`, in
   ## file order, found by the SAME quote-aware walk `parseSystemProfile`
   ## uses. The text editor (`intent.stanzaSpans`) pairs these with the
   ## parsed resources, so a value holding a `{`, a `}`, a `#` or a blank
   ## line cannot make the editor and the parser disagree on where a stanza
-  ## ends. Lines are counted by `\n`.
+  ## ends. Lines are counted by `lineEnding` exactly — the ending the
+  ## editor split the file on — so a value holding the OTHER ending (a
+  ## `\r\n` inside an LF profile, a bare `\n` inside a CRLF one) does not
+  ## count as a line to one side and not the other.
+  doAssert lineEnding in ["\n", "\r\n"]
   let clean = stripComments(text)
   var line = 0
   var at = 0
   proc lineOf(offset: int): int =
     while at < offset:
-      if clean[at] == '\n': inc line
+      if clean[at] == '\n' and
+          (lineEnding == "\n" or (at > 0 and clean[at - 1] == '\r')):
+        inc line
       inc at
     line
   for span in stanzaBounds(clean):
@@ -1495,6 +1519,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     if "depends_on" in rawFields:
       res.dependsOn = parseDependsOn(kindTag, rawFields["depends_on"])
     result.resources.add(res)
+  checkUnitStateConflicts(result.resources)
 
 # ---------------------------------------------------------------------------
 # SystemResource -> typed PrivilegedOperation. A `destroy` flag flips

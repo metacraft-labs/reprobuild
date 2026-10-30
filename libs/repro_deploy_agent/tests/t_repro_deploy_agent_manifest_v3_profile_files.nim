@@ -15,8 +15,15 @@
 ##     refused by the encoder AND by the decoder, before the signature;
 ##   * staging writes each file at its relative path beside the module and
 ##     removes what a previous manifest left there.
-## The on-target compile that `staticRead`s a staged file is exercised by
-## `t_deploy_agent_cli_compiles_manifest_profile` through the real binary.
+##   * the lowest-version rule on the reading side: a v3 envelope with no
+##     files and a v2 envelope without a sealed section are refused as
+##     non-canonical, by name, before the signature is consulted;
+##   * the reserved staged-profile name and file/directory prefix conflicts
+##     are refused.
+## The on-target compile that `staticRead`s a staged file, and a changed
+## lock behind an unchanged profile text, are driven through the real binary
+## in `t_deploy_agent_cli_compiles_manifest_profile` ("a bundled file the
+## profile staticReads reaches the apply, and a changed one is recompiled").
 
 import std/[os, strutils, unittest]
 
@@ -108,3 +115,51 @@ suite "RDMF v3: profile bundle":
     expect DeployManifestCodecError:
       discard stageProfileSources(dir, "", [
         ProfileFile(path: "../escape", content: "x")])
+
+  test "reserved name and file/directory prefix conflicts are refused":
+    for files in [
+        @[ProfileFile(path: StagedProfileModule, content: "x")],
+        @[ProfileFile(path: "a", content: "1"),
+          ProfileFile(path: "a/b", content: "2")],
+        @[ProfileFile(path: "a/b", content: "2"),
+          ProfileFile(path: "a", content: "1")]]:
+      expect DeployManifestCodecError:
+        validateProfileFiles(files)
+      expect DeployManifestCodecError:
+        discard encodeManifest(bundled(files))
+    # A shared directory is not a conflict.
+    validateProfileFiles([ProfileFile(path: "a/b", content: "1"),
+                          ProfileFile(path: "a/c", content: "2")])
+
+  test "non-canonical envelopes are refused by name, before the signature":
+    # A v3 envelope with zero files: forge the version byte of a v1
+    # envelope and splice a zero file count after `profileText`.
+    var m = bundled(@[])
+    let kp = peerAuth.generateKeypair()
+    signManifest(kp, m)
+    let v1 = encodeManifest(m)
+    # Layout: magic(4) version(2) reserved(2) target(len+n) seq(8)
+    # deploymentId(len+n) profileText(len+n) | [v3: fileCount(4)] actions...
+    var forged = v1[0 ..< 4] & @[3'u8, 0'u8] & v1[6 .. ^1]
+    var pos = 8
+    for _ in 0 ..< 3:   # target, (skip seq), deploymentId, profileText
+      let n = int(forged[pos]) or (int(forged[pos + 1]) shl 8) or
+        (int(forged[pos + 2]) shl 16) or (int(forged[pos + 3]) shl 24)
+      pos += 4 + n
+      if pos == 8 + 4 + m.target.len: pos += 8   # the u64 sequence
+    forged = forged[0 ..< pos] & @[0'u8, 0'u8, 0'u8, 0'u8] & forged[pos .. ^1]
+    try:
+      discard decodeManifest(forged)
+      check false
+    except DeployManifestCodecError as e:
+      check "non-canonical" in e.msg
+    # A v2 envelope whose secrets flag is 0.
+    var v2 = v1[0 ..< 4] & @[2'u8, 0'u8] & v1[6 .. ^1]
+    # The flag sits right before the 65-byte producer key + 64-byte signature.
+    let flagAt = v2.len - 64 - 65
+    v2 = v2[0 ..< flagAt] & @[0'u8] & v2[flagAt .. ^1]
+    try:
+      discard decodeManifest(v2)
+      check false
+    except DeployManifestCodecError as e:
+      check "non-canonical" in e.msg
