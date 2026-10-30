@@ -3221,6 +3221,21 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     userProfileText: back.user, driver: driver, purpose: "revert",
     assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
     nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
+  # Step 2 disabled the units the switch was removing, recording each
+  # first. When the switch got no further, their files are still the old
+  # generation's and the ledger still lists them unchanged, so the revert
+  # finds nothing to write and would leave them disabled: they are
+  # re-enabled here, as a refused fresh switch's are (`undoPreStop`).
+  var disabled = prior.disabled
+  for u in now.disabled:
+    if u notin disabled: disabled.add(u)
+  for u in disabled:
+    try:
+      if fileExists(unitPath(u)) and
+          runSystemctl(["is-enabled", "--", u]).output.strip() == "disabled":
+        discard runSystemctl(["enable", "--", u])
+    except CatchableError:
+      discard        # reported by the next check as drift
   recordRolledBack(stateDir, prior.attempt, fromGen, r.generationId, reason,
                    false)
   FailedReplayRevert(reverted: true, generationId: r.generationId)
