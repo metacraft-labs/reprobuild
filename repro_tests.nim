@@ -6086,6 +6086,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_profile_compile_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim",
+    binary: "build/test-bin/t_addon_unit_state_and_tools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_profile_compile_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim",
     binary: "build/test-bin/t_builtin_predicate_fixtures",
     defines: @[],

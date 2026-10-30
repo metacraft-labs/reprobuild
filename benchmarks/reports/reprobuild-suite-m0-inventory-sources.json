@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2427,
-    "pureUnitConsolidationGroups": 70,
-    "pureUnitTests": 691,
+    "nimTestBinaries": 2428,
+    "pureUnitConsolidationGroups": 71,
+    "pureUnitTests": 692,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2467
+    "testEntries": 2468
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -522,6 +522,23 @@
       "sources": [
         "libs/repro_platform/tests/test_msvc_activation_multiline_env.nim",
         "libs/repro_platform/tests/test_msvc_env_merge.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_elevation",
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "sources": [
+        "libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim",
+        "libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1416,7 +1433,7 @@
       "graph-fixture": 18,
       "integration": 1349,
       "platform/destructive": 146,
-      "pure unit": 691,
+      "pure unit": 692,
       "unclassified": 263
     },
     "graphOwnedTestArtifacts": [
@@ -1625,9 +1642,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2427,
+    "nimTestBinaryCount": 2428,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2467
+    "testEntryCount": 2468
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17932,6 +17949,27 @@
       "source": "libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_unit_state_and_tools",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_elevation",
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

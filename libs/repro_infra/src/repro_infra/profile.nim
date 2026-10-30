@@ -64,6 +64,8 @@ type
     srkLinuxNixosSystemModule = "linux.nixosSystemModule"
     srkMacosDarwinSystemModule = "macos.darwinSystemModule"
     srkLinuxFhsSandbox = "linux.fhsSandbox"
+    srkSystemdUnitState = "systemd.unitState"
+    srkLinuxAddOnTool = "linux.addOnTool"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -269,6 +271,14 @@ type
       fsbBinPath*: string                 ## absolute path inside the FHS view
       fsbFhsTreeRoots*: seq[string]       ## realized prefixes composed into /
       fsbArgv*: seq[string]               ## additional argv after fsbBinPath
+    of srkSystemdUnitState:
+      usName*: string                     ## a unit the add-on does NOT own
+      usEnabled*: bool                    ## desired: enabled (default true)
+      usRunning*: bool                    ## desired: active (default true)
+    of srkLinuxAddOnTool:
+      atCommand*: string                  ## wrapper name under /etc/repro/bin
+      atAptClosureLock*: string           ## the closure the command runs from
+      atProgram*: string                  ## FHS path inside the closure
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -337,6 +347,10 @@ proc realWorldIdentity*(r: SystemResource): string =
     "darwinSystemModule:" & r.darwinModuleName
   of srkLinuxFhsSandbox:
     "fhsSandbox:" & r.fsbBinPath
+  of srkSystemdUnitState:
+    "unitState:" & r.usName
+  of srkLinuxAddOnTool:
+    "addOnTool:" & r.atCommand
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -385,6 +399,8 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxNixosSystemModule: r.nixosModuleName
   of srkMacosDarwinSystemModule: r.darwinModuleName
   of srkLinuxFhsSandbox: r.fsbBinPath
+  of srkSystemdUnitState: r.usName
+  of srkLinuxAddOnTool: r.atCommand
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -612,6 +628,36 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
       getCurrentExceptionMsg())
 
+proc checkUnitStateResource*(r: SystemResource) =
+  ## The refusals both the text parser and the DSL adapter apply to a
+  ## `systemd.unitState` (ReproOS Add-On Mode §4.1): the name must be a
+  ## unit name systemd would accept, since the resource owns nothing it
+  ## could validate against.
+  doAssert r.kind == srkSystemdUnitState
+  if not isSafeUnitName(r.usName) or not hasKnownUnitSuffix(r.usName):
+    raiseSystemProfileInvalid("systemd.unitState name '" & r.usName &
+      "' is not a safe unit name with a unit-type suffix " &
+      "(e.g. avahi-daemon.service)")
+
+proc checkAddOnToolResource*(r: SystemResource) =
+  ## The refusals both paths apply to a `linux.addOnTool` (§4.1): a safe
+  ## command name (it becomes a file under `/etc/repro/bin`), an absolute
+  ## program path inside the closure, and a lock that parses — at plan
+  ## time, not on the host at apply time.
+  doAssert r.kind == srkLinuxAddOnTool
+  if not isSafeAddOnToolCommand(r.atCommand):
+    raiseSystemProfileInvalid("linux.addOnTool command '" & r.atCommand &
+      "' is not a safe command name (letters, digits, '.', '-', '_', '+')")
+  if not isPosixAbsolutePath(r.atProgram):
+    raiseSystemProfileInvalid("linux.addOnTool '" & r.atCommand &
+      "': program '" & r.atProgram & "' must be an absolute path inside " &
+      "the closure (e.g. /usr/bin/" & r.atCommand & ")")
+  try:
+    discard parseAptClosureLock(r.atAptClosureLock)
+  except EAptClosureLock:
+    raiseSystemProfileInvalid("linux.addOnTool '" & r.atCommand & "': " &
+      getCurrentExceptionMsg())
+
 proc stanzaBounds(clean: string):
     seq[tuple[head, brace, close: int]] =
   ## The stanzas of comment-stripped text, as offsets: where the kind tag
@@ -717,6 +763,8 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxNixosSystemModule: srk = srkLinuxNixosSystemModule
     of $srkMacosDarwinSystemModule: srk = srkMacosDarwinSystemModule
     of $srkLinuxFhsSandbox: srk = srkLinuxFhsSandbox
+    of $srkSystemdUnitState: srk = srkSystemdUnitState
+    of $srkLinuxAddOnTool: srk = srkLinuxAddOnTool
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -1362,6 +1410,28 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "' must end with '.nix' (Nix module convention)")
       res = SystemResource(kind: srkMacosDarwinSystemModule,
         darwinModuleName: n, darwinModuleContent: c)
+    of srkSystemdUnitState:
+      let stateStr =
+        if "state" in fields: fields["state"].toLowerAscii() else: "running"
+      if stateStr notin ["running", "stopped"]:
+        raiseSystemProfileInvalid("systemd.unitState state '" & stateStr &
+          "' is not one of Running / Stopped")
+      res = SystemResource(kind: srkSystemdUnitState,
+        usName: need("name"),
+        usEnabled:
+          if "enabled" in fields: parseBoolField("enabled",
+            fields["enabled"]) else: true,
+        usRunning: stateStr == "running")
+      checkUnitStateResource(res)
+    of srkLinuxAddOnTool:
+      let command = need("command")
+      res = SystemResource(kind: srkLinuxAddOnTool,
+        atCommand: command,
+        atAptClosureLock: need("aptClosureLock"),
+        atProgram:
+          if "program" in fields: fields["program"]
+          else: "/usr/bin/" & command)
+      checkAddOnToolResource(res)
     of srkLinuxFhsSandbox:
       let binPath = need("binPath")
       if not isPosixAbsolutePath(binPath):
@@ -1605,6 +1675,18 @@ proc toPrivilegedOperation*(r: SystemResource;
       darwinModuleName: r.darwinModuleName,
       darwinModuleContent: r.darwinModuleContent,
       darwinModuleDestroy: destroy)
+  of srkSystemdUnitState:
+    PrivilegedOperation(kind: pokSystemdUnitState, address: r.address,
+      usName: r.usName,
+      usEnabled: r.usEnabled,
+      usRunning: r.usRunning,
+      usDestroy: destroy)
+  of srkLinuxAddOnTool:
+    PrivilegedOperation(kind: pokLinuxAddOnTool, address: r.address,
+      atCommand: r.atCommand,
+      atAptClosureLock: r.atAptClosureLock,
+      atProgram: r.atProgram,
+      atDestroy: destroy)
   of srkLinuxFhsSandbox:
     PrivilegedOperation(kind: pokLinuxFhsSandbox, address: r.address,
       fsbBinPath: r.fsbBinPath,

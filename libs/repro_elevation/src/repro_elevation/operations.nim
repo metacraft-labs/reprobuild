@@ -333,6 +333,12 @@ type
       ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
       ## mount-namespace bubblewrap creates are MECHANISM (the privilege
       ## needed to bind-mount without root), not an isolation policy.
+    pokSystemdUnitState = "systemd.unitState"
+      ## Enable/disable and start/stop a unit the add-on does not own, and
+      ## nothing else about it (ReproOS Add-On Mode §4.1, `unitState`).
+    pokLinuxAddOnTool = "linux.addOnTool"
+      ## A wrapper under `/etc/repro/bin` running a command from a
+      ## `package(apt)` closure through the sandbox launcher (§4.1).
     pokInlineExecCall = "reprobuild.inlineExecCall"
       ## Windows-System-Resources Phase E: the cross-cutting privileged
       ## execution of an `inlineExecCall(...)` build-graph edge tagged
@@ -759,6 +765,22 @@ type
       darwinModuleName*: string
       darwinModuleContent*: string
       darwinModuleDestroy*: bool
+    of pokSystemdUnitState:
+      ## Converge only `systemctl enable|disable` and `start|stop` of
+      ## `usName`, a unit the add-on does not own. `usDestroy` forgets the
+      ## requirement and changes nothing on the host.
+      usName*: string
+      usEnabled*: bool
+      usRunning*: bool
+      usDestroy*: bool
+    of pokLinuxAddOnTool:
+      ## Write `/etc/repro/bin/<atCommand>` and the launcher manifest beside
+      ## it, so an operator runs `atProgram` from the closure
+      ## `atAptClosureLock` pins; the driver realises the closure first.
+      atCommand*: string
+      atAptClosureLock*: string
+      atProgram*: string
+      atDestroy*: bool
     of pokLinuxFhsSandbox:
       ## Launch `fsbBinPath` under bubblewrap with the M0-locked
       ## transparency-posture invocation shape:
@@ -1081,6 +1103,8 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
+  of pokSystemdUnitState: true
+  of pokLinuxAddOnTool: true
   of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
@@ -1123,6 +1147,8 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
+  of $pokSystemdUnitState: pokSystemdUnitState
+  of $pokLinuxAddOnTool: pokLinuxAddOnTool
   of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
@@ -2556,6 +2582,22 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.darwinModuleName.endsWith(".nix"):
       return "macos.darwinSystemModule name '" & op.darwinModuleName &
         "' must end with '.nix' (Nix module convention)"
+  of pokSystemdUnitState:
+    if not isSafeUnitName(op.usName) or not hasKnownUnitSuffix(op.usName):
+      return "systemd.unitState name '" & op.usName &
+        "' is not a safe unit name with a unit-type suffix"
+  of pokLinuxAddOnTool:
+    if not isSafeAddOnToolCommand(op.atCommand):
+      return "linux.addOnTool command '" & op.atCommand &
+        "' is not a safe command name (letters, digits, '.', '-', '_', '+')"
+    if not isPosixAbsolutePath(op.atProgram):
+      return "linux.addOnTool program '" & op.atProgram &
+        "' is not an absolute path inside the closure"
+    if not op.atDestroy:
+      try:
+        discard parseAptClosureLock(op.atAptClosureLock)
+      except EAptClosureLock as ex:
+        return "linux.addOnTool '" & op.atCommand & "': " & ex.msg
   of pokLinuxFhsSandbox:
     # `fsbBinPath` must be a POSIX absolute path (leading `/`). The
     # driver does NOT canonicalize — `..` collapse / symlink resolve

@@ -613,6 +613,25 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "' must end with '.nix'")
     result = SystemResource(kind: srkMacosDarwinSystemModule,
       darwinModuleName: n, darwinModuleContent: c)
+  of "systemd.unitState":
+    let stateStr = fieldString(r, "state", "Running").toLowerAscii()
+    if stateStr notin ["running", "stopped"]:
+      raise newException(ValueError,
+        "systemd.unitState state '" & stateStr &
+        "' is not one of Running / Stopped")
+    result = SystemResource(kind: srkSystemdUnitState,
+      usName: fieldString(r, "name"),
+      usEnabled: fieldBool(r, "enabled", true),
+      usRunning: stateStr == "running")
+    # Same parse-time refusals as the text path.
+    checkUnitStateResource(result)
+  of "linux.addOnTool":
+    let command = fieldString(r, "command")
+    result = SystemResource(kind: srkLinuxAddOnTool,
+      atCommand: command,
+      atAptClosureLock: fieldString(r, "aptClosureLock"),
+      atProgram: fieldString(r, "program", "/usr/bin/" & command))
+    checkAddOnToolResource(result)
   of "linux.fhsSandbox":
     # Linux-Third-Party-Sandbox-MVP M1. The closed-set / shape checks
     # mirror the `parseSystemProfile` arm in repro_infra/profile.nim
@@ -1020,6 +1039,15 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkMacosDarwinSystemModule:
       pairs.add(("name", quoteSystemValue(r.darwinModuleName)))
       pairs.add(("content", quoteSystemValue(r.darwinModuleContent)))
+    of srkSystemdUnitState:
+      pairs.add(("name", quoteSystemValue(r.usName)))
+      pairs.add(("enabled", (if r.usEnabled: "true" else: "false")))
+      pairs.add(("state",
+        quoteSystemValue(if r.usRunning: "Running" else: "Stopped")))
+    of srkLinuxAddOnTool:
+      pairs.add(("command", quoteSystemValue(r.atCommand)))
+      pairs.add(("aptClosureLock", quoteSystemValue(r.atAptClosureLock)))
+      pairs.add(("program", quoteSystemValue(r.atProgram)))
     of srkLinuxFhsSandbox:
       pairs.add(("binPath", quoteSystemValue(r.fsbBinPath)))
       pairs.add(("fhsTrees", renderListLiteral(r.fsbFhsTreeRoots)))

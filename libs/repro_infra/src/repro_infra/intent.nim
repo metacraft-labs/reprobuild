@@ -406,6 +406,15 @@ proc renderStanza*(r: SystemResource): seq[string] =
   of srkMacosDarwinSystemModule:
     result.add("  name = " & renderScalar(r.darwinModuleName))
     result.add("  content = " & renderScalar(r.darwinModuleContent))
+  of srkSystemdUnitState:
+    result.add("  name = " & renderScalar(r.usName))
+    if not r.usEnabled:
+      result.add("  enabled = false")
+    result.add("  state = " & (if r.usRunning: "Running" else: "Stopped"))
+  of srkLinuxAddOnTool:
+    result.add("  command = " & renderScalar(r.atCommand))
+    result.add("  aptClosureLock = " & renderScalar(r.atAptClosureLock))
+    result.add("  program = " & renderScalar(r.atProgram))
   of srkLinuxFhsSandbox:
     result.add("  binPath = " & renderScalar(r.fsbBinPath))
     result.add("  fhsTrees = " & renderList(r.fsbFhsTreeRoots))

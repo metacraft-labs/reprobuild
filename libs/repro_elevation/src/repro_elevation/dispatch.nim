@@ -110,7 +110,8 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule, pokLinuxNixosSystemModule,
-     pokMacosDarwinSystemModule, pokLinuxFhsSandbox:
+     pokMacosDarwinSystemModule, pokLinuxFhsSandbox, pokSystemdUnitState,
+     pokLinuxAddOnTool:
     posixSystemDesiredDigestHex(op)
   of pokInlineExecCall:
     # Windows-System-Resources Phase E: an inline-exec edge has no
@@ -214,6 +215,10 @@ proc reobserve*(ctx: FixtureContext;
     observeLinuxNixosSystemModule(op)
   of pokMacosDarwinSystemModule:
     observeMacosDarwinSystemModule(op)
+  of pokSystemdUnitState:
+    observeSystemdUnitState(op)
+  of pokLinuxAddOnTool:
+    observeLinuxAddOnTool(op)
   of pokLinuxFhsSandbox:
     observeLinuxFhsSandbox(op)
   of pokInlineExecCall:
@@ -303,6 +308,10 @@ proc applyOne(ctx: FixtureContext;
     result = applyLinuxNixosSystemModule(op)
   of pokMacosDarwinSystemModule:
     result = applyMacosDarwinSystemModule(op)
+  of pokSystemdUnitState:
+    result = applySystemdUnitState(op)
+  of pokLinuxAddOnTool:
+    result = applyLinuxAddOnTool(op)
   of pokLinuxFhsSandbox:
     result = applyLinuxFhsSandbox(op)
   of pokInlineExecCall:
@@ -398,7 +407,9 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokLinuxFirewallRule and op.lfwDestroy) or
     (op.kind == pokLinuxNixosSystemModule and op.nixosModuleDestroy) or
     (op.kind == pokMacosDarwinSystemModule and op.darwinModuleDestroy) or
-    (op.kind == pokLinuxFhsSandbox and op.fsbDestroy)
+    (op.kind == pokLinuxFhsSandbox and op.fsbDestroy) or
+    (op.kind == pokSystemdUnitState and op.usDestroy) or
+    (op.kind == pokLinuxAddOnTool and op.atDestroy)
   # Add-On spec §7.3: a unit whose `depends_on` resource changed in this
   # apply has an UNCHANGED file, so by digest it is a cache-hit. The apply
   # step marked it (`suRestartRequested`), and the driver, not this loop,
