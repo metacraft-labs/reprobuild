@@ -483,16 +483,55 @@ when defined(posix):
         raise posixFail("cannot write", path)
       off += n
 
-  proc createKeyFileExclusive(path, text: string) =
+  const KeygenStagingInfix = ".keygen-"
+    ## The staging file beside the key is `<key>.keygen-<pid>`; the pid
+    ## says which keygen owns it, so a leftover from a crashed one can be
+    ## told from a concurrent one's.
+
+  proc sweepStaleKeygenStaging(path: string) =
+    ## Remove `<path>.keygen-<pid>` files whose owning process is gone. A
+    ## keygen killed between creating its staging file and linking it leaves
+    ## one behind (with the scalar in it, 0400 -- a secret that nothing will
+    ## ever use); a LIVE keygen's file is left alone, it is about to be
+    ## linked or unlinked by its owner.
+    let dir = parentDir(path)
+    if dir.len == 0 or not dirExists(dir):
+      return
+    let prefix = extractFilename(path) & KeygenStagingInfix
+    for kind, entry in walkDir(dir):
+      if kind notin {pcFile, pcLinkToFile}:
+        continue
+      let name = extractFilename(entry)
+      if not name.startsWith(prefix):
+        continue
+      var pid: int
+      try:
+        pid = parseInt(name[prefix.len .. ^1])
+      except ValueError:
+        continue
+      if pid <= 0:
+        continue
+      # kill(pid, 0) delivers nothing; it answers whether the pid exists.
+      # EPERM means it exists under another user: live, leave it. One with
+      # THIS pid is stale too: this process has not staged anything yet, so
+      # it can only be left over from an earlier holder of the pid.
+      if pid != int(getpid()) and
+          (posix.kill(Pid(pid), 0) == 0 or errno == EPERM):
+        continue
+      discard posix.unlink(entry.cstring)
+
+  proc createKeyFileExclusive(path, text: string): bool =
     ## Publish `text` at `path` with mode 0400, never replacing anything.
+    ## Returns false, having written nothing at `path`, when another file got
+    ## there first -- a concurrent keygen -- so the caller reads that one.
     ##
-    ## Written to a sibling temporary created 0400 from the start (so the
+    ## Written to a sibling staging file created 0400 from the start (so the
     ## scalar is never on disk with a wider mode, whatever the umask), flushed,
     ## and then HARD-LINKED onto `path`: `link(2)` fails with EEXIST rather
     ## than overwrite, so a concurrent or repeated keygen cannot replace a key
     ## a producer may already have sealed to, and a crash leaves either no key
     ## or a complete one -- never a truncated file at the real name.
-    let tmp = path & ".keygen-" & $getpid()
+    let tmp = path & KeygenStagingInfix & $getpid()
     let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or O_CLOEXEC,
                         Mode(0o400))
     if fd < 0:
@@ -512,60 +551,131 @@ when defined(posix):
     let linkErr = osLastError()
     discard posix.unlink(tmp.cstring)
     if linked != 0:
+      if linkErr == OSErrorCode(EEXIST):
+        return false
       raise newException(SecretsError, "cannot publish recipient key at " &
         path & ": " & osErrorMsg(linkErr))
     let dirFd = posix.open(parentDir(path).cstring, O_RDONLY or O_CLOEXEC)
     if dirFd >= 0:
       discard fsync(dirFd)
       discard posix.close(dirFd)
+    true
 
-proc ensureRecipientKeyFile*(path: string): RecipientKey =
+  proc createParents0700(path: string) =
+    ## Create every missing ancestor of `path`, each mode 0700 regardless of
+    ## the umask. `createDir` would make the intermediate ones 0777 & ~umask,
+    ## so a key under `a/b/recipient.key` with `a` absent got a world-
+    ## searchable `a`; and the mode is set at `mkdir(2)` time, not narrowed
+    ## afterwards, so no component is ever wider than it ends up.
+    var missing: seq[string] = @[]
+    var dir = parentDir(path)
+    while dir.len > 0 and not dirExists(dir):
+      missing.add(dir)
+      let up = parentDir(dir)
+      if up == dir:
+        break
+      dir = up
+    for i in countdown(missing.high, 0):
+      if posix.mkdir(missing[i].cstring, Mode(0o700)) != 0 and errno != EEXIST:
+        raise posixFail("cannot create directory", missing[i])
+
+  proc refuseNonRegularKeyPath(path: string) =
+    ## What `fileExists` cannot tell apart from "absent": a directory, or a
+    ## symbolic link (dangling, or to a directory) AT `path`. Creating the key
+    ## there would fail with an EEXIST that reads like a concurrent keygen, or
+    ## follow the link somewhere nobody chose; name the thing instead.
+    var st: Stat
+    if lstat(path.cstring, st) != 0:
+      return
+    if S_ISLNK(st.st_mode):
+      var target = newString(4096)
+      let n = readlink(path.cstring, cstring(target), 4095)
+      target.setLen(max(n, 0))
+      raise newException(SecretsError, "recipient key path " & path &
+        " is a symbolic link (to " & target & "); the key must be a regular " &
+        "file, so remove the link or point --secrets-key at the file itself")
+    if S_ISDIR(st.st_mode):
+      raise newException(SecretsError, "recipient key path " & path &
+        " is a directory; --secrets-key names the key FILE (for example " &
+        path / "recipient.key" & ")")
+    if not S_ISREG(st.st_mode):
+      raise newException(SecretsError, "recipient key path " & path &
+        " exists but is not a regular file")
+
+proc readRecipientKeyFile(path: string): RecipientKey =
+  ## The existing key at `path`, refused when it does not parse (rather than
+  ## regenerated: a producer may already be sealing to it, and a silent new
+  ## key would make every later manifest undecryptable with no reason given)
+  ## and, on POSIX, when group or others can read it.
+  when defined(posix):
+    var st: Stat
+    if stat(path.cstring, st) != 0:
+      raise posixFail("cannot stat", path)
+    if (st.st_mode.int and 0o077) != 0:
+      raise newException(SecretsError, "recipient key " & path &
+        " is accessible to group or others (mode " &
+        toOct(st.st_mode.int and 0o777, 3) & "); the private key must " &
+        "be readable by its owner only -- chmod 0400 it, or rotate it " &
+        "if others may have read it")
+  let priv =
+    try:
+      peerAuth.loadPrivateKeyFile(path)
+    except CatchableError as e:
+      raise newException(SecretsError, "existing recipient key " & path &
+        " is not usable (" & e.msg & "); it is left untouched -- remove " &
+        "it explicitly to generate a new one")
+  RecipientKey(publicKey: peerAuth.derivePublicKey(priv), created: false)
+
+proc ensureRecipientKeyFile*(path: string;
+                             beforePublish: proc() {.gcsafe.} = nil):
+    RecipientKey =
   ## The deploy agent's sealed-secrets recipient key at `path`: generated
   ## when the file does not exist, read when it does. Never replaces a key.
   ##
   ## The file is the `ecdsa-p256:<hex>` form `--secrets-key` loads
-  ## (`peerAuth.loadPrivateKeyFile`). On POSIX it is created mode 0400, and a
-  ## missing parent directory is created 0700. Securing an EXISTING parent is
-  ## the deployment's job (Add-On bootstrap creates `/var/lib/repro/agent`
-  ## 0700 root), exactly as for the secrets directory.
+  ## (`peerAuth.loadPrivateKeyFile`). On POSIX it is created mode 0400, and
+  ## every missing ancestor directory is created 0700. Securing an EXISTING
+  ## parent is the deployment's job (Add-On bootstrap creates
+  ## `/var/lib/repro/agent` 0700 root), exactly as for the secrets directory.
   ##
-  ## An existing key is only read, but it is refused when it does not parse
-  ## (rather than regenerated: a producer may already be sealing to it, and a
-  ## silent new key would make every later manifest undecryptable with no
-  ## reason given) and, on POSIX, when group or others can read it.
+  ## Two keygens racing for the same path both return the same key: the one
+  ## whose `link(2)` finds the name taken reads the winner's file. Staging
+  ## files a crashed keygen left behind (`<path>.keygen-<pid>`, dead pid) are
+  ## removed first. A directory or a symbolic link at `path` is refused by
+  ## name. An existing key is refused when it does not parse or is readable
+  ## by group or others (`readRecipientKeyFile`).
+  ##
+  ## `beforePublish` runs after the new key is staged and before it is
+  ## linked into place. It exists for the race test, which has no other way
+  ## to put a competitor's key there at exactly that point; production
+  ## callers leave it nil.
   if path.len == 0:
     raise newException(SecretsError, "recipient key path is empty")
+  when defined(posix):
+    refuseNonRegularKeyPath(path)
+    sweepStaleKeygenStaging(path)
   if fileExists(path):
-    when defined(posix):
-      var st: Stat
-      if stat(path.cstring, st) != 0:
-        raise posixFail("cannot stat", path)
-      if (st.st_mode.int and 0o077) != 0:
-        raise newException(SecretsError, "recipient key " & path &
-          " is accessible to group or others (mode " &
-          toOct(st.st_mode.int and 0o777, 3) & "); the private key must " &
-          "be readable by its owner only -- chmod 0400 it, or rotate it " &
-          "if others may have read it")
-    let priv =
-      try:
-        peerAuth.loadPrivateKeyFile(path)
-      except CatchableError as e:
-        raise newException(SecretsError, "existing recipient key " & path &
-          " is not usable (" & e.msg & "); it is left untouched -- remove " &
-          "it explicitly to generate a new one")
-    return RecipientKey(publicKey: peerAuth.derivePublicKey(priv),
-                        created: false)
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-    when defined(posix):
-      setFilePermissions(parent, {fpUserRead, fpUserWrite, fpUserExec})
+    return readRecipientKeyFile(path)
+  when defined(posix):
+    createParents0700(path)
+  else:
+    let parent = parentDir(path)
+    if parent.len > 0 and not dirExists(parent):
+      createDir(parent)
   let kp = peerAuth.generateKeypair()
   let text = peerAuth.privateKeyFileText(kp.privateKey)
   when defined(posix):
-    createKeyFileExclusive(path, text)
+    if beforePublish != nil:
+      beforePublish()
+    if not createKeyFileExclusive(path, text):
+      # Another keygen published first; its key is the host's key now.
+      return readRecipientKeyFile(path)
   else:
     # Windows: the directory's DACL governs who may read the key (see
     # `materialiseSecrets`); POSIX mode bits have no meaning here.
+    if beforePublish != nil:
+      beforePublish()
+    if fileExists(path):
+      return readRecipientKeyFile(path)
     writeFile(path, text)
   RecipientKey(publicKey: kp.publicKey, created: true)

@@ -75,15 +75,94 @@ suite "deploy-agent recipient key generation":
       discard ensureRecipientKeyFile(keyPath)
     check readFile(keyPath) == "not a key\n"
 
-  test "a key readable by group or others is refused":
+  test "a key readable by group or others is refused and left untouched":
     when defined(posix):
       let root = createTempDir("repro-recipient-keygen-", "")
       defer: removeDir(root)
       let keyPath = root / "recipient.key"
       discard ensureRecipientKeyFile(keyPath)
       setFilePermissions(keyPath, {fpUserRead, fpUserWrite, fpGroupRead})
+      let before = readFile(keyPath)
       expect SecretsError:
         discard ensureRecipientKeyFile(keyPath)
+      # Refused is not rotated: the bytes and the (wrong) mode are as found,
+      # for the operator to decide between chmod and rotate.
+      check readFile(keyPath) == before
+      check getFilePermissions(keyPath) == {fpUserRead, fpUserWrite, fpGroupRead}
+
+  test "two keygens racing for one path agree on the winner's key":
+    when defined(posix):
+      # The loser's `link(2)` finds the name taken and reads the winner's
+      # file instead of failing. The competitor is planted at the one point a
+      # real race would put it: after this keygen staged its own key and
+      # before it linked it.
+      let root = createTempDir("repro-recipient-keygen-", "")
+      defer: removeDir(root)
+      let keyPath = root / "recipient.key"
+      var winner: RecipientKey
+      let loser = ensureRecipientKeyFile(keyPath, proc() {.gcsafe.} =
+        {.cast(gcsafe).}:
+          winner = ensureRecipientKeyFile(keyPath))
+      check winner.created
+      check not loser.created
+      check loser.publicKey == winner.publicKey
+      check peerAuth.derivePublicKey(peerAuth.loadPrivateKeyFile(keyPath)) ==
+        winner.publicKey
+      var names: seq[string] = @[]
+      for kind, path in walkDir(root):
+        names.add(path.extractFilename)
+      check names == @["recipient.key"]        # no staging file left behind
+
+  test "a crashed keygen's staging file is swept, a live one's is kept":
+    when defined(posix):
+      let root = createTempDir("repro-recipient-keygen-", "")
+      defer: removeDir(root)
+      let keyPath = root / "recipient.key"
+      # pid 2^22 + 1 is above PID_MAX_LIMIT on Linux, so it names no process;
+      # pid 1 always exists (and belongs to another user, which must count as
+      # live too). One with this process's own pid is a leftover of an earlier
+      # holder of the pid -- this process has staged nothing yet -- so it is
+      # swept as well.
+      let stale = keyPath & ".keygen-4194305"
+      let reused = keyPath & ".keygen-" & $getCurrentProcessId()
+      let live = keyPath & ".keygen-1"
+      writeFile(stale, "ecdsa-p256:" & repeat('a', 64) & "\n")
+      writeFile(reused, "ecdsa-p256:" & repeat('c', 64) & "\n")
+      writeFile(live, "ecdsa-p256:" & repeat('b', 64) & "\n")
+      discard ensureRecipientKeyFile(keyPath)
+      check not fileExists(stale)
+      check not fileExists(reused)
+      check fileExists(live)
+      removeFile(live)
+
+  test "every missing parent is created owner-only":
+    when defined(posix):
+      let root = createTempDir("repro-recipient-keygen-", "")
+      defer: removeDir(root)
+      let keyPath = root / "a" / "b" / "c" / "recipient.key"
+      discard ensureRecipientKeyFile(keyPath)
+      for dir in [root / "a", root / "a" / "b", root / "a" / "b" / "c"]:
+        check getFilePermissions(dir) == {fpUserRead, fpUserWrite, fpUserExec}
+
+  test "a directory or a symbolic link at the path is refused by name":
+    when defined(posix):
+      let root = createTempDir("repro-recipient-keygen-", "")
+      defer: removeDir(root)
+      createDir(root / "isdir")
+      try:
+        discard ensureRecipientKeyFile(root / "isdir")
+        check false
+      except SecretsError as e:
+        check "is a directory" in e.msg
+      check not fileExists(root / "isdir" / "recipient.key")
+      createSymlink(root / "nowhere", root / "dangling")
+      try:
+        discard ensureRecipientKeyFile(root / "dangling")
+        check false
+      except SecretsError as e:
+        check "symbolic link" in e.msg
+        check "nowhere" in e.msg
+      check not fileExists(root / "nowhere")
 
   test "opens what a producer seals to the printed public key":
     let root = createTempDir("repro-recipient-keygen-", "")
