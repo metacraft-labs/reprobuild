@@ -417,6 +417,9 @@ for libName in [
   "repro_homebrew_adapter",
   "repro_elevation",
   "repro_infra",
+  # ReproOS add-on mode: fingerprint, preflight, bootstrap, uninstall and
+  # the add-on layer over `repro infra apply` on a distribution-owned host.
+  "repro_addon",
   "repro_interface_artifacts",
   "repro_dev_env_artifacts",
   "repro_dev_env_activation",

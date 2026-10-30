@@ -395,6 +395,9 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.sysctlValue)
     body.writeString(op.sysctlFilename)
     body.writeBool(op.sysctlDestroy)
+  of pokLinuxDpkgDiversion:
+    body.writeString(op.ddPath)
+    body.writeBool(op.ddDestroy)
   of pokLinuxUdevRule:
     body.writeString(op.udevName)
     body.writeString(op.udevContent)
@@ -714,6 +717,11 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.sysctlValue = readString(body, pos)
     result.operation.sysctlFilename = readString(body, pos)
     result.operation.sysctlDestroy = readBool(body, pos, "sysctlDestroy")
+  of pokLinuxDpkgDiversion:
+    result.operation = PrivilegedOperation(kind: pokLinuxDpkgDiversion,
+      address: address)
+    result.operation.ddPath = readString(body, pos)
+    result.operation.ddDestroy = readBool(body, pos, "ddDestroy")
   of pokLinuxUdevRule:
     result.operation = PrivilegedOperation(kind: pokLinuxUdevRule,
       address: address)
