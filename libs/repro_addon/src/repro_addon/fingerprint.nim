@@ -624,7 +624,10 @@ proc collectUnits(fp: var Fingerprint) =
   for e in parseListUnits(units.output):
     fp.add(fcActiveUnits, e.key, e.value)
 
-proc addonRootValue(path: string): string =
+proc addonRootValue*(path: string): string =
+  ## The ``addon-roots`` record value of ``path``: ``absent``, or the
+  ## directory's kind, mode and owner. Bootstrap records it for a root it
+  ## takes over (spec §6.1), so the ledger's base value is the fingerprint's.
   var st: Stat
   if lstat(path.cstring, st) != 0:
     return "absent"

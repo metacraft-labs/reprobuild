@@ -726,6 +726,16 @@ let
         "backup"
       ];
     } (reprobuildLib.hostSystemManagement { document = neutral; host = "validator"; })
+    ++ expect "hostSystemManagement: the neutral fixture's pc-full selects system activities while fully managed" {
+      host = "pc-full";
+      managed = "here";
+      managedBy = null;
+      mode = "full";
+      activities = [
+        "default"
+        "web"
+      ];
+    } (reprobuildLib.hostSystemManagement { document = neutral; host = "pc-full"; })
     # A schema-4 document cannot say `addOn`: its add-on hosts would read as
     # managed here in full. Refused, by readIntent and hostSystemManagement.
     ++ expectTrue "hostSystemManagement refuses the previous schemaVersion (4)" (
@@ -789,6 +799,22 @@ let
           mode = "addOn";
           managedBy = "x";
           activities = [ ];
+        };
+      }
+      {
+        why = "a full entry naming a manager";
+        entry = {
+          mode = "full";
+          managedBy = "x";
+          activities = [ "web" ];
+        };
+      }
+      {
+        why = "a full entry listing default";
+        entry = {
+          mode = "full";
+          managedBy = null;
+          activities = [ "default" ];
         };
       }
       {

@@ -202,6 +202,11 @@ package cargo:
         boolFlag locked is bool, alias = "--locked"
         boolFlag offline is bool, alias = "--offline"
         boolFlag noTrack is bool, alias = "--no-track"
+        # Without ``--force`` cargo refuses a root that already holds the
+        # binary (``binary … already exists in destination``), so an edge
+        # re-run after an input changed would fail on its own previous
+        # output.
+        boolFlag force is bool, alias = "--force"
         boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
         flag features is string, alias = "--features"
         flag path is string, alias = "--path", role = input

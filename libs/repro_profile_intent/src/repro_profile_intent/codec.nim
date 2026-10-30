@@ -68,12 +68,13 @@ const
   KeyHostSystems  = "hostSystems"
     ## GM10 + add-on mode: the hosts whose `hosts:` entry has a `system:` key
     ## (`ProfileIntent.hostSystems`): a map host -> map carrying `"mode"`
-    ## (text: `managedElsewhere` or `addOn`), `"managedBy"` (text) only when
-    ## the entry names a manager, and `"activities"` (array of text) only
-    ## when an add-on entry selects system activities. Optional; omitted when
+    ## (text: `managedElsewhere`, `addOn` or `full`), `"managedBy"` (text)
+    ## only when the entry names a manager, and `"activities"` (array of
+    ## text) only when an `addOn` / `full` entry selects system activities. Optional; omitted when
     ## no host entry has the key, so a profile without the attribute encodes
-    ## exactly as before. Envelope schema 11 (it replaced schema 9's
-    ## `"systemManagedElsewhere"` map, which could not say `addOn`).
+    ## exactly as before. Envelope schema 13 (11 replaced schema 9's
+    ## `"systemManagedElsewhere"` map, which could not say `addOn`; 13 added
+    ## the `full` mode).
   KeyMode         = "mode"
   KeyManagedBy    = "managedBy"
   KeySystemActivities = "activities"
@@ -690,6 +691,7 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
       case modeText
       of $hsmManagedElsewhere: decl.mode = hsmManagedElsewhere
       of $hsmAddOn: decl.mode = hsmAddOn
+      of $hsmFull: decl.mode = hsmFull
       else:
         raiseRbpiCorrupt("body", KeyHostSystems & "." & e.key &
           " has an unknown mode `" & modeText & "`")

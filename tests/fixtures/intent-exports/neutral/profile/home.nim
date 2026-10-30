@@ -64,6 +64,11 @@ profile "gm5Neutral":
       system:
         mode: addOn
         activities: [web, backup]
+    # A fully managed host selecting a system activity (the `full` block
+    # form, decision 17): managed here, mode `full`, activities default+web.
+    "pc-full":
+      activities: [cli]
+      system: {mode: full, activities: [web]}
 
   resources:
     when linux():

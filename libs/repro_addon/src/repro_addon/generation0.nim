@@ -18,12 +18,16 @@
 ## - the apt hook ``/etc/apt/apt.conf.d/90repro-addon``: a report-only
 ##   ``DPkg::Post-Invoke`` that can never fail a dpkg run, even when the
 ##   binary it names is missing;
-## - ``/etc/profile.d/repro-addon.sh``: the add-on's ``repro`` on ``PATH``;
+## - ``/etc/profile.d/repro-addon.sh``: the add-on's ``repro`` on ``PATH``
+##   (appended). The profile DSL's ``addOnToolPath()`` writes a file of its
+##   own, ``/etc/profile.d/repro-addon-tools.sh`` (``repro_profile``
+##   ``AddOnToolPathFile``): one file, one writer -- spec §4.1;
 ## - the trust anchors under ``/etc/repro/anchors``.
 ##
 ## Every path here must be absent before bootstrap (the preflight checks
 ## it), which is what makes "bootstrap changes nothing pre-existing" a
-## property of this list rather than a hope.
+## property of this list rather than a hope. The pre-bootstrap inputs the
+## preflight takes over (spec §6.1) are never on this list.
 ##
 ## The text this module renders is the canonical system-profile text
 ## ``repro infra apply`` parses (``repro_infra/profile.parseSystemProfile``).

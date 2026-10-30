@@ -10,6 +10,7 @@
 import std/[json, strutils, tables, unittest]
 
 import repro_infra
+import repro_profile
 import repro_addon/[addon_apply, fingerprint, generation0, ledger, preflight, store_root]
 import repro_binary_cache_client/caches_config
 
@@ -55,6 +56,24 @@ suite "ledger expectations":
     check "+ mounts\t/repro/store\t*" in lines
     check "~ addon-roots\t/repro\tdir 0755 0:0" in lines
 
+  test "a taken-over root expects no change when its value is unchanged":
+    # A pre-bootstrap input (spec §6.1) carries the value it had before;
+    # the bootstrap delta is then exact: nothing for an unchanged root,
+    # a change for one whose mode bootstrap set.
+    var l = Ledger(generation: "g0", entries: @[
+      LedgerEntry(class: lcRoot, path: "/repro", mode: "0755", owner: "0:0",
+                  kindHint: "dir", replaced: "dir 0755 0:0", collision: "adopt"),
+      LedgerEntry(class: lcRoot, path: "/var/lib/repro", mode: "0755",
+                  owner: "0:0", kindHint: "dir", replaced: "dir 0700 0:0",
+                  collision: "adopt"),
+      LedgerEntry(class: lcRoot, path: "/etc/repro", mode: "0755",
+                  owner: "0:0", kindHint: "dir", replaced: "d 0755 0:0",
+                  collision: "adopt")])
+    check l.entries[0].isPreBootstrapInput
+    var lines: seq[string]
+    for e in expectedDelta(Ledger(), l): lines.add(renderExpectation(e))
+    check lines == @["~ addon-roots\t/var/lib/repro\tdir 0755 0:0"]
+
   test "uninstall back to nothing reverses each record":
     let d = expectedDelta(sampleLedger(), Ledger())
     var lines: seq[string]
@@ -97,6 +116,15 @@ suite "generation 0":
     check "/etc/systemd/system/repro-addon-reassert.service" in paths
     check AptHookPath in paths
     check ProfileDPath in paths
+
+  test "addOnToolPath() and generation 0 never write the same profile.d file":
+    # One file, one writer (spec §4.1, §13 decision 18): the profile DSL's
+    # hook for /etc/repro/bin is not generation 0's hook for the store
+    # repro, so a profile cannot rewrite generation 0's object.
+    check AddOnToolPathFile != ProfileDPath
+    check AddOnToolPathFile notin ownObjectPaths(objs)
+    check AddOnToolPathFile.startsWith("/etc/profile.d/")
+    check "/etc/repro/bin" in AddOnToolPathScript
 
   test "the apt hook can never fail dpkg":
     for o in objs:

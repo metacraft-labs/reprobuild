@@ -151,13 +151,19 @@ const
     ## ``tmpfiles``, ``sysctl`` and ``unitState`` classes of spec §4.1
     ## (``secret`` arrives with A7, ``firewall`` is opt-in and refused in
     ## agent applies until §13 Q6).
-  LinkFormKinds* = {srkFsSystemFile, srkSystemdSystemUnit,
-                    srkSystemdSystemDropIn, srkLinuxSysctl}
+  LinkFormKinds* = {srkFsSystemFile, srkSystemdSystemDropIn, srkLinuxSysctl}
     ## The kinds materialised as links into the static tree (spec §7.2
     ## step 4). The driver declares it per kind; a resource cannot choose:
     ## sysusers and tmpfiles fragments are copies so they stay readable
     ## when the store is unavailable at early boot (step 5), and so are
-    ## the add-on's own objects and anything adopted as it is.
+    ## the add-on's own objects and anything adopted as it is. Unit files
+    ## are copies too: `systemctl enable` on a symlinked unit file writes
+    ## the link's RESOLVED target into the `[Install]` links it creates
+    ## (measured on Debian 13 and Ubuntu 24.04), so a link-form unit would
+    ## carry a generation-specific store path into `.wants`, re-point a
+    ## package's own enablement link of a `replace`d unit, and dangle once
+    ## retention released that tree. Drop-ins are read, never enabled, so
+    ## they stay links.
 
 proc addonDir*(stateDir: string): string = stateDir / "addon"
 proc ledgerCopyPath*(stateDir: string): string = stateDir / "addon-ledger"
@@ -647,7 +653,8 @@ proc reshape(user: SystemProfile; dropIns: var HashSet[string]):
       if r.suCollision == "dropIn":
         dropIns.incl(r.address)
         result.add(SystemResource(kind: srkSystemdSystemDropIn,
-          address: r.address, diUnit: r.suName, diName: r.suDropInName,
+          address: r.address, diUnit: r.suName,
+          diName: (if r.suDropInName.len > 0: r.suDropInName else: "addon"),
           diContent: r.suContent, diRestartHeld: r.suRestartHeld,
           dependsOn: r.dependsOn))
       else:
@@ -697,12 +704,9 @@ proc removalRank(r: SystemResource): int =
   else: 3
 
 proc removeOwnedUnitFile(e: LedgerEntry): bool =
-  ## Remove the file the ledger owns at ``e.path``; false when it is
-  ## already gone.
-  if not fileExists(e.path) or symlinkExists(e.path):
-    return false
-  removeFile(e.path)
-  true
+  ## Remove the file or link the ledger owns at ``e.path`` (a link whose
+  ## tree no longer carries it included); false when it is already gone.
+  removeLeafNoFollow(e.path)
 
 proc removeEmptyDirs*(entries: seq[LedgerEntry]) =
   ## ``rmdir`` the ledger's directories deepest first, leaving any that
@@ -1192,6 +1196,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for p in plans:
     if p.form == "link":
       treeFiles.add(StaticFile(path: p.targetPath, content: p.content))
+  # A link-form object left in place as drift keeps the bytes it has now:
+  # its link must still resolve after the flip, or "left in place" would
+  # mean "destroyed".
+  for e in keptEntries:
+    if e.isLink and fileExists(e.path):
+      treeFiles.add(StaticFile(path: e.path, content: readFile(e.path)))
   result.staticTree = staticTreePath(treeFiles)
 
   if opts.planOnly:

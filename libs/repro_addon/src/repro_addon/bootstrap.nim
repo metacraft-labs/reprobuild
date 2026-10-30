@@ -7,12 +7,17 @@
 ##    is the one the operator acknowledged -- before anything is written;
 ## 2. **create the roots** (``/repro`` -- a btrfs subvolume on a btrfs root
 ##    -- ``/repro/store``, ``/var/lib/repro/{system,agent}``, ``/etc/repro``)
-##    with their modes;
+##    with their modes, or **take over** the ones the plan lists as
+##    pre-bootstrap inputs (spec §6.1: a host the deploy agent stood up
+##    first already has an empty store root, an empty state directory, a
+##    recipient key, a signers file), setting those same modes and recording
+##    each with the value it had before;
 ## 3. **install the trust anchors** (validated as ECDSA-P256 anchor files;
 ##    written by generation 0 itself) and **generate the secrets recipient
 ##    key on the host**, so its private half never travels: created with
 ##    its final mode ``0400`` in one ``open(O_CREAT|O_EXCL)``, never written
-##    first and narrowed after;
+##    first and narrowed after -- or keep the one a pre-bootstrap input
+##    supplies, never replacing a key;
 ## 4. **copy this very binary into the store** and verify the digest on the
 ##    store copy;
 ## 5. **apply generation 0** through the add-on layer, i.e. through
@@ -63,11 +68,6 @@ type
     recipientPublicKeyHex*: string
     ledger*: Ledger
 
-const
-  AgentDir* = "/var/lib/repro/agent"
-  RecipientKeyPath* = AgentDir & "/recipient.key"
-  RecipientPubPath* = AgentDir & "/recipient.pub"
-
 var ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
 
 proc hexOf(bytes: openArray[byte]): string =
@@ -96,29 +96,66 @@ proc createExclusive(path, content: string; mode: int) =
   finally:
     discard posix.close(fd)
 
-proc generateRecipientKey*(): string =
+proc generateRecipientKey*(kept: bool): string =
   ## Generate the host's secrets recipient key pair through the deploy
   ## agent's own keygen (``ensureRecipientKeyFile``: created ``0400`` from
   ## the start, published by a no-clobber link, never replacing an existing
-  ## key). Returns the public key (hex, uncompressed). The preflight required
-  ## the agent directory to be absent, so a key that already exists here is
+  ## key). Returns the public key (hex, uncompressed). ``kept`` is the
+  ## plan's word: the preflight found the key as a pre-bootstrap input
+  ## (spec §6.1), so the keygen must read it back rather than create one;
+  ## without it, the preflight saw no key, so one that is there now is
   ## someone else's and bootstrap refuses rather than adopting it.
   let key = ensureRecipientKeyFile(RecipientKeyPath)
-  if not key.created:
+  if key.created == kept:
     raise newException(AddonBootstrapError, RecipientKeyPath &
-      " already existed; the preflight saw no " & AgentDir)
+      (if kept: " was absent; the preflight saw it as a pre-bootstrap input"
+       else: " already existed; the preflight saw no " & AgentDir))
   when mutated("recipient-key-0644"):
     # FALSIFYING MUTATION (see mutations.nim): a bootstrap that leaves the
     # recipient key group- and world-readable.
     discard posix.chmod(RecipientKeyPath.cstring, Mode(0o644))
-  createExclusive(RecipientPubPath, peerAuth.publicKeyHex(key.publicKey) & "\n",
-                  0o444)
-  peerAuth.publicKeyHex(key.publicKey)
+  let pubHex = peerAuth.publicKeyHex(key.publicKey)
+  if kept and fileExists(RecipientPubPath):
+    # A kept public half must be the kept key's: a mismatch is a different
+    # key's record, which no later sealing may be made against.
+    if readFile(RecipientPubPath).strip() != pubHex:
+      raise newException(AddonBootstrapError, RecipientPubPath &
+        " is not the public half of " & RecipientKeyPath)
+  else:
+    createExclusive(RecipientPubPath, pubHex & "\n", 0o444)
+  pubHex
 
-proc rootEntry(path, kindHint: string): LedgerEntry =
+proc rootEntry(path, kindHint, replaced: string): LedgerEntry =
+  ## ``replaced`` is the fingerprint value the directory had before a
+  ## takeover ("" for a root bootstrap created), in the component's own
+  ## format: ``etc`` for a path under /etc, ``addon-roots`` otherwise.
   let st = statOwner(path)
   LedgerEntry(class: lcRoot, path: path, mode: st.mode, owner: st.owner,
-              kindHint: kindHint)
+              kindHint: kindHint, replaced: replaced,
+              collision: (if replaced.len > 0: "adopt" else: ""))
+
+proc baseRootValue(path: string): string =
+  if path == "/etc" or path.startsWith("/etc/"): etcEntryValue(path)
+  else: addonRootValue(path)
+
+proc establishRoot(plan: PreflightReport; path: string; mode: int;
+                   asSubvolume = false): LedgerEntry =
+  ## Create one of the add-on's roots, or take it over when the acknowledged
+  ## plan lists it as a pre-bootstrap input (spec §6.1).
+  if path in plan.preBootstrap.roots:
+    let before = baseRootValue(path)
+    rootEntry(path, takeOverRootDir(path, mode), before)
+  else:
+    rootEntry(path, createRootDir(path, mode, asSubvolume), "")
+
+proc keptFileEntry(path, preserved: string; class = lcEtcFile): LedgerEntry =
+  ## The ledger entry of a file bootstrap keeps as found: adopted, produced
+  ## by no resource, its prior value recorded (so the bootstrap delta is
+  ## exact) and its bytes preserved (so uninstall can put it back).
+  let st = statOwner(path)
+  LedgerEntry(class: class, path: path, sha256: sha256OfFile(path),
+              mode: st.mode, owner: st.owner, replaced: etcEntryValue(path),
+              collision: "adopt", preserved: preserved)
 
 proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -148,16 +185,23 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     if p.len > 0:
       discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
 
-  # 2. Roots.
+  # 2. Roots: created, or taken over where the plan says they are
+  # pre-bootstrap inputs. The directories the plan lists beyond the
+  # add-on's own (the secrets tmpfs, the agent's state) are taken over
+  # with the mode they have.
   var entries: seq[LedgerEntry]
-  entries.add(rootEntry(ReproRoot, createRootDir(ReproRoot, 0o755,
-    asSubvolume = isBtrfs(parentDir(ReproRoot)))))
-  entries.add(rootEntry(StoreRoot, createRootDir(StoreRoot, 0o755)))
-  entries.add(rootEntry("/var/lib/repro", createRootDir("/var/lib/repro", 0o755)))
-  entries.add(rootEntry(stateDir, createRootDir(stateDir, 0o700)))
-  entries.add(rootEntry(AgentDir, createRootDir(AgentDir, 0o700)))
-  entries.add(rootEntry("/etc/repro", createRootDir("/etc/repro", 0o755)))
-  entries.add(rootEntry(AnchorsDir, createRootDir(AnchorsDir, 0o755)))
+  entries.add(establishRoot(plan, ReproRoot, 0o755,
+    asSubvolume = isBtrfs(parentDir(ReproRoot))))
+  entries.add(establishRoot(plan, StoreRoot, 0o755))
+  entries.add(establishRoot(plan, "/var/lib/repro", 0o755))
+  entries.add(establishRoot(plan, stateDir, 0o700))
+  entries.add(establishRoot(plan, AgentDir, 0o700))
+  entries.add(establishRoot(plan, "/etc/repro", 0o755))
+  entries.add(establishRoot(plan, AnchorsDir, 0o755))
+  for p in plan.preBootstrap.roots:
+    if p notin [ReproRoot, StoreRoot, "/var/lib/repro", stateDir, AgentDir,
+                "/etc/repro", AnchorsDir]:
+      entries.add(rootEntry(p, takeOverRootDir(p), baseRootValue(p)))
   ensureSystemStateDir(stateDir)
 
   when mutated("bootstrap-installs-jq"):
@@ -167,8 +211,13 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     # a mutation that changes nothing there would not be a falsifier.
     discard runHostTool(["/usr/bin/apt-get", "install", "-y", "jq", "tree"])
 
-  # 3. The recipient key, generated here.
-  result.recipientPublicKeyHex = generateRecipientKey()
+  # 3. The recipient key, generated here -- or kept, when the host already
+  # had one as a pre-bootstrap input. The kept files (the signers file,
+  # the tmpfiles fragment, the agent's sequence floor) are adopted as
+  # found, their bytes preserved for uninstall.
+  let keyKept = plan.preBootstrap.recipientKey.len > 0
+  let pubKept = RecipientPubPath in plan.preBootstrap.keptFiles
+  result.recipientPublicKeyHex = generateRecipientKey(keyKept)
   when mutated("provisions-publisher-key"):
     # FALSIFYING MUTATION (see mutations.nim): a bootstrap that leaves a
     # binary-cache publisher keypair on the host, which would make it a
@@ -176,10 +225,18 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     let pub = peerAuth.generateKeypair()
     createExclusive(AgentDir / "cache-publisher.key",
                     peerAuth.privateKeyFileText(pub.privateKey), 0o400)
-  for k in [RecipientKeyPath, RecipientPubPath]:
-    let st = statOwner(k)
-    entries.add(LedgerEntry(class: lcKey, path: k, sha256: sha256OfFile(k),
-                            mode: st.mode, owner: st.owner))
+  for (k, kept) in [(RecipientKeyPath, keyKept), (RecipientPubPath, pubKept)]:
+    if kept:
+      # No preserved copy of key material: uninstall captures the bytes
+      # from the path itself before the state goes.
+      entries.add(keptFileEntry(k, "", lcKey))
+    else:
+      let st = statOwner(k)
+      entries.add(LedgerEntry(class: lcKey, path: k, sha256: sha256OfFile(k),
+                              mode: st.mode, owner: st.owner))
+  for p in plan.preBootstrap.keptFiles:
+    if p in [RecipientKeyPath, RecipientPubPath]: continue
+    entries.add(keptFileEntry(p, preserveBytes(stateDir, readFile(p))))
 
   # 4. This binary and generation 0's file bodies into the store.
   var files: seq[tuple[name, content: string]]

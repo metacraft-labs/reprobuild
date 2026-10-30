@@ -29,13 +29,17 @@ import std/[algorithm, os, posix, sets, strutils, tables]
 
 import ./etc_write
 import ./fingerprint
+import ./host_exec
 
 type
   LedgerClass* = enum
     lcRoot = "root"
       ## A directory bootstrap created as one of the add-on's own roots
       ## (``/repro``, ``/repro/store``, ``/var/lib/repro``, ``/etc/repro``,
-      ## …). ``kindHint`` is ``dir`` or ``btrfs-subvolume``.
+      ## …), or took over as a pre-bootstrap input (spec §6.1: then
+      ## ``collision`` is ``adopt``, ``resource`` is empty and ``replaced``
+      ## holds the fingerprint value the directory had before). ``kindHint``
+      ## is ``dir``, ``btrfs-dir`` or ``btrfs-subvolume``.
     lcDir = "dir"
       ## A directory an apply created to hold an object (a missing parent
       ## of a file, a ``<target>.wants`` directory).
@@ -104,7 +108,11 @@ type
                            ## the observer does not cover
     collision*: string     ## how a collision was resolved: "" (none),
                            ## ``adopt``, ``divert``, ``dropIn``,
-                           ## ``replace``, ``reconcile``
+                           ## ``replace``, ``reconcile``. ``adopt`` with an
+                           ## empty ``resource`` marks a pre-bootstrap input
+                           ## bootstrap took over (spec §6.1): carried
+                           ## forward by every apply, put back as found by
+                           ## uninstall (``isPreBootstrapInput``)
     preserved*: string     ## where the pre-write bytes of an adopted,
                            ## replaced or reconciled file are kept
                            ## (``<state>/addon/preserved/<sha256>``), or ""
@@ -138,6 +146,11 @@ const
 proc isLink*(e: LedgerEntry): bool =
   ## The object is a symlink into the static tree (``form = link``).
   e.class in FileClasses and e.form == "link"
+
+proc isPreBootstrapInput*(e: LedgerEntry): bool =
+  ## A pre-bootstrap input bootstrap took over (spec §6.1): adopted, and
+  ## produced by no resource.
+  e.collision == "adopt" and e.resource.len == 0
 
 proc flag(b: bool): string = (if b: "1" else: "0")
 
@@ -219,17 +232,12 @@ proc statOwner*(path: string): tuple[ok: bool; mode, owner: string] =
     return (false, "", "")
   (true, toOct(int(st.st_mode) and 0o7777, 4), $st.st_uid & ":" & $st.st_gid)
 
-proc sysctlKeyPath*(key: string): string =
-  ## ``/proc/sys/<key with dots as slashes>``.
-  "/proc/sys/" & key.replace('.', '/')
-
 proc readLiveSysctl*(key: string): string =
-  ## The kernel's current value of ``key`` as the fingerprint spells it
-  ## (whitespace collapsed), "" when unreadable. NOTE: read from THIS
-  ## process's namespaces; the switch observes ``net.*`` keys from the
-  ## host's namespaces instead (spec §7.2 step 6).
-  try: readFile(sysctlKeyPath(key)).splitWhitespace().join(" ")
-  except IOError, OSError: ""
+  ## The host's current value of ``key`` as the fingerprint spells it,
+  ## read from the host's namespaces (``readHostSysctl``): a ``net.*`` key
+  ## read from inside the apply unit's own network namespace is not the
+  ## host's (spec §7.2 step 6, threat model G35). "" when unreadable.
+  readHostSysctl(key)
 
 proc observeDrift*(e: LedgerEntry): string =
   ## "" when the object is exactly as the ledger recorded it, otherwise a
@@ -241,6 +249,12 @@ proc observeDrift*(e: LedgerEntry): string =
   of lcEtcFile, lcUnit, lcDropIn:
     if e.isLink:
       if not symlinkExists(e.path):
+        if fileExists(e.path):
+          # Something replaced the add-on's link with a file of its own:
+          # drift, to be left in place, never "gone".
+          return "replaced by a regular file (sha256 " &
+                 sha256OfFile(e.path)[0 ..< 12] & "), ledger link to " &
+                 e.linkTarget
         return "missing (or no longer the add-on's link)"
       let t = expandSymlink(e.path)
       if t != e.linkTarget:
@@ -360,13 +374,15 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
   for e in l.entries:
     case e.class
     of lcRoot:
+      # A root bootstrap created was absent before; one it took over had
+      # the value ``replaced`` records (spec §6.1).
       if isEtcPath(e.path):
         result.add(ExpectedRecord(component: fcEtc, key: e.path,
-          value: "d " & e.mode & " " & e.owner))
+          value: "d " & e.mode & " " & e.owner, baseValue: e.replaced))
       elif e.path in AddonRootPaths:
         result.add(ExpectedRecord(component: fcAddonRoots, key: e.path,
           value: e.kindHint & " " & e.mode & " " & e.owner,
-          baseValue: "absent"))
+          baseValue: (if e.replaced.len > 0: e.replaced else: "absent")))
     of lcDir:
       if isEtcPath(e.path):
         result.add(ExpectedRecord(component: fcEtc, key: e.path,

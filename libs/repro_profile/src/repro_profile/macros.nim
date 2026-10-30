@@ -601,7 +601,8 @@ proc parseHostSystemBlock(pairs: seq[(string, NimNode)]; where: NimNode;
     of SystemModeKey:
       if value.kind != nnkIdent:
         error("hosts entry \"" & hostName & "\": system: `" & SystemModeKey &
-              ":` takes an identifier (`" & AddOnKeyword & "`)", value)
+              ":` takes an identifier (`" & AddOnKeyword & "` or `" &
+              FullKeyword & "`)", value)
       mode = $value
     of SystemActivitiesKey:
       hasActivities = true
@@ -613,13 +614,14 @@ proc parseHostSystemBlock(pairs: seq[(string, NimNode)]; where: NimNode;
   let problem = systemBlockProblem(mode, hasActivities, activities)
   if problem.len > 0:
     error("hosts entry \"" & hostName & "\": system: " & problem, where)
-  HostSystemDecl(mode: hsmAddOn, activities: activities)
+  HostSystemDecl(mode: (if mode == FullKeyword: hsmFull else: hsmAddOn),
+    activities: activities)
 
 proc parseHostSystemValue(value: NimNode; hostName: string): HostSystemDecl =
   ## The value of a block-form host entry's `system:` key:
-  ## `managedElsewhere`, `managedElsewhere("<pointer>")`, `addOn`, or the
-  ## block form `mode: addOn` + `activities: [...]` (indented, or inline as
-  ## `{mode: addOn, activities: [...]}`). Anything else is a compile error
+  ## `managedElsewhere`, `managedElsewhere("<pointer>")`, `addOn`, `full`,
+  ## or the block form `mode: addOn | full` + `activities: [...]` (indented,
+  ## or inline as `{mode: addOn, activities: [...]}`). Anything else is a compile error
   ## naming the host.
   var v = value
   if v.kind == nnkStmtList and v.len == 1:
@@ -631,10 +633,13 @@ proc parseHostSystemValue(value: NimNode; hostName: string): HostSystemDecl =
     return parseHostSystemBlock(pairs, value, hostName)
   let expected = "`system: " & ManagedElsewhereKeyword & "`, `system: " &
     ManagedElsewhereKeyword & "(\"<managing repository>\")`, `system: " &
-    AddOnKeyword & "` or the block form `system: {" & SystemModeKey & ": " &
-    AddOnKeyword & ", " & SystemActivitiesKey & ": [...]}`"
+    AddOnKeyword & "`, `system: " & FullKeyword & "` or the block form " &
+    "`system: {" & SystemModeKey & ": " & AddOnKeyword & " | " & FullKeyword &
+    ", " & SystemActivitiesKey & ": [...]}`"
   if v.kind == nnkIdent and $v == AddOnKeyword:
     return HostSystemDecl(mode: hsmAddOn)
+  if v.kind == nnkIdent and $v == FullKeyword:
+    return HostSystemDecl(mode: hsmFull)
   if v.kind == nnkIdent and $v == ManagedElsewhereKeyword:
     return HostSystemDecl(mode: hsmManagedElsewhere)
   if v.kind in {nnkCall, nnkCommand} and v.len == 2 and

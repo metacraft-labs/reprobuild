@@ -41,7 +41,6 @@ type
   SwitchError* = object of CatchableError
 
 const
-  SystemdRunCandidates* = ["/usr/bin/systemd-run", "/bin/systemd-run"]
   SystemdSysctlCandidates* = ["/usr/lib/systemd/systemd-sysctl",
                               "/lib/systemd/systemd-sysctl"]
   SysctlService* = "systemd-sysctl.service"
@@ -165,24 +164,10 @@ proc runStart*(ts: seq[Transition]) =
 # Sysctl (step 6).
 # ---------------------------------------------------------------------------
 
-proc runInHostNamespaces*(argv: openArray[string]): HostToolResult =
-  ## Run ``argv`` as a transient unit of the host's systemd and return
-  ## its output: PID 1 spawns it in the host's namespaces whatever
-  ## namespaces this process is confined to.
-  let exe = resolveHostTool(SystemdRunCandidates)
-  if exe.len == 0:
-    raise newException(SwitchError, "systemd-run not found at " &
-      SystemdRunCandidates.join(" or "))
-  var full = @[exe, "--quiet", "--wait", "--pipe", "--collect",
-               "--service-type=exec", "--"]
-  for a in argv: full.add(a)
-  runHostTool(full)
-
 proc observeSysctlInHostNamespaces*(key: string): string =
-  ## The host's effective value of ``key`` (whitespace collapsed), read by
-  ## a transient unit; "" when unreadable.
-  let r = runInHostNamespaces(["/bin/cat", sysctlKeyPath(key)])
-  if r.exitCode != 0: "" else: r.output.splitWhitespace().join(" ")
+  ## The host's effective value of ``key``, read by a transient unit in
+  ## the host's namespaces (``host_exec.readHostSysctl``).
+  readHostSysctl(key)
 
 proc applySysctlFragments*(changedFragments: openArray[string]) =
   ## Apply the changed sysctl fragments, each by the host's own

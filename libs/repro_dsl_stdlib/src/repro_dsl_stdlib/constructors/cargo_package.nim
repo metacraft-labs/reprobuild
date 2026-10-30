@@ -334,6 +334,9 @@ proc cargo_package*(srcDir = "src";
     # about a directory this build owns outright, and it makes the staged
     # tree differ between a first run and a re-run.
     noTrack = true,
+    # The root is this build's own staging tree, so a binary already there
+    # is the previous run's; cargo must replace it, not refuse it.
+    force = true,
     noDefaultFeatures = noDefaultFeatures,
     features = featureList,
     path = (if installPath.len > 0: extractedRel / installPath

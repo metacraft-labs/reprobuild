@@ -109,7 +109,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       f = after
 
     # b modified by hand, then leaves the profile: drift, left in place.
-    discard g.run("printf 'b-modified\\n' > " & Dir & "/b.conf")
+    # (A managed file is a link into the read-only store since A4, so an
+    # editor replaces the link with a file of its own, as `sed -i` does.)
+    discard g.run("rm -f " & Dir & "/b.conf && printf 'b-modified\\n' > " & Dir & "/b.conf")
     f = g.takeFingerprint(repro)
     let a3 = g.applyProfile(repro, "gen3", Prefix)
     let l3 = g.ledgerOf()

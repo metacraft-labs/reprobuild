@@ -175,9 +175,10 @@ type
       ## References").
 
   HostSystemMode* = enum
-    ## The two values a host entry's `system:` key can take. There is no
-    ## value for "this configuration manages the whole system": that is the
-    ## entry without a `system:` key (`repro_profile/host_system`).
+    ## The values a host entry's `system:` key can take. An entry without a
+    ## `system:` key is `hsmFull` with no activities (`repro_profile/
+    ## host_system`); the spelled form exists to select system activities
+    ## on a fully managed host.
     hsmManagedElsewhere = "managedElsewhere"
       ## Something other than this configuration manages the host's system
       ## scope; `repro infra` refuses the host.
@@ -185,19 +186,24 @@ type
       ## The host's system belongs to its distribution; Reprobuild manages a
       ## declared set of services, files and accounts on top of it (ReproOS
       ## add-on mode).
+    hsmFull = "full"
+      ## This configuration manages the whole system (ReproOS, or a NixOS /
+      ## nix-darwin switch); spelled only to select system activities
+      ## (`system: {mode: full, activities: [...]}`), or bare `system: full`,
+      ## which means the same as no key.
 
   HostSystemDecl* = object
     ## What one `hosts:` entry's `system:` key declares.
     mode*: HostSystemMode
     managedBy*: string
       ## `hsmManagedElsewhere` only: the `managedElsewhere("...")` pointer,
-      ## "" when the entry names none. Always "" for `hsmAddOn`.
+      ## "" when the entry names none. Always "" for `hsmAddOn` and `hsmFull`.
     activities*: seq[string]
-      ## `hsmAddOn` only: the system-profile activities the block form's
-      ## `activities: [...]` selects, in declaration order, on top of the
-      ## system profile's `default` activity (which is always enabled).
-      ## Empty for the short form `system: addOn`, which selects `default`
-      ## alone. Always empty for `hsmManagedElsewhere`.
+      ## `hsmAddOn` and `hsmFull`: the system-profile activities the block
+      ## form's `activities: [...]` selects, in declaration order, on top of
+      ## the system profile's `default` activity (which is always enabled).
+      ## Empty for the short forms `system: addOn` / `system: full`, which
+      ## select `default` alone. Always empty for `hsmManagedElsewhere`.
 
   ActivityElementKind* = enum
     aekPackageRef

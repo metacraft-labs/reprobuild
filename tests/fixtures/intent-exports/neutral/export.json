@@ -152,6 +152,9 @@
         "desktop",
         "laptop"
       ],
+      "pc-full": [
+        "cli"
+      ],
       "rpi": [
         "cli"
       ],
@@ -429,6 +432,13 @@
         "managedBy": "example-org/infra",
         "activities": []
       },
+      "pc-full": {
+        "mode": "full",
+        "managedBy": null,
+        "activities": [
+          "web"
+        ]
+      },
       "rpi": {
         "mode": "addOn",
         "managedBy": null,
@@ -455,18 +465,13 @@
   "provenance": {
     "repro": {
       "version": "0.2.18",
-      "sourceRevision": "116298c031670446fa6689901729e83cfe98b3c8-dirty"
+      "sourceRevision": "01e2eaf5f4f69afbe438c7b5fe1111364c2089c7-dirty"
     },
     "hostSource": "env",
     "profile": {
       "root": "home.nim",
-      "digest": "06a38153ffe4a2e671b07425392a55abc0b1cc19ccfefdd4255586a0a4a975a0",
-      "inputs": [
-        {
-          "path": "home.nim",
-          "blake3": "b725dd0ef07872ecdec85d85b6cfb8b5b78458b3d81fbed9482814f13c7847ed"
-        }
-      ]
+      "digest": null,
+      "inputs": []
     },
     "dataFiles": [
       {

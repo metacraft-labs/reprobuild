@@ -174,6 +174,8 @@ suite "cargo_package: target, zig cross toolchain, workspace member":
     let install = argvOf(res.installEdge)
     check install.containsPair("--target", Triple)
     check install.containsPair("--path", "src" / "crates/llm-api-proxy")
+    # A re-run lands on its own previous output; cargo replaces it.
+    check "--force" in install
     for edge in [res.compileEdge, res.installEdge]:
       check edge.envValue("CC_armv7_unknown_linux_musleabihf").endsWith("/cc")
       check edge.envValue("CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER")

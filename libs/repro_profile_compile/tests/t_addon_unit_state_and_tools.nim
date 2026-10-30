@@ -180,7 +180,7 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
 
   test "addOnToolPath is the /etc/profile.d hook, declared once":
     let sp = compiled()
-    let hook = sp.byAddress("fs.systemFile:/etc/profile.d/repro-addon.sh")
+    let hook = sp.byAddress("fs.systemFile:" & AddOnToolPathFile)
     check hook.kind == srkFsSystemFile
     check hook.sfContent == AddOnToolPathScript
     check "/etc/repro/bin" in hook.sfContent

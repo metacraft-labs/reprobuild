@@ -56,12 +56,13 @@ const
 proc caseHosts(name: string): seq[string] =
   ## The hosts evaluated for case `name`: `Hosts`, plus the `neutral`
   ## case's two add-on hosts (ReproOS add-on mode: `rpi` says `system:
-  ## addOn`, `validator` the block form selecting system activities), so the
+  ## addOn`, `validator` the block form selecting system activities) and its
+  ## `full` block-form host (`pc-full`), so the
   ## Nix library's reading of `evaluation.system` is compared for every
   ## mode.
   result = @Hosts
   if name == "neutral":
-    result.add @["rpi", "validator"]
+    result.add @["rpi", "validator", "pc-full"]
 
 proc caseDirs(): seq[string] =
   for kind, path in walkDir(FixtureRoot):
@@ -255,6 +256,9 @@ when defined(linux) or defined(macosx):
             check evaluations["validator"][system]["system"] == %*{
               "managed": "here", "managedBy": nil, "mode": "addOn",
               "activities": ["default", "web", "backup"]}
+            check evaluations["pc-full"][system]["system"] == %*{
+              "managed": "here", "managedBy": nil, "mode": "full",
+              "activities": ["default", "web"]}
         if name == "concerns":
           # GM7: the hosts that declare `applies:` carry it in every
           # evaluation, with each package's concern; the one that declares

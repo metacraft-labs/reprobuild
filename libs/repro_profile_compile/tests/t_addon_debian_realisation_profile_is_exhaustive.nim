@@ -8,7 +8,7 @@
 ##    `SystemHardwareSpec`) has a rule -- enumerated from the types
 ##    themselves (`fieldPairs`), so a new field fails here until someone
 ##    decides its class.
-## 2. Every field the resource CONSTRUCTORS of the realisable kinds emit is
+## 2. Every field the resource CONSTRUCTORS of the realisable kinds CAN emit is
 ##    classified: each constructor is called with every parameter set (a
 ##    kind without a constructor yet, `linux.dpkgDiversion`, as the text
 ##    form carries it), and the projection must not refuse.
@@ -23,7 +23,7 @@
 ##
 ## No mocks: the real constructors, adapter and profile tables.
 
-import std/[sets, strutils, tables, unittest]
+import std/[os, sets, strutils, tables, unittest]
 
 import repro_profile
 import repro_profile_compile
@@ -32,6 +32,9 @@ import repro_infra/addon_diagnostics
 const LockText = staticRead("../../repro_dsl_stdlib/tests/fixtures/" &
   "apt_closure/debian-trixie-20261001-armhf-node-exporter.lock")
 
+const ProjectRoot = currentSourcePath().parentDir().parentDir().parentDir().
+  parentDir()
+
 proc refusal(body: proc ()): ref EAddOnOutOfScope =
   ## The `EAddOnOutOfScope` `body` raises, or nil.
   try:
@@ -39,6 +42,43 @@ proc refusal(body: proc ()): ref EAddOnOutOfScope =
   except EAddOnOutOfScope as e:
     return e
   nil
+
+proc constructorFieldsByKind(): Table[string, HashSet[string]] =
+  ## The field keys each resource constructor template in
+  ## `repro_profile/resources.nim` assigns (`fields["<key>"] = ...`), by
+  ## the kind its `pushResource` names. Read from the source so the set is
+  ## what the constructors CAN emit, optional parameters included, not what
+  ## one call happened to emit.
+  let src = readFile(ProjectRoot / "libs" / "repro_profile" / "src" /
+    "repro_profile" / "resources.nim")
+  var body: seq[string]
+  proc flush(body: var seq[string]; into: var Table[string, HashSet[string]]) =
+    var kind = ""
+    var keys = initHashSet[string]()
+    for line in body:
+      let t = line.strip()
+      if t.startsWith("pushResource(") or t.startsWith("pushResource ("):
+        let q = t.find('"')
+        if q >= 0:
+          let e = t.find('"', q + 1)
+          if e > q: kind = t[q + 1 ..< e]
+      if t.startsWith("fields[\""):
+        let e = t.find('"', 8)
+        if e > 8: keys.incl t[8 ..< e]
+      elif "fields[\"" in t:
+        # A key assigned on a continuation line (`if x: fields["k"] = ...`).
+        let a = t.find("fields[\"") + 8
+        let e = t.find('"', a)
+        if e > a: keys.incl t[a ..< e]
+    if kind.len > 0 and keys.len > 0:
+      into[kind] = keys
+    body.setLen(0)
+  for line in src.splitLines():
+    if line.startsWith("template ") or line.startsWith("proc ") or
+        line.startsWith("const") or line.startsWith("type"):
+      flush(body, result)
+    body.add line
+  flush(body, result)
 
 suite "add-on-debian realisation profile":
 
@@ -68,12 +108,25 @@ suite "add-on-debian realisation profile":
       checkpoint "SystemHardwareSpec." & name
       check rp.findMachineField("hardware." & name) >= 0
 
-  test "every field the realisable kinds' constructors emit is classified":
+  test "every field a realisable kind's constructor can emit is classified":
+    # Two independent derivations of "the fields a kind can carry", so a
+    # new parameter cannot slip past either: (a) each constructor is called
+    # with every optional parameter set to a non-default value, and the
+    # projection must not refuse; (b) the constructor SOURCE
+    # (`repro_profile/resources.nim`) is scanned for every `fields["<key>"]`
+    # a template that pushes the kind assigns, and that set must equal the
+    # rule's field set exactly -- a key the rule does not list, or lists
+    # without a constructor emitting it, fails here before any plan does.
     var r: seq[ResourceIntent]
     systemdSystemUnit(r, name = "web.service", content = "[Unit]\n",
-      enabled = true)
+      enabled = false, aptClosureLock = "repro-apt-closure-lock v1\n",
+      restartIfChanged = false)
     systemdSystemTimer(r, name = "web.timer", content = "[Timer]\n",
-      enabled = true, state = "started")
+      enabled = false, state = "stopped")
+    systemdUnitState(r, name = "avahi-daemon.service", enabled = false,
+      state = "Stopped")
+    addOnTool(r, command = "ipmitool", aptClosureLock = "lock\n",
+      program = "/usr/bin/ipmitool")
     fsSystemFile(r, path = "/etc/web/a.conf", content = "x", mode = "0640")
     fsSystemFile(r, path = "/etc/web/b.conf",
       sourceUrl = "https://example.org/b.conf", sha256 = repeat('a', 64))
@@ -82,7 +135,7 @@ suite "add-on-debian realisation profile":
       extraGroups = @["adm"])
     passwdGroup(r, name = "web", gid = "990", members = @["web"])
     linuxTmpfilesRule(r, name = "web", content = "d /var/lib/web 0700",
-      applyNow = true)
+      applyNow = false)
     linuxSysctl(r, key = "net.core.somaxconn", value = "1024",
       filename = "90-repro-web.conf")
     linuxFirewallRule(r, chain = "inet repro input", name = "web",
@@ -112,8 +165,6 @@ suite "add-on-debian realisation profile":
     var kinds = initHashSet[string]()
     for res in r:
       kinds.incl res.kind
-    # Every realisable kind was exercised, and every emitted field is in the
-    # projection report.
     for k in rp.kinds:
       if k.class != fcInvalid:
         checkpoint k.kind
@@ -124,6 +175,29 @@ suite "add-on-debian realisation profile":
     check p.entries.len == fieldCount
     for e in p.entries:
       check e.class in {fcShared, fcAddOnSpecific}
+    # (b) The source scan.
+    let emitted = constructorFieldsByKind()
+    checkpoint $emitted
+    # Vacuity: the scan sees the closure field and the unit-state kind.
+    require emitted.hasKey("systemd.systemUnit")
+    check "aptClosureLock" in emitted["systemd.systemUnit"]
+    check emitted.hasKey("systemd.unitState")
+    for k in rp.kinds:
+      if k.class == fcInvalid or not emitted.hasKey(k.kind):
+        continue
+      var ruleFields = initHashSet[string]()
+      for f in k.fields:
+        ruleFields.incl f.field
+      checkpoint k.kind & ": constructor emits " & $emitted[k.kind] &
+        ", rule lists " & $ruleFields
+      check emitted[k.kind] == ruleFields
+    # Every realisable kind with a constructor was scanned (the kinds the
+    # macro has no constructor for are listed, so this cannot pass by the
+    # scan finding nothing).
+    for k in rp.kinds:
+      if k.class != fcInvalid and k.kind notin ["linux.dpkgDiversion"]:
+        checkpoint k.kind
+        check emitted.hasKey(k.kind)
 
   test "a firewall rule outside the add-on's own table is out of scope":
     var r: seq[ResourceIntent]

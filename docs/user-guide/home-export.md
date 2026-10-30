@@ -272,7 +272,7 @@ since the Nix side keeps its own links (schema version unchanged).
 | `intent.resources[].guard`, `intent.configOverrides[].guard` | The runtime predicate under which the element applies, as text in the [predicate grammar](#predicates), or `null` for "every host". Nested `when` blocks are conjoined (`arm64 and macos`); an `elif` / `else` branch carries the negation of the earlier conditions. Two resources may share an `address` when their guards never hold together. |
 | `intent.resources[].activity` | The activity the resource belongs to — it was declared in a `resources:` block inside `activity <name>:`, or by a data-file row with `activity = "<name>"` — or `null` for a profile-wide resource. A resource with an activity applies only on a host whose selection enables that activity (`default` plus the host's `hosts:` entry), and only where its `guard` also holds. It always names an activity in `intent.activities`; refuse a document where it does not. |
 | `intent.hostApplies` | Present only when some `hosts:` entry declares `applies:` (block form, below): host → the concerns Reprobuild applies on that host. A host absent from it lets Reprobuild apply every concern. |
-| `intent.hostSystems` | Present only when some `hosts:` entry has a `system:` key ([below](#how-a-hosts-system-is-managed)): host → `{ "mode": "managedElsewhere", "managedBy": "<pointer>" \| null, "activities": [] }`, or `{ "mode": "addOn", "managedBy": null, "activities": [<system activity>, …] }` (the activities the block form selects beyond `default`; empty for `system: addOn`). A host absent from it has its whole system managed by this configuration. |
+| `intent.hostSystems` | Present only when some `hosts:` entry has a `system:` key ([below](#how-a-hosts-system-is-managed)): host → `{ "mode": "managedElsewhere", "managedBy": "<pointer>" \| null, "activities": [] }`, or `{ "mode": "addOn" \| "full", "managedBy": null, "activities": [<system activity>, …] }` (the activities the block form selects beyond `default`; empty for `system: addOn` / `system: full`). A host absent from it has its whole system managed by this configuration. |
 | `concerns` | Present only with `intent.hostApplies`: the concern names, every home-scope resource kind's concern, the concern of a `config:` override, and `packages` — for every target system, the package references (keyed `name`, or `name@version` when pinned) whose selected realization there places an application (`applications`), and those that resolve to nothing there (`unresolved`); every other reference is a plain package. It is Reprobuild's classification, made from profile policy and the current catalog, without the host-local `home.lock` or the host's `PATH` / Scoop inventory, so a consumer never restates it. `--check` compares it, so a policy or catalog change that reclassifies a package shows up. `profileBin` says, for every target system, where the launchers of the active generation are reached on a host that uses the default state directory: a `base` (`home` = `$HOME`, `xdgStateHome` = `$XDG_STATE_HOME` or `$HOME/.local/state`, `localAppData` = `%LOCALAPPDATA%`) and a `/`-separated `path` below it. |
 | `platforms` | For each target platform, whether this document describes it: `same` (the profile evaluated for that platform declares exactly this intent), `differs` (a compile-time `when defined(...)` changed it — refuse the document for that platform), or `unevaluated` (the profile could not be evaluated for that platform — treat as `differs`; the reason is in `provenance.compile.probe`). The compiling platform is always described, whatever its entry says. |
 | `provenance.repro.version` | The `repro` release that produced the document. |
@@ -286,7 +286,7 @@ since the Nix side keeps its own links (schema version unchanged).
 | `provenance.compile.os`, `.cpu` | The same platform in Nim's names (`linux`, `macosx`, `windows`; `amd64`, `arm64`). A `when defined(...)` in the profile was decided for this platform. |
 | `provenance.compile.defines` | Extra `-d:` symbols the profile compile passes (none today). |
 | `provenance.compile.probe` | For each `unevaluated` platform, why: the end of the compiler's diagnostic. |
-| `evaluation` | Present only with `--target`: `target`, `host`, `activities`, `packages` (`name`, `version`, `binaries`, `activity`), and the `resources` and `configOverrides` from `intent` whose guards hold (a resource with an `activity` only when the host selects it) — what the home planner would use for that host on that platform — plus `applies`, the concerns the host's entry declares, when it declares any; then every package also carries `concern` (`applications` or `packages`, from `concerns.packages`) and `resolved`, and -- when the host gives Reprobuild `packages` or `applications` but not `environment` -- `profileBin`, that system's row of `concerns.profileBin`, which the side that writes the shell environment puts on `PATH`. Always `system`: `{ "managed": "elsewhere", "managedBy": "<pointer>" \| null, "mode": "managedElsewhere", "activities": [] }` for a host whose system is managed elsewhere, `{ "managed": "here", "managedBy": null, "mode": "addOn", "activities": ["default", …] }` for an add-on host, and `{ "managed": "here", "managedBy": null, "mode": "full", "activities": ["default"] }` otherwise. Only `mode` `full` means the whole system is this configuration's: branch on `mode`, not on `managed`. |
+| `evaluation` | Present only with `--target`: `target`, `host`, `activities`, `packages` (`name`, `version`, `binaries`, `activity`), and the `resources` and `configOverrides` from `intent` whose guards hold (a resource with an `activity` only when the host selects it) — what the home planner would use for that host on that platform — plus `applies`, the concerns the host's entry declares, when it declares any; then every package also carries `concern` (`applications` or `packages`, from `concerns.packages`) and `resolved`, and -- when the host gives Reprobuild `packages` or `applications` but not `environment` -- `profileBin`, that system's row of `concerns.profileBin`, which the side that writes the shell environment puts on `PATH`. Always `system`: `{ "managed": "elsewhere", "managedBy": "<pointer>" \| null, "mode": "managedElsewhere", "activities": [] }` for a host whose system is managed elsewhere, `{ "managed": "here", "managedBy": null, "mode": "addOn", "activities": ["default", …] }` for an add-on host, and `{ "managed": "here", "managedBy": null, "mode": "full", "activities": ["default", …] }` otherwise (more than `default` only through `system: {mode: full, activities: [...]}`). Only `mode` `full` means the whole system is this configuration's: branch on `mode`, not on `managed`. |
 
 ### Applying some concerns of a host
 
@@ -380,6 +380,10 @@ hosts:
     system:                                # add-on mode, more activities
       mode: addOn
       activities: [ethereum_validator, host_baseline]
+  "reproos-box":
+    activities: [default]
+    system: {mode: full, activities: [host_baseline]}  # whole system here,
+                                           # plus a system activity
 ```
 
 - **`managedElsewhere`**: the host's home is this profile's, but something
@@ -398,6 +402,12 @@ hosts:
   system-profile activities it lists. `default` is always planned and is not
   listed, and a block form without activities is refused (write the short
   form).
+- **`full`**: what an absent key means -- this configuration manages the
+  whole system. It is spelled only to select system activities on such a
+  host: `system: {mode: full, activities: [...]}` (same rules as the
+  `addOn` block form); the bare `system: full` is accepted and means exactly
+  an absent key. On a distribution host `full` is refused like an absent
+  key (below).
 
 The system commands read the registry of the `home.nim` beside the system
 profile, or of the profile `--home-profile-dir` names, and look the host up
@@ -407,9 +417,10 @@ refuse a mismatch with `EAddOnModeMismatch`:
 
 - `system: addOn` on a host that is not a distribution host (ReproOS, NixOS,
   macOS, Windows, or a Linux without a readable `os-release`);
-- a host the registry declares *without* a `system:` key that runs a
-  distribution: writing system objects on a distribution host must be
-  declared (`addOn` or `managedElsewhere`), never inferred.
+- a host the registry declares as fully managed -- no `system:` key, or
+  `system: full` / its block form -- that runs a distribution: writing
+  system objects on a distribution host must be declared (`addOn` or
+  `managedElsewhere`), never inferred.
 
 A host the registry does not declare, and a system profile with no registry
 beside it, are planned as before; the report's `registry:` line says so.
