@@ -430,8 +430,10 @@ proc verifyInRelease*(inRelease: string; keyBundleDir: string;
 proc enforceValidUntil*(payload: string; now: DateTime) =
   ## Extract the ``Valid-Until:`` field from a verified InRelease
   ## payload and raise ``SignatureVerificationError`` if ``now`` is
-  ## past the deadline. Tolerates the absence of the field (some
-  ## snapshot suites omit it for archived releases).
+  ## past the deadline, or if the field is present but not in the
+  ## ``Thu, 29 Oct 2026 22:23:10 UTC`` form the archive format requires: a
+  ## deadline that cannot be read is not a deadline that was checked.
+  ## Tolerates the absence of the field (snapshot archives omit it).
   for rawLine in payload.splitLines:
     let line = rawLine.strip()
     if line.startsWith("Valid-Until:"):
@@ -440,9 +442,12 @@ proc enforceValidUntil*(payload: string; now: DateTime) =
       try:
         parsed = parse(stamp, "ddd, dd MMM yyyy HH:mm:ss 'UTC'", utc())
       except CatchableError:
-        # Other formats: leave validation to the caller; we just
-        # warn through the log.
-        return
+        var e = newException(SignatureVerificationError,
+          "InRelease Valid-Until '" & stamp & "' is not a date this " &
+          "verifier can read; refusing rather than skipping the check")
+        e.backend = sbExternalGpg
+        e.backendLog = "Valid-Until enforcement"
+        raise e
       if now > parsed:
         var e = newException(SignatureVerificationError,
           "InRelease is stale: Valid-Until " & stamp &

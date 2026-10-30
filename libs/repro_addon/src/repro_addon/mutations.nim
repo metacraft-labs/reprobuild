@@ -25,7 +25,17 @@
 ##                                            changes a base that already
 ##                                            ships ``jq``, as Ubuntu does)
 ## ``preflight-writes``                       the preflight writes a marker
-##                                            file under ``/var/lib``
+##                                            file under ``/var/lib`` and
+##                                            swallows a write error, so
+##                                            only observing the write can
+##                                            catch it
+## ``apply-skips-kind-check``                 the apply does not refuse a
+##                                            resource kind the add-on
+##                                            does not manage before
+##                                            applying it
+## ``uninstall-discards-state-on-drift``      uninstall removes the state
+##                                            directory and ledger even
+##                                            when it left drift behind
 ## ``recipient-key-0644``                     bootstrap writes the recipient
 ##                                            key group- and world-readable
 ## ``provisions-publisher-key``               bootstrap also leaves a binary
@@ -36,7 +46,9 @@ const
   AddonMutation* {.strdefine: "reproAddonMutation".} = ""
   KnownAddonMutations* = ["uninstall-skips-diversion-removal",
                           "bootstrap-installs-jq", "preflight-writes",
-                          "recipient-key-0644", "provisions-publisher-key"]
+                          "recipient-key-0644", "provisions-publisher-key",
+                          "apply-skips-kind-check",
+                          "uninstall-discards-state-on-drift"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

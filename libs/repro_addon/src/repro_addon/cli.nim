@@ -21,11 +21,17 @@
 
 import std/[os, strutils]
 
+import std/algorithm
+
+import repro_infra
+
 import ./addon_apply
 import ./bootstrap
 import ./fingerprint
 import ./ledger
+import ./linux_fs
 import ./preflight
+import ./store_root
 import ./uninstall
 import ./verify
 
@@ -48,6 +54,12 @@ commands:
       The fingerprint diff an apply between two ledgers may cause.
   ledger
       Print the current ownership ledger.
+  status
+      The current generation, the generations held as store roots, and the
+      store root's kind.
+  selfcheck-btrfs <mount point>
+      Create and delete a btrfs subvolume under a btrfs mount the way the
+      store root is created on a btrfs root (a test of that leg).
 """
 
   FingerprintUsage* = """usage: repro-addon-fingerprint [--root R] [--no-live] [--out F]
@@ -227,6 +239,27 @@ proc runAddonCli*(args: seq[string]): int =
       return 0
     of "ledger":
       stdout.write(readLedger(ledgerCopyPath(DefaultStateDir)).render())
+      return 0
+    of "status":
+      # What an operator (and the store-roots gate) needs to see: the
+      # current generation, every generation registered as a store root,
+      # and what kind of thing /repro is.
+      let current = readCurrentGenerationId(DefaultStateDir)
+      stdout.write("current generation: " & current & "\n")
+      stdout.write("store root: " & ReproRoot & " " &
+        (if not dirExists(ReproRoot): "absent"
+         elif isBtrfsSubvolume(ReproRoot): "btrfs-subvolume" else: "dir") &
+        "\n")
+      var roots = generationRoots()
+      roots.sort()
+      stdout.write("generation store roots (" & $roots.len & "):\n")
+      for g in roots:
+        stdout.write("  " & g & (if g == current: " (current)" else: "") & "\n")
+      return 0
+    of "selfcheck-btrfs":
+      if rest.len != 1:
+        raise newException(ValueError, "selfcheck-btrfs needs a btrfs mount point")
+      stdout.write(selfcheckBtrfsSubvolume(rest[0]) & "\n")
       return 0
     else:
       raise newException(ValueError, "unknown command " & cmd)

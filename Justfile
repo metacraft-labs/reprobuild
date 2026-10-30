@@ -87,6 +87,9 @@ e2e_addon_bootstrap_changes_nothing_preexisting:
 e2e_addon_bootstrap_installs_anchors_and_private_recipient_key:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key
 
+e2e_addon_store_roots_and_btrfs:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_store_roots_and_btrfs
+
 test-hcr-native-library-prerequisite:
     nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
 

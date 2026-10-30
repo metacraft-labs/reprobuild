@@ -41,7 +41,15 @@
 ##      miss locally, generates no key (the auto-credential directory stays
 ##      absent) and publishes nothing (the server has no manifest for the
 ##      entry). Positive control: the same apply with the keypair configured
-##      does publish, so the "no manifest" check can see a publish.
+##      does publish, so the "no manifest" check can see a publish. A host
+##      with the keypair but WITHOUT `REPRO_APPLY_PUBLISH=1` (a developer
+##      shell under `sudo -E`) publishes nothing either.
+##   5. MALFORMED CONFIG. A `caches.conf` the loader cannot parse configures
+##      no cache: the entry is there, the key is right, one hex digit is
+##      missing, and the apply builds locally.
+##   6. SYMLINK IN OUTPUTS. A publisher whose declared output tree holds a
+##      symbolic link publishes nothing for that edge: a partial prefix
+##      must never leave the host.
 ##
 ## Non-vacuity: before this gate was amended the dispatcher substituted
 ## through ``SubstituteEndpoint(trustedSigners: @[])`` without
@@ -141,7 +149,7 @@ const CacheEnvVars = [
   "REPRO_CACHES_CONFIG", "REPRO_BINARY_CACHE_URL",
   "REPRO_BINARY_CACHE_KEY_PATH", "REPRO_BINARY_CACHE_CERT_PATH",
   "REPRO_BINARY_CACHE_SCOPE", "REPRO_BINARY_CACHE_AUTO_CRED_DIR",
-  "REPRO_CACHE_DISABLE"]
+  "REPRO_CACHE_DISABLE", "REPRO_APPLY_PUBLISH"]
 
 proc clearCacheEnv() =
   for v in CacheEnvVars:
@@ -186,10 +194,12 @@ proc useConsumer(confPath: string; url = "") =
 
 proc usePublisher(confPath, url: string; kp: Keypair) =
   ## A host the operator made a publisher: same cache config, plus the
+  ## explicit apply-time opt-in (REPRO_APPLY_PUBLISH=1), the
   ## publish endpoint and an existing keypair.
   useConsumer(confPath, url)
   putEnv("REPRO_BINARY_CACHE_KEY_PATH", kp.keyPath)
   putEnv("REPRO_BINARY_CACHE_CERT_PATH", kp.certPath)
+  putEnv("REPRO_APPLY_PUBLISH", "1")
 
 type
   ApplyRun = object
@@ -355,6 +365,70 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         useConsumer(confA, url)
         checkSubstituted(applyOnce(tmpRoot, "anchors-a", "unanchored-edge"))
 
+  test "a publisher refuses to stage an output tree that contains a symlink":
+    when not (defined(linux) or defined(macosx)):
+      skip("symbolic links and the /bin/sh build action are POSIX; no Windows arm")
+    else:
+      withCacheServer("m4-symlink-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let confA = tmpRoot / "caches-a.conf"
+        writeCachesConf(confA, url, @[kpA.pubHex])
+        usePublisher(confA, url, kpA)
+        # The edge declares the directory `bin` and its script leaves a
+        # link to a directory inside it. The old stager did not descend
+        # into link-to-directory entries, so the prefix it published was
+        # missing a subtree; a consumer substituted it cleanly and ran
+        # without it. Now the whole edge is refused for publication.
+        let cwd = tmpRoot / "cwd-link"
+        createDir(cwd)
+        let action = ProfileBuildAction(
+          id: "symlink-edge",
+          argv: @["/bin/sh", "-c",
+            "mkdir -p bin real; printf payload > real/lib.so; " &
+            "ln -s ../real bin/lib; printf x > bin/tool"],
+          cwd: cwd, outputs: @["bin"],
+          commandStatsId: "m4.symlink.write",
+          requiresElevation: true, cacheable: true)
+        let cacheRoot = tmpRoot / "engine-cache-link"
+        createDir(cacheRoot)
+        let disp = mkBuildActionDispatcher(cacheRoot,
+          FixtureContext(filePrefix: tmpRoot / "ctx-link"))
+        let outs = disp(@[action], nil)
+        check outs.len == 1
+        check outs[0].ok                       # the edge itself converged
+        check symlinkExists(cwd / "bin" / "lib")
+        let entry = deriveCacheEntryKeyHex(buildActionCacheIdentity(
+          action, ""))
+        check not manifestPublished(url, entry)  # and nothing left the host
+
+  test "a caches.conf that cannot be parsed configures no cache":
+    when not (defined(linux) or defined(macosx)):
+      skip("the build action is a /bin/sh script and the cache server a POSIX subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-malformed-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let confA = tmpRoot / "caches-a.conf"
+        writeCachesConf(confA, url, @[kpA.pubHex])
+        usePublisher(confA, url, kpA)
+        checkBuiltLocally(applyOnce(tmpRoot, "producer", "malformed-edge"))
+        check manifestPublished(url, entryKeyHexFor("malformed-edge"))
+
+        # The same cache and the right key, but the trusted-key line is
+        # not a key: one hex digit short. The loader raises, the resolver
+        # reports a configError, and NOTHING is substituted -- a config the
+        # loader cannot read grants no trust, even to a URL the back-compat
+        # variable names as well.
+        let broken = tmpRoot / "caches-broken.conf"
+        writeFile(broken, "[fleet]\nurl = \"" & url & "\"\n" &
+          "trusted-public-keys = \"" & kpA.pubHex[0 ..< kpA.pubHex.len - 1] &
+          "\"\n")
+        useConsumer(broken, url)
+        checkBuiltLocally(applyOnce(tmpRoot, "broken-conf", "malformed-edge"))
+
+        # Positive control: the well-formed file substitutes the same entry.
+        useConsumer(confA, url)
+        checkSubstituted(applyOnce(tmpRoot, "anchors-a", "malformed-edge"))
+
   test "a consumer host generates no key and publishes nothing on a miss":
     when not (defined(linux) or defined(macosx)):
       skip("the build action is a /bin/sh script and the cache server a POSIX subprocess; no Windows arm")
@@ -373,6 +447,18 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", autoCredDir)
         checkBuiltLocally(applyOnce(tmpRoot, "consumer", "consumer-edge"))
         check not dirExists(autoCredDir)
+        check not manifestPublished(url, entryKeyHexFor("consumer-edge"))
+
+        # A keypair ALONE is not a publisher. This is the developer-shell
+        # case: REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH exported for
+        # `repro build`, then `sudo -E repro infra apply` from that shell.
+        # Without the explicit REPRO_APPLY_PUBLISH=1 the apply must not
+        # publish, even though it could sign.
+        usePublisher(confA, url, kpA)
+        delEnv("REPRO_APPLY_PUBLISH")
+        putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", autoCredDir)
+        checkBuiltLocally(applyOnce(tmpRoot, "keypair-no-optin",
+                                    "consumer-edge"))
         check not manifestPublished(url, entryKeyHexFor("consumer-edge"))
 
         # Positive control: the same apply on a publisher host does publish,

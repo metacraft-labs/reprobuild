@@ -31,6 +31,7 @@ import repro_local_store/store
 import ./fingerprint
 import ./generation0
 import ./ledger
+import ./mutations
 import ./store_root
 
 type
@@ -150,6 +151,19 @@ proc dirEntry(path, resource: string): LedgerEntry =
   LedgerEntry(class: lcDir, path: path, mode: st.mode, owner: st.owner,
               resource: resource)
 
+const AddonManagedKinds* = {srkFsSystemFile, srkSystemdSystemUnit,
+                            srkLinuxDpkgDiversion}
+  ## The resource kinds an add-on generation may declare in this release:
+  ## the ``etcFile``, ``unit`` and ``diversion`` ownership classes. The other
+  ## classes (drop-ins, sysusers, tmpfiles, sysctl, firewall, network) are
+  ## added by the milestones that implement their ledger semantics.
+
+proc unmanagedKindReason*(r: SystemResource): string =
+  ## "" when the add-on manages ``r.kind``; otherwise the refusal text.
+  if r.kind in AddonManagedKinds: ""
+  else: "resource kind " & $r.kind & " is not managed by the add-on in " &
+        "this release (" & r.address & "); nothing was applied"
+
 proc entriesFor(r: SystemResource; pre: PreState;
                 previous: seq[LedgerEntry]): seq[LedgerEntry] =
   ## The ledger entries of one applied resource. Entries the previous
@@ -200,8 +214,9 @@ proc entriesFor(r: SystemResource; pre: PreState;
     result.add(LedgerEntry(class: lcDiversion, path: r.ddPath,
                            replaced: replaced, resource: r.address))
   else:
-    raise newException(AddonApplyError, "resource kind " & $r.kind &
-      " is not managed by the add-on in this release (" & r.address & ")")
+    # Unreachable after the kind check above; kept so a future kind cannot
+    # be applied without a ledger entry.
+    raise newException(AddonApplyError, unmanagedKindReason(r))
 
 # ---------------------------------------------------------------------------
 # The apply.
@@ -279,6 +294,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         r.address & ", which is one of the add-on's own objects")
   let composedText = ownText & "\n" & opts.userProfileText
   let composed = parseSystemProfile(composedText)
+  # Every kind is checked BEFORE anything is observed or written: a kind the
+  # add-on does not manage must refuse the whole apply, not be applied by
+  # the infra layer and then fail when the ledger is built (which would
+  # leave an unledgered object behind for uninstall to miss).
+  when not mutated("apply-skips-kind-check"):
+    for r in composed.resources:
+      let why = unmanagedKindReason(r)
+      if why.len > 0:
+        raise newException(AddonApplyError, why)
   var wanted = initHashSet[string]()
   for r in composed.resources: wanted.incl(r.address)
 

@@ -42,6 +42,11 @@ type
     removed*: seq[string]
     drift*: seq[string]          ## objects left in place, with the reason
     keptAccounts*: seq[string]
+      ## Accounts the add-on created and leaves in place (spec: sysusers
+      ## accounts are never deleted). Empty in this release: generation 0
+      ## creates none, and ``linux.sysusersEntry`` / the account-creating
+      ## kinds are not yet add-on-managed (``AddonManagedKinds``). The
+      ## milestone that adds them fills this from their ledger entries.
     errors*: seq[string]
 
 proc ok*(r: UninstallResult): bool = r.drift.len == 0 and r.errors.len == 0
@@ -131,7 +136,18 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   systemctlOrRecord(["daemon-reload"], result)
 
   # 5. State, keys, /etc/repro and the store. A mount still on the store
-  #    (a stop that failed above) must not be deleted through.
+  #    (a stop that failed above) must not be deleted through. And an
+  #    uninstall that left anything behind -- drift it would not remove, a
+  #    step that failed -- keeps the state directory and with it the ledger
+  #    copy, so the leftover stays identified and a second uninstall (after
+  #    the operator restored or accepted the object) can finish the job.
+  #    Only a complete reversal removes the state.
+  when not mutated("uninstall-discards-state-on-drift"):
+    if result.drift.len > 0 or result.errors.len > 0:
+      result.errors.add("the add-on's state and ledger at " & stateDir &
+        " are kept: the uninstall is incomplete (see the drift and errors " &
+        "above); fix or accept them and run uninstall again")
+      return
   for k in byClass[lcKey]:
     removeOwned(k, result)
   if dirExists(StoreRoot) and isMountPoint(StoreRoot):

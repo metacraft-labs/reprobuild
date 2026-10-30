@@ -3,7 +3,8 @@
 ## Wires the deploy agent's injected ``ApplyHook`` to the M4
 ## ``runInfraApply`` path so a converged manifest applies its desired
 ## state with build-action outputs SUBSTITUTED FROM THE BINARY CACHE
-## (when ``REPRO_BINARY_CACHE_URL`` is set) instead of built locally.
+## (when ``caches.conf`` names a cache with its trusted publisher keys)
+## instead of built locally.
 ##
 ## Kept in its own module (separate from ``agent.nim``) so the poll/verify/
 ## monotonic core stays free of the heavyweight ``repro_infra`` +

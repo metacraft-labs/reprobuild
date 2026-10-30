@@ -38,6 +38,7 @@ import ./fingerprint
 import ./generation0
 import ./host_exec
 import ./ledger
+import ./linux_fs
 import ./mutations
 import ./preflight
 import ./store_root
@@ -149,7 +150,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
 
   # 2. Roots.
   var entries: seq[LedgerEntry]
-  entries.add(rootEntry(ReproRoot, createRootDir(ReproRoot, 0o755)))
+  entries.add(rootEntry(ReproRoot, createRootDir(ReproRoot, 0o755,
+    asSubvolume = isBtrfs(parentDir(ReproRoot)))))
   entries.add(rootEntry(StoreRoot, createRootDir(StoreRoot, 0o755)))
   entries.add(rootEntry("/var/lib/repro", createRootDir("/var/lib/repro", 0o755)))
   entries.add(rootEntry(stateDir, createRootDir(stateDir, 0o700)))
@@ -199,11 +201,19 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     entries.add(LedgerEntry(class: lcStorePrefix, path: path,
       sha256: hexOf(id)))
 
-  # 5. Generation 0, through repro infra apply.
+  # 5. Generation 0, through repro infra apply. The ledger copy exists
+  # BEFORE the apply, holding what bootstrap created so far: generation 0
+  # enables repro-addon-reassert.service, whose first run (`verify --boot`)
+  # happens inside that apply and must find a ledger, never report the
+  # add-on as degraded for lack of one. The apply then replaces it with
+  # the full generation-0 ledger.
+  writeLedger(ledgerCopyPath(stateDir), Ledger(generation: "", entries: entries))
   let ownText = renderOwnProfile(plan.gen0, prefixes.filesPrefixPath)
   let applied = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: readHostname(), userProfileText: "",
-    ownProfileText: ownText, bootstrapEntries: entries))
+    ownProfileText: ownText,
+    # Already in the preliminary ledger copy the apply reads them from.
+    bootstrapEntries: @[]))
 
   # 6. Report.
   result.planDigest = plan.digest
