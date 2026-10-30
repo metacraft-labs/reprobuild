@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2500,
+    "nimTestBinaries": 2501,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 700,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2540
+    "testEntries": 2541
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1450,7 +1450,7 @@
       "integration": 1383,
       "platform/destructive": 157,
       "pure unit": 700,
-      "unclassified": 282
+      "unclassified": 283
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1658,9 +1658,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2500,
+    "nimTestBinaryCount": 2501,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2540
+    "testEntryCount": 2541
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8121,6 +8121,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_host_lock_guards_the_switch_and_the_store",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_core",
+        "repro_elevation",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_ledger_and_plan",
       "class": "unclassified",
       "classificationReason": "imports `posix`, which grants out-of-process reach",
@@ -8175,7 +8195,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

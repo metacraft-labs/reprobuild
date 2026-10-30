@@ -256,6 +256,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim",
+    binary: "build/test-bin/t_addon_host_lock_guards_the_switch_and_the_store",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
     binary: "build/test-bin/t_addon_ledger_and_plan",
     defines: @[],

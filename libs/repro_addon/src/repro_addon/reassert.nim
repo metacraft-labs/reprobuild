@@ -34,6 +34,7 @@
 
 import std/[os, strutils, times]
 
+import repro_core/file_lock
 import repro_core/host_apply_lock
 
 import repro_infra
@@ -171,14 +172,29 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   except CatchableError as e:
     return RecoveryOutcome(resolved: false,
       lines: @["the pending marker is unreadable: " & e.msg])
-  # Zero wait: repro-addon-reassert.service is a oneshot the switch itself
-  # (re)starts while holding the host apply lock, so waiting here would stall
-  # that switch for the whole deadline. A held lock means a switch is live.
-  var (hostLock, holder) = tryAcquireHostApplyLock("add-on switch recovery")
+  # The switch that owns this marker (re)starts repro-addon-reassert.service
+  # while it holds the host apply lock, so waiting on it would stall that
+  # switch for the whole deadline: when the holder IS the marker's owner,
+  # live in this boot, recovery is that switch's own and this run defers.
+  # Any other holder -- a deploy-agent tick, an operator apply -- does not
+  # own the marker: it is waited for like any apply, and if it still holds
+  # the lock at the deadline the run is degraded, never deferred, so an
+  # interrupted switch is not silently left to the next boot.
+  var (hostLock, holder, holderPids) =
+    tryAcquireHostApplyLock("add-on switch recovery")
   if holder.len > 0:
-    return RecoveryOutcome(resolved: true, deferred: true,
-      lines: @["a switch holds the host apply lock; recovery is its own " &
-               "(" & holder & ")"])
+    if markerOwnerLive(m) and m.ownerPid in holderPids:
+      return RecoveryOutcome(resolved: true, deferred: true,
+        lines: @["the switch that owns the pending marker (pid " &
+                 $m.ownerPid & ") holds the host apply lock; recovery is " &
+                 "its own"])
+    try:
+      hostLock = acquireHostApplyLock("add-on switch recovery")
+    except ELockTimeout as e:
+      return RecoveryOutcome(resolved: false,
+        lines: @["an interrupted switch is pending and another apply, not " &
+                 "the switch that owns it, holds the host apply lock: " &
+                 e.msg])
   defer: hostLock.release()
   let lock = takeLockForRecovery(stateDir, atBoot)
   if not lock.ok:
@@ -294,6 +310,32 @@ proc checkCurrent*(stateDir: string; r: var ReassertReport) =
       if r.status == "ok": r.status = "drift"
     if e.class == lcUnit and e.collision == "replace":
       r.notes.add(e.unit & ": the add-on's /etc unit shadows the package's")
+
+proc installPendingSwitchGuard*(stateDir = DefaultStateDir) =
+  ## Make every `runInfraApply` on this host recover an interrupted switch
+  ## (the pending marker under ``stateDir``, its owner no longer running)
+  ## before it mutates anything, and refuse when recovery does not resolve
+  ## it. A marker whose owner is live belongs to the switch now running --
+  ## in practice the caller itself, the switch's own infra apply -- and is
+  ## left to it.
+  pendingSwitchGuard = proc (): tuple[ok: bool; why: string] {.closure,
+                                                              gcsafe.} =
+    {.cast(gcsafe).}:
+      if not hasPendingMarker(stateDir):
+        return (true, "")
+      var owner = PendingMarker()
+      try:
+        owner = readPendingMarker(stateDir)
+      except CatchableError:
+        discard                     # unreadable: no live owner to defer to
+      if markerOwnerLive(owner):
+        return (true, "")
+      let rec = recoverPendingSwitch(stateDir, atBoot = false)
+      if rec.resolved and not rec.deferred:
+        return (true, "")
+      (false, rec.lines.join("; "))
+
+installPendingSwitchGuard()
 
 proc renderReassert*(r: ReassertReport): string =
   result = "repro-addon reassert: " & r.status & "\n"

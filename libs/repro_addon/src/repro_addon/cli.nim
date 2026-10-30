@@ -37,6 +37,7 @@ import std/[options, os, strutils]
 
 import std/algorithm
 
+import repro_core/host_apply_lock
 import repro_infra
 
 import repro_infra/addon_diagnostics
@@ -481,6 +482,14 @@ proc runAddonStoreCli*(args: seq[string]): int =
     stdout.write("usage: repro store gc [--grace-seconds N] | roots | list\n")
     return (if args.len == 0: 2 else: 0)
   try:
+    # `gc` deletes prefixes no root holds; an apply realising a closure
+    # holds no root on it until it commits, so a collection during an apply
+    # could delete what that apply is about to bind. `gc` therefore runs
+    # under the host-wide apply lock, like every other store writer.
+    var hostLock: HostApplyLock
+    if args[0] == "gc":
+      hostLock = acquireHostApplyLock("repro store gc")
+    defer: hostLock.release()
     enterWritableStoreView()
     var s = openStore(StoreRoot)
     defer: s.close()
