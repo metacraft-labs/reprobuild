@@ -174,6 +174,19 @@ proc leafNoFollow*(path: string): tuple[kind: LeafKind; mode: int] =
 proc tmpName(leaf: string): string =
   "." & leaf & ".repro-tmp-" & $getCurrentProcessId()
 
+proc syncDir(dirfd: cint; what: string) =
+  ## Make a rename (or unlink) in the directory behind ``dirfd`` durable.
+  ## ``rename(2)`` is atomic but not durable: until the directory itself
+  ## is synced, a power loss can bring back the old name even though a
+  ## later write in ANOTHER directory survived. The add-on's crash record
+  ## (the pending marker under ``/var/lib``) and the switch it describes
+  ## (the flip under ``/etc``) live in different directories, so without
+  ## this they can disagree after a power cut. See fsync(2), "Calling
+  ## fsync() does not necessarily ensure that the entry in the directory
+  ## containing the file has also reached disk".
+  if fsync(dirfd) != 0:
+    raiseOSError(osLastError(), "fsync directory of " & what)
+
 proc writeFileNoFollow*(path, content: string; mode: int;
                         uid = -1; gid = -1) =
   ## Write ``content`` to ``path`` atomically, never through a link (see
@@ -192,6 +205,11 @@ proc writeFileNoFollow*(path, content: string; mode: int;
   if kind == lkDir:
     raise newException(NoFollowError, path & " is a directory")
   let tmp = tmpName(leaf)
+  # A leftover of a run that crashed between creating and renaming its
+  # temporary file would make the exclusive create below fail forever once
+  # the PID is reused. It is ours by name (the leaf's own temporary), so
+  # it goes; a link at that name is unlinked, never followed.
+  discard c_unlinkat(dirfd, tmp.cstring, 0)
   let fd = c_openat(dirfd, tmp.cstring,
                     O_WRONLY or O_CREAT or O_EXCL or oNoFollow or oCloExec,
                     Mode(mode))
@@ -220,6 +238,7 @@ proc writeFileNoFollow*(path, content: string; mode: int;
   if c_renameat(dirfd, tmp.cstring, dirfd, leaf.cstring) != 0:
     raiseOSError(osLastError(), "rename " & tmp & " -> " & path)
   committed = true
+  syncDir(dirfd, path)
 
 proc replaceWithLinkNoFollow*(path, target: string) =
   ## Make ``path`` a symbolic link to ``target`` atomically: the link is
@@ -244,6 +263,7 @@ proc replaceWithLinkNoFollow*(path, target: string) =
     let err = osLastError()
     discard c_unlinkat(dirfd, tmp.cstring, 0)
     raiseOSError(err, "rename " & tmp & " -> " & path)
+  syncDir(dirfd, path)
 
 proc removeLeafNoFollow*(path: string): bool =
   ## Remove the file or link at ``path`` (a dangling link included)
@@ -262,6 +282,9 @@ proc removeLeafNoFollow*(path: string): bool =
   if c_unlinkat(dirfd, leaf.cstring, 0) != 0:
     if osLastError() == OSErrorCode(ENOENT): return false
     raiseOSError(osLastError(), "unlink " & path)
+  # The removal of the add-on's pending marker is the switch's last act;
+  # it must not come back after a power cut.
+  syncDir(dirfd, path)
   true
 
 proc removeEmptyDirNoFollow*(path: string): bool =
