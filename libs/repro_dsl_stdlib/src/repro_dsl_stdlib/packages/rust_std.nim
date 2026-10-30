@@ -4,7 +4,7 @@
 ## in its sysroot (``lib/rustlib/<triple>/lib``). The ``rustc`` package's
 ## archive (``rust-<ver>-<host>.tar.xz``) carries the host's; upstream
 ## ships every other target's as a separate rust-installer component,
-## ``rust-std-<ver>-<triple>.tar.xz``, meant to be merged into the same
+## ``rust-std-<ver>-<triple>.tar.gz``, meant to be merged into the same
 ## prefix (what ``rustup target add`` does). This package is the catalog's
 ## arm for those components (ReproOS-Add-On-Mode A15, second deliverable).
 ##
@@ -58,21 +58,24 @@ const
     RustStdComponent(version: RustStdVersion,
                      triple: "armv7-unknown-linux-musleabihf",
                      cpu: "armv7", os: "linux",
-                     sha256: "abfc0e7c1eaff1e3332b5c6262d12da309035a228261d07155add44464ed52f4"),
+                     sha256: "eb6d0f4eb9e7e835a3718096234267b20912d24ca1719df3cbf58321f6c4aa72"),
     RustStdComponent(version: RustStdVersion,
                      triple: "aarch64-unknown-linux-musl",
                      cpu: "aarch64", os: "linux",
-                     sha256: "3513032b2953d795bd3ac1489de4e8174e72500a31b4e7d1b349a23ab78a7a7b"),
+                     sha256: "32f7881cfde924a798cb226272f908811aa097da3ff360a12dd8979a13ba4dc3"),
     RustStdComponent(version: RustStdVersion,
                      triple: "x86_64-unknown-linux-musl",
                      cpu: "x86_64", os: "linux",
-                     sha256: "b6786b5c490df2dcef76829039177799058f94e17725b42f912a057c0f6224f2"),
+                     sha256: "74a0e509ada9e9dd8e40a987abfdc677c6aa3487506bd6afaf9ede9466e3b189"),
   ]
     ## The digests are upstream's ``<archive>.sha256`` files, read 2026-10-30.
+    ## The ``.tar.gz`` archive rather than the ``.tar.xz`` one: tar execs the
+    ## decompressor, and ``gzip`` is a catalog package every from-source
+    ## recipe already declares, where ``xz`` is not one at all.
 
 proc rustStdUrl*(c: RustStdComponent): string =
   "https://static.rust-lang.org/dist/rust-std-" & c.version & "-" & c.triple &
-    ".tar.xz"
+    ".tar.gz"
 
 proc rustStdComponent*(triple: string): RustStdComponent =
   ## The component for `triple`, or a `ValueError` naming the triple and
@@ -114,9 +117,9 @@ package `rust-std`:
     # realizer requires a file to resolve the prefix on. ``install.sh`` is
     # the rust-installer script every component archive carries at its root
     # (``stripComponents = 1``); it is never run.
-    tarball url = RustStdDistBase & "armv7-unknown-linux-musleabihf.tar.xz",
+    tarball url = RustStdDistBase & "armv7-unknown-linux-musleabihf.tar.gz",
       sha256 = Armv7Sha256,
-      archiveType = "tar.xz",
+      archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "install.sh",
       packageId = "rust-std@" & RustStdVersion,
@@ -125,9 +128,9 @@ package `rust-std`:
       lockIdentity = "tarball:rust-std@" & RustStdVersion &
         ":linux-armv7:sha256:" & Armv7Sha256,
       version = RustStdVersion
-    tarball url = RustStdDistBase & "aarch64-unknown-linux-musl.tar.xz",
+    tarball url = RustStdDistBase & "aarch64-unknown-linux-musl.tar.gz",
       sha256 = Aarch64Sha256,
-      archiveType = "tar.xz",
+      archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "install.sh",
       packageId = "rust-std@" & RustStdVersion,
@@ -136,9 +139,9 @@ package `rust-std`:
       lockIdentity = "tarball:rust-std@" & RustStdVersion &
         ":linux-aarch64:sha256:" & Aarch64Sha256,
       version = RustStdVersion
-    tarball url = RustStdDistBase & "x86_64-unknown-linux-musl.tar.xz",
+    tarball url = RustStdDistBase & "x86_64-unknown-linux-musl.tar.gz",
       sha256 = X86_64Sha256,
-      archiveType = "tar.xz",
+      archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "install.sh",
       packageId = "rust-std@" & RustStdVersion,

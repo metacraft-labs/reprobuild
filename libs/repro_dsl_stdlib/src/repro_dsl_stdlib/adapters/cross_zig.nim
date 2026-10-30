@@ -106,8 +106,15 @@ const
     ## adapter may answer for the same triple with another toolchain.
 
   ZigCrossScratchSubdir* = ".repro/build/cross"
-    ## Where the wrappers land: `<projectRoot>/.repro/build/cross/<triple>/`,
-    ## beside cargo's own scratch so `repro clean` takes it too.
+    ## The per-target scratch root: `<projectRoot>/.repro/build/cross/<triple>/`,
+    ## beside cargo's own scratch so `repro clean` takes it too. The wrappers
+    ## land in its `zig/` subdirectory (`zigCrossWrapperDir`): the rust-std
+    ## fetch and the sysroot merge (`adapters/rust_target_sysroot`) write
+    ## their own subdirectories beside it, and an edge may only remove what
+    ## it owns -- the wrapper edge once cleared the whole triple directory
+    ## and raced the fetch extracting next to it ("Directory not empty").
+
+  ZigCrossWrapperSubdir* = "zig"
 
   ZigCrossRustflags* = "-C target-feature=+crt-static -C link-self-contained=no"
     ## See the module header: a static executable, linked by zig's musl.
@@ -138,7 +145,7 @@ proc zigCrossTarget*(rustTriple: string): ZigCrossTarget =
     "'; known: " & known.join(", ") & ". Add a row to ZigCrossTargets.")
 
 proc zigCrossWrapperDir*(projectRoot, rustTriple: string): string =
-  projectRoot / ZigCrossScratchSubdir / rustTriple
+  projectRoot / ZigCrossScratchSubdir / rustTriple / ZigCrossWrapperSubdir
 
 proc cargoTripleEnvKey*(rustTriple: string): string =
   ## `armv7-unknown-linux-musleabihf` → `ARMV7_UNKNOWN_LINUX_MUSLEABIHF`, the

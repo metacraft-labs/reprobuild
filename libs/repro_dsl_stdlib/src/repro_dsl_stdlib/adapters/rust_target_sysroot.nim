@@ -119,7 +119,7 @@ proc emitRustStdFetchAction*(projectRoot, packageName, triple: string):
   let url = rustStdUrl(c)
   let scratch = projectRoot / ".repro/fetch"
   createDir(scratch)
-  let tarball = scratch / (c.sha256 & ".tar.xz")
+  let tarball = scratch / (c.sha256 & ".tar.gz")
   let stamp = scratch / (c.sha256 & ".stamp")
   let extracted = rustStdExtractDir(projectRoot, triple)
   createDir(parentDir(extracted))

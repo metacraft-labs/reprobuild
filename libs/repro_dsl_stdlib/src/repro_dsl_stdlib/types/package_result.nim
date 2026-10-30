@@ -1674,8 +1674,26 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\"; ")
-    script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" &
+    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\" ")
+    # The static shapes a DSL name that already carries the ``lib`` prefix
+    # maps to -- ``library libCrypto:`` is ``libcrypto.a`` -- mirroring the
+    # stripped shared-object probes above. Without these a static-only
+    # build (a cross build for a static-musl target, ReproOS-Add-On-Mode
+    # A15) probed ``liblibcrypto.a`` and nothing else, and the stage copy
+    # reported "no library candidate" for a library that was there.
+    if strippedName != effectiveSourceName:
+      script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".a\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".a\" ")
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".a\" ")
+      if strippedKebabDigits.len > 0 and
+          strippedKebabDigits != strippedLowerName and
+          strippedKebabDigits != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & ".a\" ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".a\" ")
+    script.add("; do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" &
         escapedOut & "\"; exit 0; fi; done; ")
     # M9.R.14g.3 — version-suffix glob fallback for libraries that meson
     # builds with `soversion = '0.19'` and similar (wlroots, gtk-3,

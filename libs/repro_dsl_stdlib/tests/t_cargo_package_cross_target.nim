@@ -149,10 +149,14 @@ suite "cross_zig: the target table and the environment":
     # trailing argument, so take the operand of `-c` rather than the last.
     let argv = argvOf(act)
     let script = argv[argv.find("-c") + 1]
+    # The wrappers live in the triple's `zig/` subdirectory: the edge clears
+    # only that, because the rust-std fetch and the sysroot merge write their
+    # own subdirectories beside it.
     for role in ["cc", "c++", "ar", "ranlib", "rust-linker"]:
-      check ("/proj/.repro/build/cross/" & Triple & "/" & role & "'") in script
-    check "zig ar rc '/proj/.repro/build/cross/" & Triple & "/lib/libatomic.a'" in script
-    check act.outputs == @["/proj" / ".repro/build/cross" / Triple]
+      check ("/proj/.repro/build/cross/" & Triple & "/zig/" & role & "'") in script
+    check "zig ar rc '/proj/.repro/build/cross/" & Triple & "/zig/lib/libatomic.a'" in script
+    check act.outputs == @["/proj" / ".repro/build/cross" / Triple / "zig"]
+    check ("rm -rf '/proj/.repro/build/cross/" & Triple & "'") notin script
     check "zig" in act.toolIdentityRefs
 
 suite "cargo_package: target, zig cross toolchain, workspace member":
@@ -343,9 +347,9 @@ suite "rust-std: the catalog arm and the target sysroot":
 
   test "the component is looked up by triple and refused by name":
     check rustStdComponent(Triple).sha256 ==
-      "abfc0e7c1eaff1e3332b5c6262d12da309035a228261d07155add44464ed52f4"
+      "eb6d0f4eb9e7e835a3718096234267b20912d24ca1719df3cbf58321f6c4aa72"
     check rustStdUrl(rustStdComponent(Triple)) ==
-      "https://static.rust-lang.org/dist/rust-std-1.94.0-" & Triple & ".tar.xz"
+      "https://static.rust-lang.org/dist/rust-std-1.94.0-" & Triple & ".tar.gz"
     check hasRustStdComponent(Triple)
     check not hasRustStdComponent("mips-unknown-linux-gnu")
     expect ValueError:
