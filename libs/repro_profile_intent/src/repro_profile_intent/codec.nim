@@ -85,6 +85,10 @@ const
     ## profile without the section encodes exactly as before. Envelope
     ## schema 12.
   KeyManagedEtcPrefixes = "managedEtcPrefixes"
+  KeyConfirmTimeout = "confirmTimeout"
+    ## Inside the `addOn` map: the add-on switch's `confirmTimeout` in
+    ## seconds (ReproOS-Add-On Mode §7.5), as an unsigned integer. Optional;
+    ## omitted when not declared, so a section without it encodes as before.
   KeyStowScopes   = "stowScopes"
     ## GM11: the activities' stow claims (`ProfileIntent.stowScopes`): an
     ## array of maps with `"package"` and `"activity"` (text) and, under a
@@ -340,8 +344,11 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   if p.catalogImports.len > 0:
     entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
   if p.addOn.declared:
-    entries.add entry(KeyAddOn, cborMap(@[entry(KeyManagedEtcPrefixes,
-      encodeStringArray(p.addOn.managedEtcPrefixes))]))
+    var ao = @[entry(KeyManagedEtcPrefixes,
+      encodeStringArray(p.addOn.managedEtcPrefixes))]
+    if p.addOn.confirmTimeoutSec > 0:
+      ao.add entry(KeyConfirmTimeout, cborUInt(uint64(p.addOn.confirmTimeoutSec)))
+    entries.add entry(KeyAddOn, cborMap(ao))
   if p.hostApplies.len > 0:
     entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
   if p.hostSystems.len > 0:
@@ -665,6 +672,13 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
     for it in expectArray(lookup(ao, KeyManagedEtcPrefixes, KeyAddOn),
                           KeyManagedEtcPrefixes):
       result.addOn.managedEtcPrefixes.add expectText(it, KeyManagedEtcPrefixes)
+    var ctFound = false
+    let ct = lookupOpt(ao, KeyConfirmTimeout, ctFound)
+    if ctFound:
+      if ct.kind != dvUInt or ct.uintValue == 0 or ct.uintValue > 86400'u64:
+        raiseRbpiCorrupt("body", "addOn.confirmTimeout must be a positive " &
+          "number of seconds")
+      result.addOn.confirmTimeoutSec = int(ct.uintValue)
   # The per-host concern declaration is OPTIONAL on the wire (absent when
   # no host declares one).
   var haFound = false

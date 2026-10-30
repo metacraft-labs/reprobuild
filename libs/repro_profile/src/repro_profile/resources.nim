@@ -774,6 +774,7 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             stopOnRemoval: bool = true;
                             reloadIfChanged: bool = false;
                             exclusive: bool = false;
+                            healthCheck: string = "";
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
@@ -788,6 +789,14 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
   ## service two instances of which cause harm (a validator client). A unit
   ## whose content carries `X-Repro-Exclusive=true` in `[Unit]` is
   ## exclusive too.
+  ##
+  ## `healthCheck` is what must hold once the switch has started the unit
+  ## for the generation to be committed (ReproOS Add-On Mode spec §7.5):
+  ## `"active"` (the unit reaches active), `"tcp:127.0.0.1:<port>"`,
+  ## `"http://127.0.0.1:<port>/<path>"` (2xx) or `"exec:/repro/store/…"`
+  ## (exits 0); probes are loopback only. A check that has not passed
+  ## within the profile's `confirmTimeout` makes the switch revert to the
+  ## previous generation. Outside add-on mode the field is ignored.
   ##
   ## `collision` is add-on mode's opt-in when a distribution package
   ## already provides a unit of this name (ReproOS Add-On Mode spec §4.3):
@@ -831,6 +840,8 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
       fields["reloadIfChanged"] = boolField(true)
     if exclusive:
       fields["exclusive"] = boolField(true)
+    if healthCheck.len > 0:
+      fields["healthCheck"] = strField(healthCheck)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,

@@ -209,6 +209,14 @@ type
         ## (`EAddOnExclusiveOverlap`) when it cannot. A unit whose
         ## rendered file carries `X-Repro-Exclusive=true` is exclusive
         ## too, so an adopted hand-written unit can declare it.
+      suHealthCheck*: string
+        ## `healthCheck = "<check>"` (ReproOS-Add-On-Mode §7.5): what must
+        ## hold after the add-on switch starts the unit, within the
+        ## profile's `confirmTimeout`, for the generation to be committed;
+        ## otherwise the switch reverts to the previous generation. One of
+        ## `active`, `tcp:<loopback>:<port>`, `http://<loopback>:<port>/…`
+        ## or `exec:/repro/store/…` (see `parseHealthCheck`). Outside
+        ## add-on mode the field is carried and ignored.
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -355,6 +363,11 @@ type
       ## file). `/etc/repro/` is always managed and never needs listing.
       ## `fs.systemFile` and `linux.dpkgDiversion` paths outside them are
       ## refused in add-on mode with `EAddOnOutOfScope`.
+    confirmTimeoutSec*: int
+      ## `confirmTimeout = <seconds>` (§7.5): how long the switch waits,
+      ## from the moment its start step finished, for every unit's
+      ## `healthCheck` to pass. 0 when not declared: the default applies
+      ## (`DefaultConfirmTimeoutSec`).
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -862,6 +875,92 @@ const
   AlwaysManagedEtcPrefix* = "/etc/repro/"
     ## The add-on's own directory: managed without being declared.
 
+const
+  DefaultConfirmTimeoutSec* = 60
+    ## §7.5's default `confirmTimeout` (deploy-rs uses 30 s).
+  MaxConfirmTimeoutSec* = 3600
+
+type
+  HealthCheckKind* = enum
+    hcActive = "active"    ## the unit itself reaches ActiveState=active
+    hcTcp = "tcp"          ## a TCP connection to a loopback port succeeds
+    hcHttp = "http"        ## an HTTP GET on loopback answers 2xx
+    hcExec = "exec"        ## a command in the store exits 0
+
+  HealthCheckSpec* = object
+    ## A parsed `healthCheck` value. Probes are loopback only (§7.5: "a
+    ## TCP or HTTP probe on loopback"), so a check can never make the
+    ## switch reach out to the network, and a command must live in the
+    ## store, so what decides a commit is itself part of a closure.
+    kind*: HealthCheckKind
+    host*: string          ## tcp / http: `127.0.0.1`, `::1` or `localhost`
+    port*: int             ## tcp / http
+    path*: string          ## http: the request target, starting with `/`
+    argv*: seq[string]     ## exec: the command and its arguments
+
+const
+  HealthCheckStoreRoot* = "/repro/store/"
+  LoopbackHosts = ["127.0.0.1", "::1", "localhost"]
+
+proc parseHostPort(text, what: string): tuple[host: string; port: int] =
+  ## `127.0.0.1:80`, `localhost:80` or `[::1]:80`.
+  var host, portText: string
+  if text.startsWith("["):
+    let close = text.find(']')
+    if close < 0 or close + 1 >= text.len or text[close + 1] != ':':
+      raiseSystemProfileInvalid(what & ": malformed address '" & text & "'")
+    host = text[1 ..< close]
+    portText = text[close + 2 .. ^1]
+  else:
+    let colon = text.rfind(':')
+    if colon <= 0:
+      raiseSystemProfileInvalid(what & ": '" & text & "' needs host:port")
+    host = text[0 ..< colon]
+    portText = text[colon + 1 .. ^1]
+  if host notin LoopbackHosts:
+    raiseSystemProfileInvalid(what & ": '" & host & "' is not a loopback " &
+      "address; health checks probe loopback only (127.0.0.1, ::1, localhost)")
+  var port = 0
+  try:
+    port = parseInt(portText)
+  except ValueError:
+    raiseSystemProfileInvalid(what & ": port '" & portText & "' is not a number")
+  if port notin 1 .. 65535:
+    raiseSystemProfileInvalid(what & ": port " & $port & " is out of range")
+  (host, port)
+
+proc parseHealthCheck*(value: string): HealthCheckSpec =
+  ## The `healthCheck` field of a `systemd.systemUnit` (ReproOS-Add-On-Mode
+  ## §7.5). Strict: anything else is refused at parse time, so a mistyped
+  ## check can never silently mean "no check".
+  let what = "healthCheck '" & value & "'"
+  if value == "active":
+    return HealthCheckSpec(kind: hcActive)
+  if value.startsWith("tcp:"):
+    let (h, p) = parseHostPort(value[4 .. ^1], what)
+    return HealthCheckSpec(kind: hcTcp, host: h, port: p)
+  if value.startsWith("http://"):
+    let rest = value["http://".len .. ^1]
+    let slash = rest.find('/')
+    let authority = if slash < 0: rest else: rest[0 ..< slash]
+    let path = if slash < 0: "/" else: rest[slash .. ^1]
+    for c in path:
+      if ord(c) <= 32 or ord(c) >= 127:
+        raiseSystemProfileInvalid(what & ": the path carries a space or " &
+          "a control character")
+    let (h, p) = parseHostPort(authority, what)
+    return HealthCheckSpec(kind: hcHttp, host: h, port: p, path: path)
+  if value.startsWith("exec:"):
+    let argv = value[5 .. ^1].splitWhitespace()
+    if argv.len == 0 or not argv[0].startsWith(HealthCheckStoreRoot) or
+        "/../" in argv[0] or argv[0].endsWith("/.."):
+      raiseSystemProfileInvalid(what & ": the command must be an " &
+        "absolute path below " & HealthCheckStoreRoot)
+    return HealthCheckSpec(kind: hcExec, argv: argv)
+  raiseSystemProfileInvalid(what & " is not one of `active`, " &
+    "`tcp:<loopback>:<port>`, `http://<loopback>:<port>/<path>` or " &
+    "`exec:" & HealthCheckStoreRoot & "…`")
+
 proc parseCollisionField*(kindTag, value: string;
                           allowed: openArray[string]): string =
   ## The `collision` field of a stanza: "" when absent, else one of the
@@ -931,9 +1030,21 @@ proc parseAddOnStanza*(body: string): AddOnSettings =
           raiseSystemProfileInvalid(err)
         if p notin result.managedEtcPrefixes:
           result.managedEtcPrefixes.add(p)
+    of "confirmTimeout":
+      var secs = 0
+      try:
+        secs = parseInt(rawValue.strip(chars = {'"', ' '}))
+      except ValueError:
+        raiseSystemProfileInvalid("'" & AddOnStanzaTag & "' confirmTimeout '" &
+          rawValue & "' is not a whole number of seconds")
+      if secs notin 1 .. MaxConfirmTimeoutSec:
+        raiseSystemProfileInvalid("'" & AddOnStanzaTag & "' confirmTimeout " &
+          $secs & " must be between 1 and " & $MaxConfirmTimeoutSec & " seconds")
+      result.confirmTimeoutSec = secs
     else:
       raiseSystemProfileInvalid("'" & AddOnStanzaTag &
-        "' has no field '" & key & "' (known: managedEtcPrefixes)")
+        "' has no field '" & key & "' (known: managedEtcPrefixes, " &
+        "confirmTimeout)")
 
 proc isUnderManagedPrefix*(path, prefix: string): bool =
   ## Does `prefix` (as declared, see `managedPrefixError`) cover `path`?
@@ -1387,7 +1498,11 @@ proc parseSystemProfile*(text: string): SystemProfile =
         suExclusive:
           if "exclusive" in fields:
             parseBoolField("exclusive", fields["exclusive"])
-          else: false)
+          else: false,
+        suHealthCheck:
+          if "healthCheck" in fields: fields["healthCheck"] else: "")
+      if res.suHealthCheck.len > 0:
+        discard parseHealthCheck(res.suHealthCheck)
       if res.suDropInName.len > 0 and res.suCollision != "dropIn":
         raiseSystemProfileInvalid("systemd.systemUnit '" & res.suName &
           "' sets dropInName without `collision = \"dropIn\"`")
