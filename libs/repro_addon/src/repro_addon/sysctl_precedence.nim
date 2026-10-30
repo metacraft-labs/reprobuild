@@ -20,7 +20,9 @@
 ## that justifies it). Pure over a root directory, so the unit tests run
 ## it on a fixture tree.
 
-import std/[algorithm, os, posix, sets, strutils]
+import std/[algorithm, os, sets, strutils]
+
+import ./host_exec
 
 const
   SysctlDirs* = ["/etc/sysctl.d", "/run/sysctl.d", "/usr/local/lib/sysctl.d",
@@ -37,18 +39,23 @@ type
     value*: string     ## the value it assigns, whitespace-normalised
 
 proc normaliseKey*(key: string): string =
-  ## sysctl.d accepts ``/`` as well as ``.`` as the separator.
-  key.strip().replace('/', '.')
+  ## The key in systemd's normal (slash-separated) form
+  ## (``host_exec.sysctlNormalize``), so ``net.ipv4.ip_forward`` and
+  ## ``net/ipv4/ip_forward`` compare equal and ``net.ipv4.conf.eth0/100.x``
+  ## keeps its interface name ``eth0.100``.
+  sysctlNormalize(key.strip())
 
 proc normaliseValue*(value: string): string =
   value.splitWhitespace().join(" ")
 
 proc keyMatches(pattern, key: string): bool =
-  ## A plain key, or a glob (systemd 249+: ``net.ipv4.conf.*.rp_filter``).
-  if pattern == key: return true
-  if pattern.contains({'*', '?', '['}):
-    return fnmatch(pattern.cstring, key.cstring, 0) == 0
-  false
+  ## Does a later assignment override the add-on's explicit one? Only an
+  ## explicit assignment of the same key: systemd applies a glob
+  ## (``net.ipv4.conf.*.rp_filter``) to every matching key EXCEPT those
+  ## set explicitly anywhere, whatever the order (sysctl.d(5)), and the
+  ## add-on's fragment sets its key explicitly.
+  if pattern.contains({'*', '?', '['}): return false
+  normaliseKey(pattern) == key
 
 proc assignmentsIn*(text: string): seq[tuple[pattern, value: string]] =
   ## ``key = value`` lines (comments ``#`` / ``;``, a leading ``-`` that
@@ -59,14 +66,15 @@ proc assignmentsIn*(text: string): seq[tuple[pattern, value: string]] =
     if line[0] == '-': line = line[1 .. ^1].strip()
     let eq = line.find('=')
     if eq <= 0: continue
-    result.add((normaliseKey(line[0 ..< eq]), normaliseValue(line[eq + 1 .. ^1])))
+    result.add((line[0 ..< eq].strip(), normaliseValue(line[eq + 1 .. ^1])))
 
 proc laterAssignments*(key, ownFragment: string; root = "/"):
     seq[LaterAssignment] =
   ## Every assignment of ``key`` that systemd (or procps) applies AFTER
   ## ``ownFragment`` (a path in ``/etc/sysctl.d``): fragments whose name
-  ## sorts after it, and ``/etc/sysctl.conf``. The add-on's own fragments
-  ## (``90-repro-*``) are not the base's and are skipped. ``root``
+  ## sorts after it, and ``/etc/sysctl.conf``. Only the add-on's own
+  ## fragment is skipped, by its exact name (it never sorts after
+  ## itself); every other file counts, whatever it is called. ``root``
   ## relocates the directories for tests.
   let wanted = normaliseKey(key)
   let own = extractFilename(ownFragment)
@@ -84,7 +92,7 @@ proc laterAssignments*(key, ownFragment: string; root = "/"):
   files.sort(proc(a, b: tuple[name, path: string]): int = cmp(a.name, b.name))
   var later: seq[string]
   for f in files:
-    if f.name > own and not f.name.startsWith("90-repro-"):
+    if f.name > own:
       later.add(f.path)
   let conf = if root == "/": SysctlConf else: root / SysctlConf
   if fileExists(conf): later.add(conf)
@@ -121,3 +129,91 @@ proc sysctlPrecedenceRefusal*(key, value, ownFragment: string;
     " (" & clashes.join("; ") & "), so every boot would put that value " &
     "back over the ledger's " & want & "; remove or change the base's " &
     "assignment, or leave the key to the base"
+
+# ---------------------------------------------------------------------------
+# Runtime writers: systemd-networkd.
+# ---------------------------------------------------------------------------
+
+const
+  NetworkdDirs* = ["/etc/systemd/network", "/run/systemd/network",
+                   "/usr/local/lib/systemd/network",
+                   "/usr/lib/systemd/network", "/lib/systemd/network"]
+  NetworkdConfs* = ["/etc/systemd/networkd.conf", "/run/systemd/networkd.conf",
+                    "/usr/lib/systemd/networkd.conf"]
+  NetworkdForwardingKeys* = ["IPForward", "IPv4Forwarding", "IPv6Forwarding",
+                             "IPMasquerade"]
+    ## systemd.network(5) / networkd.conf(5) ``[Network]`` settings with
+    ## which networkd writes the forwarding sysctls itself, at runtime,
+    ## whenever it configures a link. (``IPMasquerade=`` implies
+    ## forwarding.)
+
+proc isForwardingKey*(key: string): bool =
+  ## ``net/ipv4/ip_forward`` and the per-interface ``forwarding`` knobs of
+  ## IPv4 and IPv6 -- what networkd's forwarding settings write.
+  let k = sysctlNormalize(key)
+  k == "net/ipv4/ip_forward" or
+    (k.startsWith("net/ipv4/conf/") and k.endsWith("/forwarding")) or
+    (k.startsWith("net/ipv6/conf/") and k.endsWith("/forwarding"))
+
+const NetworkdLinkState* = "/run/systemd/netif/links"
+  ## networkd's runtime state, one file per link it manages, naming the
+  ## ``.network`` file applied to it (``NETWORK_FILE=``).
+
+proc networkFilesInUse*(root = "/"): seq[string] =
+  ## The ``.network`` files networkd has applied to a link now. A file
+  ## whose ``[Match]`` matches no link (the container and VM templates
+  ## systemd ships, ``80-container-ve.network``) configures nothing.
+  let dir = (if root == "/": "" else: root) & NetworkdLinkState
+  if not dirExists(dir): return
+  for kind, path in walkDir(dir):
+    var text: string
+    try: text = readFile(path)
+    except IOError, OSError: continue
+    for line in text.splitLines():
+      if line.startsWith("NETWORK_FILE="):
+        let f = line["NETWORK_FILE=".len .. ^1].strip()
+        if f.len > 0 and f notin result: result.add(f)
+
+proc networkdForwardingSettings*(root = "/"): seq[string] =
+  ## Every ``[Network]`` forwarding setting networkd applies now: in a
+  ## ``.network`` file it has applied to a link (``networkFilesInUse``),
+  ## and in ``networkd.conf`` with its drop-ins (global), as ``<file>:
+  ## <Key>=<value>``.
+  proc scan(path: string; acc: var seq[string]) =
+    var text: string
+    try: text = readFile(path)
+    except IOError, OSError: return
+    var inNetwork = false
+    for raw in text.splitLines():
+      let t = raw.strip()
+      if t.startsWith("["):
+        inNetwork = t == "[Network]"
+        continue
+      if not inNetwork or t.len == 0 or t[0] in {'#', ';'}: continue
+      let eq = t.find('=')
+      if eq <= 0: continue
+      let k = t[0 ..< eq].strip()
+      if k in NetworkdForwardingKeys:
+        acc.add(path & ": " & t)
+  let base = if root == "/": "" else: root
+  for f in networkFilesInUse(root):
+    scan(base & f, result)
+  for c in NetworkdConfs:
+    scan(base & c, result)
+    let dropDir = base & c & ".d"
+    if dirExists(dropDir):
+      for kind, path in walkDir(dropDir):
+        if path.endsWith(".conf"): scan(path, result)
+
+proc networkdForwardingRefusal*(key: string; networkdInUse: bool;
+                                root = "/"): string =
+  ## "" unless ``key`` is a forwarding knob and an enabled or running
+  ## systemd-networkd is configured to write forwarding itself: then why
+  ## the resource is refused -- networkd would overwrite the ledger's value
+  ## at runtime, whenever it (re)configures a link (spec §7.2 step 6).
+  if not networkdInUse or not isForwardingKey(key): return ""
+  let settings = networkdForwardingSettings(root)
+  if settings.len == 0: return ""
+  "systemd-networkd writes " & key & " itself at runtime (" &
+    settings.join("; ") & "); the ledger's value would not hold. Drop " &
+    "the networkd setting or leave the key to networkd"

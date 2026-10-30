@@ -57,6 +57,7 @@ import ./nofollow_write
 import ./operations
 import ./os_system_parse
 import ./posix_system_parse
+import ./store_view
 
 when defined(linux) or defined(macosx):
   import std/[os, osproc, streams]
@@ -749,6 +750,18 @@ proc systemctlDaemonReload(what: string) =
 # systemd.systemUnit — unit file under /etc/systemd/system/, `systemctl`.
 # ===========================================================================
 
+proc realiseAddOnAptClosure*(lock: AptClosureLock;
+    storeRoot = AddOnSystemStoreRoot; cacheDir = AddOnAptDebCacheDir;
+    fetch: AptDebFetcher = httpDebFetcher()): string =
+  ## Realise ``lock`` into the add-on's system store. The store is a
+  ## read-only bind mount on a bootstrapped host (spec §10.2), so the
+  ## write happens from this thread's private writable view; every other
+  ## process keeps seeing it read-only. ``storeRoot``, ``cacheDir`` and
+  ## ``fetch`` are parameters only so the store-view behaviour can be
+  ## tested against a scratch mount.
+  enterWritableStoreView(storeRoot)
+  realiseAptClosure(lock, storeRoot, cacheDir, fetch)
+
 proc observeSystemdSystemUnit*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Read the unit file under `/etc/systemd/system/` and query
@@ -895,8 +908,7 @@ proc applySystemdSystemUnit*(ctx: FixtureContext;
       # exactly this prefix. A destroy leaves the prefix to store GC
       # (Add-On spec §5.2): the previous generation may still need it.
       try:
-        discard realiseAptClosure(parseAptClosureLock(op.suAptClosureLock),
-          AddOnSystemStoreRoot, AddOnAptDebCacheDir)
+        discard realiseAddOnAptClosure(parseAptClosureLock(op.suAptClosureLock))
       except CatchableError as ex:
         raiseProtocol("systemd.systemUnit '" & op.suName &
           "': realising its package(apt) closure failed: " & ex.msg)
@@ -1119,8 +1131,7 @@ proc applyLinuxAddOnTool*(op: PrivilegedOperation): ObservedOperationState =
       createSymlink(launcher, AddOnToolLauncherLink)
     let lock = parseAptClosureLock(op.atAptClosureLock)
     try:
-      discard realiseAptClosure(lock, AddOnSystemStoreRoot,
-        AddOnAptDebCacheDir)
+      discard realiseAddOnAptClosure(lock)
     except CatchableError as ex:
       raiseProtocol("linux.addOnTool '" & op.atCommand &
         "': realising its package(apt) closure failed: " & ex.msg)
@@ -1938,7 +1949,15 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
     let before = observePasswdUserRaw(op.puName)
     if not before.present:
       when defined(linux):
-        let (addOut, addCode) = runArgv("useradd", buildUseraddArgs(desired))
+        let (groupOut, groupCode) = runArgv("getent", @["group", op.puName])
+        let sameNameGroupExists = groupCode == 0 and groupOut.strip().len > 0
+        var addArgs: seq[string]
+        try:
+          addArgs = buildUseraddArgs(desired, sameNameGroupExists)
+        except EUseraddGroupCollision as ex:
+          raiseProtocol("passwd.user useradd of '" & op.puName &
+            "' refused: " & ex.msg)
+        let (addOut, addCode) = runArgv("useradd", addArgs)
         if addCode != 0:
           raiseProtocol("passwd.user useradd of '" & op.puName &
             "' failed: " & addOut.strip())

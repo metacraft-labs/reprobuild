@@ -607,11 +607,13 @@ proc ensureVerifiedDeb(lock: AptClosureLock; d: AptLockedDeb;
   ##
   ## The file is hashed here and read again by the unpacker. That is safe
   ## because the cache directory is private to the realising user (0700;
-  ## root on an Add-On host) and this process is the only writer to it
-  ## between the two reads.
+  ## root on an Add-On host) and the caller holds the cache's realisation
+  ## lock (``withRealisationLocks``), so no other realiser writes it between
+  ## the two reads.
   privateDir(cacheDir)
   result = cacheDir / (d.sha256 & ".deb")
-  # Leftovers of an interrupted earlier fetch of this member.
+  # Leftovers of an interrupted earlier fetch of this member. Under the
+  # lock no live realiser owns one, so each is an orphan.
   for kind, p in walkDir(cacheDir):
     if kind == pcFile and p.extractFilename.startsWith(d.sha256 &
         ".deb.part-"):
@@ -992,6 +994,18 @@ proc tempSibling(final: string; tag: string): string =
   # prefix.
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
 
+proc reclaimStaleScratch(parent: string) =
+  ## Remove the scratch siblings (``.tmp-apt-*``) a crashed or killed
+  ## earlier realisation left in ``parent``. Their names are unique, so
+  ## they never collide with a new attempt, but nothing else would ever
+  ## delete them. Called with the store's realisation lock held, when no
+  ## live realiser owns one.
+  if not dirExists(parent): return
+  for kind, p in walkDir(parent):
+    if p.extractFilename.startsWith(".tmp-apt-"):
+      if kind == pcDir: removeDir(p)
+      else: removeFile(p)
+
 proc publishPrefix(tmp, final: string) =
   ## Make the filled scratch directory world-readable and rename it into
   ## place, replacing a prefix without a valid marker (an interrupted
@@ -1010,6 +1024,7 @@ proc realiseDeb(lock: AptClosureLock; d: AptLockedDeb; storeRoot: string;
     return
   let deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
   createDir(parentDir(result))
+  reclaimStaleScratch(parentDir(result))
   let tmp = tempSibling(result, "apt-deb")
   let scratch = tempSibling(result, "apt-deb-tar")
   try:
@@ -1126,6 +1141,54 @@ proc buildUnion(lock: AptClosureLock; memberRoots: seq[(string, string)];
           createHardlink(src, dst)
           owner[target] = pkg
 
+# ---------------------------------------------------------------------------
+# Realisation locks
+# ---------------------------------------------------------------------------
+#
+# Two realisers can meet on one store: the deploy agent's tick and an
+# operator's ``repro infra apply`` keep separate apply locks when their state
+# directories differ, and every unit of one apply that binds a shared member
+# realises it again. Without a lock, one realiser deletes the other's
+# in-flight ``.deb.part-<pid>`` as a leftover, and both rename a filled
+# scratch directory onto the same prefix ("Directory not empty"). Measured
+# on rpi2, 2026-10-30, at reprobuild d7c86107b: 13 of tick-2's 14 errors.
+#
+# The realiser therefore holds an exclusive ``flock`` on the cache directory
+# and then on ``<store>/prefixes`` for the whole realisation, always in that
+# order. They are locks on the directories themselves, so no lock file lands
+# in the store or the cache. A realiser that waited re-checks the marker and
+# returns the prefix the other one published.
+
+when defined(posix):
+  proc c_flock(fd: cint; op: cint): cint {.importc: "flock",
+                                           header: "<sys/file.h>".}
+  var LockEx {.importc: "LOCK_EX", header: "<sys/file.h>".}: cint
+  var ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+
+  proc lockDirectory(path: string): cint =
+    result = posix.open(path.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+    if result < 0:
+      raiseOSError(osLastError(), "open " & path & " to lock it")
+    while c_flock(result, LockEx) != 0:
+      let err = osLastError()
+      if err.int32 != EINTR:
+        discard posix.close(result)
+        raiseOSError(err, "flock " & path)
+
+template withRealisationLocks(cacheDir, prefixesDir: string; body: untyped) =
+  when defined(posix):
+    let cacheFd = lockDirectory(cacheDir)
+    try:
+      let storeFd = lockDirectory(prefixesDir)
+      try:
+        body
+      finally:
+        discard posix.close(storeFd)
+    finally:
+      discard posix.close(cacheFd)
+  else:
+    body
+
 proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
                         cacheDir: string;
                         fetch: AptDebFetcher = httpDebFetcher();
@@ -1161,20 +1224,27 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
   result = aptClosurePrefixPath(storeRoot, lock)
   if aptClosureRealised(storeRoot, lock):
     return
-  var members: seq[(string, string)] = @[]
-  for d in lock.debs:
-    members.add((d.name, realiseDeb(lock, d, storeRoot, cacheDir, fetch,
-      retainDebCache)))
-  createDir(parentDir(result))
-  let tmp = tempSibling(result, "apt-closure")
-  try:
-    buildUnion(lock, members, tmp)
-    writeFile(tmp / ClosurePrefixMarker, closureMarkerText(lock))
-    setFilePermissions(tmp / ClosurePrefixMarker, FileMode)
-    publishPrefix(tmp, result)
-  except CatchableError:
-    if dirExists(tmp): removeDir(tmp)
-    raise
+  createDir(storeRoot / "prefixes")
+  privateDir(cacheDir)
+  withRealisationLocks(cacheDir, storeRoot / "prefixes"):
+    # Another realiser may have finished this closure while we waited.
+    if aptClosureRealised(storeRoot, lock):
+      return
+    var members: seq[(string, string)] = @[]
+    for d in lock.debs:
+      members.add((d.name, realiseDeb(lock, d, storeRoot, cacheDir, fetch,
+        retainDebCache)))
+    createDir(parentDir(result))
+    reclaimStaleScratch(parentDir(result))
+    let tmp = tempSibling(result, "apt-closure")
+    try:
+      buildUnion(lock, members, tmp)
+      writeFile(tmp / ClosurePrefixMarker, closureMarkerText(lock))
+      setFilePermissions(tmp / ClosurePrefixMarker, FileMode)
+      publishPrefix(tmp, result)
+    except CatchableError:
+      if dirExists(tmp): removeDir(tmp)
+      raise
 
 # ---------------------------------------------------------------------------
 # The systemd unit binding

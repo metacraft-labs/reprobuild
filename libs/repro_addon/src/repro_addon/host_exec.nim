@@ -120,9 +120,37 @@ proc runInHostNamespaces*(argv: openArray[string]): HostToolResult =
   for a in argv: full.add(a)
   runHostTool(full)
 
+proc sysctlNormalize*(key: string): string =
+  ## systemd's normal form of a sysctl key (``sysctl_normalize``, see
+  ## sysctl.d(5) "the first separator"): when the first separator is a
+  ## dot, dots become slashes and slashes become dots
+  ## (``net.ipv4.conf.eth0/100.forwarding`` ->
+  ## ``net/ipv4/conf/eth0.100/forwarding``); when it is a slash, the key
+  ## is already in that form and dots are literal. Empty components and
+  ## leading or trailing slashes are dropped.
+  var k = key
+  var first = -1
+  for i, c in k:
+    if c in {'.', '/'}:
+      first = i
+      break
+  if first >= 0 and k[first] == '.':
+    for i in first ..< k.len:
+      if k[i] == '.': k[i] = '/'
+      elif k[i] == '/': k[i] = '.'
+  var parts: seq[string]
+  for p in k.split('/'):
+    if p.len > 0: parts.add(p)
+  parts.join("/")
+
+proc sysctlFingerprintKey*(key: string): string =
+  ## The key as the base fingerprint spells it: the ``/proc/sys`` path
+  ## components joined with dots.
+  sysctlNormalize(key).replace('/', '.')
+
 proc sysctlKeyPath*(key: string): string =
-  ## ``/proc/sys/<key with dots as slashes>``.
-  "/proc/sys/" & key.replace('.', '/')
+  ## ``/proc/sys/<key in systemd's normal form>``.
+  "/proc/sys/" & sysctlNormalize(key)
 
 proc readHostSysctl*(key: string): string =
   ## The host's effective value of ``key`` (whitespace collapsed), read by

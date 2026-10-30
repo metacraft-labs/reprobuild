@@ -28,7 +28,7 @@
 ##   refuses too: the removed unit is stopped and confirmed, and the
 ##   successor never starts.
 ##
-## Then five more cases:
+## Then more cases:
 ##
 ## - a **delegated** instance (``Delegate=yes``) that moves its process
 ##   into a child control group and ignores SIGTERM: the unit's top-level
@@ -42,6 +42,12 @@
 ##   active: the socket starts it again after every stop, so the stop is
 ##   never confirmed and the apply refuses before the flip, naming the
 ##   socket, with the fingerprint unchanged;
+## - an exclusive unit ``PartOf=`` a unit that changes: systemd carries
+##   the restart to it, so the plan does too, as a confirmed stop-start
+##   after its anchor -- a SIGTERM-ignoring instance refuses the apply
+##   before the flip, a cooperative one is stopped and started again;
+## - a static predecessor behind an enabled socket refuses the successor,
+##   naming the socket, with the fingerprint unchanged;
 ## - an **unmanaged predecessor** the successor names in ``Conflicts=``:
 ##   while it runs (or is enabled) the apply refuses and the successor
 ##   never starts; once the operator stopped and disabled it the apply
@@ -431,9 +437,97 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("systemctl is-active repro-fixture-excl-n.service").strip() == "active" and
          g.exec("systemctl is-active repro-fixture-excl-old.service").stdout.strip() != "active", "")
 
+    discard g.run("mv " & LogPath & " " & LogPath & ".part4; : > " & LogPath)
+
+    # g12: an exclusive unit that is PartOf= another. systemd carries the
+    # other unit's restart to it; the plan must carry it too, as a
+    # confirmed stop-start, or a SIGTERM-ignoring instance would be left
+    # alive beside a fresh one (or a stop-start never restarted).
+    let nUnit = ("repro-fixture-excl-n.service", successor)
+    proc xUnit(v: string): (string, string) =
+      ("repro-fixture-excl-x.service", "[Unit]\nDescription=part-of anchor " & v &
+       "\n\n[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n")
+    proc eUnit(id, script: string; extra = ""): (string, string) =
+      ("repro-fixture-excl-e.service", "[Unit]\nDescription=part-of exclusive " & id &
+       "\nX-Repro-Exclusive=true\nPartOf=repro-fixture-excl-x.service\n\n[Service]\nExecStart=" &
+       script & " " & id & "\n" & extra & "\n[Install]\nWantedBy=multi-user.target\n")
+    let stubbornE = eUnit("e1", "/usr/local/bin/repro-fixture-stubborn",
+                          "TimeoutStopSec=3\nSendSIGKILL=no\n")
+    applied("g12a-part-of", profile([c1, nUnit, xUnit("v1"), stubbornE]))
+    let ePid = instances("^/bin/sh /usr/local/bin/repro-fixture-stubborn e1$")
+    step("vacuity guard: e1 runs, PartOf= the anchor (systemd lists it in ConsistsOf=)",
+         ePid.len > 0 and "repro-fixture-excl-e.service" in
+           g.run("systemctl show -p ConsistsOf --value repro-fixture-excl-x.service"), ePid)
+    let staticBefore12 = g.run("readlink /etc/repro/static").strip()
+    let plan12 = g.planProfile(repro, "g12b-plan", profile([c1, nUnit, xUnit("v2"), stubbornE]))
+    step("g12b: changing only the anchor plans a confirmed stop-start of its PartOf= exclusive unit",
+         "stop-start\trepro-fixture-excl-e.service" in plan12.stdout and
+         "PartOf=" in plan12.stdout, plan12.stdout & plan12.stderr)
+    let r12 = g.applyProfile(repro, "g12b-anchor-changes", profile([c1, nUnit, xUnit("v2"), stubbornE]))
+    step("g12b: refused with EAddOnExclusiveOverlap while the PartOf= instance will not die",
+         r12.exitCode == 2 and "EAddOnExclusiveOverlap" in r12.stderr and
+         "repro-fixture-excl-e.service" in r12.stderr, "exit " & $r12.exitCode & "\n" & r12.stdout & r12.stderr)
+    step("g12b: the old instance is the same process, alone; nothing was switched",
+         instances("^/bin/sh /usr/local/bin/repro-fixture-stubborn e1$") == ePid and
+         g.run("readlink /etc/repro/static").strip() == staticBefore12 and
+         "v1" in g.run("systemctl show -p Description --value repro-fixture-excl-x.service"),
+         g.run("cat " & LogPath))
+    discard g.run("systemctl kill -s KILL repro-fixture-excl-e.service; sleep 1; " &
+      "systemctl reset-failed repro-fixture-excl-e.service; true")
+    discard g.run("mv " & LogPath & " " & LogPath & ".part5; : > " & LogPath)
+    let goodE = eUnit("e2", "/usr/local/bin/repro-fixture-exclusive")
+    applied("g12c-part-of-cooperative", profile([c1, nUnit, xUnit("v2"), goodE]))
+    let plan12d = g.planProfile(repro, "g12d-plan", profile([c1, nUnit, xUnit("v3"), goodE]))
+    step("g12d: the anchor's change carries a stop-start of the PartOf= unit, after the anchor",
+         "restart\trepro-fixture-excl-x.service" in plan12d.stdout and
+         "stop-start\trepro-fixture-excl-e.service" in plan12d.stdout and
+         plan12d.stdout.find("restart\trepro-fixture-excl-x.service") <
+           plan12d.stdout.find("stop-start\trepro-fixture-excl-e.service"), plan12d.stdout)
+    applied("g12d-anchor-changes", profile([c1, nUnit, xUnit("v3"), goodE]))
+    noOverlap("g12d-anchor-changes")
+    step("g12d: the PartOf= unit was restarted (stopped, then started again) and runs",
+         g.run("systemctl is-active repro-fixture-excl-e.service").strip() == "active" and
+         g.run("grep -c '^start e2 ' " & LogPath & "; true").strip() == "2" and
+         "v3" in g.run("systemctl show -p Description --value repro-fixture-excl-x.service"),
+         g.run("cat " & LogPath))
+    discard g.run("mv " & LogPath & " " & LogPath & ".part6; : > " & LogPath)
+
+    # g13: an unmanaged predecessor that is static but can be started by
+    # an enabled socket refuses the successor too.
+    discard g.putProfile("old2", "[Unit]\nDescription=static predecessor\n\n[Service]\n" &
+      "ExecStart=/usr/local/bin/repro-fixture-exclusive o2\n")
+    discard g.putProfile("old2sock", "[Unit]\nDescription=predecessor socket\n\n[Socket]\n" &
+      "ListenStream=127.0.0.1:7998\nService=repro-fixture-excl-old2.service\n\n" &
+      "[Install]\nWantedBy=sockets.target\n")
+    discard g.run("cp /root/addon/old2.profile /etc/systemd/system/repro-fixture-excl-old2.service && " &
+      "cp /root/addon/old2sock.profile /etc/systemd/system/repro-fixture-excl-old2.socket && " &
+      "systemctl daemon-reload && systemctl enable --now repro-fixture-excl-old2.socket")
+    step("vacuity guard: the predecessor is static, its socket enabled and listening",
+         g.run("systemctl show -p UnitFileState --value repro-fixture-excl-old2.service").strip() == "static" and
+         g.run("systemctl is-enabled repro-fixture-excl-old2.socket").strip() == "enabled" and
+         g.run("systemctl is-active repro-fixture-excl-old2.socket").strip() == "active", "")
+    let succ2 = ("repro-fixture-excl-n2.service", "[Unit]\nDescription=exclusive fixture n2\n" &
+      "X-Repro-Exclusive=true\nConflicts=repro-fixture-excl-old2.service\n\n[Service]\n" &
+      "ExecStart=/usr/local/bin/repro-fixture-exclusive n2\n\n[Install]\nWantedBy=multi-user.target\n")
+    let p13 = profile([c1, nUnit, xUnit("v3"), goodE, succ2])
+    let f13 = g.takeFingerprint(repro)
+    let r13 = g.applyProfile(repro, "g13-socket-predecessor", p13)
+    step("g13: refused while a static predecessor's socket is enabled, naming the socket",
+         r13.exitCode == 2 and "EAddOnExclusiveOverlap" in r13.stderr and
+         "repro-fixture-excl-old2.socket" in r13.stderr, "exit " & $r13.exitCode & "\n" & r13.stdout & r13.stderr)
+    let i13 = identityReport(f13, g.takeFingerprint(repro))
+    step("g13: the refused apply wrote nothing (fingerprint unchanged)", i13.ok, i13.text)
+    step("g13: the successor never started", " n2 " notin g.run("cat " & LogPath), g.run("cat " & LogPath))
+    discard g.run("systemctl disable --now repro-fixture-excl-old2.socket")
+    applied("g13b-after-the-operator-disabled-the-socket", p13)
+    noOverlap("g13b")
+    step("g13b: n2 runs", g.run("systemctl is-active repro-fixture-excl-n2.service").strip() == "active", "")
+
     applied("g11-remove", profile([]))
     discard g.run("rm -f /etc/systemd/system/repro-fixture-excl-c.service " &
-      "/etc/systemd/system/repro-fixture-excl-old.service; systemctl daemon-reload; true")
+      "/etc/systemd/system/repro-fixture-excl-old.service " &
+      "/etc/systemd/system/repro-fixture-excl-old2.service " &
+      "/etc/systemd/system/repro-fixture-excl-old2.socket; systemctl daemon-reload; true")
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
   except CatchableError as e:

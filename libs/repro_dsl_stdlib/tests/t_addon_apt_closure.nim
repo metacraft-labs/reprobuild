@@ -535,6 +535,82 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
     check not debianArchitectureRunsOn("armhf", "")
     check hostMachineName().len > 0
 
+when defined(posix):
+  suite "Add-On apt closure: concurrent realisers and crash leftovers":
+    ## rpi2, 2026-10-30, reprobuild d7c86107b: two realisers met on one
+    ## store (a deploy-agent tick and a second apply with another state
+    ## directory). One deleted the other's in-flight ``.deb.part-<pid>`` as
+    ## a leftover ("No such file or directory" on the rename), and both
+    ## renamed a scratch directory onto the same prefix ("Directory not
+    ## empty"). Real processes (``fork``) on the real filesystem; only the
+    ## transport is the local fetcher (see the header).
+
+    proc realiseInChild(lock: AptClosureLock; store, cache: string;
+                        fetch: AptDebFetcher): Pid =
+      result = fork()
+      doAssert result >= 0
+      if result == 0:
+        var code = 0
+        try:
+          discard realiseAptClosure(lock, store, cache, fetch,
+            hostMachine = "armv7l")
+        except CatchableError as ex:
+          stderr.writeLine("realiser " & $getCurrentProcessId() &
+            " failed: " & ex.msg)
+          code = 1
+        # No atexit handlers: the scratch tree belongs to the parent.
+        exitnow(cint(code))
+
+    proc exitCodeOf(pid: Pid): int =
+      var status: cint
+      doAssert waitpid(pid, status, 0) == pid
+      if WIFEXITED(status): int(WEXITSTATUS(status)) else: 128
+
+    test "two processes realising one closure into one store both succeed":
+      let root = scratch("concurrent")
+      let (lock, urls) = buildDebs(root, @[
+        fileDeb("svc", @[("usr/bin/svc", "svc-binary")]),
+        fileDeb("libshared", @[("usr/lib/libshared.so.1", "lib")])])
+      let store = root / "store"
+      let cache = root / "cache"
+      # The first realiser holds each download in its ``.part`` file for a
+      # while, so the second arrives while one is in flight.
+      let slow: AptDebFetcher = proc (url: string; dest: string;
+                                       expectedSize: int64) =
+        copyFile(urls[url], dest)
+        sleep(700)
+      let fast: AptDebFetcher = proc (url: string; dest: string;
+                                       expectedSize: int64) =
+        copyFile(urls[url], dest)
+      let a = realiseInChild(lock, store, cache, slow)
+      sleep(250)
+      let b = realiseInChild(lock, store, cache, fast)
+      check exitCodeOf(a) == 0
+      check exitCodeOf(b) == 0
+      check aptClosureRealised(store, lock)
+      check readFile(aptClosurePrefixPath(store, lock) / "usr/bin/svc") ==
+        "svc-binary"
+      storeIsClean(store)
+
+    test "scratch left by a killed realisation is reclaimed by the next":
+      let root = scratch("crashed")
+      let (lock, urls) = buildDebs(root, @[
+        fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
+      let store = root / "store"
+      # What a realiser killed mid-unpack and mid-union leaves behind.
+      let debParent = parentDir(aptDebPrefixPath(store, lock.debs[0]))
+      let closureParent = parentDir(aptClosurePrefixPath(store, lock))
+      for d in [debParent / ".tmp-apt-deb-killed",
+                debParent / ".tmp-apt-deb-tar-killed",
+                closureParent / ".tmp-apt-closure-killed"]:
+        createDir(d / "usr")
+        writeFile(d / "usr" / "half", "x")
+      var count = new int
+      discard realiseAptClosure(lock, store, root / "cache",
+        localFetcher(urls, count), hostMachine = "armv7l")
+      check aptClosureRealised(store, lock)
+      storeIsClean(store)
+
 suite "Add-On apt closure: the unpacker's policy (spec §8.3 item 4)":
   ## Each hostile archive is realised through the public entry point; the
   ## outcome is asserted on the store and on the ``outside`` directory the

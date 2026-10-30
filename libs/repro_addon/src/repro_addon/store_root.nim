@@ -27,8 +27,12 @@ import std/[algorithm, os, posix, strutils]
 import repro_core
 import repro_local_store/store
 
+import repro_elevation/store_view
+
 import ./generation0
 import ./linux_fs
+
+export store_view.isMountPoint
 
 type
   StoreRootError* = object of CatchableError
@@ -170,50 +174,13 @@ proc removeReproRoot*() =
     removeDir(ReproRoot)
 
 # ---------------------------------------------------------------------------
-# The private writable view.
+# The private writable view (``repro_elevation/store_view``, shared with the
+# privileged driver, which writes the store too).
 # ---------------------------------------------------------------------------
 
-var
-  CloneNewNs {.importc: "CLONE_NEWNS", header: "<sched.h>".}: cint
-  MsRec {.importc: "MS_REC", header: "<sys/mount.h>".}: culong
-  MsPrivate {.importc: "MS_PRIVATE", header: "<sys/mount.h>".}: culong
-  MsRemount {.importc: "MS_REMOUNT", header: "<sys/mount.h>".}: culong
-  MsBind {.importc: "MS_BIND", header: "<sys/mount.h>".}: culong
-
-proc c_unshare(flags: cint): cint {.importc: "unshare", header: "<sched.h>".}
-proc c_mount(source, target, fstype: cstring; flags: culong;
-             data: pointer): cint {.importc: "mount", header: "<sys/mount.h>".}
-
-proc isMountPoint*(path: string): bool =
-  ## True when ``path`` is the mount point of some entry in this
-  ## process's mount table.
-  for line in readFile("/proc/self/mountinfo").splitLines():
-    let f = line.splitWhitespace()
-    if f.len > 4 and f[4] == path:
-      return true
-  false
-
-var writableViewEntered = false
-
 proc enterWritableStoreView*() =
-  ## Move this process into a private mount namespace in which
-  ## ``/repro/store`` is writable. Idempotent. The read-only bind stays in
-  ## place for every other process on the host, and the private namespace
-  ## ends with this process.
-  if writableViewEntered:
-    return
-  if c_unshare(CloneNewNs) != 0:
-    raiseOSError(osLastError(), "unshare(CLONE_NEWNS)")
-  # Stop mount events propagating out of (or into) this namespace before
-  # changing anything in it.
-  if c_mount(nil, "/", nil, MsRec or MsPrivate, nil) != 0:
-    raiseOSError(osLastError(), "make / private in the apply namespace")
-  writableViewEntered = true
-  if dirExists(StoreRoot) and isMountPoint(StoreRoot):
-    # Remount the bind without MS_RDONLY: writable here, still read-only
-    # everywhere else.
-    if c_mount(nil, StoreRoot.cstring, nil, MsRemount or MsBind, nil) != 0:
-      raiseOSError(osLastError(), "remount " & StoreRoot & " writable")
+  ## Make ``/repro/store`` writable for this thread only (spec §10.2).
+  enterWritableStoreView(StoreRoot)
 
 # ---------------------------------------------------------------------------
 # Realising the add-on's prefixes and registering generation roots.

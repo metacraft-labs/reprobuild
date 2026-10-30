@@ -212,15 +212,18 @@ proc preservedDir*(stateDir: string): string = addonDir(stateDir) / "preserved"
 proc generationLedgerPath*(stateDir, generationId: string): string =
   stateDir / "generations" / generationId / "addon-ledger"
 
+proc invocationTablePath*(stateDir: string): string =
+  addonDir(stateDir) / "invocations"
+
 proc generationUnitLookup*(stateDir: string): GenerationUnitLookup =
-  ## A unit's definition (its ledger digest) in a generation's own ledger,
-  ## for retention (``switch.generationsHeldBy``). A ledger that is
-  ## missing or unreadable is reported as not found, which keeps the
+  ## A unit's definition (``switch.unitDefinition``) in a generation's own
+  ## ledger, for retention (``switch.generationsHeldBy``). A ledger that
+  ## is missing or unreadable is reported as not found, which keeps the
   ## generation.
   var cache = initTable[string, Ledger]()
   var missing = initHashSet[string]()
   result = proc(generationId, unit: string):
-      tuple[ledgerFound, unitFound: bool; sha256: string] =
+      tuple[ledgerFound, unitFound: bool; definition: string] =
     if generationId in missing: return (false, false, "")
     if generationId notin cache:
       try:
@@ -228,10 +231,16 @@ proc generationUnitLookup*(stateDir: string): GenerationUnitLookup =
       except CatchableError:
         missing.incl(generationId)
         return (false, false, "")
-    for e in cache[generationId].entries:
-      if e.class == lcUnit and e.unit == unit:
-        return (true, true, e.sha256)
-    (true, false, "")
+    let d = unitDefinition(cache[generationId], unit)
+    (true, d.len > 0, d)
+
+proc heldGenerations*(stateDir: string; ledger: Ledger; current: string):
+    HashSet[string] =
+  ## The generations running managed units still run from (spec §5.2), by
+  ## the invocation table the switches keep -- no clock involved.
+  generationsHeldBy(runningManagedUnits(ledger),
+    readInvocationTable(invocationTablePath(stateDir)), current,
+    generationUnitLookup(stateDir))
 
 proc isAddonHost*(stateDir = DefaultStateDir): bool =
   ## An add-on host is one whose state directory holds the ledger copy.
@@ -1167,6 +1176,9 @@ when TestPauseSeam:
       return
     writeFile(dir & "/paused", $getCurrentProcessId() & "\n")
     discard readFile(dir & "/continue")
+    # Once per run: the FIFO goes with the release, so an apply this one
+    # starts (a rollback's re-apply) does not pause again.
+    removeFile(dir & "/continue")
     removeFile(dir & "/paused")
 
 proc planIdOf*(inputs: openArray[string]): string =
@@ -1209,7 +1221,13 @@ proc undoPreStop(m: PendingMarker): seq[string] =
     except CatchableError as e:
       result.add("enable " & u & ": " & e.msg)
   for u in m.stopped:
-    try: startUnit(u)
+    # A unit whose stop the refusal is about (an exclusive instance that
+    # would not die) is still running: it is not "stopped", and starting
+    # it would put a second instance beside the live one (§7.3). Only a
+    # unit whose control group is confirmed empty is started again.
+    try:
+      if unitIsActive(u) or unitAliveness(u) != uaEmpty: continue
+      startUnit(u)
     except CatchableError as e: result.add(e.msg)
 
 proc recordRolledBack(stateDir, attempt, backTo, asGeneration, why: string;
@@ -1224,6 +1242,18 @@ proc recordRolledBack(stateDir, attempt, backTo, asGeneration, why: string;
     diagnostic: (if healthFailed: "confirm failed: " else: "") & why &
       " -> back to " & backTo & " as " & asGeneration,
     recordClass: AuditClassLiveState))
+
+proc recordingRefusals(inner: PreWriteGuard;
+                       refused: var HashSet[string]): PreWriteGuard =
+  ## ``inner``, also noting in ``refused`` every address it refuses (not
+  ## one it keeps as drift), for the ledger built after the writes.
+  let sink = addr refused
+  result = proc(op: PrivilegedOperation): string {.gcsafe.} =
+    let why = inner(op)
+    if why.len > 0 and not why.startsWith(PreWriteKeepPrefix):
+      {.cast(gcsafe).}:
+        sink[].incl(op.address)
+    why
 
 proc seamedGuard(stateDir: string; inner: PreWriteGuard): PreWriteGuard =
   ## The pre-write guard, with the two write-time test seams in front of
@@ -1359,6 +1389,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       if clash.len > 0:
         raise newException(AddonCollisionError, "refusing " & r.address &
           ": " & clash)
+      # networkd writes the forwarding knobs itself at runtime when its
+      # configuration asks it to (spec §7.2 step 6).
+      let nd = readUnitProvision("systemd-networkd.service")
+      let networkdInUse = nd.activeState == "active" or
+        nd.unitFileState in ["enabled", "enabled-runtime", "linked",
+                             "linked-runtime", "alias"]
+      let nwd = networkdForwardingRefusal(r.sysctlKey, networkdInUse)
+      if nwd.len > 0:
+        raise newException(AddonCollisionError, "refusing " & r.address &
+          ": " & nwd)
 
   var prevForm = initTable[string, string]()  # target path -> link / copy
   for e in previous.entries:
@@ -1821,31 +1861,54 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         p.verdict in [$cvCreate, $cvUpdate, $cvReconcile, $cvReplace]
       f.dropInsChanged = r.suName in dropInsChangedFor
       if f.exclusive:
-        f.predecessors = conflictsServices(rendered)
+        # Conflicts= as systemd reads it -- drop-ins, continuations,
+        # specifiers, aliases -- failing closed on anything unresolved.
+        var profileDropIns: seq[string]
+        for q in plans:
+          if q.r.kind == srkSystemdSystemDropIn and q.r.diUnit == r.suName:
+            profileDropIns.add(q.content)
+        try:
+          f.predecessors = predecessorsOf(r.suName, rendered, profileDropIns)
+        except CatchableError as e:
+          raise newAddOnExclusiveOverlap(r.suName, "its predecessors " &
+            "(Conflicts=) cannot be resolved: " & e.msg)
         # The units that can activate it (sockets, timers, paths): a
         # stop-start pauses the active ones (§7.3).
-        for t in unitProperty(r.suName, "TriggeredBy").splitWhitespace():
+        for t in unitListProperty(r.suName, "TriggeredBy"):
           if readUnitProvision(t).activeState == "active":
             f.triggers.add(t)
         for pred in f.predecessors:
           # A predecessor the add-on does not own is never stopped or
-          # disabled by it; while it runs or is enabled, the successor
-          # cannot start without overlapping it (now, or at the next
-          # boot), so the plan refuses (§7.3).
+          # disabled by it; while it runs, is enabled, or can be started
+          # by an active or enabled socket, timer or path (a static
+          # service behind an enabled socket), the successor cannot start
+          # without overlapping it -- now or at the next boot -- so the
+          # plan refuses (§7.3).
           if pred in prevUnits: continue
           let pv = readUnitProvision(pred)
           let alive = unitAliveness(pred)
+          var liveTriggers: seq[string]
+          for t in unitListProperty(pred, "TriggeredBy"):
+            let tv = readUnitProvision(t)
+            if tv.activeState == "active" or tv.unitFileState in
+                ["enabled", "enabled-runtime", "linked", "linked-runtime",
+                 "alias"]:
+              liveTriggers.add(t & " (" & tv.activeState & ", " &
+                               tv.unitFileState & ")")
           when not mutated("exclusive-as-plain-restart"):
             if pv.activeState == "active" or alive != uaEmpty or
                 pv.unitFileState in ["enabled", "enabled-runtime", "linked",
-                                     "linked-runtime", "alias"]:
+                                     "linked-runtime", "alias"] or
+                liveTriggers.len > 0:
               raise newAddOnExclusiveOverlap(r.suName, "its predecessor " &
                 pred & " (named in its Conflicts=) is not the add-on's and " &
                 "is " & pv.activeState & " with its control group " &
                 $alive & " and unit-file state " &
                 (if pv.unitFileState.len > 0: pv.unitFileState
                  else: "unknown") &
-                "; stop and disable it, then apply again")
+                (if liveTriggers.len > 0: "; it can be started by " &
+                   liveTriggers.join(", ") else: "") &
+                "; stop and disable it (and its triggers), then apply again")
       for dep in r.dependsOn:
         let depAddress = addressByKey.getOrDefault(dep.kind & ":" & dep.name)
         if depAddress.len == 0: continue
@@ -1880,6 +1943,32 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       observed(f)
       facts.add(f)
       factUnits.incl(r.diUnit)
+  # The units a stop or restart propagates to (PartOf=, BindsTo=), with
+  # facts of their own, transitively, so the plan can carry the stops and
+  # restarts systemd would otherwise make unannounced (§7.3).
+  block:
+    var i = 0
+    while i < facts.len:
+      if facts[i].activeState notin ["", "inactive"] or facts[i].removed or
+          facts[i].alive != uaEmpty:
+        facts[i].dependents = unitDependents(facts[i].unit)
+        for d in facts[i].dependents:
+          if d in factUnits: continue
+          let frag = unitProperty(d, "FragmentPath")
+          var dExclusive = false
+          if frag.len > 0 and fileExists(frag):
+            try: dExclusive = unitContentDeclaresExclusive(readFile(frag))
+            except IOError, OSError: dExclusive = true   # unreadable: fail closed
+          var df = UnitFacts(unit: d, address: "dependent:" & d,
+            exclusive: dExclusive)
+          observed(df)
+          if dExclusive:
+            df.triggers = @[]
+            for t in unitListProperty(d, "TriggeredBy"):
+              if readUnitProvision(t).activeState == "active": df.triggers.add(t)
+          facts.add(df)
+          factUnits.incl(d)
+      inc i
   propagateDependencyChanges(facts, unitDeps)
   result.transitions = planTransitions(facts)
 
@@ -1908,7 +1997,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         inputs.add("unit\t" & f.unit)
       else:
         inputs.add("unit\t" & f.unit & "\t" & f.activeState & "\t" & $f.alive &
-          "\t" & f.triggers.join(","))
+          "\t" & f.triggers.join(",") & "\t" & f.dependents.join(","))
         for pred in f.predecessors:
           inputs.add("predecessor\t" & pred & "\t" &
             readUnitProvision(pred).activeState & "\t" & $unitAliveness(pred))
@@ -1934,6 +2023,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
 
   if opts.planOnly:
     return
+
+  # The invocation id every running managed unit has before the switch:
+  # one that differs at the commit was started by this switch (§5.2).
+  var invocationsBefore = initTable[string, string]()
+  for u in runningManagedUnits(previous):
+    invocationsBefore[u.unit] = u.invocationId
 
   # Every resource is decided and nothing refused: the bytes adoptions and
   # reconciliations displace are kept now, before the first write.
@@ -2056,6 +2151,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var newLedger = Ledger()
   var hookRestored: seq[string]
   var hookKept = initHashSet[string]()   # addresses left in place at write time
+  var hookRefused = initHashSet[string]()
+    # Addresses whose operation the write-time re-check refused: nothing of
+    # theirs was written, so the ledger must not claim what is there.
   var hookKeptDrift: seq[string]
   # The objects each destroy removes, for the destroy's re-observation.
   var destroyEntries = initTable[string, seq[LedgerEntry]]()
@@ -2087,6 +2185,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var hookSysctl: seq[tuple[key, value: string]]
   var hookGeneration = ""
   var paused: seq[string]      # triggers step 2 stopped; step 7 restarts
+  var notRunning: seq[string]  # stop-start units that ended before step 2
   var hookConfirm: ConfirmOutcome
   var hookHealthFailed = false
 
@@ -2111,6 +2210,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         writePendingMarker(stateDir, marker)
       let pre = runPreStop(transitions, disableOnRemoval, onStop)
       paused = pre.paused
+      notRunning = pre.notRunning
       marker.step = ssPreStop
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, "step-2")
@@ -2158,7 +2258,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       # generation is not started.
       if clean and problems.len == 0:
         try:
-          runStart(transitions, paused)
+          runStart(transitions, paused, notRunning)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
       marker.step = ssStart
@@ -2251,6 +2351,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       put(LedgerEntry(class: lcStorePrefix, path: treePath,
         sha256: prefixIdHex(treePrefixId), resource: "static-tree"))
       for p in plans:
+        if p.r.address in hookRefused:
+          # The write-time re-check refused this resource's operation: what
+          # is at its path now is not the add-on's doing (a package that
+          # installed a file there since the plan, say), so it is not
+          # claimed. What the previous ledger held for it stays.
+          for e in previous.entries:
+            if e.resource == p.r.address: put(e)
+          continue
         for e in entriesFor(p, previous.entries, driver):
           put(e)
       # A removed resource whose objects are still there stays in the
@@ -2325,7 +2433,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
            # Falsifying build of the write-time re-check gate: every
            # operation is let through unchecked.
            PreWriteGuard(proc(op: PrivilegedOperation): string {.gcsafe.} = "")
-         else: makePreWriteGuard(newDriver, targets, destroyCheck))),
+         else: recordingRefusals(
+           makePreWriteGuard(newDriver, targets, destroyCheck),
+           hookRefused))),
       addOnDispatch: policy,
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
                               afterPrivilegedSet: afterSet,
@@ -2420,10 +2530,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # The current generation is this one; the previous is what `current`
   # named before (never an uncommitted attempt's id); and a generation a
   # running managed unit may still run from is kept too (spec §5.2).
+  block:
+    # Which generation each running managed instance runs: started during
+    # this switch (its invocation id changed) -- this one; otherwise what
+    # the table said.
+    let running = runningManagedUnits(newLedger)
+    let table = invocationsAfterSwitch(
+      readInvocationTable(invocationTablePath(stateDir)), running,
+      invocationsBefore, result.generationId, committedPrevious)
+    writeInvocationTable(invocationTablePath(stateDir), table)
   result.retentionDropped = pruneGenerationRoots(result.generationId,
     committedPrevious, opts.retention.get(DefaultRetention),
-    running = runningManagedUnits(newLedger),
-    lookup = generationUnitLookup(stateDir))
+    held = heldGenerations(stateDir, newLedger, result.generationId))
   marker.step = ssCommit
   writePendingMarker(stateDir, marker)
   seamPause(stateDir, "step-9")

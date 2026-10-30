@@ -513,6 +513,62 @@ suite "SPI-2: leaves refetch through the pool":
     check has(f.leaf, blob) and has(f.pool, blob)
     check must(f.leaf, "rev-parse", "--is-shallow-repository") == "true"
 
+  test "wanted_blob_below_a_pool_ref_refills_from_an_upstream_honouring_haves":
+    # GitHub does not send a wanted object that one of the client's haves
+    # reaches; stock upload-pack does. A blob a blob:none pool lacks is always
+    # below its own refs, so a refill that negotiates those refs gets an empty
+    # pack and "bad revision '<blob>'" (measured 2026-10-30 against
+    # github.com/metacraft-labs/codetracer). A pack-objects hook makes the
+    # local upstream behave the same way, and records that it did.
+    let root = createTempDir("repro-spi2-have-reaches-want-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    makePoolBlobless(f)
+    discard must(f.up, "config", "uploadpack.allowFilter", "true")
+    let dropped = root / "dropped-wants"
+    let hook = root / "drop-wants-reached-by-haves.sh"
+    # The path goes into a shell assignment ahead of the body, so the body
+    # stays one literal: Nim drops the newline that follows a reopened
+    # triple quote, which would splice two shell lines together.
+    writeFile(hook, "#!/bin/sh\ndropped=" & q(dropped) & "\n" & """
+in=$(mktemp) || exit 1
+cat > "$in"
+haves=$(sed -n '/^--not$/,$p' "$in" | grep -c '^[0-9a-f]\{40,64\}$')
+seen=
+while IFS= read -r line; do
+  [ "$line" = "--not" ] && seen=1
+  if [ -z "$seen" ] && [ "$haves" -gt 0 ] &&
+      [ "$(git cat-file -t "$line" 2>/dev/null)" = blob ]; then
+    printf '%s\n' "$line" >> "$dropped"
+    continue
+  fi
+  printf '%s\n' "$line"
+done < "$in" | "$@"
+status=$?
+rm -f "$in"
+exit $status
+""")
+    setFilePermissions(hook, {fpUserRead, fpUserWrite, fpUserExec})
+    let uploadPack = root / "github-like-upload-pack.sh"
+    writeFile(uploadPack, "#!/bin/sh\nexec git -c uploadpack.packObjectsHook=" &
+      q(hook) & " upload-pack \"$@\"\n")
+    setFilePermissions(uploadPack, {fpUserRead, fpUserWrite, fpUserExec})
+    discard must(f.pool, "config", "remote.origin.uploadpack", uploadPack)
+    let blob = must(f.up, "rev-parse", "main:m2")
+    doAssert not has(f.leaf, blob) and not has(f.pool, blob)
+    # Premise: a pool ref reaches the wanted blob, so it is offered as a have.
+    check must(f.pool, "rev-parse", "main:m2") == blob
+    let read = run(f.leaf, true, "show", "HEAD:m2")
+    checkpoint(read.output)
+    # Positive control: the upstream withheld the blob from the request that
+    # carried haves, so whatever supplied it asked without them.
+    check fileExists(dropped) and readFile(dropped).splitLines()[0] == blob
+    check read.code == 0
+    check read.output.splitLines()[^1] == "2"
+    check has(f.leaf, blob) and has(f.pool, blob)
+
   test "missing_object_comes_back_into_leaf_and_pool":
     if findExe("git").len == 0:
       skip("needs git on PATH")

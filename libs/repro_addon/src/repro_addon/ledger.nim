@@ -498,10 +498,13 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
         result.add(ExpectedRecord(component: fcEtc, key: f, value: "*",
                                   anyChange: true))
     of lcSysctl:
-      result.add(ExpectedRecord(component: fcSysctl, key: e.path,
+      # The fingerprint spells a key by its /proc/sys path components
+      # joined with dots, whichever separator form the profile used.
+      result.add(ExpectedRecord(component: fcSysctl,
+        key: sysctlFingerprintKey(e.path),
         value: e.value, baseValue: e.replaced))
-      for k in coupledSysctlKeys(e.path):
-        if k != e.path:
+      for k in coupledSysctlKeys(sysctlFingerprintKey(e.path)):
+        if k != sysctlFingerprintKey(e.path):
           result.add(ExpectedRecord(component: fcSysctl, key: k, value: "*",
                                     coupled: true))
     of lcKey, lcStorePrefix, lcKept:

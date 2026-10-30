@@ -407,8 +407,8 @@ proc runAddonCli*(args: seq[string]): int =
       let current = readCurrentGenerationId(DefaultStateDir)
       let previous = previousGenerationOf(DefaultStateDir, current)
       let dropped = pruneGenerationRoots(current, previous, policy,
-        running = runningManagedUnits(readLedger(ledgerCopyPath(DefaultStateDir))),
-        lookup = generationUnitLookup(DefaultStateDir))
+        held = heldGenerations(DefaultStateDir,
+          readLedger(ledgerCopyPath(DefaultStateDir)), current))
       stdout.write("kept: " & current & " (current)" &
         (if previous.len > 0: ", " & previous & " (previous)" else: "") & "\n")
       stdout.write("released store roots (" & $dropped.len & "):\n")
