@@ -418,12 +418,24 @@ proc waitSerial*(g: Guest; needle: string; timeoutSec: int): string =
   if fileExists(g.serialLog): result = readFile(g.serialLog)
 
 proc exec*(g: Guest; script: string; timeoutSec = 900): ExecOut =
-  ## Run ``script`` with ``sh -c`` as root in the guest.
+  ## Run ``script`` with ``sh -c`` as root in the guest. A transport
+  ## failure (ssh's exit 255 before the remote shell ran: a reset while
+  ## the guest's sshd is still being restarted by cloud-init, a slow TCG
+  ## guest) is retried a few times; a command that ran is never re-run.
   when defined(gostiAvailable):
     let backend: VmBackend = if g.kind == gkIncus: g.incus else: g.qemu
-    let r = backend.execInGuest(g.vm, initTable[string, string](),
-                                @["sh", "-c", script], timeoutSec = timeoutSec)
-    ExecOut(exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr)
+    for attempt in 1 .. 4:
+      let r = backend.execInGuest(g.vm, initTable[string, string](),
+                                  @["sh", "-c", script], timeoutSec = timeoutSec)
+      let transport = g.kind == gkQemu and r.exitCode == 255 and
+        ("kex_exchange_identification" in r.stderr or
+         "Connection reset" in r.stderr or "Connection refused" in r.stderr or
+         "Connection timed out" in r.stderr or "Connection closed" in r.stderr)
+      if transport and attempt < 4:
+        g.note("ssh transport failure, retrying: " & r.stderr.strip())
+        sleep(5000)
+        continue
+      return ExecOut(exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr)
 
 proc run*(g: Guest; script: string; timeoutSec = 900): string =
   ## ``exec`` that must succeed; returns stdout.

@@ -18,10 +18,12 @@
 ##    mounted read-only).
 ## 3. **refusals** (the preflight exits 2 and names the failing check):
 ##    a foreign ``/etc/repro``; an unsupported ``VERSION_ID``; and a
-##    non-systemd PID 1 -- a sysvinit fixture built from the same guest
-##    (``sysvinit-core`` installed, rebooted), whose preflight runs from
-##    ``rc.local`` and reports on the serial console, because the fixture
-##    has no systemd to bring the network or sshd up the way the base did.
+##    non-systemd PID 1, built from the same guest and rebooted: real
+##    sysvinit (``sysvinit-core``, reporting from ``rc.local``) where the
+##    base packages it (Debian), otherwise -- Ubuntu 24.04 ships no init
+##    package that replaces PID 1 -- a shell script named with ``init=`` on
+##    the kernel command line. Either reports on the serial console, since
+##    the fixture has no systemd to bring the network and sshd up.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=preflight-writes``): a
 ## preflight that writes one file under ``/var/lib``. Under the
@@ -37,22 +39,43 @@ import repro_test_support/reasoned_skip
 
 import ./addon_testbed
 
-const SysvinitFixture = """set -e
-export DEBIAN_FRONTEND=noninteractive
-# systemd-sysv is Protected and conflicts with sysvinit-core: name its
-# removal explicitly, or the solver keeps it and refuses.
-apt-get install -y -qq --allow-remove-essential sysvinit-core systemd-sysv- >/dev/null
-cat > /etc/rc.local <<'RC'
-#!/bin/sh
+const FixtureReport = """#!/bin/sh
 # repro add-on test fixture: report the preflight on the serial console.
 {
   echo "REPRO-ADDON-FIXTURE pid1=$(cat /proc/1/comm)"
   /root/addon/repro system addon preflight
   echo "REPRO-ADDON-FIXTURE preflight-exit=$?"
 } > /dev/console 2>&1
-poweroff
-RC
+"""
+
+const SysvinitFixture = """set -e
+export DEBIAN_FRONTEND=noninteractive
+# systemd-sysv is Protected and conflicts with sysvinit-core: name its
+# removal explicitly, or the solver keeps it and refuses.
+apt-get install -y -qq --allow-remove-essential sysvinit-core systemd-sysv- >/dev/null
+cp /root/addon/fixture-report /etc/rc.local
+echo poweroff >> /etc/rc.local
 chmod 0755 /etc/rc.local
+"""
+
+const InitFixture = """set -e
+# Ubuntu 24.04 ships no sysvinit-core (nor any other init package that
+# replaces PID 1), so the non-systemd init here is a shell script named on
+# the kernel command line: it mounts the API filesystems, reports, and
+# powers off.
+cat > /root/addon/fixture-init <<'INIT'
+#!/bin/sh
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -o remount,rw / 2>/dev/null
+/root/addon/fixture-report
+sync
+poweroff -f
+INIT
+chmod 0755 /root/addon/fixture-init
+mkdir -p /etc/default/grub.d
+echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX init=/root/addon/fixture-init"' > /etc/default/grub.d/99-repro-addon-fixture.cfg
+update-grub >/dev/null 2>&1
 """
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
@@ -121,18 +144,27 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("compatible again once os-release is restored", back.exitCode == 0,
          back.stdout)
 
-    # 3c. A sysvinit fixture.
-    let inst = g.exec(SysvinitFixture, timeoutSec = 1800)
-    step("sysvinit fixture installs", inst.exitCode == 0,
-         inst.stdout & inst.stderr)
+    # 3c. A non-systemd PID 1: real sysvinit where the base packages it
+    # (Debian), otherwise an init script named on the kernel command line.
+    writeFile(g.runDir / "fixture-report", FixtureReport)
+    g.copyTo(g.runDir / "fixture-report", "/root/addon/fixture-report")
+    discard g.run("chmod 0755 /root/addon/fixture-report")
+    let hasSysvinit = g.exec("apt-cache policy sysvinit-core | grep -q 'Candidate: [0-9]'").exitCode == 0
+    let fixture = if hasSysvinit: "sysvinit-core" else: "init= script"
+    record["initFixture"] = %fixture
+    let inst = g.exec((if hasSysvinit: SysvinitFixture else: InitFixture),
+                      timeoutSec = 1800)
+    step("non-systemd init fixture installs (" & fixture & ")",
+         inst.exitCode == 0, inst.stdout & inst.stderr)
     if inst.exitCode == 0:
       discard g.exec("systemctl reboot || reboot", timeoutSec = 30)
       discard g.waitPoweredOff(300)
       g.bootNoWait()
       let serial = g.waitSerial("preflight-exit=", 900)
       discard g.waitPoweredOff(120)
-      let pid1 = serial.contains("REPRO-ADDON-FIXTURE pid1=init")
-      step("the fixture's PID 1 is sysvinit", pid1,
+      let pid1 = serial.contains("REPRO-ADDON-FIXTURE pid1=init") or
+                 serial.contains("REPRO-ADDON-FIXTURE pid1=fixture-init")
+      step("the fixture's PID 1 is not systemd", pid1,
            serial[max(0, serial.len - 3000) .. ^1])
       step("refuses a non-systemd PID 1",
            "preflight-exit=2" in serial and "fail init-system" in serial,
