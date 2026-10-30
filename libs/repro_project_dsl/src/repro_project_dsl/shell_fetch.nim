@@ -43,7 +43,14 @@ proc gitArchiveFetchScript*(escapedUrl, escapedRev, escapedTarball: string):
   ## a PRIVATE repository's revision without a tag) and ``git archive`` it.
   ## Shared by every emitter that handles ``dfkGitArchive`` so the two
   ## spellings are decided in one place.
-  result = "rm -rf \"" & escapedTarball & ".git\"; "
+  # Like `appendCurlDownload`: an archive already on disk is not taken
+  # again. The digest check that follows this script still verifies it, so
+  # a stale or truncated archive is refused rather than trusted; what is
+  # skipped is only the network round trip -- which for a private
+  # repository is also an ssh credential the fetch edge may not have on a
+  # re-run that nothing else needed it for (ReproOS-Add-On-Mode A15).
+  result = "if [ ! -f \"" & escapedTarball & "\" ]; then "
+  result.add("rm -rf \"" & escapedTarball & ".git\"; ")
   if isCommitId(escapedRev):
     result.add("git init -q \"" & escapedTarball & ".git\"; ")
     result.add("git -C \"" & escapedTarball & ".git\" remote add origin \"" &
@@ -57,7 +64,7 @@ proc gitArchiveFetchScript*(escapedUrl, escapedRev, escapedTarball: string):
       result.add("--branch \"" & escapedRev & "\" ")
     result.add("\"" & escapedUrl & "\" \"" & escapedTarball & ".git\"; ")
   result.add("(cd \"" & escapedTarball & ".git\" && git archive --format=tar HEAD > \"" &
-    escapedTarball & "\"); ")
+    escapedTarball & "\"); fi; ")
 
 proc shellFetchToolIdentityRefs*(hashTools: openArray[string];
                                  copiesDataFile = false;

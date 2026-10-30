@@ -373,6 +373,18 @@ suite "rust-std: the catalog arm and the target sysroot":
     check ("--target " & Triple & " --print target-libdir") in s
     check "--print sysroot | grep -qx \"$OUT\"" in s
 
+  test "the merge edge names cargo as well as rustc, so the pinned prefix is on PATH":
+    let dir = getTempDir() / ("t_rust_sysroot_" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    resetBuildActionRegistry()
+    let fetch = emitRustStdFetchAction(dir, "probe", Triple)
+    let merge = emitRustTargetSysrootAction(dir, "probe", Triple, fetch)
+    check "rustc" in merge.toolIdentityRefs
+    check "cargo" in merge.toolIdentityRefs
+    check merge.inputs == @[fetch.outputs[0]]
+    check merge.outputs == @[dir / ".repro/build/cross" / Triple / "rust-sysroot"]
+
   test "cargo_package drives the merged rustc and orders after the merge":
     withTargetEnv(Triple, proc() =
       resetBuildActionRegistry()
