@@ -1785,6 +1785,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_deploy_agent_keygen_cli.nim",
+    binary: "build/test-bin/t_deploy_agent_keygen_cli",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = createTempDir(\"repro-keygen-cli-\", \"\")"),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim",
     binary: "build/test-bin/t_develop_override_records_the_identity_it_replaced",
     defines: @[],

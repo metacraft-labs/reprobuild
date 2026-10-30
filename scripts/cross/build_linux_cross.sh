@@ -24,6 +24,10 @@
 #   --entrypoints LIST   space-separated apps/entrypoints.txt names to build
 #                        (default: the set an installed host needs, below)
 #   --skip-nim           do not cross-build the Nim compiler
+#   --source VAR=DIR     compile against DIR instead of the flake-pinned source
+#                        for VAR (IO_MON_SRC, STACKABLE_HOOKS_SRC, SHM_QUEUE_SRC,
+#                        SHM_GSET_SRC, RUNQUOTA_SRC, REPRO_TEST_ADAPTERS_SRC);
+#                        recorded as an override in cross-build-info
 #   --install            install the result on the --fetch-sysroot-from host
 #                        (passwordless sudo there): the prefix is unpacked
 #                        beside --install-prefix and swapped in by rename, and
@@ -32,11 +36,16 @@
 #   --bin-links DIR      directory for the PATH links (default /usr/local/bin)
 #
 # Environment:
-#   REPROBUILD_BUILD_MODE  debug (default, as scripts/build_apps.sh) | release
+#   REPROBUILD_BUILD_MODE  release (default here: the output is an installed
+#                          prefix, and a debug image carries the builder's
+#                          paths in every stack-trace literal) | debug
 #   REPRO_CROSS_ARCH_FLAGS target code-generation flags; the default for the
 #                          armhf triple is Debian's armhf baseline (ARMv7-A,
 #                          VFPv3-D16, hard float), which every Raspberry Pi
 #                          from the Pi 2 on executes
+#   REPRO_CROSS_BUILD_ROOT the canonical directory the tree is exported to and
+#                          compiled from (default /var/tmp/reprobuild-cross;
+#                          must be writable and owned by the caller)
 #   REPRO_CROSS_CLANG / REPRO_CROSS_LLD
 #                          an unwrapped clang / an lld bin dir; resolved from
 #                          this flake's nixpkgs when unset
@@ -73,6 +82,44 @@
 # loader for every executable link. Without it lld emits a PIE with no
 # PT_INTERP, which the kernel starts as a static PIE and which dies at its
 # first relocation (SIGSEGV before main, nothing from LD_DEBUG).
+#
+# WHAT IS COMPILED IN IS WHAT THE FLAKE PINS. The sibling sources a `nim c`
+# of this tree resolves through the environment (io-mon, nim-stackable-hooks,
+# nim-shm-queue, nim-shm-gset, runquota, reprobuild-test-adapters) are taken
+# from this flake's locked inputs, not from the dev shell's environment, which
+# prefers a sibling checkout when one is present -- a checkout at whatever
+# revision it happens to be at, which nothing recorded. `--source VAR=DIR`
+# overrides one deliberately, and the override is recorded. Every source the
+# images were compiled against, the compiler, the sysroot's glibc and -dev
+# package versions are written to `share/repro/cross-build-info` so the
+# installed prefix says what it was built from.
+#
+# NO BUILDER PATHS IN THE IMAGES. Every ELF in the prefix is checked for
+# `/home/`, `/nix/store/` and the checkout's own path after the build, and the
+# build is refused when one is found: a debug image embeds its stack-trace
+# file names and the dev shell's C compiler path, and every image embeds the
+# tree it was compiled from -- `currentSourcePath()` anchors in a dozen
+# modules (`source_root.CompiledSourceRoot`, the package catalog's defining
+# files, ...) and the source roots the compile resolved -- none of which mean
+# anything on the target. Release mode, `--filenames:canonical`,
+# `-ffile-prefix-map` and an empty `reproBuiltCCompiler` define remove the
+# first kind. The second kind no Nim flag can remap, so the compile does not
+# run in the checkout: the tree is EXPORTED to a canonical path that names no
+# user and no host (`REPRO_CROSS_BUILD_ROOT`, default `/var/tmp/reprobuild-
+# cross`; the same convention as Nix's `/build`), with the pinned sibling
+# sources copied beside it in the installed `share/repro/src/<input>` layout,
+# and that is what the images remember. Two builders then produce the same
+# anchors, and an anchor that happens to survive into the installed layout's
+# resolution order points at nothing on the target, exactly as a Nix
+# package's `/nix/store/...-source` anchor does on a non-Nix host.
+#
+# ELF BUILD ATTRIBUTES. `readelf -A` on a produced image reports
+# `Tag_CPU_arch: v6` / `Tag_FP_arch: VFPv2`: lld takes the attributes of the
+# first object it links, Debian's `crt1.o`, which is built for the armhf
+# baseline's floor. They say nothing about how the code was compiled. The
+# positive control below compiles a probe through the wrapper and asserts
+# `__ARM_ARCH >= 7` and that a 64-bit atomic is emitted inline (`ldrexd`), not
+# as a libatomic call -- which an ARMv6 build silently becomes.
 set -euo pipefail
 
 usage() { sed -n '2,40p' "$0" >&2; exit 64; }
@@ -85,6 +132,7 @@ triple="arm-linux-gnueabihf"
 out=""
 entrypoints=""
 skip_nim=0
+declare -A source_overrides=()
 install=0
 install_prefix=/usr/local/repro
 bin_links=/usr/local/bin
@@ -103,6 +151,10 @@ while [ "$#" -gt 0 ]; do
     --entrypoints) entrypoints="$2"; shift 2 ;;
     --entrypoints=*) entrypoints="${1#--entrypoints=}"; shift ;;
     --skip-nim) skip_nim=1; shift ;;
+    --source)
+      source_overrides["${2%%=*}"]="${2#*=}"; shift 2 ;;
+    --source=*)
+      kv="${1#--source=}"; source_overrides["${kv%%=*}"]="${kv#*=}"; shift ;;
     --install) install=1; shift ;;
     --install-prefix) install_prefix="$2"; shift 2 ;;
     --install-prefix=*) install_prefix="${1#--install-prefix=}"; shift ;;
@@ -113,6 +165,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Validated here, before anything is built: an --install without a host to
+# install on used to fail after a full build.
+if [ "${install}" = 1 ] && [ "${fetch_requested}" != 1 ]; then
+  echo "build_linux_cross: --install needs --fetch-sysroot-from (the host to install on)" >&2
+  exit 64
+fi
 [ -f libs/repro_project_dsl/src/repro_project_dsl.nim ] || {
   echo "build_linux_cross: run from the reprobuild checkout root" >&2; exit 64; }
 command -v nim >/dev/null 2>&1 || {
@@ -174,6 +232,7 @@ lld_bin_dir="${REPRO_CROSS_LLD:-$(resolve_nixpkgs_out llvmPackages.lld)/bin}"
 [ -x "${clang_bin}" ] || { echo "build_linux_cross: no clang at ${clang_bin}" >&2; exit 1; }
 [ -x "${lld_bin_dir}/ld.lld" ] || { echo "build_linux_cross: no ld.lld in ${lld_bin_dir}" >&2; exit 1; }
 
+clang_version="$("${clang_bin}" --version | head -n1)"
 toolchain_dir="${out}/toolchain"
 mkdir -p "${toolchain_dir}"
 cc_wrapper="${toolchain_dir}/${triple}-cc"
@@ -197,6 +256,45 @@ exec "${clang_bin}" --target=${triple} ${arch_flags} --sysroot="${sysroot}" \\
   "\${extra[@]}" "\$@"
 EOF
 chmod +x "${cc_wrapper}"
+
+# Positive control for the code-generation baseline (see the header). The
+# probe fails to compile unless the preprocessor sees the architecture the
+# flags name, and its 64-bit atomic must be emitted inline.
+arch_probe_dir="${out}/arch-probe"
+mkdir -p "${arch_probe_dir}"
+case "${nim_cpu}" in
+  arm)
+    cat > "${arch_probe_dir}/probe.c" <<'EOF'
+#if !defined(__ARM_ARCH) || __ARM_ARCH < 7
+#error "the wrapper does not compile for ARMv7 or later"
+#endif
+#include <stdint.h>
+uint64_t probe_add(uint64_t *p) { return __atomic_fetch_add(p, 1, __ATOMIC_SEQ_CST); }
+EOF
+    arch_probe_inline='ldrexd'
+    ;;
+  arm64)
+    cat > "${arch_probe_dir}/probe.c" <<'EOF'
+#if !defined(__aarch64__)
+#error "the wrapper does not compile for AArch64"
+#endif
+#include <stdint.h>
+uint64_t probe_add(uint64_t *p) { return __atomic_fetch_add(p, 1, __ATOMIC_SEQ_CST); }
+EOF
+    arch_probe_inline='ldaddal\|ldxr\|ldaxr'
+    ;;
+esac
+if ! "${cc_wrapper}" -O2 -S -o "${arch_probe_dir}/probe.s" "${arch_probe_dir}/probe.c"; then
+  echo "build_linux_cross: the toolchain wrapper does not compile for the ${triple} baseline (${arch_flags})" >&2
+  exit 1
+fi
+if ! grep -q "${arch_probe_inline}" "${arch_probe_dir}/probe.s" ||
+    grep -q '__atomic_fetch_add_8' "${arch_probe_dir}/probe.s"; then
+  echo "build_linux_cross: the wrapper emits 64-bit atomics as libatomic calls, not inline:" >&2
+  echo "  ${arch_flags} does not select a baseline with native 8-byte atomics (see ${arch_probe_dir}/probe.s)" >&2
+  exit 1
+fi
+echo "build_linux_cross: toolchain ${clang_version}; baseline probe ok (${arch_flags})"
 
 # The flags that turn a `nim c` of this tree into a cross compile. Everything
 # else a `nim c` here receives is what scripts/build_apps.sh passes.
@@ -224,18 +322,134 @@ cross_env=(
   REPROBUILD_USE_SYSTEM_HASH_LIBS=0
 )
 
+# ---------------------------------------------------------------------------
+# The canonical build root (see the header), and the sibling sources, from
+# the flake's locked inputs.
+#
+# `config.nims` and io-mon's `build_shim.sh` resolve each sibling from its
+# environment variable. The dev shell exports a sibling checkout for several
+# of them when one is present (`IO_MON_SRC=../io-mon/src`), which is right for
+# developing the sibling and wrong for a build whose output is installed
+# elsewhere: the checkout's revision is whatever it is, and nothing records
+# it. So every one of them is taken from the flake's pinned copy -- the
+# devShell attribute, evaluated rather than inherited, is that copy -- unless
+# `--source` named another directory, copied under the build root in the
+# installed layout's `share/repro/src/<input>` shape, and exported, so the
+# shim build, every `nim c` and the source staging below see the same trees.
+# ---------------------------------------------------------------------------
+build_root="${REPRO_CROSS_BUILD_ROOT:-/var/tmp/reprobuild-cross}"
+mkdir -p "${build_root}"
+if [ ! -O "${build_root}" ] || [ ! -w "${build_root}" ]; then
+  echo "build_linux_cross: ${build_root} is not a writable directory owned by $(id -un);" >&2
+  echo "  set REPRO_CROSS_BUILD_ROOT to one (it is the path the images will remember)" >&2
+  exit 1
+fi
+src_root="${build_root}/source"
+echo "build_linux_cross: exporting the tree to ${src_root}"
+rm -rf "${src_root}"
+mkdir -p "${src_root}"
+# Tracked files plus untracked ones that are not ignored (a script being
+# added), as the checkout has them now; `build/`, caches and the like are
+# ignored and stay behind. A tracked file deleted in the worktree is skipped.
+git -C "${repo_root}" ls-files -z -c -o --exclude-standard |
+  (cd "${repo_root}" && tar --null -T - --ignore-failed-read -cf - 2>/dev/null) |
+  tar -C "${src_root}" -xf -
+
+host_system="$(nix eval --raw --impure --expr builtins.currentSystem)"
+# (variable, flake input, installed-layout directory under share/repro/src,
+# suffix the variable adds below that directory) -- the same table as
+# `repro_core/source_root.InstalledSourcePackageTrees`.
+pinned_sources=(
+  "IO_MON_SRC io-mon-src io-mon /src"
+  "STACKABLE_HOOKS_SRC nim-stackable-hooks-src nim-stackable-hooks /src"
+  "SHM_QUEUE_SRC nim-shm-queue-src nim-shm-queue /src"
+  "SHM_GSET_SRC nim-shm-gset-src nim-shm-gset /src"
+  "RUNQUOTA_SRC runquota-src runquota"
+  "REPRO_TEST_ADAPTERS_SRC reprobuild-test-adapters-src reprobuild-test-adapters /src"
+  "TEST_CERTIFICATES_TOOLS_SRC test-certificates-tools-src test-certificates-tools /src"
+  "REPRO_CT_TEST_RUNNER_SRC reprobuild-ct-test-runner-src reprobuild-ct-test-runner"
+  "NIMCRYPTO_SRC nimcrypto-src nimcrypto"
+  "BEARSSL_SRC bearssl-src bearssl"
+  "CODETRACER_TRACE_FORMAT_NIM_SRC ct-trace-format-src codetracer-trace-format-nim /src"
+  "CODETRACER_PINNED_SRC codetracer-src codetracer /src"
+)
+flake_lock_json="$(nix flake metadata --json "${repo_root}" 2>/dev/null)"
+locked_rev_of() {
+  # The revision flake.lock pins for input $1.
+  printf '%s' "${flake_lock_json}" |
+    jq -r --arg n "$1" '.locks.nodes[$n].locked.rev // "unlocked"'
+}
+describe_source() {
+  # How a directory came to be: a git checkout's revision (and whether it is
+  # dirty), or the flake input it is the store copy of.
+  local dir="$1" input="$2" rev
+  case "${dir}" in
+    /nix/store/*) printf 'flake:%s@%s' "${input}" "$(locked_rev_of "${input}")" ;;
+    *)
+      if rev="$(git -C "${dir}" rev-parse HEAD 2>/dev/null)"; then
+        if [ -n "$(git -C "${dir}" status --porcelain 2>/dev/null)" ]; then
+          rev="${rev}-dirty"
+        fi
+        printf 'git:%s' "${rev}"
+      else
+        printf 'unversioned'
+      fi ;;
+  esac
+}
+source_records=()
+rm -rf "${build_root}/src"
+for row in "${pinned_sources[@]}"; do
+  read -r var input rel suffix <<< "${row}"
+  suffix="${suffix:-}"
+  if [ -n "${source_overrides[$var]:-}" ]; then
+    from="${source_overrides[$var]}"
+    [ -d "${from}" ] || { echo "build_linux_cross: --source ${var}=${from}: no such directory" >&2; exit 64; }
+    from="$(cd "${from}" && pwd)"
+    note=" (override)"
+  else
+    from="$(nix eval --raw "${repo_root}#devShells.${host_system}.default.${var}" 2>/dev/null || true)"
+    [ -n "${from}" ] || { echo "build_linux_cross: the dev shell declares no ${var}; cannot pin it" >&2; exit 1; }
+    note=""
+  fi
+  # The variable may name the tree's `src/` rather than its root; copy the
+  # root, so the copy has the layout the installed one has.
+  tree="${from}"
+  [ -n "${suffix}" ] && [ "${tree##*/}" = "${suffix#/}" ] && tree="${tree%/*}"
+  dest="${build_root}/src/${rel}"
+  mkdir -p "$(dirname "${dest}")"
+  cp -a --no-preserve=mode "${tree}" "${dest}"
+  chmod -R u+w "${dest}"
+  source_records+=("${var}=${rel}${suffix} $(describe_source "${tree}" "${input}")${note}")
+  export "${var}=${dest}${suffix}"
+done
+for rec in "${source_records[@]}"; do echo "build_linux_cross: source ${rec}"; done
+
 nim_mode_flags=(--parallelBuild:"${NIX_BUILD_CORES:-0}")
-source_revision="$(bash scripts/source_revision.sh --tree .)"
+source_revision="$(bash scripts/source_revision.sh --tree "${repo_root}")"
 if [ -n "${source_revision}" ]; then
   nim_mode_flags+=("-d:ReprobuildSourceRevision=${source_revision}")
 fi
-case "${REPROBUILD_BUILD_MODE:-debug}" in
+build_mode="${REPROBUILD_BUILD_MODE:-release}"
+case "${build_mode}" in
   debug) ;;
   release) nim_mode_flags+=("-d:release") ;;
   *) echo "unsupported REPROBUILD_BUILD_MODE=${REPROBUILD_BUILD_MODE}" >&2; exit 2 ;;
 esac
+# No builder paths (see the header): canonical file names in every literal
+# the compiler plants, the build root and the store mapped out of the C debug
+# info and `__FILE__`, and no "compiler repro was built with" path -- that one
+# is a BUILD-host path, and `fallbackCCompiler` on the target must not try it.
+no_builder_paths_flags=(
+  "--filenames:canonical"
+  "--passC:-ffile-prefix-map=${build_root}=."
+)
+nim_mode_flags+=("${no_builder_paths_flags[@]}" "-d:reproBuiltCCompiler=")
 
-stage="${out}/stage"
+# Everything from here on compiles the EXPORT, never the checkout (see the
+# header); `repo_root` stays what the flake is evaluated from.
+cd "${src_root}"
+
+stage="${build_root}/stage"
 nimcache="${out}/nimcache"
 rm -rf "${stage}"
 mkdir -p "${stage}/bin" "${stage}/lib" "${nimcache}"
@@ -266,16 +480,14 @@ check_target_elf() {
 #    `repro internal io monitor` refuses to run, and the profile compile is
 #    one such edge.
 # ---------------------------------------------------------------------------
-io_mon_src="${IO_MON_SRC:-../io-mon}"
-io_mon_src="${io_mon_src%/src}"
-shm_queue_src="$(source scripts/source_paths.sh && resolve_shm_queue_src)"
+io_mon_src="${IO_MON_SRC%/src}"
 echo "build_linux_cross: [1/5] io-mon monitor shim"
 if "${cross_env[@]}" \
     IO_MON_SHIM_OUT_DIR="${stage}/lib" \
     IO_MON_SHIM_NIMCACHE_DIR="${nimcache}/io-mon-shim" \
-    IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
-    SHM_QUEUE_SRC="${shm_queue_src}" \
-    bash "${io_mon_src}/scripts/build_shim.sh" "${nim_cross_flags[@]}"; then
+    IO_MON_BUILD_MODE="${build_mode}" \
+    bash "${io_mon_src}/scripts/build_shim.sh" "${nim_cross_flags[@]}" \
+      "${no_builder_paths_flags[@]}"; then
   check_target_elf "${stage}/lib/librepro_monitor_shim.so" || true
 else
   record_failure "io-mon monitor shim"
@@ -365,7 +577,7 @@ if [ "${skip_nim}" = 0 ]; then
   if [ "$(command -v nim)" != "${nim_tree}/bin/nim" ]; then
     echo "build_linux_cross: note: the nim on PATH ($(command -v nim)) is not ${nim_tree}/bin/nim" >&2
   fi
-  nim_src_dir="${out}/nim-src"
+  nim_src_dir="${build_root}/nim-source"
   rm -rf "${nim_src_dir}"
   cp -r "$(nix eval --raw "${nim_attr}.passthru.sources.forkSrc.outPath")" "${nim_src_dir}"
   chmod -R u+w "${nim_src_dir}"
@@ -381,7 +593,7 @@ if [ "${skip_nim}" = 0 ]; then
       --parallelBuild:"${NIX_BUILD_CORES:-0}" -d:release -d:nimKochBootstrap \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
-      "${nim_cross_flags[@]}" \
+      "${nim_cross_flags[@]}" "${no_builder_paths_flags[@]}" \
       --nimcache:"${nimcache}/nim-compiler" \
       -o:"${stage}/nim/bin/nim" compiler/nim.nim); then
     check_target_elf "${stage}/nim/bin/nim" || true
@@ -404,18 +616,58 @@ fi
 # ---------------------------------------------------------------------------
 # Assemble the prefix and the archive.
 # ---------------------------------------------------------------------------
+# No builder path may survive into an installed image (see the header).
+# Checked on every ELF in the prefix, as a set, after everything is built. A
+# PATH, not the words: `/nix/store/` and `/home/` occur as code literals (the
+# store relocation logic, the DSL runtime's shell globs, Nim's own `~`
+# expansion), so the needles are a concrete store path (its 32-character
+# hash) and a concrete home directory (its user name), plus this checkout and
+# this user's home spelled out.
+builder_path_hits=()
+check_builder_paths() {
+  local elf="$1" n
+  for needle in '/nix/store/[0-9a-df-np-sv-z]{32}-' '/home/[A-Za-z0-9._-]+/'; do
+    n="$(LC_ALL=C grep -a -c -E -- "${needle}" "${elf}" || true)"
+    [ "${n}" = 0 ] || builder_path_hits+=("${elf#"${stage}"/}: ${n} line(s) carry a path matching ${needle}")
+  done
+  for needle in "${repo_root}" "${HOME:-/nonexistent}"; do
+    n="$(LC_ALL=C grep -a -c -F -- "${needle}" "${elf}" || true)"
+    [ "${n}" = 0 ] || builder_path_hits+=("${elf#"${stage}"/}: ${n} line(s) carry ${needle}")
+  done
+}
+while IFS= read -r -d '' elf; do
+  if [ "$(head -c 4 "${elf}" 2>/dev/null)" != $'\x7fELF' ]; then
+    continue
+  fi
+  check_builder_paths "${elf}"
+done < <(find "${stage}/bin" "${stage}/lib" "${stage}/nim/bin" -type f -print0 2>/dev/null)
+if [ "${#builder_path_hits[@]}" -gt 0 ]; then
+  echo "build_linux_cross: FAILED: installed images carry builder paths:" >&2
+  printf '  - %s\n' "${builder_path_hits[@]}" >&2
+  echo "  (grep -a the file for the path to see which literal; a stack-trace" >&2
+  echo "  literal means the build was not in release mode with canonical file" >&2
+  echo "  names; a source path means a compile ran outside ${src_root})" >&2
+  exit 1
+fi
+
 bash scripts/release/stage_release_sources.sh "${stage}"
 version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' reprobuild.nimble)"
 pkg_name="reprobuild-${version}-linux-${archive_arch}"
 {
+  echo "# written by scripts/cross/build_linux_cross.sh"
   echo "source_revision=${source_revision:-unknown}"
+  echo "build_root=${build_root}"
   echo "triple=${triple}"
   echo "arch_flags=${arch_flags}"
-  echo "build_mode=${REPROBUILD_BUILD_MODE:-debug}"
-  cat "${sysroot}/.sysroot-info"
+  echo "build_mode=${build_mode}"
+  echo "c_compiler=${clang_version} (${clang_bin})"
+  echo "nim_fork=flake:nim-fork-src@$(locked_rev_of nim-fork-src)"
+  for rec in "${source_records[@]}"; do echo "source ${rec}"; done
+  grep -v '^#' "${sysroot}/.sysroot-info"
 } > "${stage}/share/repro/cross-build-info"
 rm -rf "${out}/prefix"
 mv "${stage}" "${out}/prefix"
+rm -rf "${build_root}/stage"
 rm -f "${out}/${pkg_name}.tar.gz"
 tar -C "${out}" --transform "s|^prefix|${pkg_name}|" -czf "${out}/${pkg_name}.tar.gz" prefix
 elapsed=$(( $(date +%s) - started_at ))
@@ -426,27 +678,54 @@ echo "build_linux_cross: source revision ${source_revision:-unknown}"
 # Optional: install on the host the sysroot came from.
 # ---------------------------------------------------------------------------
 if [ "${install}" = 1 ]; then
-  if [ "${fetch_requested}" != 1 ]; then
-    echo "build_linux_cross: --install needs --fetch-sysroot-from (the host to install on)" >&2
-    exit 64
-  fi
   remote_cmd=(ssh)
   [ -n "${ssh_program}" ] && remote_cmd=("${ssh_program}")
   [ -n "${fetch_from}" ] && remote_cmd+=("${fetch_from}")
-  # Unpacked beside the live prefix and swapped in by rename, so a running
-  # `repro` never sees a half-written tree and a failed unpack leaves the
-  # previous install in place.
+  # The new tree is unpacked beside the live prefix and EXCHANGED with it in
+  # one renameat2(RENAME_EXCHANGE) (Linux 3.15+, glibc 2.28+; python3 reaches
+  # it through ctypes, and a Debian-family target has python3), so there is no
+  # instant without a prefix. The previous tree is kept as `.old` until the
+  # installed `repro` and `reprobuild` both answer `--version`; if either does
+  # not, the exchange is undone and the previous install is back, byte for
+  # byte. Without python3 the swap is two renames (a window of a few
+  # milliseconds with no prefix), with the same roll-back.
   "${remote_cmd[@]}" "set -e
-    sudo rm -rf '${install_prefix}.new' '${install_prefix}.old'
-    sudo mkdir -p '${install_prefix}.new'
-    sudo tar -C '${install_prefix}.new' --strip-components=1 --no-same-owner -xzf -
-    if [ -e '${install_prefix}' ]; then sudo mv '${install_prefix}' '${install_prefix}.old'; fi
-    sudo mv '${install_prefix}.new' '${install_prefix}'
-    sudo rm -rf '${install_prefix}.old'
+    P='${install_prefix}'
+    sudo rm -rf \"\$P.new\" \"\$P.old\"
+    sudo mkdir -p \"\$P.new\"
+    sudo tar -C \"\$P.new\" --strip-components=1 --no-same-owner -xzf -
+    swap() {
+      if command -v python3 >/dev/null 2>&1; then
+        sudo python3 -c 'import ctypes, ctypes.util, os, sys
+libc = ctypes.CDLL(ctypes.util.find_library(\"c\"), use_errno=True)
+AT_FDCWD, RENAME_EXCHANGE = -100, 2
+if libc.renameat2(AT_FDCWD, sys.argv[1].encode(), AT_FDCWD, sys.argv[2].encode(), RENAME_EXCHANGE) != 0:
+    sys.exit(\"renameat2: \" + os.strerror(ctypes.get_errno()))' \"\$1\" \"\$2\"
+      else
+        sudo mv \"\$1\" \"\$1.swap\"
+        sudo mv \"\$2\" \"\$1\"
+        sudo mv \"\$1.swap\" \"\$2\"
+      fi
+    }
+    if [ -e \"\$P\" ]; then
+      swap \"\$P\" \"\$P.new\"          # P is now the new tree, P.new the old one
+      sudo mv \"\$P.new\" \"\$P.old\"
+    else
+      sudo mv \"\$P.new\" \"\$P\"
+    fi
     sudo mkdir -p '${bin_links}'
     for name in repro reprobuild nim; do
-      sudo ln -sfn '${install_prefix}'/bin/\$name '${bin_links}'/\$name
+      sudo ln -sfn \"\$P\"/bin/\$name '${bin_links}'/\$name
     done
-    '${bin_links}'/repro --version" < "${out}/${pkg_name}.tar.gz"
+    if '${bin_links}'/repro --version && '${bin_links}'/reprobuild --version; then
+      sudo rm -rf \"\$P.old\"
+    else
+      echo 'installed images do not run; restoring the previous install' >&2
+      if [ -e \"\$P.old\" ]; then
+        swap \"\$P\" \"\$P.old\"
+        sudo rm -rf \"\$P.old\"
+      fi
+      exit 1
+    fi" < "${out}/${pkg_name}.tar.gz"
   echo "build_linux_cross: installed at ${install_prefix} on the target"
 fi

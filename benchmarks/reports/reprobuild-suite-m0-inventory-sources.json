@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2443,
+    "nimTestBinaries": 2444,
     "pureUnitConsolidationGroups": 71,
     "pureUnitTests": 692,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2483
+    "testEntries": 2484
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1431,7 +1431,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1355,
+      "integration": 1356,
       "platform/destructive": 151,
       "pure unit": 692,
       "unclassified": 267
@@ -1642,9 +1642,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2443,
+    "nimTestBinaryCount": 2444,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2483
+    "testEntryCount": 2484
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10777,6 +10777,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_deploy_agent_keygen_cli",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_deploy_agent_keygen_cli.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_develop_override_records_the_identity_it_replaced",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -12625,7 +12643,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_recipient_keygen.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
