@@ -35,9 +35,10 @@
 ## (``e2e_addon_bootstrap_uninstall_byte_identity``), with a negative
 ## control built with ``-d:reproAddonMutation=uninstall-skips-diversion-removal``.
 
-import std/[algorithm, os, sets, strutils]
+import std/[algorithm, os, posix, sets, strutils]
 
 import ./addon_apply
+import ./etc_write
 import ./generation0
 import ./host_exec
 import ./ledger
@@ -108,6 +109,44 @@ proc remainingLedger*(l: Ledger; r: UninstallResult): Ledger =
     let gone = entryKey(e) in r.undone or
                (e.class == lcDir and not dirExists(e.path))
     if not gone: result.entries.add(e)
+
+proc priorModeOwner(value: string): tuple[mode: int; uid, gid: int] =
+  ## The mode and owner a fingerprint value records (``d 0755 0:0``,
+  ## ``dir 0755 0:0``, ``f 0400 0:0 sha256:…``).
+  let f = value.splitWhitespace()
+  if f.len < 3:
+    raise newException(ValueError, "no mode and owner in '" & value & "'")
+  let (uid, gid) = parseOwner(f[2])
+  (parseOctInt(f[1]), uid, gid)
+
+proc restorePreBootstrapInputs(roots: seq[LedgerEntry];
+                               files: seq[tuple[e: LedgerEntry; bytes: string]];
+                               keepStore: bool; r: var UninstallResult) =
+  ## Put the pre-bootstrap inputs back as the preflight found them: the
+  ## directories first (parents before children, with their prior mode and
+  ## owner), then the kept files from the captured bytes. Below a kept
+  ## store nothing is re-created: it is still there.
+  for e in roots:
+    if keepStore and (e.path == ReproRoot or e.path.startsWith(ReproRoot & "/")):
+      continue
+    try:
+      let (mode, uid, gid) = priorModeOwner(e.replaced)
+      if not dirExists(e.path):
+        createDir(e.path)
+      if posix.chmod(e.path.cstring, Mode(mode)) != 0:
+        raiseOSError(osLastError(), "chmod " & e.path)
+      if posix.chown(e.path.cstring, Uid(uid), Gid(gid)) != 0:
+        raiseOSError(osLastError(), "chown " & e.path)
+      r.removed.add(e.path & " (put back as found)")
+    except CatchableError as ex:
+      r.errors.add(e.path & ": " & ex.msg)
+  for (e, bytes) in files:
+    try:
+      let (mode, uid, gid) = priorModeOwner(e.replaced)
+      writeFileNoFollow(e.path, bytes, mode, uid, gid)
+      r.removed.add(e.path & " (put back as found)")
+    except CatchableError as ex:
+      r.errors.add(e.path & ": " & ex.msg)
 
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -212,8 +251,27 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         " are kept: the uninstall is incomplete (see the drift and errors " &
         "above); fix or accept them and run uninstall again")
       return
+  # Pre-bootstrap inputs the add-on took over go back exactly as found
+  # (spec §6.1, §6.4): their bytes are captured now, before the roots they
+  # live under are removed, and written back after.
+  var keptFiles: seq[tuple[e: LedgerEntry; bytes: string]]
+  var keptRoots: seq[LedgerEntry]
+  for e in l.entries:
+    if not e.isPreBootstrapInput: continue
+    case e.class
+    of lcRoot, lcDir: keptRoots.add(e)
+    of lcEtcFile, lcKey:
+      let d = observeDrift(e)
+      if d.len > 0:
+        if not d.startsWith("missing"):
+          result.drift.add(e.path & ": " & d)
+        continue
+      keptFiles.add((e, if e.preserved.len > 0 and fileExists(e.preserved):
+                            readFile(e.preserved) else: readFile(e.path)))
+    else: discard
   for k in byClass[lcKey]:
-    removeOwned(k, result)
+    if not k.isPreBootstrapInput:
+      removeOwned(k, result)
   if dirExists(StoreRoot) and isMountPoint(StoreRoot):
     result.errors.add(StoreRoot & " is still mounted; the store is kept")
   elif not opts.keepStore:
@@ -229,3 +287,4 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.removed.add(root)
       except OSError as ex:
         result.errors.add(root & ": " & ex.msg)
+  restorePreBootstrapInputs(keptRoots, keptFiles, opts.keepStore, result)

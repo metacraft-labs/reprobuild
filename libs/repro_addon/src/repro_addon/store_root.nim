@@ -105,6 +105,35 @@ proc createRootDir*(path: string; mode: int; asSubvolume = false): string =
   if posix.chown(path.cstring, 0, 0) != 0:
     raiseOSError(osLastError(), "chown " & path)
 
+proc rootKindHint*(path: string): string =
+  ## The kind word the fingerprint's ``addon-roots`` component uses for an
+  ## existing directory: ``dir``, ``btrfs-dir`` (a plain directory on a
+  ## btrfs filesystem) or ``btrfs-subvolume``. A taken-over root's ledger
+  ## entry must carry this word, not ``createRootDir``'s, for the ledger's
+  ## expectation to equal what the fingerprint records.
+  if isBtrfs(path):
+    if isBtrfsSubvolume(path): "btrfs-subvolume" else: "btrfs-dir"
+  else: "dir"
+
+proc takeOverRootDir*(path: string; mode = -1): string =
+  ## Take over a directory that already exists as one of the add-on's
+  ## pre-bootstrap inputs (spec §6.1): it must be a real directory, never
+  ## a link; it becomes root's, and gets exactly ``mode`` when one is given
+  ## (the modes of §5.3; -1 keeps the mode it has). Returns the ledger
+  ## kind hint. The preflight accepted the directory by shape; this is the
+  ## write that the acknowledged plan authorises.
+  var st: Stat
+  if lstat(path.cstring, st) != 0:
+    raise newException(StoreRootError, path & " does not exist; the " &
+      "preflight saw it")
+  if S_ISLNK(st.st_mode) or not S_ISDIR(st.st_mode):
+    raise newException(StoreRootError, path & " is not a directory")
+  if posix.chown(path.cstring, 0, 0) != 0:
+    raiseOSError(osLastError(), "chown " & path)
+  if mode >= 0 and posix.chmod(path.cstring, Mode(mode)) != 0:
+    raiseOSError(osLastError(), "chmod " & path)
+  rootKindHint(path)
+
 proc selfcheckBtrfsSubvolume*(mountPoint: string): string =
   ## Exercise the subvolume leg of ``createRootDir`` on a btrfs filesystem
   ## mounted at ``mountPoint`` (a loop-backed one in a test guest): create

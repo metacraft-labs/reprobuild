@@ -23,7 +23,8 @@
 ##
 ## Every path here must be absent before bootstrap (the preflight checks
 ## it), which is what makes "bootstrap changes nothing pre-existing" a
-## property of this list rather than a hope.
+## property of this list rather than a hope. The pre-bootstrap inputs the
+## preflight takes over (spec §6.1) are never on this list.
 ##
 ## The text this module renders is the canonical system-profile text
 ## ``repro infra apply`` parses (``repro_infra/profile.parseSystemProfile``).

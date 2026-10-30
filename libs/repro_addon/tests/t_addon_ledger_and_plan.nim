@@ -55,6 +55,24 @@ suite "ledger expectations":
     check "+ mounts\t/repro/store\t*" in lines
     check "~ addon-roots\t/repro\tdir 0755 0:0" in lines
 
+  test "a taken-over root expects no change when its value is unchanged":
+    # A pre-bootstrap input (spec §6.1) carries the value it had before;
+    # the bootstrap delta is then exact: nothing for an unchanged root,
+    # a change for one whose mode bootstrap set.
+    var l = Ledger(generation: "g0", entries: @[
+      LedgerEntry(class: lcRoot, path: "/repro", mode: "0755", owner: "0:0",
+                  kindHint: "dir", replaced: "dir 0755 0:0", collision: "adopt"),
+      LedgerEntry(class: lcRoot, path: "/var/lib/repro", mode: "0755",
+                  owner: "0:0", kindHint: "dir", replaced: "dir 0700 0:0",
+                  collision: "adopt"),
+      LedgerEntry(class: lcRoot, path: "/etc/repro", mode: "0755",
+                  owner: "0:0", kindHint: "dir", replaced: "d 0755 0:0",
+                  collision: "adopt")])
+    check l.entries[0].isPreBootstrapInput
+    var lines: seq[string]
+    for e in expectedDelta(Ledger(), l): lines.add(renderExpectation(e))
+    check lines == @["~ addon-roots\t/var/lib/repro\tdir 0755 0:0"]
+
   test "uninstall back to nothing reverses each record":
     let d = expectedDelta(sampleLedger(), Ledger())
     var lines: seq[string]

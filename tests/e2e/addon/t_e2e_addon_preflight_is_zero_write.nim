@@ -143,12 +143,21 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          if newer.stdout.strip().len == 0: "(nothing newer than the marker)"
          else: newer.stdout & newer.stderr)
 
-    # 3a. A foreign /etc/repro.
-    discard g.run("mkdir /etc/repro")
+    # 3a. A foreign occupant of /etc/repro: a file the pre-bootstrap list of
+    # spec §6.1 does not name is refused BY NAME, while the bare directory
+    # alone is a pre-bootstrap input the plan takes over (unit-tested in
+    # t_addon_preflight_pre_bootstrap_inputs; the live preflight must agree).
+    discard g.run("mkdir /etc/repro && echo x > /etc/repro/foreign.conf")
     let foreign = g.exec(repro & " system addon preflight")
-    step("refuses a foreign /etc/repro",
-         foreign.exitCode == 2 and "fail foreign-occupants" in foreign.stdout,
+    step("refuses a foreign file under /etc/repro, naming it",
+         foreign.exitCode == 2 and "fail foreign-occupants" in foreign.stdout and
+         "/etc/repro/foreign.conf" in foreign.stdout,
          foreign.stdout)
+    discard g.run("rm /etc/repro/foreign.conf")
+    let bare = g.exec(repro & " system addon preflight")
+    step("an empty /etc/repro is a pre-bootstrap input, taken over",
+         bare.exitCode == 0 and "taken over" in bare.stdout and
+         "/etc/repro" in bare.stdout, bare.stdout)
     discard g.run("rmdir /etc/repro")
 
     # 3b. An unsupported VERSION_ID.

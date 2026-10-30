@@ -52,6 +52,22 @@ type
     cacheUrl*: string              ## "" => no binary cache
     binaryPath*: string            ## "" => /proc/self/exe
 
+  PreBootstrapInputs* = object
+    ## Reprobuild's own pre-bootstrap inputs the preflight found on the
+    ## host and bootstrap takes over (spec §6.1): a host stood up with the
+    ## deploy agent before the add-on bootstraps it already carries them,
+    ## and they are not foreign occupants.
+    roots*: seq[string]       ## existing directories, parents before children
+    keptFiles*: seq[string]   ## files bootstrap leaves byte for byte as found
+    signersFile*: string      ## PreBootstrapSignersPath when kept, else ""
+    signersKeys*: seq[string] ## its keys, canonical (parseAnchorKeys)
+    recipientKey*: string     ## RecipientKeyPath when kept, else ""
+    tmpfilesFragment*: string ## PreBootstrapTmpfilesPath when kept, else ""
+
+  OccupancyReport* = object
+    inputs*: PreBootstrapInputs
+    refused*: seq[string]     ## ``<path>: <why>``, sorted; empty => pass
+
   PreflightReport* = object
     checks*: seq[PreflightCheck]
     compatible*: bool
@@ -61,6 +77,7 @@ type
     gen0*: seq[OwnObject]
     gen0Inputs*: Gen0Inputs
     rootFsType*: string
+    preBootstrap*: PreBootstrapInputs
 
   OsRelease* = Table[string, string]
 
@@ -88,6 +105,23 @@ const
   MinimumFreeBytes* = 512'u64 * 1024 * 1024
 
   AddonOwnedRoots* = [ReproRoot, "/etc/repro", "/var/lib/repro", "/run/repro"]
+
+  AgentDir* = "/var/lib/repro/agent"
+  RecipientKeyPath* = AgentDir & "/recipient.key"
+  RecipientPubPath* = AgentDir & "/recipient.pub"
+  AgentStateDir* = AgentDir & "/state"
+    ## The deploy agent's ``--state-dir`` on an add-on host; its sequence
+    ## floor lives in ``deploy-agent/`` below it.
+  AgentStateRecordsDir* = AgentStateDir & "/deploy-agent"
+  AgentStateRecordSuffixes* = [".seq", ".last-tick.json", ".tick-history.jsonl"]
+    ## The per-target files the deploy agent keeps there: the monotonic
+    ## sequence floor (``agent.nim``), the last tick and the tick history.
+  PreBootstrapSignersPath* = "/etc/repro/deploy-manifest-allowed-signers"
+    ## The allowed-signers file a pre-bootstrap deploy agent reads.
+  PreBootstrapTmpfilesPath* = "/etc/tmpfiles.d/repro-addon-bootstrap.conf"
+    ## The tmpfiles fragment a pre-bootstrap stand-up installs so that
+    ## ``/run/repro/secrets`` (a tmpfs, §5.3) exists at every boot.
+  SecretsRunDir* = "/run/repro/secrets"
 
   UnitSearchDirs* = ["/etc/systemd/system", "/run/systemd/system",
                      "/run/systemd/transient", "/run/systemd/generator",
@@ -218,6 +252,186 @@ proc anchorText(path: string): string =
   if path.len == 0: "" else: readFile(path)
 
 # ---------------------------------------------------------------------------
+# Pre-bootstrap inputs versus foreign occupants (spec §6.1).
+# ---------------------------------------------------------------------------
+
+proc inodeKind(path: string): string =
+  ## ``dir``, ``file``, ``symlink``, ``other`` or "" when absent. ``lstat``:
+  ## a link is reported as one, never followed.
+  var st: Stat
+  if lstat(path.cstring, st) != 0:
+    return ""
+  if S_ISLNK(st.st_mode): "symlink"
+  elif S_ISDIR(st.st_mode): "dir"
+  elif S_ISREG(st.st_mode): "file"
+  else: "other"
+
+proc sortedEntries(dir: string): seq[string] =
+  for kind, p in walkDir(dir, relative = true, checkDir = false):
+    result.add(p)
+  result.sort()
+
+proc tmpfilesRulePaths*(text: string): seq[string] =
+  ## The path field of every rule in a tmpfiles.d(5) fragment (comments
+  ## and blank lines skipped; a rule with no path field yields "").
+  for raw in text.splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line[0] == '#': continue
+    let f = line.splitWhitespace()
+    result.add(if f.len >= 2: f[1] else: "")
+
+proc inspectOccupancy*(hostRoot: string; deploySigners: seq[string];
+                       deploySignersGiven: bool): OccupancyReport =
+  ## Classify what exists at the add-on's own roots into the pre-bootstrap
+  ## inputs bootstrap takes over and the foreign occupants it refuses,
+  ## by the closed list of spec §6.1. Reads only; ``hostRoot`` ("" or "/"
+  ## for the live host) is prepended to every path so the classification
+  ## can be exercised against a fixture tree.
+  ##
+  ## ``deploySigners`` are the ``--deploy-signers`` anchors when
+  ## ``deploySignersGiven``; a kept signers file must then hold the same
+  ## key set, so generation 0's anchors are a re-rendering of it.
+  var inputs: PreBootstrapInputs
+  var refused: seq[string]
+  let prefix = if hostRoot.len == 0 or hostRoot == "/": "" else: hostRoot
+  proc hp(p: string): string = prefix & p
+  proc refuse(p, why: string) = refused.add(p & ": " & why)
+
+  # A directory on the list: accepted when it is a real directory whose
+  # entries are all on its own allowed list (``anyEntry``: the caller
+  # judges the entries itself). Returns true when the caller may look
+  # inside it.
+  proc acceptDir(p: string; allowed: openArray[string];
+                 anyEntry = false): bool =
+    case inodeKind(hp(p))
+    of "": false
+    of "dir":
+      inputs.roots.add(p)
+      if not anyEntry:
+        for name in sortedEntries(hp(p)):
+          if name notin allowed:
+            refuse(p & "/" & name, "not a pre-bootstrap input (only " &
+                   allowed.join(", ") & " may exist under " & p & ")")
+      true
+    of "symlink":
+      refuse(p, "a symbolic link")
+      false
+    else:
+      refuse(p, "not a directory")
+      false
+
+  # A directory on the list that must hold nothing: ``what`` says what an
+  # entry in it would be.
+  proc acceptEmptyDir(p, what: string) =
+    if acceptDir(p, [], anyEntry = true):
+      let es = sortedEntries(hp(p))
+      if es.len > 0:
+        refuse(p, "not empty (" & what & "): " & es.join(", "))
+
+  proc acceptFile(p: string): bool =
+    case inodeKind(hp(p))
+    of "": false
+    of "file": true
+    of "symlink":
+      refuse(p, "a symbolic link")
+      false
+    else:
+      refuse(p, "not a regular file")
+      false
+
+  # /repro: only the empty store root.
+  if acceptDir(ReproRoot, ["store"]):
+    acceptEmptyDir(StoreRoot, "a store in use")
+
+  # /etc/repro: only the pre-bootstrap signers file.
+  if acceptDir("/etc/repro", ["deploy-manifest-allowed-signers"]) and
+      acceptFile(PreBootstrapSignersPath):
+    var keys: seq[string]
+    var err = ""
+    try:
+      keys = parseAnchorKeys(readFile(hp(PreBootstrapSignersPath)),
+                             PreBootstrapSignersPath)
+    except CatchableError as e:
+      err = e.msg
+    if err.len > 0:
+      refuse(PreBootstrapSignersPath, "not a deploy-signer anchor file (" &
+             err & ")")
+    elif deploySignersGiven and keys != deploySigners:
+      refuse(PreBootstrapSignersPath, "its " & $keys.len & " signer key(s) " &
+             "are not the --deploy-signers anchors (" & $deploySigners.len &
+             " key(s)); generation 0 can only re-render the same set")
+    else:
+      inputs.signersFile = PreBootstrapSignersPath
+      inputs.signersKeys = keys
+      inputs.keptFiles.add(PreBootstrapSignersPath)
+
+  # /var/lib/repro: an empty system state directory (no generation of an
+  # earlier install) and the deploy agent's directory with its key and
+  # sequence floor.
+  if acceptDir("/var/lib/repro", ["system", "agent"]):
+    acceptEmptyDir("/var/lib/repro/system",
+                   "generations or state of an earlier install")
+    if acceptDir(AgentDir, ["recipient.key", "recipient.pub", "state"]):
+      if acceptFile(RecipientKeyPath):
+        inputs.recipientKey = RecipientKeyPath
+        inputs.keptFiles.add(RecipientKeyPath)
+      if acceptFile(RecipientPubPath):
+        inputs.keptFiles.add(RecipientPubPath)
+      if acceptDir(AgentStateDir, ["deploy-agent"]) and
+          acceptDir(AgentStateRecordsDir, [], anyEntry = true):
+        for name in sortedEntries(hp(AgentStateRecordsDir)):
+          let p = AgentStateRecordsDir & "/" & name
+          var known = false
+          for suf in AgentStateRecordSuffixes:
+            if name.endsWith(suf): known = true
+          if not known:
+            refuse(p, "not a deploy-agent record (" &
+                   AgentStateRecordSuffixes.join(", ") & ")")
+          elif acceptFile(p):
+            inputs.keptFiles.add(p)
+
+  # /run/repro: only the empty materialised-secrets directory.
+  if acceptDir("/run/repro", ["secrets"]):
+    acceptEmptyDir(SecretsRunDir, "materialised secrets")
+
+  # The tmpfiles fragment that recreates /run/repro/secrets at boot.
+  if acceptFile(PreBootstrapTmpfilesPath):
+    var foreign: seq[string]
+    for p in tmpfilesRulePaths(readFile(hp(PreBootstrapTmpfilesPath))):
+      if p notin ["/run/repro", SecretsRunDir]: foreign.add(p)
+    if foreign.len > 0:
+      refuse(PreBootstrapTmpfilesPath, "rules a path other than /run/repro " &
+             "or " & SecretsRunDir & ": " & foreign.join(", "))
+    else:
+      inputs.tmpfilesFragment = PreBootstrapTmpfilesPath
+      inputs.keptFiles.add(PreBootstrapTmpfilesPath)
+
+  # Any repro-* unit anywhere in the load path: an earlier install's or a
+  # pre-bootstrap stand-up's agent units, which bootstrap neither adopts
+  # nor overwrites.
+  for d in UnitSearchDirs:
+    if inodeKind(hp(d)) != "dir": continue
+    for name in sortedEntries(hp(d)):
+      if name.startsWith("repro-"):
+        refuse(d & "/" & name, "a repro-* unit; the add-on's units must be " &
+               "absent before bootstrap")
+
+  refused.sort()
+  result = OccupancyReport(inputs: inputs, refused: refused)
+
+proc renderPreBootstrap*(inputs: PreBootstrapInputs): string =
+  ## One line naming what bootstrap will take over, for the check detail.
+  var parts: seq[string]
+  if inputs.roots.len > 0:
+    parts.add($inputs.roots.len & " existing director" &
+              (if inputs.roots.len == 1: "y" else: "ies") & " (" &
+              inputs.roots.join(", ") & ")")
+  if inputs.keptFiles.len > 0:
+    parts.add($inputs.keptFiles.len & " kept file(s) (" &
+              inputs.keptFiles.join(", ") & ")")
+  if parts.len == 0: "" else: parts.join("; ")
+
+# ---------------------------------------------------------------------------
 # The preflight.
 # ---------------------------------------------------------------------------
 
@@ -287,6 +501,32 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
           (if booted: "" else: ", /run/systemd/system is absent") &
           "; the add-on needs systemd as PID 1")
 
+  # Trust anchors: the deploy-manifest signers, and the binary cache with
+  # the only publisher keys trusted for it. Parsed before the occupancy
+  # pass, which compares a kept signers file against them.
+  var signers, publishers: seq[string]
+  var anchorsError = ""
+  try:
+    signers = parseAnchorKeys(anchorText(inp.deploySignersPath),
+                              "--deploy-signers")
+    publishers = parseAnchorKeys(anchorText(inp.cachePublishersPath),
+                                 "--cache-publishers")
+    discard renderCachesConf(inp.cacheUrl, publishers)
+  except CatchableError as e:
+    anchorsError = e.msg
+
+  # What already exists at the add-on's own roots: pre-bootstrap inputs
+  # bootstrap takes over, or foreign occupants (spec §6.1).
+  let occupancy = inspectOccupancy("", signers, inp.deploySignersPath.len > 0)
+  result.preBootstrap = occupancy.inputs
+  var signersSource = ""
+  if inp.deploySignersPath.len == 0 and anchorsError.len == 0 and
+      occupancy.inputs.signersFile.len > 0:
+    # No --deploy-signers: the host's own signers file is the anchor set,
+    # re-rendered into generation 0's anchors.
+    signers = occupancy.inputs.signersKeys
+    signersSource = " (from " & occupancy.inputs.signersFile & ")"
+
   # The root filesystem and /repro.
   var fsType = ""
   var free = 0'u64
@@ -300,8 +540,12 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   let fstabRo = "ro" in fstabRootOptions(
     if fileExists("/etc/fstab"): readFile("/etc/fstab") else: "").split(',')
   let rootWritable = fsType notin ReadOnlyRootTypes and not fstabRo
+  let reproExists = ReproRoot in occupancy.inputs.roots
   result.add("repro-root", rootWritable,
-    if rootWritable: "/repro can be created on the " & fsType & " root" &
+    if rootWritable and reproExists:
+      "the existing " & ReproRoot & " (a pre-bootstrap input) is taken over " &
+      "on the " & fsType & " root"
+    elif rootWritable: "/repro can be created on the " & fsType & " root" &
                      (if fsType == "btrfs": " (as a subvolume)" else: "")
     else: "the root filesystem is read-only by design (" & fsType &
           (if fstabRo: ", fstab mounts / ro" else: "") &
@@ -310,30 +554,19 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     if free >= MinimumFreeBytes: "at least 512 MiB free on /"
     else: "less than 512 MiB free on /")
 
-  # Foreign occupants of the add-on's own roots.
-  var occupied: seq[string]
-  for r in AddonOwnedRoots:
-    if pathPresent(r): occupied.add(r)
-  result.add("foreign-occupants", occupied.len == 0,
-    if occupied.len == 0: "none of " & AddonOwnedRoots.join(", ") & " exists"
-    else: "already present: " & occupied.join(", ") &
-          " (the add-on is installed, or something else owns these paths)")
+  # Foreign occupants of the add-on's own roots, as distinct from the
+  # pre-bootstrap inputs bootstrap takes over.
+  let takenOver = renderPreBootstrap(occupancy.inputs)
+  result.add("foreign-occupants", occupancy.refused.len == 0,
+    if occupancy.refused.len > 0:
+      "refused: " & occupancy.refused.join("; ") &
+      " (the add-on is installed, or something else owns these paths)"
+    elif takenOver.len == 0: "none of " & AddonOwnedRoots.join(", ") & " exists"
+    else: "pre-bootstrap inputs taken over: " & takenOver)
 
-  # Trust anchors: the deploy-manifest signers, and the binary cache with
-  # the only publisher keys trusted for it.
-  var signers, publishers: seq[string]
-  var anchorsError = ""
-  try:
-    signers = parseAnchorKeys(anchorText(inp.deploySignersPath),
-                              "--deploy-signers")
-    publishers = parseAnchorKeys(anchorText(inp.cachePublishersPath),
-                                 "--cache-publishers")
-    discard renderCachesConf(inp.cacheUrl, publishers)
-  except CatchableError as e:
-    anchorsError = e.msg
   result.add("trust-anchors", anchorsError.len == 0,
     if anchorsError.len > 0: anchorsError
-    else: $signers.len & " deploy signer(s); " &
+    else: $signers.len & " deploy signer(s)" & signersSource & "; " &
           (if inp.cacheUrl.len == 0: "no binary cache"
            else: "cache " & inp.cacheUrl & " trusting " & $publishers.len &
                  " publisher key(s)"))
@@ -403,6 +636,10 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     "generation0": {
       "objects": objects,
       "profileSha256": sha256Hex(gen0Text),
+    },
+    "preBootstrap": {
+      "roots": %result.preBootstrap.roots,
+      "keptFiles": %result.preBootstrap.keptFiles,
     },
   }
   result.planJson = canonical(plan)
