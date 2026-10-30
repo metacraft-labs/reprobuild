@@ -15,7 +15,7 @@
 #
 # Review the diff. A row that DECREASES or DISAPPEARS is a test leaving
 # the suite; that is the event this baseline exists to make visible.
-apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	9
+apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	12
 libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim	nim	24
@@ -277,7 +277,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim	nim	
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	29
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	32
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4

@@ -98,7 +98,7 @@ proc tarBytes(entries: seq[TarFixtureEntry]): string =
     h[100 ..< 108] = octal(e.mode, 8)
     h[108 ..< 116] = octal(0, 8)
     h[116 ..< 124] = octal(0, 8)
-    let size = if e.typeflag == '0': e.content.len else: 0
+    let size = if e.typeflag in {'0', 'x'}: e.content.len else: 0
     h[124 ..< 136] = octal(size, 12)
     h[136 ..< 148] = octal(0, 12)
     h[156] = e.typeflag
@@ -391,16 +391,26 @@ WantedBy=multi-user.target
         Unit.replace("ProtectSystem=strict", "TemporaryFileSystem=/usr"),
         Unit.replace("ProtectSystem=strict",
           "TemporaryFileSystem=/var:ro /usr/lib:ro"),
-        Unit.replace("ProtectSystem=strict", "InaccessiblePaths=-/usr/bin")]:
+        Unit.replace("ProtectSystem=strict", "InaccessiblePaths=-/usr/bin"),
+        # systemd joins a trailing backslash with the next line, so each of
+        # these is the directive above it in disguise: an empty reset, a
+        # bind shadowing the closure, a tmpfs over /usr.
+        Unit.replace("ProtectSystem=strict", "BindReadOnlyPaths=\\\n"),
+        Unit.replace("ProtectSystem=strict",
+          "BindReadOnlyPaths=\\\n/opt/other:/usr"),
+        Unit.replace("ProtectSystem=strict",
+          "TemporaryFileSystem=\\\n# a comment inside the continuation\n/usr")]:
       expect EAptClosureUnit:
         discard renderUnitWithAptClosure(bad, prefix)
+    check joinUnitContinuations("A=1 \\\n# c\n2\nB=\\\n") == @["A=1  2", "B= "]
     # The same resets after the rendered lines are what the broker refuses.
     let rendered = renderUnitWithAptClosure(Unit, prefix)
     for bad in [
         rendered & "BindReadOnlyPaths=\n",
         rendered & "TemporaryFileSystem=/usr\n",
         rendered.replace("InaccessiblePaths=-/etc/ld.so.preload\n", ""),
-        rendered & "BindReadOnlyPaths=" & prefix & "/usr:/usr\n"]:
+        rendered & "BindReadOnlyPaths=" & prefix & "/usr:/usr\n",
+        rendered & "BindReadOnlyPaths=\\\n\n"]:
       expect EAptClosureUnit:
         checkUnitForAptClosure(bad, prefix, rendered = true)
     # Unrelated binds and tmpfs mounts are fine, before and after rendering.
@@ -594,6 +604,53 @@ suite "Add-On apt closure: the unpacker's policy (spec §8.3 item 4)":
     refused(scratch("chardev"), @[tarEntry("./usr/lib/null", '3', 0o666)])
     refused(scratch("fifo"), @[tarEntry("./usr/lib/pipe", '6', 0o644)])
 
+  test "a duplicate entry is refused, also through a hard link":
+    # dpkg refuses a second entry at a name it already extracted; an
+    # unpacker that overwrote would let a later entry replace an earlier
+    # one and, through a hard link, every other name of that file.
+    refused(scratch("dupfile"), @[
+      tarEntry("./usr/lib/a", '0', 0o644, "one"),
+      tarEntry("./usr/lib/a", '0', 0o644, "two")])
+    refused(scratch("duphard"), @[
+      tarEntry("./usr/lib/a", '0', 0o644, "one"),
+      tarEntry("./usr/lib/b", '1', linkName = "./usr/lib/a"),
+      tarEntry("./usr/lib/b", '0', 0o644, "two")])
+
+  test "a NUL inside a pax path or linkpath is refused":
+    proc pax(records: string): TarFixtureEntry =
+      var payload = ""
+      for r in records.split('\n'):
+        if r.len == 0: continue
+        # <len> <key>=<value>\n, where <len> counts itself.
+        var n = r.len + 3
+        if n >= 10: inc n
+        if n >= 100: inc n
+        payload.add($n & " " & r & "\n")
+      tarEntry("./PaxHeader", 'x', 0o644, payload)
+    refused(scratch("paxnul"), @[
+      pax("path=./usr/lib/x\0/../../outside/evil"),
+      tarEntry("./ignored", '0', 0o644, "x")])
+    refused(scratch("paxlinknul"), @[
+      pax("linkpath=./usr/lib/a\0junk"),
+      tarEntry("./usr/lib/l", '2', 0o777, linkName = "placeholder")])
+    # Positive control: a well-formed pax path is honoured.
+    let root = scratch("paxok")
+    let (prefix, _) = realiseLocal(root, @[FixtureDeb(name: "ok",
+      entries: @[tarEntry("./", '5', 0o755), tarEntry("./usr/", '5', 0o755),
+        tarEntry("./usr/lib/", '5', 0o755),
+        pax("path=./usr/lib/renamed-by-pax"),
+        tarEntry("./usr/lib/original", '0', 0o644, "p")])])
+    check readFile(prefix / "usr/lib/renamed-by-pax") == "p"
+    check not fileExists(prefix / "usr/lib/original")
+
+  test "the scratch prefix is owner-only until it is published":
+    let root = scratch("tmpmode")
+    createDir(root / "prefixes" / "x")
+    let tmp = tempSibling(root / "prefixes" / "x" / "final", "t")
+    check modeOf(tmp) == 0o700
+    publishPrefix(tmp, root / "prefixes" / "x" / "final")
+    check modeOf(root / "prefixes" / "x" / "final") == 0o755
+
   test "a hard link to a file in the archive is a hard link in the prefix":
     let root = scratch("hardok")
     let (prefix, _) = realiseLocal(root, @[FixtureDeb(name: "ok",
@@ -690,6 +747,9 @@ proc serveCanned(port: int) {.thread.} =
       status = "302 Found"
       extra = "Location: /ok\r\n"
     of "/ok": body = "hello"
+    of "/err":
+      status = "404 Not Found"
+      body = "E".repeat(200_000)
     of "/quit": running = false
     else: status = "404 Not Found"
     let length = if declared >= 0: declared else: body.len
@@ -740,6 +800,14 @@ suite "Add-On apt closure: bounded download (spec §8.3 item 2)":
     # A redirect is followed, and the production fetcher caps at the size.
     check downloadBounded(base & "/redir", root / "e", maxBytes = 100) == 5
     check readFile(root / "e") == "hello"
+    # An error response with a large body is not drained past 64 KiB: the
+    # refusal names the cap, not the 404 that reading it all would give.
+    var errMsg = ""
+    try:
+      discard downloadBounded(base & "/err", root / "err", maxBytes = 1 shl 20)
+    except IOError as ex:
+      errMsg = ex.msg
+    check "exceeds 65536" in errMsg
     httpDebFetcher()(base & "/ok", root / "f", 5)
     check readFile(root / "f") == "hello"
     expect IOError:

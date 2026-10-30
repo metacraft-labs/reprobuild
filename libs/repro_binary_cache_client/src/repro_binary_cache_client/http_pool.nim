@@ -479,12 +479,22 @@ proc streamGet*(pool: HttpPool; url: string;
         reusable = false
     else:
       # Drain error body into a throwaway buffer so the connection stays
-      # in a known state. Cap at 64 KiB so a misbehaving server can't
-      # blow our memory.
+      # in a known state. The buffer keeps at most 64 KiB, and the read
+      # itself stops at 64 KiB too: a server that answers an error with an
+      # endless body would otherwise keep this call busy until the socket
+      # timed out, so past the cap the drain raises and the connection is
+      # dropped rather than reused.
+      const ErrorBodyCap = 65536
       var sink = newSeq[byte](0)
+      var drained = 0
       let drainCb: StreamChunkCallback = proc(chunk: openArray[byte]) =
-        if sink.len < 65536:
-          let want = min(chunk.len, 65536 - sink.len)
+        drained += chunk.len
+        if drained > ErrorBodyCap:
+          raise newException(HttpError, "error response body exceeds " &
+            $ErrorBodyCap & " bytes for " & url & " (HTTP " &
+            $resp.statusCode & ")")
+        if sink.len < ErrorBodyCap:
+          let want = min(chunk.len, ErrorBodyCap - sink.len)
           for i in 0 ..< want:
             sink.add(chunk[i])
       if resp.chunked:
@@ -492,6 +502,10 @@ proc streamGet*(pool: HttpPool; url: string;
                              pool.receiveTimeoutMs)
         reusable = not connHdr.contains("close")
       elif resp.contentLength >= 0:
+        if resp.contentLength > ErrorBodyCap:
+          raise newException(HttpError, "error response body of " &
+            $resp.contentLength & " bytes exceeds " & $ErrorBodyCap &
+            " for " & url & " (HTTP " & $resp.statusCode & ")")
         discard drainContentLength(
           conn.sock, resp.contentLength, reuseBuffer, drainCb,
           pool.receiveTimeoutMs)
