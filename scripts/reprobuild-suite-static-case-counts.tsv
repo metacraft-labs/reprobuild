@@ -372,6 +372,7 @@ libs/repro_home_apply/tests/t_builtin_adapter_launcher_emit_composer.nim	nim	4
 libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_pre_install_runner.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_zip_extraction_cost.nim	nim	3
+libs/repro_home_apply/tests/t_catalog_projection_accepts_linked_stdlib_definition.nim	nim	1
 libs/repro_home_apply/tests/t_home_gc.nim	nim	7
 libs/repro_home_apply/tests/t_home_profile_lock.nim	nim	10
 libs/repro_home_apply/tests/t_homebrew_bridge_records.nim	nim	7
@@ -564,6 +565,7 @@ libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	138
 libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2
 libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim	7
 libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
+libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
 libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	5
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
@@ -1026,10 +1028,13 @@ tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
 tests/bundles/bundle_repro_solver_pure_unit.nim	nim	82
+tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	1
+tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_uninstall_byte_identity.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
+tests/e2e/addon/t_system_profile_host_selection.nim	nim	1
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
 tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim	nim	3
 tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim	nim	7

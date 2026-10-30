@@ -130,6 +130,11 @@ proc newFixture(label: string): Fixture =
   result.baseEnv = @[("REPROBUILD_ACTION_CACHE_ROOT",
                       result.sb.root / "action-cache")]
   result.baseEnv.add result.sb.fixturePackageEnv(["gm10-ident-base"])
+  # The registry declares hosts without `system:`; since ReproOS add-on mode
+  # a distribution base would refuse them (EAddOnModeMismatch), so the base
+  # is pinned to ReproOS, whatever machine runs the gate.
+  result.baseEnv.add ("REPRO_OS_RELEASE_PATH", ProjectRoot / "tests" /
+    "fixtures" / "os-release" / "reproos")
 
 proc hostnameEnv(mixedCase: string): seq[(string, string)] =
   ## The OS hostname as the platform's rule reads it first. On POSIX a

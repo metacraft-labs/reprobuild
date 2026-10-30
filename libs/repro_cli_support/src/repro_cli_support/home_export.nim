@@ -45,14 +45,15 @@ import repro_home_resources/concerns
 from repro_project_dsl/reprobuild_packages_catalog import
   reachableReprobuildPackagesRoots, ReprobuildPackagesRootEnv
 from repro_profile/types import ProfileIntent
-from repro_profile/host_system import systemManagementFor
+from repro_profile/host_system import systemManagementFor, managedElsewhere,
+  DefaultSystemActivity
 from repro_profile/emit import emitProfileIntentJson, parseProfileIntentJson
 
 const
   HomeExportFormat* = "repro.home.export"
     ## Value of the document's `format` field. Identifies the document kind
     ## so a consumer handed some other JSON file fails loudly.
-  HomeExportSchemaVersion* = 4
+  HomeExportSchemaVersion* = 5
     ## Value of the document's `schemaVersion` field. Version 2 (GM3): the
     ## intent's resources and config overrides carry a `guard`, and the
     ## `platforms` map says which platforms the document describes. A
@@ -71,6 +72,15 @@ const
     ## deciding whether to take over a host) would take over every host an
     ## older export describes. A new version makes such a reader refuse the
     ## old document instead.
+    ## Version 5 (ReproOS add-on mode): `intent.systemManagedElsewhere`
+    ## becomes `intent.hostSystems` (host -> `{mode, managedBy, activities}`,
+    ## `mode` one of `managedElsewhere` / `addOn`), and `evaluation.system`
+    ## gains `mode` (`full` / `addOn` / `managedElsewhere`) and `activities`
+    ## (the system activities the host enables). An add-on host is managed
+    ## "here", so a version-4 reader -- which knows only "here" and
+    ## "elsewhere" -- would read it as a host whose whole system it may
+    ## switch (`nixos-rebuild` on a Debian host). A new version makes such a
+    ## reader refuse the document instead.
     ## GM11 adds `intent.stowScopes` (the stow packages an activity's
     ## `stow:` block claims, present only when some activity has one)
     ## WITHOUT a new version: no export reader materializes the stow tree
@@ -717,15 +727,27 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
     "packages": packages,
     "resources": resources,
     "configOverrides": overrides}
-  # GM10: who manages the host's system scope, from the registry entry
-  # (`systemManagementFor`); always present, so a reader never mistakes an
-  # absent key for "managed here".
+  # GM10 + add-on mode: who manages the host's system scope and how, from
+  # the registry entry (`systemManagementFor`); always present, so a reader
+  # never mistakes an absent key for "managed here". `managed` keeps the
+  # schema-4 meaning (is it this configuration's?); `mode` says how
+  # (`full`, `addOn`, `managedElsewhere`) and is what a system switch must
+  # branch on; `activities` is the system-activity selection
+  # (`enabledSystemActivities`, `default` first, then the entry's order),
+  # empty for a host managed elsewhere.
   let management = systemManagementFor(intent, selectedHost)
+  var systemActivities = newJArray()
+  if not management.managedElsewhere:
+    systemActivities.add %DefaultSystemActivity
+    for a in management.systemActivities:
+      systemActivities.add %a
   result["system"] = %*{
     "managed": (if management.managedElsewhere: "elsewhere" else: "here"),
     "managedBy": (if management.managedElsewhere and
                      management.managedBy.len > 0: %management.managedBy
-                  else: newJNull())}
+                  else: newJNull()),
+    "mode": $management.mode,
+    "activities": systemActivities}
   # GM7: the concerns the host's entry declares Reprobuild applies, by the
   # planner's rule; absent when it declares none (every concern).
   let applied = appliedConcernsFor(profile, selectedHost)

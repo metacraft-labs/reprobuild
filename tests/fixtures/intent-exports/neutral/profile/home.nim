@@ -47,11 +47,23 @@ profile "gm5Neutral":
 
   hosts:
     # GM10: m1's system scope is managed elsewhere; the export carries
-    # it (`intent.systemManagedElsewhere`, `evaluation.system`).
+    # it (`intent.hostSystems`, `evaluation.system`).
     "m1":
       activities: [desktop, laptop]
       system: managedElsewhere("example-org/infra")
     "home-pc": [desktop, cli]
+    # ReproOS add-on mode: rpi's system belongs to its distribution and
+    # Reprobuild manages the system profile's `default` activity on top of
+    # it; validator's block form selects two more system activities (they
+    # name the SYSTEM profile's activities, not this profile's).
+    "rpi":
+      activities: [cli]
+      system: addOn
+    "validator":
+      activities: [cli]
+      system:
+        mode: addOn
+        activities: [web, backup]
 
   resources:
     when linux():

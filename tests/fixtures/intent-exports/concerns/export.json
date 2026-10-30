@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "selection": {
     "host": "m1",
     "hostDeclared": true,
@@ -275,8 +275,8 @@
   },
   "provenance": {
     "repro": {
-      "version": "0.2.6",
-      "sourceRevision": "c0a2b186e658a931beaf96fe78287c344c7202fd-dirty"
+      "version": "0.2.18",
+      "sourceRevision": "116298c031670446fa6689901729e83cfe98b3c8-dirty"
     },
     "hostSource": "env",
     "profile": {

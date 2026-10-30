@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2434,
+    "nimTestBinaries": 2439,
     "pureUnitConsolidationGroups": 69,
     "pureUnitTests": 689,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2474
+    "testEntries": 2479
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1398,10 +1398,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1353,
-      "platform/destructive": 148,
+      "integration": 1355,
+      "platform/destructive": 150,
       "pure unit": 689,
-      "unclassified": 266
+      "unclassified": 267
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1609,9 +1609,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2434,
+    "nimTestBinaryCount": 2439,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2474
+    "testEntryCount": 2479
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14495,6 +14495,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_catalog_projection_accepts_linked_stdlib_definition",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_apply/tests/t_catalog_projection_accepts_linked_stdlib_definition.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_home_gc",
       "class": "unclassified",
       "classificationReason": "spawns a subprocess",
@@ -17987,6 +18005,25 @@
       "source": "libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_debian_realisation_profile_is_exhaustive",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26342,6 +26379,40 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_mode_mismatch_is_refused",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_registry_mode_round_trip",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/addon/t_addon_registry_mode_round_trip.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_addon_bootstrap_changes_nothing_preexisting",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26407,6 +26478,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_system_profile_host_selection",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/addon/t_system_profile_host_selection.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -16,6 +16,7 @@ import std/[algorithm, json, options, strutils, tables]
 from std/os import paramCount, paramStr
 
 import ./types
+import ./host_system
 
 # ---------------------------------------------------------------------
 # Encode.
@@ -146,9 +147,14 @@ proc encodeResource(r: ResourceIntent): string =
     ",\"activity\":" &
     (if r.activity.len == 0: "null" else: encodeStr(r.activity)) & "}"
 
-proc encodeSystemManagedElsewhere(t: Table[string, string]): string =
-  ## `{"<host>": {"managedBy": "<pointer>" | null}, ...}`, hosts sorted so
-  ## the bytes are stable.
+proc encodeStringArray(items: seq[string]): string
+
+proc encodeHostSystems(t: Table[string, HostSystemDecl]): string =
+  ## `{"<host>": {"mode": "managedElsewhere" | "addOn", "managedBy":
+  ## "<pointer>" | null, "activities": [...]}, ...}`, hosts sorted so the
+  ## bytes are stable. Every key is always present (`managedBy` null and
+  ## `activities` empty where the mode has none), so a consumer never reads
+  ## an absent key as a value.
   var keys: seq[string] = @[]
   for k in t.keys:
     keys.add k
@@ -158,9 +164,10 @@ proc encodeSystemManagedElsewhere(t: Table[string, string]): string =
     if i > 0:
       result.add ","
     result.add encodeStr(k)
-    result.add ":{\"managedBy\":"
-    result.add(if t[k].len > 0: encodeStr(t[k]) else: "null")
-    result.add "}"
+    let d = t[k]
+    result.add ":{\"mode\":" & encodeStr($d.mode) & ",\"managedBy\":"
+    result.add(if d.managedBy.len > 0: encodeStr(d.managedBy) else: "null")
+    result.add ",\"activities\":" & encodeStringArray(d.activities) & "}"
   result.add "}"
 
 proc encodeHosts(h: Table[string, seq[string]]): string =
@@ -296,13 +303,12 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
   if p.hostApplies.len > 0:
     result.add ",\"hostApplies\":" & encodeHosts(p.hostApplies)
-  # GM10: the hosts whose system scope is managed elsewhere, only when some
-  # host says so, so the key set of a profile without the attribute is
-  # unchanged. Each value is an object so the attribute can grow without a
-  # change of shape; `managedBy` is null when the entry names no manager.
-  if p.systemManagedElsewhere.len > 0:
-    result.add ",\"systemManagedElsewhere\":" &
-      encodeSystemManagedElsewhere(p.systemManagedElsewhere)
+  # GM10 + add-on mode: the hosts whose `hosts:` entry has a `system:` key,
+  # only when some host has one, so the key set of a profile without the
+  # attribute is unchanged. Each value is an object carrying `mode`,
+  # `managedBy` and `activities` (`encodeHostSystems`).
+  if p.hostSystems.len > 0:
+    result.add ",\"hostSystems\":" & encodeHostSystems(p.hostSystems)
   # GM11: the activities' stow claims, only when some activity has a
   # `stow:` block, so the key set of a profile without one is unchanged.
   # In declaration order; `guard` always emitted (null: none), as for
@@ -321,6 +327,48 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
 # ---------------------------------------------------------------------
 # Decode (for tests + future tooling).
 # ---------------------------------------------------------------------
+
+proc decodeHostSystemsJson*(node: JsonNode): Table[string, HostSystemDecl] =
+  ## The `hostSystems` object `encodeHostSystems` writes (also the export's
+  ## `intent.hostSystems`), strictly: every entry must carry `mode`
+  ## (`managedElsewhere` / `addOn`), `managedBy` (string or null) and
+  ## `activities` (array of strings), and must be a value the `profile`
+  ## macro could have produced (`hostSystemDeclProblem`). Anything else
+  ## raises `ValueError` naming the host -- a malformed entry is never read
+  ## as "managed here".
+  if node.kind != JObject:
+    raise newException(ValueError, "hostSystems must be an object " &
+      "(host -> {mode, managedBy, activities})")
+  for host, v in node:
+    let shapeError = "hostSystems." & host & " must be an object with " &
+      "`mode` (\"managedElsewhere\" or \"addOn\"), `managedBy` (a string " &
+      "or null) and `activities` (an array of strings)"
+    if v.kind != JObject or not v.hasKey("mode") or
+        v["mode"].kind != JString or not v.hasKey("managedBy") or
+        v["managedBy"].kind notin {JString, JNull} or
+        not v.hasKey("activities") or v["activities"].kind != JArray:
+      raise newException(ValueError, shapeError)
+    var decl: HostSystemDecl
+    case v["mode"].getStr()
+    of $hsmManagedElsewhere: decl.mode = hsmManagedElsewhere
+    of $hsmAddOn: decl.mode = hsmAddOn
+    else:
+      raise newException(ValueError, "hostSystems." & host &
+        ": unknown mode `" & v["mode"].getStr() & "`")
+    if v["managedBy"].kind == JString:
+      decl.managedBy = v["managedBy"].getStr()
+      if decl.managedBy.len == 0:
+        raise newException(ValueError, "hostSystems." & host &
+          ": `managedBy` is an empty string; an entry that names no " &
+          "manager says null")
+    for it in v["activities"]:
+      if it.kind != JString:
+        raise newException(ValueError, shapeError)
+      decl.activities.add it.getStr()
+    let problem = hostSystemDeclProblem(decl)
+    if problem.len > 0:
+      raise newException(ValueError, "hostSystems." & host & ": " & problem)
+    result[host] = decl
 
 proc parseFieldValue(n: JsonNode): FieldValue =
   let kind = n["kind"].getStr()
@@ -471,20 +519,10 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
       for it in v:
         concerns.add it.getStr()
       result.hostApplies[k] = concerns
-  # GM10: optional; absent when no host's system is managed elsewhere. A
-  # malformed entry is refused, never read as "managed here".
-  if root.hasKey("systemManagedElsewhere"):
-    let sme = root["systemManagedElsewhere"]
-    if sme.kind != JObject:
-      raise newException(ValueError,
-        "systemManagedElsewhere must be an object (host -> {managedBy})")
-    for host, v in sme:
-      if v.kind != JObject or not v.hasKey("managedBy") or
-          v["managedBy"].kind notin {JString, JNull}:
-        raise newException(ValueError, "systemManagedElsewhere." & host &
-          " must be an object with `managedBy` (a string or null)")
-      result.systemManagedElsewhere[host] =
-        if v["managedBy"].kind == JString: v["managedBy"].getStr() else: ""
+  # GM10 + add-on mode: optional; absent when no host entry has a `system:`
+  # key. A malformed entry is refused, never read as "managed here".
+  if root.hasKey("hostSystems"):
+    result.hostSystems = decodeHostSystemsJson(root["hostSystems"])
   # GM11: optional; absent when no activity claims a stow package. A
   # malformed claim is refused, never dropped (dropping it would put the
   # package on every host).
