@@ -12665,7 +12665,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -271,7 +271,7 @@ libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	n
 libs/repro_deploy_agent/tests/t_deploy_agent_records_the_resolved_host.nim	nim	3
 libs/repro_deploy_agent/tests/t_deploy_agent_secret_files_are_private_and_never_follow_links.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
-libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim	nim	1
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	6
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim	nim	5
