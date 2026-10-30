@@ -224,7 +224,7 @@ suite "no-project-set refusals name the remedy":
       writeFile(empty / "repro-workspace.toml", MinimalSettings)
       commitAll(gitBin, empty, "settings file")
       check not fileExists(empty / ".repro" / "workspace-state.toml")
-      check not fileExists(empty / ".repro" / "workspace-state.toml")
+      check not fileExists(empty / ".repro" / "workspace.toml")
 
       for verb in verbs:
         checkRefusalTeachesRemedy(verb.label & "(empty)",
@@ -248,7 +248,7 @@ suite "no-project-set refusals name the remedy":
       commitAll(gitBin, workspace, "membership")
       createDir(workspace / ".repro")
       check not fileExists(workspace / ".repro" / "workspace-state.toml")
-      check not fileExists(workspace / ".repro" / "workspace-state.toml")
+      check not fileExists(workspace / ".repro" / "workspace.toml")
 
       for verb in verbs:
         checkRefusalTeachesRemedy(verb.label & "(workspace)",
@@ -284,8 +284,7 @@ suite "no-project-set refusals name the remedy":
       if enabled.code != 0:
         checkpoint("workspace enable output: " & enabled.output)
       check enabled.code == 0
-      check fileExists(workspace / ".repro" / "workspace-state.toml") or
-        fileExists(workspace / ".repro" / "workspace-state.toml")
+      check fileExists(workspace / ".repro" / "workspace-state.toml")
       let listed = runRepro(reproBin, workspace, ["workspace", "list"])
       if listed.code != 0:
         checkpoint("workspace list after enable: " & listed.output)

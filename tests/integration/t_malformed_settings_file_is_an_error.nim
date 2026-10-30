@@ -309,7 +309,7 @@ suite "a malformed settings file is an error":
         "--no-sync", "--workspace-root=" & freshRoot]),
         freshRoot / "repro-workspace.toml", "manifest[0].bogus")
       check not fileExists(stateFile(freshRoot))
-      check not fileExists(freshRoot / ".repro" / "workspace-state.toml")
+      check not fileExists(freshRoot / ".repro" / "workspace.toml")
 
       # Leg 3 — a TOML syntax error in the shared file.
       let syntaxRoot = recordedRoot("syntax")

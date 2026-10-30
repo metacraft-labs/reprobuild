@@ -27,6 +27,12 @@
 ## * `from_mainlines_flag` — `repro branch <path> --from-mainlines`: an
 ##   unsupported flag (exit 1, like every unknown flag) naming `--from=mainline`.
 ##
+## A further case runs the pre-push gate from a member repository of a root
+## whose only marker is its state file under the retired name (the layered
+## shape: `[[manifest]]` layers in that file, no `projects/`). The gate must
+## refuse naming the file and `repro health --fix`, not stand down as "not a
+## workspace" and let the push through ungated.
+##
 ## Each case is also checked to leave the workspace untouched, and a positive
 ## control runs the same command on the current spelling of the same content,
 ## so a refusal cannot pass because the fixture itself is broken.
@@ -234,3 +240,45 @@ suite "retired branch-role spellings are unknown":
         let good = repro(okArgv)
         checkpoint("current spelling exit=" & $good.code & "\n" & good.output)
         check good.code == 0
+
+  test "t_retired_branch_role_spellings_are_unknown: pre-push gate in an unmigrated layered root":
+    # The hazard the retired names still marking a root guards against: a
+    # workspace whose only marker is its state file under the retired name
+    # — the layered shape, with `[[manifest]]` layers in that file and no
+    # `projects/` at the root — must not look like "no workspace" to the
+    # pre-push gate, which would then stand down and let the push through
+    # ungated. Run from a member repository, as the managed hook runs it.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      checkpoint("git is required on PATH")
+      fail()
+    let scratch = createTempDir("repro-retired-gate-", "")
+    defer: removeDir(scratch)
+    let root = scratch / "ws"
+    createDir(root / ".repro")
+    writeFile(root / ".repro" / "workspace.toml",
+      "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      "[workspace]\nproject = \"demo\"\n\n" &
+      "[[manifest]]\nlocal_path = \"../layer\"\nvisibility = \"public\"\n")
+    let member = root / "app"
+    createDir(member)
+    for args in [@["init", "-q"],
+                 @["-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                   "commit", "-q", "--allow-empty", "-m", "init"]]:
+      let r = runShell(shellCommand(@[gitBin, "-C", member] & args))
+      checkpoint("git " & args.join(" ") & ": " & r.output)
+      require r.code == 0
+    let before = snapshot(root / ".repro")
+    let gate = runShell(shellCommand(
+      @[reproBinary(), "check", "--mode=pre-push"],
+      [("REPRO_WORKSPACE_CONFIG", ""), ("REPRO_DEFAULT_PROJECTS", "")]),
+      cwd = member)
+    checkpoint("pre-push gate exit=" & $gate.code & "\n" & gate.output)
+    # PRIMARY: refused, naming the retired file and the remedy — never the
+    # "not a workspace; nothing to enforce" no-op.
+    check gate.code != 0
+    check "not a workspace" notin gate.output
+    check (root / ".repro" / "workspace.toml") in gate.output or
+      (expandFilename(root) / ".repro" / "workspace.toml") in gate.output
+    check "repro health --fix" in gate.output
+    check snapshot(root / ".repro") == before

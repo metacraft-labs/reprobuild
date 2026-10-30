@@ -236,7 +236,7 @@ suite "workspace sets resolve — the closure of a requested set, as data":
     check conflict["message"].getStr.contains("'gamma'")
     # `resolve` does not read the active-set record, so the diagnostic must
     # not attribute the conflict to it (the `[<file>] at key ...` prefix that
-    # `enable`'s refusal carries names `.repro/workspace.toml`).
+    # `enable`'s refusal carries names `.repro/workspace-state.toml`).
     check not conflict["message"].getStr.contains("workspace-state.toml")
     check treeSnapshot(fx.workspaceRoot) == before
 

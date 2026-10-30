@@ -298,7 +298,7 @@ suite "workspace resolution names the manifest data it found":
       createDir(workspace / ".repro")
       check dirExists(workspace / ".repro")
       check not fileExists(workspace / ".repro" / "workspace-state.toml") and
-        not fileExists(workspace / ".repro" / "workspace-state.toml")
+        not fileExists(workspace / ".repro" / "workspace.toml")
       check fileExists(workspace / "projects" / "app.toml")
 
       checkOriginalDiagnostic("workspace sync(workspace)",

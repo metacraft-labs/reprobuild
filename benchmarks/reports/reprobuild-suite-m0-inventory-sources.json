@@ -42675,7 +42675,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_retired_branch_role_spellings_are_unknown.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

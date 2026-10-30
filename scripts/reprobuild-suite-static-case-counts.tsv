@@ -1940,7 +1940,7 @@ tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_reproos_uki_through_the_cvm_path.nim	nim	8
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
 tests/integration/t_reseal_on_generation_switch.nim	nim	4
-tests/integration/t_retired_branch_role_spellings_are_unknown.nim	nim	1
+tests/integration/t_retired_branch_role_spellings_are_unknown.nim	nim	2
 tests/integration/t_role_validation_refused_through_repro.nim	nim	1
 tests/integration/t_roles_resolve_from_settings_committed_at_the_revision.nim	nim	1
 tests/integration/t_rp1_provider_compile_edge_materializes.nim	nim	1
