@@ -42,7 +42,7 @@ export packages_schema
 
 const CatalogTarballModules* = [
     "addlicense", "alire", "appimage_runtime", "appimagetool", "autoconf",
-    "automake", "bash", "bun", "cabal", "capnp", "cargo", "cargo_nextest",
+    "automake", "bash", "binutils", "bun", "cabal", "capnp", "cargo", "cargo_nextest",
     "cargo_sort", "chocolatey", "circom", "clang", "claude_code", "clingo",
     "clippy", "cmake", "composer", "coreutils_install", "crystal", "curl",
     "dotnet_sdk", "electron_builder_nsis",

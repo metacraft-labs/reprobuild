@@ -166,6 +166,7 @@ libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim	nim	4
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
+libs/repro_cli_support/tests/t_addon_platform_dispatch.nim	nim	5
 libs/repro_cli_support/tests/t_audit_holds_at_the_gate_rate.nim	nim	3
 libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim	nim	6
 libs/repro_cli_support/tests/t_build_worker_holds_no_daemon_key.nim	nim	1
@@ -1784,7 +1785,7 @@ tests/integration/t_m21_point_in_time_queries.nim	nim	2
 tests/integration/t_m4_pure_unit_consolidation.nim	nim	3
 tests/integration/t_m9r21_4_hardware_e2e.nim	nim	3
 tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
-tests/integration/t_macho_runtime_audit.nim	nim	15
+tests/integration/t_macho_runtime_audit.nim	nim	18
 tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim	nim	3
 tests/integration/t_malformed_settings_file_is_an_error.nim	nim	1
 tests/integration/t_malformed_state_file_is_reported_accurately.nim	nim	1
@@ -2014,7 +2015,7 @@ tests/integration/t_runquota_long_temp_rendezvous.nim	nim	4
 tests/integration/t_s7_repro_build_restores_a_deleted_output.nim	nim	1
 tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim	nim	1
 tests/integration/t_sc_develop_mode_consumes_sibling_exe_and_lib_from_source.nim	nim	1
-tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim	nim	2
+tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim	nim	5
 tests/integration/t_sc_executable_producer_edge_spliced_and_on_path.nim	nim	1
 tests/integration/t_sc_library_producer_edge_spliced_through_aux_channels.nim	nim	1
 tests/integration/t_sc_lock_pinned_fetches_and_builds_sibling_from_source.nim	nim	1
@@ -2093,6 +2094,7 @@ tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	n
 tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim	nim	1
 tests/integration/t_tampered_uki_detected.nim	nim	5
 tests/integration/t_tampered_uki_fails_unseal.nim	nim	6
+tests/integration/t_tarball_compiler_archiver_views.nim	nim	3
 tests/integration/t_tarball_mode_builds_a_fall_through_source_recipe.nim	nim	1
 tests/integration/t_tarball_provisioning_cold_store_extractors.nim	nim	3
 tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
@@ -2471,6 +2473,7 @@ tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
 tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	21
+tests/unit/t_tree_sitter_generate.nim	nim	4
 tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	nim	6
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	16
@@ -2478,6 +2481,7 @@ tests/unit/t_vcs_lock_failure_excludes_protected_body.nim	nim	7
 tests/unit/t_vendor_manifest_evaluation_inputs.nim	nim	4
 tests/unit/t_version.nim	nim	2
 tests/unit/t_voice_model_packages.nim	nim	5
+tests/unit/t_windows_archiver_bundle_selection.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/t_workspace_settings_v1_decode.nim	nim	3

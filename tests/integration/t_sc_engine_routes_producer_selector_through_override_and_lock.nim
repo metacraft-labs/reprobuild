@@ -42,7 +42,7 @@
 ## Hermetic: the consumer workspace + the sibling checkout live in a fresh
 ## tempdir; nothing touches $HOME and no network / git is required.
 
-import std/[json, options, os, unittest]
+import std/[json, options, os, tempfiles, unittest]
 
 import repro_cli_support
 import repro_lock
@@ -101,6 +101,77 @@ proc writeLegacyOverride(workspaceRoot, siblingCheckout: string) =
   }) & "\n")
 
 suite "SC-1: engine routes producer selector through override + lock":
+
+  test "a consumer self row does not declare its same-named tool as a producer":
+    let scratch = createTempDir("sc1-self-row-", "")
+    defer: removeDir(scratch)
+    let workspace = scratch / "nim"
+    createDir(workspace)
+    writeFile(workspace / "repro.nim", "package nim:\n  discard\n")
+    var lock = LockedDependencies(
+      schema: SolvedGraphLockSchemaV3,
+      platform: currentPlatformId(), optimal: true,
+      inputsDigest: inputsDigestOf("sc1-self-fixture"))
+    lock.deps.add(LockedDep(
+      name: "nim", path: SelfLockedDepPath,
+      coordinates: Coordinates(kind: ckVcs, url: "https://vcs.invalid/nim.git",
+        gitRef: "main", revision: siblingRev),
+      integrity: siblingIntegrity, depends: @[producerName]))
+    lock.deps.add(LockedDep(
+      name: producerName, path: "../prod",
+      coordinates: Coordinates(kind: ckVcs, url: siblingUrl,
+        gitRef: "main", revision: siblingRev),
+      integrity: siblingIntegrity))
+    writeFile(committedLockPath(workspace), serializeLockedDependencies(lock))
+
+    let selfBinding = resolveProducerBinding("nim", workspace)
+    check selfBinding.kind == pbkNotProducer
+    check not selfBinding.declaresProducerEdge
+    let externalBinding = resolveProducerBinding(producerName, workspace)
+    check externalBinding.kind == pbkLockPinned
+    check externalBinding.lockedDep.coordinates.revision == siblingRev
+    check externalBinding.lockedDep.integrity == siblingIntegrity
+    check externalBinding.declaresProducerEdge
+
+  test "the consumer recipe is not an on-disk sibling of itself":
+    let scratch = createTempDir("sc1-own-recipe-", "")
+    defer: removeDir(scratch)
+    let workspace = scratch / "nim"
+    createDir(workspace)
+    writeFile(workspace / "repro.nim", "package nim:\n  discard\n")
+
+    let binding = resolveProducerBinding("nim", workspace)
+    check binding.kind == pbkNotProducer
+    check not binding.declaresProducerEdge
+
+  test "an explicit same-named override still wins over the consumer self row":
+    let scratch = createTempDir("sc1-self-override-", "")
+    defer: removeDir(scratch)
+    let workspace = scratch / "nim"
+    let checkout = scratch / "compiler-source"
+    createDir(workspace)
+    createDir(checkout)
+    writeFile(workspace / "repro.nim", "package nim:\n  discard\n")
+    writeFile(checkout / "repro.nim", "package nim:\n  discard\n")
+    let lock = LockedDependencies(
+      schema: SolvedGraphLockSchemaV3,
+      platform: currentPlatformId(), optimal: true,
+      inputsDigest: inputsDigestOf("sc1-self-override-fixture"),
+      deps: @[LockedDep(name: "nim", path: SelfLockedDepPath,
+        coordinates: Coordinates(kind: ckVcs, url: "https://vcs.invalid/nim.git",
+          gitRef: "main", revision: siblingRev), integrity: siblingIntegrity)])
+    writeFile(committedLockPath(workspace), serializeLockedDependencies(lock))
+    writeDevelopOverridesFile(workspace,
+      newDevelopOverrides().addOverride(DevelopOverrideEntry(
+        package: "nim", local_path: checkout, state: "editable",
+        created_at: "2026-07-01T00:00:00Z",
+        provenance: some("repro develop --only=nim"))))
+
+    let binding = resolveProducerBinding("nim", workspace)
+    check binding.kind == pbkDevelopOverride
+    check binding.localPathAbsolute == normalizedPath(checkout)
+    check binding.contentIdentity.len > 0
+    check binding.declaresProducerEdge
 
   test "legacy checkout override declares a producer edge":
     let scratch = getTempDir() / "sc1-legacy-" & $getCurrentProcessId()
@@ -175,13 +246,9 @@ suite "SC-1: engine routes producer selector through override + lock":
 
     # With neither an override nor a lock pin, a selector whose checkout is
     # present as an on-disk workspace sibling (``../prod/repro.nim`` — created
-    # above at ``siblingCheckout``) resolves as a develop-mode ON-DISK-SIBLING
-    # producer (``pbkOnDiskSibling``), NOT ``pbkNotProducer``: the same on-disk
-    # sibling ``discoverProducerSourceRoot`` already trusts for the SC-8
-    # compile-time typed-contract discovery is now honored at the build-time
-    # resolution seam, so a develop-mode consumer with sibling checkouts but no
-    # lock/override still materializes its producers (rather than falling through
-    # to PATH tool resolution and failing "not found in PATH").
+    # above at ``siblingCheckout``) resolves as ``pbkOnDiskSibling`` for typed
+    # schema discovery. Without a lock or override it declares no build edge
+    # and must not materialize a producer.
     writeLock(workspace, withProducerDep = false)
     let siblingProducer = resolveProducerBinding(producerName, workspace)
     check siblingProducer.kind == pbkOnDiskSibling
