@@ -45,6 +45,7 @@ import ./adapters/gcc_toolchain
 import ./adapters/clang_toolchain
 import ./adapters/native_cross_target
 import ./adapters/cross_aarch64_linux_gnu
+import ./adapters/cross_zig
 import ./adapters/solver_feature_set
 import ./configurables/variants
 
@@ -115,6 +116,12 @@ proc resolveCrossTarget(): CrossTarget =
   if isCrossTriple(selected.targetTriple):
     if isCrossAarch64Triple(selected.targetTriple):
       return crossAarch64LinuxGnuTarget()
+    # A triple zig knows (`adapters/cross_zig`'s table) is served by that
+    # adapter: a static-musl target with zig as its C toolchain and linker,
+    # which is what `cargo_package` and the target-parameterised C recipes
+    # read. The generic stub below is for triples no adapter claims.
+    if isZigCrossTriple(selected.targetTriple):
+      return crossZigTarget(selected.targetTriple)
     return crossTargetFromTriple(selected.targetTriple)
   nativeCrossTarget()
 
@@ -182,6 +189,21 @@ proc crossTarget*(ctx: BuildContext): CrossTarget =
   if crossTargetSlotIsStale(ctx.state):
     fillCrossTargetSlot(ctx.state)
   cast[CrossTarget](ctx.state.crossTargetSlot)
+
+proc activeCrossTarget*(): CrossTarget =
+  ## The `CrossTarget` governing the code being emitted now, with or
+  ## without an active `build:` block.
+  ##
+  ## Inside a build body this is `currentBuildContext().crossTarget`, so an
+  ## adapter that wrote the slot explicitly (`setCrossTarget`) is honoured.
+  ## Outside one -- a constructor driven by a test, or a recipe compiled for
+  ## interface extraction -- it is the variant-driven default, which is what
+  ## the slot would have been filled with. Constructors read THIS rather than
+  ## `currentBuildContext()` so they answer the same way in both settings
+  ## instead of raising in the second.
+  if tryCurrentBuildState() != nil:
+    return currentBuildContext().crossTarget
+  resolveCrossTarget()
 
 proc featureSet*(ctx: BuildContext): FeatureSet =
   if ctx.state.featureSetSlot == nil:

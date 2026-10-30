@@ -156,6 +156,7 @@ import repro_hcr_agent
 import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
+import repro_cli_support/cross_target_flag
 import repro_cli_support/dev_session
 from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
@@ -420,7 +421,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--target=TRIPLE] [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -29969,6 +29970,27 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       strategyGiven = true
     elif arg == "--print-solved-graph":
       printSolvedGraph = true
+    elif arg == "--target" or arg.startsWith("--target="):
+      # ReproOS-Add-On-Mode A15: ``--target=<triple>`` is ``--variant
+      # targetTriple=<triple>`` with the spelling canonicalised
+      # (``cross_target_flag``: a short ``armv7-linux`` names the catalog's
+      # appliance triple; ``native`` assigns nothing). It lands in the same
+      # ``REPRO_VARIANTS`` assignment the ``--variant`` arm below writes, so
+      # the provider hop, the lowered-graph cache key
+      # (``canonicalVariantAssignments``) and the stdlib's one variant read
+      # site all see one value.
+      let spelling = valueFromFlag(args, i, "--target")
+      let triple =
+        try: canonicalTargetTriple(spelling)
+        except ValueError as e:
+          stderr.writeLine("repro build: " & e.msg)
+          return 2
+      if triple.len > 0:
+        var existing = getEnv("REPRO_VARIANTS")
+        if existing.len > 0:
+          existing.add(',')
+        existing.add(TargetTripleVariantName & "=" & triple)
+        putEnv("REPRO_VARIANTS", existing)
     elif arg == "--variant" or arg.startsWith("--variant="):
       # Spec-Implementation M1 — ``--variant name=value`` registers a
       # ``prSet`` contribution against the named solver-participating

@@ -1785,6 +1785,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_cross_target_flag.nim",
+    binary: "build/test-bin/t_cross_target_flag",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
     binary: "build/test-bin/t_daemon_carried_environment",
     defines: @[],

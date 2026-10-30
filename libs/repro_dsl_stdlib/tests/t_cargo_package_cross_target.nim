@@ -21,6 +21,7 @@
 import std/[os, strutils, unittest]
 
 import repro_project_dsl
+import repro_dsl_stdlib/active_context
 import repro_dsl_stdlib/adapters/cross_zig
 import repro_dsl_stdlib/constructors/cargo_package
 import repro_dsl_stdlib/packages/cargo as cargo_module
@@ -183,3 +184,107 @@ suite "cargo_package: target, zig cross toolchain, workspace member":
     defer: clearCurrentOwningPackageOverride()
     expect ValueError:
       discard cargo_package(zigCross = true)
+
+# ---------------------------------------------------------------------------
+# A15: the target comes from the build, not the recipe.
+#
+# `repro build --target=<triple>` writes `targetTriple=<triple>` into
+# `REPRO_VARIANTS` (the same assignment `--variant` writes); the stdlib's one
+# variant read site falls back to it when no package declared the variant,
+# the active context's `crossTarget` slot is filled by the adapter that claims
+# the triple, and `cargo_package()` reads that. The env is what these cases
+# set, because it is what the flag sets.
+# ---------------------------------------------------------------------------
+
+proc withTargetEnv(triple: string; body: proc()) =
+  let saved = getEnv("REPRO_VARIANTS")
+  putEnv("REPRO_VARIANTS", "targetTriple=" & triple)
+  try:
+    body()
+  finally:
+    if saved.len > 0: putEnv("REPRO_VARIANTS", saved)
+    else: delEnv("REPRO_VARIANTS")
+
+suite "the active cross target selects the zig adapter":
+
+  test "a listed triple is answered by the zig adapter":
+    withTargetEnv(Triple, proc() =
+      let ct = activeCrossTarget()
+      check ct.name == "cross-zig-" & Triple
+      check ct.triple == Triple
+      check not ct.isNative
+      check isZigCrossTarget(ct)
+      check ct.cFlags == @["-target", "arm-linux-musleabihf",
+                           "-mcpu=generic+v7a+vfp3d16+thumb2"]
+      check ct.linkFlags == ct.cFlags
+      check ct.targetTriple() == Triple
+      check ct.hostPrefix() == "")
+
+  test "no target means the native adapter":
+    delEnv("REPRO_VARIANTS")
+    let ct = activeCrossTarget()
+    check ct.isNative
+    check not isZigCrossTarget(ct)
+    check ct.tripleOrEmpty() == ""
+
+  test "`native` spelled out is the native adapter too":
+    withTargetEnv("native", proc() =
+      check activeCrossTarget().isNative)
+
+  test "an unlisted triple is served by the generic stub, not by zig":
+    withTargetEnv("mips-unknown-linux-gnu", proc() =
+      let ct = activeCrossTarget()
+      check not ct.isNative
+      check ct.triple == "mips-unknown-linux-gnu"
+      check not isZigCrossTarget(ct))
+
+suite "cargo_package reads the active cross target":
+
+  test "with --target the recipe spells nothing and the edges are cross":
+    withTargetEnv(Triple, proc() =
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("probeSource")
+      defer: clearCurrentOwningPackageOverride()
+      let res = cargo_package()
+      check argvOf(res.compileEdge).containsPair("--target", Triple)
+      check argvOf(res.installEdge).containsPair("--target", Triple)
+      check res.compileEdge.envValue("CC_armv7_unknown_linux_musleabihf")
+        .endsWith("/cc")
+      check res.compileEdge.envValue(
+        "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS") ==
+          ZigCrossRustflags)
+    # The falsifier: the same call without the target is a native build.
+    # Without the env fallback in `toolchain_policy` both calls would be
+    # native and the case above would have been the one to fail.
+    delEnv("REPRO_VARIANTS")
+    resetBuildActionRegistry()
+    setCurrentOwningPackageOverride("probeSource")
+    defer: clearCurrentOwningPackageOverride()
+    let native = cargo_package()
+    check "--target" notin argvOf(native.compileEdge)
+    check native.compileEdge.envValue("CC_armv7_unknown_linux_musleabihf") == ""
+
+  test "an explicit target that agrees is accepted, one that differs is refused":
+    withTargetEnv(Triple, proc() =
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("probeSource")
+      defer: clearCurrentOwningPackageOverride()
+      let res = cargo_package(target = Triple)
+      check argvOf(res.compileEdge).containsPair("--target", Triple)
+      expect ValueError:
+        discard cargo_package(target = "aarch64-unknown-linux-musl")
+      try:
+        discard cargo_package(target = "aarch64-unknown-linux-musl")
+      except ValueError as e:
+        check Triple in e.msg
+        check "aarch64-unknown-linux-musl" in e.msg)
+
+  test "an unlisted active triple carries --target but no zig environment":
+    withTargetEnv("mips-unknown-linux-gnu", proc() =
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("probeSource")
+      defer: clearCurrentOwningPackageOverride()
+      let res = cargo_package()
+      check argvOf(res.compileEdge).containsPair("--target",
+        "mips-unknown-linux-gnu")
+      check res.compileEdge.envValue("CC_mips_unknown_linux_gnu") == "")

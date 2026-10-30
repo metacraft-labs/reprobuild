@@ -45,10 +45,27 @@
 ## entry is Debian's `armhf` baseline (ARMv7-A, VFPv3-D16, Thumb-2), which is
 ## what a Raspberry Pi 2 runs. An unlisted triple is refused by name at
 ## emission time; adding one is a row here and nothing else.
+##
+## ## The adapter
+##
+## The table is also what makes this module a `CrossTarget` adapter
+## (Reprobuild-Standard-Library §"`CrossTarget`"): `crossZigTarget(triple)`
+## returns the interface record for a listed triple, and the active build
+## context installs it when the solved `targetTriple` variant names one
+## (`active_context.resolveCrossTarget`). A recipe then never spells the
+## triple: `cargo_package()` reads `activeCrossTarget()` and, when it is this
+## adapter's, carries `--target` and the zig environment on its own, so
+## `repro build --target=armv7-unknown-linux-musleabihf <recipe>` is the
+## whole of a cross build's authoring. The `cFlags` of the record are zig's
+## driver arguments for the target, which is what a C-building recipe
+## (`packages/source/openssl`) hands its own configure script as `CC`.
 
 import std/[os, strutils, tables]
 
 import repro_project_dsl
+
+import ../interfaces/cross_target
+export cross_target
 
 type
   ZigCrossTarget* = object
@@ -56,19 +73,37 @@ type
     rustTriple*: string   ## cargo's `--target`
     zigTarget*: string    ## zig's `-target`
     mcpu*: string         ## zig's `-mcpu`, "" for the target's default
+    opensslTarget*: string
+      ## OpenSSL's `Configure` target for the family (`linux-armv4` is
+      ## upstream's one 32-bit ARM target: it covers ARMv4 through ARMv7,
+      ## selecting the instruction set from the compiler's flags).
+    nimCpu*: string       ## nim's `--cpu:` for the family
 
 const
   ZigCrossTargets* = [
     ZigCrossTarget(rustTriple: "armv7-unknown-linux-musleabihf",
                    zigTarget: "arm-linux-musleabihf",
-                   mcpu: "generic+v7a+vfp3d16+thumb2"),
+                   mcpu: "generic+v7a+vfp3d16+thumb2",
+                   opensslTarget: "linux-armv4",
+                   nimCpu: "arm"),
     ZigCrossTarget(rustTriple: "aarch64-unknown-linux-musl",
                    zigTarget: "aarch64-linux-musl",
-                   mcpu: ""),
+                   mcpu: "",
+                   opensslTarget: "linux-aarch64",
+                   nimCpu: "arm64"),
     ZigCrossTarget(rustTriple: "x86_64-unknown-linux-musl",
                    zigTarget: "x86_64-linux-musl",
-                   mcpu: ""),
+                   mcpu: "",
+                   opensslTarget: "linux-x86_64",
+                   nimCpu: "amd64"),
   ]
+
+  ZigCrossAdapterPrefix* = "cross-zig-"
+    ## `CrossTarget.name` of every record this adapter produces, followed
+    ## by the Rust triple. Consumers that must know WHICH adapter filled the
+    ## slot (cargo_package: "may I set the zig environment?") test the name
+    ## through `isZigCrossTarget`, never the triple alone -- another
+    ## adapter may answer for the same triple with another toolchain.
 
   ZigCrossScratchSubdir* = ".repro/build/cross"
     ## Where the wrappers land: `<projectRoot>/.repro/build/cross/<triple>/`,
@@ -104,10 +139,62 @@ proc ccTripleEnvKey*(rustTriple: string): string =
   ## form the `cc` crate's `CC_<triple>` takes.
   rustTriple.replace('-', '_')
 
-proc zigDriverArgs(t: ZigCrossTarget): string =
-  result = "-target " & t.zigTarget
+proc isZigCrossTriple*(triple: string): bool =
+  ## Whether the table has a row for `triple`. The predicate the active
+  ## build context consults before selecting this adapter.
+  for t in ZigCrossTargets:
+    if t.rustTriple == triple:
+      return true
+  false
+
+proc zigDriverArgSeq*(t: ZigCrossTarget): seq[string] =
+  ## zig's driver arguments for the target, one per element: what the
+  ## wrappers below append, and what `CrossTarget.cFlags` carries.
+  result = @["-target", t.zigTarget]
   if t.mcpu.len > 0:
-    result.add(" -mcpu=" & t.mcpu)
+    result.add("-mcpu=" & t.mcpu)
+
+proc zigDriverArgs(t: ZigCrossTarget): string =
+  zigDriverArgSeq(t).join(" ")
+
+proc zigCrossCc*(t: ZigCrossTarget): string =
+  ## `zig cc` with the target's driver arguments, as ONE string: the form
+  ## a configure script takes in `CC` (make expands `$(CC)` through the
+  ## shell, so the arguments ride along). The wrappers exist for cargo,
+  ## whose `CC_<triple>` must name a single program.
+  "zig cc " & zigDriverArgs(t)
+
+proc crossZigTarget*(rustTriple: string): CrossTarget =
+  ## The `CrossTarget` record for a listed triple. Refuses an unlisted one
+  ## the way `zigCrossTarget` does.
+  let t = zigCrossTarget(rustTriple)
+  let flags = zigDriverArgSeq(t)
+  proc tripleAccess(): string = t.rustTriple
+  proc hostPrefixAccess(): string =
+    # zig is one driver for every target: no `<triple>-gcc` naming.
+    ""
+  proc spliceAccess(buildPkgs, hostPkgs, targetPkgs: seq[string]):
+      SplicedPackageSet =
+    SplicedPackageSet(buildPkgs: buildPkgs, hostPkgs: hostPkgs,
+                      targetPkgs: targetPkgs)
+  newCrossTarget(
+    name = ZigCrossAdapterPrefix & t.rustTriple,
+    triple = t.rustTriple,
+    # zig carries its own musl and compiler-rt: there is no sysroot
+    # directory to point at.
+    sysroot = "",
+    isNative = false,
+    cFlags = flags,
+    linkFlags = flags,
+    binaryFormat = bfELF,
+    pageSize = 4096,
+    targetTriple = tripleAccess,
+    hostPrefix = hostPrefixAccess,
+    splice = spliceAccess)
+
+proc isZigCrossTarget*(ct: CrossTarget): bool =
+  ## Whether `ct` was produced by this adapter.
+  ct != nil and (not ct.isNative) and ct.name.startsWith(ZigCrossAdapterPrefix)
 
 proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
                             libDir: string): string =

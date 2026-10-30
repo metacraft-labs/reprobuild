@@ -39,7 +39,7 @@
 ## falls through to `lastSolverSolution()`, and every lookup answers exactly
 ## what it answered before. That is NLF-STAT-3's property at this layer.
 
-import std/[strutils, tables]
+import std/[os, strutils, tables]
 
 import repro_lock_files
 import repro_project_dsl
@@ -82,6 +82,29 @@ proc resetSolvedVariantRegistrations*() =
   ## not leak it into the next one.
   solvedGraphsByLockFile = initTable[string, Table[string, string]]()
 
+proc targetTripleFromEnv*(): string =
+  ## The `targetTriple` assignment in `REPRO_VARIANTS`, or "" when absent.
+  ##
+  ## `repro build --target=<triple>` writes `targetTriple=<triple>` there
+  ## (the same env the `--variant` flag writes). A recipe that never
+  ## declared the variant has no solver-assigned value for it, and the
+  ## solver assigns only what some package declared -- so without this
+  ## fallback a `--target` on the command line would reach no typed-tool
+  ## call at all. It is the contract `operations/buildtype.currentBuildType`
+  ## already gives `buildType` (`repro build --release` works for a recipe
+  ## that never declared the variant), applied to the one other variant the
+  ## CLI spells as a flag. A solver-assigned value outranks it, because the
+  ## solver already consumed the same contribution at `prSet`.
+  ##
+  ## Read HERE and nowhere else in the stdlib: this module is the one place
+  ## a toolchain decision reads variant state (see the module header), and
+  ## the env is variant state in a different envelope.
+  for assignment in getEnv(VariantEnvVar).split(','):
+    let kv = assignment.split('=', 1)
+    if kv.len == 2 and kv[0].strip() == "targetTriple":
+      return kv[1].strip()
+  ""
+
 proc activeSolvedVariants*(): ToolchainSelection =
   ## The variant assignments governing the ACTIVE build region.
   ##
@@ -105,9 +128,19 @@ proc activeSolvedVariants*(): ToolchainSelection =
       result.targetTriple = sol.variants["targetTriple"]
     if "compiler" in sol.variants:
       result.compiler = sol.variants["compiler"]
+  if result.targetTriple.len == 0:
+    result.targetTriple = targetTripleFromEnv()
 
 proc isCrossTriple*(triple: string): bool =
   ## A triple names a cross build when it is present and is not `native`.
   ## Written once so the two former paths cannot drift on the spelling of
   ## "not cross" — they already had two copies of this test.
   triple.len > 0 and triple.toLowerAscii() != "native"
+
+proc activeTargetTriple*(): string =
+  ## The triple the active build region compiles FOR, or "" for a native
+  ## build. `"native"` is the variant's spelling of "no cross target" and is
+  ## folded into "" here, so every consumer tests one thing.
+  let selected = activeSolvedVariants()
+  if isCrossTriple(selected.targetTriple): selected.targetTriple
+  else: ""

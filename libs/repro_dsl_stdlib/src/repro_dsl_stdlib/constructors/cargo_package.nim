@@ -40,16 +40,27 @@
 ##
 ## ## Cross-compiling, and workspace members
 ##
-## `target` names a Rust target triple other than the host's; both cargo
-## steps then carry `--target`. The target's standard library has to be in
-## rustc's sysroot (`lib/rustlib/<triple>/`): the recipe declares a toolchain
-## that has it (reprobuild-packages assembles one per target from the
-## host `rustc` and upstream's `rust-std-<version>-<triple>` component).
-## `zigCross = true` makes zig the target's C toolchain and linker through
-## `adapters/cross_zig`: a wrapper-writing edge is emitted and the cargo
-## edges get the `CC_<triple>` / `CARGO_TARGET_<TRIPLE>_*` environment that
-## points at it. A `--target` without `zigCross` leaves the C toolchain to
-## the recipe's own `extraEnv`.
+## The target comes from the active build context: `repro build
+## --target=<triple>` resolves the `targetTriple` variant, the context's
+## `crossTarget` slot is filled by the adapter that claims the triple
+## (`active_context.resolveCrossTarget`), and this constructor reads it
+## (`activeCrossTarget()`). Both cargo steps then carry `--target`, and when
+## the adapter is `adapters/cross_zig`'s, zig is the target's C toolchain and
+## linker: a wrapper-writing edge is emitted and the cargo edges get the
+## `CC_<triple>` / `CARGO_TARGET_<TRIPLE>_*` environment that points at it.
+## The recipe spells none of this, so the same recipe builds natively and
+## for every listed target.
+##
+## `target` and `zigCross` remain as EXPLICIT overrides for a recipe that is
+## only ever a cross build (a service for one appliance) or that brings its
+## own C toolchain in `extraEnv`. An explicit `target` that contradicts the
+## active cross target is refused: the two would otherwise produce an
+## artefact for one platform under a cache identity stamped for another.
+## The target's standard library has to be in rustc's sysroot
+## (`lib/rustlib/<triple>/`): the recipe declares a toolchain that has it
+## (reprobuild-packages assembles one per target from the host `rustc` and
+## upstream's `rust-std-<version>-<triple>` component) until the catalog's
+## `rust-std` component arm lands (ReproOS-Add-On-Mode A15).
 ##
 ## `package` selects one member of a virtual workspace (`cargo build -p`),
 ## and `installPath` is that member's directory within the source tree
@@ -65,6 +76,7 @@ import repro_project_dsl/cargo_vendor
 import ../types/package_result
 import ../packages/cargo as cargo_module
 import ../adapters/cross_zig
+import ../active_context
 
 const
   FetchScratchSubdir = ".repro/fetch"
@@ -195,6 +207,24 @@ proc cargo_package*(srcDir = "src";
   ## through for a recipe that has defined its own profile.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
+
+  # The target: the active cross target's triple unless the recipe named
+  # one, and the two must agree when both are present (see the header).
+  # `zigCross` follows the adapter that filled the slot; a recipe may still
+  # say `zigCross = true` with an explicit `target` and no active one.
+  let active = activeCrossTarget()
+  let activeTriple = active.tripleOrEmpty()
+  var target = target
+  var zigCross = zigCross
+  if activeTriple.len > 0:
+    if target.len > 0 and target != activeTriple:
+      raise newException(ValueError,
+        "cargo_package: the recipe names target '" & target &
+        "' but the build's targetTriple is '" & activeTriple &
+        "'; drop the recipe's target or build with --target=" & target)
+    target = activeTriple
+    if isZigCrossTarget(active):
+      zigCross = true
 
   let extractedRel = block:
     let raw = registeredFetchSpec(pkgName).extractedRoot
