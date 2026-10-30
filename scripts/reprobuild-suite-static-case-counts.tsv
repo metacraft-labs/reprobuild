@@ -835,7 +835,7 @@ libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim	nim	8
 libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	27
 libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim	nim	3
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
-libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	15
+libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	19
 libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	6
 libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim	nim	4
 libs/repro_workspace_snapshot/tests/t_workspace_snapshot_export_and_materialize.nim	nim	10

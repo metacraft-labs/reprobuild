@@ -1880,6 +1880,86 @@ proc realizeNixToolPaths(useDef: InterfaceToolUse;
     tuple[paths: seq[string]; receipt: string]
   ## Forward declaration -- see the definition, after ``resolveTarballTool``.
 
+proc versionFromProbeOutput*(output: string): string =
+  ## The version a tool's ``--version`` output reports: the first
+  ## ``<digits>.<digits>[.<digits>]`` token (``rustc 1.91.1 (…)`` -> ``1.91.1``,
+  ## ``This is perl 5, version 40 … (v5.40.0)`` -> ``5.40.0``, ``v20.11.1``
+  ## -> ``20.11.1``), padded to three components so ``parseSemver`` reads
+  ## it. "" when the output carries no such token.
+  var i = 0
+  while i < output.len:
+    if output[i] in Digits and (i == 0 or output[i - 1] notin Digits):
+      var j = i
+      var parts = 0
+      var token = ""
+      while j < output.len:
+        if output[j] in Digits:
+          token.add(output[j])
+        elif output[j] == '.' and j + 1 < output.len and
+            output[j + 1] in Digits and parts < 2:
+          token.add('.')
+          inc parts
+        else:
+          break
+        inc j
+      if parts >= 1:
+        if parts == 1: token.add(".0")
+        return token
+      i = j
+    inc i
+  ""
+
+proc realizedVersionOf*(profile: PathOnlyToolProfile): string =
+  ## The version the realized executable itself reported to its version
+  ## probe, or "" when no probe of that kind answered.
+  for probe in profile.probes:
+    if probe.spec.kind == tpkVersion and probe.exitCode == 0:
+      let v = versionFromProbeOutput(probe.output)
+      if v.len > 0: return v
+  ""
+
+proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
+                              realizedVersion, realization: string): string =
+  ## The refusal, or "", for a realization that reports `realizedVersion`
+  ## against the range the recipe's `uses:` declares. A declared range is
+  ## honoured by every realization route or the route is refused by name:
+  ## the tarball and scoop arms carry a declared version and are filtered
+  ## before acquisition (`selectTarballRecord`), while a ``nixPackage`` arm
+  ## carries none -- its version is whatever the pinned nixpkgs builds --
+  ## so it is checked AFTER realization, against what the tool reports.
+  ## A range the report cannot be read against is refused too: "the
+  ## version could not be verified" is not "the version is in range"
+  ## (reprobuild-pm issue 2026-10-30-path-mode-realizes-a-nix-rustc-outside-
+  ## the-declared-version-range).
+  let range = requestedUsesVersionRange(useDef)
+  if range.len == 0:
+    return ""
+  let parsed = parsedVersionRange(range)
+  if realizedVersion.len == 0:
+    return "tool-resolution failed: `" & useDef.packageSelector &
+      "` requested by uses \"" & useDef.rawConstraint & "\" was realized " &
+      "by " & realization & ", whose version probe reports no version to " &
+      "hold against the declared range '" & range & "'; a realization " &
+      "that cannot be verified is not one that satisfies it"
+  if matchesVersionRange(realizedVersion, parsed):
+    return ""
+  "tool-resolution failed: `" & useDef.packageSelector &
+    "` requested by uses \"" & useDef.rawConstraint & "\" was realized by " &
+    realization & ", which reports version " & realizedVersion &
+    ", outside the declared range '" & range & "'. The pinned nixpkgs " &
+    "does not carry a version in range: pin a realization that does " &
+    "(a tarball arm, or `" & useDef.executableName &
+    "` on PATH), or widen the range"
+
+proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
+                              useDef: InterfaceToolUse) =
+  ## Raise ``OSError`` for a profile whose realized version is outside the
+  ## recipe's declared range (see ``usesVersionRangeRefusal``).
+  let refusal = usesVersionRangeRefusal(useDef, realizedVersionOf(profile),
+    "nix://" & profile.nixSelector & " (" & profile.resolvedExecutablePath & ")")
+  if refusal.len > 0:
+    raise newException(OSError, refusal)
+
 proc nixReceiptNamesProfile(receipt: string;
                             profile: PathOnlyToolProfile): bool =
   ## Whether ``receipt`` currently names the realization ``profile``
@@ -1946,6 +2026,9 @@ else:
         result = cached.profile
         # Not part of the profile fingerprint (see the field).
         result.provisioningReceipt = receipt
+        # A cached realization is held to the range too: the range is the
+        # recipe's, the cache remembers only what nixpkgs built.
+        enforceUsesVersionRange(result, useDef)
         return
       # The receipt is missing or names another realization (another pin of
       # the same tool request wrote it last): run the edge, which restores
@@ -2046,6 +2129,8 @@ else:
     if dirExists(extendedPath(selectedStorePath)):
       result.probes = collectConfiguredProbes(resolved,
         useDef.packageSelector, useDef.executableName)
+      # What nixpkgs built is held to the range the recipe declared.
+      enforceUsesVersionRange(result, useDef)
 
     if storeRoot.len > 0 and dirExists(extendedPath(selectedStorePath)):
       let nixPackageName = safeStoreSegment("nix." & plan.packageId,

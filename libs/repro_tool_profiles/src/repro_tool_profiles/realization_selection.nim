@@ -410,7 +410,7 @@ proc requestedUsesVersionRange*(useDef: InterfaceToolUse): string =
     if ch in Whitespace:
       return constraint[i + 1 .. ^1].strip()
 
-proc parsedVersionRange(range: string): Option[SemverRange] =
+proc parsedVersionRange*(range: string): Option[SemverRange] =
   if range.len == 0:
     return none(SemverRange)
   try:
@@ -419,7 +419,7 @@ proc parsedVersionRange(range: string): Option[SemverRange] =
     raise newException(ValueError, "invalid uses version range '" & range &
       "': " & err.msg)
 
-proc matchesVersionRange(version: string; range: Option[SemverRange]): bool =
+proc matchesVersionRange*(version: string; range: Option[SemverRange]): bool =
   ## Unknown or malformed versions cannot prove a versioned request.
   if range.isNone: return true
   if version.len == 0: return false

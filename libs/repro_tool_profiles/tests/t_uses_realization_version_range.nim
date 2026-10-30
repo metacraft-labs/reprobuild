@@ -182,3 +182,61 @@ suite "reprobuild's own Nim records satisfy the ranges it asks for":
     check useDef.tarballProvisioning[0].detail.version == "2.2.10"
     check tarballAcquisitionPlan(useDef).url ==
       "https://nim-lang.org/download/nim-2.2.10_x64.zip"
+
+# ---------------------------------------------------------------------------
+# A nixPackage arm carries no declared version: whatever the pinned nixpkgs
+# builds is what the tool reports, so the range is held AFTER realization,
+# against the version probe. Nothing is mocked: the refusal is a pure
+# function of the recipe's constraint and the probe's recorded output, which
+# is how `resolveNixTool` calls it (reprobuild-pm issue
+# 2026-10-30-path-mode-realizes-a-nix-rustc-outside-the-declared-version-range).
+# ---------------------------------------------------------------------------
+
+proc nixProfile(versionOutput: string): PathOnlyToolProfile =
+  result = PathOnlyToolProfile(installMethod: "nix", nixSelector: "nixpkgs#rustc",
+    resolvedExecutablePath: "/nix/store/x-rustc-wrapper/bin/rustc")
+  result.probes.add(ToolProbeResult(
+    spec: ToolProbeSpec(kind: tpkVersion, name: "version", args: @["--version"]),
+    exitCode: 0, output: versionOutput))
+
+suite "a nix realization is held to the declared range":
+  test "the version a tool reports is read from its probe output":
+    check versionFromProbeOutput("rustc 1.91.1 (ed61e7d7e 2025-11-07) (built from a source tarball)\n") == "1.91.1"
+    check versionFromProbeOutput("cargo 1.94.0 (f5fe2fd5e 2026-01-07)") == "1.94.0"
+    check versionFromProbeOutput("This is perl 5, version 40, subversion 0 (v5.40.0)") == "5.40.0"
+    check versionFromProbeOutput("v20.11.1") == "20.11.1"
+    check versionFromProbeOutput("cmake version 3.31") == "3.31.0"
+    check versionFromProbeOutput("GNU Make 4.4.1\nBuilt for x86_64") == "4.4.1"
+    check versionFromProbeOutput("usage: thing [options]") == ""
+
+  test "the nixpkgs rustc outside the recipe's range is refused by name":
+    let useDef = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    let profile = nixProfile("rustc 1.91.1 (ed61e7d7e 2025-11-07) (built from a source tarball)")
+    check realizedVersionOf(profile) == "1.91.1"
+    try:
+      enforceUsesVersionRange(profile, useDef)
+      check false
+    except OSError as err:
+      check "rustc >=1.94 <1.95" in err.msg
+      check "1.91.1" in err.msg
+      check "nixpkgs#rustc" in err.msg
+
+  test "a version in range, or no range at all, is accepted":
+    let inRange = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    enforceUsesVersionRange(nixProfile("rustc 1.94.0 (abc 2026-01-07)"), inRange)
+    let noRange = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc")
+    enforceUsesVersionRange(nixProfile("rustc 1.91.1 (x)"), noRange)
+    check usesVersionRangeRefusal(noRange, "", "nix://x") == ""
+
+  test "a range that cannot be verified is refused, not assumed":
+    let useDef = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    expect OSError:
+      enforceUsesVersionRange(nixProfile("usage: rustc [OPTIONS]"), useDef)
+    try:
+      enforceUsesVersionRange(nixProfile("usage: rustc [OPTIONS]"), useDef)
+    except OSError as err:
+      check "reports no version" in err.msg
