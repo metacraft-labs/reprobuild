@@ -316,7 +316,12 @@
       # image the ARM scanner cannot cover is recorded as a loss (mcIncomplete)
       # instead of graded complete; 32-bit ARM links libatomic; the trap
       # handler's non-site fallback notes the signal.
-      url = "github:metacraft-labs/io-mon/7a3e4c891b63ca844319a0df74ed03c6767a8983";
+      # Bumped 7a3e4c89 -> e05beda0 (2026-10-30, re-review blocker): the shim's
+      # inline patch-status global is POD again and keeps its static C
+      # initializer; at 7a3e4c89 Nim re-initialised it after the shim's
+      # constructor, so no late scan ever ran and every dlopen graded the
+      # capture mcIncomplete on both armhf and x86-64.
+      url = "github:metacraft-labs/io-mon/e05beda08343b04b3d53f008ebcd0fe7bd27d8b1";
       flake = false;
     };
     nim-shm-gset-src = {
