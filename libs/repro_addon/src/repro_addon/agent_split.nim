@@ -194,9 +194,9 @@ proc compileProfile(conf: AgentConf; m: DeployManifest;
   if conf.profileCompiler.len == 0:
     return "the manifest's profile is source and this host has no " &
       "profile-compiler configured in " & AgentConfPath
-  # The compile works in the unit's state directory beside the staging
-  # area (never in it: only the compiler's two outputs are handed over),
-  # and the dynamic user has no home, so the compiler's caches go there.
+  # The compile works in its own scratch directory, never in the staging
+  # area (only the compiler's two outputs are handed over), and the dynamic
+  # user has no home, so the compiler's caches go there too.
   let module = stageProfileSources(workspace / "source", m.profileText,
                                    m.profileFiles)
   for v in ["HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]:
@@ -227,7 +227,11 @@ proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];
     return
   var cfg = resolveBuildActionCacheConfig()
   when mutated("agent-substitutes-untrusted"):
-    for e in cfg.endpoints.mitems: e.enforceTrust = false
+    # An endpoint list with no trusted keys and trust enforcement off: the
+    # apply path before reprobuild 1c2752eef9.
+    for e in cfg.endpoints.mitems:
+      e.enforceTrust = false
+      e.trustedSigners = @[]
   for i, a in pinned.actions:
     var b = a
     b.cwd = dir / StagedOutputsDir / $i
@@ -289,7 +293,14 @@ proc runAgentFetch*(conf: AgentConf; anchors: TrustAnchors;
   var canonical = m.profileText
   var actions = m.buildActions
   if not isCanonicalProfileText(m.profileText):
-    let why = compileProfile(conf, m, dir, stagingRoot.parentDir / "compile")
+    # The compile's scratch lives in the unit's private /tmp (DynamicUser
+    # implies PrivateTmp=yes): it is thrown away with the unit, and the
+    # engine's monitored profile run cannot exec a binary it built under
+    # the dynamic user's StateDirectory (measured on Debian 13: "io
+    # monitor: Permission denied"; the same compile under /tmp succeeds).
+    let workspace = getTempDir() / "repro-agent-compile"
+    if dirExists(workspace): removeDir(workspace)
+    let why = compileProfile(conf, m, dir, workspace)
     if why.len > 0:
       notes.add("profile: " & why)
       canonical = ""
@@ -371,6 +382,11 @@ proc copyTreeFd(srcFd: cint; dest: string; depth: int; budget: var int64) =
       let sub = openNoFollow(srcFd, name, dir = true)
       try: copyTreeFd(sub, dest / name, depth + 1, budget)
       finally: discard posix.close(sub)
+      # Its own permission bits, after its entries are written (the owner
+      # keeps write access to a directory while it is being filled).
+      if chmod((dest / name).cstring, Mode(st.st_mode.int and 0o777)) != 0:
+        raise newException(EAgentStaging, "cannot set the mode of the copy " &
+          "of " & name & ": " & osErrorMsg(osLastError()))
     elif S_ISREG(st.st_mode):
       let fd = openNoFollow(srcFd, name, dir = false)
       try:
@@ -379,8 +395,10 @@ proc copyTreeFd(srcFd: cint; dest: string; depth: int; budget: var int64) =
           raise newException(EAgentStaging, name & " is not a regular file")
         let data = readAllFd(fd, budget)
         budget -= data.len.int64
-        let mode = if (st2.st_mode.int and 0o111) != 0: 0o700 else: 0o600
-        writeFileAtomic(dest / name, data, mode)
+        # The permission bits are kept (never set-id or sticky): a staged
+        # output's archive digest covers them, and the copy must hash to
+        # the same pin the fetch unit's bytes were checked against.
+        writeFileAtomic(dest / name, data, st2.st_mode.int and 0o777)
       finally: discard posix.close(fd)
     else:
       # A symbolic link, a device, a FIFO: nothing the fetch unit has a
@@ -730,20 +748,32 @@ proc runAgentApplyCli*(args: seq[string]): int =
   except CatchableError as e:
     stderr.write("repro system addon agent-apply: " & e.msg & "\n")
     return 1
+  # Falsifying build: the sequence floor kept in the fetch unit's state
+  # directory, where its dynamic user can rewrite it.
   let floorDir = when mutated("agent-floor-in-fetch-state"):
-                   fetchStagingRoot().parentDir / "floor"
-                 else: AgentStateDir
+                   applyStagingRoot().parentDir / "floor"
+                 else: ""
   if not fileExists(ctx.copyDir / StagedManifestName):
     let o = stagedResult(ctx.copyDir, conf.target)
     let t = RecordedTick(outcome: o, exitCode: deployAgentExitCode(o.kind))
-    recordTick(floorDir, conf.target, tickStatusFor(o))
+    recordTick(AgentStateDir, conf.target, tickStatusFor(o))
     printTick(t)
     return t.exitCode
   let cfg = AgentConfig(target: conf.target,
     sources: @[ctx.copyDir / StagedManifestName],
     anchors: peerAuth.loadTrustAnchors(DeploySignersPath),
-    stateDir: floorDir)
+    stateDir: AgentStateDir, floorDir: floorDir)
   let t = runAddonAgentTick(cfg, ctx, "repro system addon agent-apply")
+  when mutated("agent-floor-in-fetch-state"):
+    # The floor belongs to the fetch unit there, as anything in its state
+    # directory does.
+    for p in walkDirRec(floorDir, yieldFilter = {pcFile, pcDir}):
+      setFilePermissions(p, {fpUserRead, fpUserWrite, fpUserExec,
+        fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite,
+        fpOthersExec})
+    setFilePermissions(floorDir, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite,
+      fpOthersExec})
   printTick(t)
   t.exitCode
 

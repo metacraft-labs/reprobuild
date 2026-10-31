@@ -169,6 +169,10 @@ type
       ## the host's recipient key and the profile's declarations, staged
       ## sealed for the apply, and materialised only into a ramfs, per
       ## service, by the apply (`repro_addon/secrets_ops`).
+    floorDir*: string
+      ## Where the last-applied sequence lives when not under ``stateDir``
+      ## (empty: under it). Only a falsifying test build of the ReproOS
+      ## add-on sets it, to put the floor where the fetch unit can write.
     requireAttestations*: bool
       ## Refuse every manifest that does not carry the RDMF v3 attestation
       ## block (closure digests, ``issuedAt`` and maximum age, rollback
@@ -225,7 +229,8 @@ proc safeTargetName*(target: string): string =
     result = "unnamed"
 
 proc sequenceStatePath*(cfg: AgentConfig): string =
-  cfg.stateDir / "deploy-agent" / (safeTargetName(cfg.target) & ".seq")
+  (if cfg.floorDir.len > 0: cfg.floorDir else: cfg.stateDir) /
+    "deploy-agent" / (safeTargetName(cfg.target) & ".seq")
 
 proc readLastAppliedSequence*(cfg: AgentConfig): uint64 =
   ## The highest sequence ever applied for this target, or 0 when none.

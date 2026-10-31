@@ -115,17 +115,23 @@ for raw in "${arches[@]}"; do
   esac
   prefix="$(nix_attr_prefix "$arch")"
   mapfile -t paths < <(nix build --no-link --print-out-paths --inputs-from . \
-    "nixpkgs#${prefix}.stdenv.cc" "nixpkgs#${prefix}.sqlite.out")
+    "nixpkgs#${prefix}.stdenv.cc" "nixpkgs#${prefix}.sqlite.out" \
+    "nixpkgs#${prefix}.zstd.out")
   # The outputs come back in no particular order (stdenv.cc also has a
   # man output): pick the compiler and the static sqlite by what they hold.
   cc=""
   sqlite_root=""
+  zstd_root=""
   for p in "${paths[@]}"; do
     for g in "$p"/bin/*-gcc; do [ -x "$g" ] && cc="$g"; done
     [ -f "$p/lib/libsqlite3.a" ] && sqlite_root="$p"
+    # libzstd linked in: a static binary cannot dlopen it, and without it
+    # the add-on could not substitute a zstd-compressed cache entry.
+    [ -f "$p/lib/libzstd.a" ] && zstd_root="$p"
   done
   [ -n "$cc" ] || { echo "build_addon_static: no gcc among ${paths[*]}" >&2; exit 1; }
   [ -n "$sqlite_root" ] || { echo "build_addon_static: no static sqlite among ${paths[*]}" >&2; exit 1; }
+  [ -n "$zstd_root" ] || { echo "build_addon_static: no static zstd among ${paths[*]}" >&2; exit 1; }
   dest="$out/$arch"
   mkdir -p "$dest"
   tmp="$dest/repro.tmp.$$"
@@ -150,6 +156,7 @@ for raw in "${arches[@]}"; do
       --"$(nim_cpu "$arch")".linux.gcc.linkerexe:"$cc" \
       --define:release --opt:size --stackTrace:off --lineTrace:off \
       --passL:-static --passL:-s \
+      --define:reproStaticZstd --passL:"-L$zstd_root/lib" \
       --passC:"-ffile-prefix-map=$(pwd -P)/=" \
       ${defines[@]+"${defines[@]}"} \
       --nimcache:"build/nimcache/repro-addon-static-$arch${mutation:+-$mutation}${seams:+-seams}" \

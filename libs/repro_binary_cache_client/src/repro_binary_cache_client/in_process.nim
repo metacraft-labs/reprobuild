@@ -791,7 +791,11 @@ proc substituteInProcess*(rootEntryKeyHex: string;
         return
       else:
         result.outcomes = outcomes
-        result.reason = "one or more substitutes failed on " & endpoint.baseUrl
+        # Name the substitute that failed and why: "failed" alone leaves an
+        # operator nothing to act on.
+        result.reason = "one or more substitutes failed on " & endpoint.baseUrl &
+          (if outcomes.len > 0 and outcomes[^1].reason.len > 0:
+             ": " & outcomes[^1].reason else: "")
     except ClosureWalkTrustError as e:
       result.trustRejected = true
       result.reason = "endpoint " & endpoint.baseUrl & ": " & e.msg

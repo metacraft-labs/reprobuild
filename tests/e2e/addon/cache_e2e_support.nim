@@ -142,7 +142,8 @@ proc publishRawArchive*(c: CacheServer; kp: PeerKeypair;
   for i, b in mb: ms[i] = char(b)
   let mp = newMultipartData()
   mp.add("manifest", ms)
-  mp.add("payload", archive, "prefix.rbcarc", "application/octet-stream")
+  mp.add("payload", archive, "prefix.rbcarc", "application/octet-stream",
+         useStream = false)
   let client = newHttpClient(timeout = 30_000)
   defer: client.close()
   let resp = client.post(c.hostUrl & "/publish", multipart = mp)

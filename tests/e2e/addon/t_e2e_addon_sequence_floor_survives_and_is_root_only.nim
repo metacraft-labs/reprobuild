@@ -47,8 +47,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        "stat -c %a:%U /var/lib/repro/agent").strip() == "700:root", "")
   step("the floor names 7", g.exec("cat " & SeqFloor).stdout.strip() == "7" or
        g.exec("cat " & FetchFloor).stdout.strip() == "7", "")
-  # The fetch unit, paused, tries to read and reset the floor.
+  # The mirror now serves an older, validly signed, fresh manifest. The
+  # fetch unit selects it and pauses; as its user, in its mount namespace,
+  # the gate reads and writes the floor, and resets it wherever the agent
+  # might keep it that the fetch unit can write.
+  discard producer.publish(PublishSpec(sequence: 3,
+    profileText: canonicalFile("/etc/repro/a8-floor", "three\n")))
   g.armFetchSeam("agent-fetch-after-select")
+  discard g.exec("rm -f " & TickStatus)
   g.startFetchNoWait()
   if g.waitSeam(FetchSeamDir, "agent-fetch-after-select"):
     let pid = g.fetchPid()
@@ -58,20 +64,20 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     let wr = g.asFetch(pid, "echo 0 > " & SeqFloor)
     step("the fetch unit cannot write the floor", wr.exitCode != 0,
          wr.stdout & wr.stderr)
-    # Wherever else the floor could be kept that the fetch unit can write.
-    let reset = g.asFetch(pid, "mkdir -p $(dirname /var/lib/repro-agent-fetch/" &
-      "floor/deploy-agent/x) 2>/dev/null; echo 0 > /var/lib/repro-agent-fetch/" &
+    let reset = g.asFetch(pid, "mkdir -p /var/lib/repro-agent-fetch/floor/" &
+      "deploy-agent 2>/dev/null; echo 0 > /var/lib/repro-agent-fetch/" &
       "floor/deploy-agent/" & AgentTarget & ".seq")
     record["fetchStateFloorReset"] = %reset.exitCode
     g.resumeSeam(FetchSeamDir)
   else:
     step("the fetch unit paused", false, "")
   g.waitApplyIdle()
-  # Reboot, then the mirror serves an older, validly signed, fresh manifest.
+  let tOld = g.lastTick()
+  step("the older sequence 3 is not applied", tOld.outcome == "aoConverged", $tOld)
+  # After a reboot the floor still holds, and the older manifest still is
+  # not applied.
   g.rebootGuest()
   discard g.exec("systemctl stop repro-agent-fetch.timer")
-  discard producer.publish(PublishSpec(sequence: 3,
-    profileText: canonicalFile("/etc/repro/a8-floor", "three\n")))
   let t2 = g.tickUnits()
   step("after the reboot the older sequence 3 is not applied",
        t2.outcome == "aoConverged", $t2 & t2.applyLog)
