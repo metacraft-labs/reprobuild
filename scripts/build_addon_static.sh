@@ -77,12 +77,21 @@ mkdir -p "$out"
 exec 9>"$out/.build.lock"
 flock 9
 
-# THE BUILD PATH. The artefact does not depend on where the checkout lives:
-# the Nim compiler hashes types by their canonical module path (the fork,
-# metacraft-labs/nim a0fabc99, `sighashes.typeHashPath`; it used to hash the
-# absolute path), and the C compiler maps the checkout out of `__FILE__`
-# (`-ffile-prefix-map`, below). scripts/check_addon_static_reproducible.sh
-# builds a commit at two paths and requires identical bytes.
+# THE BUILD PATH. The artefact does not depend on where the checkout lives.
+# The Nim compiler hashes each type by the absolute path of the file that
+# defines it; `--typeHashPathMap` (metacraft-labs/nim 9a49ee3c) hashes the
+# checkout as `/reprobuild/` and the workspace's other repositories as
+# `/workspace/`, the way `-ffile-prefix-map` maps them out of the C
+# compiler's `__FILE__` (both below). The maps are uniform -- every file of
+# the checkout, every file of the workspace -- so no two files collide.
+# scripts/check_addon_static_reproducible.sh builds a commit at two paths
+# and requires identical bytes.
+checkout_dir="$(pwd -P)"
+workspace_dir="$(cd .. && pwd -P)"
+typehash_maps=(--typeHashPathMap:"$checkout_dir/=/reprobuild/"
+               --typeHashPathMap:"$workspace_dir/=/workspace/")
+# The negative control of scripts/check_addon_static_reproducible.sh only.
+[ "${REPRO_ADDON_NO_TYPEHASH_MAP:-}" = 1 ] && typehash_maps=()
 
 command -v nim >/dev/null || {
   echo "build_addon_static: nim is not on PATH; run inside the reprobuild dev shell (nix develop)" >&2
@@ -157,7 +166,8 @@ for raw in "${arches[@]}"; do
       --define:release --opt:size --stackTrace:off --lineTrace:off \
       --passL:-static --passL:-s \
       --define:reproStaticZstd --passL:"-L$zstd_root/lib" \
-      --passC:"-ffile-prefix-map=$(pwd -P)/=" \
+      --passC:"-ffile-prefix-map=$checkout_dir/=" \
+      ${typehash_maps[@]+"${typehash_maps[@]}"} \
       ${defines[@]+"${defines[@]}"} \
       --nimcache:"build/nimcache/repro-addon-static-$arch${mutation:+-$mutation}${seams:+-seams}" \
       --out:"$tmp" \

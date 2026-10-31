@@ -10,12 +10,14 @@
 # at one path is reused at the other. Both are removed afterwards. Run inside
 # the reprobuild dev shell (scripts/build_addon_static.sh needs it).
 #
-# Negative control: REPRO_ADDON_CHECK_NIM=<a nim binary> builds with that
-# compiler instead of the dev shell's; with the fork before a0fabc99 (it
-# hashed types by absolute path) the check must fail.
+# Negative control: REPRO_ADDON_NO_TYPEHASH_MAP=1 builds both without the
+# compiler's `--typeHashPathMap`, and the check must then fail.
+# REPRO_ADDON_CHECK_NIM=<a nim binary> builds with that compiler instead of
+# the dev shell's.
 #
-# Why it could differ: the Nim compiler hashed each type by the absolute path
-# of the file defining it, and compiled the hashes into every `of` check.
+# Why it could differ: the Nim compiler hashes each type by the absolute path
+# of the file defining it, and compiles the hashes into every `of` check;
+# build_addon_static.sh maps the checkout out of that path.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ -n "${REPRO_ADDON_CHECK_NIM:-}" ]; then

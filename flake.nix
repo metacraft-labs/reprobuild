@@ -789,8 +789,15 @@
     # Riding along (22d525d8..a33aa43d, the fork's `codetracer` tip): MSVC
     # `vccexe`/`vcvarsall` tool fixes and their tests, and a release-notes
     # document; no compiler or stdlib source.
+    #
+    # Advanced from a0fabc99 to 9a49ee3c: a0fabc99's canonical-path type
+    # hash gave two copies of one package (same nimble name, same
+    # in-package path) one type hash -- `of` confused their types. The hash
+    # takes the absolute defining path again, as upstream does, and a build
+    # that wants checkout-independent hashes asks for it with
+    # `--typeHashPathMap:OLD=NEW` (scripts/build_addon_static.sh does).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=a0fabc9972793e5075dbd8b7ba5a149d05cc987d";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=9a49ee3ca32c9cd2fe467806e61d47c3a6a7ccc1";
       flake = false;
     };
     nim-csources-src = {
