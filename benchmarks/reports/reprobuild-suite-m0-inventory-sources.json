@@ -7989,8 +7989,8 @@
       "owner": "libs/ct_test_nim_unittest",
       "requiresReproBinary": false,
       "source": "libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 24,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 36,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1195,10 +1195,15 @@ proc assignGroups(repoRoot: string; edges: var seq[TestEdge]) =
       source: e.source,
       optionKey: compileOptionKey(e.source, definesFor(e), e.extraPassC,
         e.extraPassL, $e.targetOs),
+      # Used only if the source is alone on ``optionKey``: under
+      # ``DirectoryPrefixGroupRoots`` it then groups on the root directory.
+      prefixKey: prefixOptionKey(e.source, definesFor(e), e.extraPassC,
+        e.extraPassL, $e.targetOs),
       singleReason: reason,
       compiledC: compilePragmaTargets(text, e.source),
       caseNames: staticCaseNames(text))
-  let plan = planGroups(candidates, DefaultMaxGroupMembers)
+  let plan = planGroups(candidates, DefaultMaxGroupMembers,
+    PrefixGroupMaxMembers)
   var bySource = initTable[string, GroupAssignment]()
   for row in plan: bySource[row.source] = row
   for e in edges.mitems:
