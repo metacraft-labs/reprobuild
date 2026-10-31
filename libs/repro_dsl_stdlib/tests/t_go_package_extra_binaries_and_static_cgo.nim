@@ -153,7 +153,7 @@ suite "go_package: staticCgo":
       check "ZIG_GLOBAL_CACHE_DIR=\".repro/build/go/zig-cache/global\"" in s
       check "ZIG_LOCAL_CACHE_DIR=\".repro/build/go/zig-cache/local\"" in s
       check "-tags \"netgo,osusergo\"" in s
-      check ("-ldflags \"-linkmode external -extldflags " &
+      check ("-ldflags \"-buildid= -linkmode external -extldflags " &
         "'-static -Wl,--strip-debug'\"") in s
       check "zig" in act.toolIdentityRefs
 
@@ -165,7 +165,7 @@ suite "go_package: staticCgo":
         extraBinaries = @[("prysmctl", "./cmd/prysmctl")])))
       # `netgo` is not repeated; the recipe's order is kept.
       check s.count("-tags \"blst_enabled,netgo,osusergo\"") == 2
-      check s.count("-ldflags \"-X main.v=1 -linkmode external " &
+      check s.count("-ldflags \"-X main.v=1 -buildid= -linkmode external " &
         "-extldflags '-static -Wl,--strip-debug'\"") == 2
       check s.count("CC=\"") == 2
 
