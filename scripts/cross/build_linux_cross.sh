@@ -362,6 +362,10 @@ if [ ! -O "${build_root}" ] || [ ! -w "${build_root}" ]; then
   echo "  set REPRO_CROSS_BUILD_ROOT to one (it is the path the images will remember)" >&2
   exit 1
 fi
+# One cross build at a time per root (scripts/cross/build_root_lock.sh): the
+# export below and every compile after it read this tree.
+source "$(dirname "${BASH_SOURCE[0]}")/build_root_lock.sh"
+acquire_build_root_lock "${build_root}" || exit 1
 src_root="${build_root}/source"
 echo "build_linux_cross: exporting the tree to ${src_root}"
 rm -rf "${src_root}"

@@ -2354,6 +2354,7 @@ tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_config_package_paths_resolve.nim	nim	5
 tests/unit/t_configure_build_tree_cleanup.nim	nim	13
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	9
+tests/unit/t_cross_build_root_lock.nim	nim	1
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	6
 tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
