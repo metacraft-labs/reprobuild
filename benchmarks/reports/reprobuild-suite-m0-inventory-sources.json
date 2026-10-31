@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2552,
+    "nimTestBinaries": 2553,
     "pureUnitConsolidationGroups": 73,
     "pureUnitTests": 709,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2592
+    "testEntries": 2593
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1462,7 +1462,7 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1416,
-      "platform/destructive": 161,
+      "platform/destructive": 162,
       "pure unit": 709,
       "unclassified": 288
     },
@@ -1672,9 +1672,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2552,
+    "nimTestBinaryCount": 2553,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2592
+    "testEntryCount": 2593
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8359,6 +8359,26 @@
       "source": "libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 38,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_profile_kinds_through_the_switch",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_dsl_stdlib",
+        "repro_elevation",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27643,6 +27663,8 @@
       "localDependencyShape": [
         "repro_addon",
         "repro_deploy_agent",
+        "repro_dsl_stdlib",
+        "repro_elevation",
         "repro_infra",
         "repro_test_support"
       ],

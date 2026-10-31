@@ -249,8 +249,14 @@ proc stageDebs(canonical: string; dir: string; notes: var seq[string]) =
   except CatchableError: return
   let fetch = httpDebFetcher()
   for r in prof.resources:
-    if r.kind != srkSystemdSystemUnit or r.suAptClosureLock.len == 0: continue
-    let lock = parseAptClosureLock(r.suAptClosureLock)
+    # A unit's closure and an operator tool's (`linux.addOnTool`): the
+    # apply unit realises both from these copies.
+    let lockText =
+      if r.kind == srkSystemdSystemUnit: r.suAptClosureLock
+      elif r.kind == srkLinuxAddOnTool: r.atAptClosureLock
+      else: ""
+    if lockText.len == 0: continue
+    let lock = parseAptClosureLock(lockText)
     for d in lock.debs:
       let url = debUrl(lock, d)
       let dest = dir / StagedDebsDir / stagedDebName(url)

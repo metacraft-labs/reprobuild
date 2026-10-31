@@ -355,6 +355,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let root = freshRoot(\"rpi2\")"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim",
+    binary: "build/test-bin/t_addon_profile_kinds_through_the_switch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let Lock = renderAptClosureLock(AptClosureLock("),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim",
     binary: "build/test-bin/t_addon_reassert_defers_to_a_live_switch",
     defines: @[],

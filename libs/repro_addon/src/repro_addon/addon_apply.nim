@@ -271,6 +271,16 @@ const
     ## ``tmpfiles``, ``sysctl`` and ``unitState`` classes of spec §4.1
     ## (``secret`` arrives with A7, ``firewall`` is opt-in and refused in
     ## agent applies until §13 Q6).
+  AddonProfileKinds* = AddonManagedKinds + {srkSystemdSystemTimer,
+                        srkPasswdUser, srkPasswdGroup, srkLinuxAddOnTool}
+    ## What an add-on profile may declare (spec §8.3, "As implemented (A6)"):
+    ## the managed kinds, and the four the composition carries through them
+    ## (``reshape``): a ``systemd.systemTimer`` is the ``unit`` class's
+    ## timer, written as a unit; ``passwd.user`` / ``passwd.group`` are
+    ## accounts the infra drivers converge (subset semantics), ledgered as
+    ## accounts; a ``linux.addOnTool`` is applied by its driver, and its
+    ## wrapper and launcher manifest are ledgered as the ``etcFile``s they
+    ## are (§4.1).
   LinkFormKinds* = {srkFsSystemFile, srkSystemdSystemDropIn, srkLinuxSysctl}
     ## The kinds materialised as links into the static tree (spec §7.2
     ## step 4). The driver declares it per kind; a resource cannot choose:
@@ -376,7 +386,7 @@ proc isManagedPath*(path: string; prefixes: openArray[string]): bool =
 
 proc unmanagedKindReason*(r: SystemResource): string =
   ## "" when the add-on manages ``r.kind``; otherwise the refusal text.
-  if r.kind in AddonManagedKinds: ""
+  if r.kind in AddonProfileKinds: ""
   else: "resource kind " & $r.kind & " is not managed by the add-on in " &
         "this release (" & r.address & "); nothing was applied"
 
@@ -420,6 +430,30 @@ proc addOnNameError*(r: SystemResource): string =
       if not isSafePosixUserOrGroupName(r.seName):
         result = "linux.sysusersEntry name '" & r.seName.escape() &
           "' is not an account name of [A-Za-z0-9._-]"
+    of srkSystemdSystemTimer:
+      result = systemdUnitNameError("systemd.systemTimer name", r.stName)
+      if result.len == 0 and not r.stName.endsWith(".timer"):
+        result = "systemd.systemTimer name '" & r.stName.escape() &
+          "' does not end in .timer"
+      elif result.len == 0 and r.stRunning != r.stEnabled:
+        # The unit class enables-and-starts a unit, or does neither (§7.3:
+        # "start if enabled"); a timer enabled but stopped, or started but
+        # not enabled, has no add-on form in this release.
+        result = "systemd.systemTimer " & r.stName & " sets enabled = " &
+          $r.stEnabled & " and running = " & $r.stRunning & "; an add-on " &
+          "unit is enabled and started, or neither"
+    of srkPasswdUser:
+      if not isSafePosixUserOrGroupName(r.puName):
+        result = "passwd.user name '" & r.puName.escape() &
+          "' is not an account name of [A-Za-z0-9._-]"
+    of srkPasswdGroup:
+      if not isSafePosixUserOrGroupName(r.pgName):
+        result = "passwd.group name '" & r.pgName.escape() &
+          "' is not an account name of [A-Za-z0-9._-]"
+    of srkLinuxAddOnTool:
+      if not isSafeAddOnToolCommand(r.atCommand):
+        result = "linux.addOnTool command '" & r.atCommand.escape() &
+          "' is a file name of [A-Za-z0-9._+-] not starting with . or -"
     else:
       discard
 
@@ -619,9 +653,10 @@ proc overlaySaved(p: var ResourcePlan; s: SavedPlan) =
   p.accountBefore = s.accountBefore
   p.groupBefore = s.groupBefore
 
-proc savedDecision(s: SavedPlan): CollisionDecision =
+proc savedDecision(s: SavedPlan; fileBacked = true): CollisionDecision =
   ## The interrupted switch's decision, as it made it. The bytes an
-  ## adoption or reconciliation displaced were preserved at plan time.
+  ## adoption or reconciliation displaced were preserved at plan time --
+  ## for a file; an account (``fileBacked = false``) has none.
   var found = false
   for v in CollisionVerdict:
     if $v == s.verdict:
@@ -634,7 +669,7 @@ proc savedDecision(s: SavedPlan): CollisionDecision =
   result.observedSha256 = s.observedSha256
   result.reason = s.reason & " (replayed)"
   result.acceptedOutOfBand = s.reason == AcceptedOutOfBandReason
-  if result.verdict in {cvAdopt, cvReconcile}:
+  if fileBacked and result.verdict in {cvAdopt, cvReconcile}:
     if s.preserved.len == 0 or not fileExists(s.preserved):
       raise newException(AddonApplyError, "the pending plan's preserved " &
         "bytes for " & s.address & " are missing (" & s.preserved & ")")
@@ -693,6 +728,71 @@ proc accountFingerprintValue*(kind, name: string): string =
     if k == prefix & name: return v
   ""
 
+proc accountKeyOf*(r: SystemResource): string =
+  ## ``user:<name>`` / ``group:<name>`` of a ``passwd.*`` resource, "" else.
+  case r.kind
+  of srkPasswdUser: "user:" & r.puName
+  of srkPasswdGroup: "group:" & r.pgName
+  else: ""
+
+proc decideAccount*(r: SystemResource; ledgerValue: string;
+                    ledgerOwns, reconcileDrift, adopt: bool):
+    CollisionDecision =
+  ## The collision decision of a ``passwd.user`` / ``passwd.group`` (spec
+  ## §4.1 ``sysusers`` row, §4.3). The account is compared the way its
+  ## driver compares it: the observation masked by what the resource
+  ## declares (reprobuild 1ad1f593c8), so a group's ``members`` is a subset
+  ## requirement and an unpinned gid or uid is not compared.
+  ##
+  ## | account | verdict |
+  ## |---|---|
+  ## | absent | create |
+  ## | present, as declared, the ledger owns it | no-op (accepted out of band when its fingerprint moved since the ledger) |
+  ## | present, as declared, not the ledger's | adopt: recorded, nothing applied |
+  ## | present, other than declared, the ledger owns it | update |
+  ## | present, other than declared, not the ledger's | EDrift; `--reconcile-drift` converges it, `repro system adopt` claims it as it is |
+  let op = toPrivilegedOperation(r)
+  let obs = if r.kind == srkPasswdUser: observePasswdUser(op)
+            else: observePasswdGroup(op)
+  let kind = if r.kind == srkPasswdUser: "user" else: "group"
+  let name = if r.kind == srkPasswdUser: r.puName else: r.pgName
+  let now = accountFingerprintValue(kind, name)
+  result.observation = if obs.present: "unowned" else: "absent"
+  if not obs.present:
+    result.verdict = cvCreate
+    result.reason = "absent; created by its driver"
+    return
+  let asDeclared = obs.digestHex == posixSystemDesiredDigestHex(op)
+  if asDeclared:
+    if ledgerOwns:
+      result.verdict = cvNoOp
+      if ledgerValue.len > 0 and ledgerValue != now:
+        result.acceptedOutOfBand = true
+        result.reason = AcceptedOutOfBandReason
+      else:
+        result.reason = "owned by the ledger, as declared"
+    else:
+      result.verdict = cvAdopt
+      result.reason = "present, unowned, as declared (" &
+        (if kind == "group": "declared members present" else: "declared fields match") &
+        "): adopted without a change"
+    return
+  if ledgerOwns:
+    result.verdict = cvUpdate
+    result.reason = "owned by the ledger; converged to the declaration"
+  elif reconcileDrift:
+    result.verdict = cvReconcile
+    result.reason = "present, unowned, other than declared; " &
+      "--reconcile-drift converges it"
+  elif adopt:
+    result.verdict = cvAdopt
+    result.reason = "present, unowned, claimed by `repro system adopt` as it is"
+  else:
+    raise newException(AddonDriftError, "EDrift: account " & kind & " " &
+      name & " (" & r.address & ") exists and is not as declared; review " &
+      "it, then re-run with --reconcile-drift to converge it, or `repro " &
+      "system adopt " & r.address & "` to take it as it is")
+
 proc desiredBytes*(r: SystemResource): string =
   ## The bytes a resource puts on the host, as the switch's static tree
   ## and the collision pass see them.
@@ -748,6 +848,11 @@ proc preObserve(p: var ResourcePlan; driver: CollisionDriver) =
     let u = driver.unitProvision(p.r.usName)
     p.baseUnitState = u.unitFileState
     p.baseActiveState = u.activeState
+  of srkPasswdUser, srkPasswdGroup:
+    p.accountKey = accountKeyOf(p.r)
+    p.accountBefore = accountFingerprintValue(
+      (if p.r.kind == srkPasswdUser: "user" else: "group"),
+      (if p.r.kind == srkPasswdUser: p.r.puName else: p.r.pgName))
   of srkSystemdSystemUnit:
     p.targetPath = unitPath(p.r.suName)
     p.replaced = baseValue(p.targetPath)
@@ -865,8 +970,10 @@ proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry];
   for e in previous:
     if e.resource == r.address:
       if e.class == lcDir: prevDirs.add(e)
-      if e.class in {lcEtcFile, lcUnit, lcDropIn, lcDiversion, lcUnitState} and
-          (e.path == p.targetPath or e.class == lcUnitState):
+      if (e.class in {lcEtcFile, lcUnit, lcDropIn, lcDiversion, lcUnitState} and
+          (e.path == p.targetPath or e.class == lcUnitState)) or
+          (e.class == lcAccount and p.accountKey.len > 0 and
+           e.path == p.accountKey):
         known = true
         prevMain = e
   if p.own and prevMain.collision == "supersede":
@@ -1019,6 +1126,18 @@ proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry];
           if now.len > 0:
             result.add(LedgerEntry(class: lcAccount, path: key,
               value: now, kindHint: kind))
+  of srkPasswdUser, srkPasswdGroup:
+    # The account as it is after its driver converged it (or as adopted),
+    # with what it was before the add-on first touched it (``replaced``,
+    # "" when the add-on created it): the fingerprint delta's terms.
+    let kind = if r.kind == srkPasswdUser: "user" else: "group"
+    let now = accountFingerprintValue(kind,
+      (if r.kind == srkPasswdUser: r.puName else: r.pgName))
+    if now.len > 0:
+      result.add(LedgerEntry(class: lcAccount, path: p.accountKey,
+        value: now, kindHint: kind, resource: r.address,
+        replaced: (if known: prevMain.replaced else: p.accountBefore),
+        observation: observation, collision: collisionMode))
   of srkSystemdUnitState:
     # The add-on owns nothing here; the ledger records the unit's state
     # so the fingerprint delta accounts for the enablement and activity
@@ -1037,6 +1156,10 @@ proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry];
       u.baseUnitState = p.baseUnitState
       u.baseActiveState = p.baseActiveState
     result.add(u)
+  of srkLinuxAddOnTool:
+    # Ledgered through its two carriers (``addOnToolCarriers``): the files
+    # are theirs; the launcher link is in no digest (§4.1).
+    discard
   else:
     # Unreachable after `checkScope`; kept so a future kind cannot be
     # applied without a ledger entry.
@@ -1051,13 +1174,44 @@ proc dropInUnitOf(path: string): string =
   let d = extractFilename(parentDir(path))
   if d.endsWith(".d"): d[0 ..< d.len - 2] else: ""
 
+const AddOnToolCarrierSuffixes = ["#wrapper", "#manifest"]
+
+proc addOnToolCarrierOf*(r: SystemResource): string =
+  ## The ``linux.addOnTool`` address whose wrapper or launcher manifest
+  ## ``r`` stands for in the composition (``reshape``), "" for any other.
+  if r.kind != srkFsSystemFile or not r.address.startsWith("addOnTool:"):
+    return ""
+  for sfx in AddOnToolCarrierSuffixes:
+    if r.address.endsWith(sfx): return r.address[0 ..< r.address.len - sfx.len]
+  ""
+
+proc addOnToolCarriers*(r: SystemResource): seq[SystemResource] =
+  ## The two ``etcFile``s a ``linux.addOnTool`` writes (spec §4.1): the
+  ## wrapper ``/etc/repro/bin/<command>`` and its launcher manifest, with
+  ## the bytes its driver renders. They carry the tool's collision
+  ## decisions and ledger entries; the driver itself writes them (with the
+  ## wrapper's mode), realises the closure and converges the launcher link,
+  ## which is in no digest.
+  let manifestPath = addOnToolManifestPath(r.atCommand)
+  let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot,
+    parseAptClosureLock(r.atAptClosureLock))
+  @[SystemResource(kind: srkFsSystemFile, address: r.address & "#wrapper",
+      sfPath: addOnToolWrapperPath(r.atCommand),
+      sfContent: renderAddOnToolWrapper(manifestPath)),
+    SystemResource(kind: srkFsSystemFile, address: r.address & "#manifest",
+      sfPath: manifestPath,
+      sfContent: renderAddOnToolManifest(prefix, r.atProgram))]
+
 proc reshape(user: SystemProfile; dropIns: var HashSet[string]):
     seq[SystemResource] =
   ## The operator's resources as the apply carries them: a
   ## ``collision = dropIn`` unit becomes the drop-in file it writes
   ## (keeping the resource's address, which ``dropIns`` collects), and a
   ## ``collision = divert`` file gains the ``linux.dpkgDiversion`` it
-  ## depends on unless the profile already declares one for the path.
+  ## depends on unless the profile already declares one for the path. A
+  ## ``systemd.systemTimer`` is the unit it writes (keeping its address);
+  ## a ``linux.addOnTool`` is preceded by the two files it writes
+  ## (``addOnToolCarriers``).
   var diverted = initHashSet[string]()
   for r in user.resources:
     if r.kind == srkLinuxDpkgDiversion: diverted.incl(r.ddPath)
@@ -1073,6 +1227,15 @@ proc reshape(user: SystemProfile; dropIns: var HashSet[string]):
           dependsOn: r.dependsOn))
       else:
         result.add(r)
+    of srkSystemdSystemTimer:
+      # Spec §4.1: the `unit` class's timer is a unit file like any other;
+      # the address stays the timer's.
+      result.add(SystemResource(kind: srkSystemdSystemUnit,
+        address: r.address, suName: r.stName, suContent: r.stContent,
+        suEnabled: r.stEnabled, dependsOn: r.dependsOn))
+    of srkLinuxAddOnTool:
+      result.add(addOnToolCarriers(r))
+      result.add(r)
     of srkLinuxSysctl:
       if r.sysctlFilename.len == 0:
         # Spec §4.1: /etc/sysctl.d/90-repro-<name>.conf, <name> from the
@@ -1673,6 +1836,34 @@ proc unitFileChanged*(isNew: bool; verdict: string;
   prevSha256 != renderedSha256 or
     verdict in [$cvCreate, $cvUpdate, $cvReconcile, $cvReplace]
 
+proc accountRecheck(base: PreWriteGuard; checks: seq[tuple[r: SystemResource;
+                    ledgerValue: string; owns: bool;
+                    verdict: CollisionVerdict]];
+                    reconcileDrift: bool): PreWriteGuard =
+  ## The write-time re-check of a ``passwd.*`` operation: the account is
+  ## decided again (``decideAccount``) and its write refused when the
+  ## decision changed since the plan -- the plan decided on an account the
+  ## host no longer has. Every other operation goes to ``base``.
+  result = proc(op: PrivilegedOperation): string {.gcsafe.} =
+    {.cast(gcsafe).}:
+      if op.kind in {pokPasswdUser, pokPasswdGroup} and
+          not (op.kind == pokPasswdUser and op.puDestroy) and
+          not (op.kind == pokPasswdGroup and op.pgDestroy):
+        for c in checks:
+          if c.r.address != op.address: continue
+          var now: CollisionVerdict
+          try:
+            now = decideAccount(c.r, c.ledgerValue, c.owns, reconcileDrift,
+                                c.verdict == cvAdopt).verdict
+          except CatchableError as e:
+            return "refusing " & op.address & " at write time: " & e.msg
+          if now != c.verdict:
+            return "refusing " & op.address & " at write time: the " &
+              "account changed since the plan (" & $c.verdict & " -> " &
+              $now & ")"
+          return ""
+      base(op)
+
 proc acceptedOutOfBandDiff*(accepted: seq[tuple[path, address: string]]):
     seq[string] =
   ## The ledger-diff lines for targets accepted as changed out of band
@@ -1956,6 +2147,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var targets: seq[PlannedTarget]
   var verdictByAddress = initTable[string, CollisionVerdict]()
   var acceptedOutOfBand: seq[tuple[path, address: string]]
+  var accountChecks: seq[tuple[r: SystemResource; ledgerValue: string;
+                               owns: bool; verdict: CollisionVerdict]]
+    # The accounts' decisions, re-made before their driver writes (they
+    # have no file target for the write-time re-check).
     # Ledger paths changed out of band to the desired bytes, from the own
     # pass and the operator's (adopt-scoped or not); reported once each.
   # The add-on's own objects go through the same table as the operator's:
@@ -2043,6 +2238,56 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       p.form = "copy"
       p.verdict = $cvNoOp
       verdictByAddress[r.address] = cvNoOp
+      plans.add(p)
+      continue
+    if r.kind in {srkPasswdUser, srkPasswdGroup}:
+      # An account: no file, so no write-time target; its driver converges
+      # it. The ledger owns it when the previous ledger lists it under
+      # this resource (``decideAccount``).
+      var ledgerValue = ""
+      var owns = false
+      for e in previous.entries:
+        if e.class == lcAccount and e.path == p.accountKey and
+            e.resource == r.address:
+          owns = true
+          ledgerValue = e.value
+      let dec =
+        if saved.found: savedDecision(saved.plan, fileBacked = false)
+        else: decideAccount(r, ledgerValue, owns, reconcileDrift,
+                            r.address in adoptAddresses)
+      decisions[r.address] = dec
+      accountChecks.add((r: r, ledgerValue: ledgerValue, owns: owns,
+                         verdict: dec.verdict))
+      p.form = "copy"
+      p.observation = dec.observation
+      p.verdict = $dec.verdict
+      if dec.verdict == cvAdopt:
+        # As it is: nothing for the driver to do. No `adopt` collision
+        # mark -- that names preserved file bytes, which an account has
+        # none of; uninstall keeps every account anyway (§6.4).
+        p.skipInfra = true
+      verdictByAddress[r.address] = dec.verdict
+      if dec.acceptedOutOfBand:
+        acceptedOutOfBand.add((p.accountKey, r.address))
+      result.collisions.add(CollisionLine(address: r.address,
+        target: p.accountKey, observation: dec.observation,
+        verdict: $dec.verdict, reason: dec.reason))
+      if dec.verdict != cvNoOp:
+        result.ledgerDiff.add($dec.verdict & "\t" & p.accountKey & "\t" &
+          r.address)
+      plans.add(p)
+      continue
+    if r.kind == srkLinuxAddOnTool:
+      # Its driver writes the two files the carriers before it decided
+      # (``addOnToolCarriers``): the tool changes when either does.
+      var v = cvNoOp
+      for c in AddOnToolCarrierSuffixes:
+        let cv = verdictByAddress.getOrDefault(r.address & c, cvNoOp)
+        if cv notin {cvNoOp, cvAdopt}: v = cvUpdate
+        elif cv == cvAdopt and v == cvNoOp: v = cvAdopt
+      p.form = "copy"
+      p.verdict = $v
+      verdictByAddress[r.address] = v
       plans.add(p)
       continue
     var inp = DecisionInputs(address: r.address,
@@ -2165,6 +2410,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # generation 0's was: taking it over with the same bytes writes nothing.
     p.form = if held: prevForm.getOrDefault(path, "copy")
              elif r.address in supersedingUser: "copy"
+             elif addOnToolCarrierOf(r).len > 0: "copy"
              elif r.kind in LinkFormKinds and
                 dec.verdict notin {cvAdopt, cvDivert}: "link"
              else: "copy"
@@ -2177,8 +2423,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if dec.verdict != cvNoOp and not held:
       result.ledgerDiff.add($dec.verdict & "\t" & path & "\t" & r.address)
     targets.add(targetFor(r.address, inp, path, dec, obs, saved))
+    if addOnToolCarrierOf(r).len > 0:
+      # The tool's own operation writes this file: the write-time re-check
+      # of the file's decision is the tool's too.
+      targets.add(targetFor(addOnToolCarrierOf(r), inp, path, dec, obs, saved))
     if r.address in supersedingUser and p.collision.len == 0:
       p.collision = "supersede"
+    if addOnToolCarrierOf(r).len > 0:
+      # The tool's driver writes this file (with the wrapper's mode); the
+      # carrier only decides and ledgers it.
+      p.skipInfra = true
     plans.add(p)
 
   # `repro system adopt`: the addressed resource must actually be claimed
@@ -2264,6 +2518,23 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       keptAddresses.incl(r.address)
       result.drift.add(r.ddPath & ": its diversion is kept with the " &
         "drifted file")
+      continue
+    if r.kind in {srkPasswdUser, srkPasswdGroup}:
+      # Accounts are kept for ever (§6.4), like the sysusers class's: the
+      # resource is forgotten and its account stays, resource-less in the
+      # ledger so the fingerprint delta still accounts for it.
+      for e in previous.entries:
+        if e.resource == r.address and e.class == lcAccount:
+          var kept = e
+          kept.resource = ""
+          forgottenEntries.add(kept)
+      result.removed.add(r.address)
+      result.ledgerDiff.add("forget\t" & accountKeyOf(r) & "\t" & r.address)
+      continue
+    if r.kind == srkLinuxAddOnTool:
+      # Its wrapper and manifest are its carriers' (removed with them); the
+      # launcher link is in no digest and is left for the next tool.
+      result.removed.add(r.address)
       continue
     if r.kind == srkSystemdUnitState:
       # Forgetting a requirement changes nothing on the host (§4.1).
@@ -2471,6 +2742,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var addressByKey = initTable[string, string]()
   for r in composed.resources:
     addressByKey[resourceKindTag(r) & ":" & resourceName(r)] = r.address
+  for r in user.resources:
+    # A timer is composed as a unit (``reshape``): a `depends_on` names it
+    # by its own kind.
+    if r.kind == srkSystemdSystemTimer:
+      addressByKey[resourceKindTag(r) & ":" & resourceName(r)] = r.address
   # Units an interrupted or failed switch had running at its plan time
   # (its step 2 may have stopped them): planned as running, so they are
   # (re)started rather than left down.
@@ -2730,8 +3006,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   let (treePath, treePrefixId) = realiseStaticTree(treeFiles)
   var closureLocks: seq[AptClosureLock]
   for p in plans:
-    if p.r.kind == srkSystemdSystemUnit and p.r.suAptClosureLock.len > 0:
-      let lock = parseAptClosureLock(p.r.suAptClosureLock)
+    # A unit's closure, and a tool's (its driver would otherwise realise it
+    # itself, from the network, which the apply unit does not have).
+    let lockText =
+      if p.r.kind == srkSystemdSystemUnit: p.r.suAptClosureLock
+      elif p.r.kind == srkLinuxAddOnTool: p.r.atAptClosureLock
+      else: ""
+    if lockText.len > 0:
+      let lock = parseAptClosureLock(lockText)
       discard realiseAptClosure(lock, AddOnSystemStoreRoot,
         AddOnAptDebCacheDir,
         (if opts.aptFetch != nil: opts.aptFetch else: httpDebFetcher()))
@@ -3168,8 +3450,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         if k in seen: return
         seen.incl(k)
         l.entries.add(e)
+      var declaredAccounts = initHashSet[string]()
+      for p in plans:
+        if p.accountKey.len > 0 and p.r.kind in {srkPasswdUser, srkPasswdGroup}:
+          declaredAccounts.incl(p.accountKey)
       for e in previous.entries:
         if e.resource.len > 0 or e.class == lcStaticLink: continue
+        if e.class == lcAccount and e.path in declaredAccounts:
+          continue      # a passwd resource holds it now (its entry below)
         if e.class == lcUnitState and e.unitState.len == 0 and
             readUnitProvision(e.unit).activeState != "active":
           continue      # the instance left running has ended: forgotten
@@ -3288,7 +3576,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
            # operation is let through unchecked.
            PreWriteGuard(proc(op: PrivilegedOperation): string {.gcsafe.} = "")
          else: recordingRefusals(
-           makePreWriteGuard(newDriver, targets, destroyCheck),
+           accountRecheck(makePreWriteGuard(newDriver, targets,
+                                            destroyCheck),
+                          accountChecks, reconcileDrift),
            hookRefused))),
       addOnDispatch: policy,
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
