@@ -14,12 +14,17 @@
 ##   3. after a tracked edit to ``side``'s input, ``repro certify`` executes
 ##      only ``side`` (the other two are reused from this host's cache
 ##      records, which count: Standard §6.2.1, D16) and certifies all three
-##      names for the new content.
+##      names for the new content;
+##   4. committing that content and running a plain ``git push`` carries all
+##      three certificates to the origin, as a note on the tree, through the
+##      managed hook. Until then the clone has no notes ref;
+##   5. certifying a further edit, committing and running ``repro push`` does the
+##      same.
 ##
 ## NO MOCKS: real repositories and manifest, the built ``repro``, the real
 ## provider and engine. Skip rule: ``git`` or ``ssh-keygen`` missing.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
 import repro_test_support/reasoned_skip
 import repro_cli_support
 import ./certify_workspace_mode_fixture
@@ -79,3 +84,40 @@ suite "TC-8e — repro certify materializes the declared set":
       # Incremental: only the edge whose input changed executes; the other
       # two are reused from records of this host's executions (D16).
       check fx.executedOutputs().len == ran + 1
+
+      # ---- 4. a plain git push carries what certify stored ------------------
+      putEnv("REPROBUILD_REPRO", fx.cf.sib.repro)
+      let hooks = fx.reproIn(["hooks", "ensure", "--vcs", fx.cf.sib.ws])
+      checkpoint(hooks.output)
+      check hooks.code == 0
+      proc git(args: string): tuple[output: string; exitCode: int] =
+        execCmdEx("git -C " & quoteShell(fx.app) & " " & args)
+      var origin = ""
+      for (name, path) in fx.cf.sib.origins:
+        if name == "app": origin = path
+      proc recordsOnOrigin(content: string): int =
+        let note = execCmdEx("git -C " & quoteShell(origin) & " notes --ref=" &
+          certificateNotesRef & " show " & content.split(':')[^1])
+        if note.exitCode != 0: 0
+        else: note.output.count("# --- test-certificate ---")
+      check git("rev-parse --verify --quiet " & certificateNotesRef).exitCode != 0
+      check git("commit -q -a -m " & quoteShell("certified side")).exitCode == 0
+      check git("rev-parse HEAD^{tree}").output.strip() == edited.split(':')[^1]
+      let plainPush = git("push origin main")
+      checkpoint(plainPush.output)
+      check plainPush.exitCode == 0
+      check recordsOnOrigin(edited) == 3
+
+      # ---- 5. so does repro push -------------------------------------------
+      writeFile(fx.app / "src" / "side.txt", "side v3\n")
+      let further = fx.contentNow()
+      let fourth = fx.reproIn(["certify", "--tool-provisioning=path"])
+      checkpoint(fourth.output)
+      check fourth.code == 0
+      check git("commit -q -a -m " & quoteShell("certified side again")).exitCode == 0
+      check git("rev-parse HEAD^{tree}").output.strip() == further.split(':')[^1]
+      check recordsOnOrigin(further) == 0
+      let pushed = fx.reproIn(["push", "--no-certify"])
+      checkpoint(pushed.output)
+      check pushed.code == 0
+      check recordsOnOrigin(further) == 3

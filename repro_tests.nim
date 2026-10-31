@@ -16833,8 +16833,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
-    source: "tests/integration/t_certify_check_set_issues_and_attaches_pre_commit_certificate.nim",
-    binary: "build/test-bin/t_certify_check_set_issues_and_attaches_pre_commit_certificate",
+    source: "tests/integration/t_certify_check_set_issues_pre_commit_certificate.nim",
+    binary: "build/test-bin/t_certify_check_set_issues_pre_commit_certificate",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -19671,6 +19671,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_issuance_writes_the_local_store_only_and_the_tool_carries_the_notes.nim",
+    binary: "build/test-bin/t_issuance_writes_the_local_store_only_and_the_tool_carries_the_notes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g06",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_issued_certificate_lands_in_the_standard_local_store.nim",
     binary: "build/test-bin/t_issued_certificate_lands_in_the_standard_local_store",
     defines: @[],
@@ -19679,7 +19690,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",
@@ -20284,7 +20295,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_update_node_refreshes_the_flake_lock_through_repro_test.nim",
@@ -20955,7 +20966,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_nf4_foreign_env_contract.nim",
@@ -21604,7 +21615,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_protocol_v2_policy_regressions.nim",
@@ -22264,7 +22275,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_refuses_nested_declared_checkout.nim",
@@ -22456,6 +22467,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim",
     binary: "build/test-bin/t_repro_prompt_is_fast_and_silent_outside_workspace",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_repro_push_carries_no_notes_of_its_own.nim",
+    binary: "build/test-bin/t_repro_push_carries_no_notes_of_its_own",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -22924,7 +22946,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",

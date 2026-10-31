@@ -49,6 +49,7 @@
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_cli_support
+import ./certificate_note_seed
 import repro_test_support/reasoned_skip
 
 proc gitOut(repo: string; args: varargs[string]): string =
@@ -124,7 +125,7 @@ suite "a certificate note read keeps git's stderr apart":
       let repo = scratch / "lib-a"
       let tree = initRepo(repo)
       let content = "git-tree-sha1:" & tree
-      check attachCertificate("git", repo, certFor(content)).ok
+      check seedCertificateNote("git", repo, certFor(content)).ok
 
       # Expectations computed by git itself, with no trace in the environment.
       let blobOid = gitOut(repo, "notes", "--ref", certificateNotesRef,

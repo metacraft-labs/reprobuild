@@ -300,6 +300,12 @@ commits the push introduces and pushes
 on the remote when the gateway judges the branch update. You do not need to
 install anything.
 
+`repro test` and `repro certify` only write the store: reprobuild writes no git
+notes itself. `repro push` has no notes step either, because its own `git push`
+runs this hook. So a member `repro push` reports as `already-published` runs no
+hook and carries no note, and a certificate issued after its commit was published
+waits for a later push that introduces that content.
+
 The hook never fails your push:
 
 | Situation | What you see | What the gateway sees |
@@ -313,7 +319,8 @@ The hook never fails your push:
 The time budget defaults to 60 seconds. `TEST_CERTIFICATES_HOOK_TIMEOUT` changes
 it, in whole seconds, and it cannot be switched off. A gateway at `required`
 refuses a push whose tree has no note, and says the note is missing rather than
-asking you to certify again. A later ordinary push of the same commit carries it.
+asking you to certify again. A later ordinary push of the same
+commit carries it, because a refused push introduced nothing on the remote.
 
 `repro health` reports problems in that configuration in its
 `certificate-propagation` row: an invalid scope declaration, a

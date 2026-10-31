@@ -43,6 +43,7 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
+import ./certificate_note_seed
 import repro_workspace_manifests
 import repro_lock
 import repro_lock/certificate_policy
@@ -290,7 +291,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
         let certA = issueRealCert(fx, keyA.priv, keyIdA, @["t-unit"])
         check certA.isSigned
         check certA.platform == platformA
-        let attA = attachCertificate(gitBin, fx.libAPath, certA)
+        let attA = seedCertificateNote(gitBin, fx.libAPath, certA)
         check attA.ok
 
         # ---- 1 + 3. Platform A: t-unit SKIP (covered), t-int RUN (uncovered).
@@ -329,7 +330,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
             status: rksActive)])
         let forged = issueRealCert(fx, keyF.priv, keyIdF, @["t-unit"])
         check forged.isSigned
-        let attF = attachCertificate(gitBin, fx.libAPath, forged)
+        let attF = seedCertificateNote(gitBin, fx.libAPath, forged)
         check attF.ok
 
         let planF = planJson(fx, platformA)
@@ -353,7 +354,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
           @[RegisteredKey(keyId: keyIdA, publicKey: keyA.pub,
             status: rksActive)])
         let certA = issueRealCert(fx, keyA.priv, keyIdA, @["t-unit"])
-        let attA = attachCertificate(gitBin, fx.libAPath, certA)
+        let attA = seedCertificateNote(gitBin, fx.libAPath, certA)
         check attA.ok
 
         let planAdv = planJson(fx, platformA)
@@ -389,7 +390,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
           @[RegisteredKey(keyId: keyIdP, publicKey: keyP.pub,
             status: rksActive)])
         let certP = issueRealCert(fx, keyP.priv, keyIdP, @["t-unit"])
-        check attachCertificate(gitBin, fx.libAPath, certP).ok
+        check seedCertificateNote(gitBin, fx.libAPath, certP).ok
 
         let planP = planJson(fx, platformA)
         check planP["ci_trust"].getStr() == "skip"

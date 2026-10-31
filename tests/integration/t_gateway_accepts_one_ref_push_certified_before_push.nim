@@ -1,26 +1,23 @@
 ## Agents-Push-Gate.md §4.1–§4.2 (Sovereign-CI-Fleet P6.b/P6.c) — the
 ## `agents` gate end to end on a real local gateway, with no publish-first
-## workaround; and §4.3's one-ref push, as TC-8c (operator decision D12)
-## leaves it:
+## workaround; and §4.3's one-ref push, whose note the managed hook carries:
 ##
 ##   1. CERTIFY BEFORE PUSH (§4.1). A clean, committed, NOT-yet-published HEAD
 ##      is issued a `pre-commit` certificate, delivered to the standard local
 ##      certificate store (TC-8c).
-##   2. NO STORE READ AT THE GATEWAY (D12). A plain one-ref
-##      `git push --no-verify origin main` carries no certificate note, and
-##      the gateway reads no certificate store any more, so under `required`
-##      it is REFUSED — although the certificate sits in the local store.
-##      A push that runs the managed hook gets there, because the hook propagates
-##      notes from the store first; `--no-verify` skips it.
-##   3. ANY ONE PLATFORM (§4.2), BRANCH + NOTES. The certificate is noted on
-##      the pushed tree and the branch is pushed together with the notes ref;
-##      the pushed tree's policy (TC-9d: a requirement on
-##      `anyPlatform`) is met by the host's
-##      own platform and the push is forwarded.
+##   2. NO STORE READ AT THE GATEWAY. A one-ref
+##      `git push --no-verify origin main` skips the managed hook, so it carries
+##      no certificate note, and the gateway reads no certificate store, so
+##      under `required` it is REFUSED although the certificate sits in the local
+##      store.
+##   3. ANY ONE PLATFORM (§4.2), ONE REF. A plain `git push origin main` runs the
+##      managed hook, which publishes the store's certificate and pushes the
+##      notes ref first. The pushed tree's policy (a requirement on `anyPlatform`)
+##      is met by the host's own platform and the push is forwarded.
 ##
 ## Negative control in the same fixture: a second commit with no certificate,
-## pushed the same way (with the notes ref), is REJECTED and never reaches the
-## upstream.
+## pushed past the client gate together with the notes ref, is REJECTED and never
+## reaches the upstream.
 ##
 ## Falsifiability: dropping the issuance exemption leaves no certificate
 ## (step 1 fails); reintroducing a gateway store read accepts the one-ref push
@@ -225,32 +222,6 @@ proc rewindUpstreamToSeed(gitBin: string; fx: Fixture) =
   discard requireGit(q(gitBin) & " -C " & q(fx.upstreamBare) &
     " update-ref refs/heads/main " & q(fx.seedSha))
 
-proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
-    TestCertificate =
-  ## Drive the TC-1 issuance path (a REAL passing run, clean state) to mint a
-  ## genuine daemon-signed cert for ``headSha``, then attach it (TC-2) to the
-  ## pushed commit in the developer clone.
-  let fixtureJson = fx.scratch / "fixture-pass.json"
-  writeTestFixtureJson(fixtureJson, "t-unit", "exit 0")
-  let issued = runShell(shellCommand(@[
-    fx.reproBin, "test",
-    "--fixture-from=" & fixtureJson,
-    "--shard=1/1",
-    "--certify",
-    "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath],
-    daemonKeyEnv(fx.daemonKey, tc6KeyId)), fx.workspaceRoot)
-  if issued.code != 0:
-    checkpoint("repro test output: " & issued.output)
-  check issued.code == 0
-  let content = treeContentId(gitBin, fx.libAPath, headSha)
-  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
-  check result.vcs.base == headSha
-  check result.vcs.content == content
-  check "t-unit" in result.targets
-  let att = attachCertificate(gitBin, fx.libAPath, result)
-  check att.ok
-
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =
   ## True iff the REAL upstream bare contains ``sha`` as a reachable object on
   ## its branch (``git cat-file -e`` + the branch actually points there).
@@ -327,11 +298,14 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
       check "no certificate note on the pushed tree" in oneRef.output
       check not upstreamHasCommit(gitBin, fx.upstreamBare, covered)
 
-      # ---- 3. noted on the tree, pushed with the notes ref: FORWARDED -----
-      check attachCertificate(gitBin, fx.libAPath, stored.cert).ok
+      # ---- 3. the same one ref through the managed hook: FORWARDED --------
+      let hooks = runShell(shellCommand(@[fx.reproBin, "hooks", "ensure",
+        "--vcs", fx.libAPath],
+        @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+      checkpoint("hooks ensure: " & hooks.output)
+      check hooks.code == 0
       let push = runShell(shellCommand(@[
-        gitBin, "-C", fx.libAPath, "push", "--no-verify", "origin", "main",
-        certificateNotesRef & ":" & certificateNotesRef],
+        gitBin, "-C", fx.libAPath, "push", "origin", "main"],
         @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
       checkpoint("covered push: " & push.output)
       check push.code == 0
@@ -339,7 +313,15 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
       check upstreamHasCommit(gitBin, fx.upstreamBare, covered)
 
       # ---- negative control: an uncertified commit is REJECTED ------------
-      let uncovered = makeNewCommit(gitBin, fx, "uncertified change\n")
+      # Made with the managed hooks out of the way: the pre-commit gate would
+      # refuse it, and this control is about what the gateway does.
+      writeFile(fx.libAPath / "uncertified.txt", "uncertified change\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " add uncertified.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " -c core.hooksPath=/dev/null commit -m " & q("uncertified change"))
+      let uncovered = requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " rev-parse HEAD").strip()
       seedLock(fx)
       let rejected = runShell(shellCommand(@[
         gitBin, "-C", fx.libAPath, "push", "--no-verify", "origin", "main",

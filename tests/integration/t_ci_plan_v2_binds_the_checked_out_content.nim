@@ -31,6 +31,7 @@
 import std/[json, os, osproc, strutils, unittest]
 
 include tc8c_store_fixture
+import ./certificate_note_seed
 
 suite "TC-8c — the CI plan binds the checked-out content":
 
@@ -60,7 +61,7 @@ suite "TC-8c — the CI plan binds the checked-out content":
     check planPlatform(bare, host)["verdict"].getStr() == "not-covered"
     check strings(planPlatform(bare, host), "run") == @["t-unit", "t-int"]
 
-    check attachCertificate("git", fx.libAPath,
+    check seedCertificateNote("git", fx.libAPath,
       signedCertFor(fx, headContent, head)).ok
     let noted = ciPlan(fx, host)
     let notedHost = planPlatform(noted, host)

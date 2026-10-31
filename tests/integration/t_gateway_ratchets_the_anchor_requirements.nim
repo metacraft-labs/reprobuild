@@ -50,6 +50,7 @@
 import std/[os, osproc, strutils, unittest]
 
 include policy_gate_fixture
+import ./certificate_note_seed
 
 const otherPlatform = "tc-other-os/tc-other-arch"
   ## A platform no host reports: a certificate for it is fabricated by the
@@ -74,7 +75,7 @@ proc noteCertificate(fx: StoreFixture; commit: string; targets: seq[string];
   ## A registered-signed certificate for ``commit``'s tree, noted on it.
   let content = "git-tree-sha1:" & gitOut(fx.libAPath, "rev-parse",
     commit & "^{tree}")
-  check attachCertificate("git", fx.libAPath,
+  check seedCertificateNote("git", fx.libAPath,
     signedCertFor(fx, content, commit, targets = targets,
       platform = platform)).ok
 

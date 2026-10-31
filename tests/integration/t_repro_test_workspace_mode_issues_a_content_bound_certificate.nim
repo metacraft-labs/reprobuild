@@ -13,7 +13,7 @@
 ##   1. a plain ``repro test`` issues ``targets = ["test"]`` for the working
 ##      tree's content: signed, ``base`` = HEAD, ``untracked = true`` (the
 ##      scratch input is present), its commands the three edges' argv as the
-##      engine launched them, and a note on the shared ref under the tree.
+##      engine launched them, and no git note.
 ##      ``unit-suite``, whose closure ``test`` builds whole, is certified too,
 ##      with its own two commands. The run ends naming the marked nodes it did
 ##      not select;
@@ -132,14 +132,11 @@ suite "TC-8e — issue on the real repro test path":
         check sortedOutputsEndWith(cert, ["unit_a", "unit_b", "lone"])
         for command in cert.commands:
           check command.argv[0].endsWith("cert-tool")
-        # Noted on the shared ref under the tree the content names.
-        let tree = content.split(':')[^1]
-        let note = execCmdEx("git -C " & quoteShell(app) &
-          " notes --ref=refs/notes/test-certificates/certificates show " &
-          tree)
-        checkpoint(note.output)
-        check note.exitCode == 0
-        check cert.signature.value in note.output
+        # Issuance writes the store and no note: the managed pre-push hook
+        # publishes one when a push introduces this content.
+        check execCmdEx("git -C " & quoteShell(app) &
+          " rev-parse --verify --quiet " &
+          "refs/notes/test-certificates/certificates").exitCode != 0
       check "issued test-certificate.v1 for 'test'" in plain.output
       # ``unit-suite``'s whole closure is part of what ``test`` builds, so the
       # plan materializes it too, and it is certified with its own commands.

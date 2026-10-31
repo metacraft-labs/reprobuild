@@ -1537,7 +1537,7 @@ tests/integration/t_certificate_requires_verified_tree.nim	nim	2
 tests/integration/t_certificate_round_trips_against_the_canonical_form.nim	nim	1
 tests/integration/t_certificate_signature_verifies_against_registered_key.nim	nim	1
 tests/integration/t_certificates_travel_with_pushed_commit.nim	nim	1
-tests/integration/t_certify_check_set_issues_and_attaches_pre_commit_certificate.nim	nim	1
+tests/integration/t_certify_check_set_issues_pre_commit_certificate.nim	nim	1
 tests/integration/t_certifying_run_records_the_policy_snapshot_the_hook_carries.nim	nim	1
 tests/integration/t_certifying_run_refreshes_the_lock_before_testing.nim	nim	1
 tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	nim	16
@@ -1795,6 +1795,7 @@ tests/integration/t_is_published_accepts_any_remote_name.nim	nim	1
 tests/integration/t_issuance_leaves_the_user_index_untouched.nim	nim	1
 tests/integration/t_issuance_refuses_states_with_no_content_id.nim	nim	1
 tests/integration/t_issuance_refuses_when_content_changes_during_the_run.nim	nim	1
+tests/integration/t_issuance_writes_the_local_store_only_and_the_tool_carries_the_notes.nim	nim	2
 tests/integration/t_issued_certificate_lands_in_the_standard_local_store.nim	nim	3
 tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	nim	1
 tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	2
@@ -2049,8 +2050,9 @@ tests/integration/t_repro_exec_delivers_posix_signals.nim	nim	1
 tests/integration/t_repro_exec_runquotad_does_not_hold_callers_pipe.nim	nim	1
 tests/integration/t_repro_exec_survives_compile_time_tmpdir_removal.nim	nim	1
 tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim	nim	1
+tests/integration/t_repro_push_carries_no_notes_of_its_own.nim	nim	1
 tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim	nim	2
-tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	nim	32
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	nim	31
 tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim	nim	4
 tests/integration/t_repro_reap_verb_is_dispatched.nim	nim	3
 tests/integration/t_repro_runtime_dlopen_without_library_path.nim	nim	4

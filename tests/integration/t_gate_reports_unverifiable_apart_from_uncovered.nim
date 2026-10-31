@@ -45,6 +45,7 @@ import repro_test_support/reasoned_skip
 import std/[json, os, osproc, sequtils, strutils, unittest]
 
 include tc8c_store_fixture
+import ./certificate_note_seed
 
 proc evidenceOf(report: JsonNode; property: string): string =
   if report.hasKey("failures"):
@@ -80,7 +81,7 @@ suite "TC-8c — unverifiable is reported apart from uncovered":
     let content = "git-tree-sha1:" & gitOut(fx.libAPath, "rev-parse",
       b & "^{tree}")
     let cert = issuedCertificate(fx.userRoot, content, host).cert
-    check attachCertificate("git", fx.libAPath, cert).ok
+    check seedCertificateNote("git", fx.libAPath, cert).ok
     # Sanity: with a readable key store all three consumers are covered.
     check checkPrePush(fx, b).code == 0
     check planPlatform(ciPlan(fx, host), host)["verdict"].getStr() == "covered"

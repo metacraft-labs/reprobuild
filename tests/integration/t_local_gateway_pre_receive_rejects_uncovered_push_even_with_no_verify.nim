@@ -37,6 +37,7 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
+import ./certificate_note_seed
 import repro_workspace_manifests
 import repro_lock
 import repro_lock/certificate_policy
@@ -253,7 +254,7 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
   check result.vcs.content == content
   check "t-unit" in result.targets
   # The note is keyed by that tree, on the shared notes ref.
-  let att = attachCertificate(gitBin, fx.libAPath, result)
+  let att = seedCertificateNote(gitBin, fx.libAPath, result)
   check att.ok
 
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =

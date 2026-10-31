@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2563,
+    "nimTestBinaries": 2565,
     "pureUnitConsolidationGroups": 75,
     "pureUnitTests": 713,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2603
+    "testEntries": 2605
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1489,7 +1489,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1421,
+      "integration": 1423,
       "platform/destructive": 162,
       "pure unit": 713,
       "unclassified": 289
@@ -1700,9 +1700,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2563,
+    "nimTestBinaryCount": 2565,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2603
+    "testEntryCount": 2605
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -35693,7 +35693,7 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_certify_check_set_issues_and_attaches_pre_commit_certificate",
+      "binary": "build/test-bin/t_certify_check_set_issues_pre_commit_certificate",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
@@ -35705,7 +35705,7 @@
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
-      "source": "tests/integration/t_certify_check_set_issues_and_attaches_pre_commit_certificate.nim",
+      "source": "tests/integration/t_certify_check_set_issues_pre_commit_certificate.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -40299,6 +40299,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_issuance_writes_the_local_store_only_and_the_tool_carries_the_notes",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_issuance_writes_the_local_store_only_and_the_tool_carries_the_notes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_issued_certificate_lands_in_the_standard_local_store",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -44812,6 +44827,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repro_push_carries_no_notes_of_its_own",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_push_carries_no_notes_of_its_own.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repro_push_publishes_dependency_closure_in_topological_order",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -44845,7 +44875,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 32,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

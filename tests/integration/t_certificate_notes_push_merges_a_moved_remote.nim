@@ -1,5 +1,7 @@
-## ``pushCertificateNotes`` (the notes leg of ``repro push``) merges a remote
-## notes ref that moved, instead of failing on the non-fast-forward
+## The notes push the pre-push hook runs (the reference library's ``pushNotes``)
+## merges a remote notes ref that moved, instead of failing on the
+## non-fast-forward. Reprobuild's propagation relies on this, so it is pinned here
+## against the revision ``repro.lock`` links
 ## (test-certificates Tooling §3 ``notes push``; Transport §3.1 "Merging two
 ## notes"; Conformance §6 live-repository cases), at spec 9ebbcb3.
 ##
@@ -21,13 +23,13 @@
 ## commands included: a git that cannot run fails the push instead of
 ## reading as "no certificate notes", and a logging wrapper sees the push.
 ##
-## Falsifiability: the previous ``git push`` body fails step 2 outright
+## Falsifiability: a plain ``git push`` fails step 2 outright
 ## (non-fast-forward) and loses B's record; a merge that lets the incoming
 ## side win replaces A's signed copy; one that does not repair the boundary
 ## glues B's delimiter onto A's last line, so B's record disappears into A's.
 ## Letting the library run the `git` on PATH leaves the wrapper's log
-## without a `push`; treating any probe failure as "no notes" passes the
-## broken git as ok.
+## without a `push`; treating any failure as "no notes" passes the broken git
+## as ok.
 ##
 ## Real git, a real bare remote, two real clones. No mocks.
 
@@ -35,6 +37,17 @@ import repro_test_support/reasoned_skip
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_cli_support
+import ./certificate_note_seed
+from test_certificates/notes as tcnotes import nil
+
+proc pushNotes(gitBin, repo: string): tcnotes.SyncReport =
+  ## The library call the hook makes, with the git it is told to run.
+  var options = tcnotes.defaultPushOptions()
+  options.gitExe = gitBin
+  tcnotes.pushNotes(repo, "origin", certificateNotesRef, options)
+
+proc pushed(report: tcnotes.SyncReport): bool =
+  report.ok and report.outcome != tcnotes.soNoLocalNotes
 
 proc git(dir: string; args: varargs[string]): string =
   var argv = @["git", "-C", dir]
@@ -96,21 +109,21 @@ suite "certificate notes push merges a moved remote":
       certificateNoteDelimiter & "\n" & unterminated[0 ..< ^1]
     check not blobA.endsWith("\n")
     attachRawNote(cloneA, tree, blobA)
-    let pushedA = pushCertificateNotes("git", cloneA, "origin")
-    checkpoint("A: " & pushedA.diagnostic)
-    check pushedA.ok and pushedA.pushed
+    let pushedA = pushNotes("git", cloneA)
+    checkpoint("A: " & pushedA.problems.join("; "))
+    check pushed(pushedA)
 
     # ---- 2. B, which never fetched A's note, attaches and pushes ---------
     var alteredA = signedA
     alteredA.signature.value = "QkJCQg=="
-    check attachCertificate("git", cloneB, alteredA).ok
+    check seedCertificateNote("git", cloneB, alteredA).ok
     let recordB = certificateNoteRecord(certFor(tree, "runner-b"))
-    check attachCertificate("git", cloneB, certFor(tree, "runner-b")).ok
-    let pushedB = pushCertificateNotes("git", cloneB, "origin")
-    checkpoint("B: " & pushedB.diagnostic & " remarks: " &
+    check seedCertificateNote("git", cloneB, certFor(tree, "runner-b")).ok
+    let pushedB = pushNotes("git", cloneB)
+    checkpoint("B: " & pushedB.problems.join("; ") & " remarks: " &
       pushedB.remarks.join(" | "))
     check pushedB.ok
-    check pushedB.pushed
+    check pushed(pushedB)
     check pushedB.remarks.anyIt(noteMergeReportKind(it) == nmrLfRepair)
     check pushedB.remarks.anyIt(noteMergeReportKind(it) == nmrSignedConflict)
 
@@ -131,36 +144,35 @@ suite "certificate notes push merges a moved remote":
     check entries.allIt(it.read.status == crsOk)
 
     # ---- 3. pushing again changes nothing --------------------------------
-    let again = pushCertificateNotes("git", cloneB, "origin")
+    let again = pushNotes("git", cloneB)
     check again.ok
     let noteAgain = readNoteBlob("git", inspect, tree, certificateNotesRef)
     check noteAgain.body == note.body
 
     # ---- 4. the push runs the git it was given, and only that git --------
-    # ``gitBin`` is the git ``repro push`` resolved; the library's fetch,
-    # merge and push must run it too, not whatever `git` is first on PATH.
-    # A git that cannot run is a failure, never "no certificate notes".
-    let broken = pushCertificateNotes(scratch / "no-such-git", cloneB,
-      "origin")
-    checkpoint("broken git: " & broken.diagnostic)
+    # The library's fetch, merge and push run the git they are given, not
+    # whatever `git` is first on PATH. A git that cannot run is a failure, never
+    # "no certificate notes".
+    let broken = pushNotes(scratch / "no-such-git", cloneB)
+    checkpoint("broken git: " & broken.problems.join("; "))
     check not broken.ok
-    check not broken.pushed
-    check "no-such-git" in broken.diagnostic
+    check not pushed(broken)
+    check "no-such-git" in broken.problems.join("; ")
     when not defined(windows):
       # A logging wrapper around the real git (a shell script, which
       # Windows cannot run as an executable): every command it sees is one
-      # the push ran through ``gitBin``.
+      # the push ran through the git it was given.
       let log = scratch / "git-calls.log"
       let wrapper = scratch / "logging-git"
       writeFile(wrapper, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " &
         quoteShell(log) & "\nexec " & quoteShell(findExe("git")) &
         " \"$@\"\n")
       setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
-      check attachCertificate("git", cloneB,
+      check seedCertificateNote("git", cloneB,
         certFor(tree, "runner-b-again")).ok
-      let viaWrapper = pushCertificateNotes(wrapper, cloneB, "origin")
-      checkpoint("wrapper: " & viaWrapper.diagnostic)
-      check viaWrapper.ok and viaWrapper.pushed
+      let viaWrapper = pushNotes(wrapper, cloneB)
+      checkpoint("wrapper: " & viaWrapper.problems.join("; "))
+      check pushed(viaWrapper)
       let calls = readFile(log).splitLines()
       check calls.anyIt(it.startsWith("push "))
       check calls.anyIt("rev-parse" in it)

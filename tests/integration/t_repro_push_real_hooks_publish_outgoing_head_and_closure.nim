@@ -19,6 +19,8 @@
 ## no capability/context, while successful nested pushes and empty capability
 ## storage prove one-use authorization was exercised. All source publication
 ## uses local Git processes, filesystem hooks, worktrees, and bare remotes.
+## A stored certificate reaches each component member's remote through that
+## member's own hook, a retained prefix's included.
 ## The interpreter-skew case alone stubs an obsolete CLI's protocol handshake:
 ## this isolates version negotiation without embedding an old release binary,
 ## and it refuses before any source Git transport can run.
@@ -29,6 +31,7 @@
 import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles,
   unittest]
 
+import repro_cli_support
 import repro_cli_support/push_hook_protocol
 import repro_test_support
 import repro_test_support/reasoned_skip
@@ -339,6 +342,30 @@ proc withHookCli(fx: Fixture; command: string): tuple[code: int;
     else: delEnv("REPROBUILD_REPRO")
   run(command)
 
+proc storeCertificateForHead(gitBin: string; fx: Fixture; repo: string) =
+  ## Put a certificate for ``repo``'s HEAD tree in a store private to this
+  ## fixture (the children inherit its location), and write no note.
+  putEnv("TEST_CERTIFICATES_DIR", fx.scratch / "store-user")
+  putEnv("TEST_CERTIFICATES_SYSTEM_DIR", fx.scratch / "store-system")
+  let head = require(q(gitBin) & " -C " & q(repo) & " rev-parse HEAD").strip()
+  let tree = require(q(gitBin) & " -C " & q(repo) &
+    " rev-parse HEAD^{tree}").strip()
+  let cert = TestCertificate(schema: testCertificateSchemaV1,
+    framework: reprobuildFrameworkId, project: repo.extractFilename,
+    platform: currentPlatformTag(), targets: @["t-unit"], result: tcrPassed,
+    issuedAt: "2026-10-31T00:00:00Z", issuer: "real-hooks-fixture",
+    vcs: TestCertificateVcs(repo: repo.extractFilename,
+      content: "git-tree-sha1:" & tree, base: head),
+    commands: @[TestCertificateCommand(argv: @["true"])])
+  doAssert publishCertificateToLocalStore(cert, repo).written
+
+proc remoteNoteOnHeadTree(gitBin, bare: string): tuple[code: int; output: string] =
+  ## The certificate note on the tree of ``bare``'s main branch.
+  let tree = require(q(gitBin) & " -C " & q(bare) &
+    " rev-parse refs/heads/main^{tree}").strip()
+  run(q(gitBin) & " -C " & q(bare) &
+    " notes --ref=refs/notes/test-certificates/certificates show " & tree)
+
 proc invokePush(fx: Fixture): tuple[code: int; output: string] =
   runShell(shellCommand(@[fx.reproBin, "push", "--write-report", "app", "--no-certify",
     "--workspace-root=" & fx.workspace, "--current-repo=" & fx.app,
@@ -462,6 +489,12 @@ proc remoteHasLock(gitBin: string; fx: Fixture; repo, sha: string): bool =
   let path = "locks/app/" & repo & "/" & sha & ".toml"
   run(q(gitBin) & " -C " & q(fx.manifestBare) &
     " cat-file -e " & q("refs/heads/main:" & path)).code == 0
+
+proc pathsAddedSince(gitBin, repo, before: string): string =
+  ## What the backend's ``repo`` gained on main since ``before``. A member that
+  ## was really pushed publishes its own record; a refused one must add nothing.
+  require(q(gitBin) & " -C " & q(repo) & " diff --name-status " & q(before) &
+    " refs/heads/main").strip()
 
 proc capabilityDir(gitBin: string; fx: Fixture): string =
   let common = require(q(gitBin) & " -C " & q(fx.manifests) &
@@ -652,13 +685,8 @@ suite "protocol v2 real-hook repro push closure":
     let appSha = commit(fx, gitBin, fx.app, "cyclic-app")
     let libSha = commit(fx, gitBin, fx.lib, "cyclic-lib")
     let coreSha = commit(fx, gitBin, fx.core, "cyclic-core")
-    var noteTips: seq[tuple[bare, oid: string]]
-    for member in [(fx.app, fx.appBare), (fx.lib, fx.libBare), (fx.core, fx.coreBare)]:
-      discard require(q(gitBin) & " -C " & q(member[0]) &
-        " notes --ref=refs/notes/test-certificates/certificates add -m " &
-        q("cyclic component note transport"))
-      noteTips.add((member[1], require(q(gitBin) & " -C " & q(member[0]) &
-        " rev-parse refs/notes/test-certificates/certificates").strip()))
+    for member in [fx.app, fx.lib, fx.core]:
+      storeCertificateForHead(gitBin, fx, member)
     let otherBefore = remoteHead(gitBin, fx.otherBare)
     discard commit(fx, gitBin, fx.other, "unrelated-cycle-work")
     installHooks(fx)
@@ -678,12 +706,12 @@ suite "protocol v2 real-hook repro push closure":
     for member in [("app", appSha), ("lib", libSha), ("core", coreSha)]:
       check remoteHasLock(gitBin, fx, member[0], member[1])
     check report(fx)["order"] == %*["app", "lib", "core"]
-    for note in noteTips:
-      let actual = run(q(gitBin) & " -C " & q(note.bare) &
-        " rev-parse refs/notes/test-certificates/certificates")
-      check actual.code == 0
-      check actual.output.strip() == note.oid
-    check report(fx)["certNotesDiagnostic"].getStr() == ""
+    # Each member's own hook carried its certificate, under an authorization
+    # that is the component's and not the ordinary gate's.
+    for bare in [fx.appBare, fx.libBare, fx.coreBare]:
+      let note = remoteNoteOnHeadTree(gitBin, bare)
+      check note.code == 0
+      check "# --- test-certificate ---" in note.output
     check report(fx)["lockPublished"].getBool()
     check fileExists(fx.manifestPrePushLog)
     if fileExists(fx.manifestPrePushLog):
@@ -752,11 +780,7 @@ suite "protocol v2 real-hook repro push closure":
     let appSha = commit(fx, gitBin, fx.app, "retry-cycle-app")
     let libSha = commit(fx, gitBin, fx.lib, "retry-cycle-lib")
     let coreSha = commit(fx, gitBin, fx.core, "retry-cycle-core")
-    discard require(q(gitBin) & " -C " & q(fx.app) &
-      " notes --ref=refs/notes/test-certificates/certificates add -m " &
-      q("published prefix note transport"))
-    let appNote = require(q(gitBin) & " -C " & q(fx.app) &
-      " rev-parse refs/notes/test-certificates/certificates").strip()
+    storeCertificateForHead(gitBin, fx, fx.app)
     executable(fx.libBare / "hooks" / "pre-receive", "#!/bin/sh\nexit 73\n")
     installHooks(fx)
     let stopped = invokePush(fx)
@@ -765,6 +789,11 @@ suite "protocol v2 real-hook repro push closure":
     check remoteHead(gitBin, fx.appBare) == appSha
     check remoteHead(gitBin, fx.libBare) == libBefore
     check remoteHead(gitBin, fx.coreBare) == coreBefore
+    # The published prefix's certificate went with it, so the stop strands
+    # nothing and the retry, which does not push app again, needs to do nothing.
+    let prefixNote = remoteNoteOnHeadTree(gitBin, fx.appBare)
+    check prefixNote.code == 0
+    check "# --- test-certificate ---" in prefixNote.output
     checkSourceCapabilitiesEmpty(fx, gitBin)
     removeFile(fx.libBare / "hooks" / "pre-receive")
     let retried = invokePush(fx)
@@ -774,11 +803,7 @@ suite "protocol v2 real-hook repro push closure":
     check remoteHead(gitBin, fx.libBare) == libSha
     check remoteHead(gitBin, fx.coreBare) == coreSha
     check report(fx)["repos"][0]["outcome"].getStr() == "already-published"
-    let carried = run(q(gitBin) & " -C " & q(fx.appBare) &
-      " rev-parse refs/notes/test-certificates/certificates")
-    check carried.code == 0
-    check carried.output.strip() == appNote
-    check report(fx)["certNotesDiagnostic"].getStr() == ""
+    check remoteNoteOnHeadTree(gitBin, fx.appBare).output == prefixNote.output
     check report(fx)["lockPublished"].getBool()
     checkSourceCapabilitiesEmpty(fx, gitBin)
 
@@ -961,34 +986,6 @@ suite "protocol v2 real-hook repro push closure":
     check "REPROBUILD_REPRO=" in report(fx)["retryCommand"].getStr()
     check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
       remoteHead(gitBin, fx.coreBare)] == before
-    checkSourceCapabilitiesEmpty(fx, gitBin)
-
-  test "deferred component notes revalidate each peer before transport":
-    let gitBin = findExe("git")
-    check gitBin.len > 0
-    let fx = setup(gitBin, "cycle-notes-redirect")
-    defer: removeDir(fx.scratch)
-    configureCycle(fx, gitBin)
-    # All source HEADs are already published. The first notes hook changes
-    # a later peer's destination between global preflight and notes transport.
-    for member in [fx.app, fx.lib, fx.core]:
-      discard require(q(gitBin) & " -C " & q(member) &
-        " notes --ref=refs/notes/test-certificates/certificates add -m " &
-        q("deferred notes destination control"))
-    let foreignBefore = remoteHead(gitBin, fx.otherBare)
-    executable(fx.app / ".git" / "hooks" / "pre-push",
-      "#!/bin/sh\nset -eu\n" & q(gitBin) & " -C " & q(fx.lib) &
-      " remote set-url --push origin " & q(fileUrl(fx.otherBare)) &
-      "\ncat >/dev/null\n")
-    installHooks(fx)
-    let stopped = invokePush(fx)
-    check stopped.code != 0
-    check report(fx)["stoppedStage"].getStr() == "source-revalidation"
-    check "certificate notes not carried" in
-      report(fx)["certNotesDiagnostic"].getStr()
-    check remoteHead(gitBin, fx.otherBare) == foreignBefore
-    check run(q(gitBin) & " -C " & q(fx.otherBare) &
-      " rev-parse --verify refs/notes/test-certificates/certificates").code != 0
     checkSourceCapabilitiesEmpty(fx, gitBin)
 
   test "raw dependent refuses unpublished dependency":
@@ -1323,17 +1320,14 @@ suite "protocol v2 real-hook repro push closure":
       for drift in ["dirty", "head", "branch", "remote"]:
         let fx = setup(gitBin, "published-revalidation-" & drift)
         defer: removeDir(fx.scratch)
-        let coreSha = remoteHead(gitBin, fx.coreBare)
         let beforeLib = remoteHead(gitBin, fx.libBare)
         let beforeApp = remoteHead(gitBin, fx.appBare)
         let beforeManifest = remoteHead(gitBin, fx.manifestBare)
-        # An attached notes ref makes the already-published core execute a real
-        # pre-push hook without moving its source branch. The preserved hook
-        # mutates the later published member; source revalidation must catch it
-        # before either that member or the backend is transported.
-        discard require(q(gitBin) & " -C " & q(fx.core) &
-          " notes --ref=refs/notes/test-certificates/certificates add -m " &
-          q("revalidation fixture " & drift) & " HEAD")
+        # An unpublished core commit makes core execute a real pre-push hook
+        # after preflight. The preserved hook mutates the later published
+        # member; source revalidation must catch it before either that member
+        # or the backend is transported.
+        let coreSha = commit(fx, gitBin, fx.core, "revalidation-" & drift)
         let alternate = fx.scratch / "alternate-lib.git"
         if drift == "remote":
           discard require(q(gitBin) & " clone --bare " & q(fx.libBare) &
@@ -1356,15 +1350,14 @@ suite "protocol v2 real-hook repro push closure":
           else: ""
         executable(fx.core / ".git" / "hooks" / "pre-push",
           "#!/usr/bin/env sh\nset -eu\n" & mutation &
-            "\ncat >/dev/null\nexit 73\n")
+            "\ncat >/dev/null\n")
         installHooks(fx)
         let stopped = invokePush(fx)
         if stopped.code == 0: checkpoint(stopped.output)
         check stopped.code != 0
         let stoppedReport = report(fx)
         check stoppedReport["repos"][0]["name"].getStr() == "core"
-        check stoppedReport["repos"][0]["outcome"].getStr() ==
-          "already-published"
+        check stoppedReport["repos"][0]["outcome"].getStr() == "pushed"
         check stoppedReport["repos"][1]["name"].getStr() == "lib"
         check stoppedReport["repos"][1]["outcome"].getStr() == "failed"
         check stoppedReport["stoppedRepo"].getStr() == "lib"
@@ -1380,15 +1373,14 @@ suite "protocol v2 real-hook repro push closure":
           check "remote location changed after preflight" in diagnostic
         else: check false
 
-        # The preserved hook deliberately refuses its notes transport after
-        # causing the fixture drift. The carry is best-effort, so `repro push`
-        # continues to the later member and must revalidate it; no source ref
-        # or lock backend may advance.
+        # Core's push succeeded, so `repro push` continues to the later member
+        # and must revalidate it; no other source ref may advance, and the
+        # backend gains core's own record and nothing else.
         check remoteHead(gitBin, fx.coreBare) == coreSha
         check remoteHead(gitBin, fx.libBare) == beforeLib
         check remoteHead(gitBin, fx.appBare) == beforeApp
-        check remoteHead(gitBin, fx.manifestBare) == beforeManifest
-        check not remoteHasLock(gitBin, fx, "core", coreSha)
+        check pathsAddedSince(gitBin, fx.manifestBare, beforeManifest) ==
+          "A\tlocks/app/core/" & coreSha & ".toml"
         check not remoteHasLock(gitBin, fx, "lib", beforeLib)
         check not remoteHasLock(gitBin, fx, "app", beforeApp)
 
@@ -1408,14 +1400,12 @@ suite "protocol v2 real-hook repro push closure":
       discard require(q(gitBin) & " -C " & q(fx.lib) &
         " remote set-url --add --push origin " & q(fileUrl(libMirror)))
 
-      discard require(q(gitBin) & " -C " & q(fx.core) &
-        " notes --ref=refs/notes/test-certificates/certificates add -m " &
-        q("delete later advertised branch") & " HEAD")
+      let coreSha = commit(fx, gitBin, fx.core, "delete-later-advertised-branch")
       executable(fx.core / ".git" / "hooks" / "pre-push",
         "#!/usr/bin/env sh\nset -eu\n" &
         q(gitBin) & " --git-dir=" & q(fx.libBare) &
           " update-ref -d refs/heads/main\n" &
-        "cat >/dev/null\nexit 73\n")
+        "cat >/dev/null\n")
       installHooks(fx)
 
       let localHeads = @[
@@ -1426,7 +1416,6 @@ suite "protocol v2 real-hook repro push closure":
         sourceStorageSnapshot(gitBin, fx.core),
         sourceStorageSnapshot(gitBin, fx.lib),
         sourceStorageSnapshot(gitBin, fx.app)]
-      let coreRemote = remoteHead(gitBin, fx.coreBare)
       let deletedLibRemote = remoteHead(gitBin, fx.libBare)
       let mirrorRemote = remoteHead(gitBin, libMirror)
       let appRemote = remoteHead(gitBin, fx.appBare)
@@ -1435,15 +1424,13 @@ suite "protocol v2 real-hook repro push closure":
       let backendRemote = remoteHead(gitBin, fx.manifestBare)
       let backendStatus = require(q(gitBin) & " -C " & q(fx.manifests) &
         " status --porcelain")
-      let backendRecords = backendRecordState(gitBin, fx.manifests)
 
       let stopped = invokePush(fx)
       if stopped.code == 0: checkpoint(stopped.output)
       check stopped.code != 0
       let stoppedReport = report(fx)
       check stoppedReport["repos"][0]["name"].getStr() == "core"
-      check stoppedReport["repos"][0]["outcome"].getStr() ==
-        "already-published"
+      check stoppedReport["repos"][0]["outcome"].getStr() == "pushed"
       check stoppedReport["repos"][1]["name"].getStr() == "lib"
       check stoppedReport["repos"][1]["outcome"].getStr() == "failed"
       check stoppedReport["stoppedRepo"].getStr() == "lib"
@@ -1454,19 +1441,22 @@ suite "protocol v2 real-hook repro push closure":
       check not branchExists(gitBin, fx.libBare)
       check deletedLibRemote == localHeads[1]
       check remoteHead(gitBin, libMirror) == mirrorRemote
-      check remoteHead(gitBin, fx.coreBare) == coreRemote
+      check remoteHead(gitBin, fx.coreBare) == coreSha
       check remoteHead(gitBin, fx.appBare) == appRemote
-      check remoteHead(gitBin, fx.manifestBare) == backendRemote
-      check require(q(gitBin) & " -C " & q(fx.manifests) &
-        " rev-parse HEAD").strip() == backendLocal
+      # The backend gains core's own record, which core's real push published,
+      # on both sides, and nothing for the refused members.
+      let coreRecord = "A\tlocks/app/core/" & coreSha & ".toml"
+      check pathsAddedSince(gitBin, fx.manifestBare, backendRemote) == coreRecord
+      check pathsAddedSince(gitBin, fx.manifests, backendLocal) == coreRecord
       check require(q(gitBin) & " -C " & q(fx.manifests) &
         " status --porcelain") == backendStatus
-      check backendRecordState(gitBin, fx.manifests) == backendRecords
       for index, source in [fx.core, fx.lib, fx.app]:
         check require(q(gitBin) & " -C " & q(source) &
           " rev-parse HEAD").strip() == localHeads[index]
-        check sourceStorageSnapshot(gitBin, source) == sourceState[index]
-      check not remoteHasLock(gitBin, fx, "core", localHeads[0])
+      # Core really pushed, so its remote-tracking ref moved; the others' storage
+      # is untouched.
+      for index, source in [fx.lib, fx.app]:
+        check sourceStorageSnapshot(gitBin, source) == sourceState[index + 1]
       check not remoteHasLock(gitBin, fx, "lib", localHeads[1])
       check not remoteHasLock(gitBin, fx, "app", localHeads[2])
 
@@ -1817,19 +1807,16 @@ suite "protocol v2 real-hook repro push closure":
       let pinnedBranch = "reprobuild/pinned/" & libSha[0 ..< 12]
       discard require(q(gitBin) & " -C " & q(fx.lib) &
         " switch -c " & q(pinnedBranch))
-      # An attached notes ref makes the already-published core run a real
-      # pre-push hook, which deletes lib's only containing branch after
-      # preflight has classified lib as published.
-      discard require(q(gitBin) & " -C " & q(fx.core) &
-        " notes --ref=refs/notes/test-certificates/certificates add -m " &
-        q("delete pinned member's containing branch") & " HEAD")
+      # An unpublished core commit makes core run a real pre-push hook, which
+      # deletes lib's only containing branch after preflight has classified lib
+      # as published.
+      let coreSha = commit(fx, gitBin, fx.core, "delete-pinned-containing-branch")
       executable(fx.core / ".git" / "hooks" / "pre-push",
         "#!/usr/bin/env sh\nset -eu\n" &
         q(gitBin) & " --git-dir=" & q(fx.libBare) &
           " update-ref -d refs/heads/main\n" &
-        "cat >/dev/null\nexit 73\n")
+        "cat >/dev/null\n")
       installHooks(fx)
-      let coreRemote = remoteHead(gitBin, fx.coreBare)
       let appRemote = remoteHead(gitBin, fx.appBare)
       let backendRemote = remoteHead(gitBin, fx.manifestBare)
 
@@ -1840,7 +1827,7 @@ suite "protocol v2 real-hook repro push closure":
       check r["repos"].len == 2
       if r["repos"].len == 2:
         check r["repos"][0]["name"].getStr() == "core"
-        check r["repos"][0]["outcome"].getStr() == "already-published"
+        check r["repos"][0]["outcome"].getStr() == "pushed"
         check r["repos"][1]["name"].getStr() == "lib"
         check r["repos"][1]["branch"].getStr() == pinnedBranch
         check r["repos"][1]["outcome"].getStr() == "failed"
@@ -1853,9 +1840,10 @@ suite "protocol v2 real-hook repro push closure":
       # parking branch appears on lib's remote.
       check require(q(gitBin) & " -C " & q(fx.libBare) &
         " for-each-ref --format='%(refname)' refs/heads/").strip() == ""
-      check remoteHead(gitBin, fx.coreBare) == coreRemote
+      check remoteHead(gitBin, fx.coreBare) == coreSha
       check remoteHead(gitBin, fx.appBare) == appRemote
-      check remoteHead(gitBin, fx.manifestBare) == backendRemote
+      check pathsAddedSince(gitBin, fx.manifestBare, backendRemote) ==
+        "A\tlocks/app/core/" & coreSha & ".toml"
 
   test "existing destination behind HEAD is advanced though another branch has it":
     # Containment by ANOTHER branch only stands in for a destination branch
