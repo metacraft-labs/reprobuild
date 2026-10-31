@@ -14952,6 +14952,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_m83_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_profile_compile_refuses_noexec_state_dir.nim",
+    binary: "build/test-bin/t_e2e_profile_compile_refuses_noexec_state_dir",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_m83_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim",
     binary: "build/test-bin/t_e2e_profile_compile_runtime_read_tracked",
     defines: @[],

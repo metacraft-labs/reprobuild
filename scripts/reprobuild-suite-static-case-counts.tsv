@@ -1366,6 +1366,7 @@ tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim	nim	4
 tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5
 tests/e2e/m83/t_e2e_profile_compile_path_with_spaces.nim	nim	2
+tests/e2e/m83/t_e2e_profile_compile_refuses_noexec_state_dir.nim	nim	1
 tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim	nim	3
 tests/e2e/m83/t_e2e_profile_modules.nim	nim	7

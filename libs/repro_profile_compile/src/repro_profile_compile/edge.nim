@@ -69,6 +69,7 @@ from repro_core/source_root import resolveReprobuildSourceRoot
 import repro_hash
 import repro_build_engine
 from repro_local_store import FileFingerprintPolicy, ffpHybrid
+from repro_elevation/store_view import isNoExecMount
 from repro_profile/emit import ReproIntentOutFlag
 import repro_profile_intent/envelope as profile_envelope
 
@@ -208,6 +209,38 @@ const MissingPublicCliPathReason* =
   ## answers "" for an image that has not declared itself `repro`
   ## (Distribution-And-Packaging.md §5.2), so this is the sentence such a
   ## caller sees.
+
+proc refuseNoExecBinaryDir(binaryPath: string) =
+  ## Refuse a state directory from which the compiled profile cannot be
+  ## executed, BEFORE the compile edge spends its time producing it.
+  ##
+  ## The run edge executes the profile binary where the compile edge put it,
+  ## under the state directory. On a mount carrying ``noexec`` that
+  ## ``execve`` fails with ``EACCES`` however the file is permissioned, and
+  ## the failure surfaced only as the io monitor's bare "Permission denied"
+  ## after a full compile. Such mounts are ordinary, not exotic: systemd 257
+  ## (measured on Debian 13) mounts the ``StateDirectory=`` of a
+  ## ``DynamicUser=yes`` unit ``noexec``, and hardened hosts mount ``/tmp``,
+  ## ``/var/tmp`` or ``/home`` the same way.
+  ##
+  ## The directory is created first so the mount that will actually hold the
+  ## binary is the one asked about (the compile edge would create it anyway).
+  let binaryDir = parentDir(binaryPath)
+  createDir(extendedPath(binaryDir))
+  let noExec =
+    try:
+      isNoExecMount(binaryDir)
+    except OSError as err:
+      raiseProfileCompile("repro profile compile: cannot read the mount " &
+        "flags of " & binaryDir & ": " & err.msg)
+  if noExec:
+    raiseProfileCompile("repro profile compile: the state directory " &
+      "holds the compiled profile at " & binaryPath & ", but " & binaryDir &
+      " is on a file system mounted noexec, so the profile could not be " &
+      "run there. Pass a state directory on a file system that permits " &
+      "execution. (systemd 257 mounts the StateDirectory= of a unit with " &
+      "DynamicUser=yes noexec; the unit's private /tmp is exec-capable " &
+      "unless the host mounts /tmp noexec.)")
 
 proc hasFailedActions(run: BuildRunResult): bool =
   for item in run.results:
@@ -664,6 +697,7 @@ proc compileProfileToRbpi*(profileRoot: string;
   let binaryPath = cachedProfileBinaryPath(opts.stateDir, key)
   let intentPath = cachedIntentDocumentPath(opts.stateDir, key)
   let nimcacheDir = cachedNimcacheDir(opts.stateDir, key)
+  refuseNoExecBinaryDir(binaryPath)
 
   # The compiler identity the compile edge's weak fingerprint names.
   # Resolved here with the helper's own resolver (`$REPRO_NIM_COMPILER`,

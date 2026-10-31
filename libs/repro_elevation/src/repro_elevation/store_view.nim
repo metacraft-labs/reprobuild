@@ -92,6 +92,24 @@ proc isReadOnlyMount*(path: string): bool =
   else:
     false
 
+proc isNoExecMount*(path: string): bool =
+  ## True when the mount that holds ``path`` forbids executing programs from
+  ## it (``noexec``): ``execve`` of any file there fails with ``EACCES``
+  ## whatever the file's mode bits say. ``statvfs`` reports the flags of the
+  ## MOUNT, not of the superblock, so a ``noexec`` bind of an otherwise
+  ## executable filesystem is reported too (see statvfs(3),
+  ## https://man7.org/linux/man-pages/man3/statvfs.3.html, ``ST_NOEXEC``).
+  ## ``path`` must exist. Linux only; elsewhere it answers false and the
+  ## caller learns of such a mount from the failing ``execve`` itself.
+  when defined(linux):
+    var st: Statvfs
+    if statvfs(path.cstring, st) != 0:
+      raiseOSError(osLastError(), "statvfs " & path)
+    (culong(st.f_flag) and StNoExec) != 0
+  else:
+    discard path
+    false
+
 when defined(linux):
   var privateNamespaceEntered {.threadvar.}: bool
     ## Set only once BOTH the unshare and the ``MS_PRIVATE`` mount succeeded.

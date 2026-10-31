@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2548,
+    "nimTestBinaries": 2549,
     "pureUnitConsolidationGroups": 73,
     "pureUnitTests": 707,
-    "staticallyDetectedRuntimeCompilerFlowTests": 132,
-    "testEntries": 2588
+    "staticallyDetectedRuntimeCompilerFlowTests": 133,
+    "testEntries": 2589
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1461,7 +1461,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1414,
+      "integration": 1415,
       "platform/destructive": 161,
       "pure unit": 707,
       "unclassified": 288
@@ -1672,9 +1672,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2548,
+    "nimTestBinaryCount": 2549,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2588
+    "testEntryCount": 2589
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3611,6 +3611,28 @@
         }
       ],
       "source": "tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 172,
+          "path": "tests/e2e/m83/t_e2e_profile_compile_refuses_noexec_state_dir.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "discard compileProfileToRbpi(profilePath, opts)"
+        }
+      ],
+      "source": "tests/e2e/m83/t_e2e_profile_compile_refuses_noexec_state_dir.nim"
     },
     {
       "class": "integration",
@@ -32641,6 +32663,26 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_profile_compile_refuses_noexec_state_dir",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_elevation",
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_profile_compile_refuses_noexec_state_dir.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
