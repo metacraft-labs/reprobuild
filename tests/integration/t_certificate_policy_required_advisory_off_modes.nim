@@ -71,6 +71,7 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
+import ./certificate_note_seed
 import repro_workspace_manifests
 import repro_lock
 import repro_lock/certificate_policy
@@ -222,7 +223,7 @@ proc attachUntrustedCert(gitBin: string; fx: ModeFixture; commit: string):
       # registry, so TC-5 stops at ``svUnregisteredKey`` before any crypto.
       value: "dzktbW9kZXMtbm90LWEtcmVhbC1zaWduYXR1cmU="))
   cert.result = tcrPassed
-  let att = attachCertificate(gitBin, fx.clone, cert)
+  let att = seedCertificateNote(gitBin, fx.clone, cert)
   doAssert att.ok, att.diagnostic
   cert
 
@@ -466,7 +467,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
           algorithm: "ed25519",
           value: "dzExLW5vdC1hLXJlYWwtc2lnbmF0dXJl"))
       cert.result = tcrPassed
-      let att = attachCertificate(gitBin, repo, cert)
+      let att = seedCertificateNote(gitBin, repo, cert)
       check att.ok
 
       # ---- (1) the note IS there and readable -----------------------------

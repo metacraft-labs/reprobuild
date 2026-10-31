@@ -50,6 +50,7 @@ import repro_local_store/store as local_store
 import ./addon_apply
 import ./addon_rollback
 import ./agent_record
+import ./agent_repin
 import ./agent_switch
 import ./apt_hook
 import ./base_identity
@@ -111,6 +112,10 @@ commands:
       Generate the next recipient key and print its public half; the
       current key is deleted when the first envelope sealed to the new
       one opens.
+  agent-repin [--apply <digest>]
+      Resolve the deploy agent's origins again and print the plan for the
+      fetch unit's egress allow-list and hosts file (writing nothing), or
+      apply the plan the digest names as one switch (spec §9.1).
   agent-tick --source <manifest>... [--target T] [--allowed-signers F]
       One deploy-agent tick in one process: verify (RDMF v3 required),
       accept the sealed section, apply the profile through the switch; it
@@ -122,11 +127,14 @@ commands:
       The apply unit (repro-agent-apply.service, root, no network): copy
       the staging area, verify everything again, apply.
   migration-plan [--state-dir D] [--agent-state A] [--target T]
+                 [--legacy-secrets-dir S]
       Plan, writing nothing, the migration the first tick of an agent that
       applied outside the switch runs (spec §9 "Migration"): every object it
       would adopt, write or refuse, and the service transitions. D and A
       default to the add-on's and the agent's state directories; pass
-      copies to plan against a snapshot. Exit 0 when it would succeed, 2
+      copies to plan against a snapshot. S is the agent's --secrets-dir,
+      whose hand-written LoadCredential= sources the plan accepts (spec
+      §10.3). Exit 0 when it would succeed, 2
       when it would refuse, 1 when nothing can be planned.
   resume
       Let the deploy agent converge again after a local rollback paused it
@@ -436,6 +444,8 @@ proc runAddonCli*(args: seq[string]): int =
       return runAgentApplyCli(rest)
     of "resume":
       return runResumeCli(rest)
+    of "agent-repin":
+      return runAgentRepinCli(rest)
     of "migration-plan":
       return runMigrationPlanCli(rest)
     of "test-sleep":
@@ -726,11 +736,14 @@ proc runMigrationPlanCli*(args: seq[string]): int =
   var stateDir = hostAddonStateDir()
   var agentState = AgentStateDir
   var target = ""
+  var legacySecrets = ""
   var i = 0
   try:
     while i < args.len:
       let a = args[i]
-      if a == "--state-dir" or a.startsWith("--state-dir="):
+      if a == "--legacy-secrets-dir" or a.startsWith("--legacy-secrets-dir="):
+        legacySecrets = takeValue(args, i, "--legacy-secrets-dir")
+      elif a == "--state-dir" or a.startsWith("--state-dir="):
         stateDir = takeValue(args, i, "--state-dir")
       elif a == "--agent-state" or a.startsWith("--agent-state="):
         agentState = takeValue(args, i, "--agent-state")
@@ -760,7 +773,8 @@ proc runMigrationPlanCli*(args: seq[string]): int =
   stdout.write("migration of agent generation " & legacyGen & " (" &
     agentState & ") into " & stateDir & "\n")
   try:
-    let r = planLegacyMigration(stateDir, agentState, target, readHostname())
+    let r = planLegacyMigration(stateDir, agentState, target, readHostname(),
+                                legacySecretsDir = legacySecrets)
     stdout.write(renderAddonSections(r))
     var restarts = 0
     for t in r.transitions:

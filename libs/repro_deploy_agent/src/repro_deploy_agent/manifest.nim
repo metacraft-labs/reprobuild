@@ -68,6 +68,8 @@
 
 import std/[algorithm, strutils]
 
+import nimcrypto/[hash, sha2]
+
 from repro_core import elementCountFits
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_profile as reproProfile
@@ -86,6 +88,24 @@ type
     ## the producer's business. ``content`` is the file's bytes.
     path*: string
     content*: string
+
+  CompiledProfilePin* = object
+    ## The producer's compile of a source profile (RDMF v3, flags bit 1).
+    ## ``digest`` is ``compiledProfileDigest`` of the canonical resource
+    ## text and the build-action JSON the compile emitted, spelled
+    ## ``sha256:<64 lowercase hex>``; empty means no pin. ``platform``,
+    ## ``arch`` and ``host`` are the predicate facts the producer compiled
+    ## for: an agent compiles with exactly these, never its own, so one
+    ## compiler revision gives one output on the producer and on the host.
+    ## ``compilerRevision`` is the source revision of the compiler the
+    ## producer used (``ReprobuildSourceRevision``): an agent whose compiler
+    ## is another revision reports that, distinctly, instead of a bare
+    ## digest mismatch.
+    digest*: string
+    compilerRevision*: string
+    platform*: string
+    arch*: string
+    host*: string
 
   ClosureDigest* = object
     ## One pinned closure output (RDMF v3): the archive digest of the
@@ -124,6 +144,12 @@ type
     closureDigests*: seq[ClosureDigest]
       ## The pinned output digest of every build action this manifest's
       ## desired state realises, sorted by ``actionId``.
+    compiledProfile*: CompiledProfilePin
+      ## RDMF v3 attestation block, flags bit 1: the digest of what the
+      ## producer's own compile of ``profileText`` produced, and the facts
+      ## it compiled for. An agent compiles the source itself (unprivileged)
+      ## only as a cache of this: output with another digest is refused
+      ## (Deploy-Agent.md §"The compiled-profile pin").
     buildActions*: seq[reproProfile.ProfileBuildAction]
     hasSecrets*: bool
       ## Whether ``secrets`` carries a sealed section. Only ever true for a
@@ -170,6 +196,12 @@ const
     ## block keeps emitting that form until the host's agent is upgraded),
     ## and an agent that requires the block (a ReproOS add-on agent) then
     ## refuses a v3 envelope without it exactly as it refuses v1 and v2.
+  DeployManifestFlagCompiledProfile* = 2'u16
+    ## Bit 1 of ``flags``: the attestation block ends with the
+    ## compiled-profile pin (``CompiledProfilePin``). Only with bit 0.
+  CompiledProfileDigestPrefix* = "sha256:"
+  CompiledProfileDigestDomain* = "RDMF-compiled-profile-v1\n"
+    ## The domain-separation prefix of ``compiledProfileDigest``'s input.
   ClosureDigestPrefix* = "blake3:"
   ClosureDigestHexLen* = 64
   StagedProfileModule* = "manifest_profile.nim"
@@ -415,12 +447,38 @@ proc validateClosureDigests*(ds: openArray[ClosureDigest]) =
         "closure digests are not strictly ascending by action id: '" &
         ds[i - 1].actionId & "' then '" & d.actionId & "'")
 
+proc hasCompiledProfilePin*(m: DeployManifest): bool =
+  m.compiledProfile.digest.len > 0 or m.compiledProfile.platform.len > 0 or
+    m.compiledProfile.compilerRevision.len > 0 or
+    m.compiledProfile.arch.len > 0 or m.compiledProfile.host.len > 0
+
 proc hasAttestations*(m: DeployManifest): bool =
   ## Whether ``m`` carries the v3 attestation block. Any of its fields set
   ## means it does; ``validateAttestations`` then requires the mandatory
   ## pair.
   m.issuedAt != 0 or m.maxAgeSeconds != 0 or m.rollbackFloor != 0 or
-    m.closureDigests.len > 0
+    m.closureDigests.len > 0 or m.hasCompiledProfilePin
+
+proc compiledProfilePinError*(p: CompiledProfilePin): string =
+  ## Why ``p`` is not a well-formed pin, or "".
+  if not p.digest.startsWith(CompiledProfileDigestPrefix) or
+      p.digest.len != CompiledProfileDigestPrefix.len + 64:
+    return "the compiled-profile digest is not spelled " &
+      CompiledProfileDigestPrefix & "<64 hex digits>: '" & p.digest & "'"
+  for c in p.digest[CompiledProfileDigestPrefix.len .. ^1]:
+    if c notin {'0' .. '9', 'a' .. 'f'}:
+      return "the compiled-profile digest is not lowercase hex: '" &
+        p.digest & "'"
+  for (name, v) in [("compiler revision", p.compilerRevision),
+                    ("platform", p.platform), ("arch", p.arch),
+                    ("host", p.host)]:
+    if v.len == 0:
+      return "the compiled-profile pin names no " & name
+    for c in v:
+      if c notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
+        return "the compiled-profile pin's " & name & " '" & v &
+          "' has a character outside [A-Za-z0-9._-]"
+  ""
 
 proc validateAttestations*(m: DeployManifest) =
   ## The block's own rules (Deploy-Agent.md §Strictness): ``issuedAt`` and
@@ -439,6 +497,10 @@ proc validateAttestations*(m: DeployManifest) =
       "rollback floor " & $m.rollbackFloor & " is above the manifest's own " &
       "sequence " & $m.sequence)
   validateClosureDigests(m.closureDigests)
+  if m.hasCompiledProfilePin:
+    let err = compiledProfilePinError(m.compiledProfile)
+    if err.len > 0:
+      raise newException(DeployManifestCodecError, err)
 
 proc sortClosureDigests*(ds: var seq[ClosureDigest]) =
   ## Put pins in the order the encoder requires (``validateClosureDigests``).
@@ -451,7 +513,10 @@ proc closureDigestFor*(m: DeployManifest; actionId: string): string =
   ""
 
 proc wireFlags*(m: DeployManifest): uint16 =
-  if m.hasAttestations: DeployManifestFlagAttestations else: 0'u16
+  if not m.hasAttestations: 0'u16
+  elif m.hasCompiledProfilePin:
+    DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile
+  else: DeployManifestFlagAttestations
 
 proc wireVersion*(m: DeployManifest): uint16 =
   ## The lowest format version that can express this manifest's content.
@@ -491,6 +556,12 @@ proc encodeUnsignedPrefix(m: DeployManifest): seq[byte] =
       for d in m.closureDigests:
         writeString(result, d.actionId)
         writeString(result, d.digest)
+      if m.hasCompiledProfilePin:
+        writeString(result, m.compiledProfile.digest)
+        writeString(result, m.compiledProfile.compilerRevision)
+        writeString(result, m.compiledProfile.platform)
+        writeString(result, m.compiledProfile.arch)
+        writeString(result, m.compiledProfile.host)
   writeU32LE(result, uint32(m.buildActions.len))
   for a in m.buildActions:
     encodeBuildAction(result, a)
@@ -542,11 +613,14 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
   # rather than skipped (an older reader that ignored the word would
   # misparse the block as build actions).
   if flags != 0'u16 and (result.formatVersion < DeployManifestFormatVersionV3 or
-      flags != DeployManifestFlagAttestations):
+      flags notin [DeployManifestFlagAttestations,
+                   DeployManifestFlagAttestations or
+                     DeployManifestFlagCompiledProfile]):
     raise newException(DeployManifestCodecError,
       "deploy manifest flags word is " & $flags & " in a formatVersion " &
       $result.formatVersion & " envelope (only formatVersion 3 may set " &
-      "bit 0, the attestation block)")
+      "bit 0, the attestation block, and with it bit 1, the " &
+      "compiled-profile pin)")
   result.target = readString(buf, pos)
   result.sequence = readU64LE(buf, pos)
   result.deploymentId = readString(buf, pos)
@@ -574,7 +648,7 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
     # makes the whole envelope malformed, so it is rejected here, before
     # the signature is even checked.
     validateProfileFiles(result.profileFiles)
-    if flags == DeployManifestFlagAttestations:
+    if (flags and DeployManifestFlagAttestations) != 0:
       result.issuedAt = readU64LE(buf, pos)
       result.maxAgeSeconds = readU64LE(buf, pos)
       result.rollbackFloor = readU64LE(buf, pos)
@@ -587,6 +661,17 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
         d.actionId = readString(buf, pos)
         d.digest = readString(buf, pos)
         result.closureDigests.add(d)
+      if (flags and DeployManifestFlagCompiledProfile) != 0:
+        result.compiledProfile.digest = readString(buf, pos)
+        result.compiledProfile.compilerRevision = readString(buf, pos)
+        result.compiledProfile.platform = readString(buf, pos)
+        result.compiledProfile.arch = readString(buf, pos)
+        result.compiledProfile.host = readString(buf, pos)
+        # A bit 1 whose pin is empty is a layout no producer emits.
+        if not result.hasCompiledProfilePin:
+          raise newException(DeployManifestCodecError,
+            "non-canonical envelope: flags bit 1 with an empty " &
+            "compiled-profile pin")
       # Same strictness as the bundle: the block's own rules are checked
       # before the signature, so a malformed block is named as one.
       validateAttestations(result)
@@ -732,4 +817,73 @@ proc closureDigestRefusal*(m: DeployManifest; actionId, actual: string): string 
     return "closure digest mismatch for build action '" & actionId &
       "': the signed manifest pins " & pin & ", the output is " &
       (if actual.len > 0: actual else: "absent or unhashable")
+  ""
+
+# ---------------------------------------------------------------------------
+# The compiled-profile pin (RDMF v3, flags bit 1).
+# ---------------------------------------------------------------------------
+
+proc writeU64Frame(dst: var string; v: uint64) =
+  for i in 0 ..< 8:
+    dst.add(char((v shr (8 * i)) and 0xff'u64))
+
+proc compiledProfileDigest*(canonicalText, actionsJson: string): string =
+  ## The digest a producer pins for its compile of a source profile, and
+  ## an agent recomputes over what its own compile emitted:
+  ## ``sha256:`` and the lowercase hex SHA-256 of
+  ##
+  ##   ``RDMF-compiled-profile-v1\n``
+  ##   u64 LE length of the canonical resource text, then its bytes
+  ##   u64 LE length of the build-action JSON, then its bytes
+  ##
+  ## -- both exactly as ``repro deploy-agent compile-profile`` writes them
+  ## (``--canonical-out`` and ``--actions-out``). Length-framed so no
+  ## split of the two texts collides with another. SHA-256 rather than
+  ## BLAKE3 so a producer written in any language computes it from its
+  ## standard library (infra's Python producer does).
+  var input = CompiledProfileDigestDomain
+  writeU64Frame(input, uint64(canonicalText.len))
+  input.add(canonicalText)
+  writeU64Frame(input, uint64(actionsJson.len))
+  input.add(actionsJson)
+  CompiledProfileDigestPrefix & toLowerAscii($sha256.digest(input))
+
+const CompilerRevisionMismatch* = "compiler revision mismatch"
+  ## The start of ``compiledProfileRefusal``'s message when the host's
+  ## compiler is not the revision the producer compiled with.
+
+proc compiledProfileRefusal*(m: DeployManifest;
+                             canonicalText, actionsJson: string;
+                             compilerRevision: string): string =
+  ## Compare what an agent's compile of ``m.profileText`` emitted with the
+  ## producer's pin. "" when the manifest pins it and the digests agree;
+  ## otherwise why the compiled profile must not be applied. A source
+  ## profile with no pin is refused here: whoever needs to accept one does
+  ## not call this.
+  ##
+  ## ``compilerRevision`` is the revision the host's compiler reports. The
+  ## producer and the host must run the same one (the output is only
+  ## reproducible within a revision), so another revision is refused as
+  ## such, before the digest is compared: an operator then knows to align
+  ## the compilers rather than to look for a compromise. The revision is
+  ## the compiler's own word and decides nothing on its own: a compiler
+  ## that claims the right one is still held to the digest.
+  if m.compiledProfile.digest.len == 0:
+    return "the manifest ships its profile as source and pins no digest " &
+      "of its compile (RDMF v3 attestation block, flags bit 1): an agent " &
+      "applies no compiled profile the producer did not vouch for"
+  when agentMutated("agent-skips-compile-digest"):
+    return ""
+  if compilerRevision != m.compiledProfile.compilerRevision:
+    return CompilerRevisionMismatch & ": the producer compiled with " &
+      "reprobuild " & m.compiledProfile.compilerRevision & ", this host's " &
+      "compiler is " & (if compilerRevision.len > 0: compilerRevision
+                        else: "of an unknown revision") &
+      "; the profile is applied only when both compile with one revision"
+  let actual = compiledProfileDigest(canonicalText, actionsJson)
+  if actual != m.compiledProfile.digest:
+    return "compiled-profile digest mismatch: the signed manifest pins " &
+      m.compiledProfile.digest & " (compiled for " &
+      m.compiledProfile.platform & "/" & m.compiledProfile.arch & ", host " &
+      m.compiledProfile.host & "), this host's compile is " & actual
   ""

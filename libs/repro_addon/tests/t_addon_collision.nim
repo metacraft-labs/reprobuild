@@ -167,6 +167,9 @@ suite "the decision table, file rows":
     # EDrift, which refused rpi2's caches.conf.
     let (same, _) = d.decide(fileInputs("f", "v1\n", ledgerSha = sha256Hex("v0\n")), at("/etc/app/owned.conf"))
     check same.verdict == cvNoOp
+    # ...and it is reported (`accepted-out-of-band` in the ledger diff),
+    # unlike a plain no-op. At 59c075685f it was indistinguishable from one.
+    check same.acceptedOutOfBand and not n.acceptedOutOfBand
 
   test "package-owned conffile: EAddOnPackageOwned naming the package and the drop-in":
     # The fixture's dpkg index lists the dpkg-side path; the driver is

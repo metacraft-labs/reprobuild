@@ -9,6 +9,11 @@
 ## evidence record. A generation 3 without a floor whose check fails
 ## reverts to 2 as before (``aoRolledBack``).
 ##
+## Then a failure after the flip that is not a confirmation (generation 4,
+## floor 4, a write into a directory made immutable): the switch is left in
+## place and reported ``failed_at_floor``, and a recovery finishes it
+## (second falsifying mutation, ``floor-only-on-confirm``: it reverts).
+##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=floor-ignored``): the
 ## confirm-or-revert ignores the floor and reverts to generation 1: red.
 ##
@@ -68,6 +73,38 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        t3.outcome == "aoRolledBack", $t3 & "\n" & t3.applyLog)
   step("the host is back on generation 2", g.unitVersion() == "v2", g.unitVersion())
   discard g.run("rm -f /run/a8-fail-v3")
+  # A failure after the flip that is not a confirmation (A8 review M3):
+  # generation 4 (floor 4) writes a file into a directory an external
+  # fixture made immutable, so its drivers fail and the switch does not
+  # commit. The floor still bounds the revert: the switch is left in place
+  # (pending marker, floor-hold, the static tree flipped to generation 4)
+  # and reported failed_at_floor; a recovery once the fixture is gone
+  # finishes it forward.
+  discard g.run("mkdir -p /etc/a8-floor && chattr +i /etc/a8-floor")
+  let staticBefore = g.run("readlink /etc/repro/static").strip()
+  let p4 = profile("v4").replace("managedEtcPrefixes = []",
+    "managedEtcPrefixes = [\"/etc/a8-floor/\"]") &
+    "\nfs.systemFile {\n  path = \"/etc/a8-floor/x.conf\"\n  content = \"x\"\n}\n"
+  discard producer.publish(PublishSpec(sequence: 4, profileText: p4,
+    rollbackFloor: 4))
+  let t4 = g.tickUnits()
+  step("sequence 4 (floor 4) fails after its flip and is not reverted: " &
+       "failed_at_floor", t4.outcome == "aoApplyFailed" and
+       t4.errorCode == "failed_at_floor", $t4 & "\n" & t4.applyLog)
+  step("its switch is left in place (pending marker and floor-hold)",
+       g.exec("test -e /var/lib/repro/system/addon/pending && " &
+              "test -e /var/lib/repro/system/addon/floor-hold").exitCode == 0, "")
+  step("the static tree is not flipped back",
+       g.run("readlink /etc/repro/static").strip() != staticBefore,
+       staticBefore)
+  step("an evidence record of the uncommitted failed-at-floor", g.exec(
+       "grep -l '\"committed\": false' /var/lib/repro/system/addon/evidence/*failed-at-floor*").exitCode == 0, "")
+  discard g.run("chattr -i /etc/a8-floor")
+  let rec = g.exec(repro & " system addon recover", timeoutSec = 1200)
+  step("a recovery finishes generation 4 forward", rec.exitCode == 0 and
+       g.unitVersion() == "v4" and
+       g.exec("test -e /var/lib/repro/system/addon/floor-hold").exitCode != 0,
+       rec.stdout & rec.stderr)
 
 suite Gate:
   test "an induced health failure cannot revert below the signed floor":

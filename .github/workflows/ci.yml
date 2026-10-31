@@ -901,16 +901,100 @@ jobs:
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
           #    toolchain comes from its dev shell (direnv).
           direnv allow "$ct_root"
+          # codetracer_trace_format_nim's provider reads its native build
+          # inputs from the ENVIRONMENT while constructing its graph, which is
+          # before its own useFlakeDevShell() can activate the shell that
+          # defines them -- that recipe says so itself, in the comment above
+          # its own `pcreLibDir` binding: "Provider construction runs before
+          # its own dev environment is active." We
+          # activate codetracer's dev shell here, not that sibling's, so
+          # without this its startup body refuses:
+          #   `owning typed builds require declared Zstd include/library paths`
+          # Several of these are asserted with dirExists/fileExists, so the
+          # paths must be REALISED and not merely named; reading them out of
+          # the sibling's own dev shell realises them, gives the values its
+          # recipe expects rather than whatever nixpkgs this repo pins, and
+          # needs no edit here when that recipe declares another input.
+          tf_root="$(cd "$ct_root/.." && pwd)/codetracer-trace-format-nim"
+          if [ -d "$tf_root" ]; then
+            cat > "$RUNNER_TEMP/dump-ct-inputs.sh" <<'DUMP_EOS'
+          for name in CT_ZSTD_INCLUDE_DIR CT_ZSTD_LIB_DIR \
+                      CT_ZSTD_LIBRARY_FILE CT_PCRE_LIB_DIR \
+                      CT_NIM_STEW_SRC CT_NIM_RESULTS_SRC \
+                      CT_NIM_UNITTEST2_SRC; do
+            eval "value=\${$name:-}"
+            [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
+          done
+          # The loop's status is its last iteration's, and the Windows-only
+          # CT_ZSTD_LIBRARY_FILE is legitimately unset on Linux, so without
+          # this an absent trailing variable would exit non-zero and be read
+          # as a failure to inspect the shell at all. Emptiness is checked by
+          # the caller instead.
+          exit 0
+          DUMP_EOS
+            tf_inputs="$(nix develop "$tf_root" \
+              --command sh "$RUNNER_TEMP/dump-ct-inputs.sh")" || {
+              echo "ct-build: could not read declared inputs from $tf_root" >&2
+              exit 1
+            }
+            if [ -z "$tf_inputs" ]; then
+              echo "ct-build: $tf_root's dev shell declared no CT_* inputs" >&2
+              exit 1
+            fi
+            while IFS= read -r ct_input; do
+              [ -n "$ct_input" ] || continue
+              # The `?` is shellcheck's own way to say that exporting the
+              # NAME=value this expands to is intended (SC2163); without it
+              # the form reads as an attempt to export `ct_input` itself.
+              export "${ct_input?}"
+              echo "ct-build: $ct_input"
+            done <<< "$tf_inputs"
+          else
+            echo "ct-build: sibling absent at $tf_root; CT_* left unset" >&2
+          fi
+          # Keep the build's own output, and on a derivation failure keep that
+          # derivation's BUILDER log too. Without this the step reports only
+          # `error: Cannot build '<drv>'` -- nix buffers the builder's stdout
+          # and nothing here asks for it -- so a failure names the derivation
+          # and hides the error inside it. Step 15 already tees its output;
+          # this is the same thing one step later.
+          mkdir -p "$repro_root/test-logs"
+          ct_build_log="$repro_root/test-logs/ct-build.log"
+          set +e
           ( cd "$ct_root" && \
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \
             CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
             REPROBUILD_NIX_DAEMON_BIN="$repro_root/tools/reprobuild-nix-daemon/reprobuild-nix-daemon" \
             REPROBUILD_BIN="$repro_bin" \
+            CT_ZSTD_INCLUDE_DIR="${CT_ZSTD_INCLUDE_DIR:-}" \
+            CT_ZSTD_LIB_DIR="${CT_ZSTD_LIB_DIR:-}" \
+            CT_ZSTD_LIBRARY_FILE="${CT_ZSTD_LIBRARY_FILE:-}" \
+            CT_PCRE_LIB_DIR="${CT_PCRE_LIB_DIR:-}" \
+            CT_NIM_STEW_SRC="${CT_NIM_STEW_SRC:-}" \
+            CT_NIM_RESULTS_SRC="${CT_NIM_RESULTS_SRC:-}" \
+            CT_NIM_UNITTEST2_SRC="${CT_NIM_UNITTEST2_SRC:-}" \
             REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
             REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \
             REPRO_BINARY_CACHE_CERT_PATH="${REPRO_BINARY_CACHE_CERT_PATH:-}" \
-            direnv exec "$ct_root" just build-once )
+            direnv exec "$ct_root" just build-once ) 2>&1 | tee "$ct_build_log"
+          ct_build_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$ct_build_rc" -ne 0 ]; then
+            # Match every .drv the output names: `Cannot build '<drv>'`
+            # names only the DEPENDENTS, while nix names the derivation that
+            # actually failed on its own `For full logs, run: nix log <drv>`
+            # line -- excluding spaces from the class picks up both.
+            grep -oE "/nix/store/[a-z0-9]+-[^' ]+\\.drv" "$ct_build_log" \
+              | sort -u \
+              | while read -r drv; do
+                  echo "=== nix log $drv ==="
+                  nix log "$drv" 2>&1 \
+                    | tee "$repro_root/test-logs/drv-$(basename "$drv" .drv).log" \
+                    | tail -80
+                done
+            exit "$ct_build_rc"
+          fi
           ct_bin="$ct_root/src/build-debug-repro/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"

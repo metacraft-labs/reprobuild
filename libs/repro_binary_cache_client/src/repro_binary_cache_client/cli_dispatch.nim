@@ -164,7 +164,7 @@ type
 # Helpers
 # ---------------------------------------------------------------------------
 
-proc defaultCacheUrl(): string =
+proc defaultCacheUrl*(): string =
   result = getEnv("REPRO_BINARY_CACHE_URL", DefaultUrl)
 
 proc newCacheHttpClient(url: string; timeoutMs: int): HttpClient =
@@ -210,7 +210,7 @@ proc parseEntryKeyHex(hex: string): string =
         "entry-key hex carries non-hex char: " & hex)
   result = hex.toLowerAscii()
 
-proc loadProducerKeypair(): peerAuth.PeerKeypair =
+proc loadProducerKeypair*(): peerAuth.PeerKeypair =
   let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
   let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")
   if keyPath.len == 0 or certPath.len == 0:

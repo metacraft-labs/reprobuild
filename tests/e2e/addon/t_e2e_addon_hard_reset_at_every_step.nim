@@ -36,7 +36,10 @@
 ## have written, and the ledger does not say what) is truncated before the
 ## reset; recovery must write nothing, report ``degraded`` and keep the
 ## marker; restoring the plan and running ``repro system addon recover``
-## must then finish the recovery. The same at ``step-2`` (nothing written
+## must then finish the recovery. The same at ``step-5``, after the
+## drivers' writes: the marker is kept, ``degraded`` names the plan, and
+## nothing is reverted -- ``current``, the static tree and the rolled-back
+## records stay as the switch left them (decision 27). The same at ``step-2`` (nothing written
 ## yet but stops): the replay cannot run, so recovery reverts instead --
 ## the host is A, the unit reports ``ok``, no marker is left and the
 ## attempt is recorded ``rolled-back`` (§7.2: a replay that fails reverts
@@ -101,6 +104,7 @@ const
   RevertPoints* = ["revert:step-3", "revert:mid-write", "revert:step-8"]
   MutationOnlyPoints* = ["commit-current-removed"]
   Diverted = "/etc/repro-fixture/fixture.conf"
+  StateCurrent = "/var/lib/repro/system/current"
 
 proc selectedPoints(all: openArray[string]): seq[string] =
   ## ``REPRO_ADDON_RESET_POINTS`` (comma-separated) narrows the points, for
@@ -333,6 +337,85 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              rec.exitCode == 0 and "reassert: ok" in rec.stdout,
              rec.stdout & rec.stderr)
         let gen = judge("unusable-record", rec.stdout, "")
+        inB = gen == "B"
+
+      # --- A record that cannot be used after the drivers' writes (step-5):
+      # no revert can tell the switch's writes apart, so recovery keeps the
+      # marker, reports degraded and writes nothing -- in particular it
+      # starts no partial revert (decision 27). Twice: the plan file
+      # unusable (truncated), and the plan readable but the switch
+      # unplannable from it (the ledger it began from corrupted).
+      proc keptAfterWrites(label, damage, repair, names: string) =
+        toA(label)
+        let beforeW = g.rolledBackRecords()
+        let curW = g.exec("readlink " & StateCurrent).stdout.strip()
+        let p5 = g.startSwitchPausedAt(repro, "b", profileB(), "step-5")
+        step(label & ": the switch paused at step-5", p5.exitCode == 0,
+             p5.stdout & p5.stderr)
+        if p5.exitCode != 0: return
+        let newTree = g.exec("sed -n 's/^static\\t//p' " & SeamDir &
+                             "/pending").stdout.strip()
+        discard g.run(damage & " && sync")
+        g.hardReset()
+        g.boot()
+        let j = g.waitReasserted()
+        step(label & ": the re-assert unit reported degraded naming " & names,
+             "repro-addon reassert: degraded" in j and names in j, j)
+        step(label & ": the marker is kept",
+             g.exec("test -e " & SeamDir & "/pending").exitCode == 0, "")
+        let staticNow = g.exec("readlink /etc/repro/static").stdout.strip()
+        let curNow = g.exec("readlink " & StateCurrent).stdout.strip()
+        step(label & ": no partial revert (current, the static tree and the " &
+             "rolled-back records are as the switch left them)",
+             curNow == curW and newTree.len > 0 and staticNow == newTree and
+             g.rolledBackRecords() == beforeW,
+             "current " & curW & " -> " & curNow & "; static " & staticNow &
+             " (switch's tree " & newTree & "); rolled-back " & $beforeW &
+             " -> " & $g.rolledBackRecords())
+        discard g.run(repair)
+        let rec = g.exec(repro & " system addon recover", timeoutSec = 1200)
+        step(label & ": with the record repaired, recover finishes it",
+             rec.exitCode == 0 and "reassert: ok" in rec.stdout,
+             rec.stdout & rec.stderr)
+        let gen = judge(label, rec.stdout, "")
+        inB = gen == "B"
+
+      keptAfterWrites("unusable-record-after-writes",
+        "cp " & SeamDir & "/pending.d/plan /root/plan5.bak && : > " & SeamDir &
+          "/pending.d/plan",
+        "cp /root/plan5.bak " & SeamDir & "/pending.d/plan", "plan")
+      keptAfterWrites("unplannable-record-after-writes",
+        "cp " & SeamDir & "/pending.d/from-ledger /root/ledger5.bak && " &
+          "echo corrupted > " & SeamDir & "/pending.d/from-ledger",
+        "cp /root/ledger5.bak " & SeamDir & "/pending.d/from-ledger",
+        "write-ahead record")
+
+      # --- A generation without its own profile copies (one applied before
+      # they were kept): a recovery that must revert goes back to the
+      # profiles the write-ahead record saved instead of keeping the marker.
+      toA("no-profile-copies")
+      let beforeN = g.rolledBackRecords()
+      let curN = g.exec("readlink " & StateCurrent).stdout.strip()
+      discard g.run("rm -f " & StateCurrent & "/addon-own.profile " &
+                    StateCurrent & "/addon-user.profile; sync")
+      let p6 = g.startSwitchPausedAt(repro, "b", profileB(), "step-2")
+      step("no-profile-copies: the switch paused at step-2 (A keeps no profile copies)",
+           p6.exitCode == 0 and curN.len > 0, p6.stdout & p6.stderr)
+      if p6.exitCode == 0:
+        discard g.run(": > " & SeamDir & "/pending.d/plan && sync")
+        g.hardReset()
+        g.boot()
+        let j = g.waitReasserted()
+        step("no-profile-copies: the recovery reverted from the record's profiles and reported ok",
+             "repro-addon reassert: ok" in j and "reverted to" in j and
+             "write-ahead record saved" in j, j)
+        step("no-profile-copies: no pending marker is left",
+             g.exec("test ! -e " & SeamDir & "/pending").exitCode == 0, "")
+        let gen = judge("no-profile-copies", j, "")
+        step("no-profile-copies: the host is A", gen == "A", gen)
+        step("no-profile-copies: the attempt is recorded rolled-back",
+             g.rolledBackRecords() > beforeN,
+             $beforeN & " -> " & $g.rolledBackRecords())
         inB = gen == "B"
 
       # --- An unusable record before any write: recovery reverts.

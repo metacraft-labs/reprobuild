@@ -17,13 +17,29 @@
 ##                                      compared with the output it pins
 ## ``rdmf-ignores-issued-at``           a stale v3 manifest is not reported
 ##                                      ``aoStale``
+## ``agent-issued-at-future-trusted``   an ``issuedAt`` in the future (or
+##                                      before the last applied one) is
+##                                      accepted as fresh
+## ``agent-state-plain-write``          the sequence floor, quarantine and
+##                                      pause are written in place, and an
+##                                      empty floor reads as 0
+## ``agent-skips-compile-digest``       a compiled profile is applied
+##                                      whatever its digest
+## ``engine-agent-skips-a8``            the full engine's agent on an
+##                                      add-on host accepts a manifest
+##                                      without the attestation block and
+##                                      skips the A8 profile checks
 ## ===================================  ====================================
 
 const AgentMutation {.strdefine: "reproAddonMutation".} = ""
 
 const KnownAgentMutations* = ["rdmf-ignores-revoked-keys",
                               "rdmf-skips-closure-digest",
-                              "rdmf-ignores-issued-at"]
+                              "rdmf-ignores-issued-at",
+                              "agent-issued-at-future-trusted",
+                              "agent-state-plain-write",
+                              "agent-skips-compile-digest",
+                              "engine-agent-skips-a8"]
 
 template agentMutated*(name: static string): bool =
   ## True only in the build compiled with ``-d:reproAddonMutation=<name>``.

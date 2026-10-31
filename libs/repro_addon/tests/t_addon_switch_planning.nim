@@ -123,6 +123,68 @@ suite "transition planning (§7.3)":
     check verbsOf(planTransitions(fs)) ==
       @["restart a.service", "restart b.service", "restart c.service"]
 
+  test "the printed list after a kept removal is the executed one":
+    # Step 2's re-check kept old.service: steps 2 and 7 ran the list
+    # planned again without it, and the kept unit is marked as drift.
+    var r = facts("old.service")
+    r.removed = true
+    var c = facts("c.service")
+    c.fileChanged = true
+    let reviewed = planTransitions(@[r, c])
+    check verbsOf(reviewed) == @["stop old.service", "restart c.service"]
+    let replanned = planTransitions(@[c])
+    let executed = executedTransitions(replanned, ["old.service"])
+    check verbsOf(executed) == @["restart c.service", "leave old.service"]
+    check executed[1].reason == KeptAsDriftReason
+    check "kept as drift" in renderTransitions(executed)
+    check verbsOf(parseTransitions(renderTransitions(executed))) == verbsOf(executed)
+    # A kept unit the switch still acted on keeps its entry, no leave.
+    check verbsOf(executedTransitions(reviewed, ["old.service"])) == verbsOf(reviewed)
+
+  test "Upholds=: own upholders paused, own UpheldBy= link first, others refused":
+    var x = facts("x.service")
+    x.exclusive = true
+    x.fileChanged = true
+    x.upholders = @["u.service"]
+    var u = facts("u.service")
+    var ts = planTransitions(@[x, u])
+    check planUpholds(ts, @[x, u]).len == 0
+    check ts[0].verb == tvStopStart and ts[0].upholders == @["u.service"]
+    check "pauses upholder u.service" in ts[0].reason
+    # An upholder the add-on does not own (a hand-written service, a
+    # target) is refused, naming it; an exclusive unit's refusal says so.
+    var x2 = x
+    x2.upholders = @["multi-user.target", "hand.service"]
+    var ts2 = planTransitions(@[x2])
+    let ref2 = planUpholds(ts2, @[x2])
+    check ref2.len == 1 and ref2[0].unit == "x.service" and ref2[0].exclusive
+    check "multi-user.target (a target unit)" in ref2[0].detail
+    check "hand.service (not the add-on's unit)" in ref2[0].detail
+    # A unit the profile only drops into is not the add-on's own either.
+    var dropped = facts("u.service")
+    dropped.owned = false
+    var ts3 = planTransitions(@[x, dropped])
+    check planUpholds(ts3, @[x, dropped]).len == 1
+    # A removed unit held up through its own UpheldBy= link: the link
+    # goes first; a non-exclusive removed unit held up otherwise refused.
+    var r = facts("r.service")
+    r.removed = true
+    r.upholders = @["multi-user.target"]
+    r.ownUpholdLinks = @["multi-user.target"]
+    var ts4 = planTransitions(@[r])
+    check planUpholds(ts4, @[r]).len == 0
+    check ts4[0].verb == tvStop and ts4[0].unlinkFirst and ts4[0].upholders.len == 0
+    r.ownUpholdLinks = @[]
+    var ts5 = planTransitions(@[r])
+    let ref5 = planUpholds(ts5, @[r])
+    check ref5.len == 1 and not ref5[0].exclusive and "cannot be removed" in ref5[0].detail
+    # A restart is one job: Upholds= cannot undo it, nothing to plan.
+    var c = facts("c.service")
+    c.fileChanged = true
+    c.upholders = @["multi-user.target"]
+    var ts6 = planTransitions(@[c])
+    check planUpholds(ts6, @[c]).len == 0 and ts6[0].verb == tvRestart
+
   test "the transition section renders and parses back":
     var f = facts("x.service")
     f.fileChanged = true

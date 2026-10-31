@@ -21,16 +21,24 @@
 import std/[json, os, strutils]
 
 import repro_deploy_agent
+import repro_deploy_agent/agent_mutations
 import repro_deploy_agent/apply_hook
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_profile
 
 import ./addon_apply
+import ./agent_checks
 import ./agent_record
 import ./static_tree
 
 type
+  ManifestCompiler* = proc(m: DeployManifest):
+      tuple[ok: bool; canonical, actionsJson, revision, error: string]
+      {.closure, gcsafe.}
+    ## Compiles a manifest's source profile somewhere other than this
+    ## process (``verified_compile.unprivilegedCompile``) and returns what
+    ## it emitted, untrusted.
   AddonApplyFn* = proc(o: AddonApplyOptions): AddonApplyResult {.closure,
                                                                gcsafe.}
     ## `runAddonApply` in production; a test records the options.
@@ -51,36 +59,89 @@ proc defaultAddonApply(): AddonApplyFn =
 
 proc addonAgentApplyHook*(stateDir, hostIdentity: string;
                           agentStateDir = "";
-                          resolver: ProfileResolver = nil;
+                          compiler: ManifestCompiler = nil;
                           dispatcher: BuildActionDispatcher = nil;
                           apply: AddonApplyFn = nil;
-                          driftSink: proc(d: string) {.closure, gcsafe.} = nil):
+                          driftSink: proc(d: string) {.closure, gcsafe.} = nil;
+                          unitNames: UnitNamesResolver = systemdUnitNames;
+                          legacySecretsDir = ""):
     ApplyHook =
-  ## The agent's apply on an add-on host: the manifest's profile (compiled
-  ## first when ``resolver`` is given, the full engine's case) through the
-  ## add-on switch into ``stateDir``, recording the manifest's deployment
-  ## and sequence. An unsupported base is raised through, as the agent
-  ## expects (``aoUnsupportedBase``); every other failure is ``ok = false``.
-  ## ``agentStateDir`` (the agent's own state) is registered with the
-  ## add-on, so an operator rollback pauses this agent (§9.3).
+  ## The agent's apply on an add-on host: the manifest's profile through
+  ## the add-on switch into ``stateDir``, recording the manifest's
+  ## deployment and sequence. An unsupported base is raised through, as the
+  ## agent expects (``aoUnsupportedBase``); every other failure is
+  ## ``ok = false``. ``agentStateDir`` (the agent's own state) is
+  ## registered with the add-on, so an operator rollback pauses this agent
+  ## (§9.3).
+  ##
+  ## The full engine's agent makes every check the add-on agent's apply
+  ## unit makes (A8, owner decision B3): a source profile is compiled by
+  ## ``compiler`` -- never in this (root) process -- and applied only when
+  ## the compile reproduces the signed pin; the compiled profile may not
+  ## widen the managed prefixes; no profile may touch the management path;
+  ## and every build action is bound to the closure digest the manifest
+  ## pins. Freshness, the sequence floor, quarantine and the pause are the
+  ## tick's (``requireAttestations``).
+  ##
+  ## ``legacySecretsDir`` is the full engine's `--secrets-dir`: registered
+  ## with the add-on, a hand-written `LoadCredential=` from under it is the
+  ## legacy delivery §10.3 accepts.
   let run = if apply != nil: apply else: defaultAddonApply()
   result = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     {.cast(gcsafe).}:
       var text = m.profileText
       var resolved: seq[ProfileBuildAction]
-      if resolver != nil and m.profileText.strip().len > 0:
-        if not resolver(m.profileText, m.profileFiles, text, resolved):
-          return (false, "profile did not compile; see the diagnostic above")
+      let source = not isCanonicalProfileText(m.profileText)
+      when not agentMutated("engine-agent-skips-a8"):
+        if source:
+          if compiler == nil:
+            return (false, "the manifest's profile is source and this " &
+              "agent has no unprivileged compiler; nothing was written")
+          let c = compiler(m)
+          if not c.ok:
+            return (false, "the profile did not compile: " & c.error)
+          let pin = compiledProfileCheck(m, c.canonical, c.actionsJson,
+                                         c.revision)
+          if pin.len > 0:
+            recordCompiledProfileRefusal(m, pin)
+            return (false, pin)
+          text = c.canonical
+          if c.actionsJson.len > 0:
+            resolved = to(parseJson(c.actionsJson), seq[ProfileBuildAction])
+        var prof: SystemProfile
+        try: prof = parseSystemProfile(text)
+        except CatchableError as e:
+          return (false, "the profile does not parse: " & e.msg)
+        let refusal = agentProfileRefusal(m, prof, source, stateDir, unitNames)
+        if refusal.len > 0:
+          return (false, refusal)
+      else:
+        if source and compiler != nil:
+          let c = compiler(m)
+          if not c.ok: return (false, "the profile did not compile: " & c.error)
+          text = c.canonical
+          if c.actionsJson.len > 0:
+            resolved = to(parseJson(c.actionsJson), seq[ProfileBuildAction])
       # A producer's explicit action set wins, as in the plain hook.
-      let actions = if m.buildActions.len > 0: m.buildActions else: resolved
+      var actions = if m.buildActions.len > 0: m.buildActions else: resolved
+      when not agentMutated("engine-agent-skips-a8"):
+        let pinned = pinActionsToClosureDigests(m, actions)
+        if pinned.refusal.len > 0:
+          return (false, "closure digests: " & pinned.refusal &
+            "; nothing was written")
+        actions = pinned.actions
       try:
         if agentStateDir.len > 0:
           registerAgentState(stateDir, agentStateDir)
+        if legacySecretsDir.len > 0:
+          registerLegacySecretsDir(stateDir, legacySecretsDir)
         let r = run(AddonApplyOptions(stateDir: stateDir,
           hostIdentity: hostIdentity, userProfileText: text,
           buildActions: actions, buildActionDispatcher: dispatcher,
           agentRecord: agentRecordOf(m), agentSequence: m.sequence,
-          rollbackFloor: m.rollbackFloor))
+          rollbackFloor: m.rollbackFloor,
+          legacySecretsDirs: (if legacySecretsDir.len > 0: @[legacySecretsDir]
+                              else: @[])))
         if driftSink != nil:
           for d in r.drift: driftSink("apply drift " & d)
         # Below the signed rollback floor a failure keeps the generation
@@ -96,6 +157,10 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
         # Attempted, failed its confirmation, reverted (§7.5): the agent's
         # quarantine outcome, as in the apply unit's hook.
         raise newException(EApplyRolledBack, e.msg)
+      except AddonFailedAtFloor as e:
+        # Failed after its flip, not committed, and kept from reverting by
+        # the floor (§7.5, A8): the same outcome as a committed failure.
+        raise newException(EApplyFailedAtFloor, e.msg)
       except CatchableError as e:
         return (false, e.msg)
 
@@ -132,7 +197,8 @@ proc legacyLastDeployment(legacyStateDir, target: string):
     discard
 
 proc migrationOptions(stateDir, legacyStateDir, target,
-                      hostIdentity: string): AddonApplyOptions =
+                      hostIdentity: string;
+                      legacySecretsDir = ""): AddonApplyOptions =
   ## The switch a migration runs: the profile the legacy agent's current
   ## generation applied, recorded as that agent's last deployment.
   let gen = legacyAgentGeneration(legacyStateDir)
@@ -145,11 +211,14 @@ proc migrationOptions(stateDir, legacyStateDir, target,
     userProfileText: env.profileText,
     agentSequence: last.sequence,
     agentRecord: AgentRecord(deploymentId: last.deploymentId,
-      sequence: last.sequence, migratedFrom: gen))
+      sequence: last.sequence, migratedFrom: gen),
+    legacySecretsDirs: (if legacySecretsDir.len > 0: @[legacySecretsDir]
+                        else: @[]))
 
 proc migrateLegacyAgentState*(stateDir, legacyStateDir, target,
                               hostIdentity: string;
-                              apply: AddonApplyFn = nil): AddonApplyResult =
+                              apply: AddonApplyFn = nil;
+                              legacySecretsDir = ""): AddonApplyResult =
   ## Commit the profile the legacy agent last applied as an add-on
   ## generation. The objects are the agent's own writes, unchanged since, so
   ## the switch adopts them as they are (spec §4.3, "present, unowned,
@@ -157,16 +226,23 @@ proc migrateLegacyAgentState*(stateDir, legacyStateDir, target,
   ## that differs refuses the switch with nothing written, and the migration
   ## is retried by the next tick.
   let run = if apply != nil: apply else: defaultAddonApply()
-  run(migrationOptions(stateDir, legacyStateDir, target, hostIdentity))
+  if legacySecretsDir.len > 0:
+    registerLegacySecretsDir(stateDir, legacySecretsDir)
+  run(migrationOptions(stateDir, legacyStateDir, target, hostIdentity,
+                       legacySecretsDir))
 
 proc planLegacyMigration*(stateDir, legacyStateDir, target,
                           hostIdentity: string;
-                          apply: AddonApplyFn = nil): AddonApplyResult =
+                          apply: AddonApplyFn = nil;
+                          legacySecretsDir = ""): AddonApplyResult =
   ## What the migration would do, decided and reported with nothing written
   ## (``planOnly``): every object it would adopt, write or refuse, and the
   ## service transitions. ``stateDir`` and ``legacyStateDir`` may be copies
   ## of the host's (`repro system addon migration-plan`).
   let run = if apply != nil: apply else: defaultAddonApply()
-  var o = migrationOptions(stateDir, legacyStateDir, target, hostIdentity)
+  # Nothing is registered: a plan writes nothing, the directory is this
+  # apply's only.
+  var o = migrationOptions(stateDir, legacyStateDir, target, hostIdentity,
+                           legacySecretsDir)
   o.planOnly = true
   run(o)

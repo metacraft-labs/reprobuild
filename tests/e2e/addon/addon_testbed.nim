@@ -298,6 +298,10 @@ type
     runDir*: string
     ownerToken*: string
     diskPath*: string
+    cpus*: int
+      ## Virtual CPUs; 0 means the test bed's default for the architecture.
+    memoryMB*: int
+      ## Guest memory; 0 means the test bed's default (2048).
     seedPath*: string
     keyPath*: string
     serialLog*: string
@@ -375,9 +379,11 @@ const
   GuestProxyAddress* = "10.0.2.100"
   GuestProxyPort* = 3128
 
-proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0): Guest =
+proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0; cpus = 0;
+               memoryMB = 0): Guest =
   ## Claim a run and prepare (not boot) a guest of ``b``. ``diskGiB`` is the
-  ## overlay's virtual size (a release upgrade needs more than 8).
+  ## overlay's virtual size (a release upgrade needs more than 8);
+  ## ``cpus`` and ``memoryMB`` override the default size (0: the default).
   ## ``relayPort > 0`` restricts the guest's network to one service: the
   ## host's loopback ``relayPort``, at ``GuestProxyAddress:GuestProxyPort``.
   when not defined(gostiAvailable):
@@ -387,6 +393,7 @@ proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0): Guest =
     let name = QemuNamePrefix & $getCurrentProcessId() & "-" & randomHex(6)
     let (dir, token) = claimRunDir(name)
     result = Guest(base: b, name: name, runDir: dir, ownerToken: token,
+                   cpus: cpus, memoryMB: memoryMB,
                    kind: (if useIncus(): gkIncus else: gkQemu),
                    relayPort: relayPort)
     if result.kind == gkIncus:
@@ -432,8 +439,8 @@ when defined(gostiAvailable):
   proc bootQemu(g: Guest; readonly: bool) =
     var spec = BootMediaSpec(name: g.name, kind: bmkQcow2,
       mediaPath: g.diskPath, secondaryIsoPath: g.seedPath,
-      cpus: (if g.base.debArch == "amd64": 2 else: 4),
-      memoryMB: 2048,
+      cpus: (if g.cpus > 0: g.cpus elif g.base.debArch == "amd64": 2 else: 4),
+      memoryMB: (if g.memoryMB > 0: g.memoryMB else: 2048),
       generation: (if g.base.debArch == "amd64": 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),

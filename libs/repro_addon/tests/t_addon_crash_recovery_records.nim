@@ -81,6 +81,21 @@ suite "write-ahead plan (§7.7)":
     expect PendingPlanError:
       discard readPendingPlan(root)
 
+  test "the profiles the switch began from survive an unusable plan file":
+    var p2 = plan
+    p2.fromOwnText = "own before\n"
+    p2.fromUserText = "user before\n"
+    writePendingPlan(root, p2)
+    check readPendingPlan(root).fromOwnText == "own before\n"
+    writeFile(pendingPlanDir(root) / "plan", "")
+    expect PendingPlanError:
+      discard readPendingPlan(root)
+    let fp = pendingFromProfiles(root)
+    check fp.found and fp.own == "own before\n" and fp.user == "user before\n"
+    # A record an older build wrote has no own profile: nothing to go on.
+    removeFile(pendingPlanDir(root) / "from-own.profile")
+    check not pendingFromProfiles(root).found
+
   test "clearing removes the directory":
     writePendingPlan(root, plan)
     clearPendingPlan(root)

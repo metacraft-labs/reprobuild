@@ -72,6 +72,20 @@ suite "cargo typed tool: --target":
     for act in recorded:
       check argvOf(act).containsPair("--target", Triple)
 
+  test "cargo.build and cargo.install name the vendored config with --config":
+    # cargo reads `.cargo/config.toml` from its working directory upward,
+    # not from the manifest's; cargo_package runs it from the recipe root,
+    # so the vendored-sources file is named explicitly.
+    resetBuildActionRegistry()
+    discard cargoTool.build(locked = true, config = "src/.cargo/config.toml")
+    discard cargoTool.install(locked = true, root = "r",
+      config = "src/.cargo/config.toml")
+    for act in registeredBuildActions():
+      check argvOf(act).containsPair("--config", "src/.cargo/config.toml")
+    resetBuildActionRegistry()
+    discard cargoTool.build(locked = true)
+    check "--config" notin argvOf(registeredBuildActions()[0])
+
   test "an omitted target emits no flag":
     # Every existing cargo edge goes through this wrapper; a flag that
     # appeared by default would change every fingerprint for nothing.
@@ -87,6 +101,18 @@ suite "cross_zig: the target table and the environment":
     let t = zigCrossTarget(Triple)
     check t.zigTarget == "arm-linux-musleabihf"
     check t.mcpu == "generic+v7a+vfp3d16+thumb2"
+
+  test "the glibc armv7 row is the Pi's own C library, linked dynamically":
+    check isZigCrossTriple("armv7-unknown-linux-gnueabihf")
+    let t = zigCrossTarget("armv7-unknown-linux-gnueabihf")
+    check t.zigTarget == "arm-linux-gnueabihf.2.36"
+    check isZigGlibcTarget(t)
+    check not isZigGlibcTarget(zigCrossTarget(Triple))
+    # No static-musl flags for glibc; the remap still applies.
+    check zigCrossRustflags("", "armv7-unknown-linux-gnueabihf") == ""
+    check zigCrossRustflags("/p", "armv7-unknown-linux-gnueabihf") ==
+      "--remap-path-prefix=/p=" & ZigCrossRemapTarget
+    check zigCrossRustflags("", Triple) == ZigCrossRustflags
 
   test "an unknown triple is refused by name, with the known ones":
     expect ValueError:
@@ -357,7 +383,7 @@ suite "rust-std: the catalog arm and the target sysroot":
     expect ValueError:
       discard rustStdComponent("mips-unknown-linux-gnu")
 
-  test "the merge copies rustc, links the rest, and proves the target libdir":
+  test "the merge wraps rustc with --sysroot, links the rest, and proves the target libdir":
     let s = rustSysrootMergeScript("1.94.0", Triple, "/x/rust-std", "/x/sysroot")
     # The rustc of the component's version, found by walking PATH; never
     # `command -v rustc`, which is whatever happens to be first.
@@ -365,7 +391,12 @@ suite "rust-std: the catalog arm and the target sysroot":
     check "for d in $PATH" in s
     check "command -v rustc" notin s
     check "no rustc 1.94.0 on the edge's PATH" in s
-    check "cp \"$HOST_RUSTC\" \"$OUT/bin/rustc\"" in s
+    # A copied binary keeps its own sysroot (rustc derives it from the
+    # librustc_driver it loads through an absolute RUNPATH), so the merged
+    # prefix's rustc is the host rustc run with --sysroot.
+    check "cp \"$HOST_RUSTC\" \"$OUT/bin/rustc\"" notin s
+    check "exec %s --sysroot %s" in s
+    check "\"'$HOST_RUSTC'\" \"'$OUT'\" > \"$OUT/bin/rustc\"" in s
     check "ln -s \"$f\" \"$OUT/bin/$n\"" in s
     check "ln -s \"$f\" \"$OUT/lib/$n\"" in s
     check ("cp -a '/x/rust-std/rust-std-" & Triple & "/lib/rustlib/" & Triple &

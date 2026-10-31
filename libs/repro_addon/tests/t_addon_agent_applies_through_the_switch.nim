@@ -10,8 +10,11 @@
 ##   agent's own marker), a paused agent's tick reports ``aoPaused`` (exit
 ##   0) and applies nothing, and resume lifts it;
 ## * the apply hook hands the add-on switch the add-on's state directory,
-##   the manifest's deployment and sequence, its build actions and, when a
-##   resolver is given (the full engine), the compiled text;
+##   the manifest's deployment and sequence and its build actions; a source
+##   profile is compiled by the injected (unprivileged) compiler and applied
+##   only at the digest the manifest signs, and the management path and an
+##   action the manifest pins no digest for are refused before the switch
+##   (A8, owner decisions B1 and B3);
 ## * migration runs exactly when the add-on store has no agent generation
 ##   and the agent's own state directory has one, and switches the profile
 ##   that agent last applied, recording what it took over.
@@ -22,7 +25,10 @@
 ## there.
 ##
 ## MOCK JUSTIFICATION. The add-on switch itself is replaced by a recorder
-## (``AddonApplyFn``) in the hook and migration cases: a real switch needs
+## (``AddonApplyFn``) in the hook and migration cases, and the compiler by a
+## closure (``ManifestCompiler``) that emits chosen text -- the real one is a
+## systemd transient unit, which the VM gate
+## ``e2e_addon_engine_agent_enforces_a8`` runs: a real switch needs
 ## root, systemd and a bootstrapped host, which the VM gate provides. What
 ## is tested here is what reaches the switch. The agent tick, the record
 ## codecs, the generation envelope and the state layout are the production
@@ -37,6 +43,7 @@ import repro_infra/addon_diagnostics
 import repro_peer_cache/auth as peerAuth
 import repro_profile
 import repro_addon/addon_apply
+import repro_addon/agent_checks
 import repro_addon/agent_record
 import repro_addon/agent_switch
 import repro_addon/collision
@@ -131,6 +138,25 @@ suite "a paused agent":
     check deployAgentExitCode(o.kind) == 0
     check applied == 0
 
+const Canonical = "fs.systemFile {\n  path = \"/etc/a8-x.conf\"\n" &
+  "  content = \"x\"\n}\n"
+  ## Canonical resource text: applied as signed, never compiled.
+
+proc noUnits(unit: string): seq[string] {.gcsafe.} = @[]
+  ## No systemd here: a unit is known by its own name only.
+
+proc pinned(m: var DeployManifest; canonical, actionsJson: string) =
+  ## The producer's side of the compiled-profile pin.
+  m.issuedAt = 1
+  m.maxAgeSeconds = 1
+  m.compiledProfile = CompiledProfilePin(
+    digest: compiledProfileDigest(canonical, actionsJson),
+    compilerRevision: "rev-1",
+    platform: "linux", arch: "x86_64", host: "h")
+  # The compile emits one action; the block pins its closure too.
+  m.closureDigests = @[ClosureDigest(actionId: "searxng",
+    digest: "blake3:" & repeat('0', 64))]
+
 suite "the agent's apply goes through the add-on switch":
   test "the switch gets the add-on state, the deployment, the sequence and the actions":
     let r = Recorder()
@@ -138,8 +164,8 @@ suite "the agent's apply goes through the add-on switch":
     let tmp = createTempDir("addon-agent-hook-", "")
     defer: removeDir(tmp)
     let hook = addonAgentApplyHook(tmp / "system", "rpi2",
-      agentStateDir = tmp / "agent", apply = recorder(r))
-    let res = hook(manifest(4, "hms-4-aa", "fs.systemFile {}\n", @[action]))
+      agentStateDir = tmp / "agent", apply = recorder(r), unitNames = noUnits)
+    let res = hook(manifest(4, "hms-4-aa", Canonical, @[action]))
     check res.ok
     check "gen-1" in res.message
     check r.calls.len == 1
@@ -147,35 +173,91 @@ suite "the agent's apply goes through the add-on switch":
     check o.stateDir == tmp / "system"
     check registeredAgentStates(tmp / "system") == @[tmp / "agent"]
     check o.hostIdentity == "rpi2"
-    check o.userProfileText == "fs.systemFile {}\n"
+    check o.userProfileText == Canonical
     check o.agentRecord == AgentRecord(deploymentId: "hms-4-aa", sequence: 4)
     check o.buildActions.len == 1 and o.buildActions[0].id == "llm-api-proxy"
 
-  test "the full engine's resolver compiles first; a failed compile applies nothing":
+  test "a source profile is compiled elsewhere and applied only at its signed digest (A8 B1/B3)":
     let r = Recorder()
-    let resolver: ProfileResolver = proc(profileText: string;
-        profileFiles: seq[ProfileFile]; outText: var string;
-        outBuildActions: var seq[ProfileBuildAction]): bool {.gcsafe.} =
-      if "bad" in profileText: return false
-      outText = "canonical of " & profileText
-      outBuildActions = @[ProfileBuildAction(id: "searxng")]
-      true
-    let hook = addonAgentApplyHook("/s", "h", resolver = resolver,
-      apply = recorder(r))
-    check hook(manifest(5, "d5", "import repro_profile")).ok
-    check r.calls[0].userProfileText == "canonical of import repro_profile"
+    let actionsJson = $(%(@[ProfileBuildAction(id: "searxng")]))
+    var calls = 0
+    var emit = Canonical      # what the (untrusted) compiler emits
+    var revision = "rev-1"    # and the revision it says it is
+    let compiler: ManifestCompiler = proc(m: DeployManifest):
+        tuple[ok: bool; canonical, actionsJson, revision, error: string]
+        {.closure, gcsafe.} =
+      {.cast(gcsafe).}:
+        inc calls
+        if "bad" in m.profileText:
+          return (false, "", "", "", "it does not compile")
+        (true, emit, actionsJson, revision, "")
+    let tmp = createTempDir("addon-agent-compile-", "")
+    defer: removeDir(tmp)
+    let hook = addonAgentApplyHook(tmp / "s", "h", compiler = compiler,
+      apply = recorder(r), unitNames = noUnits)
+    var m5 = manifest(5, "d5", "import repro_profile")
+    pinned(m5, Canonical, actionsJson)
+    check hook(m5).ok
+    check r.calls[0].userProfileText == Canonical
     check r.calls[0].buildActions[0].id == "searxng"
-    check not hook(manifest(6, "d6", "bad profile")).ok
+    # A source profile the producer pinned no compile of: refused.
+    let unpinned = hook(manifest(6, "d6", "import repro_profile"))
+    check not unpinned.ok and "pins no digest" in unpinned.message
+    # A compiler that emits something else (a root unit): refused.
+    emit = Canonical & "systemd.systemUnit {\n  name = \"evil.service\"\n" &
+      "  content = \"[Service]\\nExecStart=/bin/true\\n\"\n}\n"
+    var m7 = manifest(7, "d7", "import repro_profile")
+    pinned(m7, Canonical, actionsJson)
+    let evil = hook(m7)
+    check not evil.ok and CompiledProfileRefusal in evil.message
+    # A compiler of another revision: refused as that, not as a digest
+    # mismatch, even when it emits the pinned bytes.
+    emit = Canonical
+    revision = "rev-2"
+    var m9 = manifest(9, "d9", "import repro_profile")
+    pinned(m9, Canonical, actionsJson)
+    let other = hook(m9)
+    check not other.ok and CompilerRevisionMismatch in other.message
+    revision = "rev-1"
+    # A failed compile applies nothing.
+    var m8 = manifest(8, "d8", "bad profile")
+    pinned(m8, Canonical, actionsJson)
+    check not hook(m8).ok
+    # No compiler at all: a source profile is never compiled in-process.
+    let none = addonAgentApplyHook(tmp / "s", "h", apply = recorder(r),
+      unitNames = noUnits)
+    check not none(m5).ok
     check r.calls.len == 1
+
+  test "the management path and an unpinned action are refused before the switch":
+    let r = Recorder()
+    let tmp = createTempDir("addon-agent-refuse-", "")
+    defer: removeDir(tmp)
+    let hook = addonAgentApplyHook(tmp / "s", "h", apply = recorder(r),
+      unitNames = noUnits)
+    let sshd = "fs.systemFile {\n  path = \"/etc/ssh/sshd_config.d/x.conf\"\n" &
+      "  content = \"x\"\n}\n"
+    let res = hook(manifest(1, "d1", sshd))
+    check not res.ok and ManagementPathRefusal in res.message
+    var m = manifest(2, "d2", Canonical, @[ProfileBuildAction(id: "a")])
+    m.issuedAt = 1
+    m.maxAgeSeconds = 1
+    m.closureDigests = @[ClosureDigest(actionId: "b",
+      digest: "blake3:" & repeat('0', 64))]
+    let unpinned = hook(m)
+    check not unpinned.ok and "closure digests" in unpinned.message
+    check r.calls.len == 0
 
   test "an unsupported base is raised through; any other failure is not ok":
     let r = Recorder(raiseBase: true)
-    let hook = addonAgentApplyHook("/s", "h", apply = recorder(r))
+    let hook = addonAgentApplyHook("/s", "h", apply = recorder(r),
+      unitNames = noUnits)
     expect EAddOnUnsupportedBase:
-      discard hook(manifest(1, "d", "x"))
+      discard hook(manifest(1, "d", Canonical))
     let f = Recorder(fail: "an interrupted switch is pending")
-    let failing = addonAgentApplyHook("/s", "h", apply = recorder(f))
-    let res = failing(manifest(1, "d", "x"))
+    let failing = addonAgentApplyHook("/s", "h", apply = recorder(f),
+      unitNames = noUnits)
+    let res = failing(manifest(1, "d", Canonical))
     check not res.ok and "pending" in res.message
 
 suite "migration of an agent that applied outside the switch":

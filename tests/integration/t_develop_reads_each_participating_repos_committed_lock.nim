@@ -51,10 +51,14 @@
 ##   4. NEGATIVE — with the per-repo locks removed, the union is EMPTY again:
 ##      exit 1, and the inventory names both the root path and the participating
 ##      repos it probed. The guard stays a guard;
-##   5. NEGATIVE — an UNPARSEABLE in-repo lock contributes nothing (still exit
-##      1). A reader that fell back to the checkout's `HEAD` on a bad record
-##      would turn "this repo is locked" into "this repo exists", which is the
-##      rubber stamp this test exists to forbid.
+##   5. NEGATIVE — an UNPARSEABLE in-repo lock pins nothing and is REFUSED,
+##      not read as an empty lock: exit 2 (CLI/develop.md, "a public or team
+##      backend that cannot be read → refuse (exit 2)"), naming the public
+##      committed-lock backend and the offending file, and never reaching the
+##      empty-union diagnostic of (4). A reader that fell back to the
+##      checkout's `HEAD` on a bad record would turn "this repo is locked" into
+##      "this repo exists", which is the rubber stamp this test exists to
+##      forbid.
 ##
 ## Falsifiability / pre-fix behavior: against the single-root read, (1) fails
 ## with `the workspace lock set at <ws> is EMPTY: no lock backend readable from
@@ -259,12 +263,19 @@ suite "DS-1: the public tier reads each participating repo's own committed lock"
 
       # ---- (5) NEGATIVE — an unparseable in-repo lock pins nothing. -------
       # No fallback to the checkout's HEAD: a record that cannot be read is not
-      # a repo that is locked.
-      writeFile(ws / "liba" / "repro.lock", "this is not a lock document\n")
+      # a repo that is locked. Nor is it an ABSENT lock: a present public
+      # medium that fails to parse is a backend that could not be read, which
+      # develop refuses with exit 2 and the file named, rather than folding it
+      # into the empty-union failure of (4).
+      let garbageLock = ws / "liba" / "repro.lock"
+      writeFile(garbageLock, "this is not a lock document\n")
       let garbage = runCmd(q(reproBin) &
         " develop --list --tool-provisioning=path --workspace-root=" & q(ws))
-      if garbage.code == 0:
+      if garbage.code != 2:
         checkpoint("develop --list output: " & garbage.output)
-      check garbage.code == 1
-      check "is EMPTY" in garbage.output
+      check garbage.code == 2
+      check "public lock backend (kind=committed-lock" in garbage.output
+      check "could not be read" in garbage.output
+      check garbageLock in garbage.output
+      check "is EMPTY" notin garbage.output
       check libaHead notin garbage.output

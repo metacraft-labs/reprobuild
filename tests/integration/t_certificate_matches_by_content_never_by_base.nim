@@ -36,6 +36,7 @@
 import std/[os, strutils, unittest]
 
 import repro_cli_support
+import ./certificate_note_seed
 import repro_cli_support/content_id
 import content_id_fixture
 
@@ -237,8 +238,8 @@ suite "TC-8b — content matching":
     # from the amended commit by its tree. A record attached to that tree but
     # naming other content is ignored and reported as misattached.
     let gitBin = findExe("git")
-    check attachCertificate(gitBin, repo, cert).ok
-    check attachCertificateRecord(gitBin, repo, tested["git-tree-sha1:".len .. ^1],
+    check seedCertificateNote(gitBin, repo, cert).ok
+    check seedCertificateRecord(gitBin, repo, tested["git-tree-sha1:".len .. ^1],
       certFor(treeOf(repo, commitC), base = amended, platform = "linux/x")).ok
     let attached = readAttachedCertificatesFrom(gitBin, repo, amended,
       certificateNotesRef)

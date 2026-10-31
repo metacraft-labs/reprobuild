@@ -73,11 +73,31 @@ remote() {
 
 # Refuse a target whose multiarch triple is not the one asked for: a sysroot
 # of the wrong architecture links nothing and fails far from here.
-remote_triple="$(remote 'gcc -dumpmachine 2>/dev/null || dpkg-architecture -qDEB_HOST_MULTIARCH')"
+# A runtime-only target has neither gcc nor dpkg-dev; dpkg itself names
+# the architecture, and Debian's multiarch triple follows from it.
+remote_triple="$(remote 'gcc -dumpmachine 2>/dev/null ||
+  dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null ||
+  case "$(dpkg --print-architecture)" in
+    armhf) echo arm-linux-gnueabihf ;; arm64) echo aarch64-linux-gnu ;;
+    amd64) echo x86_64-linux-gnu ;; *) dpkg --print-architecture ;;
+  esac')"
 remote_triple="${remote_triple%$'\r'}"
 if [ "${remote_triple}" != "${triple}" ]; then
   echo "fetch_target_sysroot: the target reports '${remote_triple}', not '${triple}'" >&2
   exit 1
+fi
+
+# The C++ headers of the target's own libstdc++ (the cross build compiles
+# clingo against them): libstdc++-<major>-dev, the major of the libstdc++6
+# the target has installed.
+cxx_major="$(remote "dpkg-query -W -f='\${Version}' libstdc++6" | sed 's/[.-].*//')"
+cxx_major="${cxx_major%$'\r'}"
+if [ -n "${cxx_major}" ]; then
+  # With the C library's and the kernel's headers and the GCC runtime
+  # (crt*.o, libgcc) of the same major: what a C and C++ link needs on a
+  # target that has no compiler installed.
+  dev_packages+=(libc6-dev linux-libc-dev "libgcc-${cxx_major}-dev"
+                 "libstdc++-${cxx_major}-dev")
 fi
 
 mkdir -p "${sysroot}"
@@ -91,7 +111,9 @@ echo "fetch_target_sysroot: copying include + library directories from the targe
 # /lib/ld-linux-*.so.*), so it is copied alongside the multiarch directory;
 # so is usr/lib/linux, where linux-libc-dev keeps the uapi headers the
 # multiarch include/<triple>/asm symlinks point into.
-remote "cd / && tar -cf - usr/include usr/lib/${triple} usr/lib/gcc/${triple} usr/lib/linux usr/lib/ld-linux*" |
+# A runtime-only target has no usr/include and no GCC runtime directory:
+# only what exists is copied, and the -dev packages below supply the rest.
+remote "cd / && tar -cf - \$(ls -d usr/include usr/lib/${triple} usr/lib/gcc/${triple} usr/lib/linux usr/lib/ld-linux* 2>/dev/null)" |
   tar -C "${staging}" -xf -
 # Debian's merged-/usr: /lib is a symlink to usr/lib. Keep that shape so
 # linker scripts naming /lib/<triple>/... (libc.so) resolve under --sysroot.

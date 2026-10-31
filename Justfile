@@ -208,6 +208,12 @@ e2e_addon_induced_health_failure_cannot_revert_below_floor:
 e2e_addon_fetch_unit_reaches_only_its_origins:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_fetch_unit_reaches_only_its_origins
 
+e2e_addon_compromised_compiler_is_refused:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_compromised_compiler_is_refused
+
+e2e_addon_engine_agent_enforces_a8:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_engine_agent_enforces_a8
+
 e2e_addon_sequence_floor_survives_and_is_root_only:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_sequence_floor_survives_and_is_root_only
 
@@ -711,6 +717,16 @@ lint:
     bash ./scripts/check_dev_shell_env.sh 2>&1 | tee test-logs/lint.log
     bash ./scripts/check_repo_requirements.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
+    # Directly after the `nim check` sweep, because it answers the question
+    # that sweep cannot: `nim check` is per-module type checking for THIS
+    # host, and a Linux-only `{.importc, header: "<sys/vfs.h>".}` binding
+    # type-checks everywhere -- only the C compiler for the foreign target
+    # ever rejects it. So a green sweep on Linux said nothing about whether
+    # the engine still builds on a Mac, and a Mac that could not run
+    # home-switch at all was how we found out. Generates C for --os:macosx
+    # and --os:windows and refuses a Linux-only module in either closure;
+    # no macOS runner, about a minute a target. See the script header.
+    bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every

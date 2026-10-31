@@ -299,7 +299,16 @@ proc cargo_package*(srcDir = "src";
         compileAfter.add(emitRustTargetSysrootAction(projectRoot, pkgName,
           target, fetch))
 
+  # The vendored-sources configuration the vendor action writes beside the
+  # extracted source, named explicitly: cargo runs from the recipe root and
+  # reads configuration from its working directory upward, not from the
+  # manifest's, so the file would otherwise never be read and an offline
+  # build would refuse its first crate.
+  let vendoredConfig =
+    if projectRoot.len > 0: cargoConfigDir(projectRoot) / "config.toml"
+    else: ""
   var compileEdge = cargo_module.cargo.build(
+    config = vendoredConfig,
     locked = true,
     release = releaseProfile,
     offline = true,
@@ -327,6 +336,7 @@ proc cargo_package*(srcDir = "src";
   # target directory, so this places artefacts rather than rebuilding them.
   let installRoot = effectiveDestdir / "usr"
   let installEdge = cargo_module.cargo.install(
+    config = vendoredConfig,
     locked = true,
     offline = true,
     # Without `--no-track`, cargo writes a `.crates.toml` ledger into the

@@ -85,3 +85,15 @@ proc canonicalTargetTriple*(spelling: string): string =
       "forms are " & ShortTargetAliases.mapIt(it[0]).join(", ") &
       " -- spell any other target as a full triple")
   s
+
+proc variantsWithoutTarget*(raw: string): string =
+  ## A `REPRO_VARIANTS` value without its `targetTriple` assignments: the
+  ## variant channel of a build-host (native) sub-build inside a `--target`
+  ## build.
+  var kept: seq[string]
+  for item in raw.split(','):
+    let kv = item.split('=', 1)
+    if item.strip().len > 0 and not (kv.len == 2 and
+        kv[0].strip() == "targetTriple"):
+      kept.add(item)
+  kept.join(",")

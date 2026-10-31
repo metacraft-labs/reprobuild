@@ -54,6 +54,27 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     step(what & ": nothing was written", g.exec("test -e " & path).exitCode != 0, "")
     let id = identityReport(f0, g.takeFingerprint(repro))
     step(what & ": the fingerprint is unchanged", id.ok, id.text)
+  # Agent-only cases (spec §9.1 list, A8 review M1): a firewalld zone, and a
+  # unit that would alias the ssh service through its own [Install] section.
+  let agentOnly = @[
+    ("a firewalld zone", withPrefixes(@["/etc/firewalld/"],
+       canonicalFile("/etc/firewalld/zones/a8.xml", "<zone/>\n")),
+     "/etc/firewalld/zones/a8.xml"),
+    ("a unit aliasing the ssh service", "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
+       "systemd.systemUnit {\n  name = \"a8-login.service\"\n  content = \"[Service]\n" &
+       "ExecStart=/bin/true\n\n[Install]\nAlias=sshd@.service\nWantedBy=multi-user.target\n\"\n" &
+       "  enabled = false\n}\n", "/etc/systemd/system/a8-login.service")]
+  for (what, prof, path) in agentOnly:
+    let f0 = g.takeFingerprint(repro)
+    discard producer.publish(PublishSpec(sequence: sequence, profileText: prof))
+    inc sequence
+    let t = g.tickUnits()
+    discard g.exec("systemctl reset-failed repro-agent-apply.service")
+    step("the agent refuses " & what, t.outcome == "aoApplyFailed" and
+         "EAddOnManagementPath" in t.message, $t & t.applyLog)
+    step(what & ": nothing was written", g.exec("test -e " & path).exitCode != 0, "")
+    let id = identityReport(f0, g.takeFingerprint(repro))
+    step(what & ": the fingerprint is unchanged", id.ok, id.text)
   # The operator path over SSH (an open session) applies all three.
   var bodyText = ""
   var prefixes: seq[string]

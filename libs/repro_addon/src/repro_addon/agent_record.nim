@@ -157,3 +157,56 @@ proc resumeAgents*(stateDir: string): seq[string] =
   ## ``repro system addon resume``: the agent states whose pause was lifted.
   for d in agentStatesToPause(stateDir):
     if clearPauseMarker(d): result.add(d)
+
+# ---------------------------------------------------------------------------
+# The legacy secrets directory of a full-engine agent (§10.3, "Legacy
+# delivery", approved by the operator 2026-10-31).
+#
+# A deploy agent that keeps its `--secrets-dir` delivery (§9) writes units
+# that load their secrets with hand-written `LoadCredential=` lines naming
+# files in that directory. The switch accepts such a line only when its
+# source is under a directory registered here. The agent's apply hook
+# registers its own `--secrets-dir` on every apply, so a later operator
+# rollback, recovery or replay of one of its generations accepts the same
+# lines without knowing the agent's flags.
+# ---------------------------------------------------------------------------
+
+const LegacySecretsDirsName* = "legacy-secrets-dirs"
+
+proc legacySecretsDirsPath*(stateDir: string): string =
+  stateDir / "addon" / LegacySecretsDirsName
+
+proc legacySecretsDirError*(dir: string): string =
+  ## "" when ``dir`` may be registered: absolute, normalised (no `.`, `..`,
+  ## empty segment or trailing `/`) and not `/` itself.
+  if dir.len < 2 or not dir.isAbsolute: return dir & " is not an absolute path"
+  if dir.endsWith("/") or "//" in dir: return dir & " is not normalised"
+  for seg in dir[1 .. ^1].split('/'):
+    if seg in ["", ".", ".."]: return dir & " is not normalised"
+  if '%' in dir or '\n' in dir or ':' in dir:
+    return dir & " holds a character a unit directive cannot carry"
+  ""
+
+proc registeredLegacySecretsDirs*(stateDir: string): seq[string] =
+  try:
+    for l in readFile(legacySecretsDirsPath(stateDir)).splitLines():
+      let d = l.strip()
+      if d.len > 0 and legacySecretsDirError(d).len == 0 and d notin result:
+        result.add(d)
+  except IOError, OSError:
+    discard
+
+proc registerLegacySecretsDir*(stateDir, dir: string) =
+  ## Record the agent's `--secrets-dir` (idempotent; durable like the
+  ## agent-state registry). Refuses a directory `legacySecretsDirError`
+  ## names.
+  let why = legacySecretsDirError(dir)
+  if why.len > 0:
+    raise newException(AgentRecordError, "cannot register the legacy " &
+      "secrets directory: " & why)
+  var known = registeredLegacySecretsDirs(stateDir)
+  if dir in known: return
+  known.add(dir)
+  let path = legacySecretsDirsPath(stateDir)
+  createDir(parentDir(path))
+  writeFileAtomic(path, known.join("\n") & "\n", 0o644)

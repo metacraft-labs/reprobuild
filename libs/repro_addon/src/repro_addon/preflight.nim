@@ -33,6 +33,7 @@ import repro_peer_cache/auth as peerAuth
 import ./fingerprint
 import ./generation0
 import ./host_exec
+export host_exec.systemdMajor
 import ./linux_fs
 import ./mutations
 import ./store_root
@@ -252,13 +253,6 @@ proc firstLine(path: string): string =
     result = readFile(path).splitLines()[0].strip()
   except IOError, OSError, IndexDefect:
     result = ""
-
-proc systemdMajor*(versionOutput: string): int =
-  ## ``systemd 257 (257.8-1~deb13u2)`` -> 257; 0 when unparsable.
-  let f = versionOutput.splitLines()[0].splitWhitespace()
-  if f.len >= 2 and f[0] == "systemd":
-    try: return parseInt(f[1]) except ValueError: discard
-  0
 
 proc fstabRootOptions*(text: string): string =
   ## The options field of the fstab entry for ``/``, "" if none.
@@ -586,6 +580,25 @@ proc isAddressLiteral(host: string): bool =
   except ValueError:
     false
 
+const SystemdDefaultPath* =
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  ## The PATH systemd gives a service that sets none (systemd.exec(5),
+  ## "Environment variables in spawned processes").
+
+proc hostCCompiler*(searchPath = SystemdDefaultPath): string =
+  ## The C compiler a profile compile in the fetch unit would find: `cc`,
+  ## else `gcc`, else `clang`, on `searchPath`; "" when there is none.
+  for name in ["cc", "gcc", "clang"]:
+    for dir in searchPath.split(':'):
+      let p = dir / name
+      if fileExists(p):
+        try:
+          let perms = getFilePermissions(p)
+          if fpOthersExec in perms or fpUserExec in perms: return p
+        except OSError:
+          discard
+  ""
+
 proc resolveAgentInputs*(target: string; sources: seq[string];
                          cacheUrl, profileCompiler: string): AgentUnitsInputs =
   ## The deploy agent's part of generation 0. Every origin -- each manifest
@@ -603,6 +616,14 @@ proc resolveAgentInputs*(target: string; sources: seq[string];
       "path without spaces: " & profileCompiler)
   result.target = target
   result.profileCompiler = profileCompiler
+  if profileCompiler.len > 0 and hostCCompiler().len == 0:
+    # §13 decision 31: a host that compiles profiles takes its C compiler
+    # from its base. The fetch unit runs with systemd's default PATH, so
+    # that is where it must be.
+    raise newException(ValueError, "--profile-compiler is given, but this " &
+      "host has no C compiler on systemd's default PATH (" &
+      SystemdDefaultPath & "): the profile compile turns a profile into C " &
+      "and needs one. Install one from the distribution (gcc) first")
   var origins = sources
   if cacheUrl.len > 0: origins.add(cacheUrl)
   for src in sources:

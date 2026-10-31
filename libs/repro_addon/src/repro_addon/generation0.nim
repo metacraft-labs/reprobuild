@@ -127,6 +127,9 @@ const
   AgentFetchTimer* = "repro-agent-fetch.timer"
   AgentApplyUnit* = "repro-agent-apply.service"
   AgentFetchStateName* = "repro-agent-fetch"
+  AgentCompileDirName* = "compile"
+    ## The profile compile's directory under the fetch unit's state
+    ## directory (its caches persist between ticks).
     ## The fetch unit's ``StateDirectory=``: ``/var/lib/repro-agent-fetch``
     ## (``/var/lib/private/...`` under ``DynamicUser=``), the staging area.
   AgentApplyCapabilities* = ["CAP_CHOWN", "CAP_DAC_OVERRIDE",
@@ -135,11 +138,33 @@ const
     "CAP_SYS_PTRACE", "CAP_MKNOD", "CAP_IPC_LOCK", "CAP_AUDIT_WRITE",
     "CAP_LINUX_IMMUTABLE"]
     ## The apply unit's bounding set: what the switch's typed operations
-    ## need (file ownership and modes across /etc and the store, the
-    ## store's private writable mount view, account creation, mlock of
-    ## plaintext secrets, reading other units' /proc entries) and NOT
-    ## ``CAP_NET_ADMIN``: every class that would need it -- firewall,
-    ## network, sshd drop-ins -- is refused in agent applies (spec §9.1).
+    ## need (file ownership and modes across /etc and the store, account
+    ## creation, mlock of plaintext secrets) and NOT ``CAP_NET_ADMIN``:
+    ## every class that would need it -- firewall, network, sshd drop-ins --
+    ## is refused in agent applies (spec §9.1).
+    ##
+    ## Two are broad and each is needed for one thing (A8 review, low):
+    ##
+    ## - ``CAP_SYS_ADMIN``: the store's private writable view
+    ##   (``repro_elevation/store_view``) is ``unshare(CLONE_NEWNS)`` and a
+    ##   bind remount of ``/repro/store``, both of which require it
+    ##   (unshare(2), mount(2)). ``AgentApplyConfinement`` then restricts
+    ##   namespaces to mount namespaces, so it cannot enter or create any
+    ##   other.
+    ## - ``CAP_SYS_PTRACE``: the secrets directory is reached through
+    ##   ``/proc/1/root`` (PID 1's mount namespace, since this unit has its
+    ##   own), and following another process's ``/proc/<pid>/root`` takes a
+    ##   ptrace-mode access check that a process with fewer capabilities
+    ##   than PID 1 passes only with it (proc(5), ptrace(2) "Ptrace access
+    ##   mode checking"). The ``@debug`` system calls (``ptrace``,
+    ##   ``process_vm_readv``/``writev``) are filtered out, so it is no
+    ##   more than that check.
+  AgentApplyConfinement* = "RestrictNamespaces=mnt\n" &
+    "SystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete " &
+    "@raw-io @reboot @swap\n" &
+    "LockPersonality=yes\n"
+    ## What bounds the two capabilities above (systemd.exec(5)
+    ## ``RestrictNamespaces=``, ``SystemCallFilter=``).
 
 proc unitPath*(name: string): string =
   ## The unit file the driver writes for ``name``: the driver's own
@@ -439,6 +464,18 @@ proc renderAgentHosts*(a: AgentUnitsInputs): string =
            "# generation 0 was rendered (the fetch unit has no DNS).\n"
   for h in a.hosts: result.add(h.address & " " & h.name & "\n")
 
+const ResolverSocketsHidden* =
+  "InaccessiblePaths=-/run/systemd/resolve -/run/nscd -/var/run/nscd\n"
+  ## The host's resolver services, reached over AF_UNIX: systemd-resolved's
+  ## varlink and D-Bus endpoints (``nss-resolve``) and nscd. The IP filter
+  ## never sees those connections, so without this a unit with no network
+  ## egress could still have any name resolved -- a DNS channel out
+  ## (measured on Debian 13: ``getent hosts`` answered inside the fetch
+  ## unit's sandbox). With them hidden, the NSS ``dns`` fallback is a UDP
+  ## query the IP filter denies. AF_UNIX itself stays: the apply unit talks
+  ## to PID 1 over it, and the fetch unit's profile compiler may use it
+  ## locally.
+
 proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   ## ``repro-agent-fetch.service`` (spec §9.1): a dynamic user with no
   ## capabilities, a read-only system, no access to the add-on's state
@@ -454,8 +491,20 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   let hostsBind = if a.hosts.len > 0:
                     "BindReadOnlyPaths=" & AgentHostsPath & ":/etc/hosts\n"
                   else: ""
+  # The compile links and runs the profile binary under the state
+  # directory, which systemd mounts noexec for a dynamic user; the state
+  # directory alone is made exec-capable again (systemd.exec(5) ExecPaths=).
+  # The whole state directory, which exists before the unit's namespace is
+  # set up (the compile directory below it may not yet); "-" tolerates a
+  # spelling the host does not have.
+  let compileExec = "ExecPaths=-/var/lib/private/" & AgentFetchStateName &
+    " -/var/lib/" & AgentFetchStateName & "\n"
   let stateHidden = when mutated("agent-floor-in-fetch-state"): ""
                     else: "InaccessiblePaths=-/var/lib/repro\n"
+  # The fetch unit needs no system bus either (resolved answers there too).
+  let noResolver = when mutated("agent-dns-via-resolved"): ""
+                   else: ResolverSocketsHidden &
+                         "InaccessiblePaths=-/run/dbus -/var/run/dbus\n"
   "[Unit]\n" &
   "Description=Reprobuild add-on deploy agent: fetch (unprivileged)\n" &
   "After=network-online.target repro-store.mount\n" &
@@ -479,7 +528,7 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   "ProtectKernelModules=yes\n" &
   "ProtectControlGroups=yes\n" &
   "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
-  stateHidden & egress & hostsBind
+  stateHidden & noResolver & compileExec & egress & hostsBind
 
 proc agentFetchTimer*(): string =
   "[Unit]\n" &
@@ -502,7 +551,8 @@ proc agentApplyUnit*(reproExe: string): string =
   ## through descriptors, into its own copy.
   let net = when mutated("agent-apply-has-network"): ""
             else: "PrivateNetwork=yes\nIPAddressDeny=any\n" &
-                  "RestrictAddressFamilies=AF_UNIX AF_NETLINK\n"
+                  "RestrictAddressFamilies=AF_UNIX AF_NETLINK\n" &
+                  ResolverSocketsHidden
   "[Unit]\n" &
   "Description=Reprobuild add-on deploy agent: apply\n" &
   "After=repro-store.mount " & AgentFetchUnit & "\n" &
@@ -513,6 +563,7 @@ proc agentApplyUnit*(reproExe: string): string =
   "TimeoutStartSec=3h\n" &
   "NoNewPrivileges=yes\n" &
   "CapabilityBoundingSet=" & AgentApplyCapabilities.join(" ") & "\n" &
+  AgentApplyConfinement &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
   net & NoSwapLine

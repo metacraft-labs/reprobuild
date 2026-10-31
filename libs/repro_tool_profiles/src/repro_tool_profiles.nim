@@ -2030,16 +2030,33 @@ proc storePathNamesRequestedPackage(pname: string; useDef: InterfaceToolUse;
                                     profile: PathOnlyToolProfile): bool =
   ## Whether a store path's pname is the package the use requested: the
   ## use's selector, or the nix attribute it was realized through (the part
-  ## of ``nixSelector`` after ``#``, last dotted component).
+  ## of ``nixSelector`` after ``#``, without a trailing ``^<outputs>``
+  ## output selector, last dotted component). ``^`` is Nix's installable
+  ## output-selection syntax (``#zstd^*``, ``#openssl^dev,out``; see
+  ## https://nix.dev/manual/nix/latest/command-ref/new-cli/nix#installables),
+  ## not part of the attribute: ``#zstd^*`` realized as ``zstd-1.5.7-dev``
+  ## names ``zstd``.
   if pname.len == 0: return false
   let p = pname.toLowerAscii()
   if p == useDef.packageSelector.toLowerAscii(): return true
   var attr = profile.nixSelector
   let hash = attr.rfind('#')
   if hash >= 0: attr = attr[hash + 1 .. ^1]
+  # Strip the output selector before the dot split, so the split sees only
+  # the attribute path.
+  let caret = attr.find('^')
+  if caret >= 0: attr = attr[0 ..< caret]
   let dot = attr.rfind('.')
   if dot >= 0: attr = attr[dot + 1 .. ^1]
   attr.len > 0 and p == attr.toLowerAscii()
+
+type
+  UsesVersionOutOfRange* = object of OSError
+    ## A ``nixPackage`` realization whose reported version the recipe's
+    ## ``uses:`` range refuses (``usesVersionRangeRefusal``). A subtype of
+    ## ``OSError`` so every existing handler still catches it, and distinct
+    ## so ``tpmNix`` can tell "nixpkgs builds the wrong version" from a
+    ## realization that failed.
 
 proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
                               useDef: InterfaceToolUse) =
@@ -2064,7 +2081,7 @@ proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
   let refusal = usesVersionRangeRefusal(useDef, version,
     "nix://" & profile.nixSelector & " (" & profile.resolvedExecutablePath & ")")
   if refusal.len > 0:
-    raise newException(OSError, refusal)
+    raise newException(UsesVersionOutOfRange, refusal)
 
 proc nixReceiptNamesProfile(receipt: string;
                             profile: PathOnlyToolProfile): bool =
@@ -2326,6 +2343,30 @@ proc hasTargetTarballProvisioning(useDef: InterfaceToolUse;
 
 proc hasHostTarballProvisioning(useDef: InterfaceToolUse): bool =
   hasTargetTarballProvisioning(useDef, hostRealizationTarget())
+
+proc nixModeTakesTarballArm*(useDef: InterfaceToolUse;
+    target = hostRealizationTarget()): bool =
+  ## Whether ``tpmNix`` realizes ``useDef`` from its tarball arm because the
+  ## catalog declares no ``nixPackage`` arm for it at all, and does declare
+  ## an archive for ``target``. Without this a tool the catalog pins only as
+  ## an archive (``zig``) is unrealizable under ``--tool-provisioning=nix``,
+  ## while path mode and the stdlib fall-through
+  ## (``tryResolveStdlibProvisioning``) already take the archive.
+  useDef.nixProvisioning.len == 0 and
+    hasTargetTarballProvisioning(useDef, target)
+
+proc nixRangeRefusalFallsBackToTarball*(useDef: InterfaceToolUse;
+    target = hostRealizationTarget()): bool =
+  ## Whether ``tpmNix`` may realize ``useDef`` from its tarball arm after
+  ## the ``nixPackage`` arm was refused for its version: the recipe declared
+  ## a range, and an archive for ``target`` declares a version inside it.
+  ## The pinned nixpkgs carries one version of each package; a recipe that
+  ## needs a newer one is served by an archive the catalog pins with its
+  ## digest, which is what the refusal tells the author to add. Without a
+  ## range, or without an archive in range, the refusal stands.
+  let range = requestedUsesVersionRange(useDef)
+  range.len > 0 and selectTarballRecord(useDef.tarballProvisioning, target,
+    "", none(string), versionRange = range).status == kcSelected
 
 proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
   ## Whether the path-mode resolver has anything to realize `useDef` from
@@ -9282,6 +9323,30 @@ proc tarballModeFallsThroughToFromSource*(useDef: InterfaceToolUse): bool =
   ## executable name has no recipe to find and keeps the tarball diagnostic.
   useDef.executableName.len > 0 and not hasHostTarballProvisioning(useDef)
 
+const LinuxHostToolchainPackages* = ["gcc", "make", "binutils"]
+  ## The C toolchain tarball mode does not realize on a Linux host
+  ## (Dependency-Provisioning-In-Build-Graph.md §4.3, "Not the Linux C
+  ## toolchain"): their source recipes need each other, and the catalog has
+  ## no prebuilt Linux toolchain archive to break that cycle.
+
+proc tarballModeHostToolchainRefusal*(useDef: InterfaceToolUse;
+                                      hostOs = hostOS): string =
+  ## The refusal, or "", for a tarball-mode fall-through to one of the
+  ## Linux C toolchain's source recipes. Decided where the fall-through is,
+  ## so the build stops naming the scope rule instead of descending into
+  ## the `make -> gcc -> gmp -> ... -> gcc` cycle.
+  if hostOs != "linux" or
+      useDef.packageSelector notin LinuxHostToolchainPackages or
+      not tarballModeFallsThroughToFromSource(useDef):
+    return ""
+  "tool-resolution failed: --tool-provisioning=tarball does not realize " &
+    "the C toolchain on a Linux host: \"" & useDef.packageSelector &
+    "\" has no Linux tarball, and its source recipe is part of the " &
+    "gcc/make/binutils bootstrap cycle no tarball breaks " &
+    "(Dependency-Provisioning-In-Build-Graph.md §4.3, \"Not the Linux C " &
+    "toolchain\"). Take the toolchain from the host: " &
+    "--tool-provisioning=path, or nix."
+
 proc noHostTarballSentence(useDef: InterfaceToolUse): string =
   "package \"" & useDef.packageSelector & "\" has no tarball realization " &
     "for this host (cpu=" & hostCpuToken() & " os=" & hostOsToken() & "; " &
@@ -9474,7 +9539,27 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
       else:
         raise
   of tpmNix:
-    result = resolveNixTool(useDef, storeRoot)
+    if nixModeTakesTarballArm(useDef):
+      # The catalog declares no ``nixPackage`` arm for this tool (zig ships
+      # static release archives and nothing else is pinned), so the archive
+      # is its realization in every mode, as it already is in path mode.
+      return resolveTarballTool(useDef, storeRoot)
+    try:
+      result = resolveNixTool(useDef, storeRoot)
+    except UsesVersionOutOfRange as refusal:
+      # nixpkgs builds a version the recipe's range refuses. An archive the
+      # catalog pins inside the range is the realization the refusal names
+      # (``nixRangeRefusalFallsBackToTarball``); with none, it stands.
+      if not nixRangeRefusalFallsBackToTarball(useDef):
+        raise
+      try:
+        result = resolveTarballTool(useDef, storeRoot)
+      except TarballHostLoaderMissing as missing:
+        # A generic-Linux archive this host cannot run (NixOS: no
+        # `/lib64/ld-linux-*`) is no realization either; the refusal is
+        # still the answer, with the reason the archive was not taken.
+        raise newException(UsesVersionOutOfRange, refusal.msg &
+          ". The in-range archive cannot run on this host: " & missing.msg)
   of tpmTarball:
     if not tarballModeFallsThroughToFromSource(useDef):
       # A host tarball is the realization and is never bypassed: its own

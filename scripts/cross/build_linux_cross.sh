@@ -335,6 +335,9 @@ cross_env=(
   -u OPENSSL_LIBDIR -u OPENSSL_PREFIX -u SQLITE_LIBDIR -u SQLITE_PREFIX
   -u BLAKE3_PREFIX -u XXHASH_PREFIX -u CLINGO_PREFIX -u ZSTD_PREFIX
   REPROBUILD_USE_SYSTEM_HASH_LIBS=0
+  # config.nims then offers no /nix/store prefix and no host directory for
+  # any library (an architecture filter cannot tell musl from glibc).
+  REPRO_CROSS_SYSROOT="${sysroot}"
 )
 
 # ---------------------------------------------------------------------------
@@ -359,6 +362,10 @@ if [ ! -O "${build_root}" ] || [ ! -w "${build_root}" ]; then
   echo "  set REPRO_CROSS_BUILD_ROOT to one (it is the path the images will remember)" >&2
   exit 1
 fi
+# One cross build at a time per root (scripts/cross/build_root_lock.sh): the
+# export below and every compile after it read this tree.
+source "$(dirname "${BASH_SOURCE[0]}")/build_root_lock.sh"
+acquire_build_root_lock "${build_root}" || exit 1
 src_root="${build_root}/source"
 echo "build_linux_cross: exporting the tree to ${src_root}"
 rm -rf "${src_root}"
@@ -629,6 +636,31 @@ if [ "${skip_nim}" = 0 ]; then
     record_failure "nim compiler"
   fi
 fi
+
+# ---------------------------------------------------------------------------
+# 6. The prefix's own runtime libraries (scripts/cross/runtime_closure.sh):
+#    clingo cross-built against the sysroot, every non-C-library dependency
+#    copied in from the sysroot, every image's RUNPATH pointed at the
+#    prefix's lib/, and the closure checked. Added for ReproOS add-on mode,
+#    whose hosts may not depend on the base's libraries.
+# ---------------------------------------------------------------------------
+echo "build_linux_cross: [6/6] runtime libraries"
+source "${repo_root}/scripts/cross/runtime_closure.sh"
+READELF="$(resolve_nixpkgs_out binutils-unwrapped)/bin/readelf"
+PATCHELF="$(resolve_nixpkgs_out patchelf)/bin/patchelf"
+CMAKE="$(resolve_nixpkgs_out cmake)/bin/cmake"
+cxx_wrapper="${toolchain_dir}/${triple}-c++"
+sed "s|exec \"${clang_bin}\"|exec \"${clang_bin}++\"|" "${cc_wrapper}" > "${cxx_wrapper}"
+chmod +x "${cxx_wrapper}"
+if build_target_clingo "${cc_wrapper}" "${cxx_wrapper}" "${sysroot}" \
+    "${stage}/lib" "${build_root}/clingo"; then
+  check_target_elf "${stage}/lib/libclingo.so" || true
+else
+  record_failure "clingo for ${triple}"
+fi
+bundle_runtime_closure "${stage}" "${sysroot}" "${triple}" ||
+  record_failure "bundling the runtime libraries"
+check_prefix_closure "${stage}" || record_failure "the prefix's runtime closure"
 
 if [ "${#failures[@]}" -gt 0 ]; then
   echo "" >&2

@@ -300,6 +300,32 @@ commits the push introduces and pushes
 on the remote when the gateway judges the branch update. You do not need to
 install anything.
 
+`repro test` and `repro certify` only write the store: reprobuild writes no git
+notes itself. `repro push` has no notes step either, because its own `git push`
+runs this hook, and it prints the hook's `repro hooks: certificates:` lines and,
+when a push fails, what the remote or a hook said.
+
+The hook carries only what a push introduces: commits the remote has not got, as
+far as your clone can tell. Two cases therefore carry nothing, however many
+certificates the store holds:
+
+- a certificate issued after its commit was published. `repro push` reports that
+  member as `already-published`, runs no hook, and says the certificate is not in
+  the local notes;
+- a new branch at a commit a remote-tracking ref already reaches. A gateway at
+  `required` refuses it unless the tree already has a note, and says what to run.
+
+In both, publish and push the notes yourself, then push again if you were refused:
+
+```sh
+test-certificates notes publish <commit>
+test-certificates notes push <remote>
+```
+
+`test-certificates` is the executable of the same library, and `repro` does not
+install it: `nix run github:metacraft-labs/test-certificates-tools -- notes publish
+<commit>` runs it without installing anything.
+
 The hook never fails your push:
 
 | Situation | What you see | What the gateway sees |
@@ -313,7 +339,8 @@ The hook never fails your push:
 The time budget defaults to 60 seconds. `TEST_CERTIFICATES_HOOK_TIMEOUT` changes
 it, in whole seconds, and it cannot be switched off. A gateway at `required`
 refuses a push whose tree has no note, and says the note is missing rather than
-asking you to certify again. A later ordinary push of the same commit carries it.
+asking you to certify again. A later ordinary push of the same
+commit carries it, because a refused push introduced nothing on the remote.
 
 `repro health` reports problems in that configuration in its
 `certificate-propagation` row: an invalid scope declaration, a

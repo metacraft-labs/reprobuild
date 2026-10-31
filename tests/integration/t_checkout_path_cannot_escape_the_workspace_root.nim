@@ -1384,8 +1384,10 @@ suite "a declared checkout path cannot escape the workspace root":
 
           # ...and the run FAILED, naming the offending value and a remedy. A
           # lock is machine-written, so the remedy is the command that
-          # rewrites it.
-          check res.code == 1
+          # rewrites it. The lock is the public backend, and a public backend
+          # that cannot be read is refused with exit 2 (CLI/develop.md,
+          # "Unreachable-backend policy").
+          check res.code == 2
           check res.output.contains(value)
           check res.output.contains("repro lock refresh")
           # The offender is the DEPENDENCY, not just the string — an operator
@@ -1403,7 +1405,7 @@ suite "a declared checkout path cannot escape the workspace root":
         "--workspace-root=" & workspaceRoot]))
       checkpoint("develop --all --list with revision='" & absoluteRevision &
         "': " & absRes.output)
-      check absRes.code == 1
+      check absRes.code == 2
       check absRes.output.contains(absoluteRevision)
       check absRes.output.contains("repro lock refresh")
 

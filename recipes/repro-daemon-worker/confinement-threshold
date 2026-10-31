@@ -1,1 +1,11 @@
+# Overall exposure ceiling for repro-daemon-worker.service, in tenths:
+# 26 means 2.6, the value `systemd-analyze security --offline` reports
+# for this unit.
+#
+# MEASURED ON BARE METAL (gpu-server-001-mcl-bench-001, systemd 260.1,
+# run 41208389754). The same unit with the same pinned analyzer reports
+# 3.1 inside the ephemeral GARM containers -- 0.5 higher -- because some
+# checks cannot be verified from inside one. A refusal that reports 3.1
+# on an ephemeral runner is therefore NOT evidence that the unit
+# regressed; compare like with like before moving this number.
 26
