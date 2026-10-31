@@ -87,6 +87,12 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       bad.add(l)
   step("every compiler ran in the fetch unit under its dynamic user, none " &
        "as UID 0 or in the apply unit", bad.len == 0, bad.join("\n"))
+  # Compiled under the unit's state directory, which systemd mounts noexec
+  # for a dynamic user and the unit's ExecPaths= makes exec-capable: the
+  # compiled profile binary is there, kept for the next tick.
+  step("the compile ran under the fetch unit's state directory", g.exec(
+       "ls /var/lib/private/repro-agent-fetch/compile/state/profile-cache/bin/*/profile-build").exitCode == 0,
+       g.exec("find /var/lib/private/repro-agent-fetch -maxdepth 3").stdout)
   step("the compiled profile was applied", t.outcome == "aoApplied" and
        g.exec("cat /etc/repro/a8-compiled").stdout == "compiled\n",
        $t & "\n" & t.fetchLog & t.applyLog)
