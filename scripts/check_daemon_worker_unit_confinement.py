@@ -250,8 +250,9 @@ def check_conf4(text):
     if exposure > int(threshold):
         sys.stderr.write("\n".join(output.splitlines()[-25:]) + "\n")
         raise Failure("CONF-4: exposure of repro-daemon-worker.service, %d.%d, exceeds the "
-                      "committed threshold %s (%s)"
-                      % (exposure // 10, exposure % 10, threshold, analyze))
+                      "committed threshold %d.%d (%s)"
+                      % (exposure // 10, exposure % 10,
+                         int(threshold) // 10, int(threshold) % 10, analyze))
     if out.returncode != 0:
         # `--threshold` makes systemd-analyze fail only above it; failing at
         # or below it is some other error, and is reported as one.

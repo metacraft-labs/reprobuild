@@ -155,6 +155,12 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("exceeds the committed threshold", message)
         self.assertIn("9.6", message)
+        # Both numbers are rendered in the same units. The file stores tenths
+        # (`26`), so printing it raw beside a decoded exposure read as "9.6
+        # exceeds 26" -- which is false as written and sent a reader looking
+        # for an inverted comparison instead of a confinement shortfall.
+        self.assertIn("committed threshold 2.6", message)
+        self.assertNotIn("threshold 26", message)
 
     def test_conf4_passes_an_exposure_within_the_threshold(self):
         self.assertEqual(
