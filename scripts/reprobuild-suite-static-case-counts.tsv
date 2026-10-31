@@ -318,7 +318,7 @@ libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	37
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
-libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	27
+libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	28
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
@@ -2183,7 +2183,7 @@ tests/integration/t_tampered_uki_fails_unseal.nim	nim	6
 tests/integration/t_tarball_compiler_archiver_views.nim	nim	3
 tests/integration/t_tarball_mode_builds_a_fall_through_source_recipe.nim	nim	1
 tests/integration/t_tarball_provisioning_cold_store_extractors.nim	nim	3
-tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim	nim	5
+tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim	nim	6
 tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim	nim	1
 tests/integration/t_tdx_agent_backend.nim	nim	28
@@ -2427,7 +2427,7 @@ tests/unit/t_m9r10a_cycle_break.nim	nim	7
 tests/unit/t_m9r10a_exec_name_audit.nim	nim	5
 tests/unit/t_m9r10b_synthesis_wiring.nim	nim	8
 tests/unit/t_m9r11_runquota_daemon_recovery.nim	nim	11
-tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	13
+tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	15
 tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15

@@ -412,3 +412,23 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
       if pkg.scoopProvisioning.len == 0 and
          pkg.tarballProvisioning.len == 0:
         check pkg.nixProvisioning.len >= 1
+
+suite "tarball mode does not realize the Linux C toolchain":
+  # Dependency-Provisioning-In-Build-Graph.md §4.3, "Not the Linux C
+  # toolchain" (operator decision 2026-10-31).
+  proc noTarballUse(selector: string): InterfaceToolUse =
+    InterfaceToolUse(packageSelector: selector, executableName: selector,
+                     rawConstraint: selector)
+
+  test "gcc, make and binutils without a Linux tarball are refused by the scope rule":
+    for selector in ["gcc", "make", "binutils"]:
+      let r = tarballModeHostToolchainRefusal(noTarballUse(selector), "linux")
+      checkpoint(r)
+      check "does not realize the C toolchain on a Linux host" in r
+      check "Not the Linux C toolchain" in r
+      check "--tool-provisioning=path" in r
+
+  test "another host, or another package, falls through as before":
+    check tarballModeHostToolchainRefusal(noTarballUse("gcc"), "macosx") == ""
+    check tarballModeHostToolchainRefusal(noTarballUse("gcc"), "windows") == ""
+    check tarballModeHostToolchainRefusal(noTarballUse("zlib"), "linux") == ""

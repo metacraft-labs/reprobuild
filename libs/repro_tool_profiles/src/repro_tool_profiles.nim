@@ -9314,6 +9314,30 @@ proc tarballModeFallsThroughToFromSource*(useDef: InterfaceToolUse): bool =
   ## executable name has no recipe to find and keeps the tarball diagnostic.
   useDef.executableName.len > 0 and not hasHostTarballProvisioning(useDef)
 
+const LinuxHostToolchainPackages* = ["gcc", "make", "binutils"]
+  ## The C toolchain tarball mode does not realize on a Linux host
+  ## (Dependency-Provisioning-In-Build-Graph.md §4.3, "Not the Linux C
+  ## toolchain"): their source recipes need each other, and the catalog has
+  ## no prebuilt Linux toolchain archive to break that cycle.
+
+proc tarballModeHostToolchainRefusal*(useDef: InterfaceToolUse;
+                                      hostOs = hostOS): string =
+  ## The refusal, or "", for a tarball-mode fall-through to one of the
+  ## Linux C toolchain's source recipes. Decided where the fall-through is,
+  ## so the build stops naming the scope rule instead of descending into
+  ## the `make -> gcc -> gmp -> ... -> gcc` cycle.
+  if hostOs != "linux" or
+      useDef.packageSelector notin LinuxHostToolchainPackages or
+      not tarballModeFallsThroughToFromSource(useDef):
+    return ""
+  "tool-resolution failed: --tool-provisioning=tarball does not realize " &
+    "the C toolchain on a Linux host: \"" & useDef.packageSelector &
+    "\" has no Linux tarball, and its source recipe is part of the " &
+    "gcc/make/binutils bootstrap cycle no tarball breaks " &
+    "(Dependency-Provisioning-In-Build-Graph.md §4.3, \"Not the Linux C " &
+    "toolchain\"). Take the toolchain from the host: " &
+    "--tool-provisioning=path, or nix."
+
 proc noHostTarballSentence(useDef: InterfaceToolUse): string =
   "package \"" & useDef.packageSelector & "\" has no tarball realization " &
     "for this host (cpu=" & hostCpuToken() & " os=" & hostOsToken() & "; " &

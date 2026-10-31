@@ -96,6 +96,13 @@ type
     keypair*: peerAuth.PeerKeypair
     ## Zero selects the protocol maximum. Positive values may lower it.
     maxArchiveBytes*: int64
+    ## When non-empty, the BLAKE3 hex the raw archive must digest to: the
+    ## ``expectedOutputDigest`` a profile pins for the edge this entry
+    ## answers. A different digest refuses the publish before anything is
+    ## uploaded, with ``rawArchiveDigestHex`` set so the caller can report
+    ## the digest the bytes do have. Empty publishes whatever the prefix
+    ## holds (``repro cache publish``).
+    expectedRawDigestHex*: string
 
   PublishInProcessResult* = object
     ## Outcome of a single ``publishInProcess`` call.
@@ -927,6 +934,12 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     result.rawArchiveDigestHex = rawDigest.toHex()
   except CatchableError as e:
     result.error = "publish: cannot create prefix archive: " & e.msg
+    return
+  if req.expectedRawDigestHex.len > 0 and
+      req.expectedRawDigestHex.toLowerAscii() != result.rawArchiveDigestHex:
+    result.error = "publish: the prefix archive digests to blake3:" &
+      result.rawArchiveDigestHex & ", not the pinned blake3:" &
+      req.expectedRawDigestHex & ", so nothing is published"
     return
 
   # Compress the archive when this host can, and upload whichever form is

@@ -86,6 +86,16 @@ const
                    mcpu: "generic+v7a+vfp3d16+thumb2",
                    opensslTarget: "linux-armv4",
                    nimCpu: "arm"),
+    # The Raspberry Pi's own C library: what an object LD_PRELOADed into the
+    # Pi's (glibc) processes must be built against, which the static-musl
+    # row above cannot serve. zig links against its glibc ABI lists at the
+    # pinned version (Debian bookworm's 2.36; a binary built for it runs on
+    # trixie's 2.41) -- https://ziglang.org/download/0.13.0/release-notes.html#glibc
+    ZigCrossTarget(rustTriple: "armv7-unknown-linux-gnueabihf",
+                   zigTarget: "arm-linux-gnueabihf.2.36",
+                   mcpu: "generic+v7a+vfp3d16+thumb2",
+                   opensslTarget: "linux-armv4",
+                   nimCpu: "arm"),
     ZigCrossTarget(rustTriple: "aarch64-unknown-linux-musl",
                    zigTarget: "aarch64-linux-musl",
                    mcpu: "",
@@ -278,15 +288,24 @@ proc zigCrossCmakeToolchain*(t: ZigCrossTarget; wrapperDir: string): string =
     "set(CMAKE_RANLIB " & q(wrapperDir / "ranlib") & " CACHE FILEPATH \"\")\n" &
     "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n"
 
-proc zigCrossRustflags*(remapRoot: string): string =
-  ## The target RUSTFLAGS: the static-musl flags, plus the path remap that
-  ## makes the build independent of where the checkout is (`remapRoot`,
-  ## the recipe's project root, is spelled `ZigCrossRemapTarget` in the
-  ## binary). Empty `remapRoot` (no project root: interface extraction)
-  ## adds no remap.
-  result = ZigCrossRustflags
+proc isZigGlibcTarget*(t: ZigCrossTarget): bool =
+  ## A row that links against glibc (`…-gnu…` zig target) rather than zig's
+  ## static musl.
+  "-gnu" in t.zigTarget
+
+proc zigCrossRustflags*(remapRoot: string; rustTriple = ""): string =
+  ## The target RUSTFLAGS: the static-musl flags for a musl row (none for a
+  ## glibc row: zig cannot link glibc statically, and the binary loads the
+  ## target's glibc), plus the path remap that makes the build independent
+  ## of where the checkout is (`remapRoot`, the recipe's project root, is
+  ## spelled `ZigCrossRemapTarget` in the binary). Empty `remapRoot` (no
+  ## project root: interface extraction) adds no remap.
+  let glibc = rustTriple.len > 0 and isZigCrossTriple(rustTriple) and
+    isZigGlibcTarget(zigCrossTarget(rustTriple))
+  result = if glibc: "" else: ZigCrossRustflags
   if remapRoot.len > 0:
-    result.add(" --remap-path-prefix=" & remapRoot & "=" & ZigCrossRemapTarget)
+    if result.len > 0: result.add(" ")
+    result.add("--remap-path-prefix=" & remapRoot & "=" & ZigCrossRemapTarget)
 
 proc zigCrossCargoEnv*(rustTriple, wrapperDir: string;
                        remapRoot = ""): seq[(string, string)] =
@@ -302,7 +321,8 @@ proc zigCrossCargoEnv*(rustTriple, wrapperDir: string;
     ("AR_" & ccKey, wrapperDir / "ar"),
     ("RANLIB_" & ccKey, wrapperDir / "ranlib"),
     ("CARGO_TARGET_" & cargoKey & "_LINKER", wrapperDir / "rust-linker"),
-    ("CARGO_TARGET_" & cargoKey & "_RUSTFLAGS", zigCrossRustflags(remapRoot)),
+    ("CARGO_TARGET_" & cargoKey & "_RUSTFLAGS",
+      zigCrossRustflags(remapRoot, rustTriple)),
   ]
 
 proc zigCrossWrappersActionId*(packageName, rustTriple: string): string =

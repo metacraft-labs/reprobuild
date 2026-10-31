@@ -102,6 +102,18 @@ suite "cross_zig: the target table and the environment":
     check t.zigTarget == "arm-linux-musleabihf"
     check t.mcpu == "generic+v7a+vfp3d16+thumb2"
 
+  test "the glibc armv7 row is the Pi's own C library, linked dynamically":
+    check isZigCrossTriple("armv7-unknown-linux-gnueabihf")
+    let t = zigCrossTarget("armv7-unknown-linux-gnueabihf")
+    check t.zigTarget == "arm-linux-gnueabihf.2.36"
+    check isZigGlibcTarget(t)
+    check not isZigGlibcTarget(zigCrossTarget(Triple))
+    # No static-musl flags for glibc; the remap still applies.
+    check zigCrossRustflags("", "armv7-unknown-linux-gnueabihf") == ""
+    check zigCrossRustflags("/p", "armv7-unknown-linux-gnueabihf") ==
+      "--remap-path-prefix=/p=" & ZigCrossRemapTarget
+    check zigCrossRustflags("", Triple) == ZigCrossRustflags
+
   test "an unknown triple is refused by name, with the known ones":
     expect ValueError:
       discard zigCrossTarget("mips-unknown-linux-gnu")

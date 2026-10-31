@@ -63,7 +63,10 @@
 
 import std/[algorithm, monotimes, net, os, osproc, strtabs, strutils,
   tempfiles, unittest]
+when defined(posix):
+  import std/posix
 import repro_peer_cache/auth
+import repro_cli_support/infra as cli_infra
 
 import repro_test_support/reasoned_skip
 
@@ -212,7 +215,8 @@ proc isHostElf(path: string): bool =
   fileExists(path) and readFile(path).startsWith("\x7fELF") and
     not isElf(path, EmArm)
 
-proc runBuild(root, project: string; args: seq[string]):
+proc runBuild(root, project: string; args: seq[string];
+              extraEnv: openArray[(string, string)] = []):
     tuple[code: int, output: string] =
   var env = newStringTable(modeCaseSensitive)
   for key, value in envPairs(): env[key] = value
@@ -222,6 +226,7 @@ proc runBuild(root, project: string; args: seq[string]):
   env["REPRO_STORE_ROOT"] = root / "cas"
   env["REPRO_CACHE_DISABLE"] = "1"
   env.del("REPRO_VARIANTS")
+  for (k, v) in extraEnv: env[k] = v
   # The mirror action's object check runs `repro-install-mirror-publish`,
   # built beside `repro`.
   env["PATH"] = reproBinary.parentDir & PathSep & getEnv("PATH")
@@ -422,4 +427,189 @@ suite "--target refuses a recipe that does not thread it, end to end":
       check bad.code == 2
       check "(the object check)" in bad.output
       check "EM_X86_64" in bad.output
+      check manifestCount(root) == 1
+
+const
+  # A configure that honours CC, as an Autoconf-generated one does, so the
+  # threaded zig wrapper builds the target's objects and the install mirror
+  # holds them; natively CC is unset and the host `cc` builds them.
+  HonestConfigure = """#!/bin/sh
+prefix=/usr
+for a in "$@"; do case "$a" in --prefix=*) prefix=${a#--prefix=};; esac; done
+srcdir=$(dirname "$0")
+cat > Makefile <<MK
+all: hello
+hello: $srcdir/hello.c
+	${CC:-cc} -o hello $srcdir/hello.c
+install: hello
+	mkdir -p \$(DESTDIR)$prefix/bin
+	cp hello \$(DESTDIR)$prefix/bin/hello
+MK
+"""
+
+  # `autotools_package` threads a zig target itself, so this recipe builds
+  # for the target and mirrors to `install@<triple>`.
+  ThreadedAutotoolsRecipe = """
+import repro_project_dsl
+import repro_dsl_stdlib/active_context
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
+
+package helloPrefix:
+  defaultToolProvisioning "path"
+  nativeBuildDeps:
+    "gcc"
+    "make"
+    "zig >=0.13 <0.14"
+  build:
+    discard activeCrossTarget()
+    let pkg = autotools_package(srcDir = "./src")
+    discard pkg.executable("hello")
+"""
+
+proc publishProfile(helloDigest: string): string =
+  ## A profile with one substitute-only edge pinned to ``helloDigest`` and
+  ## one ordinary edge. Neither is ever applied: the edges exist to be
+  ## named by `--publish`, and the digest is not part of the entry key, so
+  ## re-pinning it leaves the key `cache-keys` prints unchanged.
+  """
+import repro_profile
+
+profile "publishProbe":
+  resources:
+    inlineExecCall(
+      argv = @["/bin/sh", "-c", "exit 70"],
+      cwd = "/repro/store/prefixes/helloc/1",
+      outputs = @["bin"],
+      requiresElevation = true,
+      address = "hello-prefix",
+      commandStatsId = "inlineExecCall",
+      substituteOnly = true,
+      expectedOutputDigest = "$1")
+    inlineExecCall(
+      argv = @["/bin/sh", "-c", "exit 70"],
+      cwd = "/repro/store/prefixes/plain/1",
+      outputs = @["bin"],
+      requiresElevation = true,
+      address = "plain-prefix",
+      commandStatsId = "inlineExecCall")
+""" % helloDigest
+
+suite "repro build --publish=<profile>#<edge>":
+  test "t_build_publish_lands_under_the_key_cache_keys_prints_and_refuses_the_rest":
+    # CLI/build.md, "Publishing for an appliance" (operator decision
+    # 2026-10-31). A real cache server, a real compiled profile and a real
+    # threaded target build; no stand-ins.
+    requirePreconditions(["zig"]):
+      let root = createTempDir("target-publish-edge-", "")
+      defer: removeDir(root)
+      let project = createProject(root, ThreadedAutotoolsRecipe)
+      writeFile(project / "src/configure", HonestConfigure)
+      let profile = root / "profile" / "system.nim"
+      createDir(profile.parentDir)
+      writeFile(profile, publishProfile("blake3:" & repeat("00", 32)))
+      let (server, url) = startCacheServer(root)
+      defer:
+        server.terminate()
+        discard server.waitForExit()
+        server.close()
+      discard loadOrGenerateKeypair(root / "producer.cert", root / "producer.key")
+      let creds = @[("REPRO_BINARY_CACHE_URL", url),
+                    ("REPRO_BINARY_CACHE_KEY_PATH", root / "producer.key"),
+                    ("REPRO_BINARY_CACHE_CERT_PATH", root / "producer.cert")]
+      # Unknown edge: refused by name, the edges listed, nothing published.
+      let unknown = runBuild(root, project, @["--target=" & Triple,
+        "--publish=" & profile & "#no-such-edge"], creds)
+      checkpoint(unknown.output)
+      check unknown.code == 2
+      check "has no build-action edge 'no-such-edge'" in unknown.output
+      check "hello-prefix" in unknown.output and "plain-prefix" in unknown.output
+      check manifestCount(root) == 0
+      # An edge that is not substitute-only: refused, nothing published.
+      let plain = runBuild(root, project, @["--target=" & Triple,
+        "--publish=" & profile & "#plain-prefix"], creds)
+      checkpoint(plain.output)
+      check plain.code == 2
+      check "is not substitute-only" in plain.output
+      check manifestCount(root) == 0
+      # The profile pins other bytes: refused before the upload, naming the
+      # digest the build's bytes do have.
+      let stale = runBuild(root, project, @["--target=" & Triple,
+        "--publish=" & profile & "#hello-prefix"], creds)
+      checkpoint(stale.output)
+      check stale.code == 2
+      check "nothing is published" in stale.output
+      check manifestCount(root) == 0
+      var actual = ""
+      let marker = " digests to blake3:"
+      let at = stale.output.find(marker)
+      if at >= 0:
+        actual = stale.output[at + marker.len ..< at + marker.len + 64]
+      require actual.len == 64
+      # Positive: pinned to the build's bytes, published under exactly the
+      # key cache-keys prints.
+      writeFile(profile, publishProfile("blake3:" & actual))
+      let good = runBuild(root, project, @["--target=" & Triple,
+        "--publish=" & profile & "#hello-prefix"], creds)
+      checkpoint(good.output)
+      check good.code == 0
+      check manifestCount(root) == 1
+      check ("output-digest blake3:" & actual) in good.output
+      let keys = runRepro(root, @["infra", "cache-keys", "--profile", profile,
+        "--state-dir", root / "keys-state", "--platform-cpu=armv7",
+        "--platform-os=linux", "--platform-abi=gnu", "--platform-libc="], [])
+      checkpoint(keys.output)
+      var printed = ""
+      var inEdge = false
+      for line in keys.output.splitLines():
+        if line == "hello-prefix": inEdge = true
+        elif inEdge and line.strip().startsWith("entry-key: "):
+          printed = line.strip()["entry-key: ".len .. ^1]
+          break
+      check printed.len == 64
+      check ("published " & printed & " for system.nim#hello-prefix") in
+        good.output
+      # Platform mismatch: the native build's host-object mirror offered for
+      # the armv7 edge is refused by the publication object check. A
+      # `--target` build always writes its own (target) mirror, so the host
+      # mirror is handed to the same function the flag runs.
+      let native = runBuild(root, project, @[])
+      checkpoint(native.output)
+      require native.code == 0
+      let hostMirror = project / ".repro/output/install"
+      require dirExists(hostMirror)
+      # The prefix exists and holds the edge's output, so the refusal below
+      # can only be the publication check, not "no prefix".
+      require fileExists(hostMirror / "usr/bin/hello")
+      for (k, v) in creds: putEnv(k, v)
+      # Compiling the profile in this process runs its actions under the
+      # built engine (`reprobuild`, beside the `repro` thin client), the
+      # embedding contract of `compileProfileToRbpi`.
+      putEnv("REPRO_PUBLIC_CLI_PATH",
+        reproBinary.parentDir / "reprobuild".addFileExt(ExeExt))
+      # The refusal is read from stderr: the pin check (after the object
+      # check) also answers 2, and only the message tells them apart.
+      proc publishHostMirror(): int =
+        cli_infra.publishBuildForProfileEdge(profile & "#hello-prefix",
+          hostMirror, Triple, root / "mismatch-state")
+      when defined(posix):
+        let errLog = root / "mismatch.stderr"
+        flushFile(stderr)
+        let savedErr = dup(2)
+        let errFile = open(errLog, fmWrite)
+        discard dup2(getFileHandle(errFile), 2)
+        let mismatch =
+          try: publishHostMirror()
+          finally:
+            flushFile(stderr)
+            discard dup2(savedErr, 2)
+            discard posix.close(savedErr)
+            errFile.close()
+        let refusal = readFile(errLog)
+        checkpoint(refusal)
+        check "(the object check)" in refusal
+        check "nothing is published" in refusal
+      else:
+        let mismatch = publishHostMirror()
+      check mismatch == 2
       check manifestCount(root) == 1

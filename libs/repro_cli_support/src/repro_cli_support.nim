@@ -12673,6 +12673,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if tarballFallThrough and
           not tarballModeFallsThroughToFromSource(useDef):
         continue
+      if tarballFallThrough:
+        let scopeRefusal = tarballModeHostToolchainRefusal(useDef)
+        if scopeRefusal.len > 0:
+          raise newException(ValueError, scopeRefusal)
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind == rrSiblingMissing:
         continue
@@ -29775,6 +29779,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
+  var publishEdgeSpec = ""
+  var buildTargetTriple = ""
   var buildStrategy = lsDefault
   var strategyGiven = false
   var target = ""
@@ -30109,6 +30115,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       strategyGiven = true
     elif arg == "--print-solved-graph":
       printSolvedGraph = true
+    elif arg.startsWith("--publish="):
+      # CLI/build.md §"Publishing for an appliance": publish this build's
+      # target install mirror under a profile's substitute-only edge key.
+      publishEdgeSpec = arg["--publish=".len .. ^1]
     elif arg == "--target" or arg.startsWith("--target="):
       # ReproOS-Add-On-Mode A15: ``--target=<triple>`` is ``--variant
       # targetTriple=<triple>`` with the spelling canonicalised
@@ -30124,6 +30134,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         except ValueError as e:
           stderr.writeLine("repro build: " & e.msg)
           return 2
+      buildTargetTriple = triple
       if triple.len > 0:
         var existing = getEnv("REPRO_VARIANTS")
         if existing.len > 0:
@@ -30529,6 +30540,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         peerCacheInstaller = peerCacheBuildWiring.installer,
         actionOutcomeSink = actionOutcomeSink,
         graphAugmenter = graphAugmenter).exitCode
+      if result == 0 and publishEdgeSpec.len > 0 and not dryRun and
+          not prepareOnly:
+        let projectRoot =
+          try: projectRootForModule(absolutePath(
+                 parseBuildTarget(target).modulePath))
+          except CatchableError: getCurrentDir()
+        result = publishBuildForProfileEdge(publishEdgeSpec,
+          projectRoot / installMirrorSubpath(), buildTargetTriple,
+          projectRoot / ".repro" / "build" / "publish-state")
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -30624,8 +30644,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # A caller that needs the per-action outcome (certificate issuance) gets a
   # direct build: the daemon protocol carries an exit code and diagnostics,
   # not the engine's per-action results.
+  # `--publish` runs after the build in this process, so it takes the
+  # direct route.
   if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil or
-      graphAugmenter != nil:
+      graphAugmenter != nil or publishEdgeSpec.len > 0:
     return runDirectBuild()
   try:
     return runDaemonBuild()

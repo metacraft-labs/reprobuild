@@ -13660,7 +13660,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim",
       "sourceSuiteCount": 6,
-      "staticCaseCount": 27,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -47197,16 +47197,18 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_dsl_stdlib",
         "repro_peer_cache",
+        "repro_profile",
         "repro_project_dsl",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51554,8 +51556,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_m9r11_stub_provisioning_widening.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
