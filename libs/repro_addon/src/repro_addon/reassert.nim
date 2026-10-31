@@ -344,27 +344,49 @@ type
     ## production; a test seam records the call instead of driving
     ## systemctl and /etc on the test machine.
 
-proc guardStateDirs*(applyStateDir: string): seq[string] =
+proc guardStateDirs*(applyStateDir: string;
+                     pointer = AddonStateDirPointer): seq[string] =
   ## Where an interrupted add-on switch's marker can be: the state
-  ## directory of the apply asking (an add-on bootstrapped with
-  ## `--state-dir X` is applied with X), the resolved system state
-  ## directory, and the default. Deduplicated, in that order.
-  for d in [applyStateDir, resolveSystemStateDir(), DefaultStateDir]:
+  ## directory of the apply asking, the add-on's own state directory as
+  ## bootstrap recorded it (an add-on bootstrapped with `--state-dir X` is
+  ## found even by an apply that was not given X, such as a deploy-agent
+  ## tick), the resolved system state directory, and the default.
+  ## Deduplicated, in that order.
+  for d in [applyStateDir, readAddonStateDirPointer(pointer),
+            resolveSystemStateDir(), DefaultStateDir]:
     if d.len > 0 and d notin result: result.add(d)
+
+proc ownerlessSwitchMayBeLive*(stateDir: string; pid: int): string =
+  ## For a marker that records no owner (a build before 931aae1ed2 wrote
+  ## it): why its switch may still be running, or "" when it cannot be.
+  ## Those builds held the state directory's apply lock for the whole
+  ## switch -- taken before the marker was written, released after it was
+  ## cleared -- and recorded their PID in it. So a live old switch always
+  ## leaves a lock record whose PID is running. No record, our own, or a
+  ## dead holder means no old switch is running. This uses no wall clock
+  ## (a host without an RTC can run with a wrong one until NTP syncs), and a
+  ## reused PID can only err towards refusing.
+  let rec = readApplyLockRecord(stateDir)
+  if rec.present and rec.pid > 0 and rec.pid != pid and
+      processAlive(rec.pid):
+    return "its state directory's apply lock is held by pid " & $rec.pid &
+      ", which is running: it may be the older build's switch"
+  ""
 
 proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
                            pid = getCurrentProcessId();
-                           bootId = currentBootId()):
+                           bootId = currentBootId();
+                           pointer = AddonStateDirPointer):
     tuple[ok: bool; why: string] =
   ## The apply-side check (§7.7), run with the host apply lock held. For
   ## each pending marker: one written by this process, in this boot, is
   ## the caller's own switch and is left to it. A marker an older build
-  ## wrote (no owner recorded) is recovered only when it predates this
-  ## boot; otherwise the old binary may still be running that switch, and
-  ## the apply refuses. Every other marker belongs to a switch that is
-  ## gone, whatever process now has its PID: it is recovered first, and
-  ## the apply refuses when recovery does not resolve it.
-  for dir in guardStateDirs(applyStateDir):
+  ## wrote (no owner recorded) is recovered unless that build's switch may
+  ## still be running (``ownerlessSwitchMayBeLive``), in which case the
+  ## apply refuses. Every other marker belongs to a switch that is gone,
+  ## whatever process now has its PID: it is recovered first, and the
+  ## apply refuses when recovery does not resolve it.
+  for dir in guardStateDirs(applyStateDir, pointer):
     if not hasPendingMarker(dir): continue
     var m = PendingMarker()
     var readable = true
@@ -375,16 +397,18 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
     if readable:
       if markerOwnedByCaller(m, pid, bootId):
         continue
-      if m.ownerPid == 0 and not markerPredatesBoot(dir):
-        return (false, "the pending marker in " & dir & " records no " &
-          "owner (an older build wrote it) and was written during this " &
-          "boot, so its switch may still be running")
+      if m.ownerPid == 0:
+        let live = ownerlessSwitchMayBeLive(dir, pid)
+        if live.len > 0:
+          return (false, "the pending marker in " & dir & " records no " &
+            "owner (an older build wrote it) and " & live)
     let rec = recover(dir)
     if not (rec.resolved and not rec.deferred):
       return (false, dir & ": " & rec.lines.join("; "))
   (true, "")
 
-proc installPendingSwitchGuard*(recover: SwitchRecovery = nil) =
+proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
+                                pointer = AddonStateDirPointer) =
   ## Make every `runInfraApply` on this host run `checkPendingSwitches`
   ## before it mutates anything (ReproOS Add-On Mode §7.7).
   var r = recover
@@ -395,7 +419,7 @@ proc installPendingSwitchGuard*(recover: SwitchRecovery = nil) =
   pendingSwitchGuard = proc (applyStateDir: string):
       tuple[ok: bool; why: string] {.closure, gcsafe.} =
     {.cast(gcsafe).}:
-      checkPendingSwitches(applyStateDir, r)
+      checkPendingSwitches(applyStateDir, r, pointer = pointer)
 
 installPendingSwitchGuard()
 

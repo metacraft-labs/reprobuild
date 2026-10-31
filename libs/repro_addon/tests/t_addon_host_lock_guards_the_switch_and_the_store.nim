@@ -120,25 +120,75 @@ suite "an apply recovers an interrupted switch first, or refuses":
     var st: cint
     doAssert waitpid(other, st, 0) == other
 
-  test "a marker an older build wrote this boot is refused; one from before boot is recovered":
-    # d7c86107b wrote markers with no owner. During a binary swap the old
-    # binary may still be running that switch, so a marker from this boot
-    # is not recovered under it.
+  test "an ownerless marker: refused while its old switch may run, recovered otherwise, whatever the clock":
+    # d7c86107b wrote markers with no owner, and held the state directory's
+    # apply lock (with its PID) for the whole switch. At 918919853d the
+    # decision was the marker's mtime against /proc/stat btime. On a host
+    # without an RTC, before NTP has synced, a live switch's marker can
+    # look older than the boot. The decision is now the lock record.
     let tmp = createTempDir("addon-guard-ownerless-", "")
     defer: removeDir(tmp)
     let dir = tmp / "addon-state"
     let rec = Recorder(outcome: RecoveryOutcome(resolved: true))
     rawMarker(dir, 0, "")
-    let fresh = checkPendingSwitches(dir, recorderFor(rec))
-    check not fresh.ok
-    check "older build" in fresh.why
+    # The marker looks as old as can be: any wall-clock rule would recover.
+    setLastModificationTime(pendingMarkerPath(dir), fromUnix(1))
+    # The old switch: holds the state lock and is running.
+    var held, release: array[2, cint]
+    doAssert pipe(held) == 0 and pipe(release) == 0
+    let old = fork()
+    doAssert old >= 0
+    if old == 0:
+      doAssert tryAcquireApplyLock(dir).acquired
+      var c = 'h'
+      discard posix.write(held[1], addr c, 1)
+      discard posix.read(release[0], addr c, 1)
+      exitnow(0)
+    var c: char
+    doAssert posix.read(held[0], addr c, 1) == 1
+    let live = checkPendingSwitches(dir, recorderFor(rec))
+    check not live.ok
+    check ("pid " & $old) in live.why
     check rec.calls.len == 0
-    let boot = bootTimeUnix()
-    check boot > 0
+    c = 'r'
+    doAssert posix.write(release[1], addr c, 1) == 1
+    var st: cint
+    doAssert waitpid(old, st, 0) == old
+    # The holder is gone (its lock record stays, as a crash leaves it), and
+    # the marker now looks brand new: recovered all the same.
     setLastModificationTime(pendingMarkerPath(dir),
-      fromUnix(boot - 3600))
+      fromUnix(getTime().toUnix() + 86400))
+    check readApplyLockRecord(dir).present
     check checkPendingSwitches(dir, recorderFor(rec)).ok
     check rec.calls == @[dir]
+
+  test "the add-on's state directory is found through bootstrap's pointer":
+    # Bootstrapped with --state-dir X, applied by a deploy-agent tick that
+    # runs with its own state directory. At 918919853d the guard looked
+    # only at the caller's directory, the resolved one and the default, so
+    # the tick applied over the half switch in X.
+    let tmp = createTempDir("addon-guard-pointer-", "")
+    defer: removeDir(tmp)
+    putEnv(HostApplyLockEnvVar, tmp / "apply.lock")
+    defer: delEnv(HostApplyLockEnvVar)
+    let addonState = tmp / "addon-x"
+    let pointer = tmp / "var-lib-repro" / "addon-state-dir"
+    writeAddonStateDirPointer(addonState, pointer)
+    check readAddonStateDirPointer(pointer) == addonState
+    check readAddonStateDirPointer(tmp / "absent") == ""
+    let rec = Recorder(outcome: RecoveryOutcome(resolved: false,
+      lines: @["recorded"]))
+    installPendingSwitchGuard(recorderFor(rec), pointer = pointer)
+    defer: installPendingSwitchGuard()
+    rawMarker(addonState, 0, "")
+    var refused = false
+    try:
+      discard runInfraApply("", options(tmp / "agent-state"))
+    except EPendingSwitch:
+      refused = true
+    check refused
+    check rec.calls == @[addonState]
+    check not dirExists(tmp / "agent-state")
 
   test "with no boot id (macOS, Windows) the caller's own marker is decided by PID":
     let me = getCurrentProcessId()

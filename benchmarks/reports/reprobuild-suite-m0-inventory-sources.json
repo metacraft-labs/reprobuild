@@ -8194,7 +8194,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

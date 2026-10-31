@@ -31,7 +31,7 @@ libs/repro_addon/tests/t_addon_collision.nim	nim	35
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	23
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
-libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	6
+libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	7
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	45
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2

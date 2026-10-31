@@ -42,6 +42,7 @@ import repro_deploy_agent/secrets
 import ./addon_apply
 import ./fingerprint
 import ./generation0
+import ./static_tree
 import ./host_exec
 import ./ledger
 import ./linux_fs
@@ -255,6 +256,9 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
           " as a pre-bootstrap input, which bootstrap has no mode for")
       entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
   ensureSystemStateDir(stateDir)
+  # Every apply's pending-switch check finds the add-on's state through
+  # this, whatever --state-dir it was itself given (§7.7).
+  writeAddonStateDirPointer(stateDir)
 
   when mutated("bootstrap-installs-jq"):
     # FALSIFYING MUTATION (see mutations.nim): a bootstrap that installs a

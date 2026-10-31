@@ -352,25 +352,23 @@ proc markerOwnedByCaller*(m: PendingMarker; pid: int; bootId: string): bool =
   ## Windows) both sides are "" and the PID alone decides.
   m.ownerPid > 0 and m.ownerPid == pid and m.ownerBoot == bootId
 
-proc bootTimeUnix*(): int64 =
-  ## The kernel's boot time (``btime`` in /proc/stat), 0 when unknown.
-  try:
-    for line in readFile("/proc/stat").splitLines():
-      if line.startsWith("btime "):
-        return parseBiggestInt(line[6 .. ^1].strip())
-  except CatchableError:
-    discard
-  0
+const AddonStateDirPointer* = "/var/lib/repro/addon-state-dir"
+  ## Where bootstrap records the add-on's state directory (one line). It
+  ## lives under the add-on root ``/var/lib/repro``, which uninstall removes
+  ## whole and the fingerprint records only as a root, so it is part of the
+  ## add-on's own state, like the state directory itself. A process that is
+  ## not given the add-on's ``--state-dir`` -- a deploy-agent tick runs with
+  ## its own -- finds the add-on's pending marker through it.
 
-proc markerPredatesBoot*(stateDir: string; bootTime = bootTimeUnix()): bool =
-  ## True when the pending marker was last written before this boot, so no
-  ## process of this boot can be running its switch. False when either
-  ## time is unknown.
-  if bootTime <= 0: return false
-  try:
-    getLastModificationTime(pendingMarkerPath(stateDir)).toUnix() < bootTime
-  except OSError:
-    false
+proc writeAddonStateDirPointer*(stateDir: string;
+                                path = AddonStateDirPointer) =
+  createDir(parentDir(path))
+  writeFileNoFollow(path, stateDir & "\n", 0o644)
+
+proc readAddonStateDirPointer*(path = AddonStateDirPointer): string =
+  ## The recorded add-on state directory, "" when none is recorded.
+  try: readFile(path).strip()
+  except IOError, OSError: ""
 
 proc markerOwnerLive*(m: PendingMarker): bool =
   ## True when the process that owns the switch is still running it: the
