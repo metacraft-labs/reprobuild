@@ -67,8 +67,9 @@
 ##   * `-tags netgo,osusergo` select Go's own DNS resolver and user lookup,
 ##     which a static musl binary needs because there is no NSS to load
 ##     (https://pkg.go.dev/net#hdr-Name_Resolution, https://pkg.go.dev/os/user);
-##   * `-ldflags '-linkmode external -extldflags -static'` hands the final
-##     link to zig with `-static` (https://pkg.go.dev/cmd/link).
+##   * `-ldflags "-linkmode external -extldflags '-static -Wl,--strip-debug'"`
+##     hands the final link to zig, static and without the debug sections
+##     that would carry the checkout's path (https://pkg.go.dev/cmd/link).
 ##
 ## Zig keeps a compilation cache; its global and local caches are pointed
 ## under this recipe's scratch tree so the build neither reads nor writes
@@ -130,8 +131,15 @@ proc goStaticCgoTriple*(cpu = hostCPU): string =
 const
   GoStaticCgoTags* = ["netgo", "osusergo"]
     ## Go's own resolver and user lookup: a static musl binary has no NSS.
-  GoStaticCgoLdflags* = "-linkmode external -extldflags -static"
-    ## The final link goes to the external linker (zig), told `-static`.
+  GoStaticCgoLdflags* =
+    "-linkmode external -extldflags '-static -Wl,--strip-debug'"
+    ## The final link goes to the external linker (zig), told `-static`,
+    ## and to drop debug sections: zig compiles musl, compiler-rt and the
+    ## cgo C sources with DWARF whose `DW_AT_comp_dir` and file names are
+    ## the recipe's scratch tree and zig's install path, so with the
+    ## sections kept the bytes depend on the checkout's path (measured:
+    ## prysm from two checkouts differed only in `.debug_*`). The Go
+    ## linker's own `-s -w` do not reach the external link.
 
 const GoAsmTrimVar* = "REPRO_GO_ASM_TRIMPATH"
   ## Environment variable naming the module cache root, which the

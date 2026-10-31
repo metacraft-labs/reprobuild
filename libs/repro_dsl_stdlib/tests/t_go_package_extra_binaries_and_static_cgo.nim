@@ -153,7 +153,8 @@ suite "go_package: staticCgo":
       check "ZIG_GLOBAL_CACHE_DIR=\".repro/build/go/zig-cache/global\"" in s
       check "ZIG_LOCAL_CACHE_DIR=\".repro/build/go/zig-cache/local\"" in s
       check "-tags \"netgo,osusergo\"" in s
-      check "-ldflags \"-linkmode external -extldflags -static\"" in s
+      check ("-ldflags \"-linkmode external -extldflags " &
+        "'-static -Wl,--strip-debug'\"") in s
       check "zig" in act.toolIdentityRefs
 
   test "the recipe's tags and ldflags are kept, the static ones appended":
@@ -164,8 +165,8 @@ suite "go_package: staticCgo":
         extraBinaries = @[("prysmctl", "./cmd/prysmctl")])))
       # `netgo` is not repeated; the recipe's order is kept.
       check s.count("-tags \"blst_enabled,netgo,osusergo\"") == 2
-      check s.count(
-        "-ldflags \"-X main.v=1 -linkmode external -extldflags -static\"") == 2
+      check s.count("-ldflags \"-X main.v=1 -linkmode external " &
+        "-extldflags '-static -Wl,--strip-debug'\"") == 2
       check s.count("CC=\"") == 2
 
   test "the merge helpers are identities when static cgo is off":
