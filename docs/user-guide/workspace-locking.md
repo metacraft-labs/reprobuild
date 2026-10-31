@@ -287,6 +287,40 @@ push protocol still stops checks that depend on it. Refused pushes do not
 create, refresh or publish locks.
 Here is what each one means.
 
+### Certificates travel through the pre-push hook
+
+A gateway that requires test certificates reads them from git notes on the
+pushed tree. It has no access to your local certificate store. The managed
+`pre-push` hook gets them there: before the publication gate reports, it runs
+the hook body of the
+[`test_certificates`](https://github.com/metacraft-labs/test-certificates-tools)
+library linked into `repro`. That publishes the store's certificates for the
+commits the push introduces and pushes
+`refs/notes/test-certificates/certificates` to the same remote, so the notes are
+on the remote when the gateway judges the branch update. You do not need to
+install anything.
+
+The hook never fails your push:
+
+| Situation | What you see | What the gateway sees |
+| --------- | ------------ | --------------------- |
+| No certificate in the store for these commits | `nothing to propagate` | No note |
+| The remote refuses the notes ref, or does not answer within the time budget | `NOT fully propagated`, with the reason | Whatever arrived before it stopped |
+| An invalid `testCertificatesScope` declaration | `NOT fully propagated`, with the reason | No note |
+| `TEST_CERTIFICATES_HOOK=off git push …` | A line saying it was not propagated | No note |
+| `git push --no-verify` | Nothing: every `pre-push` hook is skipped | No note |
+
+The time budget defaults to 60 seconds. `TEST_CERTIFICATES_HOOK_TIMEOUT` changes
+it, in whole seconds, and it cannot be switched off. A gateway at `required`
+refuses a push whose tree has no note, and says the note is missing rather than
+asking you to certify again. A later ordinary push of the same commit carries it.
+
+`repro health` reports problems in that configuration in its
+`certificate-propagation` row: an invalid scope declaration, a
+`testCertificates.notesRef` other than the default, which sends notes to a ref
+gateways do not read, `TEST_CERTIFICATES_HOOK=off` left set in the environment,
+or a certificate store with no root it can resolve.
+
 ### Refreshing hooks after a protocol mismatch
 
 The generated dispatcher, managed hook body, and `repro` CLI use hook

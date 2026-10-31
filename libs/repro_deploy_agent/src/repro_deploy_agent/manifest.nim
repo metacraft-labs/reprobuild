@@ -66,11 +66,12 @@
 ## and reviewers can byte-trace it. The signed payload is everything UP TO
 ## ``signature``.
 
-import std/strutils
+import std/[algorithm, strutils]
 
 from repro_core import elementCountFits
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_profile as reproProfile
+import ./agent_mutations
 import ./secrets as reproSecrets
 
 export reproSecrets.SealedSecrets, reproSecrets.SecretFile,
@@ -86,6 +87,16 @@ type
     path*: string
     content*: string
 
+  ClosureDigest* = object
+    ## One pinned closure output (RDMF v3): the archive digest of the
+    ## declared outputs of the build action ``actionId``, spelled
+    ## ``blake3:<64 lowercase hex>`` -- the ``expectedOutputDigest``
+    ## spelling, i.e. what ``repro cache publish`` prints for those outputs.
+    ## An agent that requires v3 refuses an output whose digest differs,
+    ## before it is linked, named in a unit or activated.
+    actionId*: string
+    digest*: string
+
   DeployManifest* = object
     ## A signed desired-state document for ONE target.
     formatVersion*: uint16
@@ -97,6 +108,22 @@ type
       ## Files the profile reads at compile time, relative to itself (a
       ## `staticRead("locks/x.lock")`). Empty for a self-contained profile.
       ## Non-empty makes the envelope v3; see ``DeployManifestFormatVersionV3``.
+    issuedAt*: uint64
+      ## RDMF v3 attestation block: when the producer signed this manifest,
+      ## in seconds since the Unix epoch (UTC). With ``maxAgeSeconds`` it
+      ## bounds how long a mirror can keep serving it (``aoStale``). 0 means
+      ## the block is absent; when present it is never 0.
+    maxAgeSeconds*: uint64
+      ## The oldest this manifest may be when an agent selects it: a manifest
+      ## with ``now - issuedAt > maxAgeSeconds`` is stale. Present with
+      ## ``issuedAt``, never 0.
+    rollbackFloor*: uint64
+      ## The lowest manifest SEQUENCE an automatic revert may return to: a
+      ## generation applied from an older sequence (or by no manifest at
+      ## all) is below the floor. 0 means no floor. Never above ``sequence``.
+    closureDigests*: seq[ClosureDigest]
+      ## The pinned output digest of every build action this manifest's
+      ## desired state realises, sorted by ``actionId``.
     buildActions*: seq[reproProfile.ProfileBuildAction]
     hasSecrets*: bool
       ## Whether ``secrets`` carries a sealed section. Only ever true for a
@@ -132,6 +159,19 @@ const
     ## (an apt closure lock, a long configuration file) and producers had to
     ## inline every such file into the Nim source. Deploy-Agent.md §"The
     ## `RDMF` envelope".
+  DeployManifestFlagAttestations* = 1'u16
+    ## Bit 0 of the u16 after ``formatVersion`` (``flags``, formerly
+    ## "reserved"): the v3 envelope carries the attestation block --
+    ## ``issuedAt``, ``maxAgeSeconds``, ``rollbackFloor`` and the closure
+    ## digests -- right after the profile bundle. Only a v3 envelope may set
+    ## it, and no other bit is defined: a decoder refuses any other value.
+    ## A flag rather than a fixed layout because v3 already shipped with the
+    ## bundle alone (a producer serving a host whose agent predates the
+    ## block keeps emitting that form until the host's agent is upgraded),
+    ## and an agent that requires the block (a ReproOS add-on agent) then
+    ## refuses a v3 envelope without it exactly as it refuses v1 and v2.
+  ClosureDigestPrefix* = "blake3:"
+  ClosureDigestHexLen* = 64
   StagedProfileModule* = "manifest_profile.nim"
     ## The file name the agent stages ``profileText`` under before compiling
     ## it (a valid Nim module name: the compiler rejects a hyphenated stem).
@@ -344,9 +384,78 @@ proc validateProfileFiles*(files: openArray[ProfileFile]) =
           "' conflict: one is a directory of the other")
     seen.add(f.path)
 
+proc closureDigestError*(d: ClosureDigest): string =
+  ## Why ``d`` is not a well-formed closure digest entry, or "".
+  if d.actionId.len == 0: return "closure digest names an empty action id"
+  if '\0' in d.actionId: return "closure digest action id contains a NUL byte"
+  if not d.digest.startsWith(ClosureDigestPrefix) or
+      d.digest.len != ClosureDigestPrefix.len + ClosureDigestHexLen:
+    return "closure digest for '" & d.actionId & "' is not spelled " &
+      ClosureDigestPrefix & "<" & $ClosureDigestHexLen & " hex digits>: '" &
+      d.digest & "'"
+  for c in d.digest[ClosureDigestPrefix.len .. ^1]:
+    if c notin {'0' .. '9', 'a' .. 'f'}:
+      return "closure digest for '" & d.actionId &
+        "' is not lowercase hex: '" & d.digest & "'"
+  ""
+
+proc validateClosureDigests*(ds: openArray[ClosureDigest]) =
+  ## Raise ``DeployManifestCodecError`` on a malformed entry, or when the
+  ## entries are not strictly ascending by ``actionId`` (byte order). The
+  ## order makes the signed bytes of one set of pins unique, so two
+  ## producers emitting the same pins sign the same bytes; strictly
+  ## ascending also excludes a duplicate id, which would leave which pin
+  ## governs an action to the reader.
+  for i, d in ds:
+    let err = closureDigestError(d)
+    if err.len > 0:
+      raise newException(DeployManifestCodecError, err)
+    if i > 0 and not (ds[i - 1].actionId < d.actionId):
+      raise newException(DeployManifestCodecError,
+        "closure digests are not strictly ascending by action id: '" &
+        ds[i - 1].actionId & "' then '" & d.actionId & "'")
+
+proc hasAttestations*(m: DeployManifest): bool =
+  ## Whether ``m`` carries the v3 attestation block. Any of its fields set
+  ## means it does; ``validateAttestations`` then requires the mandatory
+  ## pair.
+  m.issuedAt != 0 or m.maxAgeSeconds != 0 or m.rollbackFloor != 0 or
+    m.closureDigests.len > 0
+
+proc validateAttestations*(m: DeployManifest) =
+  ## The block's own rules (Deploy-Agent.md §Strictness): ``issuedAt`` and
+  ## ``maxAgeSeconds`` are both non-zero, the floor is not above the
+  ## manifest's own sequence (a floor no generation of this manifest can
+  ## reach would forbid every revert, including to itself), and the
+  ## closure digests are well formed and ordered.
+  if m.issuedAt == 0:
+    raise newException(DeployManifestCodecError,
+      "attestation block without issuedAt (seconds since the epoch, > 0)")
+  if m.maxAgeSeconds == 0:
+    raise newException(DeployManifestCodecError,
+      "attestation block without a maximum age (seconds, > 0)")
+  if m.rollbackFloor > m.sequence:
+    raise newException(DeployManifestCodecError,
+      "rollback floor " & $m.rollbackFloor & " is above the manifest's own " &
+      "sequence " & $m.sequence)
+  validateClosureDigests(m.closureDigests)
+
+proc sortClosureDigests*(ds: var seq[ClosureDigest]) =
+  ## Put pins in the order the encoder requires (``validateClosureDigests``).
+  ds.sort(proc (a, b: ClosureDigest): int = cmp(a.actionId, b.actionId))
+
+proc closureDigestFor*(m: DeployManifest; actionId: string): string =
+  ## The pinned digest of ``actionId``, or "" when the manifest pins none.
+  for d in m.closureDigests:
+    if d.actionId == actionId: return d.digest
+  ""
+
+proc wireFlags*(m: DeployManifest): uint16 =
+  if m.hasAttestations: DeployManifestFlagAttestations else: 0'u16
+
 proc wireVersion*(m: DeployManifest): uint16 =
   ## The lowest format version that can express this manifest's content.
-  if m.profileFiles.len > 0: DeployManifestFormatVersionV3
+  if m.profileFiles.len > 0 or m.hasAttestations: DeployManifestFormatVersionV3
   elif m.hasSecrets: DeployManifestFormatVersionV2
   else: DeployManifestFormatVersionV1
 
@@ -362,7 +471,7 @@ proc encodeUnsignedPrefix(m: DeployManifest): seq[byte] =
   for ch in DeployManifestMagic:
     result.add(byte(ch))
   writeU16LE(result, m.wireVersion)
-  writeU16LE(result, 0'u16)                  # reserved / future flags
+  writeU16LE(result, m.wireFlags)            # flags (bit 0: v3 attestations)
   writeString(result, m.target)
   writeU64LE(result, m.sequence)
   writeString(result, m.deploymentId)
@@ -373,6 +482,15 @@ proc encodeUnsignedPrefix(m: DeployManifest): seq[byte] =
     for f in m.profileFiles:
       writeString(result, f.path)
       writeString(result, f.content)
+    if m.hasAttestations:
+      validateAttestations(m)
+      writeU64LE(result, m.issuedAt)
+      writeU64LE(result, m.maxAgeSeconds)
+      writeU64LE(result, m.rollbackFloor)
+      writeU32LE(result, uint32(m.closureDigests.len))
+      for d in m.closureDigests:
+        writeString(result, d.actionId)
+        writeString(result, d.digest)
   writeU32LE(result, uint32(m.buildActions.len))
   for a in m.buildActions:
     encodeBuildAction(result, a)
@@ -418,7 +536,17 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
       $result.formatVersion & ", expected " &
       $DeployManifestFormatVersionV1 & ", " & $DeployManifestFormatVersionV2 &
       " or " & $DeployManifestFormatVersionV3)
-  discard readU16LE(buf, pos)                # reserved
+  let flags = readU16LE(buf, pos)
+  # Only a v3 envelope may set a flag, and only the attestation bit is
+  # defined; anything else is a layout this decoder cannot read, refused
+  # rather than skipped (an older reader that ignored the word would
+  # misparse the block as build actions).
+  if flags != 0'u16 and (result.formatVersion < DeployManifestFormatVersionV3 or
+      flags != DeployManifestFlagAttestations):
+    raise newException(DeployManifestCodecError,
+      "deploy manifest flags word is " & $flags & " in a formatVersion " &
+      $result.formatVersion & " envelope (only formatVersion 3 may set " &
+      "bit 0, the attestation block)")
   result.target = readString(buf, pos)
   result.sequence = readU64LE(buf, pos)
   result.deploymentId = readString(buf, pos)
@@ -429,12 +557,14 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
       raise newException(DeployManifestCodecError,
         "element count exceeds remaining bytes")
     # The lowest-version rule, enforced on the reading side: a v3 envelope
-    # with no bundle should have been v2 or v1. Named as such, rather than
-    # failing later as an invalid signature over bytes no producer emits.
-    if fileCountRaw == 0'u32:
+    # with neither a bundle nor the attestation block should have been v2
+    # or v1. Named as such, rather than failing later as an invalid
+    # signature over bytes no producer emits.
+    if fileCountRaw == 0'u32 and flags == 0'u16:
       raise newException(DeployManifestCodecError,
         "non-canonical envelope: formatVersion 3 with no profile files " &
-        "(a producer must emit the lowest version that expresses its content)")
+        "and no attestation block (a producer must emit the lowest " &
+        "version that expresses its content)")
     for _ in 0 ..< int(fileCountRaw):
       var f: ProfileFile
       f.path = readString(buf, pos)
@@ -444,6 +574,22 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
     # makes the whole envelope malformed, so it is rejected here, before
     # the signature is even checked.
     validateProfileFiles(result.profileFiles)
+    if flags == DeployManifestFlagAttestations:
+      result.issuedAt = readU64LE(buf, pos)
+      result.maxAgeSeconds = readU64LE(buf, pos)
+      result.rollbackFloor = readU64LE(buf, pos)
+      let digestCountRaw = readU32LE(buf, pos)
+      if not elementCountFits(digestCountRaw, buf.len - pos, 8):
+        raise newException(DeployManifestCodecError,
+          "element count exceeds remaining bytes")
+      for _ in 0 ..< int(digestCountRaw):
+        var d: ClosureDigest
+        d.actionId = readString(buf, pos)
+        d.digest = readString(buf, pos)
+        result.closureDigests.add(d)
+      # Same strictness as the bundle: the block's own rules are checked
+      # before the signature, so a malformed block is named as one.
+      validateAttestations(result)
   let actionCountRaw = readU32LE(buf, pos)
   if not elementCountFits(actionCountRaw, buf.len - pos, 4):
     raise newException(DeployManifestCodecError, "element count exceeds remaining bytes")
@@ -521,3 +667,69 @@ proc verifyTrusted*(m: DeployManifest; anchors: peerAuth.TrustAnchors): bool =
   ## signature that verifies but whose key is not an anchor is REJECTED.
   let prefix = encodeUnsignedPrefix(m)
   peerAuth.verifySignature(anchors, m.producerPubKey, prefix, m.signature)
+
+# ---------------------------------------------------------------------------
+# Closure digests against the actions an apply realises (RDMF v3).
+# ---------------------------------------------------------------------------
+
+proc pinActionsToClosureDigests*(m: DeployManifest;
+    actions: seq[reproProfile.ProfileBuildAction]):
+    tuple[actions: seq[reproProfile.ProfileBuildAction]; refusal: string] =
+  ## Bind every action an apply is about to realise to the output digest
+  ## the signed manifest pins for it, so the substitute path refuses any
+  ## other bytes before a single one is materialised
+  ## (``expectedOutputDigest``; Deploy-Agent.md §"Version 3"). A manifest
+  ## without the attestation block pins nothing and ``actions`` pass
+  ## through unchanged. With the block:
+  ##
+  ## - an action the manifest pins no digest for is refused (the producer
+  ##   did not vouch for its output);
+  ## - an action whose own ``expectedOutputDigest`` differs from the pin is
+  ##   refused (the profile and the signed manifest disagree about the
+  ##   bytes, and neither is allowed to win silently);
+  ## - a pin naming no action is refused (the producer pinned a closure the
+  ##   target did not compile: a platform mismatch, Deploy-Agent.md
+  ##   §"Field semantics").
+  ##
+  ## ``refusal`` is "" when every action is pinned.
+  result.actions = actions
+  if not m.hasAttestations: return
+  var used: seq[string]
+  for a in result.actions.mitems:
+    let pin = m.closureDigestFor(a.id)
+    if pin.len == 0:
+      result.refusal = "the manifest pins no closure digest for build " &
+        "action '" & a.id & "'"
+      return
+    if a.expectedOutputDigest.len > 0 and a.expectedOutputDigest != pin:
+      result.refusal = "build action '" & a.id & "' pins " &
+        a.expectedOutputDigest & " but the signed manifest pins " & pin
+      return
+    a.expectedOutputDigest = pin
+    used.add(a.id)
+  for d in m.closureDigests:
+    if d.actionId notin used:
+      result.refusal = "the manifest pins closure digest " & d.digest &
+        " for build action '" & d.actionId & "', which this apply does " &
+        "not realise"
+      return
+
+proc closureDigestRefusal*(m: DeployManifest; actionId, actual: string): string =
+  ## Compare the digest an output actually has (``archiveDigestTag`` of its
+  ## declared outputs, as staged) with the one the signed manifest pins.
+  ## "" when they agree; otherwise why the output must not be moved into
+  ## the store, linked or named in a unit. A manifest without the
+  ## attestation block pins nothing and refuses nothing here (an agent
+  ## that needs pins requires the block before it gets this far).
+  if not m.hasAttestations: return ""
+  let pin = m.closureDigestFor(actionId)
+  if pin.len == 0:
+    return "the manifest pins no closure digest for build action '" &
+      actionId & "'"
+  when agentMutated("rdmf-skips-closure-digest"):
+    return ""
+  if actual != pin:
+    return "closure digest mismatch for build action '" & actionId &
+      "': the signed manifest pins " & pin & ", the output is " &
+      (if actual.len > 0: actual else: "absent or unhashable")
+  ""

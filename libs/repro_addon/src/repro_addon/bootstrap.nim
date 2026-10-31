@@ -42,6 +42,7 @@ import repro_deploy_agent/secrets
 import ./addon_apply
 import ./fingerprint
 import ./generation0
+import ./static_tree
 import ./host_exec
 import ./ledger
 import ./linux_fs
@@ -60,6 +61,9 @@ type
     cachePublishersPath*: string
     cacheUrl*: string
     stateDir*: string
+    agentTarget*: string          ## the deploy agent's target (A8), or ""
+    agentSources*: seq[string]    ## its manifest sources
+    profileCompiler*: string      ## the fetch unit's profile compiler, or ""
 
   BootstrapResult* = object
     planDigest*: string
@@ -177,11 +181,6 @@ const
 
 proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
-  # The whole bootstrap holds the host-wide apply lock: it writes the store,
-  # /etc and the unit set before its generation-0 apply starts, and no other
-  # apply may change the host underneath it (``repro_core/host_apply_lock``).
-  var hostLock = acquireHostApplyLock("repro system addon bootstrap")
-  defer: hostLock.release()
   if opts.planDigest.len == 0:
     raise newException(AddonBootstrapError,
       "bootstrap needs --plan <digest>: run `repro system addon preflight` " &
@@ -191,7 +190,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let plan = runPreflight(PreflightInputs(
     deploySignersPath: opts.deploySignersPath,
     cachePublishersPath: opts.cachePublishersPath,
-    cacheUrl: opts.cacheUrl))
+    cacheUrl: opts.cacheUrl, agentTarget: opts.agentTarget,
+    agentSources: opts.agentSources, profileCompiler: opts.profileCompiler))
   if plan.digest != opts.planDigest:
     raise newException(AddonPlanMismatch,
       "the host's preflight plan is " & plan.digest & ", not the " &
@@ -204,6 +204,27 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     raise newException(AddonBootstrapError,
       "the acknowledged plan is not compatible; nothing was written:\n  " &
       failed.join("\n  "))
+
+  # 1b. Only now, with the plan acknowledged and nothing written, take the
+  # host-wide apply lock for the rest of the bootstrap: it writes the store,
+  # /etc and the unit set before its generation-0 apply starts, and no other
+  # apply may change the host underneath it (``repro_core/host_apply_lock``).
+  # The lock file (/run/repro-apply.lock) is outside every add-on root, so
+  # the preflight never sees it. Another apply may have changed the host
+  # while this one waited, so the plan is recomputed under the lock.
+  var hostLock = acquireHostApplyLock("repro system addon bootstrap")
+  defer: hostLock.release()
+  let lockedPlan = runPreflight(PreflightInputs(
+    deploySignersPath: opts.deploySignersPath,
+    cachePublishersPath: opts.cachePublishersPath,
+    cacheUrl: opts.cacheUrl, agentTarget: opts.agentTarget,
+    agentSources: opts.agentSources, profileCompiler: opts.profileCompiler))
+  if lockedPlan.digest != plan.digest:
+    raise newException(AddonPlanMismatch,
+      "the host's preflight plan changed to " & lockedPlan.digest &
+      " while the bootstrap waited for the host apply lock; nothing was " &
+      "written apart from that lock (" & hostApplyLockPath() & ", outside " &
+      "every add-on root). Re-run the preflight and review what changed.")
   if plan.preBootstrap.roots.len > 0 and stateDir != DefaultStateDir:
     # The preflight inspected the default state directory; a bootstrap
     # into another one would leave the inspected /var/lib/repro/system
@@ -240,6 +261,9 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
           " as a pre-bootstrap input, which bootstrap has no mode for")
       entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
   ensureSystemStateDir(stateDir)
+  # Every apply's pending-switch check finds the add-on's state through
+  # this, whatever --state-dir it was itself given (§7.7).
+  writeAddonStateDirPointer(stateDir)
 
   when mutated("bootstrap-installs-jq"):
     # FALSIFYING MUTATION (see mutations.nim): a bootstrap that installs a

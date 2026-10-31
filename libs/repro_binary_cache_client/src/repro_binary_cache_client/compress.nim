@@ -93,7 +93,32 @@ var
 
 const ZstdDynLib = zstdDynlibName(HostZstdDynlibTarget)
 
+when defined(reproStaticZstd):
+  {.passL: "-lzstd".}
+  proc zstdStatic_ZSTD_createCStream() {.importc: "ZSTD_createCStream", cdecl.}
+  proc zstdStatic_ZSTD_freeCStream() {.importc: "ZSTD_freeCStream", cdecl.}
+  proc zstdStatic_ZSTD_initCStream() {.importc: "ZSTD_initCStream", cdecl.}
+  proc zstdStatic_ZSTD_isError() {.importc: "ZSTD_isError", cdecl.}
+  proc zstdStatic_ZSTD_getErrorName() {.importc: "ZSTD_getErrorName", cdecl.}
+  proc zstdStatic_ZSTD_CStreamInSize() {.importc: "ZSTD_CStreamInSize", cdecl.}
+  proc zstdStatic_ZSTD_CStreamOutSize() {.importc: "ZSTD_CStreamOutSize", cdecl.}
+
 proc ensureZstdLoaded() =
+  when defined(reproStaticZstd):
+    # A statically linked binary (the ReproOS add-on's musl build) cannot
+    # dlopen: libzstd is linked in (``scripts/build_addon_static.sh``) and
+    # its entry points are taken directly.
+    if zstdLibHandle != nil:
+      return
+    ZSTD_createCStream = cast[ZstdCreateCStreamProc](zstdStatic_ZSTD_createCStream)
+    ZSTD_freeCStream = cast[ZstdFreeCStreamProc](zstdStatic_ZSTD_freeCStream)
+    ZSTD_initCStream = cast[ZstdInitCStreamProc](zstdStatic_ZSTD_initCStream)
+    ZSTD_isError = cast[ZstdIsErrorProc](zstdStatic_ZSTD_isError)
+    ZSTD_getErrorName = cast[ZstdGetErrorNameProc](zstdStatic_ZSTD_getErrorName)
+    ZSTD_CStreamInSize = cast[ZstdCStreamInSizeProc](zstdStatic_ZSTD_CStreamInSize)
+    ZSTD_CStreamOutSize = cast[ZstdCStreamOutSizeProc](zstdStatic_ZSTD_CStreamOutSize)
+    zstdLibHandle = cast[LibHandle](1)
+    return
   if zstdLibHandle != nil:
     return
   let lib = loadLib(ZstdDynLib)

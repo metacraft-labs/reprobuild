@@ -85,6 +85,12 @@ type
     message*: string             ## the human-readable outcome message
     errorCode*: string           ## the machine-readable outcome error code
     error*: string               ## exception text; empty unless the tick raised
+    addOnDrift*: seq[string]
+      ## On a ReproOS add-on host: what the apt hook recorded since the
+      ## previous tick (``AgentDeps.driftProbe``), one event per line. It
+      ## never changes the outcome or the exit code: drift underneath a
+      ## converged host is still a converged host, and an operator acts on
+      ## the drift, not the timer (add-on spec §7.8, §9.2).
 
   RecordedTick* = object
     ## What `runAgentTickRecorded` observed. `raised` distinguishes "the tick
@@ -94,6 +100,7 @@ type
     exitCode*: int
     raised*: bool
     error*: string
+    addOnDrift*: seq[string]       ## what the drift probe returned
 
 proc tickStatusPath*(stateDir, target: string): string =
   ## Sibling of `sequenceStatePath` — same directory, same per-target
@@ -114,13 +121,19 @@ proc deployAgentExitCode*(kind: AgentOutcomeKind): int =
   ## 1 = apply failed / source error (retryable — the timer retries);
   ## 2 = rejected / ambiguous (non-retryable).
   case kind
-  of aoApplied, aoConverged, aoWaiting: 0
+  of aoApplied, aoConverged, aoWaiting, aoPaused: 0
   of aoApplyFailed, aoSourceError: 1
   # `2` is the "operator must act" class, alongside a rejected or ambiguous
   # manifest. A secrets failure is deliberately NOT `1`: retrying on the timer
   # will not fix a wrong recipient key or a missing --secrets-key, and grouping
   # it with the retryable failures would bury it in a loop that never converges.
-  of aoRejected, aoAmbiguous, aoSecretsFailed: 2
+  # An unsupported base (a release upgrade the matrix does not cover yet)
+  # is the same class: no retry changes the host's distribution.
+  # A stale manifest (a frozen mirror) and a reverted, quarantined
+  # deployment are the same class: the timer cannot fix either. A pause is
+  # an operator's own choice and reports 0.
+  of aoRejected, aoAmbiguous, aoSecretsFailed, aoUnsupportedBase, aoStale,
+     aoRolledBack: 2
 
 proc toJsonNode*(rec: TickStatusRecord): JsonNode =
   %*{
@@ -135,7 +148,8 @@ proc toJsonNode*(rec: TickStatusRecord): JsonNode =
     "deploymentId": rec.deploymentId,
     "message": rec.message,
     "errorCode": rec.errorCode,
-    "error": rec.error
+    "error": rec.error,
+    "addOnDrift": rec.addOnDrift
   }
 
 proc renderTickStatus*(rec: TickStatusRecord): string =

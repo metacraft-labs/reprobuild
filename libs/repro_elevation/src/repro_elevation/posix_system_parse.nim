@@ -1045,23 +1045,45 @@ proc canonicalPasswdGroupState*(observed: PasswdGroupObservation): string =
   "group:present;gid=" & observed.gid &
     ";members=" & observed.members.join(",")
 
+proc declaredGroupMembers(desired: PasswdGroupDesired): seq[string] =
+  for m in desired.members:
+    let n = m.strip()
+    if n.len > 0 and n notin result:
+      result.add(n)
+  result.sort()
+
 proc canonicalPasswdGroupDesired*(desired: PasswdGroupDesired): string =
   ## The desired canonical string. An unpinned `gid` (empty) is
   ## rendered `*` so a desired state that does not pin the gid does
-  ## not falsely equal an observed state that has one. ADDITIVE-only
-  ## semantics: the canonical digest reflects the DECLARED members
-  ## only — an observation with extra members will not match the
-  ## desired digest, so the driver runs the apply (which is a no-op
-  ## for already-present declared members and an `-aG` for missing
-  ## ones). This is intentional: a profile that adds a member then is
-  ## re-applied should converge the new member; ditto for the gid.
-  var members: seq[string]
-  for m in desired.members:
-    let n = m.strip()
-    if n.len > 0 and n notin members:
-      members.add(n)
-  members.sort()
+  ## not falsely equal an observed state that has one. Members are the
+  ## DECLARED set; `members` is a subset requirement (System-Profile-
+  ## And-Infra-Apply.md, `passwd.group`), so the observation it is
+  ## compared with is masked to the same set
+  ## (`canonicalPasswdGroupStateMaskedBy`).
   "group:present;gid=" & (if desired.gid.len > 0: desired.gid else: "*") &
+    ";members=" & declaredGroupMembers(desired).join(",")
+
+proc canonicalPasswdGroupStateMaskedBy*(observed: PasswdGroupObservation;
+    desired: PasswdGroupDesired): string =
+  ## An observed group in the SAME canonical form as
+  ## `canonicalPasswdGroupDesired`: an unpinned gid renders `*`, and the
+  ## member list is the observed members that the resource declares. The
+  ## driver adds missing members and never removes one it was not asked
+  ## for, so a member the profile does not name is not a difference: a
+  ## group with an undeclared live member plans a no-op, and one missing a
+  ## declared member still plans an update. Comparing the unmasked state
+  ## instead made every such group plan "update" on every apply. The plan,
+  ## the apply's recorded digest and drift detection all use this, so the
+  ## three agree; `canonicalPasswdGroupState` stays the literal record.
+  if not observed.present:
+    return "group:absent"
+  let declared = declaredGroupMembers(desired)
+  var members: seq[string]
+  for m in observed.members:
+    if m in declared and m notin members:
+      members.add(m)
+  members.sort()
+  "group:present;gid=" & (if desired.gid.len > 0: observed.gid else: "*") &
     ";members=" & members.join(",")
 
 # ---------------------------------------------------------------------------

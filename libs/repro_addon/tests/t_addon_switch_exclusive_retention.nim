@@ -114,7 +114,7 @@ suite "stops and restarts propagate along PartOf=/BindsTo= (§7.3)":
     e.alive = uaPopulated
     let ts = planTransitions(@[x, e])
     check verbsOf(ts) == @["restart x.service", "stop-start e.service"]
-    check ts[1].exclusive and "PartOf=" in ts[1].reason
+    check ts[1].exclusive and "propagating dependency" in ts[1].reason
   test "a dependent of a stop-start unit is started again after it":
     var x = unitFacts("x.service", exclusive = true)
     x.alive = uaPopulated
@@ -141,6 +141,24 @@ suite "stops and restarts propagate along PartOf=/BindsTo= (§7.3)":
     h.restartHeld = true
     check verbsOf(planTransitions(@[y, h])) ==
       @["restart y.service", "stop-start h.service"]
+  test "Requires= (RequiredBy) and a path through a target propagate; PropagatesStopTo stops":
+    var x = unitFacts("x.service")
+    x.fileChanged = true
+    x.dependents = @["t.target"]
+    x.stopDependents = @["s.service"]
+    var t = unitFacts("t.target")
+    t.dependents = @["e.service"]
+    var e = unitFacts("e.service", exclusive = true)
+    e.alive = uaPopulated
+    let s = unitFacts("s.service")
+    let ts = planTransitions(@[x, t, e, s])
+    check "restart x.service" in verbsOf(ts)
+    check "stop-start e.service" in verbsOf(ts)    # through the target
+    check "stop s.service" in verbsOf(ts)          # PropagatesStopTo: stopped, not restarted
+    check verbsOf(ts).len == 3                     # the target itself is not planned
+    for tr in ts:
+      if tr.unit == "e.service": check "t.target" in tr.reason and tr.exclusive
+
   test "an inactive dependent is left alone":
     var x = unitFacts("x.service")
     x.fileChanged = true
@@ -257,14 +275,33 @@ suite "sysctl precedence (§4.3, §7.2 step 6)":
     # A shipped template that matches no link configures nothing.
     writeFile(root / "usr/lib/systemd/network/80-container-ve.network",
               "[Match]\nName=ve-*\n[Network]\nIPMasquerade=both\n")
-    check networkdForwardingRefusal("net.ipv4.ip_forward", true, root) == ""
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root) == ""
     writeFile(root / "run/systemd/netif/links/2",
               "ADMIN_STATE=configured\nNETWORK_FILE=/run/systemd/network/10-eth.network\n")
-    check "IPForward=yes" in networkdForwardingRefusal("net.ipv4.ip_forward", true, root)
-    check "80-container-ve" notin networkdForwardingRefusal("net.ipv4.ip_forward", true, root)
-    check networkdForwardingRefusal("net.ipv4.ip_forward", false, root) == ""
-    check networkdForwardingRefusal("net.core.somaxconn", true, root) == ""
-    check networkdForwardingRefusal("net.ipv6.conf.all.forwarding", true, root).len > 0
+    # Only a value networkd would overwrite is refused, per family.
+    check "IPForward=yes" in networkdRefusal("net.ipv4.ip_forward", "0", true, root)
+    check networkdRefusal("net.ipv4.ip_forward", "1", true, root) == ""
+    check "80-container-ve" notin networkdRefusal("net.ipv4.ip_forward", "0", true, root)
+    check networkdRefusal("net.ipv4.ip_forward", "0", false, root) == ""
+    check networkdRefusal("net.core.somaxconn", "1", true, root) == ""
+    check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root).len > 0
+    writeFile(root / "run/systemd/network/10-eth.network",
+              "[Match]\nName=eth0\n[Network]\nIPv6Forwarding=yes\n")
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root) == ""   # the other family
+    check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root).len > 0
+  test "a per-link key of a link networkd manages is refused, whatever it is":
+    createDir(root / "run/systemd/netif/links")
+    createDir(root / "sys/class/net/eth0")
+    createDir(root / "sys/class/net/eth1")
+    writeFile(root / "sys/class/net/eth0/ifindex", "2\n")
+    writeFile(root / "sys/class/net/eth1/ifindex", "3\n")
+    writeFile(root / "run/systemd/netif/links/2",
+              "ADMIN_STATE=configured\nNETWORK_FILE=/run/systemd/network/10-eth.network\n")
+    check networkdManagedLinks(root) == @["eth0"]
+    check "manages eth0" in networkdRefusal("net.ipv6.conf.eth0.accept_ra", "0", true, root)
+    check "manages eth0" in networkdRefusal("net/ipv4/conf/eth0/rp_filter", "1", true, root)
+    check networkdRefusal("net.ipv6.conf.eth1.accept_ra", "0", true, root) == ""
+    check networkdRefusal("net.ipv4.conf.all.rp_filter", "1", true, root) == ""
 
 suite "retention keeps what running units use (§5.2)":
   test "the invocation table follows instances, not clocks":
@@ -275,11 +312,21 @@ suite "retention keeps what running units use (§5.2)":
       RunningUnit(unit: "outside.service", definition: "d2", invocationId: "inv-out")]
     let before = {"held.service": "inv-old", "fresh.service": "inv-prev",
                   "outside.service": "inv-out"}.toTable
-    let t = invocationsAfterSwitch(table, running, before, "g5", "g4")
+    let t = invocationsAfterSwitch(table, running, before,
+      ["fresh.service"].toHashSet, "g5", "g4")
     check t["inv-old"] == "g1"         # kept its instance: what the table said
-    check t["inv-new"] == "g5"         # started during this switch
+    check t["inv-new"] == "g5"         # started by this switch
     check t["inv-out"] == "g4"         # started outside a switch: what was on disk
     check t.len == 3                   # entries of ended instances are dropped
+    # Started during the switch but not by it: either definition.
+    let other = invocationsAfterSwitch(table, running, before,
+      initHashSet[string](), "g5", "g4")
+    check other["inv-new"] == "g4,g5"
+    # No table yet (the first switch after an upgrade): unknown, any.
+    let first = invocationsAfterSwitch(initTable[string, string](), running,
+      before, ["fresh.service"].toHashSet, "g5", "g4", tableExisted = false)
+    check first["inv-old"] == AnyRetainedGeneration
+    check first["inv-new"] == "g5"
 
   test "only a generation that gave the running unit another definition is held":
     proc lookup(id, unit: string): tuple[ledgerFound, unitFound: bool; definition: string] =
@@ -296,6 +343,24 @@ suite "retention keeps what running units use (§5.2)":
     check held("i3") == ["g9"].toHashSet      # no ledger: kept
     check held("i4").len == 0                 # the current generation
     check held("unknown").len == 0            # started after the last switch
+    let t2 = {"both": "g1,g2", "any": AnyRetainedGeneration}.toTable
+    check generationsHeldBy(@[RunningUnit(unit: "u.service", definition: "new",
+      invocationId: "both")], t2, "g5", lookup) == ["g1"].toHashSet
+    check generationsHeldBy(@[RunningUnit(unit: "u.service", definition: "new",
+      invocationId: "any")], t2, "g5", lookup, retained = @["g1", "g2", "g5", "g9"]) ==
+      ["g1", "g9"].toHashSet
+
+  test "the table is written durably and read back":
+    let dir = getTempDir() / ("repro-addon-inv-" & $getCurrentProcessId())
+    removeDir(dir)
+    createDir(dir)
+    writeInvocationTable(dir / "invocations", {"a": "g1", "b": "*"}.toTable)
+    check readInvocationTable(dir / "invocations") == {"a": "g1", "b": "*"}.toTable
+    var leftovers = 0
+    for f in walkDir(dir):
+      if extractFilename(f.path) != "invocations": inc leftovers
+    check leftovers == 0
+    removeDir(dir)
 
   test "a unit's definition covers its file and its drop-ins":
     var l = Ledger()

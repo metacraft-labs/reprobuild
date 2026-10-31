@@ -22,6 +22,9 @@
 
 import std/[random, strutils]
 
+import repro_core/file_lock
+import repro_core/host_apply_lock
+
 import ./dispatch
 import ./elevation_state
 import ./errors
@@ -558,6 +561,18 @@ proc runBrokerSession*(nonce: string; ctx: FixtureContext): int =
       protocolVersion: BrokerProtocolVersion,
       reason: "nonce mismatch — refusing to serve an unauthenticated peer")))
     return 4
+  # The broker is the elevated half of an unprivileged apply: it, not its
+  # unprivileged parent, takes the host-wide apply lock, for the whole
+  # session. A held lock refuses the session before any operation.
+  var hostLock: HostApplyLock
+  try:
+    hostLock = acquireHostApplyLock("the privileged broker",
+      privileged = true)
+  except ELockTimeout as e:
+    ch.sendFrame(encodeHelloAck(HelloAckFrame(accepted: false,
+      protocolVersion: BrokerProtocolVersion, reason: e.msg)))
+    return 5
+  defer: hostLock.release()
   ch.sendFrame(encodeHelloAck(HelloAckFrame(accepted: true,
     protocolVersion: BrokerProtocolVersion, reason: "")))
 
@@ -657,6 +672,14 @@ proc applyPrivilegedSetInProcess*(ctx: FixtureContext;
   ## the guard's reason) and the set continues with the next one. An
   ## answer starting with `PreWriteKeepPrefix` leaves the object as it is,
   ## recorded as a no-op with the reason.
+  ##
+  ## The whole set runs under the host-wide apply lock
+  ## (`repro_core/host_apply_lock`), whoever called it: a privileged set
+  ## never runs beside another process's apply. Re-entrant, so an apply
+  ## that already holds it does not wait on itself.
+  var hostLock = acquireHostApplyLock("the privileged set",
+    privileged = isProcessElevated())
+  defer: hostLock.release()
   for plannedOp in planned:
     var dr: DispatchResult
     if preWriteGuard != nil:

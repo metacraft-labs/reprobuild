@@ -19,10 +19,11 @@
 ## rewritten atomically at every step boundary; a host that reboots
 ## mid-switch finds exactly the last step completed.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, posix, strutils, times]
 
 import repro_core
 import repro_local_store/store
+from repro_infra/apply_lock import currentBootId, processAlive
 
 import ./etc_write
 import ./fingerprint
@@ -69,7 +70,15 @@ type
                               ## for this switch (known from step 4 on); the
                               ## switch committed iff `current` names it
     purpose*: string          ## apply | revert | rollback | replay: what
-                              ## started this switch (diagnostic only)
+                              ## started this switch
+    revertOf*: string         ## a revert: the failed attempt's generation id
+                              ## ("" when it failed before it had one)
+    revertReason*: string     ## a revert: why the attempt failed
+    ownerPid*: int            ## the process running the switch: the one
+                              ## that wrote the marker last (stamped by
+                              ## `writePendingMarker`); 0 for a marker an
+                              ## older build wrote
+    ownerBoot*: string        ## the kernel boot id when it was written
 
 const
   StaticLinkPath* = "/etc/repro/static"
@@ -113,6 +122,39 @@ proc staticTreePath*(files: seq[StaticFile]): string =
     provenanceChecksum = "tree:" & sha256Hex(treeManifest(files)))
   StoreRoot / prefixRelativePath(StaticTreePackage, ReprobuildVersion, id)
 
+proc treeCarries(path: string; files: seq[StaticFile]): bool =
+  ## Every file of the tree at ``path`` carries its planned bytes.
+  for f in files:
+    let at = path / staticRelPath(f.path)
+    if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
+      return false
+  true
+
+proc fsyncPath(path: string) =
+  ## fsync one file or directory by path (opened read-only).
+  let fd = posix.open(path.cstring, O_RDONLY or O_CLOEXEC)
+  if fd < 0:
+    raiseOSError(osLastError(), "open " & path & " to sync it")
+  try:
+    if posix.fsync(fd) != 0:
+      raiseOSError(osLastError(), "fsync " & path)
+  finally:
+    discard posix.close(fd)
+
+proc syncTree*(root: string) =
+  ## Make a realised tree durable: every file and directory in it, and the
+  ## directories its name lives in. The store writes a prefix without
+  ## syncing it (a build cache can recompute what a crash loses), but the
+  ## static tree is what `/etc` reads through once the flip happens: a
+  ## power cut after the flip must not bring the tree back empty.
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+    fsyncPath(path)
+  var d = root
+  while d.len > StoreRoot.len and d.startsWith(StoreRoot):
+    fsyncPath(d)
+    d = parentDir(d)
+  fsyncPath(StoreRoot)
+
 proc realiseStaticTree*(files: seq[StaticFile]):
     tuple[path: string; prefixId: PrefixIdBytes] =
   ## Step 1 of the switch: put the tree into the store (an existing
@@ -121,6 +163,12 @@ proc realiseStaticTree*(files: seq[StaticFile]):
   ## the generation is committed. Every file is 0644; a secret never
   ## travels this way (the ``secret`` class is tmpfs-only, §10.3).
   enterWritableStoreView()
+  # A tree a crash tore (the store had indexed it, its files never reached
+  # the disk) is removed so the store re-materialises it: the store
+  # re-creates a prefix whose directory is gone.
+  let planned = staticTreePath(files)
+  if dirExists(planned) and not treeCarries(planned, files):
+    removeDir(planned)
   var s = openStore(StoreRoot)
   defer: s.close()
   let staging = StoreRoot / "tmp" / ("addon-etc-" & $getCurrentProcessId())
@@ -148,6 +196,7 @@ proc realiseStaticTree*(files: seq[StaticFile]):
     if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
       raise newException(StaticTreeError, "static tree file " & at &
         " does not carry the planned bytes")
+  syncTree(result.path)
   s.registerRoot(PendingRootId, rkProfile)
   s.attachPrefixToRoot(PendingRootId, result.prefixId)
 
@@ -235,6 +284,10 @@ proc render*(m: PendingMarker): string =
   result.add("disabled\t" & escapeField(m.disabled.join(" ")) & "\n")
   result.add("attempt\t" & escapeField(m.attempt) & "\n")
   result.add("purpose\t" & escapeField(m.purpose) & "\n")
+  result.add("revert-of\t" & escapeField(m.revertOf) & "\n")
+  result.add("revert-reason\t" & escapeField(m.revertReason) & "\n")
+  result.add("owner-pid\t" & $m.ownerPid & "\n")
+  result.add("owner-boot\t" & escapeField(m.ownerBoot) & "\n")
 
 proc parsePendingMarker*(text: string): PendingMarker =
   let lines = text.splitLines()
@@ -268,13 +321,116 @@ proc parsePendingMarker*(text: string): PendingMarker =
       if v.len > 0: result.disabled = v.split(' ')
     of "attempt": result.attempt = v
     of "purpose": result.purpose = v
+    of "revert-of": result.revertOf = v
+    of "revert-reason": result.revertReason = v
+    of "owner-pid":
+      try: result.ownerPid = parseInt(v)
+      except ValueError:
+        raise newException(StaticTreeError, "malformed owner-pid " & v)
+    of "owner-boot": result.ownerBoot = v
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
 
 proc writePendingMarker*(stateDir: string; m: PendingMarker) =
-  ## Atomic: a crash leaves the previous marker or this one.
+  ## Atomic: a crash leaves the previous marker or this one. The writer is
+  ## the switch, so the marker is stamped with this process and this boot:
+  ## that is how recovery and the apply guard tell the switch that owns a
+  ## marker from any other holder of the host apply lock.
+  var stamped = m
+  stamped.ownerPid = getCurrentProcessId()
+  stamped.ownerBoot = currentBootId()
   createDir(parentDir(pendingMarkerPath(stateDir)))
-  writeFileNoFollow(pendingMarkerPath(stateDir), m.render(), 0o600)
+  writeFileNoFollow(pendingMarkerPath(stateDir), stamped.render(), 0o600)
+
+proc markerOwnedByCaller*(m: PendingMarker; pid: int; bootId: string): bool =
+  ## Pure: the marker was written by process ``pid`` in the boot
+  ## ``bootId``. A caller holding the host apply lock exclusively asks
+  ## this, not "is the owner alive": the only switch that can be live
+  ## while the caller holds the lock is the caller itself, and an
+  ## unrelated process that reused a dead owner's PID (pid_max is 32768
+  ## on armv7) is alive too. Where the kernel has no boot id (macOS,
+  ## Windows) both sides are "" and the PID alone decides.
+  m.ownerPid > 0 and m.ownerPid == pid and m.ownerBoot == bootId
+
+const AddonStateDirPointer* = "/var/lib/repro/addon-state-dir"
+  ## Where bootstrap records the add-on's state directory (one line). It
+  ## lives under the add-on root ``/var/lib/repro``, which uninstall removes
+  ## whole and the fingerprint records only as a root, so it is part of the
+  ## add-on's own state, like the state directory itself. A process that is
+  ## not given the add-on's ``--state-dir`` -- a deploy-agent tick runs with
+  ## its own -- finds the add-on's pending marker through it.
+
+proc writeAddonStateDirPointer*(stateDir: string;
+                                path = AddonStateDirPointer) =
+  createDir(parentDir(path))
+  writeFileNoFollow(path, stateDir & "\n", 0o644)
+
+when defined(posix):
+  var PointerOpenNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+proc readAddonStateDirPointerChecked*(path = AddonStateDirPointer;
+                                      owner = 0):
+    tuple[dir: string; why: string] =
+  ## The recorded add-on state directory, or ``dir`` "" and ``why`` the
+  ## reason the pointer is not trusted ("" too when there is none). The
+  ## pointer decides where an apply looks for an interrupted switch to
+  ## recover, so it is trusted only as bootstrap writes it: a regular file,
+  ## opened without following a symbolic link, owned by ``owner`` (root on
+  ## a host; a test passes its own uid) and not writable by group or
+  ## others, naming an absolute, normalised path to an existing directory.
+  when defined(posix):
+    let fd = posix.open(path.cstring, O_RDONLY or PointerOpenNoFollow or O_CLOEXEC)
+    if fd < 0:
+      let err = osLastError()
+      if err.int32 == ENOENT: return ("", "")
+      return ("", path & " is not opened (" & osErrorMsg(err) &
+        "; a symbolic link is refused)")
+    var content = ""
+    try:
+      var st: Stat
+      if fstat(fd, st) != 0:
+        return ("", path & ": fstat failed")
+      if not S_ISREG(st.st_mode):
+        return ("", path & " is not a regular file")
+      if int(st.st_uid) != owner:
+        return ("", path & " is owned by uid " & $st.st_uid & ", not " &
+          $owner)
+      if (int(st.st_mode) and 0o022) != 0:
+        return ("", path & " is writable by group or others")
+      var buf = newString(4096)
+      let n = posix.read(fd, addr buf[0], buf.len)
+      if n < 0: return ("", path & ": read failed")
+      content = buf[0 ..< n].strip()
+    finally:
+      discard posix.close(fd)
+    if content.len == 0 or not content.isAbsolute or
+        os.normalizedPath(content) != content or content.endsWith("/"):
+      return ("", path & " does not hold an absolute, normalised path")
+    if not dirExists(content) or symlinkExists(content):
+      return ("", path & " names " & content & ", which is not an " &
+        "existing directory")
+    (content, "")
+  else:
+    discard owner
+    ("", "")
+
+proc readAddonStateDirPointer*(path = AddonStateDirPointer;
+                               owner = 0): string =
+  ## The recorded add-on state directory, "" when there is none or it is
+  ## not trusted (see ``readAddonStateDirPointerChecked``; the reason goes
+  ## to stderr).
+  let r = readAddonStateDirPointerChecked(path, owner)
+  if r.why.len > 0:
+    stderr.writeLine("repro-addon: ignoring the add-on state-directory " &
+      "pointer: " & r.why)
+  r.dir
+
+proc markerOwnerLive*(m: PendingMarker): bool =
+  ## True when the process that owns the switch is still running it: the
+  ## recorded PID exists and the marker was written in this boot (a PID
+  ## from an earlier boot names some unrelated process now).
+  m.ownerPid > 0 and m.ownerBoot.len > 0 and
+    m.ownerBoot == currentBootId() and processAlive(m.ownerPid)
 
 proc readPendingMarker*(stateDir: string): PendingMarker =
   parsePendingMarker(readFile(pendingMarkerPath(stateDir)))

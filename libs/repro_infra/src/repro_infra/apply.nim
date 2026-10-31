@@ -162,6 +162,10 @@ type
       ## whether the set ran without an error or drift finding. Returns
       ## diagnostics: a non-empty result is an error, counted and
       ## withholding the commit under `commitOnlyWhenClean`.
+    commitPoint*: proc(point: string) {.gcsafe.}
+      ## Told at the commit's crash-relevant points (``commit-envelope``:
+      ## the envelope is durable, `current` not moved yet; and inside the
+      ## move). A test seam for the add-on's crash gate; nil otherwise.
     commitOnlyWhenClean*: bool
       ## Move `current` and write the generation envelope only when the
       ## privileged set and the after-hook reported no error and no
@@ -186,6 +190,12 @@ type
       ## user account; the apply fails closed with `EPasswdDestroy`
       ## BEFORE any mutation unless this flag is set. The symmetric
       ## counterpart of the `--accept-feature-destroy` rollback gate.
+    destroysFirst*: bool
+      ## Dispatch the `extraDestroyResources` before the profile's own
+      ## operations instead of after them. The add-on switch needs it: its
+      ## flip leaves the link of a removed drop-in dangling, and systemd
+      ## refuses to load (or `enable`) a unit with a dangling drop-in, so
+      ## the removal must happen before the unit it modifies is written.
     extraDestroyResources*: seq[SystemResource]
       ## `repro system rollback` seam: resources the rollback must
       ## actively REVERT (a feature disable / capability uninstall /
@@ -515,6 +525,17 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
       # M4: a non-cache-hit edge ran a local process this apply.
       inc result.locallyBuiltActionCount
 
+type
+  PendingSwitchGuard* = proc (applyStateDir: string):
+    tuple[ok: bool; why: string] {.closure, gcsafe.}
+
+var pendingSwitchGuard*: PendingSwitchGuard = nil
+  ## Installed by the add-on layer (`repro_addon/reassert`), which owns the
+  ## switch and its pending marker; nil where that layer is not linked.
+  ## `runInfraApply` calls it with the host apply lock held: ok when no
+  ## interrupted switch is pending (or it was just recovered), otherwise
+  ## why not.
+
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
   ## the `system.nim` text and resolved `opts`.
@@ -549,8 +570,19 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## does not stop a second apply that uses another state directory, and
   ## the deploy agent's tick reaches this proc without taking it at all.
   var hostLock = acquireHostApplyLock("repro infra apply (state " &
-    opts.stateDir & ")")
+    opts.stateDir & ")", privileged = isProcessElevated())
   defer: hostLock.release()
+  # Before any mutation: an add-on switch interrupted on this host (its
+  # pending marker present, its owner gone) is recovered first, under the
+  # lock this apply already holds, and the apply refuses if it cannot be.
+  # Applying on top of a half switch would bury it; the deploy agent would
+  # otherwise keep doing exactly that until the next boot.
+  if pendingSwitchGuard != nil:
+    let g = pendingSwitchGuard(opts.stateDir)
+    if not g.ok:
+      raise newException(EPendingSwitch, "an interrupted add-on switch " &
+        "is pending on this host and recovery did not resolve it; " &
+        "refusing to apply on top of it: " & g.why)
   resetBrokerLaunchCount()
   refreshApplyLock(opts.stateDir)
 
@@ -625,11 +657,16 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # digest is the resource's live observed state, so the broker's
   # drift gate treats it uniformly. An already-reverted resource
   # (observe says absent) is dispatched as a destroy no-op.
+  var destroys: seq[PlannedOperation]
   for r in opts.extraDestroyResources:
     let obs = observeResource(r)
-    planned.add(PlannedOperation(
+    destroys.add(PlannedOperation(
       operation: toPrivilegedOperation(r, destroy = true),
       baselineDigestHex: obs.observedDigestHex))
+  if opts.destroysFirst:
+    planned = destroys & planned
+  else:
+    planned.add(destroys)
 
   let partition = partitionApply(
     block:
@@ -758,6 +795,11 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       previousGenerationId: previousGenerationId))
   # The generation pointer / `current` marker is updated by the
   # NON-elevated parent (this proc), never the broker.
-  writeCurrentGenerationId(opts.stateDir, generationId)
+  if opts.phases.commitPoint != nil:
+    opts.phases.commitPoint("commit-envelope")
+  writeCurrentGenerationId(opts.stateDir, generationId,
+    onPoint = (if opts.phases.commitPoint != nil:
+                 proc(p: string) = opts.phases.commitPoint(p)
+               else: nil))
   result.committed = true
   discard refreshApplyLock(opts.stateDir)

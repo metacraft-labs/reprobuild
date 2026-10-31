@@ -22,6 +22,8 @@ import ../types/package_result
 import ../packages/cmake as cmake_module
 import ../packages/sh as sh_module
 import ../active_context
+import ../adapters/cross_zig
+import ../operations/zig_c
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4) — shared shape with ``autotools_package`` /
@@ -266,7 +268,17 @@ proc cmake_package*(srcDir: string;
   ## srcDir), depends on the fetch action's stamp, and writes its own
   ## stamp under ``.repro/build/cmake-patch.stamp`` so the engine's
   ## action-cache fingerprint stays stable across rebuilds.
-  requireCrossTargetConsulted("cmake_package")
+  # A zig target is threaded through a CMake toolchain file
+  # (`adapters/cross_zig`); any other non-native target still refuses.
+  let zigTarget = activeZigCrossTarget()
+  if zigTarget != nil:
+    requireZigDeclared("cmake_package")
+  else:
+    requireCrossTargetConsulted("cmake_package")
+  # A target build's build tree (and the staging tree inside it) is keyed by
+  # the target, so a native and a target configure of one recipe never
+  # share (and wipe) one tree (CLI/build.md §"Cross Targets: `--target`").
+  let buildDir = targetKeyedDir(buildDir)
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let effectiveDestRoot =
@@ -278,6 +290,13 @@ proc cmake_package*(srcDir: string;
     if raw.len > 0: raw else: "src"
   let fetchActOpt = maybeEmitFetchAction(pkgName, projectRoot, extractedRel)
   var configureAfter: seq[BuildActionDef] = @[]
+  var zigToolchainFile = ""
+  if zigTarget != nil:
+    let wrappers = emitZigCrossWrappersAction(projectRoot, pkgName,
+      zigTarget.triple)
+    configureAfter.add(wrappers)
+    zigToolchainFile = zigCrossWrapperDir(projectRoot, zigTarget.triple) /
+      ZigCrossCmakeToolchainName
   var patchActionId = ""
   if fetchActOpt.isSome:
     configureAfter.add(fetchActOpt.get())
@@ -335,6 +354,8 @@ proc cmake_package*(srcDir: string;
   # convention assumption that breaks under sibling install prefixes.
   # Threading each ``<Component>_DIR`` explicitly is the surgical fix.
   var effectiveCacheVars = cacheVars
+  if zigToolchainFile.len > 0:
+    effectiveCacheVars.add("CMAKE_TOOLCHAIN_FILE=" & zigToolchainFile)
   var linkLibraryDirs: seq[string] = @[]
   # ECM's KDEClangFormat module generates .clang-format in the source tree
   # whenever clang-format is discoverable. Its platform check also opens the

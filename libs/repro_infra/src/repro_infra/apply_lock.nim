@@ -157,6 +157,10 @@ type
     reclaimedFrom*: int       ## pid this lock was reclaimed from, else 0
     present*: bool            ## the lock file exists on disk
     legacy*: bool             ## a bare-PID lock from an older `repro`
+    bootId*: string           ## the kernel boot id when taken ("" if
+                              ## unknown): a lock from another boot belongs
+                              ## to a process that boot ended, whatever PID
+                              ## its number now names
 
   ApplyLockPolicy* = object
     ## When a lock held by a LIVE, different process may be reclaimed.
@@ -244,6 +248,15 @@ proc processAlive*(pid: int): bool =
 # upgrade across a held lock does not misfire) but never written.
 # ---------------------------------------------------------------------------
 
+proc currentBootId*(): string =
+  ## ``/proc/sys/kernel/random/boot_id``: a random id the kernel draws at
+  ## every boot; "" where there is none (not Linux).
+  when defined(linux):
+    try: readFile("/proc/sys/kernel/random/boot_id").strip()
+    except CatchableError: ""
+  else:
+    ""
+
 proc parseApplyLockRecord*(text: string): ApplyLockRecord =
   ## Parse the lock body. An unparseable body yields `pid == 0`, which
   ## every caller treats as "nobody can prove ownership".
@@ -274,6 +287,7 @@ proc parseApplyLockRecord*(text: string): ApplyLockRecord =
       of "heartbeat": result.heartbeatAt = int64(parseBiggestInt(value))
       of "beats": result.beats = parseInt(value)
       of "reclaimed-from": result.reclaimedFrom = parseInt(value)
+      of "boot": result.bootId = value
       else: discard
     except ValueError:
       # A half-parsed record must not be half-trusted: fall back to
@@ -287,6 +301,8 @@ proc renderApplyLockRecord*(rec: ApplyLockRecord): string =
            "beats=" & $rec.beats & "\n"
   if rec.reclaimedFrom != 0:
     result.add("reclaimed-from=" & $rec.reclaimedFrom & "\n")
+  if rec.bootId.len > 0:
+    result.add("boot=" & rec.bootId & "\n")
 
 proc writeApplyLockRecord(lockPath: string; rec: ApplyLockRecord) =
   ## Replace the lock file in one step. The heartbeat rewrites this file
@@ -410,7 +426,8 @@ proc tryAcquireApplyLock*(stateDir: string;
           elif progressed(existing, recheck):
             return
   var fresh = ApplyLockRecord(
-    pid: me, acquiredAt: now, heartbeatAt: now, beats: 0)
+    pid: me, acquiredAt: now, heartbeatAt: now, beats: 0,
+    bootId: currentBootId())
   if existing.present and existing.pid == me:
     # Re-entry by the current process keeps its own history.
     if existing.acquiredAt > 0: fresh.acquiredAt = existing.acquiredAt

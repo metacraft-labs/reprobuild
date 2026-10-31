@@ -10,7 +10,11 @@
 ##   repro system addon verify [--boot | --after-dpkg]
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
+##   repro system addon secrets [--boot]
 ##   repro system addon probe <healthCheck>
+##   repro system addon secret put --service S --name N [--target T] < secret
+##   repro system addon rotate-recipient-key
+##   repro system addon agent-tick --source <manifest>... [--target T]
 ##   repro system rollback [<generation>] [--reconcile-drift]
 ##   repro system addon fingerprint [--root R] [--no-live] [--out F]
 ##   repro system addon fingerprint diff <before> <after>
@@ -34,6 +38,7 @@ import std/[options, os, strutils]
 
 import std/algorithm
 
+import repro_core/host_apply_lock
 import repro_infra
 
 import repro_infra/addon_diagnostics
@@ -44,6 +49,10 @@ import repro_local_store/store as local_store
 
 import ./addon_apply
 import ./addon_rollback
+import ./agent_record
+import ./agent_switch
+import ./apt_hook
+import ./base_identity
 import ./bootstrap
 import ./collision
 import ./fingerprint
@@ -53,9 +62,13 @@ import ./linux_fs
 import ./health
 import ./preflight
 import ./reassert
+import ./seams
+import ./secrets_ops
+import ./agent_split
 import ./static_tree
 import ./store_root
 import ./switch
+import ./transitions
 import ./uninstall
 import ./verify
 
@@ -63,14 +76,19 @@ const
   AddonUsage* = """usage: repro system addon <command> [options]
 
 commands:
-  preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]] [--json]
+  preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
+            [--target T --manifest URL... [--profile-compiler P]] [--json]
       Inventory the host read-only and print the plan and its digest.
   bootstrap --plan <digest> [--deploy-signers F] [--cache-publishers F [--cache-url U]]
+            [--target T --manifest URL... [--profile-compiler P]]
       Install the add-on on a host whose preflight plan has <digest>.
   uninstall [--keep-store]
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
-      Compare every ledger object with the host (report only).
+      Compare every ledger object with the host (report only). --after-dpkg
+      (the apt hook): also report packages that now own ledger paths and
+      changed vendor units, record findings in the journal and the hook's
+      event log, and always exit 0.
   reassert [--boot]
       Finish or revert an interrupted switch, check the current generation
       (static tree, store objects, ledger digests) and report ok, drift or
@@ -78,9 +96,42 @@ commands:
       always exits 0.
   recover
       The same, for an operator: exits 1 unless the host ends ok or drift.
+  secrets [--boot]
+      Re-materialise the current generation's secrets from the retained
+      envelope (the boot secrets unit; leaves them to an apply that holds
+      the host apply lock). --boot: always exits 0.
   probe <healthCheck>
       Run one tcp: or http:// health check here (the confirm step runs it
       in the host's namespaces); exits 0 when it passes.
+  secret put --service S --name N [--target T] < secret
+      Seal the secret read from stdin to this host's recipient key as the
+      entry S/N of the retained envelope, and re-materialise the current
+      generation's secrets under /run/repro/secrets.
+  rotate-recipient-key
+      Generate the next recipient key and print its public half; the
+      current key is deleted when the first envelope sealed to the new
+      one opens.
+  agent-tick --source <manifest>... [--target T] [--allowed-signers F]
+      One deploy-agent tick in one process: verify (RDMF v3 required),
+      accept the sealed section, apply the profile through the switch; it
+      compiles nothing. Exit 0, 1 (retryable) or 2 (an operator must act).
+  agent-fetch
+      The fetch unit (repro-agent-fetch.service, unprivileged): select,
+      compile, substitute and download into its staging area.
+  agent-apply
+      The apply unit (repro-agent-apply.service, root, no network): copy
+      the staging area, verify everything again, apply.
+  migration-plan [--state-dir D] [--agent-state A] [--target T]
+      Plan, writing nothing, the migration the first tick of an agent that
+      applied outside the switch runs (spec §9 "Migration"): every object it
+      would adopt, write or refuse, and the service transitions. D and A
+      default to the add-on's and the agent's state directories; pass
+      copies to plan against a snapshot. Exit 0 when it would succeed, 2
+      when it would refuse, 1 when nothing can be planned.
+  resume
+      Let the deploy agent converge again after a local rollback paused it
+      (spec §9.3): removes the pause marker of every agent the rollback
+      paused. Exits 0 whether or not one was there.
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -229,6 +280,9 @@ proc selfcheckManagedWrite*(path: string): string =
   let post = applyFsSystemFile(FixtureContext(addOn: policy), op)
   "wrote " & path & " (digest " & post.digestHex[0 ..< 12] & ")"
 
+proc runMigrationPlanCli*(args: seq[string]): int
+  ## Below, beside the other plan verbs.
+
 proc runAddonCli*(args: seq[string]): int =
   ## Dispatch ``repro system addon <args>``.
   if args.len == 0 or args[0] in ["-h", "--help", "help"]:
@@ -236,6 +290,15 @@ proc runAddonCli*(args: seq[string]): int =
     return (if args.len == 0: 2 else: 0)
   let cmd = args[0]
   let rest = args[1 .. ^1]
+  # The verbs that hold plaintext secrets run where their heap cannot be
+  # swapped (spec §10.3): `secret`, `rotate-recipient-key` and `agent-tick`
+  # always, the re-assert and secrets verbs on a host that keeps envelopes
+  # (their boot units carry MemorySwapMax=0 themselves).
+  if cmd in ["secret", "rotate-recipient-key", "agent-tick", "agent-apply"] or
+      (cmd in ["reassert", "recover", "secrets"] and "--boot" notin rest and
+       hostHasSecrets()):
+    let r = reexecInNoSwapScope()
+    if r >= 0: return r
   try:
     case cmd
     of "fingerprint":
@@ -252,6 +315,12 @@ proc runAddonCli*(args: seq[string]): int =
           inp.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
         elif a == "--cache-url" or a.startsWith("--cache-url="):
           inp.cacheUrl = takeValue(rest, i, "--cache-url")
+        elif a == "--target" or a.startsWith("--target="):
+          inp.agentTarget = takeValue(rest, i, "--target")
+        elif a == "--manifest" or a.startsWith("--manifest="):
+          inp.agentSources.add(takeValue(rest, i, "--manifest"))
+        elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
+          inp.profileCompiler = takeValue(rest, i, "--profile-compiler")
         elif a == "--json":
           json = true
         else:
@@ -276,6 +345,12 @@ proc runAddonCli*(args: seq[string]): int =
           opts.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
         elif a == "--cache-url" or a.startsWith("--cache-url="):
           opts.cacheUrl = takeValue(rest, i, "--cache-url")
+        elif a == "--target" or a.startsWith("--target="):
+          opts.agentTarget = takeValue(rest, i, "--target")
+        elif a == "--manifest" or a.startsWith("--manifest="):
+          opts.agentSources.add(takeValue(rest, i, "--manifest"))
+        elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
+          opts.profileCompiler = takeValue(rest, i, "--profile-compiler")
         else:
           raise newException(ValueError, "unknown option " & a)
         inc i
@@ -308,6 +383,10 @@ proc runAddonCli*(args: seq[string]): int =
       for a in rest:
         if a in ["--boot", "--after-dpkg"]: reportOnly = true
         else: raise newException(ValueError, "unknown option " & a)
+      if "--after-dpkg" in rest:
+        # The apt hook (spec §7.8): ledger digests, new package owners of
+        # ledger paths, changed vendor units; recorded, always exit 0.
+        return runAfterDpkgCli()
       if reportOnly:
         # Report-only callers (the boot unit, the apt hook) must never fail
         # whatever invoked them, so nothing here may raise or exit non-zero.
@@ -334,7 +413,35 @@ proc runAddonCli*(args: seq[string]): int =
         return 0
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
-      return (if r.status in ["ok", "drift"]: 0 else: 1)
+      return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
+    of "secrets":
+      # `repro system addon secrets [--boot]`: re-materialise the current
+      # generation's secrets (repro-addon-secrets.service at boot, §7.7).
+      var atBoot = false
+      for a in rest:
+        if a == "--boot": atBoot = true
+        else: raise newException(ValueError, "unknown option " & a)
+      let r = bootSecrets(DefaultStateDir)
+      stdout.write("repro-addon secrets: " & r.line & "\n")
+      return (if atBoot or r.ok: 0 else: 1)
+    of "secret":
+      return runSecretPutCli(rest)
+    of "rotate-recipient-key":
+      return runRotateRecipientKeyCli(rest)
+    of "agent-tick":
+      return agent_split.runAgentTickCli(rest)
+    of "agent-fetch":
+      return runAgentFetchCli(rest)
+    of "agent-apply":
+      return runAgentApplyCli(rest)
+    of "resume":
+      return runResumeCli(rest)
+    of "migration-plan":
+      return runMigrationPlanCli(rest)
+    of "test-sleep":
+      # Seam builds only (a hanging command in the store, for a gate);
+      # every other build answers with a usage error.
+      return seamSleepCommand(rest)
     of "probe":
       if rest.len != 1:
         raise newException(ValueError, "probe needs one healthCheck value")
@@ -365,6 +472,10 @@ proc runAddonCli*(args: seq[string]): int =
       # /repro is.
       let current = readCurrentGenerationId(DefaultStateDir)
       stdout.write("current generation: " & current & "\n")
+      # The generation `current` was switched from, as its envelope
+      # records: the history `repro system rollback` walks.
+      stdout.write("previous generation: " &
+        previousGenerationOf(DefaultStateDir, current) & "\n")
       stdout.write("static tree: " &
         (if readStaticTarget().len > 0: readStaticTarget() else: "none") & "\n")
       if hasPendingMarker(DefaultStateDir):
@@ -429,6 +540,17 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   ## the sysctl values observed from the host's namespaces too.
   result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
     renderTransitions(r.transitions)
+  if r.baseIdentity.id.len > 0:
+    # The base the plan was computed against (§7.4) and, after a
+    # distribution upgrade, what changed since the current generation (§7.9).
+    result.add("base: " & describeBase(r.baseIdentity) & " (identity " &
+      baseIdentityDigest(r.baseIdentity)[0 ..< 16] & ", in the supported " &
+      "matrix)\n")
+    if r.baseChanges.len > 0:
+      result.add("base changed since generation " & r.previousGenerationId &
+        " (" & describeBase(r.previousBase) & "):\n")
+      for c in r.baseChanges: result.add("  " & c & "\n")
+    result.add(renderReleaseUpgradeChecklist(r.baseIdentity))
   if r.planId.len > 0:
     result.add("add-on plan-id: " & r.planId & "\n")
   if r.staticTree.len > 0:
@@ -450,6 +572,14 @@ proc runAddonStoreCli*(args: seq[string]): int =
     stdout.write("usage: repro store gc [--grace-seconds N] | roots | list\n")
     return (if args.len == 0: 2 else: 0)
   try:
+    # `gc` deletes prefixes no root holds; an apply realising a closure
+    # holds no root on it until it commits, so a collection during an apply
+    # could delete what that apply is about to bind. `gc` therefore runs
+    # under the host-wide apply lock, like every other store writer.
+    var hostLock: HostApplyLock
+    if args[0] == "gc":
+      hostLock = acquireHostApplyLock("repro store gc")
+    defer: hostLock.release()
     enterWritableStoreView()
     var s = openStore(StoreRoot)
     defer: s.close()
@@ -581,19 +711,95 @@ proc runAddonGeneration(verb: string; args: seq[string];
     stderr.write(verb & ": " & e.msg & "\n")
     1
 
+proc noSwapIfSecrets*(): int =
+  ## An apply, plan or rollback on a host that keeps sealed envelopes opens
+  ## one: it runs where its heap cannot be swapped (spec §10.3).
+  if isAddonHost() and hostHasSecrets(): reexecInNoSwapScope() else: -1
+
+proc runMigrationPlanCli*(args: seq[string]): int =
+  ## ``repro system addon migration-plan``: the migration's plan, nothing
+  ## written (spec §9 "Migration"). Read-only on the host and on the state
+  ## directories it is given, so it can run against copies before the
+  ## binary that would migrate is installed.
+  let reexec = noSwapIfSecrets()
+  if reexec >= 0: return reexec
+  var stateDir = hostAddonStateDir()
+  var agentState = AgentStateDir
+  var target = ""
+  var i = 0
+  try:
+    while i < args.len:
+      let a = args[i]
+      if a == "--state-dir" or a.startsWith("--state-dir="):
+        stateDir = takeValue(args, i, "--state-dir")
+      elif a == "--agent-state" or a.startsWith("--agent-state="):
+        agentState = takeValue(args, i, "--agent-state")
+      elif a == "--target" or a.startsWith("--target="):
+        target = takeValue(args, i, "--target")
+      else:
+        raise newException(ValueError, "unknown option " & a)
+      inc i
+  except ValueError as e:
+    stderr.write("repro system addon migration-plan: " & e.msg & "\n")
+    return 2
+  if target.len == 0: target = readHostname()
+  const verb = "repro system addon migration-plan"
+  if not isAddonHost(stateDir):
+    stderr.write(verb & ": " & stateDir & " is not an add-on state " &
+      "directory (no ownership ledger)\n")
+    return 1
+  if anyAgentGeneration(stateDir):
+    stdout.write("no migration: an add-on generation of " & stateDir &
+      " already carries an agent record\n")
+    return 0
+  let legacyGen = legacyAgentGeneration(agentState)
+  if legacyGen.len == 0:
+    stdout.write("no migration: " & agentState & " holds no agent " &
+      "generation\n")
+    return 0
+  stdout.write("migration of agent generation " & legacyGen & " (" &
+    agentState & ") into " & stateDir & "\n")
+  try:
+    let r = planLegacyMigration(stateDir, agentState, target, readHostname())
+    stdout.write(renderAddonSections(r))
+    var restarts = 0
+    for t in r.transitions:
+      if t.verb in {tvRestart, tvStopStart, tvStop}: inc restarts
+    stdout.write("units stopped or restarted: " & $restarts & "\n")
+    if r.drift.len > 0:
+      stdout.write("drift the migration would leave in place:\n")
+      for d in r.drift: stdout.write("  " & d & "\n")
+    stdout.write("plan only: nothing was written\n")
+    0
+  except EAddOn, AddonCollisionError, AddonDriftError, AddonApplyError,
+      ESystemProfileInvalid:
+    let e = getCurrentException()
+    stdout.write("the migration would refuse, with nothing written: " &
+      e.msg & "\n")
+    2
+  except CatchableError as e:
+    stderr.write(verb & ": " & e.msg & "\n")
+    1
+
 proc runAddonInfraApplyCli*(args: seq[string]): int =
   ## ``repro infra apply --profile <canonical text> [--reconcile-drift]``
   ## on an add-on host.
+  let r = noSwapIfSecrets()
+  if r >= 0: return r
   runAddonGeneration("repro infra apply", args, planOnly = false)
 
 proc runAddonInfraPlanCli*(args: seq[string]): int =
   ## ``repro infra plan --profile <canonical text>`` on an add-on host:
   ## the ledger diff and the collision report, nothing written.
+  let r = noSwapIfSecrets()
+  if r >= 0: return r
   runAddonGeneration("repro infra plan", args, planOnly = true)
 
 proc runAddonRollbackCli*(args: seq[string]): int =
   ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
   ## add-on host: re-apply a retained generation through the switch.
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
   var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
                                   hostIdentity: readHostname())
   for a in args:
@@ -610,6 +816,17 @@ proc runAddonRollbackCli*(args: seq[string]): int =
     stdout.write("rolled back from " & r.fromGeneration & " to " &
       r.toGeneration & " (applied as generation " & r.apply.generationId &
       ")\n")
+    # The deploy agent only moves forward: a local rollback pauses it
+    # until `repro system addon resume` (spec §9.3). The rollback itself
+    # paused every agent registered with the add-on (`pausedAgents`);
+    # A8's pause covers a configured agent that has not applied yet.
+    pauseAfterRollback(r.apply.generationId)
+    if r.pausedAgents.len > 0:
+      stdout.write("paused the deploy agent of " & r.pausedAgents.join(", ") &
+        " (spec §9.3); `repro system addon resume` lets it apply again\n")
+    elif fileExists(AgentConfPath):
+      stdout.write("the deploy agent is paused (aoPaused) until " &
+        "`repro system addon resume`\n")
     0
   except AddonApplyError as e:
     stderr.write("repro system rollback: " & e.msg & "\n")
@@ -647,5 +864,7 @@ proc runAddonAdoptCli*(args: seq[string]): int =
   if address.len == 0:
     stderr.write("repro system adopt: <address> is required\n")
     return 2
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
   runAddonGeneration("repro system adopt", rest, planOnly = false,
                      adopt = @[address])

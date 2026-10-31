@@ -18,6 +18,7 @@ import std/os
 import repro_infra
 
 import ./addon_apply
+import ./agent_record
 import ./collision
 import ./static_tree
 
@@ -33,6 +34,8 @@ type
     fromGeneration*: string
     toGeneration*: string
     apply*: AddonApplyResult
+    pausedAgents*: seq[string]
+      ## The agent state directories this rollback paused (§9.3).
 
 proc previousCommittedGeneration*(stateDir: string): string =
   ## The generation `current` was switched from, as its envelope records.
@@ -73,4 +76,14 @@ proc runAddonRollback*(opts: AddonRollbackOptions): AddonRollbackResult =
   result.apply = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: opts.hostIdentity, ownProfileText: g.own,
     userProfileText: g.user, reconcileDrift: opts.reconcileDrift,
-    driver: opts.driver, purpose: "rollback"))
+    driver: opts.driver, purpose: "rollback",
+    # Its secrets come from the target generation's own envelope copy; a
+    # copy that no longer opens refuses the rollback before anything is
+    # written (spec §10.3).
+    secretsFromGeneration: result.toGeneration))
+  # A local rollback pauses the deploy agents (spec §9.3): otherwise the
+  # next tick re-applies the latest sequence over the operator's rollback.
+  # Each agent's marker names the generation and the operator; `repro
+  # system addon resume` clears them. Written only once the rollback
+  # committed.
+  result.pausedAgents = pauseAgents(stateDir, result.toGeneration)

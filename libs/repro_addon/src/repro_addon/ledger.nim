@@ -115,7 +115,9 @@ type
                            ## the observer does not cover
     collision*: string     ## how a collision was resolved: "" (none),
                            ## ``adopt``, ``divert``, ``dropIn``,
-                           ## ``replace``, ``reconcile``. ``adopt`` with an
+                           ## ``replace``, ``reconcile``, ``supersede``
+                           ## (a profile resource that took over one of
+                           ## generation 0's objects, spec §9). ``adopt`` with an
                            ## empty ``resource`` marks a pre-bootstrap input
                            ## bootstrap took over (spec §6.1): carried
                            ## forward by every apply, put back as found by
@@ -343,7 +345,13 @@ proc observeDrift*(e: LedgerEntry): string =
     ""
   of lcInstallLink:
     if not symlinkExists(e.path):
-      return "missing (or no longer a symlink)"
+      # A file or directory put where the add-on's link was is someone
+      # else's: drift, never "missing" (which removal would clean up).
+      if dirExists(e.path):
+        return "replaced by a directory, ledger link to " & e.linkTarget
+      if fileExists(e.path):
+        return "replaced by a regular file, ledger link to " & e.linkTarget
+      return "missing"
     let t = expandSymlink(e.path)
     if t != e.linkTarget:
       return "points at " & t & ", ledger " & e.linkTarget

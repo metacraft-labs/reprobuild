@@ -13,7 +13,8 @@
 import std/[net, os, strutils, times, unittest]
 
 import repro_infra
-import repro_addon/[health, ledger, pending_plan, seams, static_tree]
+import repro_addon/[addon_apply, generation0, health, host_exec, ledger, pending_plan,
+                    seams, static_tree]
 
 let root = getTempDir() / ("repro-addon-recovery-" & $getCurrentProcessId())
 removeDir(root)
@@ -173,7 +174,7 @@ suite "confirm (§7.5)":
 
   test "passes as soon as every check has passed once":
     var rounds = 0
-    let runner: ProbeRunner = proc(c: UnitHealthCheck): string =
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =
       if c.unit == "a.service": inc rounds
       if rounds >= 3: "" else: "not yet"
     let o = confirm(checks, 10, runner, pollMs = 50)
@@ -182,7 +183,7 @@ suite "confirm (§7.5)":
     check o.waitedSec < 5
 
   test "fails at the timeout with each check's last reason":
-    let runner: ProbeRunner = proc(c: UnitHealthCheck): string =
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =
       if c.unit == "a.service": "" else: "connection refused"
     let start = epochTime()
     let o = confirm(checks, 1, runner, pollMs = 100)
@@ -191,9 +192,99 @@ suite "confirm (§7.5)":
     check o.failures == @["b.service tcp:127.0.0.1:1: connection refused"]
     check took >= 1.0 and took < 3.0
 
+  test "a probe gets the remaining budget and a hung one cannot extend the wait":
+    var budgets: seq[int]
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =
+      budgets.add(budgetSec)
+      sleep(budgetSec * 1000)       # a check that hangs for all it is given
+      "hung"
+    let start = epochTime()
+    let o = confirm(checks[0 .. 0], 2, runner, pollMs = 50)
+    check not o.passed
+    check epochTime() - start < 3.5
+    check budgets.len >= 1 and budgets[0] <= 2
+
+  test "the bounded host-tool runner kills at the deadline":
+    let start = epochTime()
+    let r = runHostTool(["/bin/sh", "-c", "while :; do :; done"], timeoutSec = 1)
+    check r.exitCode == 124
+    check epochTime() - start < 5
+
+  test "the bounded runner drains output larger than a pipe and keeps a bounded part":
+    # A probe that prints far more than the 64 KiB a pipe holds must not
+    # block on its write until the deadline kills it.
+    let start = epochTime()
+    let r = runHostTool(["/bin/sh", "-c",
+      # Shell builtins only (the fixed tool environment's PATH need not
+      # carry coreutils): 20000 lines of 50 bytes, about 1 MB.
+      "i=0; while [ $i -lt 20000 ]; do " &
+      "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; " &
+      "i=$((i+1)); done"],
+      timeoutSec = 20)
+    check r.exitCode == 0
+    check r.output.len == BoundedOutputBytes
+    check epochTime() - start < 10
+
   test "no checks: confirmed at once":
-    let runner: ProbeRunner = proc(c: UnitHealthCheck): string = "never"
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string = "never"
     check confirm(@[], 60, runner).passed
+
+suite "the commit point (§7.2 step 9)":
+  test "current moves by one rename and leaves no temporary link":
+    let sd = root / "state"
+    createDir(sd / "generations" / "g1")
+    createDir(sd / "generations" / "g2")
+    writeCurrentGenerationId(sd, "g1")
+    check readCurrentGenerationId(sd) == "g1"
+    var points: seq[string]
+    writeCurrentGenerationId(sd, "g2", onPoint = proc(p: string) = points.add(p))
+    check readCurrentGenerationId(sd) == "g2"
+    check points.len == 0          # the product build has no window to name
+    for kind, path in walkDir(sd):
+      check "tmp" notin extractFilename(path)
+
+  test "the apply lock records the boot it was taken in":
+    let rec = ApplyLockRecord(pid: 42, acquiredAt: 1, heartbeatAt: 1,
+                              bootId: currentBootId())
+    check currentBootId().len > 0
+    check parseApplyLockRecord(renderApplyLockRecord(rec)).bootId == currentBootId()
+    check parseApplyLockRecord("pid=42\nacquired=1\n").bootId == ""
+
+suite "a failed replay reverts unless no revert is possible (§7.2)":
+  test "a failed revert, a first switch and a moved current keep the marker":
+    let sd = root / "replay-fail"
+    createDir(sd / "addon")
+    # A revert that failed is not reverted again.
+    let rv = revertAfterFailedReplay(sd, PendingMarker(purpose: "revert",
+      fromGeneration: "g1", step: ssPreStop), "boom")
+    check not rv.reverted and "revert" in rv.why
+    # Bootstrap's first switch has nothing to go back to.
+    let first = revertAfterFailedReplay(sd, PendingMarker(purpose: "apply",
+      step: ssPreStop), "boom")
+    check not first.reverted and "bootstrap" in first.why
+    # `current` names neither: never guessed.
+    let moved = revertAfterFailedReplay(sd, PendingMarker(purpose: "apply",
+      fromGeneration: "g1", step: ssPreStop), "boom")
+    check not moved.reverted and "current" in moved.why
+
+suite "boot ordering of the add-on's own units (§7.7, §10.3)":
+  test "the secrets unit is off the recovery's path and bounded":
+    let objs = generation0Objects(Gen0Inputs(
+      reproExe: "/repro/store/prefixes/x/1/bin/repro"))
+    var secrets, reassert = ""
+    for o in objs:
+      if o.unit == SecretsUnit: secrets = o.content
+      if o.unit == ReassertUnit: reassert = o.content
+    check secrets.len > 0 and reassert.len > 0
+    # Default dependencies: it mounts the ramfs through systemd-run, which
+    # needs the system bus (after basic.target).
+    check "DefaultDependencies=no" notin secrets
+    check ReassertUnit notin secrets.split("Before=")[0]
+    check "TimeoutStartSec=" & $SecretsUnitTimeoutSec & "s" in secrets
+    check "Before=" & ReassertUnit in secrets
+    check "After=local-fs.target repro-store.mount " & SecretsUnit in reassert
+    # Two capped confirms fit in the re-assert unit's timeout.
+    check 2 * BootConfirmCapSec < ReassertTimeoutMin * 60
 
 suite "test seams":
   test "a product build has no pause point":

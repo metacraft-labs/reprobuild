@@ -116,6 +116,13 @@ e2e_addon_write_time_recheck:
 # (exclusive_never_overlaps), sysctl-in-apply-namespace
 # (net_sysctl_applies_in_host_namespace), path-based-write-follows-links
 # (writes_never_follow_symlinks); the gate is then expected to fail.
+# The deploy agent on an add-on host applies through the switch: migration
+# of an agent that applied outside it restarts nothing, agent generations
+# record deployment and sequence, rollback reaches them and pauses the agent
+# (spec §7.4, §7.5, §9, §9.3).
+e2e_addon_agent_generations_and_rollback:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_generations_and_rollback
+
 e2e_addon_switch_is_planned_exactly:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_switch_is_planned_exactly
 
@@ -124,6 +131,9 @@ e2e_addon_exclusive_never_overlaps:
 
 e2e_addon_gc_keeps_current_and_previous:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_gc_keeps_current_and_previous
+
+e2e_addon_hostile_deb_cannot_escape_its_prefix:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_hostile_deb_cannot_escape_its_prefix
 
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
@@ -139,8 +149,112 @@ e2e_addon_base_boots_without_store:
 e2e_addon_confirm_or_revert:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_confirm_or_revert
 
+# Milestone A7: secrets. The disk-scan gate runs the seam build (its second
+# pass kills the tick mid-materialisation; run_addon_gate.sh selects it).
+e2e_addon_no_plaintext_secret_on_disk:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_no_plaintext_secret_on_disk
+
+e2e_addon_service_reads_only_its_credentials:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_service_reads_only_its_credentials
+
+e2e_addon_recipient_key_rotation:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_recipient_key_rotation
+
+e2e_addon_secrets_follow_generations:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_secrets_follow_generations
+
+e2e_addon_secrets_without_memory_controller:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_secrets_without_memory_controller
+
+t_addon_recipient_key_mode_checked_at_load:
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_recipient_key_mode_checked_at_load recipient-key-mode-unchecked
+
+t_addon_secret_files_created_private_and_never_through_symlinks:
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_secret_files_created_private_and_never_through_symlinks secrets-write-then-narrow
+
+e2e_addon_recovery_never_holds_up_boot:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_recovery_never_holds_up_boot
+
+e2e_addon_refused_recovery_keeps_its_record:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_refused_recovery_keeps_its_record
+
 e2e_addon_net_sysctl_applies_in_host_namespace:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace
+
+# Milestone A8: the deploy agent's fetch/apply split (spec §9.1). Each
+# gate runs on debian-12, debian-13 and ubuntu-24.04 by default; set
+# REPRO_ADDON_MUTATION=<name> for its falsifying build.
+e2e_addon_agent_end_to_end:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_end_to_end
+
+e2e_addon_compromised_fetch_cannot_write_etc:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_compromised_fetch_cannot_write_etc
+
+e2e_addon_apply_unit_has_no_network:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_apply_unit_has_no_network
+
+e2e_addon_fetch_substitutes_only_from_bootstrap_anchors:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_fetch_substitutes_only_from_bootstrap_anchors
+
+e2e_addon_agent_refuses_management_path_classes:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_refuses_management_path_classes
+
+e2e_addon_hostile_archive_cannot_escape_staging:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_hostile_archive_cannot_escape_staging
+
+e2e_addon_induced_health_failure_cannot_revert_below_floor:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_induced_health_failure_cannot_revert_below_floor
+
+e2e_addon_fetch_unit_reaches_only_its_origins:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_fetch_unit_reaches_only_its_origins
+
+e2e_addon_sequence_floor_survives_and_is_root_only:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_sequence_floor_survives_and_is_root_only
+
+e2e_addon_profile_compiles_unprivileged:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_profile_compiles_unprivileged
+
+e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace
+
+e2e_addon_stale_manifest_is_reported:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_stale_manifest_is_reported
+
+e2e_addon_staging_swap_after_verify_is_refused:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_staging_swap_after_verify_is_refused
+
+# Milestone A10: living under apt and distribution release upgrades. The
+# upgrade gates run against the time-shifted snapshot mirror
+# (tests/e2e/addon/snapshot_mirror.nim), from images published before the
+# point release they cross.
+# The static add-on artefact must not depend on the checkout's path.
+check-addon-static-reproducible ARCH="amd64":
+    bash ./scripts/check_addon_static_reproducible.sh {{ARCH}}
+
+e2e_addon_survives_point_upgrades:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-20260706-amd64,debian-13-20260831-amd64,ubuntu-24.04-20251213-amd64,ubuntu-26.04-20260731-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_survives_point_upgrades
+
+e2e_addon_hook_reports_new_file_on_ledger_path:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64,ubuntu-26.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_hook_reports_new_file_on_ledger_path
+
+e2e_addon_unattended_upgrades_week:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-20260831-amd64,ubuntu-24.04-20251213-amd64,ubuntu-26.04-20260731-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_unattended_upgrades_week
+
+e2e_addon_debian_12_to_13_release_upgrade:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_debian_12_to_13_release_upgrade
+
+e2e_addon_ubuntu_24_04_to_26_04_release_upgrade:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade
+
+e2e_addon_apt_hook_never_blocks_dpkg:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64,ubuntu-26.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_apt_hook_never_blocks_dpkg
+
+t_addon_apt_hook_and_base_identity:
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity apt-hook-without-timeout
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity apt-hook-without-exit0
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity base-coupling-unflagged
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity base-matrix-unchecked
+    bash ./scripts/run_addon_unit_mutation.sh t_addon_apt_hook_and_base_identity package-owner-absorbed
 
 test-hcr-native-library-prerequisite:
     nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
@@ -597,6 +711,16 @@ lint:
     bash ./scripts/check_dev_shell_env.sh 2>&1 | tee test-logs/lint.log
     bash ./scripts/check_repo_requirements.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
+    # Directly after the `nim check` sweep, because it answers the question
+    # that sweep cannot: `nim check` is per-module type checking for THIS
+    # host, and a Linux-only `{.importc, header: "<sys/vfs.h>".}` binding
+    # type-checks everywhere -- only the C compiler for the foreign target
+    # ever rejects it. So a green sweep on Linux said nothing about whether
+    # the engine still builds on a Mac, and a Mac that could not run
+    # home-switch at all was how we found out. Generates C for --os:macosx
+    # and --os:windows and refuses a Linux-only module in either closure;
+    # no macOS runner, about a minute a target. See the script header.
+    bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every

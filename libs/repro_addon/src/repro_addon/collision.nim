@@ -65,6 +65,11 @@ type
     dropInPaths*: seq[string]
     unitFileState*: string  ## enabled / disabled / static / ... / ""
     activeState*: string    ## active / inactive / failed / ...
+    needDaemonReload*: bool
+      ## systemd's loaded definition is older than the unit's files on disk
+      ## (``NeedDaemonReload``). Read fail-safe: anything but an explicit
+      ## ``no`` counts as stale, because the one consumer (an adopted unit's
+      ## restart decision) must restart when it cannot tell.
 
   CollisionDriver* = ref object
     ## The per-distribution observations (spec §4.3, §4.3.1).
@@ -296,6 +301,7 @@ proc unitProvisionFromShow*(text: string): UnitProvision =
     result.dropInPaths.add(p)
   result.unitFileState = kv.getOrDefault("UnitFileState")
   result.activeState = kv.getOrDefault("ActiveState")
+  result.needDaemonReload = kv.getOrDefault("NeedDaemonReload") != "no"
 
 proc readUnitProvision*(unit: string): UnitProvision =
   ## ``systemctl show`` for one unit. Fails closed: a missing systemctl,
@@ -308,7 +314,8 @@ proc readUnitProvision*(unit: string): UnitProvision =
   var r: HostToolResult
   try:
     r = runSystemctl(["show", "-p",
-      "LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState",
+      "LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState," &
+        "NeedDaemonReload",
       "--", unit])
   except HostToolMissing as e:
     raise newException(AddonCollisionError, "cannot observe unit " & unit &
@@ -440,6 +447,13 @@ proc observeTarget*(d: CollisionDriver; path: string;
   if unit.len > 0:
     result.unit = d.unitProvision(unit)
 
+proc packageOfObservation*(observation: string): string =
+  ## The package an ownership observation names (``package:``,
+  ## ``conffile:``, ``ucf:``, ``diversion:``), or "".
+  for pfx in ["package:", "conffile:", "ucf:", "diversion:"]:
+    if observation.startsWith(pfx): return observation[pfx.len .. ^1]
+  ""
+
 proc observationText*(o: TargetObservation; kind: TargetKind): string =
   ## The ledger's one-word summary of who owns the target.
   if o.diversion.present and o.diversion.package != ":":
@@ -466,6 +480,9 @@ type
     desiredContent*: string    ## the bytes themselves (for preservation)
     ledgerSha256*: string      ## the current ledger's digest, "" if unowned
     ledgerOwns*: bool
+    ledgerObservation*: string ## the ledger entry's plan-time ownership
+                               ## observation (``absent``, ``conffile:<pkg>``,
+                               ## ...), "" if unowned
     ledgerOwnsDiversion*: bool ## the ledger lists a diversion of the path
     collision*: string         ## the resource's opt-in, "" for none
     divertedByProfile*: bool   ## a `linux.dpkgDiversion` of the path is declared
@@ -524,7 +541,22 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
   if o.exists and not o.isRegular:
     raise newException(AddonCollisionError, "refusing " & inp.address &
       ": " & o.path & " exists and is not a regular file")
-  # Row 2: the ledger owns it.
+  # Row 2: the ledger owns it -- unless a package came to own the path
+  # since (spec §4.3, §7.6, §7.8): that is a package-owned path, refused by
+  # name until the operator resolves it, never absorbed by rewriting the
+  # ledger's observation to the package's name. Removing the resource
+  # hands the path back to the package (``handback.nim``).
+  if inp.ledgerOwns and o.ownership.package.len > 0 and
+      packageOfObservation(inp.ledgerObservation) != o.ownership.package:
+    when not mutated("package-owner-absorbed"):
+      var e = newAddOnPackageOwned(o.path, o.ownership.package,
+                                   o.ownership.conffile, d.dropInHint(o.path))
+      e.msg.add(" -- package " & o.ownership.package & " came to own this " &
+        "ledger path after the add-on took it (" & inp.address &
+        "). Remove the resource to hand the path back to the package, " &
+        "then declare it again with `collision = \"divert\"` if the " &
+        "add-on should still own its content")
+      raise e
   if inp.ledgerOwns:
     if o.exists and o.sha256 == inp.ledgerSha256:
       result.verdict = (if o.sha256 == inp.desiredSha256: cvNoOp else: cvUpdate)
@@ -534,15 +566,32 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       result.verdict = cvCreate
       result.reason = "owned by the ledger but missing; recreated"
       return
+    if o.sha256 == inp.desiredSha256:
+      # Changed out of band to exactly what this apply wants (a writer
+      # outside the switch applied the same profile: the deploy agent
+      # before it applied through the switch, §9 "Migration"). Nothing
+      # conflicts and nothing is written; the ledger records the bytes.
+      result.verdict = cvNoOp
+      result.reason = "owned by the ledger, changed out of band to the " &
+        "profile's content; recorded as it is"
+      return
     if inp.reconcileDrift:
       result.verdict = cvReconcile
       result.preWriteBytes = readFile(o.path)
       result.reason = "owned by the ledger but changed out of band; " &
         "--reconcile-drift replaces it and preserves the current bytes"
       return
+    # A package that unpacked its own file over the add-on's names
+    # itself here (spec §7.6: "the next plan shows actionable drift with
+    # the package named").
+    let byPackage =
+      if o.ownership.package.len > 0: "; package " & o.ownership.package &
+        " now ships this path" & (if o.ownership.conffile: " (conffile)"
+                                  else: "")
+      else: ""
     raise newException(AddonDriftError, "EDrift: " & o.path &
       " (" & inp.address & ") is owned by the ledger but its content " &
-      "changed out of band (sha256 " & o.sha256[0 ..< 12] & ", ledger " &
+      "changed out of band" & byPackage & " (sha256 " & o.sha256[0 ..< 12] & ", ledger " &
       inp.ledgerSha256[0 ..< min(12, inp.ledgerSha256.len)] & "); " &
       "review it, then re-run with --reconcile-drift to replace it " &
       "(the current bytes are kept in the ledger)")

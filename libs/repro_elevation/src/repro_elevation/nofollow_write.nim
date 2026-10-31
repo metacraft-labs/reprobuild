@@ -30,6 +30,13 @@
 
 import std/[os, posix, strutils]
 
+const NoFollowMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's compile-time falsifying mutations (``repro_addon/
+  ## mutations``): ``nofollow-write-skips-fsync`` builds this writer
+  ## without its fsyncs, so the crash gate can show it detects their loss.
+const SkipsFsync = NoFollowMutation == "nofollow-write-skips-fsync"
+
+
 type
   NoFollowError* = object of CatchableError
   SymlinkOnPath* = object of NoFollowError
@@ -135,9 +142,16 @@ proc createDirsNoFollow*(path: string; mode = 0o755) =
         raiseSymlinkOnPath(cur)
       if err != OSErrorCode(ENOENT):
         raiseOSError(err, "open directory " & cur)
-      if c_mkdirat(fd, seg.cstring, Mode(mode)) != 0 and
-          osLastError() != OSErrorCode(EEXIST):
-        raiseOSError(osLastError(), "mkdir " & cur)
+      if c_mkdirat(fd, seg.cstring, Mode(mode)) != 0:
+        if osLastError() != OSErrorCode(EEXIST):
+          raiseOSError(osLastError(), "mkdir " & cur)
+      else:
+        # The new directory's entry is durable only once its parent is
+        # synced; a file later written inside it would otherwise survive a
+        # power cut in a directory that did not.
+        when not SkipsFsync:
+          if fsync(fd) != 0:
+            raiseOSError(osLastError(), "fsync the parent of " & cur)
       next = c_openat(fd, seg.cstring,
                       O_RDONLY or oDirectory or oNoFollow or oCloExec, Mode(0))
       if next < 0:
@@ -184,16 +198,21 @@ proc syncDir(dirfd: cint; what: string) =
   ## this they can disagree after a power cut. See fsync(2), "Calling
   ## fsync() does not necessarily ensure that the entry in the directory
   ## containing the file has also reached disk".
+  when SkipsFsync: return
   if fsync(dirfd) != 0:
     raiseOSError(osLastError(), "fsync directory of " & what)
 
 proc writeFileNoFollow*(path, content: string; mode: int;
-                        uid = -1; gid = -1) =
+                        uid = -1; gid = -1; replacingLinkTo = "") =
   ## Write ``content`` to ``path`` atomically, never through a link (see
   ## the module header). ``mode`` is the final mode; ``uid``/``gid`` set
   ## the owner when non-negative. The parent directory must exist. Raises
   ## ``SymlinkOnPath`` for a link anywhere on the path, ``OSError`` for
   ## any other failure; a failure leaves no temporary file behind.
+  ## ``replacingLinkTo``: the leaf may be a symbolic link, but only one
+  ## pointing at exactly this target; the file is renamed over it, so the
+  ## path goes from the link to the file with no moment in which it is
+  ## missing.
   let parts = components(path)
   let leaf = parts[^1]
   let dirfd = openDirNoFollow(parentDir(path))
@@ -201,7 +220,15 @@ proc writeFileNoFollow*(path, content: string; mode: int;
   # The leaf itself: a link is refused by name, before any write.
   let (kind, _) = statLeaf(dirfd, leaf)
   if kind == lkLink:
-    raiseSymlinkOnPath(path)
+    if replacingLinkTo.len == 0:
+      raiseSymlinkOnPath(path)
+    var buf = newString(4096)
+    let n = c_readlinkat(dirfd, leaf.cstring, buf.cstring, csize_t(buf.len))
+    if n < 0:
+      raiseOSError(osLastError(), "readlink " & path)
+    buf.setLen(n)
+    if buf != replacingLinkTo:
+      raiseSymlinkOnPath(path)
   if kind == lkDir:
     raise newException(NoFollowError, path & " is a directory")
   let tmp = tmpName(leaf)
@@ -231,8 +258,9 @@ proc writeFileNoFollow*(path, content: string; mode: int;
     if uid >= 0 or gid >= 0:
       if fchown(fd, Uid(uid), Gid(gid)) != 0:
         raiseOSError(osLastError(), "fchown " & path)
-    if fsync(fd) != 0:
-      raiseOSError(osLastError(), "fsync " & path)
+    when not SkipsFsync:
+      if fsync(fd) != 0:
+        raiseOSError(osLastError(), "fsync " & path)
   finally:
     discard posix.close(fd)
   if c_renameat(dirfd, tmp.cstring, dirfd, leaf.cstring) != 0:
@@ -286,6 +314,40 @@ proc removeLeafNoFollow*(path: string): bool =
   # it must not come back after a power cut.
   syncDir(dirfd, path)
   true
+
+type
+  LinkRemoval* = enum
+    lrRemoved      ## the link was there, pointing at ``target``: removed
+    lrAbsent       ## nothing was there
+    lrDifferent    ## something else is there (a file, a directory, a link
+                   ## elsewhere): left untouched
+
+proc removeLinkIfTarget*(path, target: string): LinkRemoval =
+  ## Unlink the symbolic link at ``path`` only while it still points at
+  ## ``target``, relative to its parent's descriptor and without following
+  ## anything on the way. Anything else at the path is someone else's and
+  ## is left exactly as it is. Raises on any other failure.
+  let parts = components(path)
+  let leaf = parts[^1]
+  let dirfd = openDirNoFollow(parentDir(path))
+  defer: discard posix.close(dirfd)
+  let (kind, _) = statLeaf(dirfd, leaf)
+  case kind
+  of lkAbsent: return lrAbsent
+  of lkLink: discard
+  else: return lrDifferent
+  var buf = newString(4096)
+  let n = c_readlinkat(dirfd, leaf.cstring, buf.cstring, csize_t(buf.len))
+  if n < 0:
+    if osLastError() == OSErrorCode(ENOENT): return lrAbsent
+    raiseOSError(osLastError(), "readlink " & path)
+  buf.setLen(n)
+  if buf != target:
+    return lrDifferent
+  if c_unlinkat(dirfd, leaf.cstring, 0) != 0:
+    if osLastError() == OSErrorCode(ENOENT): return lrAbsent
+    raiseOSError(osLastError(), "unlink " & path)
+  lrRemoved
 
 proc removeEmptyDirNoFollow*(path: string): bool =
   ## ``rmdir`` the leaf of ``path`` without following a link on the way;

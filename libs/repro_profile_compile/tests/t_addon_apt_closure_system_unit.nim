@@ -71,7 +71,7 @@ suite "Add-On: systemd.systemUnit with a package(apt) closure":
     check "InaccessiblePaths=-/etc/ld.so.preload" in lines
     check lines.find(expectedBindLine()) == lines.find("[Service]") + 1
     check expectedBindLine().startsWith("BindReadOnlyPaths=/repro/store/" &
-      "prefixes/apt-closure-prometheus-node-exporter/1.9.0-1+b4-")
+      "prefixes/apt-closure-prometheus-node-exporter/1.9.0-1_b4-")
     # ExecStart names the daemon directly; no sandbox launcher anywhere.
     check "ExecStart=/usr/bin/prometheus-node-exporter " &
       "--web.listen-address=127.0.0.1:9100" in lines

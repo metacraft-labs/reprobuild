@@ -15,6 +15,11 @@
 ##    ``current`` is a generation with A's content, A's service is active
 ##    serving A's page, the host's fingerprint equals A's, and the
 ##    attempt's apply log records ``rolled-back``;
+## 3b. *a check that hangs*: generation H checks with a command in the store
+##    that never returns (the seam build's ``repro system addon
+##    test-sleep``); confirmTimeout must still bound the wait -- the probe is
+##    killed at the deadline -- and the switch must be rolled back within
+##    the same bound as B;
 ## 4. *operator rollback* (``repro system rollback``, the milestone's second
 ##    deliverable): A' is applied again, then ``repro system rollback`` with
 ##    no argument returns the host to A (A's page, A's fingerprint), and
@@ -23,7 +28,8 @@
 ## The probes are the production ones: ``repro system addon probe`` run as
 ## a transient unit in the host's namespaces.
 ##
-## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
+## Opt-in: ``REPRO_ADDON_VM_GATES=1``; the seam build (for 3b's hanging
+## command; ``scripts/run_addon_gate.sh`` selects it).
 ##
 ## *Mocking.* None.
 
@@ -121,6 +127,24 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          currentNow notin logged, logged)
     step("no pending marker is left",
          g.exec("test ! -e /var/lib/repro/system/addon/pending").exitCode == 0, "")
+    # 3b. A check that hangs is bounded by confirmTimeout.
+    let storeRepro = g.run("ls /repro/store/prefixes/repro-addon/*/bin/repro " &
+                           "| head -1").strip()
+    let hang = "exec:" & storeRepro & " system addon test-sleep 100000"
+    t0 = epochTime()
+    r = g.applyProfile(repro, "h", profile("page-H", hang, ConfirmTimeout))
+    let tookHang = epochTime() - t0
+    record["hangRevertSeconds"] = %tookHang
+    step("a hanging check: the switch is rolled back", r.exitCode != 0 and
+         "rolled back" in r.stdout & r.stderr, r.stdout & r.stderr)
+    step("a hanging check: rolled back within confirmTimeout plus the " &
+         "transition time", tookHang <= bound,
+         $tookHang & " s, bound " & $bound & " s")
+    step("a hanging check: A's page is served again", g.served() == "page-A", "")
+    step("a hanging check: the hung command was killed",
+         # `[a]ddon`: the pattern must not match the shell running pgrep.
+         g.exec("pgrep -f '[a]ddon test-sleep'").exitCode != 0,
+         g.exec("pgrep -af '[a]ddon test-sleep'").stdout)
     # 4. Operator rollback through the switch.
     r = g.applyProfile(repro, "a2", profile("page-A2", good))
     step("rollback: A' applied again", r.exitCode == 0, r.stdout & r.stderr)

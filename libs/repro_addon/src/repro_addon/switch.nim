@@ -171,11 +171,29 @@ proc unitListProperty*(unit, property: string): seq[string] =
   ## unit, drop-ins included. Empty for a unit systemd does not know.
   unitProperty(unit, property).splitWhitespace()
 
+const
+  RestartPropagatingProperties* = ["RequiredBy", "RequisiteOf", "BoundBy",
+                                   "ConsistsOf"]
+    ## The reverse dependencies along which systemd carries a stop as a stop
+    ## and a restart as a restart (``UNIT_ATOM_PROPAGATE_STOP`` and
+    ## ``UNIT_ATOM_PROPAGATE_RESTART`` in ``src/core/unit-dependency-atom.c``,
+    ## systemd 252-260): the units with ``Requires=``, ``Requisite=``,
+    ## ``BindsTo=`` or ``PartOf=`` the unit.
+  StopPropagatingProperties* = ["PropagatesStopTo"]
+    ## Carries a stop (and the stop of a restart) as a stop only (systemd
+    ## 249+, ``UNIT_ATOM_PROPAGATE_STOP_GRACEFUL``).
+
 proc unitDependents*(unit: string): seq[string] =
-  ## The units a stop or restart of ``unit`` propagates to: those with
-  ## ``PartOf=`` it (systemd reports them as its ``ConsistsOf=``) and
-  ## those with ``BindsTo=`` it (``BoundBy=``).
-  for p in ["ConsistsOf", "BoundBy"]:
+  ## The units a stop or restart of ``unit`` propagates to as a stop or a
+  ## restart (``RestartPropagatingProperties``).
+  for p in RestartPropagatingProperties:
+    for d in unitListProperty(unit, p):
+      if d notin result: result.add(d)
+
+proc unitStopDependents*(unit: string): seq[string] =
+  ## The units a stop or restart of ``unit`` stops
+  ## (``StopPropagatingProperties``).
+  for p in StopPropagatingProperties:
     for d in unitListProperty(unit, p):
       if d notin result: result.add(d)
 
@@ -236,20 +254,31 @@ proc predecessorsOf*(unit, content: string; extraDropIns: openArray[string]):
     let id = resolveUnitName(n)
     if id != unit and id notin result: result.add(id)
 
-proc systemctlVerb(verb, unit: string) =
-  let r = if unit.len > 0: runSystemctl([verb, "--", unit])
-          else: runSystemctl([verb])
+proc systemctlVerb(verb, unit: string; noBlock = false) =
+  ## ``noBlock`` queues the job and returns (``--no-block``): a recovery at
+  ## boot must never wait on a job the boot transaction orders after
+  ## something else.
+  var args = @[verb]
+  if noBlock: args.add("--no-block")
+  if unit.len > 0:
+    args.add("--")
+    args.add(unit)
+  let r = runSystemctl(args)
   if r.exitCode != 0:
     raise newException(SwitchError, "systemctl " & verb & " " & unit & ": " &
       r.output.strip())
 
 proc stopUnit*(unit: string) = systemctlVerb("stop", unit)
-proc startUnit*(unit: string) = systemctlVerb("start", unit)
-proc restartUnit*(unit: string) = systemctlVerb("restart", unit)
-proc tryRestartUnit*(unit: string) = systemctlVerb("try-restart", unit)
+proc startUnit*(unit: string; noBlock = false) =
+  systemctlVerb("start", unit, noBlock)
+proc restartUnit*(unit: string; noBlock = false) =
+  systemctlVerb("restart", unit, noBlock)
+proc tryRestartUnit*(unit: string; noBlock = false) =
+  systemctlVerb("try-restart", unit, noBlock)
   ## Restart only if active (§7.3: "a restart applies only to a unit that
   ## is active when the apply reaches it").
-proc reloadUnit*(unit: string) = systemctlVerb("reload", unit)
+proc reloadUnit*(unit: string; noBlock = false) =
+  systemctlVerb("reload", unit, noBlock)
 proc disableUnit*(unit: string) = systemctlVerb("disable", unit)
 
 proc daemonReload*() = systemctlVerb("daemon-reload", "")
@@ -295,6 +324,10 @@ proc confirmExited*(units: openArray[string]; successor: string) =
   ## must have an empty control group. Not stopped here: a predecessor
   ## alive now is one the plan did not stop, so the apply refuses.
   for u in units:
+    when mutated("unmanaged-predecessor-not-refused"):
+      # The falsifying mutation drops every predecessor protection: only
+      # the successor's own group is checked.
+      if u != successor: continue
     let alive = unitAliveness(u)
     if alive != uaEmpty:
       raise newAddOnExclusiveOverlap(successor, (if u == successor:
@@ -310,6 +343,11 @@ type
                             ## stop-start units step 2 found not running
                             ## (they ended since the plan): step 7 does not
                             ## start them, as a restart would not have
+    keptLinks*: seq[string]
+                            ## install links of removed units that were no
+                            ## longer the add-on's link when step 2 came to
+                            ## remove them (replaced by a file, re-pointed):
+                            ## left in place, the caller reports the drift
 
 type
   PreStopObserver* = proc(unit: string) {.closure.}
@@ -319,7 +357,8 @@ type
     ## marker never misses one that a crash or a refusal interrupts.
 
 proc runPreStop*(ts: seq[Transition];
-                 disable: openArray[tuple[unit: string; links: seq[string]]];
+                 disable: openArray[tuple[unit: string;
+                                          links: seq[tuple[path, target: string]]]];
                  onStop: PreStopObserver = nil): PreStopResult =
   ## Step 2: the transition list's stops, exclusive ones first and
   ## confirmed, then the units this generation removes are disabled by
@@ -347,7 +386,7 @@ proc runPreStop*(ts: seq[Transition];
       result.stopped.add(t.unit)
   else:
     for t in preStopEntries(ts):
-      if t.verb == tvStopStart:
+      if t.verb == tvStopStart and not mutated("trigger-not-paused"):
         for trig in t.triggers:
           if unitIsActive(trig) and trig notin result.paused:
             note("trigger:" & trig)
@@ -357,39 +396,62 @@ proc runPreStop*(ts: seq[Transition];
           unitAliveness(t.unit) == uaEmpty:
         result.notRunning.add(t.unit)
       note(t.unit)
-      if t.exclusive:
+      if t.exclusive and not (mutated("removed-exclusive-stop-unconfirmed") and
+                              t.verb == tvStop):
         stopExclusive(t.unit)
       else:
         stopUnit(t.unit)
       result.stopped.add(t.unit)
-    for t in startEntries(ts):
-      if t.exclusive and t.verb in {tvStart, tvStopStart}:
-        confirmExited(@[t.unit] & t.predecessors, t.unit)
+    when not mutated("exclusive-planned-by-active-state"):
+      for t in startEntries(ts):
+        if t.exclusive and t.verb in {tvStart, tvStopStart}:
+          confirmExited(@[t.unit] & t.predecessors, t.unit)
   for d in disable:
     note("disable:" & d.unit)
     for l in d.links:
-      try: discard removeLeafNoFollow(l)
-      except CatchableError: discard   # already gone, or not a leaf
+      # Only while it is still the add-on's link (pointing where the ledger
+      # says); anything else at the path is left and reported. An empty
+      # target is the re-check's falsifying build: unlink whatever is there.
+      if l.target.len == 0:
+        discard removeLeafNoFollow(l.path)
+      elif removeLinkIfTarget(l.path, l.target) == lrDifferent:
+        result.keptLinks.add(l.path)
 
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
-               notRunning: openArray[string] = []) =
+               notRunning: openArray[string] = []; noBlock = false) =
   ## Step 7: start, restart or reload in the order given. A
   ## ``stop-start`` unit was stopped in step 2 and is started here. Every
   ## start of an exclusive unit first confirms the unit and its
   ## predecessors exited -- again: something may have activated it since
   ## step 2 (D-Bus, an operator), and such an instance runs the old
   ## definition, so it is stopped and confirmed before the new one starts.
-  ## The triggers step 2 paused start again immediately before their unit.
+  ## The triggers step 2 paused start again immediately before their unit
+  ## -- also for a unit that had ended before step 2 and is not started,
+  ## and, last, any paused trigger not yet restarted: a trigger step 2
+  ## paused is never left stopped by a switch that completes.
+  let pausedSet = @paused
+  var restored: seq[string]
+  proc restoreTriggers(units: openArray[string]) =
+    for trig in units:
+      if trig in pausedSet and trig notin restored and
+          unitProperty(trig, "LoadState") == "loaded":
+        startUnit(trig, noBlock)
+        restored.add(trig)
   for t in startEntries(ts):
     case t.verb
     of tvStart, tvStopStart:
       if t.verb == tvStopStart and t.unit in notRunning:
-        continue          # ended before step 2: a restart would not start it
+        # Ended before step 2: a restart would not start it. Its triggers
+        # go back as they were, after the reload, so an activation from
+        # here on runs the new definition.
+        when not mutated("idle-unit-triggers-left-paused"):
+          restoreTriggers(t.triggers)
+        continue
       when mutated("exclusive-as-plain-restart"):
         if t.verb == tvStopStart: restartUnit(t.unit)   # a plain restart
         else: startUnit(t.unit)
       else:
-        if t.exclusive:
+        if t.exclusive and not mutated("exclusive-planned-by-active-state"):
           if unitAliveness(t.unit) != uaEmpty or unitIsActive(t.unit):
             stopExclusive(t.unit)
           confirmExited(@[t.unit] & t.predecessors, t.unit)
@@ -397,12 +459,10 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
         # refuses to start an `Accept=no` socket whose service already
         # runs, and the old instance was confirmed exited above, so an
         # activation from here on runs the new definition.
-        for trig in t.triggers:
-          if trig in paused and unitProperty(trig, "LoadState") == "loaded":
-            startUnit(trig)
-        startUnit(t.unit)
-    of tvRestart: tryRestartUnit(t.unit)
-    of tvReload: reloadUnit(t.unit)
+        restoreTriggers(t.triggers)
+        startUnit(t.unit, noBlock)
+    of tvRestart: tryRestartUnit(t.unit, noBlock)
+    of tvReload: reloadUnit(t.unit, noBlock)
     else: discard
   when mutated("exclusive-as-plain-restart"):
     # The deferred stops of the exclusive units this generation removes:
@@ -410,6 +470,8 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
     for t in preStopEntries(ts):
       if t.exclusive and t.verb == tvStop:
         stopUnit(t.unit)
+  when not mutated("idle-unit-triggers-left-paused"):
+    restoreTriggers(pausedSet)
 
 # ---------------------------------------------------------------------------
 # Sysctl (step 6).
@@ -527,24 +589,49 @@ proc runningManagedUnits*(l: Ledger): seq[RunningUnit] =
       definition: (if e.class == lcUnitState: "" else: unitDefinition(l, e.unit)),
       invocationId: unitProperty(e.unit, "InvocationID")))
 
+const AnyRetainedGeneration* = "*"
+  ## The table's value for an instance whose generation is not known at
+  ## all (one already running when the add-on first kept the table): it
+  ## may run any retained generation's definition, so every one that
+  ## defines the unit differently is kept.
+
 proc invocationsAfterSwitch*(table: InvocationTable;
                              running: seq[RunningUnit];
                              before: Table[string, string];
-                             newGeneration, previousGeneration: string):
-    InvocationTable =
+                             startedBySwitch: HashSet[string];
+                             newGeneration, previousGeneration: string;
+                             tableExisted = true): InvocationTable =
   ## The invocation table after a switch committed ``newGeneration``.
-  ## ``before`` maps each managed unit to the invocation id it had before
-  ## step 2. An instance started during the switch (its id changed) runs
-  ## the new generation's definition; one that kept its id keeps what the
-  ## table said, or -- started outside any switch since the last one --
-  ## the previous committed generation's, which was on disk then. Entries
-  ## of instances no longer running are dropped.
+  ## ``before`` maps each managed unit to the invocation id it had just
+  ## before step 2; ``startedBySwitch`` names the units step 7 started or
+  ## restarted. Values are a comma-separated list of generations the
+  ## instance may run, or ``AnyRetainedGeneration``:
+  ##
+  ## - an instance that kept its id keeps what the table said; one the
+  ##   table does not know started outside any switch since the last one,
+  ##   from the previous committed generation's definition on disk -- or,
+  ##   when there was no table yet (the first switch after an upgrade), it
+  ##   may be any retained generation's;
+  ## - an instance whose id changed and that the switch started runs the
+  ##   new generation's definition;
+  ## - an instance whose id changed and that the switch did NOT start was
+  ##   started by someone else during the switch, before or after the
+  ##   reload: either definition, so both are recorded.
+  ##
+  ## Entries of instances no longer running are dropped.
   for u in running:
     if u.invocationId.len == 0: continue
-    if before.getOrDefault(u.unit) != u.invocationId:
+    let changed = before.getOrDefault(u.unit) != u.invocationId
+    if changed and u.unit in startedBySwitch:
       result[u.invocationId] = newGeneration
+    elif changed:
+      result[u.invocationId] =
+        (if previousGeneration.len > 0: previousGeneration & "," else: "") &
+        newGeneration
     elif u.invocationId in table:
       result[u.invocationId] = table[u.invocationId]
+    elif not tableExisted:
+      result[u.invocationId] = AnyRetainedGeneration
     elif previousGeneration.len > 0:
       result[u.invocationId] = previousGeneration
 
@@ -557,31 +644,36 @@ proc readInvocationTable*(path: string): InvocationTable =
       result[f[0]] = f[1]
 
 proc writeInvocationTable*(path: string; t: InvocationTable) =
+  ## Durably: a temporary file beside the table, fsynced, renamed over it,
+  ## and the directory fsynced (``writeFileNoFollow``), never through a
+  ## link -- a crash leaves the old table or the new one, never a torn one.
   var keys: seq[string]
   for k in t.keys: keys.add(k)
   keys.sort()
   var text = ""
   for k in keys: text.add(k & "\t" & t[k] & "\n")
   createDir(parentDir(path))
-  let tmp = path & ".tmp"
-  writeFile(tmp, text)
-  moveFile(tmp, path)
+  writeFileNoFollow(path, text, 0o600)
 
 proc generationsHeldBy*(units: seq[RunningUnit]; table: InvocationTable;
-                        current: string; lookup: GenerationUnitLookup):
-    HashSet[string] =
-  ## The generations whose roots running units still need: the generation
-  ## an instance runs (``table``), when it is not the current one and its
-  ## own ledger gives the unit another definition (or is missing). An
-  ## instance the table does not know started after the last switch, from
-  ## the definition on disk: the current one, which needs nothing extra.
+                        current: string; lookup: GenerationUnitLookup;
+                        retained: seq[string] = @[]): HashSet[string] =
+  ## The generations whose roots running units still need: each generation
+  ## an instance may run (``table``; ``AnyRetainedGeneration`` means every
+  ## one in ``retained``), when it is not the current one and its own
+  ## ledger gives the unit another definition (or is missing). An instance
+  ## the table does not know started after the last switch, from the
+  ## definition on disk: the current one, which needs nothing extra.
   for u in units:
-    let g = table.getOrDefault(u.invocationId)
-    if g.len == 0 or g == current: continue
-    let found = if lookup != nil: lookup(g, u.unit)
-                else: (ledgerFound: false, unitFound: false, definition: "")
-    if not found.ledgerFound or found.definition != u.definition:
-      result.incl(g)
+    let v = table.getOrDefault(u.invocationId)
+    if v.len == 0: continue
+    let gens = if v == AnyRetainedGeneration: retained else: v.split(',')
+    for g in gens:
+      if g.len == 0 or g == current: continue
+      let found = if lookup != nil: lookup(g, u.unit)
+                  else: (ledgerFound: false, unitFound: false, definition: "")
+      if not found.ledgerFound or found.definition != u.definition:
+        result.incl(g)
 
 proc pruneGenerationRoots*(current, previous: string;
                            policy = DefaultRetention;

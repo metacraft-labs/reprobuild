@@ -26,6 +26,26 @@
 ## it in Step 4 as a miss, judging the record's own policy and the evidence
 ## level its issuer signed into the memo entry (`memo_store.nim`, entry v3).
 ##
+## Campaign M17 chunk 2: the memo entry carries the published-trace record of
+## Edge-Derived-Identities.md §3.1 with the SAME semantics as the portable
+## memo's `rbpm-v2` (`repro_local_store/portable_memo.nim`):
+##   * the PathSet (v2) tags each entry DECLARED or OBSERVED;
+##   * every identity comes from the portable memo's identity functions
+##     (`observedIdentity` -> `readIdentity`), so it carries the input's entry
+##     kind and executable bit, and its content digest is BLAKE3-256 under
+##     the one published-digest domain (`PublishedDigestDomain`);
+##   * the entry (v4) states the evidence SOURCE as well as the level, both
+##     signed; the record states the input-check policy and the outputs;
+##   * the publication rule is the one rule (`publication_rule.nim`).
+## The two stay two encodings because they carry different payloads to
+## different consumers: a memo entry carries the producer's LOCAL
+## `ActionResultRecord`, which the consumer re-keys and installs into its own
+## action cache (`installTwoPhaseBundle`), with `$WORKSPACE` naming; the
+## portable record names logical roots and is verified without installing a
+## local record. Folding them into one format needs the logical-root naming of
+## M17 chunk 3 and the shared verifier walk of chunk 4. Entries of versions
+## 1-3 and v1 PathSets are refused across hosts as a miss naming the format.
+##
 ## The producer side (`publishTwoPhase`) writes exactly what those steps
 ## read: the PathSet blob and the output blobs into the local CAS (the
 ## content plane serves them), and a memo entry under its own
@@ -37,8 +57,6 @@
 ## lookup and install (`workspace_paths.nim`).
 
 import std/[asyncdispatch, options, os, strutils]
-when defined(posix):
-  from std/posix import Stat, stat, S_ISREG, S_ISDIR
 
 from repro_core/codec import elementCountFits
 import repro_cas_store
@@ -69,6 +87,12 @@ type
       ## The workspace checkout root `$WORKSPACE` stands for.
     portable*: bool
       ## Normalize on publish and rebase on lookup/install.
+    declaredInputs*: seq[string]
+      ## The action's DECLARED inputs, as physical paths on this host
+      ## (`materialPath(cwd, input)`). Campaign M17 chunk 2: the PathSet tags
+      ## each entry with its role, so a published record keeps declared
+      ## inputs apart from observed ones (Edge-Derived-Identities.md §3.1),
+      ## exactly as the portable memo's `rbpm-v2` does.
 
   TwoPhasePublishOutcome* = object
     published*: bool
@@ -108,9 +132,18 @@ type
       ## build does not read (a miss, never a rejection).
     publicationRuleMisses*: int
       ## Entries skipped because the record may not cross hosts at all
-      ## (`publicationRefusalOf`): a timestamp-policy, non-Level-0, unstated-
-      ## level or zero-evidence record. What an older or non-conforming
-      ## producer publishes; a miss, never a rejection, and no suspicion.
+      ## (`memoEntryRefusal`): a timestamp-policy, non-Level-0, unstated-
+      ## level, unstated-source or zero-evidence record, or an entry from
+      ## before the published-trace record (memo entry v1-v3). What an older
+      ## or non-conforming producer publishes; a miss, never a rejection,
+      ## and no suspicion.
+    legacyFormatMisses*: int
+      ## PathSets skipped because they are in the pre-rbpm-v2 format (RPPS
+      ## v1, campaign M17 chunk 2): a miss, with the format named.
+    declaredSetMisses*: int
+      ## Entries skipped because the producer declared other inputs than
+      ## this action does (the PathSet's role tags disagree with this
+      ## action's declared inputs): a miss, not a forgery.
 
 const
   TwoPhaseBundleMagic = "RPTB"
@@ -192,79 +225,112 @@ proc rebaseRecord*(record: ActionResultRecord;
 
 const
   ReadEntryTag* = "r:"
-    ## PathSet entry for an input observed by READ or PROBE: its identity is
-    ## the file's content, or what stands there instead (a directory, a
-    ## special file, nothing).
+    ## PathSet entry for an OBSERVED input read or probed: its identity is
+    ## the file's kind, executable bit and content, or what stands there
+    ## instead (a directory, a special file, nothing).
   EnumerationEntryTag* = "e:"
     ## PathSet entry for a directory the execution ENUMERATED (the record
     ## tracks its membership): its identity is which names it contains.
+  DeclaredReadEntryTag* = "dr:"
+    ## As `ReadEntryTag`, for an input the action DECLARED (campaign M17
+    ## chunk 2, PathSet v2): a published record keeps declared inputs apart
+    ## from observed ones (Edge-Derived-Identities.md §3.1).
+  DeclaredEnumerationEntryTag* = "de:"
+    ## As `EnumerationEntryTag`, for a declared input.
 
-proc pathSetEntryOf*(input: FileFingerprint): string =
-  ## The PathSet entry of one recorded input: an observation-kind tag and the
-  ## (normalized) name. The tag matters because the same directory can be an
-  ## existence probe in one record — a shell's walk up its ancestors, where
-  ## only "it is a directory" was observed — and an enumeration in another.
-  ## Keying the probe on membership would make every unrelated sibling of
-  ## every ancestor an input and two checkouts could never match; keying the
-  ## enumeration on existence would miss a file appearing in it.
-  (if membershipTrackedDirectory(input.metadata): EnumerationEntryTag
-   else: ReadEntryTag) & input.path
+proc isDeclaredInput*(name: string; ctx: TwoPhaseContext): bool =
+  ## Whether the (normalized) record name `name` is one of the action's
+  ## declared inputs on THIS host: compared as physical locations,
+  ## separator-normalized and, on Windows, case-insensitively.
+  if ctx.declaredInputs.len == 0:
+    return false
+  proc key(path: string): string =
+    result = normalizedPath(path).replace('\\', '/')
+    when defined(windows):
+      result = result.toLowerAscii()
+  let here = key(physicalLocation(name, ctx))
+  for declared in ctx.declaredInputs:
+    if key(declared) == here:
+      return true
+  false
 
-proc splitPathSetEntry*(entry: string): tuple[enumerated: bool; name: string] =
-  if entry.startsWith(EnumerationEntryTag):
-    (true, entry[EnumerationEntryTag.len .. ^1])
+proc pathSetEntryOf*(input: FileFingerprint; declared = false): string =
+  ## The PathSet entry of one recorded input: a role-and-observation-kind tag
+  ## and the (normalized) name. The access tag matters because the same
+  ## directory can be an existence probe in one record — a shell's walk up
+  ## its ancestors, where only "it is a directory" was observed — and an
+  ## enumeration in another. Keying the probe on membership would make every
+  ## unrelated sibling of every ancestor an input and two checkouts could
+  ## never match; keying the enumeration on existence would miss a file
+  ## appearing in it. The role says whether the action declared the input.
+  let enumerated = membershipTrackedDirectory(input.metadata)
+  (if declared:
+     (if enumerated: DeclaredEnumerationEntryTag else: DeclaredReadEntryTag)
+   else:
+     (if enumerated: EnumerationEntryTag else: ReadEntryTag)) & input.path
+
+proc pathSetEntryOf*(input: FileFingerprint; ctx: TwoPhaseContext): string =
+  pathSetEntryOf(input, isDeclaredInput(input.path, ctx))
+
+proc splitPathSetEntry*(entry: string):
+    tuple[enumerated: bool; name: string; declared: bool] =
+  if entry.startsWith(DeclaredEnumerationEntryTag):
+    (true, entry[DeclaredEnumerationEntryTag.len .. ^1], true)
+  elif entry.startsWith(DeclaredReadEntryTag):
+    (false, entry[DeclaredReadEntryTag.len .. ^1], true)
+  elif entry.startsWith(EnumerationEntryTag):
+    (true, entry[EnumerationEntryTag.len .. ^1], false)
   elif entry.startsWith(ReadEntryTag):
-    (false, entry[ReadEntryTag.len .. ^1])
+    (false, entry[ReadEntryTag.len .. ^1], false)
   else:
     raise newException(ValueError, "untagged path set entry: " & entry)
 
-proc pathSetOf*(normalized: ActionResultRecord): PeerPathSet =
-  ## The PathSet of a (normalized) record: its tagged input entries,
-  ## canonical (sorted, de-duplicated).
+proc pathSetOf*(normalized: ActionResultRecord;
+                ctx: TwoPhaseContext): PeerPathSet =
+  ## The PathSet of a (normalized) record: its tagged input entries, each
+  ## with its role under `ctx`'s declared inputs, canonical (sorted,
+  ## de-duplicated).
   var entries: seq[string] = @[]
   for input in normalized.inputs:
-    entries.add(pathSetEntryOf(input))
+    entries.add(pathSetEntryOf(input, ctx))
+  canonicalPathSet(entries)
+
+proc withoutRoles*(pathSet: PeerPathSet): PeerPathSet =
+  ## The PathSet with every entry tagged observed: what two PathSets that
+  ## differ only in which inputs are declared have in common.
+  var entries: seq[string] = @[]
+  for entry in pathSet:
+    let (enumerated, name, _) = splitPathSetEntry(entry)
+    entries.add((if enumerated: EnumerationEntryTag else: ReadEntryTag) & name)
   canonicalPathSet(entries)
 
 # ---------------------------------------------------------------------------
 # Observed identities.
 # ---------------------------------------------------------------------------
 
-proc isSpecialFile(path: string): bool =
-  ## A device, FIFO or socket: something `fileExists` accepts but whose
-  ## "content" is not a fixed byte string (`/dev/urandom` never ends).
-  when defined(posix):
-    var st: Stat
-    if stat(path.cstring, st) != 0:
-      return false
-    not S_ISREG(st.st_mode) and not S_ISDIR(st.st_mode)
-  else:
-    false
-
 proc observedIdentity*(path: string; enumerated = false): string =
-  ## The identity of one observed input on this filesystem:
-  ##   * a regular file: the BLAKE3-256 of its bytes;
+  ## The identity of one observed input on this filesystem, from the SAME
+  ## identity functions the portable memo uses (`portable_fingerprint`;
+  ## campaign M17 chunk 2: both published records carry one semantics):
+  ##   * a regular file: its executable bit and its BLAKE3-256 content digest
+  ##     under the published-digest domain (`file:<hex>` / `exec:<hex>`,
+  ##     `readIdentity`), so a changed executable bit misses like changed
+  ##     content does;
   ##   * a directory: its membership digest when the execution ENUMERATED
   ##     it, else just `directory` (a probe observed existence and kind);
   ##   * a device/FIFO/socket: `special` (never read);
   ##   * nothing there: `absent`.
-  ## An unreadable file yields `unreadable:` followed by the path: the
-  ## producer refuses to publish such an observation, so it never matches.
-  if dirExists(path):
-    if enumerated: DirectoryIdentityPrefix & membershipHex(path)
-    else: ReadOfDirectory
-  elif fileExists(path):
-    if isSpecialFile(path):
-      "special"
-    else:
-      let hex = fileContentHex(path)
-      if hex.len == 0: "unreadable:" & path else: hex
+  ## A regular file that cannot be read is `unreadable` (`ReadOfUnreadable`):
+  ## the producer refuses to publish such an observation, so it never
+  ## matches.
+  if enumerated and dirExists(path):
+    DirectoryIdentityPrefix & membershipHex(path)
   else:
-    AbsentIdentity
+    readIdentity(path)
 
 proc entryIdentity*(entry: string; ctx: TwoPhaseContext): string =
   ## The identity of one tagged PathSet entry, observed through `ctx`.
-  let (enumerated, name) = splitPathSetEntry(entry)
+  let (enumerated, name, _) = splitPathSetEntry(entry)
   observedIdentity(physicalLocation(name, ctx), enumerated)
 
 proc identitiesFor*(pathSet: PeerPathSet; ctx: TwoPhaseContext): seq[string] =
@@ -272,15 +338,35 @@ proc identitiesFor*(pathSet: PeerPathSet; ctx: TwoPhaseContext): seq[string] =
     result.add(entryIdentity(entry, ctx))
 
 proc publicationRefusalOf*(record: ActionResultRecord;
-                           level: EvidenceLevel): string =
+                           level: EvidenceLevel;
+                           source: EvidenceSource): string =
   ## Why `record` may not cross hosts through the peer cache, or "" when it
   ## may: `repro_local_store.publicationRefusal`, the one rule every
   ## publisher and consumer applies (Edge-Derived-Identities.md §3.3a, §3.4
-  ## item 1, §3.6). The producer asks it of the record it is about to
-  ## publish, before computing a single identity; the consumer asks it of the
-  ## record a peer served, with the level the issuer signed, whatever that
-  ## producer's version or conformance.
-  publicationRefusal(record, level)
+  ## item 1, §3.1, §3.6) -- the same rule the portable memo applies to its
+  ## `rbpm-v2` records (`publication_rule.nim`). The producer asks it of the
+  ## record it is about to publish, before computing a single identity; the
+  ## consumer asks it of the record a peer served, with the level and source
+  ## the issuer signed, whatever that producer's version or conformance.
+  publicationRefusal(record, level, source)
+
+proc memoEntryRefusal*(entry: MemoEntry; record: ActionResultRecord): string =
+  ## Why a memo entry another host published (or this node holds) may not
+  ## be used across hosts, or "" when it may: an entry from before the
+  ## published-trace record (versions 1-3: no evidence source, a PathSet
+  ## without roles, identities without entry kind or executable bit), else
+  ## the publication rule over its record with the level and source its
+  ## issuer signed. Campaign M17 chunk 2: "readers refuse v1 for publication
+  ## and consumption across hosts, as a miss with a diagnostic".
+  if entry.formatVersion != 0 and
+      entry.formatVersion < FirstPublishedTraceEntryVersion:
+    return "the memo entry is version " & $entry.formatVersion & ", from " &
+      "before the published-trace record (version " &
+      $FirstPublishedTraceEntryVersion & "): it states no evidence source " &
+      "and its path set does not keep declared inputs apart from observed " &
+      "ones, so it is not used across hosts (Edge-Derived-Identities.md " &
+      "§3.1, §3.3)"
+  publicationRefusalOf(record, entry.evidenceLevel, entry.evidenceSource)
 
 proc inputsStillMatch*(record: ActionResultRecord;
                        cwd: string): tuple[ok: bool; changed: string] =
@@ -400,7 +486,9 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
                       record: ActionResultRecord;
                       ctx: TwoPhaseContext;
                       attestor: LeafProvider = nil;
-                      evidenceLevel = elUnstated): TwoPhasePublishOutcome =
+                      evidenceLevel = elUnstated;
+                      evidenceSource = UnstatedEvidence):
+                      TwoPhasePublishOutcome =
   ## Publishes one freshly recorded execution into the two-phase stores.
   ##
   ## Refuses (returns `published = false` with a reason) rather than
@@ -409,7 +497,9 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
   ##     (`publicationRefusalOf`, campaign M17): made under `ffpTimestamp`,
   ##     a regular-file input without a content hash, monitor evidence other
   ##     than Level 0 (`evidenceLevel`, which the engine graded; a caller
-  ##     that does not say is refused), or no observed input. Checked FIRST,
+  ##     that does not say is refused), an unstated evidence source
+  ##     (`evidenceSource`, from the action's dependency policy), or no
+  ##     observed input. Checked FIRST,
   ##     before any input is re-observed or hashed: publication never
   ##     computes content identities for such a record after the fact;
   ##   * a record without CAS payloads (nothing a peer could restore);
@@ -426,7 +516,7 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
   ## the memo entry is on disk under `(peerKey, strong)`, and `advertKeys`
   ## lists what the caller should advertise. Re-publishing the same
   ## execution is idempotent and never rewrites another selector's entry.
-  let refusal = publicationRefusalOf(record, evidenceLevel)
+  let refusal = publicationRefusalOf(record, evidenceLevel, evidenceSource)
   if refusal.len > 0:
     return TwoPhasePublishOutcome(reason: "not published: " & refusal)
   if attestor.isNil:
@@ -452,12 +542,16 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
       return TwoPhasePublishOutcome(reason: "normalize failed: " & err.msg)
   # What a consumer receives is the NORMALIZED record, which drops the
   # workspace's ancestor existence probes; it has to pass the same rule the
-  # consumer will apply to it.
-  let normalizedRefusal = publicationRefusalOf(normalized, evidenceLevel)
+  # consumer will apply to it. NOT redundant with the check above: a record
+  # whose only inputs are such probes passes the rule as recorded and names
+  # no observed input once normalized (`t_peer_cache_refuses_timestamp_
+  # records_across_hosts`, "publishTwoPhase judges the NORMALIZED record").
+  let normalizedRefusal = publicationRefusalOf(normalized, evidenceLevel,
+    evidenceSource)
   if normalizedRefusal.len > 0:
     return TwoPhasePublishOutcome(reason: "not published: " &
       normalizedRefusal)
-  let pathSet = pathSetOf(normalized)
+  let pathSet = pathSetOf(normalized, ctx)
   let pathSetBytes = encodePeerPathSet(pathSet)
   let pathSetDigest = digestOf(pathSetBytes)
   var identities: seq[string] = @[]
@@ -466,7 +560,7 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
     # normalized name rebases onto the producer root, which is where the
     # unnormalized record pointed.
     let id = entryIdentity(entry, ctx)
-    if id.startsWith("unreadable:"):
+    if id == ReadOfUnreadable:
       return TwoPhasePublishOutcome(reason: "input unreadable: " & entry)
     identities.add(id)
   let stored = cas.casPut(pathSetBytes)
@@ -480,7 +574,8 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
     strongFingerprint: strong,
     recordBytes: encodeActionResultRecord(normalized),
     outputDigests: outputDigests,
-    evidenceLevel: evidenceLevel)
+    evidenceLevel: evidenceLevel,
+    evidenceSource: evidenceSource)
   try:
     attest(entry, attestor())
   except CatchableError as err:
@@ -573,6 +668,13 @@ proc fetchTwoPhase*(client: PeerCacheClient; ctx: TwoPhaseContext;
     var pathSet: PeerPathSet
     try:
       pathSet = decodePeerPathSet(psBytes.get())
+    except LegacyPeerFormatError as err:
+      # An older producer's PathSet: well formed, never read across hosts
+      # by this build (campaign M17 chunk 2). A miss, not a suspicion.
+      inc outcome.legacyFormatMisses
+      outcome.reason = "path set " & $psd & " is not used across hosts: " &
+        err.msg
+      continue
     except CatchableError as err:
       outcome.reason = "malformed path set " & $psd & ": " & err.msg
       continue
@@ -658,7 +760,8 @@ proc fetchTwoPhase*(client: PeerCacheClient; ctx: TwoPhaseContext;
       if not verdict.ok:
         reject("memo-issuer-unbound", verdict.reason)
         continue
-      if pathSetOf(record) != pathSet:
+      let ownPathSet = pathSetOf(record, ctx)
+      if withoutRoles(ownPathSet) != withoutRoles(pathSet):
         reject("selector-validation-failed",
           "memo entry record disagrees with its path set")
         continue
@@ -683,11 +786,21 @@ proc fetchTwoPhase*(client: PeerCacheClient; ctx: TwoPhaseContext;
       # than passing as a plain miss, and before any output blob is fetched,
       # so nothing it names is materialised. Not suspicion: an honest older
       # producer serves exactly this.
-      let ruleRefusal = publicationRefusalOf(record, entry.evidenceLevel)
+      let ruleRefusal = memoEntryRefusal(entry, record)
       if ruleRefusal.len > 0:
         inc outcome.publicationRuleMisses
         outcome.reason = "peer " & $item.peerId & " serves a record this " &
           "host does not accept from another host: " & ruleRefusal
+        continue
+      # The PathSet names its declared inputs by their role; this action's
+      # own declared inputs must be the same ones (Edge-Derived-Identities.md
+      # §3.1). A producer whose action declared others under the same weak
+      # fingerprint is honest about a different action: a miss, no
+      # suspicion.
+      if ownPathSet != pathSet:
+        inc outcome.declaredSetMisses
+        outcome.reason = "peer " & $item.peerId & " serves a record whose " &
+          "declared inputs are not this action's: a miss"
         continue
       var blobs: seq[seq[byte]] = @[]
       var complete = true

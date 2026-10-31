@@ -709,7 +709,13 @@ proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
       let finalMode = managedCopyMode(kind, mode, defaultMode)
       # Root: owned by 0:0 explicitly (a process's group need not be 0).
       # Anyone else (the unprivileged unit tests) owns what it creates.
-      let owner = if geteuid() == 0: 0 else: -1
+      # Every caller is Linux-only; the guard mirrors the `geteuid` import
+      # so the module still compiles for its Windows drivers, where a POSIX
+      # owner means nothing and nothing is chowned.
+      when defined(linux) or defined(macosx):
+        let owner = if geteuid() == 0: 0 else: -1
+      else:
+        let owner = -1
       writeFileNoFollow(path, content, finalMode, uid = owner, gid = owner)
   except SymlinkOnPath as e:
     raiseProtocol(what & " refuses to write through a symbolic link: " &
@@ -3059,14 +3065,17 @@ elif defined(macosx):
 
 proc observePasswdGroup*(op: PrivilegedOperation): ObservedOperationState =
   ## Re-observe a group account. `present` is true when the group
-  ## exists; the digest covers the canonical observed state (gid +
-  ## sorted member list).
+  ## exists; the digest covers the observed state masked by what the
+  ## resource declares (`canonicalPasswdGroupStateMaskedBy`): the gid when
+  ## it is pinned, and the declared members that are present.
   when defined(linux) or defined(macosx):
     let obs = observePasswdGroupRaw(op.pgName)
     result.present = obs.present
     result.digestHex =
       if not obs.present: ZeroDigestHex
-      else: posixDigestHexOfText(canonicalPasswdGroupState(obs))
+      else: posixDigestHexOfText(canonicalPasswdGroupStateMaskedBy(obs,
+        PasswdGroupDesired(name: op.pgName, gid: op.pgGid,
+          members: op.pgMembers)))
   else:
     raiseNotImplementedPlatform("passwd.group observe")
 
@@ -3188,7 +3197,7 @@ proc applyPasswdGroup*(op: PrivilegedOperation):
         afterDiff.missingMembers.join(", ") & ".")
     result.present = true
     result.digestHex = posixDigestHexOfText(
-      canonicalPasswdGroupState(after))
+      canonicalPasswdGroupStateMaskedBy(after, desiredOf(op)))
   elif defined(macosx):
     if op.pgDestroy:
       return destroyPasswdGroup(op)
@@ -3261,7 +3270,7 @@ proc applyPasswdGroup*(op: PrivilegedOperation):
         afterDiff.missingMembers.join(", ") & ".")
     result.present = true
     result.digestHex = posixDigestHexOfText(
-      canonicalPasswdGroupState(after))
+      canonicalPasswdGroupStateMaskedBy(after, desiredOf(op)))
   else:
     raiseNotImplementedPlatform("passwd.group apply")
 

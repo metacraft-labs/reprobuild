@@ -16,6 +16,7 @@ import std/[os, strutils]
 
 import repro_elevation
 import repro_infra
+import repro_infra/addon_diagnostics
 from repro_core/source_root import publicCliImagePath
 import repro_profile_compile
 # For `ProfileBuildAction`, which the resolver signature below names
@@ -142,8 +143,15 @@ proc mkRunInfraApplyHook*(stateDir: string;
         #
         # So: an explicit producer-supplied set wins (it is a deliberate act),
         # and otherwise the compiled profile speaks for its own edges.
-        let effectiveActions =
+        let chosenActions =
           if m.buildActions.len > 0: m.buildActions else: resolvedActions
+        # RDMF v3: every action is bound to the output digest the signed
+        # manifest pins, so the substitute path refuses other bytes before
+        # materialising any (Deploy-Agent.md §"Version 3").
+        let pinned = pinActionsToClosureDigests(m, chosenActions)
+        if pinned.refusal.len > 0:
+          return (ok: false, message: "closure digests: " & pinned.refusal)
+        let effectiveActions = pinned.actions
 
         # `emBroker`, NOT `emNoElevate`, and the difference is the whole value
         # of the agent on Windows.
@@ -189,5 +197,8 @@ proc mkRunInfraApplyHook*(stateDir: string;
           message: "generation " & res.generationId & ", applied " &
             $res.appliedCount & ", substituted-from-cache " &
             $res.substitutedFromCacheCount)
+      except EAddOnUnsupportedBase:
+        # Typed through to the agent: an operator action, not a retry.
+        raise
       except CatchableError as e:
         return (ok: false, message: "runInfraApply raised: " & e.msg)

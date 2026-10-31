@@ -182,3 +182,32 @@ suite "the propagated-libdir remap in the rpath script":
     check ("/$m9r14f_dep/.repro/output/install@" & Triple & "/$m9r14f_rel") in
       crossScript
     check "/.repro/output/install/" notin crossScript
+
+
+suite "no unkeyed fallback under --target":
+  test "the sibling install-tree roots drop build/out under --target":
+    withVariants("", proc() =
+      let roots = fromSourceInstallTreeRoots()
+      check "build/out/usr" in roots and "build/out" in roots)
+    withVariants("targetTriple=armv7-unknown-linux-musleabihf", proc() =
+      for root in fromSourceInstallTreeRoots():
+        check not root.startsWith("build/out")
+        check root.startsWith(".repro/output/install@armv7-unknown-linux-musleabihf"))
+
+  test "no source spells the unkeyed install mirror path":
+    # `.repro/output/install` written out instead of `installMirrorSubpath()`
+    # is the native build's mirror whatever the target (the Qt and Mesa
+    # helpers of package_result.nim and from_source_custom's mirror did).
+    let libs = currentSourcePath().parentDir.parentDir.parentDir
+    var offenders: seq[string]
+    for f in walkDirRec(libs):
+      if not f.endsWith(".nim") or "/tests/" in f: continue
+      let lines = readFile(f).splitLines()
+      for i in 0 ..< lines.len - 1:
+        let joined = lines[i].strip() & " " & lines[i + 1].strip()
+        if lines[i].strip().startsWith("#"): continue
+        if "\"output\" /" in joined and "\"install\"" in joined and
+            "\".repro\"" in lines[i]:
+          offenders.add(f & ":" & $(i + 1))
+    checkpoint($offenders)
+    check offenders.len == 0

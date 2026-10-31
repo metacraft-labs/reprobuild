@@ -1005,8 +1005,7 @@ proc m9r15oCollectQt6TransitiveCmakeDeps*(projectRoot, packageName: string):
     # Only inject when the sibling install-mirror exists on disk so
     # the helper is inert in unit-test fixtures + host-orchestration
     # mode that builds the action graph without populating mirrors.
-    let mirrorUsr = siblingsRoot / dep / ".repro" / "output" /
-      "install" / "usr"
+    let mirrorUsr = siblingsRoot / dep / installMirrorSubpath() / "usr"
     if not dirExists(mirrorUsr):
       continue
     result.add(dep)
@@ -1111,16 +1110,19 @@ proc m9r33Collect2Qt6CmakeModulePathDirs*(projectRoot, packageName: string):
     let dep = m9r14fStripDepConstraint(raw)
     if not dep.startsWith("qt6-"):
       return
-    let qt6CmakeRoot = recipeRoot / dep / ".repro" / "output" /
-      "install" / "usr" / "lib" / "cmake" / "Qt6"
+    let qt6CmakeRoot = recipeRoot / dep / installMirrorSubpath() / "usr" /
+      "lib" / "cmake" / "Qt6"
     if not dirExists(qt6CmakeRoot):
       return
     sink.add(qt6CmakeRoot.replace("\\", "/"))
     let platformsDir = qt6CmakeRoot / "platforms"
     if dirExists(platformsDir):
       sink.add(platformsDir.replace("\\", "/"))
-  for raw in registeredNativeBuildDeps(packageName):
-    visit(raw, result)
+  # A `nativeBuildDeps:` entry runs on the build host: its native mirror,
+  # whatever `--target` says (CLI/build.md §"Cross Targets: `--target`").
+  withInstallMirrorTarget(""):
+    for raw in registeredNativeBuildDeps(packageName):
+      visit(raw, result)
   for raw in registeredBuildDeps(packageName):
     visit(raw, result)
 
@@ -1180,8 +1182,7 @@ proc m9r33Emit2MesaGlesv2CacheVars*(projectRoot, packageName: string):
   let recipeRoot = parentDir(projectRoot)
   if recipeRoot.len == 0:
     return
-  let mesaInstall = recipeRoot / "mesa" / ".repro" / "output" /
-    "install" / "usr"
+  let mesaInstall = recipeRoot / "mesa" / installMirrorSubpath() / "usr"
   let glesHeader = mesaInstall / "include" / "GLES2" / "gl2.h"
   let glesLib = mesaInstall / "lib64" / "libGLESv2.so"
   if not fileExists(glesHeader) or not fileExists(glesLib):

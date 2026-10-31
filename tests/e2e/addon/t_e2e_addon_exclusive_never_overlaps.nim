@@ -53,23 +53,38 @@
 ##   never starts; once the operator stopped and disabled it the apply
 ##   goes through without overlap.
 ##
-## Falsifying mutations:
+## More cases: a socket-activated unit that idles out between the plan
+## and step 2 (the switch paused at the seam after realise): its socket is
+## listening again after the switch; an exclusive unit that ``Requires=``
+## the anchor, under ``KillMode=process`` with a SIGTERM-ignoring worker,
+## refuses the anchor's change; ``PropagatesStopTo=`` stops its dependent.
+## The gate runs on the seam build (pause points compiled in, inert unless
+## a control file asks; ``scripts/run_addon_gate.sh``).
 ##
-## - ``REPRO_ADDON_MUTATION=exclusive-as-plain-restart``: the switch treats
-##   an exclusive unit like any other -- the successor starts before the
-##   old instance is stopped -- and the rename produces an overlapping
-##   pair in the log, the retry and the failed-but-alive rename start
-##   their successors beside the live instance, and the unmanaged
-##   predecessor overlaps its successor: red.
-## - ``REPRO_ADDON_MUTATION=exclusive-exited-by-top-level-procs``: "exited"
-##   is read from the top-level ``cgroup.procs`` (empty for the delegated
-##   instance) and unknowns count as exited: the delegated case starts its
-##   successor beside the live instance: red.
-## - ``REPRO_ADDON_MUTATION=partof-not-propagated``: the plan leaves what
-##   systemd carries along ``PartOf=`` implicit: changing the anchor plans
-##   no stop-start of the exclusive dependent, the SIGTERM-ignoring
-##   instance is not refused, and the cooperative one is not shown
-##   restarted by the plan: red.
+## Falsifying mutations -- every case is red under one of them and green
+## without (each in its own run, so a mutation red early does not hide a
+## later case; the measurement record maps cases to mutations):
+##
+## - ``exclusive-as-plain-restart``: the successor starts before the old
+##   instance stops -- the rename, change and adoption overlap (g2-g4) and
+##   the stubborn instance is not refused (g6): red.
+## - ``exclusive-planned-by-active-state``: exclusive units planned by
+##   ``ActiveState`` alone, no group confirmed before a start -- the retry
+##   and the failed-but-alive rename start a successor (g6b, g6c): red.
+## - ``exclusive-exited-by-top-level-procs``: "exited" read from the
+##   top-level ``cgroup.procs`` -- the delegated instance (g8b): red.
+## - ``trigger-not-paused``: the socket re-activates the old definition
+##   during the stop-start, which is then refused (g9b): red.
+## - ``idle-unit-triggers-left-paused``: the idle unit's socket stays
+##   stopped after the switch (g9d): red.
+## - ``removed-exclusive-stop-unconfirmed``: a removed exclusive unit is
+##   stopped without confirmation -- the failed-but-alive rename and the
+##   removal an unmanaged socket keeps alive go through (g6c, g9c): red.
+## - ``unmanaged-predecessor-not-refused``: the unmanaged predecessor (g10)
+##   and the static one behind an enabled socket (g13) do not refuse: red.
+## - ``partof-not-propagated``: the plan leaves what systemd carries along
+##   ``PartOf=``, ``Requires=`` and ``PropagatesStopTo=`` implicit (g12b,
+##   g14b, g15b): red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_exclusive_never_overlaps``).
 ## Bases: ``REPRO_ADDON_BASES`` (default here: debian-13-amd64,ubuntu-24.04-amd64).
@@ -132,6 +147,18 @@ while :; do sleep 0.2; done
   StubbornScript = StubbornTemplate.replace("@LOG@", LogPath)
   DelegatedScript = DelegatedTemplate.replace("@LOG@", LogPath)
   SlowStopScript = SlowStopTemplate.replace("@LOG@", LogPath)
+  # A main process that stops on SIGTERM and a worker child that ignores
+  # it: under KillMode=process systemd signals only the main process, so
+  # the worker outlives the unit's stop in its control group.
+  WithChildTemplate = """#!/bin/sh
+id="$1"
+read up _ < /proc/uptime
+echo "start $id $up" >> @LOG@
+( trap '' TERM; read up _ < /proc/uptime; echo "start $id-worker $up" >> @LOG@; while :; do sleep 0.2; done ) &
+trap 'read up _ < /proc/uptime; echo "stop $id $up" >> @LOG@; exit 0' TERM
+while :; do sleep 0.2; done
+"""
+  WithChildScript = WithChildTemplate.replace("@LOG@", LogPath)
   SocketUnit = "[Unit]\nDescription=exclusive fixture socket\n\n[Socket]\n" &
     "ListenStream=127.0.0.1:7999\nService=repro-fixture-excl-s.service\n\n" &
     "[Install]\nWantedBy=sockets.target\n"
@@ -197,13 +224,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     writeFile(g.runDir / "stubborn.sh", StubbornScript)
     writeFile(g.runDir / "delegated.sh", DelegatedScript)
     writeFile(g.runDir / "slowstop.sh", SlowStopScript)
+    writeFile(g.runDir / "withchild.sh", WithChildScript)
+    g.copyTo(g.runDir / "withchild.sh", "/usr/local/bin/repro-fixture-withchild")
     g.copyTo(g.runDir / "fixture.sh", "/usr/local/bin/repro-fixture-exclusive")
     g.copyTo(g.runDir / "stubborn.sh", "/usr/local/bin/repro-fixture-stubborn")
     g.copyTo(g.runDir / "delegated.sh", "/usr/local/bin/repro-fixture-delegated")
     g.copyTo(g.runDir / "slowstop.sh", "/usr/local/bin/repro-fixture-slowstop")
     discard g.run("chmod 0755 /usr/local/bin/repro-fixture-exclusive " &
       "/usr/local/bin/repro-fixture-stubborn /usr/local/bin/repro-fixture-delegated " &
-      "/usr/local/bin/repro-fixture-slowstop; : > " & LogPath)
+      "/usr/local/bin/repro-fixture-slowstop /usr/local/bin/repro-fixture-withchild; : > " & LogPath)
     if not g.bootstrapAddon(repro, step): return fails
 
     proc applied(name: string; p: string) =
@@ -295,6 +324,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let c1 = ("repro-fixture-excl-c.service", exclusiveUnit("c1"))
     proc instances(pattern: string): string =
       g.exec("pgrep -f " & quoteShell(pattern) & " | sort").stdout.strip()
+    proc forceDown(unit: string) =
+      ## Put a unit down by force and wait until nothing of it is left:
+      ## no process in its control group (any child group included), no
+      ## pending job, not active. A falsifying mutation can leave systemd
+      ## a propagated restart still queued behind a stop that timed out;
+      ## killing once would race it, and the next case would start on a
+      ## live instance.
+      discard g.run("for i in $(seq 1 30); do systemctl kill -s KILL " & unit &
+        " 2>/dev/null; sleep 1; systemctl reset-failed " & unit & " 2>/dev/null; " &
+        "cg=$(systemctl show -p ControlGroup --value " & unit & "); " &
+        "st=$(systemctl show -p ActiveState --value " & unit & "); " &
+        "jobs=$(systemctl list-jobs --no-legend " & unit & " 2>/dev/null | wc -l); " &
+        "if [ \"$st\" != active ] && [ \"$st\" != activating ] && [ \"$st\" != deactivating ] && " &
+        "[ \"$jobs\" = 0 ] && { [ -z \"$cg\" ] || [ ! -e /sys/fs/cgroup$cg ] || " &
+        "grep -q 'populated 0' /sys/fs/cgroup$cg/cgroup.events; }; then break; fi; " &
+        "done; true", timeoutSec = 120)
     # g6b: retry the refused apply while the old instance lives (its unit
     # is `failed`, its process alive).
     let failedState = g.run("systemctl show -p ActiveState --value repro-fixture-excl-d.service").strip()
@@ -327,8 +372,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run(repro & " system addon status"))
     # Put the stubborn instance down by force and start a fresh log: its
     # lifetime never logged a stop, so it would overlap everything after.
-    discard g.run("systemctl kill -s KILL repro-fixture-excl-d.service; sleep 1; " &
-      "systemctl reset-failed repro-fixture-excl-d.service; true")
+    forceDown("repro-fixture-excl-d.service")
     discard g.run("mv " & LogPath & " " & LogPath & ".part1; : > " & LogPath)
 
     # g8: a delegated instance in a child control group.
@@ -350,8 +394,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          instances("^/bin/sh /usr/local/bin/repro-fixture-delegated f2$").len == 0 and
          instances("^/bin/sh /usr/local/bin/repro-fixture-delegated f1$") == fPid,
          g.run("cat " & LogPath))
-    discard g.run("systemctl kill -s KILL repro-fixture-excl-f.service; sleep 1; " &
-      "systemctl reset-failed repro-fixture-excl-f.service; true")
+    forceDown("repro-fixture-excl-f.service")
     discard g.run("mv " & LogPath & " " & LogPath & ".part2; : > " & LogPath)
 
     # g9: socket activation between the pre-stop and the start.
@@ -410,6 +453,34 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("systemctl is-active repro-fixture-excl-s.service").strip() == "active" and
          g.exec("test ! -e /var/lib/repro/system/addon/pending").exitCode == 0, "")
     discard g.run("kill " & loopPid & "; true")
+    # g9d: the stop-start unit idles out between the plan and step 2 (the
+    # switch is paused after realise and the service stopped; its socket
+    # stays listening). Step 2 pauses the socket, finds the unit not
+    # running and step 7 does not start it -- and the socket must still be
+    # listening afterwards.
+    # Fresh socket (no queued connections), then the service running, as
+    # the plan must see it.
+    discard g.run("systemctl stop repro-fixture-excl-s.socket; " &
+      "systemctl stop repro-fixture-excl-s.service; systemctl start repro-fixture-excl-s.socket; " &
+      "systemctl start repro-fixture-excl-s.service")
+    let p9d = profile([c1, ("repro-fixture-excl-s.service", exclusiveUnit("s3"))])
+    let paused9d = g.startSwitchPausedAt(repro, "g9d-idle", p9d, "step-1")
+    step("g9d: the switch paused after realise", paused9d.exitCode == 0,
+         paused9d.stdout & paused9d.stderr)
+    discard g.run("systemctl stop repro-fixture-excl-s.service; true")
+    step("vacuity guard: the service idled out, its socket listens",
+         g.exec("systemctl is-active repro-fixture-excl-s.service").stdout.strip() != "active" and
+         g.run("systemctl is-active repro-fixture-excl-s.socket").strip() == "active", "")
+    let r9d = g.resumeSwitch()
+    step("g9d: the switch completes, having planned a stop-start that pauses the socket",
+         r9d.exitCode == 0 and "stop-start\trepro-fixture-excl-s.service" in r9d.stdout and
+         "pauses repro-fixture-excl-s.socket" in r9d.stdout, r9d.stdout & r9d.stderr)
+    step("g9d: the socket step 2 paused is listening again, the idle unit not started",
+         g.exec("systemctl is-active repro-fixture-excl-s.socket").stdout.strip() == "active" and
+         g.exec("systemctl is-active repro-fixture-excl-s.service").stdout.strip() != "active",
+         g.run("systemctl status --no-pager repro-fixture-excl-s.socket; true"))
+    # Whatever the outcome, the next cases need the socket listening.
+    discard g.run("systemctl start repro-fixture-excl-s.socket; true")
     # The socket is the test's scaffolding, not the add-on's: take it away
     # (its queued connections would start the service again whenever it
     # stops, which a later removal of the exclusive service rightly
@@ -467,7 +538,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let plan12 = g.planProfile(repro, "g12b-plan", profile([c1, nUnit, xUnit("v2"), stubbornE]))
     step("g12b: changing only the anchor plans a confirmed stop-start of its PartOf= exclusive unit",
          "stop-start\trepro-fixture-excl-e.service" in plan12.stdout and
-         "PartOf=" in plan12.stdout, plan12.stdout & plan12.stderr)
+         "propagating dependency" in plan12.stdout, plan12.stdout & plan12.stderr)
     let r12 = g.applyProfile(repro, "g12b-anchor-changes", profile([c1, nUnit, xUnit("v2"), stubbornE]))
     step("g12b: refused with EAddOnExclusiveOverlap while the PartOf= instance will not die",
          r12.exitCode == 2 and "EAddOnExclusiveOverlap" in r12.stderr and
@@ -477,8 +548,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("readlink /etc/repro/static").strip() == staticBefore12 and
          "v1" in g.run("systemctl show -p Description --value repro-fixture-excl-x.service"),
          g.run("cat " & LogPath))
-    discard g.run("systemctl kill -s KILL repro-fixture-excl-e.service; sleep 1; " &
-      "systemctl reset-failed repro-fixture-excl-e.service; true")
+    forceDown("repro-fixture-excl-e.service")
     discard g.run("mv " & LogPath & " " & LogPath & ".part5; : > " & LogPath)
     let goodE = eUnit("e2", "/usr/local/bin/repro-fixture-exclusive")
     applied("g12c-part-of-cooperative", profile([c1, nUnit, xUnit("v2"), goodE]))
@@ -528,11 +598,66 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     noOverlap("g13b")
     step("g13b: n2 runs", g.run("systemctl is-active repro-fixture-excl-n2.service").strip() == "active", "")
 
+    discard g.run("mv " & LogPath & " " & LogPath & ".part7; : > " & LogPath)
+
+    # g14: Requires= propagates a restart too (systemd's RequiredBy=). An
+    # exclusive unit that Requires= the anchor, under KillMode=process
+    # with a worker that ignores SIGTERM: changing only the anchor plans
+    # a confirmed stop-start of it, which refuses while the worker lives.
+    let base14 = @[c1, nUnit, xUnit("v3"), goodE, succ2]
+    proc rUnit(id: string): (string, string) =
+      ("repro-fixture-excl-r.service", "[Unit]\nDescription=requires exclusive " & id &
+       "\nX-Repro-Exclusive=true\nRequires=repro-fixture-excl-xr.service\n" &
+       "After=repro-fixture-excl-xr.service\n\n[Service]\nExecStart=" &
+       "/usr/local/bin/repro-fixture-withchild " & id &
+       "\nKillMode=process\nTimeoutStopSec=3\n\n[Install]\nWantedBy=multi-user.target\n")
+    proc xrUnit(v: string): (string, string) =
+      ("repro-fixture-excl-xr.service", "[Unit]\nDescription=requires anchor " & v &
+       "\n\n[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n")
+    applied("g14a-requires", profile(base14 & @[xrUnit("v1"), rUnit("r1")]))
+    step("vacuity guard: r1 and its worker run; the anchor lists it in RequiredBy=",
+         instances("^/bin/sh /usr/local/bin/repro-fixture-withchild r1$").len > 0 and
+         "repro-fixture-excl-r.service" in
+           g.run("systemctl show -p RequiredBy --value repro-fixture-excl-xr.service"),
+         g.run("cat " & LogPath))
+    let plan14 = g.planProfile(repro, "g14b-plan", profile(base14 & @[xrUnit("v2"), rUnit("r1")]))
+    step("g14b: changing only the anchor plans a confirmed stop-start of the Requires= unit",
+         "stop-start\trepro-fixture-excl-r.service" in plan14.stdout and
+         "propagating dependency" in plan14.stdout, plan14.stdout & plan14.stderr)
+    let r14 = g.applyProfile(repro, "g14b-anchor-changes", profile(base14 & @[xrUnit("v2"), rUnit("r1")]))
+    step("g14b: refused with EAddOnExclusiveOverlap while the KillMode=process worker lives",
+         r14.exitCode == 2 and "EAddOnExclusiveOverlap" in r14.stderr and
+         "repro-fixture-excl-r.service" in r14.stderr, "exit " & $r14.exitCode & "\n" & r14.stdout & r14.stderr)
+    step("g14b: no second instance was started",
+         g.run("grep -c '^start r1 ' " & LogPath & "; true").strip() == "1", g.run("cat " & LogPath))
+    forceDown("repro-fixture-excl-r.service")
+    discard g.run("mv " & LogPath & " " & LogPath & ".part8; : > " & LogPath)
+
+    # g15: PropagatesStopTo= carries the anchor's restart to the dependent
+    # as a stop: the plan says so, the dependent is stopped (confirmed) and
+    # not started again, and nothing overlaps.
+    proc x2Unit(v: string): (string, string) =
+      ("repro-fixture-excl-x2.service", "[Unit]\nDescription=stop-propagating anchor " & v &
+       "\nPropagatesStopTo=repro-fixture-excl-e4.service\n\n[Service]\n" &
+       "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n")
+    let e4 = ("repro-fixture-excl-e4.service", exclusiveUnit("e4"))
+    applied("g15a-propagates-stop", profile(base14 & @[xrUnit("v2"), x2Unit("v1"), e4]))
+    let plan15 = g.planProfile(repro, "g15b-plan", profile(base14 & @[xrUnit("v2"), x2Unit("v2"), e4]))
+    step("g15b: changing only the anchor plans a stop of its PropagatesStopTo= unit",
+         "restart\trepro-fixture-excl-x2.service" in plan15.stdout and
+         "stop\trepro-fixture-excl-e4.service" in plan15.stdout, plan15.stdout & plan15.stderr)
+    applied("g15b-anchor-changes", profile(base14 & @[xrUnit("v2"), x2Unit("v2"), e4]))
+    noOverlap("g15b-anchor-changes")
+    step("g15b: the dependent is stopped, as systemd's own propagation leaves it",
+         g.exec("systemctl is-active repro-fixture-excl-e4.service").stdout.strip() != "active" and
+         g.run("grep -c '^stop e4 ' " & LogPath & "; true").strip() == "1", g.run("cat " & LogPath))
+
     applied("g11-remove", profile([]))
     discard g.run("rm -f /etc/systemd/system/repro-fixture-excl-c.service " &
       "/etc/systemd/system/repro-fixture-excl-old.service " &
       "/etc/systemd/system/repro-fixture-excl-old2.service " &
       "/etc/systemd/system/repro-fixture-excl-old2.socket; systemctl daemon-reload; true")
+    discard g.run("pkill -f '^/bin/sh /usr/local/bin/repro-fixture-withchild'; true")
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
   except CatchableError as e:

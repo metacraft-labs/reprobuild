@@ -22,11 +22,20 @@
 ##   ledger, leaves the profile; while the apply is paused it is replaced
 ##   by a hand-edited file. The removal leaves it in place as drift (exit
 ##   1, the ledger keeps the entry) instead of deleting the edit.
+## - **(d) an install link due for removal is replaced**: a unit with an
+##   ``Alias=`` leaves the profile; while the apply is paused the alias
+##   link is replaced by a hand-written unit file. Step 2 removes install
+##   links only after observing them again: the file is kept, reported as
+##   drift, and the unit is left in place whole -- its file, its WantedBy
+##   link and their ledger entries stay, and it is not stopped.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=pause-before-write-no-recheck``):
 ## the same seam with the write-time re-check not installed. (a) then
 ## overwrites the package's file, (b) writes through the new diversion's
-## path, (c) deletes the hand edit: red.
+## path, (c) deletes the hand edit, (d) unlinks the hand-written file in
+## step 2: red. ``REPRO_ADDON_MUTATION=kept-units-still-stopped`` (the same
+## seam; the kept unit is still stopped with the plan's transitions) turns
+## (d)'s "still active" red.
 ##
 ## The default run (no ``REPRO_ADDON_MUTATION``) selects the
 ## ``pause-before-write`` build: the seam is the instrument of this gate,
@@ -72,6 +81,20 @@ fs.systemFile {
 "
 }
 """
+
+  WithD = """systemd.systemUnit {
+  name = "repro-fx-rc.service"
+  content = "[Service]
+ExecStart=/bin/sleep infinity
+
+[Install]
+WantedBy=multi-user.target
+Alias=repro-fx-rc-alias.service
+"
+}
+"""
+  AliasPath = "/etc/systemd/system/repro-fx-rc-alias.service"
+  HandUnit = "[Service]\nExecStart=/bin/true\n"
 
 proc listed(ledgerText, path: string): int =
   for e in parseLedger(ledgerText).entries:
@@ -160,6 +183,35 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("cat " & Dir & "/c.conf") == "hand edit\n" and
          listed(g.ledgerOf(), Dir & "/c.conf") == 1,
          "exit " & $rc.exitCode & "\n" & rc.stdout)
+
+    # (d) An install link due for removal is replaced by a file.
+    # c.conf is still held as drift from (c); --reconcile-drift lets it go.
+    let rd0 = g.applyProfile(repro, "with-d", WithD, " --reconcile-drift")
+    step("(d) the unit and its alias are applied and the alias ledgered",
+         rd0.exitCode == 0 and listed(g.ledgerOf(), AliasPath) == 1 and
+         g.sha256InGuest(AliasPath) == "link", rd0.stdout & rd0.stderr)
+    let rd = g.pausedApply(repro, "remove-d", Prefix, proc() =
+      discard g.run("rm -f " & AliasPath & " && printf '" & HandUnit.replace("\n", "\\n") &
+                    "' > " & AliasPath))
+    step("(d) an alias link replaced by a file after the plan is kept, as drift",
+         rd.exitCode == 1 and "drift" in rd.stdout and
+         g.sha256InGuest(AliasPath) != "link" and
+         g.run("cat " & AliasPath) == HandUnit,
+         "exit " & $rd.exitCode & "\n" & rd.stdout & "\n" & g.exec("ls -la " & AliasPath).stdout)
+    block:
+      # Left in place WHOLE: the unit file, its WantedBy link and their
+      # ledger entries are still there, and the unit was not stopped.
+      let unitFile = "/etc/systemd/system/repro-fx-rc.service"
+      let wants = "/etc/systemd/system/multi-user.target.wants/repro-fx-rc.service"
+      let ld = g.ledgerOf()
+      step("(d) the kept unit's file, WantedBy link and ledger entries survive",
+           g.sha256InGuest(unitFile) notin ["absent", "link"] and
+           g.sha256InGuest(wants) == "link" and
+           listed(ld, unitFile) == 1 and listed(ld, wants) == 1 and
+           listed(ld, AliasPath) == 1,
+           g.exec("ls -la " & unitFile & " " & wants).stdout & g.exec("ls -la " & unitFile & " " & wants).stderr)
+      let act = g.exec("systemctl is-active repro-fx-rc.service").stdout.strip()
+      step("(d) the kept unit is still active", act == "active", act)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

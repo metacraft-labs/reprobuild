@@ -25,7 +25,7 @@
 ## disk is write-protected below the guest (QEMU ``readonly=on``) and
 ## compares the disk image byte for byte afterwards.
 
-import std/[algorithm, json, os, posix, strutils, tables]
+import std/[algorithm, json, nativesockets, net, os, posix, strutils, tables, uri]
 
 import repro_core
 import repro_peer_cache/auth as peerAuth
@@ -52,6 +52,9 @@ type
     cachePublishersPath*: string   ## "" => empty anchor set
     cacheUrl*: string              ## "" => no binary cache
     binaryPath*: string            ## "" => /proc/self/exe
+    agentTarget*: string           ## "" => no deploy-agent units (A8)
+    agentSources*: seq[string]     ## the manifest sources (HTTP(S) URLs)
+    profileCompiler*: string       ## "" => source profiles are refused
 
   KeptFile* = object
     ## A file bootstrap keeps as found. A content-pinned input (the signers
@@ -108,9 +111,16 @@ const
     SupportedBase(id: "debian", versionId: "13", note: "supported"),
     SupportedBase(id: "raspbian", versionId: "13", note: "supported"),
     SupportedBase(id: "ubuntu", versionId: "24.04", note: "supported"),
+    # Ubuntu 26.04 joins the matrix with the 24.04 -> 26.04 release-upgrade
+    # gate that covers it (spec §6.1, milestone A10).
+    SupportedBase(id: "ubuntu", versionId: "26.04", note: "supported"),
     SupportedBase(id: "debian", versionId: "12",
                   note: "release-upgrade source"),
   ]
+
+  SupportedBaseList* = "debian 13, raspbian 13, ubuntu 24.04, ubuntu 26.04; " &
+                       "debian 12 as release-upgrade source"
+    ## The matrix as one phrase, for refusals.
 
   SupportedArchitectures* = ["amd64", "arm64", "armhf"]
 
@@ -559,6 +569,72 @@ proc add(r: var PreflightReport; id: string; ok: bool; detail: string) =
   r.checks.add(PreflightCheck(id: id, verdict: (if ok: vPass else: vFail),
                               detail: detail))
 
+proc urlHostPort(url: string): tuple[host: string; port: int] =
+  ## The host and port of an ``http(s)://`` URL; raises on anything else.
+  let u = parseUri(url)
+  if u.scheme notin ["http", "https"] or u.hostname.len == 0:
+    raise newException(ValueError, "not an http(s) URL with a host: " & url)
+  result.host = u.hostname
+  result.port = if u.port.len > 0: parseInt(u.port)
+                elif u.scheme == "https": 443 else: 80
+
+proc isAddressLiteral(host: string): bool =
+  var a: IpAddress
+  try:
+    a = parseIpAddress(host)
+    true
+  except ValueError:
+    false
+
+proc resolveAgentInputs*(target: string; sources: seq[string];
+                         cacheUrl, profileCompiler: string): AgentUnitsInputs =
+  ## The deploy agent's part of generation 0. Every origin -- each manifest
+  ## source and the cache -- becomes addresses for ``IPAddressAllow=``; a
+  ## host name is resolved here and pinned in the fetch unit's hosts file.
+  if target.len == 0 or sources.len == 0:
+    raise newException(ValueError, "the deploy agent needs both --target " &
+      "and at least one --manifest source")
+  for c in target:
+    if c notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
+      raise newException(ValueError, "invalid --target: " & target)
+  if profileCompiler.len > 0 and (not profileCompiler.startsWith("/") or
+      profileCompiler.find({' ', '"', '#', '\n'}) >= 0):
+    raise newException(ValueError, "--profile-compiler must be an absolute " &
+      "path without spaces: " & profileCompiler)
+  result.target = target
+  result.profileCompiler = profileCompiler
+  var origins = sources
+  if cacheUrl.len > 0: origins.add(cacheUrl)
+  for src in sources:
+    if src.find({' ', '"', '#', '{', '}', '\\', '\n'}) >= 0:
+      raise newException(ValueError, "invalid manifest source: " & src)
+    result.sources.add(src)
+  for o in origins:
+    let (host, _) = urlHostPort(o)
+    if isAddressLiteral(host):
+      if host notin result.allowedAddresses: result.allowedAddresses.add(host)
+      continue
+    var found = false
+    for ai in [Domain.AF_INET, Domain.AF_INET6]:
+      var res: ptr AddrInfo
+      try:
+        res = getAddrInfo(host, Port(0), ai, SOCK_STREAM, IPPROTO_TCP)
+      except OSError:
+        continue
+      var p = res
+      while p != nil:
+        let ip = getAddrString(p.ai_addr)
+        if ip notin result.allowedAddresses: result.allowedAddresses.add(ip)
+        if (ip, host) notin result.hosts: result.hosts.add((ip, host))
+        found = true
+        p = p.ai_next
+      freeAddrInfo(res)
+    if not found:
+      raise newException(ValueError, "cannot resolve the origin " & host &
+        " of " & o & " (the fetch unit's allow-list needs its addresses)")
+  result.allowedAddresses.sort()
+  result.hosts.sort()
+
 proc runPreflight*(inp: PreflightInputs): PreflightReport =
   ## Inventory the host and compute the plan. Writes nothing.
   when mutated("preflight-writes"):
@@ -587,8 +663,7 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   result.add("distribution", baseNote.len > 0,
     if baseNote.len > 0: id & " " & versionId & " (" & baseNote & ")"
     else: "ID=" & id & " VERSION_ID=" & versionId &
-          " is not in the add-on base matrix (debian 13, raspbian 13, " &
-          "ubuntu 24.04; debian 12 as release-upgrade source)")
+          " is not in the add-on base matrix (" & SupportedBaseList & ")")
 
   # Architecture of the userspace.
   let arch = userspaceArchitecture()
@@ -684,11 +759,29 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   if anchorsError.len > 0:
     publishers = @[]
 
+  # The deploy agent (A8, spec §9.1): its origins pinned to addresses now,
+  # since the fetch unit's egress allow-list takes addresses and the unit
+  # has no DNS.
+  var agentInputs: AgentUnitsInputs
+  var agentError = ""
+  if inp.agentTarget.len > 0 or inp.agentSources.len > 0:
+    try:
+      agentInputs = resolveAgentInputs(inp.agentTarget, inp.agentSources,
+        (if anchorsError.len > 0: "" else: inp.cacheUrl), inp.profileCompiler)
+    except CatchableError as e:
+      agentError = e.msg
+    result.add("deploy-agent", agentError.len == 0,
+      if agentError.len > 0: agentError
+      else: "target " & agentInputs.target & ", " &
+            $agentInputs.sources.len & " manifest source(s); the fetch " &
+            "unit may reach " & agentInputs.allowedAddresses.join(", "))
+
   # Generation 0 must find every one of its paths absent.
   let reproExe = reproExeFor(result.binarySha256)
   result.gen0Inputs = Gen0Inputs(reproExe: reproExe, deploySigners: signers,
     cacheUrl: (if anchorsError.len > 0: "" else: inp.cacheUrl),
-    cachePublishers: publishers)
+    cachePublishers: publishers,
+    agent: (if agentError.len > 0: AgentUnitsInputs() else: agentInputs))
   result.gen0 = generation0Objects(result.gen0Inputs)
   var taken: seq[string]
   for o in result.gen0:
@@ -750,6 +843,12 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       "deploySigners": %signers,
       "cacheUrl": inp.cacheUrl,
       "cachePublishers": %publishers,
+    },
+    "agent": {
+      "target": agentInputs.target,
+      "sources": %agentInputs.sources,
+      "allowedAddresses": %agentInputs.allowedAddresses,
+      "profileCompiler": agentInputs.profileCompiler,
     },
     "generation0": {
       "objects": objects,

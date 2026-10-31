@@ -261,7 +261,8 @@ proc twoPhaseContextOf*(query: PeerCacheActionQuery): TwoPhaseContext =
   TwoPhaseContext(peerKey: blobDigestFromBytes(query.peerKey),
                   cwd: query.cwd,
                   workspaceRoot: query.workspaceRoot,
-                  portable: query.portable)
+                  portable: query.portable,
+                  declaredInputs: query.declaredInputs)
 
 proc newPeerCacheEngineHooks*(client: PeerCacheClient;
                               storage: PeerCacheStorage;
@@ -353,7 +354,8 @@ proc newPeerCacheEngineHooks*(client: PeerCacheClient;
     {.cast(gcsafe).}:
       try:
         let outcome = publishTwoPhase(st.memo, engineCas, record,
-          twoPhaseContextOf(query), att, query.evidenceLevel)
+          twoPhaseContextOf(query), att, query.evidenceLevel,
+          query.evidenceSource)
         if not outcome.published:
           inc stats.publishSkips
           stats.lastPublishReason = outcome.reason
@@ -670,7 +672,9 @@ proc entryReaderFor*(host: PeerCacheHost): MemoEntryReader =
         # timestamp-policy record, no stated level), or one an older build
         # sharing the root still writes, is not served -- and not
         # re-attested below, which would sign it again as this host's.
-        if publicationRefusalOf(record, entry.evidenceLevel).len > 0:
+        # Since M17 chunk 2 that includes every entry from before the
+        # published-trace record (versions 1-3, `memoEntryRefusal`).
+        if memoEntryRefusal(entry, record).len > 0:
           continue
         if h.config.trustMode == tmTls and
             entry.issuerHostId == h.selfPeerId and h.identity.canMint:

@@ -14,9 +14,16 @@ import ../types/options
 import ../packages/gcc as gcc_module
 import ../packages/clang as clang_module
 import ../active_context
+import ./zig_c
 
 proc compile*(opts: CompileOptions): BuildActionDef =
   ## Dispatch on ``currentCompiler()``.
+  # Under a zig cross target the target is threaded here (zig_c); any
+  # other non-native target still refuses, as before.
+  let zigTarget = activeZigCrossTarget()
+  if zigTarget != nil:
+    requireZigDeclared("compile")
+    return zig_c.zigCompile(opts, zigTarget)
   requireCrossTargetConsulted("compile")
   case currentCompiler()
   of cfGcc:   gcc_module.gccCompile(opts)

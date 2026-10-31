@@ -18,8 +18,10 @@
 ## put that value back at every boot; the plan refuses the resource
 ## (exit 2), naming the file, and nothing is written. So is a forwarding
 ## key while systemd-networkd is in use and configured (here globally, in
-## ``networkd.conf.d``) to write forwarding itself; the record notes
-## whether the base runs networkd.
+## ``networkd.conf.d``) to write forwarding itself with another value
+## (the same value is not refused), and so is a per-link key of a link
+## networkd manages; the record notes whether the base runs networkd and
+## which link it manages.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=sysctl-in-apply-namespace``):
 ## the switch runs ``systemd-sysctl`` on the fragments in the apply's own
@@ -153,6 +155,23 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     else:
       step("without networkd in use its configuration refuses nothing",
            nwd.exitCode == 0, "exit " & $nwd.exitCode & "\n" & nwd.stdout & nwd.stderr)
+    # The same family with the add-on's value is no conflict.
+    discard g.run("printf '[Network]\\nIPv4Forwarding=yes\\n' " &
+      "> /etc/systemd/networkd.conf.d/99-repro-fixture.conf")
+    let same = g.planProfile(repro, "sysctl-networkd-same", Profile)
+    step("networkd setting the same forwarding value refuses nothing",
+         same.exitCode == 0, "exit " & $same.exitCode & "\n" & same.stdout & same.stderr)
+    # A per-link key of a link networkd manages: networkd rewrites it.
+    let managedLink = g.run("networkctl list --no-legend 2>/dev/null | " &
+      "awk '$5==\"configured\" && $2!=\"lo\" {print $2; exit}'; true").strip()
+    record["networkdManagedLink"] = %managedLink
+    if networkdInUse and managedLink.len > 0:
+      let perLink = "addOn {\n  managedEtcPrefixes = []\n}\n\nlinux.sysctl {\n" &
+        "  key = \"net.ipv6.conf." & managedLink & ".accept_ra\"\n  value = \"0\"\n}\n"
+      let pl = g.planProfile(repro, "sysctl-networkd-link", perLink)
+      step("a per-link key of a link networkd manages is refused (exit 2), naming the link",
+           pl.exitCode == 2 and ("manages " & managedLink) in pl.stderr,
+           "exit " & $pl.exitCode & "\n" & pl.stdout & pl.stderr)
     discard g.run("rm -rf /etc/systemd/networkd.conf.d/99-repro-fixture.conf; " &
       "rmdir /etc/systemd/networkd.conf.d 2>/dev/null; true")
     let ib = identityReport(fb, g.takeFingerprint(repro))

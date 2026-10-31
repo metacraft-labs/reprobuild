@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
@@ -1112,6 +1113,18 @@ type
       ## tool installed. ``nil`` keeps the engine ignorant of the
       ## catalog (legacy behaviour); the action's argv must then
       ## reference absolute paths.
+    objectCheckTriple*: string
+      ## The non-native triple of this build (``repro build --target``), or
+      ## "". When set, an action tagged ``publishToBinaryCache`` is not a
+      ## success until every native object among its declared outputs is an
+      ## object for this triple (CLI/build.md §"Cross Targets: `--target`",
+      ## the object check): otherwise its evidence is unpublishable, so the
+      ## action fails, its outputs are removed, and nothing is recorded or
+      ## published under the target identity. Defaults from
+      ## ``REPRO_VARIANTS``, the channel the stdlib reads the target from, so
+      ## the engine and the recipes agree on one value. Kept apart from
+      ## ``targetTripleResolver``, which namespaces tool-reference cache
+      ## keys and is not wired for ``--target``.
     targetTripleResolver*: TargetTripleResolver
       ## DSL-port M9.R.7. Optional ``targetTriple`` variant
       ## resolver closure. When non-nil, the engine consults it
@@ -2145,6 +2158,15 @@ type
       ## publisher signs it into the memo entry so a consumer can refuse a
       ## record that is not Level 0 (Edge-Derived-Identities.md §3.4 item 1);
       ## a publisher handed `elUnstated` refuses.
+    evidenceSource*: EvidenceSource
+      ## Campaign M17 chunk 2: where the action's evidence comes from
+      ## (`evidenceSourceOf`: monitored, a recognized format by name, a
+      ## builtin), signed into the memo entry with the level
+      ## (Edge-Derived-Identities.md §3.1).
+    declaredInputs*: seq[string]
+      ## Campaign M17 chunk 2: the action's declared inputs as physical paths
+      ## (`materialPath(cwd, input)`), so the published PathSet keeps them
+      ## apart from observed inputs (Edge-Derived-Identities.md §3.1).
 
   PeerCacheActionFetcher* = proc(query: PeerCacheActionQuery):
     Option[seq[byte]] {.gcsafe, closure.}
@@ -2652,6 +2674,7 @@ proc defaultBuildEngineConfig*(cacheRoot: string;
   BuildEngineConfig(
     cacheRoot: cacheRoot,
     actionCacheRoot: actionCacheRoot,
+    objectCheckTriple: objectCheckTripleFromVariants(getEnv("REPRO_VARIANTS")),
     runQuotaCliPath: "",
     monitorCliPath: "",
     maxParallelism: 8'u32,
@@ -7282,6 +7305,47 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
+func evidenceSourceOf*(action: BuildAction): EvidenceSource =
+  ## Where an execution of `action` gets its dependency evidence, as a
+  ## published record states it (Edge-Derived-Identities.md §3.1; campaign M17
+  ## chunk 2). Decided by the same facts that decide whether the engine
+  ## monitors it (`monitoredAction`):
+  ##
+  ## * an action under a monitor policy (`MonitorPolicyKinds`: automatic, or a
+  ##   recognized report / converter VALIDATED by the monitor) whose evidence
+  ##   the engine folds from an io-mon capture is monitored: every process
+  ##   (`monitoredAction` wires the capture at launch), and an action of any
+  ##   kind whose caller prewired one (`monitorDepfile`; the condition
+  ##   `monitorEvidenceRequired` folds under);
+  ## * any other built-in (`kind != bakProcess`) runs in-process: there is no
+  ##   child to monitor, and its evidence is its declared inputs and outputs;
+  ## * a process under a recognized-format policy is evidenced by the
+  ##   report(s) it produces, named by registry name (`make-depfile`, `iomon`
+  ##   for an edge that produces its own io-mon capture);
+  ## * a process under a converter policy is evidenced by the converter's
+  ##   output format.
+  let policy = action.dependencyPolicy
+  if policy.kind in MonitorPolicyKinds and
+      (action.kind == bakProcess or action.monitorDepfile.len > 0):
+    return MonitoredEvidence
+  if action.kind != bakProcess:
+    return BuiltinEvidence
+  var names: seq[string] = @[]
+  if policy.kind in RecognizedPolicyKinds:
+    for report in policy.recognizedReports:
+      if $report.formatName notin names:
+        names.add($report.formatName)
+    names.sort()
+    return formatEvidence(names.join("+"))
+  for conv in policy.postBuildConverters:
+    let name =
+      if conv.outputKind == dcoReproPathSet: "repro-path-set"
+      else: $conv.outputFormatName
+    if name notin names:
+      names.add(name)
+  names.sort()
+  convertedEvidence(names.join("+"))
+
 func evidenceLevelOf*(status: MonitorEvidenceStatus): EvidenceLevel =
   ## The ladder grade as a record states it to another host (campaign M17,
   ## Edge-Derived-Identities.md §3.4 item 1). An execution no monitor graded
@@ -9419,6 +9483,48 @@ proc resetScratchDirs*(action: BuildAction): string =
       return "cannot empty scratch directory '" & dir & "': " & err.msg
   ""
 
+proc refuseForeignTargetOutputs(action: BuildAction; triple: string;
+                                result: var EvidenceCollection) =
+  ## The object check at the publication boundary. Under ``--target`` an
+  ## action tagged ``publishToBinaryCache`` publishes its outputs under the
+  ## target's identity, so every native object among them must be for
+  ## ``triple``. A mismatch makes the evidence unpublishable -- every launch
+  ## route then fails the action before it records or publishes anything --
+  ## and removes the outputs, so a consumer never resolves them either.
+  ## Checking HERE rather than in one convention's edges is what covers every
+  ## tagged edge (the install-mirror edge, the autotools stage copies, any
+  ## edge a recipe tags itself).
+  var paths: seq[string]
+  for path in action.recordedOutputPaths():
+    if path.len > 0:
+      paths.add(materialPath(action.cwd, path))
+  # The package's declared exemptions ride in the action's environment
+  # (part of its identity). Stale ones are the mirror check's to report: one
+  # action's outputs are not the package's whole tree.
+  var exemptionsRaw = ""
+  for entry in action.env:
+    if entry.startsWith(TargetObjectExemptionsEnvVar & "="):
+      exemptionsRaw = entry[TargetObjectExemptionsEnvVar.len + 1 .. ^1]
+  let found =
+    try:
+      applyTargetObjectExemptions(targetObjectMismatchesInPaths(paths, triple),
+        decodeTargetObjectExemptions(exemptionsRaw), requireUse = false)
+    except UnknownTargetCpu, ValueError:
+      @[getCurrentExceptionMsg()]
+  if found.len == 0:
+    return
+  var msg = "action '" & action.id & "': " & $found.len &
+    " output object(s) are not for --target '" & triple & "', so the action " &
+    "is refused before anything is recorded or published under the target " &
+    "(CLI/build.md \"Cross Targets: `--target`\", the object check):"
+  for line in found:
+    msg.add("\n  " & line)
+  result.evidence.diagnostics.add(msg)
+  result.publishable = false
+  for path in paths:
+    try: removePathNoFollow(extendedPath(path))
+    except CatchableError: discard
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil):
@@ -9851,6 +9957,9 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # the head of this proc included — grade the set the key is actually built
   # from. Rule 7. See `gradeKeyedInputSet`.
   gradeKeyedInputSet(action, result)
+  if strict and config != nil and config[].objectCheckTriple.len > 0 and
+      action.publishToBinaryCache:
+    refuseForeignTargetOutputs(action, config[].objectCheckTriple, result)
   if strict and not result.publishable:
     discard
 
@@ -18526,7 +18635,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if record.determinism.declared and
         not record.determinism.class.allowsCrossMachineSubstitution():
       return
-    let refusal = publicationRefusal(record, evidenceLevel)
+    let refusal = publicationRefusal(record, evidenceLevel,
+      query.evidenceSource)
     if refusal.len > 0:
       runResult.trace(actionId, "peer-cache-publish-refused", refusal)
       return
@@ -18889,7 +18999,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## same strings `computePortableFingerprint` reads from disk.
     case kind
     of pikRead: (if view.exists: ReadOfDirectory else: ReadOfAbsent)
-    of pikProbe: (if view.exists: ProbePresent else: ProbeAbsent)
+    of pikProbe: (if view.exists: probeIdentityOf(iekDirectory)
+                  else: ProbeAbsent)
     of pikEnumeration: membershipHexOfNames(view.names)
     of pikEnvironment: ""
 
@@ -19092,7 +19203,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       portable: config.portableRoots.len > 0,
       cwd: action.cwd,
       policy: action.actionCachePolicy,
-      workspaceRoot: config.peerCacheWorkspaceRoot)
+      workspaceRoot: config.peerCacheWorkspaceRoot,
+      evidenceSource: evidenceSourceOf(action),
+      declaredInputs: portableDeclaredInputsOf(action))
     if result.portable:
       let hex = portableWeakOf(action)
       if hex.len == 64:
@@ -19125,9 +19238,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                             observedEnv: seq[ObservedEnv];
                             policy: FileFingerprintPolicy;
                             recordInputs: seq[FileFingerprint];
-                            evidenceLevel: EvidenceLevel) =
+                            evidenceLevel: EvidenceLevel;
+                            evidenceSource: EvidenceSource) =
     ## The shared tail of both portable recorders: fingerprint, outputs,
     ## local memo record, and (once per record) publication.
+    ##
+    ## The record is the published-trace record `rbpm-v2` (campaign M17
+    ## chunk 2; Edge-Derived-Identities.md §3.1): it states the policy, the
+    ## evidence level and SOURCE, whether the action is fixed-output, and its
+    ## inputs split into declared and observed, each with entry kind,
+    ## executable bit and published-domain digest.
     ##
     ## `policy`, `recordInputs` and `evidenceLevel` describe the LOCAL record
     ## this portable record is the projection of: the input-check policy it
@@ -19161,9 +19281,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # any checkout of any project on this host can find it by portable
         # weak fingerprint -> path set -> strong fingerprint. Soft-fail: a
         # memo that cannot be written costs reuse, never the build.
-        let memo = PortableMemoRecord(
-          weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
-          strongHex: fp.strongHex, outputs: outs.outputs)
+        let memo = newPortableMemoRecord(fp.weakHex, fp.inputs, fp.strongHex,
+          outs.outputs, policy, evidenceLevel, evidenceSource,
+          fixedOutput = action.fixedOutput)
         let memoRoot = sharedRoot / "portable-memo"
         try:
           recordMemo(memoRoot, memo)
@@ -19192,8 +19312,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let observations =
           if action.fixedOutput: max(fp.inputs.len, 1)
           else: fp.inputs.len
-        let refusal = publicationRefusal(policy, recordInputs, evidenceLevel,
-          observations)
+        # The rule over the LOCAL record's facts (its content hashes), then
+        # over the portable record exactly as a consumer will judge it
+        # (`portableRecordRefusal`, the same rule over what the record
+        # states, e.g. an input it could not read).
+        var refusal = publicationRefusal(policy, recordInputs, evidenceLevel,
+          evidenceSource, observations)
+        if refusal.len == 0:
+          refusal = portableRecordRefusal(memo)
         if refusal.len > 0 and config.portableMemoPublisher != nil and
             substitutable:
           runResult.trace(action.id, "portable-memo-publish-refused", refusal)
@@ -19275,6 +19401,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## could not (campaign M17).
     var accesses = portableAccessesOf(action, evidence)
     accesses.evidenceLevel = evidenceLevel
+    let evidenceSource = evidenceSourceOf(
+      declaredActions.getOrDefault(action.id, action))
+    accesses.evidenceSource = evidenceSource
     cache.recordInputAccesses(record.weakFingerprint,
       record.strongFingerprint, accesses)
     if config.portableRoots.len == 0:
@@ -19288,7 +19417,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         present: variable.present, value: variable.value))
     finishPortableRecord(idx, action, accesses.reads, accesses.probes,
       accesses.enumerations, observed, record.policy, record.inputs,
-      evidenceLevel)
+      evidenceLevel, evidenceSource)
 
   proc recordFixedOutputPortable(idx: int; action: BuildAction;
                                  evidenceLevel: EvidenceLevel) =
@@ -19310,7 +19439,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if fileExists(extendedPath(input)):
         reads.add(input)
     finishPortableRecord(idx, action, reads, @[], @[], @[],
-      action.actionCachePolicy, @[], evidenceLevel)
+      action.actionCachePolicy, @[], evidenceLevel,
+      evidenceSourceOf(declaredActions.getOrDefault(action.id, action)))
 
   proc recordPortableFromLocalHit(idx: int; action: BuildAction;
                                   record: ActionResultRecord) =
@@ -19373,9 +19503,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # The level the producing run stored beside the record: a hit is served
     # without monitor evidence of its own, and a Level-1 record must not
     # publish from its hit what it could not publish when it ran.
+    # The source likewise: the producing run's, from its sidecar (unstated
+    # for a sidecar written before the field, which keeps the record local).
     finishPortableRecord(idx, action, derived.reads, derived.probes,
       derived.enumerations, observed, record.policy, record.inputs,
-      derived.evidenceLevel)
+      derived.evidenceLevel, derived.evidenceSource)
 
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
@@ -20865,10 +20997,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let o = producedOutputs[path]
           case entry.kind
           of pikRead:
-            # `readIdentity`'s answers, so a lookup agrees with the recorder.
-            return some(if o.directory: ReadOfDirectory else: o.digest)
+            # `readIdentity`'s answers, so a lookup agrees with the recorder:
+            # a file by its executable bit and digest, as the record states.
+            return some(readIdentityOf(o))
           of pikProbe:
-            return some("present")
+            return some(probeIdentityOf(
+              if o.directory: iekDirectory else: iekFile))
           of pikEnumeration:
             if o.directory:
               return some(membershipHexOfNames(
@@ -20892,11 +21026,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               if at < 0:
                 return some(ReadOfAbsent)
               case o.entries[at].kind
-              of tekFile: return some(o.entries[at].identity)
-              of tekDirectory: return some(ReadOfDirectory)
+              of tekFile, tekDirectory:
+                return some(readIdentityOf(o.entries[at]))
               else: return some(Unresolved)
             of pikProbe:
-              return some(if at >= 0: "present" else: "absent")
+              if at < 0:
+                return some(ProbeAbsent)
+              return some(probeIdentityOf(
+                if o.entries[at].kind in {tekDirectory, tekLinkToDir}:
+                  iekDirectory
+                else: iekFile))
             of pikEnumeration:
               if at >= 0 and o.entries[at].kind == tekDirectory:
                 return some(membershipHexOfNames(
@@ -20974,7 +21113,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           try: recordMemo(memoRoot, hit.get())
           except CatchableError: discard
       if hit.isNone:
-        runResult.trace(id, "portable-miss", "weak=" & weak)
+        # Which input of a stored record differs here, declared or observed
+        # (Edge-Derived-Identities.md §3.1): "" when nothing is stored.
+        let why =
+          try: explainMemoMiss(memoRoot, roots, weak, resolver)
+          except CatchableError: ""
+        runResult.trace(id, "portable-miss", "weak=" & weak &
+          (if why.len > 0: "; " & why else: ""))
         continue
       # The record must name exactly what this action produces here, and
       # its directory listings must be the trees its digests name.

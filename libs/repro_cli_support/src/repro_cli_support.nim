@@ -16,6 +16,7 @@ else:
   # this module's namespace.
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN,
     ENOENT
+from repro_core/target_object_check import objectCheckTripleFromVariants
 import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
@@ -131,6 +132,7 @@ import sibling_ignores
 import repo_relocation
 import repro_tool_profiles
 import repro_local_store
+import repro_local_store/budget_gc
 # M9.R.77.5 — R11 Layer-1 CAS facade. ``runCasCommand`` uses the narrow
 # put / get / verify / path surface without touching the Layer-2 prefix
 # tables that ``runStoreCommand`` operates against.
@@ -180,6 +182,9 @@ import repro_cli_support/content_id
 # local certificate store (test-certificates Transport §2).
 import repro_cli_support/certificate_store
 export certificate_store
+# The managed pre-push hook's call into the linked reference library, and what
+# ``repro health`` reports about the configuration it reads.
+import repro_cli_support/certificate_propagation
 # The reference ``test_certificates`` library (test-certificates-tools),
 # linked for what the standard fixes byte for byte and reprobuild has no
 # reason to own: the strict TOML reader certificates are parsed with, note
@@ -12015,6 +12020,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # populated ``cacheEntryIdentity`` — the from-source conventions
     # tag install + stage-copy actions accordingly.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # The cross build's object check at the publication boundary
+    # (CLI/build.md §"Cross Targets: `--target`"): the triple `--target`
+    # wrote into REPRO_VARIANTS. This literal config does not go through
+    # `defaultBuildEngineConfig`, so it is set here, on both BUILD configs.
+    engineConfig.objectCheckTriple =
+      objectCheckTripleFromVariants(getEnv("REPRO_VARIANTS"))
     # L3 PUBLISH-SCOPE: resolve the target cache's scope. An INTERMEDIATE
     # cache publishes every built store output; a RELEASE cache (default)
     # only the public-interface members tagged ``publishToBinaryCache``.
@@ -12574,11 +12585,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if not tarballFallThrough:
       seedBootstrapCycleBreakTools()
     var pendingSourceUses = buildArtifact.projectInterface.toolUses
+    # Which side of a `--target` build each queued use is for. A
+    # `nativeBuildDeps:` tool runs on the build host, so its source recipe is
+    # built natively -- and so is everything that recipe needs, because it
+    # is all for the tool (From-Source-Build-Recipes.md §"Package-level
+    # dependency declarations"). Without this every queued use inherited the
+    # process-wide `targetTriple` and a build tool was built for the target.
+    var pendingNative: seq[bool]
+    for use in pendingSourceUses:
+      pendingNative.add(use.depKind == DepKindNative)
     var expandedSourceRecipes = initHashSet[string]()
     var nextSourceUse = 0
     template enqueueSourceDependencies(directory: string; runtimeOnly: bool) =
       let recipeDir = absolutePath(directory)
-      let expansionKey = recipeDir & ":" & $runtimeOnly
+      let expansionKey = recipeDir & ":" & $runtimeOnly & ":" & $nativeSide
       if expansionKey notin expandedSourceRecipes:
         expandedSourceRecipes.incl(expansionKey)
         # A restored prefix is not evidence of a complete dependency closure.
@@ -12633,12 +12653,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           if runtimeOnly: producerArtifact.projectInterface.runtimeToolUses
           else: producerArtifact.projectInterface.toolUses
         for dependency in dependencies:
-          if dependency.depKind != "native":
+          if dependency.depKind != DepKindNative:
             pendingSourceUses.add(dependency)
+            pendingNative.add(nativeSide)
 
     while nextSourceUse < pendingSourceUses.len:
       let useDef = pendingSourceUses[nextSourceUse]
+      let nativeSide = pendingNative[nextSourceUse]
       inc nextSourceUse
+      # A native-side use is resolved and built with the target removed
+      # from the variant channel, so the sibling's sub-build (and its object
+      # check) is a native build; restored on every exit from this iteration.
+      let variantsBefore = getEnv("REPRO_VARIANTS")
+      let variantsWereSet = existsEnv("REPRO_VARIANTS")
+      if nativeSide:
+        putEnv("REPRO_VARIANTS", variantsWithoutTarget(variantsBefore))
+      defer:
+        if variantsWereSet: putEnv("REPRO_VARIANTS", variantsBefore)
+        else: delEnv("REPRO_VARIANTS")
       if tarballFallThrough and
           not tarballModeFallsThroughToFromSource(useDef):
         continue
@@ -12700,6 +12732,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             toolName & "\" at " & siblingRecipeDir)
           fromSourceResolvedRecipes.incl(siblingRecipeDir)
           pendingSourceUses.add(useDef)
+          pendingNative.add(nativeSide)
           continue
       # The bootstrap floor suppresses recursive construction only after a
       # configured source-artifact cache had a chance to restore the mirror.
@@ -12796,6 +12829,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       fromSourceResolvedRecipes.incl(siblingRecipeDir)
       if not dryRun:
         pendingSourceUses.add(useDef)
+        pendingNative.add(nativeSide)
 
   # Cross-Repo-Source-Consumption SC-2 (§4.2) — producer graph load + splice
   # (executable channel). A pre-pass that mirrors the from-source auto-recurse
@@ -13686,6 +13720,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``publishToBinaryCache = true`` + populated
     # ``cacheEntryIdentity``.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # The cross build's object check at the publication boundary
+    # (CLI/build.md §"Cross Targets: `--target`"): the triple `--target`
+    # wrote into REPRO_VARIANTS. This literal config does not go through
+    # `defaultBuildEngineConfig`, so it is set here, on both BUILD configs.
+    engineConfig.objectCheckTriple =
+      objectCheckTripleFromVariants(getEnv("REPRO_VARIANTS"))
     # L3 PUBLISH-SCOPE: intermediate cache → publish everything;
     # release cache (default) → only tagged public-interface members.
     engineConfig.binaryCacheIntermediateScope =
@@ -24322,6 +24362,14 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
       # guessed/replayed token had no pending record). With the token already
       # scrubbed, the loser receives no exemption and must pass the exact same
       # ordinary policy gate as a source push.
+    # Propagation runs before the gate reports, so that a refusal below is the
+    # last thing the operator reads and the notes are already on the remote
+    # when the gateway judges the branch update that follows this hook. Its
+    # outcome decides nothing here: Tooling §4.3 leaves that to the receiving
+    # gate. A publisher's own lock-record push returned above and a record
+    # store returned before that: neither carries content anyone certified.
+    discard propagateCertificates(prePushRepoRoot, remoteName, remoteLocation,
+      refsBytes, proc (line: string) = stderr.writeLine(line))
     var checkArgs = @["--mode=pre-push"]
     if repoRoot.len > 0:
       checkArgs.add("--current-repo=" & repoRoot)
@@ -38923,13 +38971,63 @@ proc runStoreDaemonCommand(args: seq[string]): int =
     stderr.writeLine("repro store daemon " & action & ": error: " & err.msg)
     return 1
 
+proc parseStoreByteSize(text: string; value: var int64): bool =
+  ## `123`, `512K`, `64M`, `384G`, `1.5T` (binary multiples; an optional
+  ## `iB` / `B` is accepted, so `384GiB` and `384G` are the same budget).
+  var t = text.strip()
+  var unit = 1'i64
+  for (suffix, mult) in [("TIB", 1'i64 shl 40), ("GIB", 1'i64 shl 30),
+                         ("MIB", 1'i64 shl 20), ("KIB", 1'i64 shl 10),
+                         ("TB", 1'i64 shl 40), ("GB", 1'i64 shl 30),
+                         ("MB", 1'i64 shl 20), ("KB", 1'i64 shl 10),
+                         ("T", 1'i64 shl 40), ("G", 1'i64 shl 30),
+                         ("M", 1'i64 shl 20), ("K", 1'i64 shl 10),
+                         ("B", 1'i64)]:
+    if t.toUpperAscii.endsWith(suffix):
+      t = t[0 ..< t.len - suffix.len].strip()
+      unit = mult
+      break
+  try:
+    let f = parseFloat(t)
+    if f <= 0: return false
+    value = int64(f * float(unit))
+    value > 0
+  except ValueError:
+    false
+
+proc parseStoreDuration(text: string; value: var int64): bool =
+  ## `3600`, `90s`, `30m`, `12h`, `2d`.
+  var t = text.strip().toLowerAscii()
+  var unit = 1'i64
+  if t.len > 0 and t[^1] in {'s', 'm', 'h', 'd'}:
+    unit = case t[^1]
+      of 'm': 60'i64
+      of 'h': 3600'i64
+      of 'd': 86400'i64
+      else: 1'i64
+    t = t[0 ..< t.len - 1]
+  try:
+    let n = parseBiggestInt(t)
+    if n < 0: return false
+    value = n * unit
+    true
+  except ValueError:
+    false
+
 proc runStoreCommand*(args: seq[string]): int =
   ## Implements `repro store <subcommand>` for the M56 unified local
   ## content-addressed store. Supported subcommands:
   ##
   ##   gc       — eager garbage collection (SQL dead-set query plus a
   ##              filesystem move into `gc/pending-deletion/` and a
-  ##              post-grace unlink sweep).
+  ##              post-grace unlink sweep). With `--budget=SIZE` it is the
+  ##              size-budgeted collector instead
+  ##              (`repro_local_store/budget_gc`): above SIZE it evicts the
+  ##              least recently used dead prefixes, action-cache entries
+  ##              and (with `--evict-cas`) unreferenced CAS blobs down to
+  ##              `--target=SIZE` (default 90% of the budget), never
+  ##              anything used within `--keep-recent=DURATION` (default
+  ##              2d). `--dry-run` plans without removing anything.
   ##   recover  — `PRAGMA quick_check`, sweep `tmp/`, and reconcile
   ##              on-disk `prefixes/...` directories against the
   ##              SQLite index.
@@ -38962,7 +39060,9 @@ proc runStoreCommand*(args: seq[string]): int =
   if args.len == 0:
     echo "usage: repro store {gc | recover | roots | list | optimise | " &
       "materialize <src-dir> <dst-dir>} " &
-      "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode]"
+      "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode] " &
+      "[--budget=SIZE [--target=SIZE] [--keep-recent=DURATION] " &
+      "[--evict-cas] [--dry-run]]"
     return 2
   if args[0] == "serve":
     # Executable-Consolidation M3: `repro store serve` is the store daemon
@@ -38982,9 +39082,36 @@ proc runStoreCommand*(args: seq[string]): int =
   # and it produces no error to notice. Declining it is therefore an
   # explicit flag rather than something a caller inherits by silence.
   var allowSharedInode = true
+  var budgetBytes = 0'i64
+  var targetBytes = 0'i64
+  var keepRecentSeconds = 2 * 86400'i64
+  var evictCas = false
+  var dryRun = false
+  var budgetFlagSeen = false
   var positionals: seq[string] = @[]
   for raw in args:
-    if raw.startsWith("--store-root="):
+    if raw.startsWith("--budget="):
+      if not parseStoreByteSize(raw[len("--budget=") .. ^1], budgetBytes):
+        stderr.writeLine("repro store: --budget wants a size such as 384G: " & raw)
+        return 2
+    elif raw.startsWith("--target="):
+      budgetFlagSeen = true
+      if not parseStoreByteSize(raw[len("--target=") .. ^1], targetBytes):
+        stderr.writeLine("repro store: --target wants a size such as 340G: " & raw)
+        return 2
+    elif raw.startsWith("--keep-recent="):
+      budgetFlagSeen = true
+      if not parseStoreDuration(raw[len("--keep-recent=") .. ^1],
+          keepRecentSeconds):
+        stderr.writeLine("repro store: --keep-recent wants a duration such as 2d: " & raw)
+        return 2
+    elif raw == "--evict-cas":
+      budgetFlagSeen = true
+      evictCas = true
+    elif raw == "--dry-run":
+      budgetFlagSeen = true
+      dryRun = true
+    elif raw.startsWith("--store-root="):
       storeRootOverride = raw[len("--store-root=") .. ^1]
     elif raw.startsWith("--grace-seconds="):
       graceSeconds = parseInt(raw[len("--grace-seconds=") .. ^1])
@@ -39003,6 +39130,16 @@ proc runStoreCommand*(args: seq[string]): int =
   let sub = positionals[0]
   if sub != "materialize" and positionals.len > 1:
     stderr.writeLine("repro store: unexpected argument: " & positionals[1])
+    return 2
+  if (budgetBytes > 0 or budgetFlagSeen) and sub != "gc":
+    stderr.writeLine("repro store: --budget and its options apply to `gc` only")
+    return 2
+  if budgetFlagSeen and budgetBytes <= 0:
+    stderr.writeLine("repro store gc: --target / --keep-recent / --evict-cas / " &
+      "--dry-run need --budget=SIZE")
+    return 2
+  if targetBytes > 0 and targetBytes > budgetBytes:
+    stderr.writeLine("repro store gc: --target must not exceed --budget")
     return 2
 
   if sub == "materialize":
@@ -39039,6 +39176,21 @@ proc runStoreCommand*(args: seq[string]): int =
       # — the gc equivalent of a root nobody can reach to delete. So the
       # pin roots are re-read from the locks they name first, and the sweep
       # then sees the truth. Every other root kind is untouched.
+      if budgetBytes > 0:
+        # The budget collector evicts a CHOSEN subset of what is dead, so
+        # the pin roots are re-derived first for the same reason as below:
+        # a version whose pin was removed must be evictable.
+        if not dryRun:
+          discard cli_selfhost.prunePinRootsForGc(root)
+        let report = budgetGc(root, BudgetGcPolicy(
+          budgetBytes: budgetBytes, targetBytes: targetBytes,
+          keepRecentSeconds: keepRecentSeconds, graceSeconds: graceSeconds,
+          evictCas: evictCas, dryRun: dryRun))
+        if emitJson:
+          echo renderBudgetGcJson(report, root)
+        else:
+          echo renderBudgetGcText(report, root)
+        return 0
       let pinOutcomes = cli_selfhost.prunePinRootsForGc(root)
       var droppedPins = 0
       for outcome in pinOutcomes:
@@ -67031,14 +67183,27 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
       let label =
         if verdict.outcome == voUnverifiable: "unverifiable"
         else: "uncovered"
-      let noneArrived =
-        if found.len == 0 and couldNotLook.len == 0:
-          " (no certificate note on the pushed tree under " &
-            certificateNotesRef & "; push that ref with the branch)"
-        else: ""
-      let remedies = unmetRemedies(verdict)
+      let noneArrived = found.len == 0 and couldNotLook.len == 0
+      # When no note arrived, the gateway cannot tell an uncertified tree from
+      # certificates that never travelled, and "go and certify" would send a
+      # developer who has them to redo the work. So it names what is missing.
+      var unmetNames: seq[string]
+      for u in verdict.unmet:
+        let pair = "'" & u.name & "' on " &
+          (if u.platform == anyCertificatePlatform: "any platform"
+           else: u.platform)
+        if pair notin unmetNames: unmetNames.add(pair)
+      let remedies =
+        if noneArrived: unmetNames else: unmetRemedies(verdict)
       let detail = u.refName & ": " & label & ": " &
-        describeCoverageVerdict(verdict) & noneArrived &
+        describeCoverageVerdict(verdict) &
+        (if noneArrived:
+           " (no certificate note on the pushed tree under " &
+             certificateNotesRef & ": nothing propagated one. The managed " &
+             "pre-push hook carries them from the local certificate store, " &
+             "and --no-verify skips it; otherwise push that ref with the " &
+             "branch)"
+         else: "") &
         (if verdict.outcome == voNotCovered and remedies.len > 0:
            " — " & remedies.join("; ") else: "")
       result.outcome = verdict.outcome
@@ -74937,6 +75102,35 @@ proc healthBranchAncestry(identity: GitToolIdentity; abs: string;
     result.diagnostic = "cannot compare with " & result.comparison & ": " &
       mb.output.strip().splitLines().join(" | ")
 
+proc certificatePropagationCheck(workspaceRoot: string): HealthCheck =
+  ## The ``certificate-propagation`` row of ``repro health``. The hook body is
+  ## linked, so its presence is not in question. What can still stop
+  ## certificates reaching a gateway is each repository's own configuration,
+  ## and a push reports that only in output nobody may be reading.
+  const name = "certificate-propagation"
+  let enumerated = enumerateParticipatingRepos(workspaceRoot)
+  var findings = certificatePropagationEnvironmentFindings()
+  var inspected = 0
+  for repo in enumerated.repos:
+    if gitTopLevel(repo.repoPath).len == 0: continue
+    inc inspected
+    for finding in certificatePropagationFindings(repo.repoPath):
+      findings.add(repo.name & ": " & finding)
+  if findings.len == 0:
+    return HealthCheck(name: name, status: hsOk,
+      detail: "scope declarations and notes ref valid in " &
+        $inspected & " repo(s)",
+      remedy: "", fixKind: hfNone)
+  HealthCheck(name: name, status: hsWarn,
+    detail: $findings.len & " configuration problem(s) keep certificates " &
+      "from reaching a gateway; pushes still go through: " &
+      findings.join("; "),
+    remedy: "fix or remove the named value: git -C <repo> config --unset-all " &
+      "testCertificates.notesRef, git -C <repo> config --remove-section " &
+      "testCertificatesScope.<name>, or unset " &
+      CertificateHookSwitchVariable,
+    fixKind: hfNone)
+
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
@@ -75805,6 +75999,11 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     per repo is PG-16's; this row is the machine-wide skew and the
   #     disagreement between shells, which is PG-14's.)
   checks.add(hookInterpreterSkewCheck(parsed.workspaceRoot))
+
+  # 8c'. The configuration the managed pre-push hook's propagation reads.
+  #      Warnings, never failures: a push goes through regardless (Tooling
+  #      §4.3). What is lost is what a receiving gate will see.
+  checks.add(certificatePropagationCheck(parsed.workspaceRoot))
 
   # 8d. The post-commit lock writer's OUTCOME (CLI/health.md, **Lock writer**).
   #

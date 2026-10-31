@@ -780,8 +780,24 @@
     # (`getOwner`, completed copy-operation inspection) with their VM support,
     # and lock, test and Nix-shell commits that touch no compiler or stdlib
     # source.
+    #
+    # Advanced from 22d525d8 to a0fabc99 so type hashes no longer depend on
+    # the checkout path: `sighashes.hashTypeSym` hashed the defining file's
+    # absolute path into every RTTI hash, so the static add-on `repro` built
+    # from one commit differed between two checkouts (~500 bytes of `of`
+    # tokens and display tables); it now hashes the canonical module path.
+    # Riding along (22d525d8..a33aa43d, the fork's `codetracer` tip): MSVC
+    # `vccexe`/`vcvarsall` tool fixes and their tests, and a release-notes
+    # document; no compiler or stdlib source.
+    #
+    # Advanced from a0fabc99 to 9a49ee3c: a0fabc99's canonical-path type
+    # hash gave two copies of one package (same nimble name, same
+    # in-package path) one type hash -- `of` confused their types. The hash
+    # takes the absolute defining path again, as upstream does, and a build
+    # that wants checkout-independent hashes asks for it with
+    # `--typeHashPathMap:OLD=NEW` (scripts/build_addon_static.sh does).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=22d525d83ff061f5912121f3519418cda806d36c";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=9a49ee3ca32c9cd2fe467806e61d47c3a6a7ccc1";
       flake = false;
     };
     nim-csources-src = {

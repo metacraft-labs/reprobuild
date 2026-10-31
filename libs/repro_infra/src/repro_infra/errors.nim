@@ -9,6 +9,9 @@ type
   EInfra* = object of CatchableError
     ## Root of the system-scope / infra exception hierarchy.
 
+  EPendingSwitch* = object of EInfra
+    ## An interrupted add-on switch is on the host and could not be
+    ## recovered before an apply; the apply refused to run on top of it.
   ESystemStateDirInvalid* = object of EInfra
     ## The per-host system state directory could not be resolved
     ## (e.g. `PROGRAMDATA` unset on Windows).

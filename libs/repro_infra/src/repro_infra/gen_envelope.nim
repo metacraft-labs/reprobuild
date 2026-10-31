@@ -52,6 +52,8 @@
 ## envelope).
 
 import std/[algorithm, os, strutils]
+when defined(posix):
+  import std/posix
 
 import blake3
 import repro_core
@@ -176,7 +178,11 @@ proc decodeGenerationBytes*(bytes: openArray[byte];
 
 proc writeGenerationEnvelope*(pointerFilePath: string;
                               env: GenerationEnvelope) =
-  ## Atomically write the generation envelope (tmp-then-rename).
+  ## Atomically and durably write the generation envelope: a temporary
+  ## file, fsynced, renamed over the target, and the directory fsynced, so
+  ## a power cut after this returns cannot bring back a missing or
+  ## zero-length envelope (the generation would exist under `current` with
+  ## no record of what it is).
   let bytes = encodeGeneration(env)
   let parent = parentDir(pointerFilePath)
   if parent.len > 0:
@@ -185,10 +191,24 @@ proc writeGenerationEnvelope*(pointerFilePath: string;
   for i, b in bytes:
     s[i] = char(b)
   let tmp = pointerFilePath & ".tmp"
-  writeFile(tmp, s)
-  if fileExists(pointerFilePath):
-    removeFile(pointerFilePath)
-  moveFile(tmp, pointerFilePath)
+  when defined(posix):
+    var f: File
+    if not open(f, tmp, fmWrite):
+      raise newException(IOError, "cannot write " & tmp)
+    try:
+      f.write(s)
+      f.flushFile()
+      if posix.fsync(f.getFileHandle()) != 0:
+        raiseOSError(osLastError(), "fsync " & tmp)
+    finally:
+      f.close()
+    moveFile(tmp, pointerFilePath)    # rename(2) over the old envelope
+    if parent.len > 0: fsyncDirPath(parent)
+  else:
+    writeFile(tmp, s)
+    if fileExists(pointerFilePath):
+      removeFile(pointerFilePath)
+    moveFile(tmp, pointerFilePath)
 
 proc readGenerationEnvelope*(pointerFilePath: string): GenerationEnvelope =
   if not fileExists(pointerFilePath):

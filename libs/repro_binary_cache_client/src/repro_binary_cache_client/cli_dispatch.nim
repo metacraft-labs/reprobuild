@@ -462,7 +462,8 @@ proc cmdPublish(rawArgs: seq[string]): int =
     # The pre-refactor CLI used the same partitioning.
     if res.statusCode == 0 and
        (res.error.contains("identity-derived key does not match") or
-        res.error.contains("prefix path does not exist")):
+        res.error.contains("prefix path does not exist") or
+        res.error.contains("(the object check)")):
       return 2
     return 1
   echo "published ", res.responseBody.strip()

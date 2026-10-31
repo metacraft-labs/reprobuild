@@ -61,7 +61,7 @@
 ## reach the served bytes. Neither is redundant: the tag is what makes
 ## decryption fail closed, and it is checked BEFORE any plaintext is used.
 
-import std/[os, strutils]
+import std/[os, sets, strutils]
 when defined(posix):
   import std/posix
   # std/posix does not export these on every target; take them from libc.
@@ -69,6 +69,8 @@ when defined(posix):
   var oCloExec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
 
 from repro_core/codec import elementCountFits
+
+import ./agent_mutations
 
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
@@ -112,6 +114,22 @@ type
 
   SecretsError* = object of CatchableError
     ## Malformed secret list, bad key material, or a failed tag check.
+
+  RecipientKeyRevoked* = object of SecretsError
+    ## A seal was asked for a recipient key on the producer's revoked-key
+    ## list. Raised before any key material is derived.
+
+  RevokedRecipientKeys* = object
+    ## The producer half of recipient-key revocation (CRED-2): the
+    ## recipient public keys no producer may seal to any longer, whoever
+    ## asks. Every seal takes one (``sealSecrets``, ``sealSecretsInPlace``),
+    ## so a stale target configuration or a caller that still names a
+    ## revoked key gets ``RecipientKeyRevoked`` rather than an envelope a
+    ## compromised key opens. Same file format as a trust-anchor file: one
+    ## 130-hex uncompressed P-256 key per line, ``#`` comments.
+    keys: seq[peerAuth.PublicKeyBytes]
+    source*: string
+      ## Where the list came from: the file, or why a seal needs none.
 
 # ---------------------------------------------------------------------------
 # Path validation.
@@ -283,6 +301,46 @@ proc deriveKeyAndNonce(shared: array[SharedSecretLen, byte];
     result.key[i] = stream[i]
   for i in 0 ..< GcmNonceLen:
     result.nonce[i] = stream[AesKeyLen + i]
+  # The stack copies of the key material are wiped before they are
+  # released; the returned key is the caller's to wipe.
+  zeroMem(addr stream[0], stream.len)
+  zeroMem(addr ikm[0], ikm.len)
+  zeroMem(addr hc, sizeof(hc))
+
+proc gcmTransformPtr(key: array[AesKeyLen, byte];
+                     nonce: array[GcmNonceLen, byte];
+                     aad: string;
+                     data: pointer; dataLen: int;
+                     encrypt: bool;
+                     tag: var array[GcmTagLen, byte]): bool =
+  ## Run AES-256-GCM over the ``dataLen`` bytes at ``data`` in place (a
+  ## buffer the caller owns -- a locked one, for plaintext that must not
+  ## reach swap). When `encrypt`, writes the authentication tag into `tag`
+  ## and returns true. When decrypting, checks `tag` and returns whether it
+  ## matched -- the caller MUST NOT use the data if this returns false.
+  var keyCopy = key
+  var nonceCopy = nonce
+  var aadCopy = aad
+  var bc: bsslBlock.AesCtCtrKeys
+  bsslBlock.aesCtCtrInit(bc, addr keyCopy[0], csize_t(AesKeyLen))
+  var gc: bsslAead.GcmContext
+  bsslAead.gcmInit(gc, addr bc.vtable, bsslHash.ghashCtmul32)
+  bsslAead.gcmReset(gc, addr nonceCopy[0], csize_t(GcmNonceLen))
+  if aadCopy.len > 0:
+    bsslAead.gcmAadInject(gc, addr aadCopy[0], csize_t(aadCopy.len))
+  bsslAead.gcmFlip(gc)
+  bsslAead.gcmRun(gc, (if encrypt: cint(1) else: cint(0)),
+                  (if dataLen > 0: data else: nil), csize_t(dataLen))
+  if encrypt:
+    bsslAead.gcmGetTag(gc, addr tag[0])
+    result = true
+  else:
+    result = bsslAead.gcmCheckTag(gc, addr tag[0]) == 1'u32
+  # Wipe the key, its AES schedule and the GCM state (which holds the
+  # GHASH key) before the stack frame is released.
+  zeroMem(addr keyCopy[0], AesKeyLen)
+  zeroMem(addr bc, sizeof(bc))
+  zeroMem(addr gc, sizeof(gc))
 
 proc gcmTransform(key: array[AesKeyLen, byte];
                   nonce: array[GcmNonceLen, byte];
@@ -323,11 +381,56 @@ proc gcmTransform(key: array[AesKeyLen, byte];
 # Seal / open.
 # ---------------------------------------------------------------------------
 
+proc loadRevokedRecipientKeys*(path: string): RevokedRecipientKeys =
+  ## The producer's revoked-key list at ``path``. A missing or malformed
+  ## file raises: a producer configured with a list must never seal as if
+  ## it were empty because the file went missing.
+  try:
+    let anchors = peerAuth.loadTrustAnchors(path)
+    for k in anchors.publicKeys.items: result.keys.add(k)
+  except CatchableError as e:
+    raise newException(SecretsError,
+      "cannot read the revoked recipient-key list: " & e.msg)
+  result.source = path
+
+proc revokedRecipientKeysOf*(keys: openArray[peerAuth.PublicKeyBytes];
+                             source: string): RevokedRecipientKeys =
+  ## A list built in memory (a test, or a producer that keeps it
+  ## elsewhere); ``source`` names where it came from.
+  for k in keys: result.keys.add(k)
+  result.source = source
+
+proc noRevokedRecipientKeys*(why: string): RevokedRecipientKeys =
+  ## An explicitly empty list, for a seal that has no producer
+  ## configuration to consult: a host sealing to its own current key
+  ## (``repro system addon secret put``, a rotation's re-seal), whose
+  ## revocation is the host-side rotation. ``why`` is recorded as the
+  ## source so the choice is visible, never implicit.
+  doAssert why.len > 0, "say why this seal consults no revoked-key list"
+  result.source = why
+
+proc isRevoked*(r: RevokedRecipientKeys; key: peerAuth.PublicKeyBytes): bool =
+  key in r.keys
+
+proc revokedCount*(r: RevokedRecipientKeys): int = r.keys.len
+
+proc refuseRevoked(r: RevokedRecipientKeys; key: peerAuth.PublicKeyBytes) =
+  when not agentMutated("rdmf-ignores-revoked-keys"):
+    if r.isRevoked(key):
+      var hex = ""
+      for b in key: hex.add(toHex(int(b), 2).toLowerAscii())
+      raise newException(RecipientKeyRevoked,
+        "refusing to seal to recipient key " & hex &
+        ": it is on the revoked recipient-key list (" & r.source & ")")
+
 proc sealSecrets*(recipientPubKey: peerAuth.PublicKeyBytes;
                   target: string;
-                  files: seq[SecretFile]): SealedSecrets =
+                  files: seq[SecretFile];
+                  revoked: RevokedRecipientKeys): SealedSecrets =
   ## Encrypt `files` to `recipientPubKey`. A fresh ephemeral keypair is
   ## generated per call, so the derived AES key is unique per envelope.
+  ## Refused with ``RecipientKeyRevoked`` when the key is on ``revoked``.
+  refuseRevoked(revoked, recipientPubKey)
   let ephemeral = peerAuth.generateKeypair()
   let shared = ecdhSharedX(ephemeral.privateKey, recipientPubKey)
   let derived = deriveKeyAndNonce(shared, target, ephemeral.publicKey,
@@ -679,3 +782,64 @@ proc ensureRecipientKeyFile*(path: string;
       return readRecipientKeyFile(path)
     writeFile(path, text)
   RecipientKey(publicKey: kp.publicKey, created: true)
+
+# ---------------------------------------------------------------------------
+# Seal / open in place, in a buffer the caller owns.
+#
+# For a caller that must keep plaintext out of memory it does not control --
+# the ReproOS add-on locks its plaintext in RAM so that no page of it can be
+# swapped (repro_addon/locked_buffer). The payload is the canonical encoding
+# `encodeSecretFiles` produces; the caller parses or builds it in place.
+# ---------------------------------------------------------------------------
+
+proc openSecretsInPlace*(recipientPrivKey: peerAuth.PrivateKeyBytes;
+                         target: string; sealed: SealedSecrets;
+                         dst: pointer; dstLen: int) =
+  ## Decrypt `sealed` into the `dstLen` bytes at `dst` (exactly the
+  ## ciphertext's length). Raises `SecretsError` -- with `dst` zeroed -- on a
+  ## failed tag check or an unusable ephemeral key: no unauthenticated byte
+  ## is left for the caller.
+  if dstLen != sealed.ciphertext.len:
+    raise newException(SecretsError, "openSecretsInPlace: buffer of " &
+      $dstLen & " bytes for a ciphertext of " & $sealed.ciphertext.len)
+  let recipientPub = peerAuth.derivePublicKey(recipientPrivKey)
+  var shared = ecdhSharedX(recipientPrivKey, sealed.ephemeralPubKey)
+  var derived = deriveKeyAndNonce(shared, target, sealed.ephemeralPubKey,
+                                  recipientPub)
+  zeroMem(addr shared[0], shared.len)
+  if dstLen > 0:
+    copyMem(dst, unsafeAddr sealed.ciphertext[0], dstLen)
+  var tag = sealed.tag
+  let opened = gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
+                               dst, dstLen, encrypt = false, tag = tag)
+  zeroMem(addr derived.key[0], AesKeyLen)
+  if not opened:
+    if dstLen > 0: zeroMem(dst, dstLen)
+    raise newException(SecretsError,
+      "sealed secrets failed authentication for target '" & target &
+      "': wrong recipient key, wrong target, or tampered ciphertext")
+
+proc sealSecretsInPlace*(recipientPubKey: peerAuth.PublicKeyBytes;
+                         target: string; payload: pointer;
+                         payloadLen: int;
+                         revoked: RevokedRecipientKeys): SealedSecrets =
+  ## Encrypt the `payloadLen` bytes of plaintext at `payload` in place to
+  ## `recipientPubKey` and return the sealed section; afterwards the buffer
+  ## holds ciphertext only. Refused (the buffer untouched) with
+  ## ``RecipientKeyRevoked`` when the key is on ``revoked``.
+  refuseRevoked(revoked, recipientPubKey)
+  let ephemeral = peerAuth.generateKeypair()
+  var shared = ecdhSharedX(ephemeral.privateKey, recipientPubKey)
+  var derived = deriveKeyAndNonce(shared, target, ephemeral.publicKey,
+                                  recipientPubKey)
+  zeroMem(addr shared[0], shared.len)
+  var tag: array[GcmTagLen, byte]
+  discard gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
+                          payload, payloadLen, encrypt = true, tag = tag)
+  zeroMem(addr derived.key[0], AesKeyLen)
+  result.ephemeralPubKey = ephemeral.publicKey
+  result.nonce = derived.nonce
+  result.tag = tag
+  result.ciphertext = newSeq[byte](payloadLen)
+  if payloadLen > 0:
+    copyMem(addr result.ciphertext[0], payload, payloadLen)

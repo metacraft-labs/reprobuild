@@ -285,6 +285,19 @@ package nim:
         flag gccLinkerExe is string,
           alias = "--gcc.linkerexe:",
           format = concat
+        # A cross target (`constructors/nim_executable`, `nim_library` under
+        # a zig `CrossTarget`): the OS beside `cpu`, and clang pointed at the
+        # zig `cc` wrapper for both compile and link
+        # (https://nim-lang.org/docs/nimc.html#crossminuscompilation).
+        flag os is string,
+          alias = "--os:",
+          format = concat
+        flag clangExe is string,
+          alias = "--clang.exe:",
+          format = concat
+        flag clangLinkerExe is string,
+          alias = "--clang.linkerexe:",
+          format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
         flag parallelBuild is int,
           alias = "--parallelBuild:",

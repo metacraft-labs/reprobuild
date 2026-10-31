@@ -201,6 +201,16 @@ const ExplicitSlotDesignation* = "\x00explicit"
 
 var activeBuilds {.threadvar.}: seq[PackageBuildState]
 
+var packageTargetObjectExemptions:
+    Table[string, seq[TargetObjectExemption]]
+  ## Per package: the object-check exemptions its recipe declared
+  ## (``declareTargetObjectExemption``). Keyed by the owning package rather
+  ## than the build frame, so an artifact frame nested in the package's
+  ## ``build:`` carries them too.
+var packageEmittedAction: Table[string, bool]
+  ## Per package: whether it has emitted an action, after which a new
+  ## exemption is refused -- the actions already emitted would not carry it.
+
 proc beginBuildBlock*(packageName: string;
                       ownerKind = "package";
                       ownerName = ""): PackageBuildState {.dynOrStatic.} =
@@ -212,6 +222,17 @@ proc beginBuildBlock*(packageName: string;
     ownerKind: ownerKind,
     ownerName: (if ownerName.len > 0: ownerName else: packageName),
     packageName: packageName)
+  # The package's outermost frame starts its exemptions and its
+  # "has emitted an action" seal afresh, so a second evaluation of the same
+  # package in one process is not refused by the first one's seal.
+  var outermost = true
+  for frame in activeBuilds:
+    if frame.packageName == packageName:
+      outermost = false
+      break
+  if outermost:
+    packageTargetObjectExemptions.del(packageName)
+    packageEmittedAction.del(packageName)
   activeBuilds.add(result)
 
 proc endBuildBlock*(state: PackageBuildState) {.dynOrStatic.} =
@@ -243,6 +264,19 @@ proc tryCurrentBuildState*(): PackageBuildState {.dynOrStatic.} =
   if activeBuilds.len == 0:
     return nil
   activeBuilds[^1]
+
+proc enclosingBuildFrames*(): seq[PackageBuildState] {.dynOrStatic.} =
+  ## The active `build:` frames of the innermost frame's package, innermost
+  ## first: the top frame and every frame directly beneath it with the same
+  ## `packageName` (an `executable` / `library` block nested in its
+  ## package's build). Empty when no build block is active.
+  if activeBuilds.len == 0:
+    return
+  let package = activeBuilds[^1].packageName
+  for i in countdown(activeBuilds.high, 0):
+    if activeBuilds[i].packageName != package:
+      break
+    result.add(activeBuilds[i])
 
 
 const fs* = ReproFs()
@@ -1357,17 +1391,54 @@ proc currentPackageDependencyRootEnvEntries*(): seq[(string, string)]
     return @[]
   packageDependencyRootEnvEntries(pkgName, packageProjectRoot(pkgName))
 
+proc declareTargetObjectExemption*(path, reason: string) {.dynOrStatic.} =
+  ## Declare that the staged ``path`` (relative to the installed prefix)
+  ## holds a foreign-architecture object the package ships on purpose, and
+  ## why (CLI/build.md §"Cross Targets: `--target`", declared exemptions).
+  ## Refused outside a package, after the package has emitted an action, for
+  ## a malformed path or an empty reason, and for a duplicate path.
+  let state = tryCurrentBuildState()
+  if state == nil:
+    raise newException(ValueError, "targetObjectExemption('" & path &
+      "') outside a package's build: block")
+  let pkg = state.packageName
+  if packageEmittedAction.getOrDefault(pkg, false):
+    raise newException(ValueError, "package '" & pkg &
+      "': targetObjectExemption('" & path & "') after the package emitted " &
+      "an action; declare exemptions first in the build: block, so every " &
+      "action carries them")
+  let e = TargetObjectExemption(path: path, reason: reason)
+  validateTargetObjectExemption(e)
+  var list = packageTargetObjectExemptions.getOrDefault(pkg, @[])
+  for existing in list:
+    if existing.path == path:
+      raise newException(ValueError, "package '" & pkg &
+        "': targetObjectExemption('" & path & "') is declared twice")
+  list.add(e)
+  packageTargetObjectExemptions[pkg] = list
+
 proc currentPackageActionEnvEntries*(): seq[(string, string)]
     {.dynOrStatic.} =
   ## Common package-root env entries injected into every action emitted
   ## while a package build body is active. ``OUT_MIRROR`` keeps typed
   ## shell actions on the mutable producer staging root; DEP_* roots
-  ## remain resolver-backed and follow declared dependency order.
+  ## remain resolver-backed and follow declared dependency order. A
+  ## package's declared object-check exemptions ride here too, so the
+  ## mirror check and the engine's publication check read the same list,
+  ## and the list is part of every action's identity.
   let outMirror = currentPackageInstallMirrorStagingRoot()
   if outMirror.len > 0:
     result.add(("OUT_MIRROR", outMirror))
   for entry in currentPackageDependencyRootEnvEntries():
     result.add(entry)
+  let state = tryCurrentBuildState()
+  if state != nil:
+    let pkg = state.packageName
+    packageEmittedAction[pkg] = true
+    let exemptions = packageTargetObjectExemptions.getOrDefault(pkg, @[])
+    if exemptions.len > 0:
+      result.add((TargetObjectExemptionsEnvVar,
+        encodeTargetObjectExemptions(exemptions)))
 
 proc mergePackageActionEnv(packageActionEnv, explicitEnv:
     openArray[(string, string)]): seq[(string, string)] {.dynOrStatic.} =

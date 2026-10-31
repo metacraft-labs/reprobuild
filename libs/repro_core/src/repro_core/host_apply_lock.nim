@@ -10,40 +10,53 @@
 ## two corrupted each other's closure realisations. The deploy agent took no
 ## apply lock at all.
 ##
-## This lock is keyed on the host, not on a state directory. Every path that
-## changes system state takes it for its whole duration: ``runInfraApply``
-## (the operator's ``repro infra apply``, the deploy agent's tick, an add-on
-## apply and the rollbacks that run through it), add-on bootstrap, and the
-## ReproOS ``repro system`` apply and rollback pipelines.
+## Rules (System-Profile-And-Infra-Apply.md, validation criteria):
 ##
-## * It is an ``flock`` on ``/run/repro/apply.lock`` (root), so the kernel
-##   releases it when the holder dies: there is nothing to reclaim.
-## * It is re-entrant within a process (a reference count): an add-on apply
-##   that calls ``runInfraApply`` takes it once.
-## * A second apply waits up to a deadline, then refuses naming the
-##   holder's PID (``ELockTimeout``).
+## * **One path per host**: ``/run/repro-apply.lock`` on Linux and macOS,
+##   ``%ProgramData%\repro-apply.lock`` on Windows. It is deliberately NOT
+##   under ``/run/repro``: that directory is an add-on root, and the add-on
+##   preflight refuses anything in it but ``secrets``. A lock file there made
+##   every preflight after the first apply incompatible.
+## * **Every privileged mutation runs under it**: ``runInfraApply`` and the
+##   in-process privileged set, the privileged broker session (Windows), the
+##   infra and add-on rollbacks, the add-on apply, bootstrap and switch
+##   recovery, and the ReproOS system apply and rollback. Each takes it
+##   FIRST, before any state directory's own lock.
+## * **Only a privileged process takes it.** The file is created ``0600``
+##   by root, so an unprivileged process can neither create nor open it, and
+##   no local user can hold it to stall the host's applies. An unprivileged
+##   process cannot change the host through ``repro`` either: on Linux and
+##   macOS a non-root apply has no broker and is refused before the
+##   privileged set, and on Windows its elevated broker takes the lock
+##   itself. So a non-privileged acquisition is a no-op.
+## * It is an ``flock``, re-entrant within a process (a reference count),
+##   and the kernel drops it when the holder dies: there is nothing to
+##   reclaim. A second apply waits up to a deadline, then refuses naming the
+##   holder's PID. Switch recovery first tries without waiting
+##   (``tryAcquireHostApplyLock``): when the holder is the switch that owns
+##   the pending marker, that switch started the recovery unit and recovery
+##   defers to it; any other holder (a deploy-agent tick) is waited for.
 ##
-## A process that is not root cannot change host state without elevating,
-## and cannot create ``/run/repro``. It locks a per-user file instead, which
-## serialises that user's applies with each other (tests included).
-## ``REPRO_HOST_APPLY_LOCK`` names the lock file explicitly (a confined
-## harness, or a test that must not share the user's lock); it is never set
-## in production.
+## ``REPRO_HOST_APPLY_LOCK`` names another lock file for tests. An
+## unprivileged process honours it (and then does lock); root honours it only
+## in a binary built with ``-d:reproHostApplyLockTestOverride``, so a
+## production root apply can never be pointed at a private lock.
 
 import std/[os, strutils]
-when not defined(windows):
-  import std/posix
-
 import ./file_lock
+import ./process_privilege
+
+export process_privilege.processIsPrivileged
 
 const
   HostApplyLockEnvVar* = "REPRO_HOST_APPLY_LOCK"
   HostApplyLockWaitEnvVar* = "REPRO_HOST_APPLY_LOCK_WAIT_SECONDS"
-  SystemHostApplyLockPath* = "/run/repro/apply.lock"
+  SystemHostApplyLockPath* = "/run/repro-apply.lock"
+  WindowsHostApplyLockName* = "repro-apply.lock"
   DefaultHostApplyLockWaitSeconds* = 600
     ## A deploy-agent tick that meets an operator apply waits this long,
-    ## then refuses (the next tick retries). Ten minutes covers a typical
-    ## apply; an apply that runs longer is reported, not waited out.
+    ## then refuses (the next tick retries).
+  RootMayOverrideHostLock* = defined(reproHostApplyLockTestOverride)
 
 type
   HostApplyLock* = object
@@ -53,21 +66,24 @@ var
   hostLock: ReproFileLock
   hostLockDepth = 0
 
-proc hostApplyLockPathFor*(euid: int; env: string; tempDir: string): string =
-  ## Pure: the lock file for a process with ``euid``, given the
-  ## ``REPRO_HOST_APPLY_LOCK`` value ``env``.
-  if env.len > 0: env
-  elif euid == 0: SystemHostApplyLockPath
-  else: tempDir / ("repro-host-apply-" & $euid & ".lock")
 
-proc hostApplyLockPath*(): string =
+proc hostApplyLockPathFor*(privileged: bool; env: string;
+                           programData = ""): string =
+  ## Pure: the lock file for a process, given ``REPRO_HOST_APPLY_LOCK``.
+  if env.len > 0 and (not privileged or RootMayOverrideHostLock):
+    return env
   when defined(windows):
-    hostApplyLockPathFor(1, getEnv(HostApplyLockEnvVar), getTempDir())
+    (if programData.len > 0: programData else: "C:\\ProgramData") /
+      WindowsHostApplyLockName
   else:
-    hostApplyLockPathFor(int(geteuid()), getEnv(HostApplyLockEnvVar),
-      getTempDir())
+    discard programData
+    SystemHostApplyLockPath
 
-proc hostApplyLockWaitMs(): int =
+proc hostApplyLockPath*(privileged = processIsPrivileged()): string =
+  hostApplyLockPathFor(privileged, getEnv(HostApplyLockEnvVar),
+    getEnv("ProgramData"))
+
+proc hostApplyLockWaitMs*(): int =
   let raw = getEnv(HostApplyLockWaitEnvVar).strip()
   var seconds = DefaultHostApplyLockWaitSeconds
   if raw.len > 0:
@@ -75,21 +91,40 @@ proc hostApplyLockWaitMs(): int =
     except ValueError: discard
   seconds * 1000
 
-proc acquireHostApplyLock*(what: string): HostApplyLock =
+proc acquireHostApplyLock*(what: string; waitMs = hostApplyLockWaitMs();
+                           privileged = processIsPrivileged()):
+    HostApplyLock =
   ## Take the host-wide apply lock for ``what`` (named in the refusal).
-  ## Re-entrant within the process. Raises ``ELockTimeout`` when another
-  ## process still holds it at the deadline.
+  ## Re-entrant within the process. A process that is not ``privileged``
+  ## takes nothing (see the module header) unless a test lock is named.
+  ## Raises ``ELockTimeout`` when another process still holds it after
+  ## ``waitMs``.
   if hostLockDepth > 0:
     inc hostLockDepth
     return HostApplyLock(held: true)
-  let path = hostApplyLockPath()
+  let override = getEnv(HostApplyLockEnvVar)
+  if not privileged and override.len == 0:
+    return HostApplyLock(held: false)
+  let path = hostApplyLockPathFor(privileged, override, getEnv("ProgramData"))
   try:
-    hostLock = acquireExclusiveLockWithin(path, hostApplyLockWaitMs())
+    hostLock = acquireExclusiveLockWithin(path, waitMs, mode = 0o600)
   except ELockTimeout as e:
     e.msg = what & ": another apply is changing this host (" & e.msg & ")"
     raise
   hostLockDepth = 1
   HostApplyLock(held: true)
+
+proc tryAcquireHostApplyLock*(what: string;
+                              privileged = processIsPrivileged()):
+    tuple[lock: HostApplyLock; holder: string; holderPids: seq[int]] =
+  ## Zero-wait form: ``lock.held`` false, ``holder`` describing who has it
+  ## and ``holderPids`` naming them (from /proc/locks) when another process
+  ## holds it now.
+  try:
+    result.lock = acquireHostApplyLock(what, 0, privileged)
+  except ELockTimeout as e:
+    result.holder = e.msg
+    result.holderPids = e.holderPids
 
 proc release*(lock: var HostApplyLock) =
   ## Release one reference; the flock is dropped with the last.

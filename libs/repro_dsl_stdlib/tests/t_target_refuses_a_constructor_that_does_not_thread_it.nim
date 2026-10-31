@@ -18,12 +18,14 @@
 ## mirror, nothing in the store) is
 ## `tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it`.
 
-import std/[os, strutils, unittest]
+import std/[os, sequtils, strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/active_context
+import repro_dsl_stdlib/toolchain_policy
 import repro_dsl_stdlib/operations/compile
 import repro_dsl_stdlib/operations/link
+import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/constructors/c_executable
 import repro_dsl_stdlib/constructors/nim_executable
 import repro_dsl_stdlib/constructors/nim_library
@@ -36,7 +38,12 @@ import repro_dsl_stdlib/constructors/node_package
 import repro_dsl_stdlib/constructors/cargo_package
 
 const
-  Triple = "armv7-unknown-linux-musleabihf"
+  # The guard's triple: a cross target no adapter threads for the C
+  # operations (the generic stub), so every non-threading constructor
+  # refuses. A zig target is threaded by `compile` / `link` / `archive`
+  # (`operations/zig_c`), so it is `ZigTriple`, below.
+  Triple = "riscv64-unknown-linux-gnu"
+  ZigTriple = "armv7-unknown-linux-musleabihf"
   Recipe = "hostOnlyProbe"
 
 proc withTarget(value: string; body: proc()) =
@@ -137,13 +144,238 @@ suite "what the guard lets through":
         check registeredBuildActions().len == 1))
 
   test "cargo_package is cross-aware and does not lift the guard for others":
-    withTarget(Triple, proc() =
+    withTarget(ZigTriple, proc() =
       inBuild(proc() =
         setCurrentOwningPackageOverride(Recipe)
         defer: clearCurrentOwningPackageOverride()
         let res = cargo_package()
         check res.compileEdge.id.len > 0
         let emitted = registeredBuildActions().len
-        let msg = refusal(proc() = discard cmake_package("src"))
-        check "cmake_package" in msg
+        # A neighbour that does not thread a zig target (cmake_package and
+        # autotools_package now do).
+        let msg = refusal(proc() = discard meson_package("src"))
+        check "meson_package" in msg
         check registeredBuildActions().len == emitted))
+
+suite "nested frames, helper reads and host triples":
+
+  test "a read in the package's build: covers an artifact frame nested in it":
+    withTarget(Triple, proc() =
+      inBuild(proc() =
+        discard activeCrossTarget()
+        let inner = beginBuildBlock(Recipe, ownerKind = "executable",
+          ownerName = "hello")
+        try:
+          check refusal(proc() =
+            discard compile("src/a.c", "build/a.o")) == ""
+        finally:
+          endBuildBlock(inner)))
+
+  test "a read in another package's enclosing frame does not cover this one":
+    withTarget(Triple, proc() =
+      inBuild(proc() =
+        discard activeCrossTarget()
+        let other = beginBuildBlock("someOtherPackage")
+        try:
+          check "compile" in refusal(proc() =
+            discard compile("src/a.c", "build/a.o"))
+        finally:
+          endBuildBlock(other)))
+
+  test "a helper reading through peekActiveCrossTarget lifts nothing":
+    withTarget(Triple, proc() =
+      inBuild(proc() =
+        proc helper(): string = peekActiveCrossTarget().triple
+        check helper() == Triple
+        let inner = beginBuildBlock(Recipe, ownerKind = "executable",
+          ownerName = "hello")
+        try:
+          check helper() == Triple
+          check "compile" in refusal(proc() =
+            discard compile("src/a.c", "build/a.o"))
+        finally:
+          endBuildBlock(inner)
+        check "compile" in refusal(proc() =
+          discard compile("src/a.c", "build/a.o"))))
+
+  test "--target naming the build host is native: no refusal":
+    when defined(linux) and defined(amd64):
+      for host in ["x86_64-unknown-linux-gnu", "x86_64-pc-linux-gnu"]:
+        withTarget(host, proc() =
+          check not isCrossTriple(host)
+          check activeTargetTriple() == ""
+          check activeTargetTripleTag() == ""
+          inBuild(proc() =
+            check refusal(proc() =
+              discard compile("src/a.c", "build/a.o")) == ""))
+      check isCrossTriple("x86_64-unknown-linux-musl")
+    check isCrossTriple(Triple)
+    check not isCrossTriple("native")
+
+suite "declared object-check exemptions":
+  proc exemptionsEnvOf(a: BuildActionDef): string =
+    for (k, v) in a.env:
+      if k == "REPRO_TARGET_OBJECT_EXEMPTIONS": return v
+
+  test "every action the package emits carries its exemptions":
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/bpf/prog.o", "an eBPF program")
+      let first = buildAction(id = "x-first", call = inlineExecCall(@["true"]))
+      let inner = beginBuildBlock(Recipe, ownerKind = "executable",
+        ownerName = "hello")
+      try:
+        let nested = buildAction(id = "x-nested",
+          call = inlineExecCall(@["true"]))
+        check exemptionsEnvOf(nested) == "usr/lib/bpf/prog.o\tan eBPF program"
+      finally:
+        endBuildBlock(inner)
+      check exemptionsEnvOf(first) == "usr/lib/bpf/prog.o\tan eBPF program")
+
+  test "an exemption after the package emitted an action is refused":
+    inBuild(proc() =
+      discard buildAction(id = "x-early", call = inlineExecCall(@["true"]))
+      check "after the package emitted an action" in refusal(proc() =
+        targetObjectExemption("usr/lib/fw.bin", "firmware")))
+
+  test "a duplicate, a pattern and a missing reason are refused":
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/fw.bin", "firmware")
+      check "declared twice" in refusal(proc() =
+        targetObjectExemption("usr/lib/fw.bin", "again"))
+      check refusal(proc() =
+        targetObjectExemption("usr/lib/*.bin", "firmware")).len > 0
+      check "no reason" in refusal(proc() =
+        targetObjectExemption("usr/lib/other.bin", "")))
+
+  test "a new evaluation of the package starts with no exemptions or seal":
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/fw.bin", "firmware")
+      discard buildAction(id = "x-a", call = inlineExecCall(@["true"])))
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/other.bin", "firmware")
+      let a = buildAction(id = "x-b", call = inlineExecCall(@["true"]))
+      check exemptionsEnvOf(a) == "usr/lib/other.bin\tfirmware")
+
+suite "a zig target is threaded into the C operations":
+  proc argStrings(a: BuildActionDef): seq[string] =
+    for arg in a.call.arguments:
+      result.add(arg.name & "=" & arg.encodedValue.replace("\x1f", " "))
+
+  test "compile, link and c_executable emit zig cc with the target's flags":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let o = compile("src/a.c", "build/a.o")
+        check o.call.packageName == "zig"
+        check o.call.subcommand == "cc"
+        let args = argStrings(o)
+        checkpoint($args)
+        check args.anyIt(it.startsWith(
+          "targetArgs=-target arm-linux-musleabihf -mcpu="))
+        check "sources=src/a.c" in args
+        check "compileOnly=true" in args
+        let o2 = compile("src/b.c", "build/b.o")
+        let exe = link(@[o, o2], "build/hello")
+        check exe.call.subcommand == "cc"
+        # Every object, not only the first; each at its target-keyed path.
+        check "output=build@" & ZigTriple & "/a.o" in args
+        check "sources=build@" & ZigTriple & "/a.o build@" & ZigTriple &
+          "/b.o" in argStrings(exe)
+        check "output=build/hello@" & ZigTriple in argStrings(exe) or
+          "output=build@" & ZigTriple & "/hello" in argStrings(exe)
+        let before = registeredBuildActions().len
+        discard c_executable("hello2", @["src/hello.c"])
+        check registeredBuildActions().len > before))
+
+  test "a static library is a zig ar archive":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let o = compile("src/a.c", "build/a.o")
+        let lib = link(LinkOptions(objects: @[o], kind: lokStatic,
+          target: "build/liba.a"))
+        check lib.call.packageName == "zig"
+        check lib.call.subcommand == "ar"
+        check "archive=build@" & ZigTriple & "/liba.a" in argStrings(lib)))
+
+  test "a native build still emits the native compiler, at the bare path":
+    withTarget("", proc() =
+      inBuild(proc() =
+        let o = compile("src/a.c", "build/a.o")
+        check o.call.packageName != "zig"
+        check "build/a.o" in o.outputs
+        check nim_executable("hello", "src/hello.nim").install.outputs.anyIt(
+          it.endsWith("hello") and "@" notin it)))
+
+  test "a registered package that does not declare zig is refused":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        # `Recipe` is not a registered package here; register a frame for
+        # one that is: the stdlib's own `zig` package does not declare zig
+        # as a native dependency of itself.
+        let other = beginBuildBlock("zig")
+        try:
+          let msg = refusal(proc() = discard compile("src/a.c", "build/a.o"))
+          checkpoint(msg)
+          check "does not declare `zig` in `nativeBuildDeps:`" in msg
+        finally:
+          endBuildBlock(other)))
+
+  test "nim_executable and nim_library build for the zig target":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let exe = nim_executable("hello", "src/hello.nim")
+        let args = argStrings(exe.install)
+        checkpoint($args)
+        check "cpu=arm" in args
+        check "os=linux" in args
+        # Keyed output, so the native build's `hello` is a different file.
+        check "output=hello@" & ZigTriple in args
+        check "cc=clang" in args
+        check args.anyIt(it.startsWith("clangExe=") and
+          it.endsWith("/" & ZigTriple & "/wrappers/cc") or
+          (it.startsWith("clangExe=") and it.endsWith("/cc")))
+        var wrapperIds: seq[string]
+        for a in registeredBuildActions():
+          if a.id.startsWith("zig-cross-wrappers-"): wrapperIds.add(a.id)
+        check wrapperIds.len == 1
+        check wrapperIds[0] in exe.install.deps
+        let lib = nim_library("hello", "src/hello.nim")
+        check "cpu=arm" in argStrings(lib.install)))
+
+  test "cmake_package configures with a toolchain file naming the wrappers":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        setCurrentOwningPackageOverride(Recipe)
+        defer: clearCurrentOwningPackageOverride()
+        discard cmake_package("src")
+        var configure: BuildActionDef
+        var wrappers = ""
+        for a in registeredBuildActions():
+          if a.call.subcommand == "configure": configure = a
+          if a.id.startsWith("zig-cross-wrappers-"): wrappers = a.id
+        check wrappers.len > 0
+        let args = argStrings(configure).join("\n")
+        checkpoint(args)
+        check "CMAKE_TOOLCHAIN_FILE=" in args
+        check "toolchain.cmake" in args))
+
+  test "autotools_package configures with the zig toolchain and --host":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        setCurrentOwningPackageOverride(Recipe)
+        defer: clearCurrentOwningPackageOverride()
+        discard autotools_package("src")
+        var configure: BuildActionDef
+        var wrappers = ""
+        for a in registeredBuildActions():
+          if a.commandStatsId == "autotools_package.configure": configure = a
+          if a.id.startsWith("zig-cross-wrappers-"): wrappers = a.id
+        check wrappers.len > 0
+        check wrappers in configure.deps
+        var cc = ""
+        for (k, v) in configure.env:
+          if k == "CC": cc = v
+        check cc.endsWith("/" & ZigTriple & "/wrappers/cc") or cc.endsWith("/cc")
+        let script = argStrings(configure).join(" ")
+        checkpoint(script)
+        check "Generated by GNU Autoconf" in script
+        check "--host=arm-linux-musleabihf" in script))

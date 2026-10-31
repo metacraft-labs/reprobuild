@@ -3,6 +3,12 @@
 ## stand-in repro binary. Every command stops at usage or an explicit refusal;
 ## none plans, applies, probes the host, or starts a daemon. The Linux arm must
 ## still reach the real add-on usage while other platforms refuse that mode.
+##
+## The rollback cases tell the two rollback paths apart by how each rejects
+## an unknown option, before either takes a lock or reads the host:
+## `repro_addon/cli.runAddonRollbackCli` says "unknown option", the ordinary
+## `parseInfraFlags` raises "unknown flag:". The add-on state directory is a
+## scratch directory holding only the ledger copy `isAddonHost` tests for.
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
@@ -81,3 +87,26 @@ suite "portable CLI keeps the Linux add-on boundary":
     else:
       check "repro system adopt: supported only on Linux" in actual.output
       check "only an add-on host" notin actual.output
+
+  test "rollback on an add-on host takes the add-on switch only on Linux":
+    let stateDir = createTempDir("addon-dispatch-", "")
+    defer: removeDir(stateDir)
+    writeFile(stateDir / "addon-ledger", "")
+    let actual = dispatch("system",
+      @["rollback", "--unknown-dispatch-control"], stateDir = stateDir)
+    check actual.code == 2
+    when defined(linux):
+      check "unknown option --unknown-dispatch-control" in actual.output
+      check "unknown flag:" notin actual.output
+    else:
+      check "unknown flag: --unknown-dispatch-control" in actual.output
+      check "unknown option" notin actual.output
+
+  test "rollback elsewhere keeps the ordinary system rollback":
+    let stateDir = createTempDir("addon-dispatch-", "")
+    defer: removeDir(stateDir)
+    let actual = dispatch("system",
+      @["rollback", "--unknown-dispatch-control"], stateDir = stateDir)
+    check actual.code == 2
+    check "unknown flag: --unknown-dispatch-control" in actual.output
+    check "unknown option" notin actual.output

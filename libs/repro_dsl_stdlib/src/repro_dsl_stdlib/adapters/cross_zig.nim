@@ -257,6 +257,27 @@ proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
   else:
     raise newException(ValueError, "cross_zig: unknown wrapper role " & role)
 
+const ZigCrossCmakeToolchainName* = "toolchain.cmake"
+
+proc zigCrossCmakeToolchain*(t: ZigCrossTarget; wrapperDir: string): string =
+  ## The CMake toolchain file for a zig target: the wrappers in
+  ## `wrapperDir` as the compilers and archiver, the target named so CMake
+  ## enters cross-compiling mode, and programs searched on the build host
+  ## only (they run there). Libraries, headers and packages keep CMake's
+  ## default search: a `buildDeps:` sibling's target mirror arrives on
+  ## `CMAKE_PREFIX_PATH`, and the object check refuses a host library that
+  ## found its way in anyway.
+  ## https://cmake.org/cmake/help/latest/manual/cmake-toolchains.7.html#cross-compiling-for-linux
+  let cpu = t.rustTriple.split('-')[0]
+  proc q(path: string): string = "\"" & path.replace("\\", "/") & "\""
+  "set(CMAKE_SYSTEM_NAME Linux)\n" &
+    "set(CMAKE_SYSTEM_PROCESSOR " & cpu & ")\n" &
+    "set(CMAKE_C_COMPILER " & q(wrapperDir / "cc") & ")\n" &
+    "set(CMAKE_CXX_COMPILER " & q(wrapperDir / "c++") & ")\n" &
+    "set(CMAKE_AR " & q(wrapperDir / "ar") & " CACHE FILEPATH \"\")\n" &
+    "set(CMAKE_RANLIB " & q(wrapperDir / "ranlib") & " CACHE FILEPATH \"\")\n" &
+    "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n"
+
 proc zigCrossRustflags*(remapRoot: string): string =
   ## The target RUSTFLAGS: the static-musl flags, plus the path remap that
   ## makes the build independent of where the checkout is (`remapRoot`,
@@ -310,6 +331,10 @@ proc emitZigCrossWrappersAction*(projectRoot, packageName,
   for role in ["cc", "c++", "ar", "ranlib", "rust-linker"]:
     script.add("printf '%s' " & q(zigCrossWrapperScript(role, t, libDir)) &
       " > " & q(dir / role) & "; chmod 755 " & q(dir / role) & "; ")
+  # The CMake toolchain file beside the wrappers it names
+  # (`cmake_package` under a zig target).
+  script.add("printf '%s' " & q(zigCrossCmakeToolchain(t, dir)) & " > " &
+    q(dir / ZigCrossCmakeToolchainName) & "; ")
   # An empty archive: `zig ar rc` with no members writes a valid, empty
   # `ar` file, which the linker accepts for `-latomic` and resolves nothing
   # from (zig's compiler-rt provides the atomics).

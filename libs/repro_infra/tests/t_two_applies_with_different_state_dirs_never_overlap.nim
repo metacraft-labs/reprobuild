@@ -103,8 +103,59 @@ when defined(posix):
       outer.release()
       check not hostApplyLockHeldHere()
 
-    test "the system lock lives outside every state directory":
-      check hostApplyLockPathFor(0, "", "/tmp") == SystemHostApplyLockPath
-      check hostApplyLockPathFor(1000, "", "/tmp") ==
-        "/tmp/repro-host-apply-1000.lock"
-      check hostApplyLockPathFor(0, "/x/l", "/tmp") == "/x/l"
+    test "a privileged set never runs while another process holds the host lock":
+      # The broker session (Windows) and the in-process privileged set are
+      # the two places a privileged operation executes, and each takes the
+      # host lock itself, whoever started the apply: an unprivileged apply's
+      # elevated half cannot overlap a root apply. The in-process set is
+      # the one this platform runs. Before round 3 it took no lock: B wrote
+      # the fixture file while A held the lock.
+      let tmp = createTempDir("host-apply-lock-privset-", "")
+      defer: removeDir(tmp)
+      putEnv(HostApplyLockEnvVar, tmp / "apply.lock")
+      defer: delEnv(HostApplyLockEnvVar)
+      var held, release: array[2, cint]
+      doAssert pipe(held) == 0 and pipe(release) == 0
+      let a = fork()
+      doAssert a >= 0
+      if a == 0:
+        var lock = acquireHostApplyLock("A")
+        var c = 'h'
+        discard posix.write(held[1], addr c, 1)
+        discard posix.read(release[0], addr c, 1)
+        lock.release()
+        exitnow(0)
+      var c: char
+      doAssert posix.read(held[0], addr c, 1) == 1
+      putEnv(HostApplyLockWaitEnvVar, "0")
+      defer: delEnv(HostApplyLockWaitEnvVar)
+      createDir(tmp / "sandbox")
+      let op = PrivilegedOperation(kind: pokFixtureFile, address: "fx",
+        fileRelPath: "written", fileContent: "B")
+      var refused = false
+      try:
+        discard applyPrivilegedSetInProcess(
+          FixtureContext(filePrefix: tmp / "sandbox"),
+          [PlannedOperation(operation: op)])
+      except ELockTimeout as e:
+        refused = a.int in e.holderPids
+      check refused
+      check not fileExists(tmp / "sandbox" / "written")
+      c = 'r'
+      doAssert posix.write(release[1], addr c, 1) == 1
+      var status: cint
+      doAssert waitpid(a, status, 0) == a
+
+    test "the lock is one host path, outside every add-on root and state directory":
+      check SystemHostApplyLockPath == "/run/repro-apply.lock"
+      check not SystemHostApplyLockPath.startsWith("/run/repro/")
+      check hostApplyLockPathFor(true, "", "") == SystemHostApplyLockPath
+      # Root ignores a test override in a production build (m4).
+      check hostApplyLockPathFor(true, "/x/l", "") == SystemHostApplyLockPath
+      check hostApplyLockPathFor(false, "/x/l", "") == "/x/l"
+
+    test "an unprivileged process without a test lock takes nothing":
+      delEnv(HostApplyLockEnvVar)
+      var l = acquireHostApplyLock("unprivileged", privileged = false)
+      check not hostApplyLockHeldHere()
+      l.release()

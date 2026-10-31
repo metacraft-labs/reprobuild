@@ -42,7 +42,7 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[os, strutils]
+import std/[json, os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -50,8 +50,17 @@ import repro_deploy_agent/secrets
 import repro_peer_cache/auth as peerAuth
 import repro_home_intent/host_identity
 import repro_profile
-from repro_profile_compile import defaultSystemPlanTarget
 import ./infra
+# Add-on mode owns Linux filesystem and ledger operations, so its closure
+# reaches `repro_addon/linux_fs` and its `<sys/vfs.h>` bindings. Keep those
+# imports out of the portable engine, exactly as `./infra` does -- this
+# module is linked into `apps/repro/repro.nim`, which builds for macOS and
+# Windows too. `scripts/check_portable_engine_closure.sh` is the gate.
+when defined(linux):
+  import repro_addon/addon_apply
+  import repro_addon/agent_switch
+import repro_elevation
+import repro_profile_compile
 
 type
   DeployAgentFlags = object
@@ -160,11 +169,60 @@ proc runDeployAgentKeygen(args: seq[string]): int =
   echo peerAuth.publicKeyHex(key.publicKey)
   0
 
+proc runDeployAgentCompileProfile*(args: seq[string]): int =
+  ## ``repro deploy-agent compile-profile --staged <module.nim>
+  ## --canonical-out <file> --actions-out <file> [--state-dir D]``: compile a
+  ## staged manifest profile (its bundle beside it, as
+  ## ``stageProfileSources`` writes it) to the canonical resource text and
+  ## the build actions, through the same Phase-F3 path ``repro infra apply``
+  ## uses, and write both; apply nothing. The unprivileged fetch unit of a
+  ## ReproOS add-on host runs this as its profile compiler, so the compiler
+  ## never runs in the root apply unit (ReproOS add-on §9.1).
+  var staged, canonicalOut, actionsOut, stateDir = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if i + 1 >= args.len:
+      stderr.writeLine("repro deploy-agent compile-profile: " & a &
+        " needs a value")
+      return 2
+    case a
+    of "--staged": staged = args[i + 1]
+    of "--canonical-out": canonicalOut = args[i + 1]
+    of "--actions-out": actionsOut = args[i + 1]
+    of "--state-dir": stateDir = args[i + 1]
+    else:
+      stderr.writeLine("repro deploy-agent compile-profile: unknown option " & a)
+      return 2
+    i += 2
+  if staged.len == 0 or canonicalOut.len == 0 or actionsOut.len == 0:
+    stderr.writeLine("usage: repro deploy-agent compile-profile --staged " &
+      "<module.nim> --canonical-out <file> --actions-out <file> [--state-dir D]")
+    return 2
+  if stateDir.len == 0: stateDir = staged.parentDir / ".compile-state"
+  var bundlePaths: seq[string]
+  for f in walkDirRec(staged.parentDir):
+    if f != staged: bundlePaths.add(f)
+  var text = ""
+  var actions: seq[ProfileBuildAction]
+  let host = try: selectHost("", false).name except CatchableError: ""
+  if not resolveSystemProfileText(staged, readFile(staged), stateDir,
+      "repro deploy-agent compile-profile", text,
+      planCommand = "repro infra plan", outBuildActions = addr actions,
+      target = defaultSystemPlanTarget(host), declaredInputs = bundlePaths):
+    return 1
+  writeFile(canonicalOut, text)
+  writeFile(actionsOut, $(%actions))
+  0
+
 proc runDeployAgentCommand*(args: seq[string]): int =
   ## ``repro deploy-agent`` entrypoint (one tick), or ``repro deploy-agent
-  ## keygen`` (see `runDeployAgentKeygen`).
+  ## keygen`` (see `runDeployAgentKeygen`), or ``compile-profile``
+  ## (`runDeployAgentCompileProfile`).
   if args.len > 0 and args[0] == "keygen":
     return runDeployAgentKeygen(args[1 .. ^1])
+  if args.len > 0 and args[0] == "compile-profile":
+    return runDeployAgentCompileProfile(args[1 .. ^1])
   var flags: DeployAgentFlags
   try:
     flags = parseFlags(args)
@@ -289,10 +347,56 @@ proc runDeployAgentCommand*(args: seq[string]): int =
         outBuildActions = addr outBuildActions, target = capturedTarget,
         declaredInputs = bundlePaths)
 
-  let deps = AgentDeps(
-    apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
-      hostIdentity = host,
-      profileResolver = resolver))
+  # On a ReproOS add-on host every agent apply goes through the add-on
+  # switch (spec §9, §9.1): it is ledgered, retained as an add-on generation
+  # recording the manifest's deployment and sequence (§7.4), reachable by
+  # `repro system rollback` (§7.5), and an operator rollback pauses the
+  # agent (§9.3). The legacy `--secrets-dir` delivery above is unchanged:
+  # the tick still opens the sealed section into it before the apply. A
+  # host whose agent applied outside the switch before this build is first
+  # taken over by one switch of the profile it last applied (§9
+  # "Migration"), which adopts every object without writing or restarting.
+  #
+  # An add-on host is a Linux host by construction -- the switch is a btrfs
+  # subvolume and a dpkg-level ownership ledger -- so off Linux there is no
+  # add-on state to detect and the ordinary apply hook is the only arm. The
+  # detection lives inside the `when` with the imports, rather than beside
+  # them, because naming `hostAddonStateDir` or `isAddonHost` out here would
+  # pull the whole add-on closure back into a macOS or Windows engine.
+  var deps: AgentDeps
+  var throughAddonSwitch = false
+  when defined(linux):
+    let addonState = hostAddonStateDir()
+    if isAddonHost(addonState) and
+        absolutePath(addonState) != absolutePath(flags.stateDir):
+      if needsLegacyMigration(addonState, flags.stateDir):
+        let legacyGen = legacyAgentGeneration(flags.stateDir)
+        try:
+          let r = migrateLegacyAgentState(addonState, flags.stateDir,
+            flags.target, host)
+          echo "repro deploy-agent: migration: add-on generation " &
+            r.generationId & " took over agent generation " & legacyGen &
+            " (applied " & $r.infra.appliedCount & ", no-op " &
+            $r.infra.noOpCount & ")"
+        except CatchableError as e:
+          let msg = "migrating agent generation " & legacyGen & " into the " &
+            "add-on switch failed; nothing was applied: " & e.msg
+          stderr.writeLine("repro deploy-agent: " & msg)
+          var rec = tickStatusForRaise(flags.target, msg)
+          rec.exitCode = 1
+          rec.errorCode = "addon_migration_failed"
+          recordTick(flags.stateDir, flags.target, rec)
+          return 1
+      let ctx = FixtureContext(filePrefix: flags.stateDir)
+      deps = AgentDeps(
+        apply: addonAgentApplyHook(addonState, host, flags.stateDir, resolver,
+          mkBuildActionDispatcher(flags.cacheRoot, ctx)))
+      throughAddonSwitch = true
+  if not throughAddonSwitch:
+    deps = AgentDeps(
+      apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
+        hostIdentity = host,
+        profileResolver = resolver))
 
   # `runAgentTickRecorded`, not `runAgentTick`: it runs the same tick, resolves
   # the same exit code, and additionally leaves the durable record — including
