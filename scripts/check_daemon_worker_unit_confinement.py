@@ -224,7 +224,14 @@ EXPOSURE_LINE = re.compile(r"Overall exposure level for \S+: (\d+)\.(\d)\b")
 
 def check_conf4(text):
     with open(THRESHOLD) as f:
-        threshold = f.read().strip()
+        # The file records where the number was measured; a committed
+        # exposure ceiling is only comparable against the same host class.
+        threshold = ''
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                threshold = line
+                break
     try:
         analyze = systemd_analyze()
     except SystemdAnalyzeUnavailable as err:

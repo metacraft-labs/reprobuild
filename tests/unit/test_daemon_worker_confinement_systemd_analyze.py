@@ -166,8 +166,12 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
         self.assertEqual(
             self.conf4(stdout="→ Overall exposure level for repro-daemon-worker.service:"
                               " 2.6 OK 🙂\n", code=0),
-            (ROOT / "recipes/repro-daemon-worker/confinement-threshold")
-            .read_text(encoding="utf-8").strip())
+            # The file records the host class it was measured on as comments,
+            # so compare against the value the reader takes, not the whole file.
+            next(line.strip() for line in
+                 (ROOT / "recipes/repro-daemon-worker/confinement-threshold")
+                 .read_text(encoding="utf-8").splitlines()
+                 if line.strip() and not line.strip().startswith("#")))
 
 
 @unittest.skipIf(os.name == "nt" or not sys.platform.startswith("linux"),
