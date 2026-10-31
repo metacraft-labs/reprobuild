@@ -901,6 +901,15 @@ jobs:
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
           #    toolchain comes from its dev shell (direnv).
           direnv allow "$ct_root"
+          # Keep the build's own output, and on a derivation failure keep that
+          # derivation's BUILDER log too. Without this the step reports only
+          # `error: Cannot build '<drv>'` -- nix buffers the builder's stdout
+          # and nothing here asks for it -- so a failure names the derivation
+          # and hides the error inside it. Step 15 already tees its output;
+          # this is the same thing one step later.
+          mkdir -p "$repro_root/test-logs"
+          ct_build_log="$repro_root/test-logs/ct-build.log"
+          set +e
           ( cd "$ct_root" && \
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \
@@ -910,7 +919,20 @@ jobs:
             REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
             REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \
             REPRO_BINARY_CACHE_CERT_PATH="${REPRO_BINARY_CACHE_CERT_PATH:-}" \
-            direnv exec "$ct_root" just build-once )
+            direnv exec "$ct_root" just build-once ) 2>&1 | tee "$ct_build_log"
+          ct_build_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$ct_build_rc" -ne 0 ]; then
+            grep -oE "/nix/store/[a-z0-9]+-[^']+\\.drv" "$ct_build_log" \
+              | sort -u \
+              | while read -r drv; do
+                  echo "=== nix log $drv ==="
+                  nix log "$drv" 2>&1 \
+                    | tee "$repro_root/test-logs/drv-$(basename "$drv" .drv).log" \
+                    | tail -80
+                done
+            exit "$ct_build_rc"
+          fi
           ct_bin="$ct_root/src/build-debug-repro/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
