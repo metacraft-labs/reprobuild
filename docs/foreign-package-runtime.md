@@ -309,20 +309,26 @@ unit (`apt_closure.realiseAptClosure`):
    ship different bytes at the same path are a refusal, and so is a path
    that would be written through another member's symlink.
 4. Both levels are filled in a fresh `0700` temporary sibling, made `0755`
-   and renamed into place, with the completion marker written last.
+   and marked complete, then published through the store like any other
+   prefix: the store seals a `.repro-receipt` into it, renames it into
+   place and records it in the store's index.
 5. Once a member's prefix exists its cached `.deb` is deleted (the prefix
    supersedes it), so the cache holds only in-flight downloads. Prefixes no
    longer named by any generation belong to the store's garbage collector:
-   each generation registers the prefixes it runs from as a store root, and
-   a prefix no root holds becomes collectable once the retention window
-   (never the current or previous generation) has passed. Nothing deletes
-   them yet.
+   each generation registers the closure it runs from (the union and its
+   members) as a store root, and `repro store gc` collects a prefix no
+   root holds once the retention window (never the current or previous
+   generation) has passed.
 
-The closure's `<hash16>` depends only on the realiser version, the
-architecture and the member digests. The planner therefore renders the unit
-offline, and the host realises exactly the path the unit names. In an epoch,
-`:` is written `_`, because `:` separates a `BindReadOnlyPaths=` source from
-its target.
+Each `<hash16>` is the store's realization hash for the prefix: for a
+member it depends on the realiser version, the package name, version and
+architecture and the `.deb`'s SHA-256; for the closure on the realiser
+version, the first root's name and version, the architecture and the member
+digests. The planner therefore renders the unit offline, and the host
+realises exactly the path the unit names. The name and version in the path
+keep only `[A-Za-z0-9._-]` and write every other character `_` (so an
+epoch's `:`, which separates a `BindReadOnlyPaths=` source from its target,
+never appears, and neither do `+` or `~`).
 
 ### How the daemon finds its libraries
 

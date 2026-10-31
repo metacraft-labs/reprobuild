@@ -13318,13 +13318,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_dsl_stdlib",
+        "repro_local_store",
         "repro_test_support"
       ],
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim",
-      "sourceSuiteCount": 8,
-      "staticCaseCount": 35,
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 37,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

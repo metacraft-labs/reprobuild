@@ -38,6 +38,7 @@ import repro_dsl_stdlib/packages/apt_index
 import repro_dsl_stdlib/packages/apt_jammy
 import repro_dsl_stdlib/packages/apt_closure {.all.}
 import repro_core/file_lock
+import repro_local_store
 from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 const ShaA = "a".repeat(64)
@@ -252,8 +253,12 @@ suite "Add-On apt closure: identity and store paths (spec §8.3 item 4)":
 
   test "the prefix names the first root and writes an epoch's ':' as '_'":
     let p = aptClosurePrefixPath("/repro/store", sampleLock())
+    # The store's own path for the closure's realization hash (G38: the
+    # store's recovery, index and collector must recognise it).
     check p == "/repro/store/prefixes/apt-closure-svc/1_2.0-1-" &
-      aptClosureIdentity(sampleLock())
+      prefixIdHex(aptClosurePrefixId(sampleLock()))[0 ..< 16]
+    check p == "/repro/store/" & prefixRelativePath("apt-closure-svc",
+      "1:2.0-1", aptClosurePrefixId(sampleLock()))
     check ':' notin p
     check aptDebPrefixPath("/repro/store", sampleLock().debs[1]).startsWith(
       "/repro/store/prefixes/apt-deb-svc/1_2.0-1-")
@@ -535,6 +540,84 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
     check not debianArchitectureRunsOn("arm64", "armv7l")
     check not debianArchitectureRunsOn("armhf", "")
     check hostMachineName().len > 0
+
+suite "Add-On apt closure: store receipts, index rows and GC (threat model G38)":
+  ## A closure prefix the store does not know is never collected and no
+  ## root can hold it. Every prefix the realiser writes -- each member's
+  ## and the union -- must carry a sealed receipt and an index row, so a
+  ## generation's root keeps it and ``repro store gc`` collects it once no
+  ## root does. Falsifying mutation ``apt-closure-unrecorded``
+  ## (``scripts/run_addon_unit_mutation.sh t_addon_apt_closure
+  ## apt-closure-unrecorded``): prefixes renamed into place
+  ## without receipt or row; this suite must then fail.
+  test "every prefix is indexed, rooted while held and collected when not":
+    let root = scratch("g38")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")]),
+      fileDeb("libdep", @[("usr/lib/libdep.so.1", "dep")])])
+    let store = root / "store"
+    var count = new int
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    let ids = aptClosurePrefixIds(lock)
+    check ids.len == 3
+    var paths = @[prefix]
+    for d in lock.debs: paths.add(aptDebPrefixPath(store, d))
+    var st = openStore(store)
+    defer: st.close()
+    for i, id in ids:
+      let rel = paths[i].relativePath(store)
+      check fileExists(paths[i] / ReceiptFileName)
+      let row = st.lookupPrefix(id)
+      check row.found
+      check row.row.realizedPath == rel
+      check st.lookupPrefixByRealizedPath(rel).found
+    # The store's own recovery recognises every one of them (a prefix
+    # without a receipt, or whose leaf is not the store's name for its
+    # hash, would be quarantined here).
+    let rec = st.recover()
+    check rec.quarantinedPrefixes.len == 0
+    for pth in paths: check dirExists(pth)
+    # Held by a root: the collector leaves all three.
+    st.registerRoot("t-generation", rkProfile)
+    for id in ids: st.attachPrefixToRoot("t-generation", id)
+    let kept = st.gc(graceSeconds = 0)
+    check kept.quarantined.len == 0
+    for pth in paths: check dirExists(pth)
+    check aptClosureRealised(store, lock)
+    # Released: the collector takes all three.
+    st.deleteRoot("t-generation")
+    let collected = st.gc(graceSeconds = 0)
+    check collected.quarantined.len == 3
+    for pth in paths: check not dirExists(pth)
+    check not aptClosureRealised(store, lock)
+    for id in ids: check not st.lookupPrefix(id).found
+    # And the closure realises again afterwards.
+    check realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l") == prefix
+    check st.lookupPrefix(ids[0]).found
+
+  test "a published prefix whose index row was lost is re-indexed":
+    let root = scratch("g38-reindex")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "x")])])
+    let store = root / "store"
+    var count = new int
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    # Simulate a realiser that died between the store's rename and its
+    # index insert: the rows go, the receipts stay.
+    block:
+      removeFile(store / "index.db")
+      for side in ["index.db-wal", "index.db-shm"]:
+        if fileExists(store / side): removeFile(store / side)
+    let before = count[]
+    check realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l") == prefix
+    check count[] == before          # nothing fetched or unpacked again
+    var st = openStore(store)
+    defer: st.close()
+    for id in aptClosurePrefixIds(lock): check st.lookupPrefix(id).found
 
 when defined(posix):
   suite "Add-On apt closure: concurrent realisers and crash leftovers":

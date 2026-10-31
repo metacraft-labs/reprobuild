@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run one add-on unit gate (libs/repro_addon/tests/<test>.nim), green and
-# then under a falsifying mutation, and require red under the mutation.
+# Run one add-on unit gate (libs/repro_addon/tests/<test>.nim, or the apt
+# closure realiser's libs/repro_dsl_stdlib/tests/<test>.nim), green and then
+# under a falsifying mutation, and require red under the mutation.
 #
 #   scripts/run_addon_unit_mutation.sh <test-basename> <mutation>
 #
@@ -14,6 +15,7 @@ cd "$(dirname "$0")/.."
 test="${1:?usage: run_addon_unit_mutation.sh <test-basename> <mutation>}"
 mutation="${2:?usage: run_addon_unit_mutation.sh <test-basename> <mutation>}"
 src="libs/repro_addon/tests/${test}.nim"
+[ -f "$src" ] || src="libs/repro_dsl_stdlib/tests/${test}.nim"
 [ -f "$src" ] || { echo "run_addon_unit_mutation: no such test: $src" >&2; exit 2; }
 mkdir -p build/test-bin
 

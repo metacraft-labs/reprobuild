@@ -303,7 +303,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_action.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	35
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	37
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4

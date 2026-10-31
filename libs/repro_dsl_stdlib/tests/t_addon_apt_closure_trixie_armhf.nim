@@ -124,13 +124,14 @@ suite "Add-On apt closure: real Debian trixie armhf closure":
           check sameFile(exporter,
             aptDebPrefixPath(store, d) / "usr/bin/prometheus-node-exporter")
 
-      # Only ``usr`` and ``etc`` (and the marker) at the top: the base owns
-      # /bin, /lib, /sbin as merged-/usr links, and /var, /run, ... are the
-      # host's.
+      # Only ``usr`` and ``etc`` (and the marker and the store's receipt)
+      # at the top: the base owns /bin, /lib, /sbin as merged-/usr links,
+      # and /var, /run, ... are the host's.
       var top: seq[string] = @[]
       for kind, p in walkDir(prefix): top.add(p.extractFilename)
-      check top.len == 3
-      check "usr" in top and "etc" in top and ".repro-apt-closure" in top
+      check top.len == 4
+      check "usr" in top and "etc" in top and ".repro-apt-closure" in top and
+        ".repro-receipt" in top
 
       # No setuid/setgid bit anywhere (util-linux's ``su`` is setuid in the
       # archive), no special files.
@@ -144,11 +145,15 @@ suite "Add-On apt closure: real Debian trixie armhf closure":
             setid.add(p)
         check setid.len == 0
 
-      # Nothing was written anywhere but the store's prefixes and the
-      # cache: the store root holds only ``prefixes``, and under it only
-      # complete ``apt-deb-*`` and ``apt-closure-*`` entries.
-      check toSeq(walkDir(store)).mapIt(it.path.extractFilename) ==
-        @["prefixes"]
+      # Nothing was written anywhere but the store and the cache: the store
+      # root holds only the store's own layout (prefixes, its index and
+      # its empty staging, CAS and collector directories), and under
+      # ``prefixes`` only complete ``apt-deb-*`` and ``apt-closure-*``
+      # entries, each one the store published.
+      for kind, p in walkDir(store):
+        check p.extractFilename in ["prefixes", "tmp", "cas", "gc",
+          "index.db", "index.db-wal", "index.db-shm"]
+      check toSeq(walkDir(store / "tmp")).len == 0
       for kind, p in walkDir(store / "prefixes"):
         let leaf = p.extractFilename
         check leaf.startsWith("apt-deb-") or leaf.startsWith("apt-closure-")

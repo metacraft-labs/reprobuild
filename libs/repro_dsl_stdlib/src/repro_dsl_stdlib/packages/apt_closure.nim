@@ -45,6 +45,7 @@ when defined(posix):
 
 import repro_binary_cache_client/http_pool
 import repro_core/file_lock
+import repro_local_store
 
 import ./apt_index
 import ./apt_jammy
@@ -61,10 +62,18 @@ const
   AptClosureLockHeader* = "repro-apt-closure-lock v1"
     ## First line of every lock. A future incompatible format changes this.
 
-  AptClosureRealiserVersion* = "2"
+  AptClosureRealiserVersion* = "3"
     ## Part of the closure identity. Bump it whenever the realiser changes
     ## the BYTES or LAYOUT it writes (hardening, folding, union rules), so a
     ## prefix written by an older realiser is never mistaken for a new one.
+    ## "3": every prefix is published through the store (a sealed
+    ## ``.repro-receipt`` and an index row) at the store's own path for its
+    ## realization hash, so the collector sees it and a root can hold it.
+
+  AptDebStoreAdapter* = "apt-deb"
+    ## The store adapter name a member prefix's receipt and index row carry.
+  AptClosureStoreAdapter* = "apt-closure"
+    ## The store adapter name a closure (union) prefix carries.
 
   AddOnSystemStoreRoot* = "/repro/store"
     ## Add-On Mode's system-scope store (spec §5.1). Fixed: a different root
@@ -77,6 +86,17 @@ const
 
   DebPrefixMarker = ".repro-apt-deb"
   ClosurePrefixMarker = ".repro-apt-closure"
+
+const AptClosureMutation {.strdefine: "reproAddonMutation".} = ""
+  ## Compile-time falsifying mutations of the realiser (the add-on's
+  ## ``-d:reproAddonMutation=<name>`` builds; never in a product build):
+  ##
+  ## * ``apt-closure-unrecorded``: prefixes are renamed into place with no
+  ##   receipt and no index row (the realiser before receipts), so the
+  ##   store's collector can neither see them nor a root hold them;
+  ## * ``apt-deb-reader-follows-symlinks``: the ``data.tar`` reader writes
+  ##   through a symbolic link a member's own archive planted, and the
+  ##   union builder's link check is off.
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -444,9 +464,18 @@ proc pathSafeVersion*(version: string): string =
   ## epoch's ``:`` is written ``_`` (a character no Debian version uses).
   version.replace(':', '_')
 
-proc debPrefixHash(d: AptLockedDeb): string =
-  sha256OfString("repro.apt-deb\x00" & AptClosureRealiserVersion & "\x00" &
-    d.sha256)[0 ..< 16]
+proc debStorePackage(d: AptLockedDeb): string = "apt-deb-" & d.name
+
+proc aptDebPrefixId*(d: AptLockedDeb): PrefixIdBytes =
+  ## The store realization hash of a member's prefix: a pure function of
+  ## the member's archive bytes (its SHA-256), its name, version and
+  ## architecture, and the realiser version. The prefix's directory is the
+  ## store's own path for it (``prefixRelativePath``), so the store's
+  ## recovery, index and collector treat it like any other prefix.
+  computeRealizationHash(debStorePackage(d), d.version, AptDebStoreAdapter,
+    lockIdentity = d.sha256, declaredExecutablePath = "",
+    provenanceChecksum = "sha256:" & d.sha256,
+    extra = [AptClosureRealiserVersion, d.architecture])
 
 proc aptClosureIdentity*(lock: AptClosureLock): string =
   ## 16-hex identity of the closure's CONTENT: realiser version,
@@ -465,17 +494,38 @@ proc rootDeb(lock: AptClosureLock): AptLockedDeb =
   raiseLock("root " & lock.roots[0] & " is not a member")
 
 proc aptDebPrefixPath*(storeRoot: string; d: AptLockedDeb): string =
-  ## ``<store>/prefixes/apt-deb-<name>/<version>-<hash16>``.
-  storeRoot / "prefixes" / ("apt-deb-" & d.name) /
-    (pathSafeVersion(d.version) & "-" & debPrefixHash(d))
+  ## ``<store>/prefixes/apt-deb-<name>/<version>-<hash16>``: the store's
+  ## path for ``aptDebPrefixId`` (name and version restricted to
+  ## ``[A-Za-z0-9._-]``, every other character written ``_``, so an
+  ## epoch's ``:`` never reaches a ``BindReadOnlyPaths=`` line).
+  storeRoot / prefixRelativePath(debStorePackage(d), d.version,
+    aptDebPrefixId(d))
+
+proc aptClosurePrefixId*(lock: AptClosureLock): PrefixIdBytes =
+  ## The store realization hash of the closure's union prefix: a pure
+  ## function of the first root's name and version and of the closure's
+  ## content identity (``aptClosureIdentity``).
+  let r = rootDeb(lock)
+  computeRealizationHash("apt-closure-" & r.name, r.version,
+    AptClosureStoreAdapter, lockIdentity = aptClosureIdentity(lock),
+    declaredExecutablePath = "", extra = [AptClosureRealiserVersion])
 
 proc aptClosurePrefixPath*(storeRoot: string; lock: AptClosureLock): string =
-  ## ``<store>/prefixes/apt-closure-<first root>/<root version>-<hash16>``.
-  ## A pure function of the lock: the planner and the host agree on it
-  ## without either touching the network.
+  ## ``<store>/prefixes/apt-closure-<first root>/<root version>-<hash16>``,
+  ## the store's path for ``aptClosurePrefixId``. A pure function of the
+  ## lock: the planner and the host agree on it without either touching the
+  ## network.
   let r = rootDeb(lock)
-  storeRoot / "prefixes" / ("apt-closure-" & r.name) /
-    (pathSafeVersion(r.version) & "-" & aptClosureIdentity(lock))
+  storeRoot / prefixRelativePath("apt-closure-" & r.name, r.version,
+    aptClosurePrefixId(lock))
+
+proc aptClosurePrefixIds*(lock: AptClosureLock): seq[PrefixIdBytes] =
+  ## Every store prefix a realised closure consists of: the union first,
+  ## then each member's. A generation that binds the closure roots all of
+  ## them, so the collector never removes a member a live closure was
+  ## built from (and a later closure sharing it need not unpack it again).
+  result.add(aptClosurePrefixId(lock))
+  for d in lock.debs: result.add(aptDebPrefixId(d))
 
 proc closureMarkerText(lock: AptClosureLock): string =
   result = "identity " & aptClosureIdentity(lock) & "\n"
@@ -913,7 +963,8 @@ proc unpackDebTar*(tarPath, outDir, pkg: string) =
         raiseTar(pkg, "entry '" & h.name & "' names the extraction root")
       skipTarPayload(f, h.size, pkg)
       continue
-    refuseThroughSymlink(outDir, comps, pkg, h.name)
+    when AptClosureMutation != "apt-deb-reader-follows-symlinks":
+      refuseThroughSymlink(outDir, comps, pkg, h.name)
     let dst = outDir / comps.join("/")
     let parent = parentDir(dst)
     if not dirExists(parent):
@@ -1010,18 +1061,77 @@ proc reclaimStaleScratch(parent: string) =
 proc publishPrefix(tmp, final: string) =
   ## Make the filled scratch directory world-readable and rename it into
   ## place, replacing a prefix without a valid marker (an interrupted
-  ## earlier attempt).
+  ## earlier attempt). Only the ``apt-closure-unrecorded`` mutation
+  ## publishes this way now; see ``publishThroughStore``.
   setFilePermissions(tmp, DirMode)
   if dirExists(final):
     removeDir(final)
   moveDir(tmp, final)
 
-proc realiseDeb(lock: AptClosureLock; d: AptLockedDeb; storeRoot: string;
-                cacheDir: string; fetch: AptDebFetcher;
+proc ensureIndexed(st: var Store; final: string;
+                   prefixId: PrefixIdBytes): bool =
+  ## Make sure the index has a row for the prefix at ``final``. A prefix the
+  ## store renamed into place carries a sealed receipt; when its row is
+  ## missing (the realiser died between the rename and the insert) the row
+  ## is rebuilt from that receipt, exactly as the store's recovery does.
+  ## ``false`` when ``final`` is not a prefix the store published for
+  ## ``prefixId`` (no receipt, or one for another hash): the caller then
+  ## realises it again.
+  if st.lookupPrefix(prefixId).found: return true
+  let receiptPath = final / ReceiptFileName
+  if not fileExists(receiptPath): return false
+  var rec: RealizationReceipt
+  try:
+    rec = readReceiptFile(receiptPath)
+  except CatchableError:
+    return false
+  if rec.realizationHash != prefixId: return false
+  discard st.insertPrefixOrIgnore(PrefixRow(prefixId: prefixId,
+    packageName: rec.packageName, version: rec.version,
+    realizedPath: rec.realizedPath, adapter: rec.adapter,
+    receiptDigest: receiptDigest(rec), createdAtUnix: rec.createdAtUnix))
+  true
+
+proc publishThroughStore(st: var Store; tmp, final: string;
+                         prefixId: PrefixIdBytes; hint: StoreReceiptHint) =
+  ## Hand the filled, verified scratch directory ``tmp`` to the store: it
+  ## becomes the store's staging directory, the store seals its receipt,
+  ## renames it to ``final`` and inserts the index row (the store's
+  ## stage -> rename -> INSERT protocol, ``realizePrefix``). A prefix
+  ## without a receipt and a row is invisible to ``repro store gc`` and to
+  ## every root, so it would never be collected.
+  setFilePermissions(tmp, DirMode)
+  when AptClosureMutation == "apt-closure-unrecorded":
+    discard st
+    discard prefixId
+    discard hint
+    publishPrefix(tmp, final)
+    return
+  # A directory at ``final`` that the store did not publish for this hash
+  # (no receipt) cannot be trusted or indexed; it is replaced.
+  if dirExists(final) and not ensureIndexed(st, final, prefixId):
+    removeDir(final)
+  let res = st.realizePrefix(prefixId, hint,
+    proc (stage: string; mechanism: var string) =
+      removeDir(stage)
+      moveDir(tmp, stage)
+      mechanism = "apt-unpack")
+  if dirExists(tmp): removeDir(tmp)
+  if res.absolutePath != final:
+    raise newException(IOError, "apt closure: the store placed " &
+      res.absolutePath & ", not the planned " & final)
+  if not ensureIndexed(st, final, prefixId):
+    raise newException(IOError, "apt closure: " & final &
+      " was published without a receipt for its realization hash")
+
+proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
+                storeRoot: string; cacheDir: string; fetch: AptDebFetcher;
                 retainDebCache: bool): string =
   result = aptDebPrefixPath(storeRoot, d)
   let marker = result / DebPrefixMarker
-  if fileExists(marker) and readFile(marker) == d.sha256 & "\n":
+  if fileExists(marker) and readFile(marker) == d.sha256 & "\n" and
+      (AptClosureMutation == "apt-closure-unrecorded" or
+       ensureIndexed(st, result, aptDebPrefixId(d))):
     return
   let deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
   createDir(parentDir(result))
@@ -1036,7 +1146,11 @@ proc realiseDeb(lock: AptClosureLock; d: AptLockedDeb; storeRoot: string;
     verifyHardenedTree(tmp, d.name)
     writeFile(tmp / DebPrefixMarker, d.sha256 & "\n")
     setFilePermissions(tmp / DebPrefixMarker, FileMode)
-    publishPrefix(tmp, result)
+    publishThroughStore(st, tmp, result, aptDebPrefixId(d),
+      StoreReceiptHint(adapter: AptDebStoreAdapter,
+        packageName: debStorePackage(d), version: d.version,
+        lockIdentity: d.sha256, provenanceUrl: debUrl(lock, d),
+        provenanceChecksum: "sha256:" & d.sha256))
   except CatchableError:
     if dirExists(tmp): removeDir(tmp)
     if dirExists(scratch): removeDir(scratch)
@@ -1109,6 +1223,8 @@ proc buildUnion(lock: AptClosureLock; memberRoots: seq[(string, string)];
       # closure — on the host's ``/usr`` for an absolute target. walkDirRec
       # yields parents first, so every ancestor already exists in ``dest``.
       block ancestors:
+        when AptClosureMutation == "apt-deb-reader-follows-symlinks":
+          break ancestors
         let comps = target.split('/')
         var p = dest
         for c in comps[0 ..< comps.len - 1]:
@@ -1198,10 +1314,13 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
                         string =
   ## Make the closure prefix exist and return its path (spec §8.3 item 4).
   ## Idempotent: a closure already realised is returned untouched, and a
-  ## member realised by another closure is reused. Every write lands under
-  ## ``storeRoot / "prefixes"`` (and the ``.deb`` cache): a temporary
-  ## sibling is filled and then renamed, with the completion marker written
-  ## last, so an interrupted run leaves nothing a later run would trust.
+  ## member realised by another closure is reused. Every write lands in
+  ## the store (``prefixes/``, its staging directory and its index) and the
+  ## ``.deb`` cache: a temporary sibling is filled, verified and marked
+  ## complete, then handed to the store, which seals its receipt, renames
+  ## it into place and records it in the index, so an interrupted run
+  ## leaves nothing a later run would trust and every published prefix is
+  ## one ``repro store gc`` and the store's roots know.
   ##
   ## ``hostMachine`` is the kernel's machine name the closure must be able
   ## to run on; a lock for another architecture is refused
@@ -1224,18 +1343,32 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
     e.hostMachine = hostMachine
     raise e
   result = aptClosurePrefixPath(storeRoot, lock)
-  if aptClosureRealised(storeRoot, lock):
-    return
   createDir(storeRoot / "prefixes")
   privateDir(cacheDir)
+  # Always under the locks, even for a closure already realised: the
+  # completion marker says the bytes are there, the index row (checked and,
+  # after an interrupted run, rebuilt from the receipt in ``ensureIndexed``)
+  # says the store knows them, and only both make the prefix collectable
+  # and rootable.
   withRealisationLocks(cacheDir, storeRoot / "prefixes", lockDeadlineMs):
-    # Another realiser may have finished this closure while we waited.
-    if aptClosureRealised(storeRoot, lock):
+    var st = openStore(storeRoot)
+    defer: st.close()
+    # A realised closure is self-contained (its files are hard links of
+    # the members'), so its members are not needed again, and are not
+    # fetched again when the collector took one no root held.
+    if aptClosureRealised(storeRoot, lock) and
+        (AptClosureMutation == "apt-closure-unrecorded" or
+         ensureIndexed(st, result, aptClosurePrefixId(lock))):
+      # Members still on disk are re-indexed too (a lost row would leave
+      # one the collector cannot see); a missing member stays missing.
+      for d in lock.debs:
+        let dp = aptDebPrefixPath(storeRoot, d)
+        if dirExists(dp): discard ensureIndexed(st, dp, aptDebPrefixId(d))
       return
     var members: seq[(string, string)] = @[]
     for d in lock.debs:
-      members.add((d.name, realiseDeb(lock, d, storeRoot, cacheDir, fetch,
-        retainDebCache)))
+      members.add((d.name, realiseDeb(st, lock, d, storeRoot, cacheDir,
+        fetch, retainDebCache)))
     createDir(parentDir(result))
     reclaimStaleScratch(parentDir(result))
     let tmp = tempSibling(result, "apt-closure")
@@ -1243,7 +1376,12 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
       buildUnion(lock, members, tmp)
       writeFile(tmp / ClosurePrefixMarker, closureMarkerText(lock))
       setFilePermissions(tmp / ClosurePrefixMarker, FileMode)
-      publishPrefix(tmp, result)
+      let root = rootDeb(lock)
+      publishThroughStore(st, tmp, result, aptClosurePrefixId(lock),
+        StoreReceiptHint(adapter: AptClosureStoreAdapter,
+          packageName: "apt-closure-" & root.name, version: root.version,
+          lockIdentity: aptClosureIdentity(lock),
+          provenanceUrl: lock.archive))
     except CatchableError:
       if dirExists(tmp): removeDir(tmp)
       raise

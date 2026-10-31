@@ -2562,22 +2562,27 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if replaying and priorMarker.previousStatic.len > 0: priorMarker.previousStatic
     else: readStaticTarget()
   let (treePath, treePrefixId) = realiseStaticTree(treeFiles)
-  var closurePaths: seq[string]
+  var closureLocks: seq[AptClosureLock]
   for p in plans:
     if p.r.kind == srkSystemdSystemUnit and p.r.suAptClosureLock.len > 0:
-      closurePaths.add(realiseAptClosure(
-        parseAptClosureLock(p.r.suAptClosureLock), AddOnSystemStoreRoot,
-        AddOnAptDebCacheDir))
+      let lock = parseAptClosureLock(p.r.suAptClosureLock)
+      discard realiseAptClosure(lock, AddOnSystemStoreRoot,
+        AddOnAptDebCacheDir)
+      closureLocks.add(lock)
   # The whole closure is rooted from here on, not only the tree: a
   # `repro store gc` between this step and the commit -- or after a crash,
   # before recovery -- must not collect what the switch is about to run.
+  # Every prefix of each closure is held (the union and its members, all
+  # indexed by the realiser); a member the collector already took is not
+  # in the index and is not needed by the realised union.
   block:
     var closurePrefixes: seq[PrefixIdBytes]
     enterWritableStoreView()
     var st = openStore(StoreRoot)
-    for path in closurePaths:
-      let found = st.lookupPrefixByRealizedPath(path)
-      if found.found: closurePrefixes.add(found.row.prefixId)
+    for lock in closureLocks:
+      for id in aptClosurePrefixIds(lock):
+        if st.lookupPrefix(id).found and id notin closurePrefixes:
+          closurePrefixes.add(id)
     st.close()
     holdOnPendingRoot(closurePrefixes)
 
