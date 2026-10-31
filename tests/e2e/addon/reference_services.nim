@@ -117,8 +117,14 @@ proc refPackages*(work: string): RefPackages =
     raise newException(TestBedError, "REPRO_A12_PACKAGES must name the " &
       "reprobuild-packages checkout the reference packages were built in")
   result.vaultwarden = work / "trees" / "vaultwarden"
-  stageTree(result.vaultwarden,
-    [(recipeOutput(root, "vaultwarden") / "bin" / "vaultwarden", "vaultwarden")])
+  # `REPRO_A12_VAULTWARDEN_BIN` names a statically linked vaultwarden built
+  # elsewhere (a pinned nixpkgs `pkgsStatic.vaultwarden`), for a host whose
+  # Rust cross toolchain cannot build the recipe; the record names it.
+  let vwOverride = getEnv("REPRO_A12_VAULTWARDEN_BIN")
+  let vwBinary =
+    if vwOverride.len > 0: vwOverride
+    else: recipeOutput(root, "vaultwarden") / "bin" / "vaultwarden"
+  stageTree(result.vaultwarden, [(vwBinary, "vaultwarden")])
   result.geth = work / "trees" / "geth"
   stageTree(result.geth, [(recipeOutput(root, "geth") / "bin" / "geth", "geth")])
   result.prysm = work / "trees" / "prysm"
@@ -359,14 +365,14 @@ proc putSecret*(g: Guest; verb, service, name, value: string): ExecOut =
   g.exec("chmod 0400 " & f & " && " & verb & " --service " & service &
     " --name " & name & " < " & f & "; rc=$?; rm -f " & f & "; exit $rc")
 
-proc putReferenceSecrets*(g: Guest; verb: string; jwt: string;
+proc putReferenceSecrets*(g: Guest; verb: string; jwt, adminToken: string;
                           validatorUnits: openArray[string];
                           step: StepFn) =
   ## Every secret the reference activities load: the admin token, the
   ## engine API secret for its two services, and the wallet password for
-  ## each unit name the validator may run under.
-  var entries = @[("vaultwarden", "admin-token",
-                   "a12-admin-" & jwtHex()[0 ..< 24]),
+  ## each unit name the validator may run under. The caller draws the
+  ## values once, so two guests can be given the same ones.
+  var entries = @[("vaultwarden", "admin-token", adminToken),
                   ("eth-execution", "jwt", jwt), ("eth-beacon", "jwt", jwt)]
   for u in validatorUnits:
     entries.add((u[0 ..< u.len - ".service".len], "wallet-password",

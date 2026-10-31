@@ -104,8 +104,9 @@ proc exportHistory(g: Guest; prysm, datadir, outDir: string): JsonNode =
     "chown eth-validator: " & outDir & " && runuser -u eth-validator -- " &
     prysm & "/bin/validator slashing-protection-history export " &
     "--accept-terms-of-use --datadir " & datadir &
-    " --slashing-protection-export-dir " & outDir & " >/dev/null 2>&1 " &
-    "&& cat " & outDir & "/*.json")
+    " --slashing-protection-export-dir " & outDir & " > " & outDir &
+    ".log 2>&1 && cat " & outDir & "/*.json || { tail -20 " & outDir &
+    ".log; exit 1; }")
   if r.exitCode != 0:
     raise newException(TestBedError, "export of " & datadir & " failed: " &
       r.stdout & r.stderr)
@@ -138,6 +139,7 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     pins.validatorStateDir = "/var/lib/ethereum/" &
       pins.validatorUnit.replace(".service", "")
   putReferenceSecrets(g, repro & " system addon secret put", jwtHex(),
+                      "a12-admin-" & jwtHex()[0 ..< 24],
                       [DefaultValidatorUnit, RenamedUnit], step)
   provisionWallet(g, net)
   writeFile(work / "monitor.py", MonitorScript)
@@ -163,6 +165,11 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
   step("the chain justifies an epoch",
        g.waitJustified(startEpoch + 2, 900),
        "justified " & $g.justifiedEpoch() & ", started at " & $startEpoch)
+  # By the time an epoch is justified, at least two thirds of the keys have
+  # attested; every key's history must reach back at least this far.
+  let justifiedAt = max(parseInt(g.run("date +%s").strip()) - net.genesisTime,
+                        0) div 12
+  record["justifiedAtEpoch"] = %justifiedAt
   # 1. restart
   discard g.run("systemctl restart " & pins.validatorUnit)
   g.waitSigning(2)
@@ -271,12 +278,14 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
        second.stdout & second.stderr)
   # The unit's history.
   discard g.run("systemctl stop " & unit)
-  let hist = g.exportHistory(prysmBin, StateDir, "/root/a12-exp-unit")
+  let hist = g.exportHistory(prysmBin, StateDir, "/var/tmp/a12-exp-unit")
   var all = @[hist]
-  if dirExists(rogueDir):
+  block:
+    # The second host's instance may have exited before creating its
+    # database; when it did create one, it must hold no signature.
     let r2 = g.exec("test -e " & rogueDir & "/validator.db")
     if r2.exitCode == 0:
-      let h2 = g.exportHistory(prysmBin, rogueDir, "/root/a12-exp-second")
+      let h2 = g.exportHistory(prysmBin, rogueDir, "/var/tmp/a12-exp-second")
       step("the second host's instance signed nothing",
            attestationCount([h2]) == 0, $attestationCount([h2]))
       all.add(h2)
@@ -286,7 +295,8 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
   let first = earliestTarget([hist])
   var late: seq[string]
   for k in net.pubkeys:
-    if first.getOrDefault(k.toLowerAscii(), high(int)) > startEpoch + 2:
+    let key = (if k.startsWith("0x"): k else: "0x" & k).toLowerAscii()
+    if first.getOrDefault(key, high(int)) > justifiedAt:
       late.add(k)
   step("every key's history begins where the run began (none started over)",
        late.len == 0, $late)
@@ -304,8 +314,8 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
       "--monitoring-port=8092 --enable-doppelganger=false " &
       "--graffiti=a12-control"), timeoutSec = 200)
   discard g.run("systemctl stop " & unit)
-  let hu = g.exportHistory(prysmBin, StateDir, "/root/a12-exp-unit2")
-  let hc = g.exportHistory(prysmBin, ctlDir, "/root/a12-exp-control")
+  let hu = g.exportHistory(prysmBin, StateDir, "/var/tmp/a12-exp-unit2")
+  let hc = g.exportHistory(prysmBin, ctlDir, "/var/tmp/a12-exp-control")
   let found = conflicts([hu, hc])
   record["positiveControlConflicts"] = %found.len
   step("positive control: a second database's real double sign is found",

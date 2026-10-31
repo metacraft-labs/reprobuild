@@ -1,5 +1,5 @@
 ## Gate ``e2e_addon_reproos_service_parity`` (milestone A12; ReproOS Add-On
-## Mode §8.3, §13 decision 31).
+## Mode §8.3, §13 decision 32).
 ##
 ## The reference activities (``fixtures/reference_services/system.nim``:
 ## ``vaultwarden`` and ``ethereum_validator``) are realised twice from the
@@ -13,7 +13,7 @@
 ##   test only*, with the full engine applying the profile itself
 ##   (``repro infra apply --profile system.nim``, the host registry beside it
 ##   selecting ``system: {mode: full, activities: [...]}``). That is the
-##   full realisation the engine has (decision 31): every resource written
+##   full realisation the engine has (decision 32): every resource written
 ##   in place, the secrets materialised from the host's own envelope. It is
 ##   not a ReproOS image and not the per-generation ``/etc`` farm, which
 ##   this gate does not claim to cover.
@@ -127,6 +127,7 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
   createDir(work)
   let pk = refPackages(work)
   record["packages"] = packageSha256s(pk)
+  record["vaultwardenBin"] = %(let o = getEnv("REPRO_A12_VAULTWARDEN_BIN"); (if o.len > 0: o else: "reprobuild-packages recipe"))
   let cache = add.startCache()
   defer: cache.stop()
   let kp = peerAuth.generateKeypair()
@@ -161,9 +162,11 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
   let digests = publishAll(cache, kp, pk, net, pins, addC.actions)
   # --- the same secrets on both.
   let jwt = jwtHex()
+  let adminToken = "a12-admin-" & jwtHex()[0 ..< 24]
   for (g, verb) in [(add, addRepro & " system addon secret put"),
                     (full, env & eng & " system secret put")]:
-    putReferenceSecrets(g, verb, jwt, [DefaultValidatorUnit], step)
+    putReferenceSecrets(g, verb, jwt, adminToken, [DefaultValidatorUnit],
+                        step)
     provisionWallet(g, net)
   # --- realise on the add-on guest.
   discard bs.producer.publish(PublishSpec(sequence: 1,
