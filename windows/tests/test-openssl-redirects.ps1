@@ -27,7 +27,22 @@ function Require([bool]$Condition, [string]$Message) {
 }
 function Assert-Rejected([scriptblock]$Operation, [string]$Pattern) {
   try { & $Operation | Out-Null } catch {
-    if ($_.Exception.Message -notmatch $Pattern) { throw }
+    # Match the WHOLE exception chain, not just the outermost message.
+    # HttpClient reports a TLS trust refusal as the generic "An error occurred
+    # while sending the request." and names the certificate only in its inner
+    # exceptions, so matching the top message alone failed this test on a
+    # refusal that was correct. The pattern is unchanged, so an unrelated send
+    # failure still does not match.
+    $chain = ''
+    $error_ = $_.Exception
+    while ($null -ne $error_) {
+      $chain = "$chain`n$($error_.GetType().FullName): $($error_.Message)"
+      $error_ = $error_.InnerException
+    }
+    if ($chain -notmatch $Pattern) {
+      Write-Host "REJECTION CHAIN DID NOT MATCH '$Pattern':$chain"
+      throw
+    }
     return
   }
   throw "Expected rejection matching '$Pattern'."
