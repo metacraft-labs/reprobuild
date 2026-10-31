@@ -4809,6 +4809,7 @@
             "runQuotaError",
             "second",
             "seenPath",
+            "selfSpawnImage",
             "shape",
             "socketPath",
             "sources",
@@ -4836,7 +4837,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1345,
+          "line": 1355,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
