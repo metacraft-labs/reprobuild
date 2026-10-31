@@ -345,14 +345,15 @@ type
     ## systemctl and /etc on the test machine.
 
 proc guardStateDirs*(applyStateDir: string;
-                     pointer = AddonStateDirPointer): seq[string] =
+                     pointer = AddonStateDirPointer;
+                     pointerOwner = 0): seq[string] =
   ## Where an interrupted add-on switch's marker can be: the state
   ## directory of the apply asking, the add-on's own state directory as
   ## bootstrap recorded it (an add-on bootstrapped with `--state-dir X` is
   ## found even by an apply that was not given X, such as a deploy-agent
   ## tick), the resolved system state directory, and the default.
   ## Deduplicated, in that order.
-  for d in [applyStateDir, readAddonStateDirPointer(pointer),
+  for d in [applyStateDir, readAddonStateDirPointer(pointer, pointerOwner),
             resolveSystemStateDir(), DefaultStateDir]:
     if d.len > 0 and d notin result: result.add(d)
 
@@ -376,7 +377,8 @@ proc ownerlessSwitchMayBeLive*(stateDir: string; pid: int): string =
 proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
                            pid = getCurrentProcessId();
                            bootId = currentBootId();
-                           pointer = AddonStateDirPointer):
+                           pointer = AddonStateDirPointer;
+                           pointerOwner = 0):
     tuple[ok: bool; why: string] =
   ## The apply-side check (§7.7), run with the host apply lock held. For
   ## each pending marker: one written by this process, in this boot, is
@@ -386,7 +388,7 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
   ## apply refuses. Every other marker belongs to a switch that is gone,
   ## whatever process now has its PID: it is recovered first, and the
   ## apply refuses when recovery does not resolve it.
-  for dir in guardStateDirs(applyStateDir, pointer):
+  for dir in guardStateDirs(applyStateDir, pointer, pointerOwner):
     if not hasPendingMarker(dir): continue
     var m = PendingMarker()
     var readable = true
@@ -408,7 +410,8 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
   (true, "")
 
 proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
-                                pointer = AddonStateDirPointer) =
+                                pointer = AddonStateDirPointer;
+                                pointerOwner = 0) =
   ## Make every `runInfraApply` on this host run `checkPendingSwitches`
   ## before it mutates anything (ReproOS Add-On Mode §7.7).
   var r = recover
@@ -419,7 +422,8 @@ proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
   pendingSwitchGuard = proc (applyStateDir: string):
       tuple[ok: bool; why: string] {.closure, gcsafe.} =
     {.cast(gcsafe).}:
-      checkPendingSwitches(applyStateDir, r, pointer = pointer)
+      checkPendingSwitches(applyStateDir, r, pointer = pointer,
+        pointerOwner = pointerOwner)
 
 installPendingSwitchGuard()
 

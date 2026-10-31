@@ -173,12 +173,15 @@ suite "an apply recovers an interrupted switch first, or refuses":
     defer: delEnv(HostApplyLockEnvVar)
     let addonState = tmp / "addon-x"
     let pointer = tmp / "var-lib-repro" / "addon-state-dir"
+    createDir(addonState)
     writeAddonStateDirPointer(addonState, pointer)
-    check readAddonStateDirPointer(pointer) == addonState
-    check readAddonStateDirPointer(tmp / "absent") == ""
+    let me = int(getuid())
+    check readAddonStateDirPointer(pointer, me) == addonState
+    check readAddonStateDirPointer(tmp / "absent", me) == ""
     let rec = Recorder(outcome: RecoveryOutcome(resolved: false,
       lines: @["recorded"]))
-    installPendingSwitchGuard(recorderFor(rec), pointer = pointer)
+    installPendingSwitchGuard(recorderFor(rec), pointer = pointer,
+      pointerOwner = me)
     defer: installPendingSwitchGuard()
     rawMarker(addonState, 0, "")
     var refused = false
@@ -208,6 +211,44 @@ suite "an apply recovers an interrupted switch first, or refuses":
     check checkPendingSwitches(dir, recorderFor(rec), pid = me,
       bootId = "").ok
     check rec.calls.len == 0
+
+  test "a pointer is trusted only as bootstrap writes it":
+    # The pointer decides where an apply looks for a switch to recover. At
+    # 76f0f4f7a9 it was a plain readFile: a symbolic link, a file someone
+    # other than root wrote, or a group-writable one steered the guard.
+    let tmp = createTempDir("addon-pointer-trust-", "")
+    defer: removeDir(tmp)
+    let me = int(getuid())
+    let target = tmp / "addon-x"
+    createDir(target)
+    let good = tmp / "good"
+    writeAddonStateDirPointer(target, good)
+    check readAddonStateDirPointerChecked(good, me) == (target, "")
+    # A symbolic link to a good pointer.
+    createSymlink(good, tmp / "link")
+    let viaLink = readAddonStateDirPointerChecked(tmp / "link", me)
+    check viaLink.dir == "" and "symbolic link" in viaLink.why
+    # Not owned by the expected owner (on a host: not root).
+    let foreign = readAddonStateDirPointerChecked(good, me + 1)
+    check foreign.dir == "" and "owned by uid" in foreign.why
+    # Writable by group.
+    let gw = tmp / "group-writable"
+    writeAddonStateDirPointer(target, gw)
+    setFilePermissions(gw, {fpUserRead, fpUserWrite, fpGroupRead,
+      fpGroupWrite, fpOthersRead})
+    check "group or others" in readAddonStateDirPointerChecked(gw, me).why
+    # Relative, not normalised, or naming no directory.
+    for bad in ["relative/dir", target & "/../addon-x", target & "/",
+                tmp / "missing"]:
+      let p = tmp / "bad"
+      if fileExists(p): removeFile(p)
+      writeAddonStateDirPointer(bad, p)
+      let r = readAddonStateDirPointerChecked(p, me)
+      check r.dir == ""
+      check r.why.len > 0
+    # The guard ignores an untrusted pointer.
+    check target notin guardStateDirs(tmp / "caller", tmp / "link", me)
+    check target in guardStateDirs(tmp / "caller", good, me)
 
   test "a marker its live switch owns does not stop that switch's apply":
     let tmp = createTempDir("addon-guard-live-", "")

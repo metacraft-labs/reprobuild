@@ -365,10 +365,65 @@ proc writeAddonStateDirPointer*(stateDir: string;
   createDir(parentDir(path))
   writeFileNoFollow(path, stateDir & "\n", 0o644)
 
-proc readAddonStateDirPointer*(path = AddonStateDirPointer): string =
-  ## The recorded add-on state directory, "" when none is recorded.
-  try: readFile(path).strip()
-  except IOError, OSError: ""
+when defined(posix):
+  var PointerOpenNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+proc readAddonStateDirPointerChecked*(path = AddonStateDirPointer;
+                                      owner = 0):
+    tuple[dir: string; why: string] =
+  ## The recorded add-on state directory, or ``dir`` "" and ``why`` the
+  ## reason the pointer is not trusted ("" too when there is none). The
+  ## pointer decides where an apply looks for an interrupted switch to
+  ## recover, so it is trusted only as bootstrap writes it: a regular file,
+  ## opened without following a symbolic link, owned by ``owner`` (root on
+  ## a host; a test passes its own uid) and not writable by group or
+  ## others, naming an absolute, normalised path to an existing directory.
+  when defined(posix):
+    let fd = posix.open(path.cstring, O_RDONLY or PointerOpenNoFollow or O_CLOEXEC)
+    if fd < 0:
+      let err = osLastError()
+      if err.int32 == ENOENT: return ("", "")
+      return ("", path & " is not opened (" & osErrorMsg(err) &
+        "; a symbolic link is refused)")
+    var content = ""
+    try:
+      var st: Stat
+      if fstat(fd, st) != 0:
+        return ("", path & ": fstat failed")
+      if not S_ISREG(st.st_mode):
+        return ("", path & " is not a regular file")
+      if int(st.st_uid) != owner:
+        return ("", path & " is owned by uid " & $st.st_uid & ", not " &
+          $owner)
+      if (int(st.st_mode) and 0o022) != 0:
+        return ("", path & " is writable by group or others")
+      var buf = newString(4096)
+      let n = posix.read(fd, addr buf[0], buf.len)
+      if n < 0: return ("", path & ": read failed")
+      content = buf[0 ..< n].strip()
+    finally:
+      discard posix.close(fd)
+    if content.len == 0 or not content.isAbsolute or
+        os.normalizedPath(content) != content or content.endsWith("/"):
+      return ("", path & " does not hold an absolute, normalised path")
+    if not dirExists(content) or symlinkExists(content):
+      return ("", path & " names " & content & ", which is not an " &
+        "existing directory")
+    (content, "")
+  else:
+    discard owner
+    ("", "")
+
+proc readAddonStateDirPointer*(path = AddonStateDirPointer;
+                               owner = 0): string =
+  ## The recorded add-on state directory, "" when there is none or it is
+  ## not trusted (see ``readAddonStateDirPointerChecked``; the reason goes
+  ## to stderr).
+  let r = readAddonStateDirPointerChecked(path, owner)
+  if r.why.len > 0:
+    stderr.writeLine("repro-addon: ignoring the add-on state-directory " &
+      "pointer: " & r.why)
+  r.dir
 
 proc markerOwnerLive*(m: PendingMarker): bool =
   ## True when the process that owns the switch is still running it: the
