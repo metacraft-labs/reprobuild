@@ -516,6 +516,22 @@ suite "repro system adopt is scoped to the addressed resource":
     expect AddonApplyError:
       discard scopedAdoptProfile(given, current, ["systemFile:/etc/nowhere"])
 
+suite "a target accepted as changed out of band is reported once":
+  test "one line per path, whichever passes decided it":
+    # The apply collects these from its own-object pass and from the
+    # operator's pass (adopt-scoped or not) and reports them through this
+    # one helper (spec §4.3). A path both passes decided -- generation 0's
+    # caches.conf and a profile declaring it -- is one line, the first
+    # decider's; distinct paths keep their order. The fields are TABs.
+    let lines = acceptedOutOfBandDiff(@[
+      (path: "/etc/repro/caches.conf", address: "systemFile:/etc/repro/caches.conf"),
+      (path: "/etc/app/a.conf", address: "systemFile:/etc/app/a.conf"),
+      (path: "/etc/repro/caches.conf", address: "systemFile:/etc/repro/caches.conf")])
+    check lines == @[
+      "accepted-out-of-band\t/etc/repro/caches.conf\tsystemFile:/etc/repro/caches.conf",
+      "accepted-out-of-band\t/etc/app/a.conf\tsystemFile:/etc/app/a.conf"]
+    check acceptedOutOfBandDiff(@[]).len == 0
+
 suite "removal by ledger: a resource with no ledger entry is never removed":
   test "the unlisted branch: listed as unlisted, neither destroyed nor restored":
     # A committed profile can name a resource the ledger holds nothing of

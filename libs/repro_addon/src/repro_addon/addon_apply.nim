@@ -1662,6 +1662,18 @@ proc unitFileChanged*(isNew: bool; verdict: string;
   prevSha256 != renderedSha256 or
     verdict in [$cvCreate, $cvUpdate, $cvReconcile, $cvReplace]
 
+proc acceptedOutOfBandDiff*(accepted: seq[tuple[path, address: string]]):
+    seq[string] =
+  ## The ledger-diff lines for targets accepted as changed out of band
+  ## (spec §4.3): ``accepted-out-of-band<TAB>path<TAB>address``, one per
+  ## path, whichever passes of the apply decided it (the add-on's own
+  ## objects, the operator's resources, a `repro system adopt` scope).
+  var seen = initHashSet[string]()
+  for a in accepted:
+    if a.path in seen: continue
+    seen.incl(a.path)
+    result.add("accepted-out-of-band\t" & a.path & "\t" & a.address)
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -1932,6 +1944,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var plans: seq[ResourcePlan]
   var targets: seq[PlannedTarget]
   var verdictByAddress = initTable[string, CollisionVerdict]()
+  var acceptedOutOfBand: seq[tuple[path, address: string]]
+    # Ledger paths changed out of band to the desired bytes, from the own
+    # pass and the operator's (adopt-scoped or not); reported once each.
   # The add-on's own objects go through the same table as the operator's:
   # a link planted on one of their paths, or a package that came to own
   # one, is met the same way, and the pre-write guard knows them.
@@ -1971,10 +1986,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       p.preserved = deferPreserve(dec.preWriteBytes)
     verdictByAddress[r.address] = dec.verdict
     if dec.acceptedOutOfBand:
-      # Nothing is written, but the out-of-band write is reported on
-      # every apply, a rollback's included (spec §4.3).
-      result.ledgerDiff.add("accepted-out-of-band\t" & p.targetPath &
-        "\t" & r.address)
+      acceptedOutOfBand.add((p.targetPath, r.address))
     result.collisions.add(CollisionLine(address: r.address, target: p.targetPath,
       observation: dec.observation, verdict: $dec.verdict, reason: dec.reason))
     targets.add(targetFor(r.address, inp, p.targetPath, dec, obs, saved))
@@ -2092,10 +2104,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     p.content = inp.desiredContent
     verdictByAddress[r.address] = dec.verdict
     if dec.acceptedOutOfBand:
-      # Nothing is written, but the out-of-band write is reported on
-      # every apply, a rollback's included (spec §4.3).
-      result.ledgerDiff.add("accepted-out-of-band\t" & p.targetPath &
-        "\t" & r.address)
+      acceptedOutOfBand.add((p.targetPath, r.address))
     # `repro system adopt` changes the addressed resource only. Every other
     # resource is the current generation's; one the ledger owns with bytes
     # that differ from what its declaration renders (an earlier adoption
@@ -2424,6 +2433,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # FALSIFYING MUTATION: a credential change is not planned into the
     # transitions (no restart, no exclusive stop-start).
     credentialChanged = @[]
+
+  # Nothing is written for them, but the out-of-band write is reported on
+  # every apply, a rollback's included (spec §4.3).
+  result.ledgerDiff.add(acceptedOutOfBandDiff(acceptedOutOfBand))
 
   # --- The service transition list (spec §7.3). ---
   # In the composed profile's dependency order, so step 7 starts a unit
