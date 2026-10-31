@@ -597,6 +597,21 @@ proc publishEnvelope(rbpiPath: string; bytes: seq[byte]) =
 # Public entry point.
 # ---------------------------------------------------------------------------
 
+proc anchoredCompileOptions*(opts: ProfileCompileOptions):
+    ProfileCompileOptions =
+  ## ``opts`` with its directories made absolute against THIS process's
+  ## working directory. The compile's edges run with their own working
+  ## directory (the reprobuild source tree, which in an installed engine is
+  ## a store path), so a relative ``stateDir`` or ``workDir`` handed down as
+  ## it was named the nimcache and the published binary relative to that
+  ## tree: ``compile-profile --state-dir st`` failed with "cannot create
+  ## directory: /nix/store/<...>-source/st/profile-cache/...". A relative
+  ## path a caller passes means relative to where the caller runs.
+  result = opts
+  if result.stateDir.len > 0: result.stateDir = absolutePath(result.stateDir)
+  if result.workDir.len > 0: result.workDir = absolutePath(result.workDir)
+  if result.repoRoot.len > 0: result.repoRoot = absolutePath(result.repoRoot)
+
 proc compileProfileToRbpi*(profileRoot: string;
                            opts: ProfileCompileOptions):
     ProfileCompileArtifact =
@@ -613,6 +628,7 @@ proc compileProfileToRbpi*(profileRoot: string;
   ## refused with `missingReprobuildSourcesMessage()` when nothing resolves.
   if opts.stateDir.len == 0:
     raiseProfileCompile("compileProfileToRbpi: stateDir is required")
+  let opts = anchoredCompileOptions(opts)
   if opts.publicCliPath.len == 0:
     raiseProfileCompile("compileProfileToRbpi: publicCliPath is required" &
       MissingPublicCliPathReason)

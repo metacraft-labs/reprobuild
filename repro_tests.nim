@@ -6735,6 +6735,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_profile_compile_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_profile_compile/tests/t_profile_compile_relative_dirs_are_anchored.nim",
+    binary: "build/test-bin/t_profile_compile_relative_dirs_are_anchored",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_profile_compile_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim",
     binary: "build/test-bin/t_profile_runtime_stderr",
     defines: @[],
