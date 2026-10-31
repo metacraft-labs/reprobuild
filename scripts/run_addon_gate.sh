@@ -81,7 +81,7 @@ mutation_args=()
 [ -n "${REPRO_ADDON_MUTATION:-}" ] && mutation_args=(--mutation "$REPRO_ADDON_MUTATION")
 # Gates that pause a switch at a step need the seam build.
 case "$test" in
-  t_e2e_addon_hard_reset_at_every_step|t_e2e_addon_recovery_never_holds_up_boot|t_e2e_addon_refused_recovery_keeps_its_record|t_e2e_addon_confirm_or_revert|t_e2e_addon_exclusive_never_overlaps|t_e2e_addon_no_plaintext_secret_on_disk|t_e2e_addon_secrets_follow_generations|t_e2e_addon_secrets_without_memory_controller)
+  t_e2e_addon_hard_reset_at_every_step|t_e2e_addon_recovery_never_holds_up_boot|t_e2e_addon_refused_recovery_keeps_its_record|t_e2e_addon_confirm_or_revert|t_e2e_addon_exclusive_never_overlaps|t_e2e_addon_no_plaintext_secret_on_disk|t_e2e_addon_secrets_follow_generations|t_e2e_addon_secrets_without_memory_controller|t_e2e_addon_apply_unit_has_no_network|t_e2e_addon_fetch_unit_reaches_only_its_origins|t_e2e_addon_sequence_floor_survives_and_is_root_only|t_e2e_addon_staging_swap_after_verify_is_refused|t_e2e_addon_profile_compiles_unprivileged)
     export REPRO_ADDON_TEST_SEAMS=1 ;;
 esac
 [ "${REPRO_ADDON_TEST_SEAMS:-}" = "1" ] && mutation_args+=(--test-seams)

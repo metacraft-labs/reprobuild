@@ -12,11 +12,8 @@
 ##       re-materialise the current generation's secrets.
 ##   repro system addon rotate-recipient-key
 ##       Generate the next recipient key and print its public half (CRED-2).
-##   repro system addon agent-tick --source <manifest>... [--target T]
-##       One deploy-agent tick on the add-on host, in one process: the
-##       sealed section goes through ``acceptSealedSection`` and the profile
-##       through the add-on switch. Milestone A8 splits this into the fetch
-##       and apply units (§9.1); the secrets half is this one.
+##   (the deploy agent's tick, ``agent_split``, uses ``acceptSealedSection``
+##   as its secrets sink and ``tickApply`` around its apply)
 ##
 ## Every write here holds the host-wide apply lock and the state
 ## directory's apply lock, the same two the switch takes, so a secret is
@@ -314,8 +311,9 @@ proc tickApply*(stateDir: string; l: SecretsLayout; m: DeployManifest;
     result = (true, "generation " & r.generationId &
       (if r.drift.len > 0: "; " & $r.drift.len & " object(s) left as " &
          "actionable drift" else: ""))
-  except EAddOnUnsupportedBase:
-    # Typed through to the agent: aoUnsupportedBase, exit 2 (spec §7.9).
+  except EAddOnUnsupportedBase, EApplyRolledBack:
+    # Typed through to the agent: aoUnsupportedBase, exit 2 (spec §7.9);
+    # aoRolledBack, the deployment quarantined (spec §9.2, A8).
     try: discardStaged(l)
     except CatchableError: discard
     raise
@@ -549,74 +547,5 @@ proc runRotateRecipientKeyCli*(args: seq[string]): int =
     stderr.write("repro system addon rotate-recipient-key: " & e.msg & "\n")
     1
 
-proc runAgentTickCli*(args: seq[string]): int =
-  ## ``repro system addon agent-tick --source S... [--target T]
-  ## [--allowed-signers F]``: one tick (see the module header). Exits with
-  ## the deploy agent's outcome code (0 applied/converged, 1 retryable, 2
-  ## an operator must act: ``aoSecretsFailed`` among them).
-  var sources: seq[string]
-  var target = ""
-  var signers = DeploySignersPath
-  var i = 0
-  try:
-    while i < args.len:
-      let a = args[i]
-      if a == "--source" or a.startsWith("--source="):
-        sources.add(takeArg(args, i, "--source"))
-      elif a == "--target" or a.startsWith("--target="):
-        target = takeArg(args, i, "--target")
-      elif a == "--allowed-signers" or a.startsWith("--allowed-signers="):
-        signers = takeArg(args, i, "--allowed-signers")
-      else:
-        raise newException(ValueError, "unknown option " & a)
-      inc i
-    if sources.len == 0:
-      raise newException(ValueError, "at least one --source is required")
-  except ValueError as e:
-    stderr.write("repro system addon agent-tick: " & e.msg & "\n")
-    return 2
-  if target.len == 0: target = readHostname()
-  let layout = defaultSecretsLayout()
-  var cfg = AgentConfig(target: target, sources: sources,
-    anchors: peerAuth.loadTrustAnchors(signers), stateDir: AgentStateDir,
-    fetchTimeoutMs: 30_000)
-  cfg.secretsSink = proc(m: DeployManifest): string {.gcsafe.} =
-    {.cast(gcsafe).}:
-      acceptSealedSection(DefaultStateDir, layout, m)
-  var deps: AgentDeps
-  # What the apply left as actionable drift: reported with the tick, never
-  # dropped (a committed generation with drift is still applied).
-  var applyDrift: seq[string]
-  deps.apply = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
-    {.cast(gcsafe).}:
-      # A manifest with a sealed section applies from the section it
-      # staged; the commit promotes it, and whatever happens the staged
-      # copy does not outlive this tick.
-      tickApply(DefaultStateDir, layout, m, proc(o: AddonApplyOptions):
-          AddonApplyResult =
-        result = runAddonApply(o)
-        for d in result.drift: applyDrift.add("apply drift " & d))
-  var hostLock = acquireHostApplyLock("repro system addon agent-tick")
-  defer: hostLock.release()
-  retryPendingSecretsCommit(DefaultStateDir, layout)
-  # Every tick, a converged one included, reports what the apt hook
-  # recorded since the previous tick, and what this tick's apply left as
-  # drift (spec §7.8, §9.2): in the tick status record (`addOnDrift`) and
-  # on stdout. The outcome and exit code stay the tick's.
-  deps.driftProbe = proc(): seq[string] {.gcsafe.} =
-    {.cast(gcsafe).}:
-      result = hookEventsSince(AgentStateDir / AptHookCursorName)
-      result.add(applyDrift)
-  let tick = runAgentTickRecorded(cfg, deps)
-  if tick.raised:
-    stdout.write("outcome: tickRaised\nmessage: " & tick.error & "\n")
-  else:
-    stdout.write("outcome: " & $tick.outcome.kind & "\n" &
-                 "sequence: " & $tick.outcome.sequence & "\n" &
-                 "message: " & tick.outcome.message & "\n")
-  for d in tick.addOnDrift: stdout.write("add-on drift: " & d & "\n")
-  # The evidence record and the journal message (spec §7.8, §9.2).
-  recordAgentDrift((if tick.raised: "tickRaised" else: $tick.outcome.kind),
-                   (if tick.raised: 0'u64 else: tick.outcome.sequence),
-                   tick.addOnDrift)
-  tick.exitCode
+# ``repro system addon agent-tick`` moved to ``agent_split`` with milestone
+# A8, beside the fetch and apply units it shares its apply with.

@@ -240,6 +240,32 @@
 ##                                            symlink the archive planted,
 ##                                            and the union builder's link
 ##                                            check is off
+## ``floor-ignored``                          a failure after the flip reverts
+##                                            even below the signed rollback
+##                                            floor
+## ``agent-apply-skips-recheck``              the agent's apply unit takes the
+##                                            fetch unit's compiled profile
+##                                            without its own re-check
+## ``agent-allows-management-path``           an agent apply may carry an sshd
+##                                            drop-in, firewall or network
+##                                            resource
+## ``agent-apply-has-network``                the apply unit has no
+##                                            ``PrivateNetwork=`` /
+##                                            ``IPAddressDeny=``
+## ``agent-fetch-unrestricted-egress``        the fetch unit has no
+##                                            ``IPAddressAllow=`` /
+##                                            ``IPAddressDeny=`` pair
+## ``agent-floor-in-fetch-state``             the sequence floor lives in the
+##                                            fetch unit's state directory
+## ``agent-compiles-in-apply``                the apply unit compiles a source
+##                                            profile itself, as root
+## ``agent-rereads-staging``                  the apply unit re-reads the
+##                                            staging path after verifying
+## ``agent-substitutes-untrusted``            the fetch unit substitutes with
+##                                            trust enforcement off
+## ``agent-extract-follows-links``            the fetch unit's archive
+##                                            extraction writes through a
+##                                            symlink component
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -300,7 +326,19 @@ const
                           # cannot import this module; listed so a static
                           # build accepts them.
                           "apt-closure-unrecorded",
-                          "apt-deb-reader-follows-symlinks"]
+                          "apt-deb-reader-follows-symlinks",
+                          # Milestone A8 (``agent_split``, ``generation0``,
+                          # ``addon_apply``): each gate's falsifying build.
+                          "floor-ignored",
+                          "agent-apply-skips-recheck",
+                          "agent-allows-management-path",
+                          "agent-apply-has-network",
+                          "agent-fetch-unrestricted-egress",
+                          "agent-floor-in-fetch-state",
+                          "agent-compiles-in-apply",
+                          "agent-rereads-staging",
+                          "agent-substitutes-untrusted",
+                          "agent-extract-follows-links"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

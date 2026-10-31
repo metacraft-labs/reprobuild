@@ -554,6 +554,11 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string): seq[ExtractedEntr
   ## knowing they exist.
   extractPrefixRaw(rawArchiveBytes(archive), outDir)
 
+const ExtractMutation {.strdefine: "reproAddonMutation".} = ""
+  ## Only a falsifying test build of the static ReproOS add-on binary sets
+  ## this (``-d:reproAddonMutation=agent-extract-follows-links``); see
+  ## ``repro_addon/mutations``. Empty in every product build.
+
 proc refuseWriteThroughSymlink*(outDir, rel: string) =
   ## Raise unless writing the entry ``rel`` under ``outDir`` stays inside
   ## ``outDir``.
@@ -577,6 +582,10 @@ proc refuseWriteThroughSymlink*(outDir, rel: string) =
   ## Exported so every consumer that copies substituted bytes onward (the
   ## build-action apply path writes them into an action's working
   ## directory) applies the same rule to its own destination.
+  when ExtractMutation == "agent-extract-follows-links":
+    # Falsifying build of the ReproOS add-on gate
+    # `e2e_addon_hostile_archive_cannot_escape_staging`: the check is gone.
+    return
   var cur = outDir
   for part in rel.split('/'):
     cur = cur / part

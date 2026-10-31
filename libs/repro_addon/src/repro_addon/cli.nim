@@ -62,6 +62,7 @@ import ./preflight
 import ./reassert
 import ./seams
 import ./secrets_ops
+import ./agent_split
 import ./static_tree
 import ./store_root
 import ./switch
@@ -72,9 +73,11 @@ const
   AddonUsage* = """usage: repro system addon <command> [options]
 
 commands:
-  preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]] [--json]
+  preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
+            [--target T --manifest URL... [--profile-compiler P]] [--json]
       Inventory the host read-only and print the plan and its digest.
   bootstrap --plan <digest> [--deploy-signers F] [--cache-publishers F [--cache-url U]]
+            [--target T --manifest URL... [--profile-compiler P]]
       Install the add-on on a host whose preflight plan has <digest>.
   uninstall [--keep-store]
       Reverse everything the ownership ledger records.
@@ -106,9 +109,17 @@ commands:
       current key is deleted when the first envelope sealed to the new
       one opens.
   agent-tick --source <manifest>... [--target T] [--allowed-signers F]
-      One deploy-agent tick: verify, accept the sealed section, apply the
-      profile through the switch. Exit 0, 1 (retryable) or 2 (an operator
-      must act; aoSecretsFailed among them).
+      One deploy-agent tick in one process: verify (RDMF v3 required),
+      accept the sealed section, apply the profile through the switch; it
+      compiles nothing. Exit 0, 1 (retryable) or 2 (an operator must act).
+  agent-fetch
+      The fetch unit (repro-agent-fetch.service, unprivileged): select,
+      compile, substitute and download into its staging area.
+  agent-apply
+      The apply unit (repro-agent-apply.service, root, no network): copy
+      the staging area, verify everything again, apply.
+  resume
+      Let the deploy agent converge again after a local rollback paused it.
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -268,7 +279,7 @@ proc runAddonCli*(args: seq[string]): int =
   # swapped (spec §10.3): `secret`, `rotate-recipient-key` and `agent-tick`
   # always, the re-assert and secrets verbs on a host that keeps envelopes
   # (their boot units carry MemorySwapMax=0 themselves).
-  if cmd in ["secret", "rotate-recipient-key", "agent-tick"] or
+  if cmd in ["secret", "rotate-recipient-key", "agent-tick", "agent-apply"] or
       (cmd in ["reassert", "recover", "secrets"] and "--boot" notin rest and
        hostHasSecrets()):
     let r = reexecInNoSwapScope()
@@ -289,6 +300,12 @@ proc runAddonCli*(args: seq[string]): int =
           inp.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
         elif a == "--cache-url" or a.startsWith("--cache-url="):
           inp.cacheUrl = takeValue(rest, i, "--cache-url")
+        elif a == "--target" or a.startsWith("--target="):
+          inp.agentTarget = takeValue(rest, i, "--target")
+        elif a == "--manifest" or a.startsWith("--manifest="):
+          inp.agentSources.add(takeValue(rest, i, "--manifest"))
+        elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
+          inp.profileCompiler = takeValue(rest, i, "--profile-compiler")
         elif a == "--json":
           json = true
         else:
@@ -313,6 +330,12 @@ proc runAddonCli*(args: seq[string]): int =
           opts.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
         elif a == "--cache-url" or a.startsWith("--cache-url="):
           opts.cacheUrl = takeValue(rest, i, "--cache-url")
+        elif a == "--target" or a.startsWith("--target="):
+          opts.agentTarget = takeValue(rest, i, "--target")
+        elif a == "--manifest" or a.startsWith("--manifest="):
+          opts.agentSources.add(takeValue(rest, i, "--manifest"))
+        elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
+          opts.profileCompiler = takeValue(rest, i, "--profile-compiler")
         else:
           raise newException(ValueError, "unknown option " & a)
         inc i
@@ -391,7 +414,13 @@ proc runAddonCli*(args: seq[string]): int =
     of "rotate-recipient-key":
       return runRotateRecipientKeyCli(rest)
     of "agent-tick":
-      return runAgentTickCli(rest)
+      return agent_split.runAgentTickCli(rest)
+    of "agent-fetch":
+      return runAgentFetchCli(rest)
+    of "agent-apply":
+      return runAgentApplyCli(rest)
+    of "resume":
+      return runResumeCli(rest)
     of "test-sleep":
       # Seam builds only (a hanging command in the store, for a gate);
       # every other build answers with a usage error.
@@ -705,6 +734,12 @@ proc runAddonRollbackCli*(args: seq[string]): int =
     stdout.write("rolled back from " & r.fromGeneration & " to " &
       r.toGeneration & " (applied as generation " & r.apply.generationId &
       ")\n")
+    # The deploy agent only moves forward: a local rollback pauses it
+    # until `repro system addon resume` (spec §9.3).
+    pauseAfterRollback(r.apply.generationId)
+    if fileExists(AgentConfPath):
+      stdout.write("the deploy agent is paused (aoPaused) until " &
+        "`repro system addon resume`\n")
     0
   except AddonApplyError as e:
     stderr.write("repro system rollback: " & e.msg & "\n")

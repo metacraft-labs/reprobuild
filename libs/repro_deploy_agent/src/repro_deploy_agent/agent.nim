@@ -126,6 +126,14 @@ type
     ## the host ran before. The agent quarantines the deployment
     ## (``aoRolledBack``) instead of retrying it on every tick.
 
+  EApplyFailedAtFloor* = object of CatchableError
+    ## Raised by an apply hook whose apply failed after its flip but was
+    ## NOT reverted, because the manifest's rollback floor forbids going
+    ## back to the generation the host ran before: the new generation is
+    ## committed and stays (ReproOS add-on spec §7.5, ``failed-at-floor``).
+    ## The agent records the sequence as applied -- the host is on it --
+    ## and reports ``aoApplyFailed`` with ``errorCode`` ``failed_at_floor``.
+
   ApplyHook* = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.}
     ## May raise ``EAddOnUnsupportedBase`` (and nothing else): the one
     ## refusal the agent reports as an operator action of its own
@@ -189,6 +197,7 @@ type
   Candidate = object
     source: string
     manifest: DeployManifest
+    bytes: seq[byte]
 
 # ---------------------------------------------------------------------------
 # Last-applied-sequence persistence.
@@ -508,13 +517,25 @@ proc readSource(cfg: AgentConfig; deps: AgentDeps; source: string):
 # The tick.
 # ---------------------------------------------------------------------------
 
-proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
-  ## One poll+verify+apply pass. Pure with respect to injected deps —
-  ## the only side effects are the durable last-applied-sequence file
-  ## (on a successful apply) and whatever ``deps.apply`` does.
+type
+  Selection* = object
+    ## What polling, decoding, verifying and selecting produced: either a
+    ## ``manifest`` (``found``) with the bytes it was decoded from, or the
+    ## ``outcome`` that ends the tick without one.
+    found*: bool
+    outcome*: AgentOutcome
+    manifest*: DeployManifest
+    bytes*: seq[byte]
+    source*: string
+
+proc selectManifest*(cfg: AgentConfig; deps: AgentDeps): Selection =
+  ## Steps 1-4 of the tick: poll every source, decode, verify signature
+  ## and anchor membership, and select the highest sequence, refusing an
+  ## ambiguous tie. Nothing is written. A ReproOS add-on host runs this in
+  ## its unprivileged fetch unit, and the apply unit runs the whole tick
+  ## again over its own copy of the selected envelope.
   doAssert cfg.target.len > 0, "agent target must be set"
   doAssert not cfg.anchors.isNil, "agent allowed-signers must be set"
-  doAssert deps.apply != nil, "agent apply hook must be set"
 
   var trusted: seq[Candidate] = @[]
   # -- POLL + DECODE + VERIFY --------------------------------------------
@@ -523,16 +544,16 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
     if r.missing:
       continue                     # soft miss — no manifest at this source
     if not r.ok:
-      return AgentOutcome(kind: aoSourceError, target: cfg.target,
+      return Selection(outcome: AgentOutcome(kind: aoSourceError, target: cfg.target,
         message: "source read failed for " & source & ": " & r.error,
-        errorCode: "source_read_failed")
+        errorCode: "source_read_failed"))
     var m: DeployManifest
     try:
       m = decodeManifest(r.body)
     except CatchableError as e:
-      return AgentOutcome(kind: aoRejected, target: cfg.target,
+      return Selection(outcome: AgentOutcome(kind: aoRejected, target: cfg.target,
         message: "manifest decode failed for " & source & ": " & e.msg,
-        errorCode: "malformed_manifest")
+        errorCode: "malformed_manifest"))
     # Per-target schema: a manifest for another target is IGNORED. This
     # is not an error — a shared source may carry many targets.
     if m.target != cfg.target:
@@ -545,15 +566,15 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
           "signed by a key that is NOT in the allowed-signers set"
         else:
           "signature verification failed (tampered or wrong key)"
-      return AgentOutcome(kind: aoRejected, target: cfg.target,
+      return Selection(outcome: AgentOutcome(kind: aoRejected, target: cfg.target,
         sequence: m.sequence, deploymentId: m.deploymentId,
         message: "manifest from " & source & " REJECTED: " & why,
-        errorCode: "verification_failed")
-    trusted.add(Candidate(source: source, manifest: m))
+        errorCode: "verification_failed"))
+    trusted.add(Candidate(source: source, manifest: m, bytes: r.body))
 
   if trusted.len == 0:
-    return AgentOutcome(kind: aoWaiting, target: cfg.target,
-      message: "no desired-state manifest for target " & cfg.target)
+    return Selection(outcome: AgentOutcome(kind: aoWaiting, target: cfg.target,
+      message: "no desired-state manifest for target " & cfg.target))
 
   # -- SELECT HIGHEST VALID SEQUENCE -------------------------------------
   trusted.sort(proc (a, b: Candidate): int =
@@ -564,11 +585,23 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   for c in trusted:
     if c.manifest.sequence == selected.sequence and
        c.manifest.deploymentId != selected.deploymentId:
-      return AgentOutcome(kind: aoAmbiguous, target: cfg.target,
+      return Selection(outcome: AgentOutcome(kind: aoAmbiguous, target: cfg.target,
         sequence: selected.sequence,
         message: "ambiguous desired state: multiple deployments share " &
           "sequence " & $selected.sequence,
-        errorCode: "ambiguous_sequence")
+        errorCode: "ambiguous_sequence"))
+  result = Selection(found: true, manifest: selected,
+    bytes: trusted[^1].bytes, source: trusted[^1].source)
+
+proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
+  ## One poll+verify+apply pass. Pure with respect to injected deps —
+  ## the only side effects are the durable last-applied-sequence file
+  ## (on a successful apply) and whatever ``deps.apply`` does.
+  doAssert deps.apply != nil, "agent apply hook must be set"
+  let sel = selectManifest(cfg, deps)
+  if not sel.found:
+    return sel.outcome
+  let selected = sel.manifest
 
   # -- FORMAT (an agent that requires the v3 attestation block) ----------
   if cfg.requireAttestations:
@@ -671,6 +704,15 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
       message: "the host's base is outside the supported matrix at " &
         "sequence " & $selected.sequence & ": " & e.msg,
       errorCode: "unsupported_base")
+  except EApplyFailedAtFloor as e:
+    writeLastAppliedSequence(cfg, selected.sequence)
+    clearQuarantine(cfg)
+    return AgentOutcome(kind: aoApplyFailed, target: cfg.target,
+      sequence: selected.sequence, deploymentId: selected.deploymentId,
+      message: "sequence " & $selected.sequence & " failed after its " &
+        "switch and stays applied, because its rollback floor " &
+        $selected.rollbackFloor & " forbids reverting: " & e.msg,
+      errorCode: "failed_at_floor")
   except EApplyRolledBack as e:
     writeQuarantine(cfg, selected.sequence, selected.deploymentId)
     return AgentOutcome(kind: aoRolledBack, target: cfg.target,

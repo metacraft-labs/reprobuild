@@ -174,6 +174,48 @@ e2e_addon_refused_recovery_keeps_its_record:
 e2e_addon_net_sysctl_applies_in_host_namespace:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace
 
+# Milestone A8: the deploy agent's fetch/apply split (spec §9.1). Each
+# gate runs on debian-12, debian-13 and ubuntu-24.04 by default; set
+# REPRO_ADDON_MUTATION=<name> for its falsifying build.
+e2e_addon_agent_end_to_end:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_end_to_end
+
+e2e_addon_compromised_fetch_cannot_write_etc:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_compromised_fetch_cannot_write_etc
+
+e2e_addon_apply_unit_has_no_network:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_apply_unit_has_no_network
+
+e2e_addon_fetch_substitutes_only_from_bootstrap_anchors:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_fetch_substitutes_only_from_bootstrap_anchors
+
+e2e_addon_agent_refuses_management_path_classes:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_refuses_management_path_classes
+
+e2e_addon_hostile_archive_cannot_escape_staging:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_hostile_archive_cannot_escape_staging
+
+e2e_addon_induced_health_failure_cannot_revert_below_floor:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_induced_health_failure_cannot_revert_below_floor
+
+e2e_addon_fetch_unit_reaches_only_its_origins:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_fetch_unit_reaches_only_its_origins
+
+e2e_addon_sequence_floor_survives_and_is_root_only:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_sequence_floor_survives_and_is_root_only
+
+e2e_addon_profile_compiles_unprivileged:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_profile_compiles_unprivileged
+
+e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace
+
+e2e_addon_stale_manifest_is_reported:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_stale_manifest_is_reported
+
+e2e_addon_staging_swap_after_verify_is_refused:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_staging_swap_after_verify_is_refused
+
 # Milestone A10: living under apt and distribution release upgrades. The
 # upgrade gates run against the time-shifted snapshot mirror
 # (tests/e2e/addon/snapshot_mirror.nim), from images published before the

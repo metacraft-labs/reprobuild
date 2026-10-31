@@ -42,7 +42,7 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[os, strutils]
+import std/[json, os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -160,11 +160,60 @@ proc runDeployAgentKeygen(args: seq[string]): int =
   echo peerAuth.publicKeyHex(key.publicKey)
   0
 
+proc runDeployAgentCompileProfile*(args: seq[string]): int =
+  ## ``repro deploy-agent compile-profile --staged <module.nim>
+  ## --canonical-out <file> --actions-out <file> [--state-dir D]``: compile a
+  ## staged manifest profile (its bundle beside it, as
+  ## ``stageProfileSources`` writes it) to the canonical resource text and
+  ## the build actions, through the same Phase-F3 path ``repro infra apply``
+  ## uses, and write both; apply nothing. The unprivileged fetch unit of a
+  ## ReproOS add-on host runs this as its profile compiler, so the compiler
+  ## never runs in the root apply unit (ReproOS add-on §9.1).
+  var staged, canonicalOut, actionsOut, stateDir = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if i + 1 >= args.len:
+      stderr.writeLine("repro deploy-agent compile-profile: " & a &
+        " needs a value")
+      return 2
+    case a
+    of "--staged": staged = args[i + 1]
+    of "--canonical-out": canonicalOut = args[i + 1]
+    of "--actions-out": actionsOut = args[i + 1]
+    of "--state-dir": stateDir = args[i + 1]
+    else:
+      stderr.writeLine("repro deploy-agent compile-profile: unknown option " & a)
+      return 2
+    i += 2
+  if staged.len == 0 or canonicalOut.len == 0 or actionsOut.len == 0:
+    stderr.writeLine("usage: repro deploy-agent compile-profile --staged " &
+      "<module.nim> --canonical-out <file> --actions-out <file> [--state-dir D]")
+    return 2
+  if stateDir.len == 0: stateDir = staged.parentDir / ".compile-state"
+  var bundlePaths: seq[string]
+  for f in walkDirRec(staged.parentDir):
+    if f != staged: bundlePaths.add(f)
+  var text = ""
+  var actions: seq[ProfileBuildAction]
+  let host = try: selectHost("", false).name except CatchableError: ""
+  if not resolveSystemProfileText(staged, readFile(staged), stateDir,
+      "repro deploy-agent compile-profile", text,
+      planCommand = "repro infra plan", outBuildActions = addr actions,
+      target = defaultSystemPlanTarget(host), declaredInputs = bundlePaths):
+    return 1
+  writeFile(canonicalOut, text)
+  writeFile(actionsOut, $(%actions))
+  0
+
 proc runDeployAgentCommand*(args: seq[string]): int =
   ## ``repro deploy-agent`` entrypoint (one tick), or ``repro deploy-agent
-  ## keygen`` (see `runDeployAgentKeygen`).
+  ## keygen`` (see `runDeployAgentKeygen`), or ``compile-profile``
+  ## (`runDeployAgentCompileProfile`).
   if args.len > 0 and args[0] == "keygen":
     return runDeployAgentKeygen(args[1 .. ^1])
+  if args.len > 0 and args[0] == "compile-profile":
+    return runDeployAgentCompileProfile(args[1 .. ^1])
   var flags: DeployAgentFlags
   try:
     flags = parseFlags(args)

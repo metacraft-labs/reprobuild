@@ -60,7 +60,7 @@
 ## The plan's three add-on sections (spec §7.1) are in the result: the
 ## ledger diff, the collision report, and the service transition list.
 
-import std/[algorithm, options, os, sets, strutils, tables, times]
+import std/[algorithm, json, options, os, sets, strutils, tables, times]
 
 import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
@@ -87,6 +87,7 @@ import ./seams
 import ./static_tree
 import ./store_root
 import ./switch
+import ./evidence
 import ./sysctl_precedence
 import ./transitions
 
@@ -192,6 +193,21 @@ type
       ## ``confirmTimeout``: a recovery at boot runs a replay's confirm
       ## and, if that fails, a revert's, inside the re-assert unit's start
       ## timeout, so each is capped (``reassert``, ``BootConfirmCapSec``).
+    # --- Milestone A8: the deploy agent's apply unit (spec §7.5, §9.1). ---
+    agentSequence*: uint64
+      ## The signed manifest sequence this switch applies (0: not a deploy
+      ## agent's). Recorded with the generation (``AgentSequenceFileName``)
+      ## so a later rollback floor can tell how old it is.
+    rollbackFloor*: uint64
+      ## The signed manifest's rollback floor (a sequence; 0 = none). When
+      ## the generation ``current`` names was applied from a lower sequence
+      ## (or by no manifest), a failure after the flip does not revert: the
+      ## new generation is committed with ``failedAtFloor`` set and an
+      ## evidence record (spec §7.5, threat model T36).
+    aptFetch*: AptDebFetcher
+      ## Where an apt closure's ``.deb`` files come from; nil is the
+      ## network. The agent's apply unit has none, and passes the copy of
+      ## what its fetch unit staged.
 
   AddonApplyResult* = object
     generationId*: string
@@ -221,6 +237,9 @@ type
     baseIdentity*: BaseIdentity    ## the base observed at plan time (§7.4)
     previousBase*: BaseIdentity    ## the one the current generation recorded
     baseChanges*: seq[string]      ## what changed between the two (§7.9)
+    failedAtFloor*: seq[string]
+      ## Non-empty when the switch failed after its flip and the rollback
+      ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
 
 const
   DefaultStateDir* = "/var/lib/repro/system"
@@ -254,6 +273,28 @@ proc userProfilePath*(stateDir: string): string = addonDir(stateDir) / "user.pro
 proc preservedDir*(stateDir: string): string = addonDir(stateDir) / "preserved"
 proc generationLedgerPath*(stateDir, generationId: string): string =
   stateDir / "generations" / generationId / "addon-ledger"
+
+let SelfExeAtStart = getAppFilename()
+  ## This binary's path as the process started. Read once, at start-up:
+  ## once a thread has entered the store's private writable view
+  ## (``enterWritableStoreView``), ``/proc/self/exe`` of a binary in the
+  ## store names it relative to the store bind's own root
+  ## (``/prefixes/...``), and the confirm step's probes, which run this
+  ## binary in the host's namespaces, could not find it (measured on
+  ## Debian 13 from ``repro-agent-apply.service``, 2026-10-31).
+
+const AgentSequenceFileName* = "agent-sequence"
+  ## In a generation's directory: the manifest sequence a deploy-agent
+  ## apply committed it from (absent: an operator apply, sequence 0).
+
+proc generationAgentSequence*(stateDir, generationId: string): uint64 =
+  ## The manifest sequence ``generationId`` was applied from; 0 when it was
+  ## applied by no manifest or the record is unreadable (below every floor,
+  ## the safe direction).
+  if generationId.len == 0: return 0
+  let p = stateDir / "generations" / generationId / AgentSequenceFileName
+  if not fileExists(p): return 0
+  try: parseBiggestUInt(readFile(p).strip()) except CatchableError: 0'u64
 
 proc invocationTablePath*(stateDir: string): string =
   addonDir(stateDir) / "invocations"
@@ -2567,7 +2608,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if p.r.kind == srkSystemdSystemUnit and p.r.suAptClosureLock.len > 0:
       let lock = parseAptClosureLock(p.r.suAptClosureLock)
       discard realiseAptClosure(lock, AddOnSystemStoreRoot,
-        AddOnAptDebCacheDir)
+        AddOnAptDebCacheDir,
+        (if opts.aptFetch != nil: opts.aptFetch else: httpDebFetcher()))
       closureLocks.add(lock)
   # The whole closure is rooted from here on, not only the tree: a
   # `repro store gc` between this step and the commit -- or after a crash,
@@ -2600,7 +2642,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                          min(declaredConfirm, opts.confirmCapSec)
                        else: declaredConfirm
   let probeExe = if opts.reproExe.len > 0: opts.reproExe
-                 else: getAppFilename()
+                 else: SelfExeAtStart
 
   # The write-ahead plan, BEFORE the marker that makes it meaningful and
   # before anything on the base changes. A replay keeps the plan of the
@@ -2732,6 +2774,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var notRunning: seq[string]  # stop-start units that ended before step 2
   var hookConfirm: ConfirmOutcome
   var hookHealthFailed = false
+  # A8, spec §7.5: may a failure after the flip revert to the generation
+  # `current` names? Not when the signed floor is above the sequence that
+  # generation was applied from. Only a fresh apply is bounded: a revert,
+  # replay or rollback is already the way back.
+  let floorBlocksRevert = opts.rollbackFloor > 0'u64 and
+    purpose == "apply" and not replaying and
+    generationAgentSequence(stateDir, committedPrevious) < opts.rollbackFloor
+  var hookFailedAtFloor: seq[string]
 
   proc beforeSet(planId: string) {.gcsafe.} =
     ## Steps 2 and 3: pre-stop, then flip. A refusal here (an exclusive
@@ -3073,7 +3123,17 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                         renderProfileText(storedNow), 0o600)
         # The base it was applied on (spec §7.4).
         writeFileAtomic(gd / BaseIdentityFileName, baseIdentityText, 0o644)
+        if opts.agentSequence > 0'u64:
+          writeFileAtomic(gd / AgentSequenceFileName,
+                          $opts.agentSequence & "\n", 0o644)
       seamPause(stateDir, seamPrefix & "step-8")
+      # A8: below the rollback floor the new generation stays, and what
+      # failed is reported (`failed-at-floor`) instead of withholding the
+      # commit -- which would revert to the generation the floor forbids.
+      when not mutated("floor-ignored"):
+        if problems.len > 0 and floorBlocksRevert:
+          hookFailedAtFloor = problems
+          problems = @[]
       problems
 
   var infraError = ""
@@ -3141,6 +3201,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   result.sysctlObserved = hookSysctl
 
   result.confirm = hookConfirm
+  result.failedAtFloor = hookFailedAtFloor
 
   if not result.infra.committed:
     # Not a generation: `current` still names the one the switch began
@@ -3205,6 +3266,24 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       committedPrevious & " (re-applied as generation " &
       reverted.generationId & "): " & why)
     raise err
+
+  # A8, spec §7.5: the rollback floor kept a failed switch in place.
+  # Recorded as `failed-at-floor` in the attempt's apply log and as an
+  # evidence record; the caller reports the failures.
+  if hookFailedAtFloor.len > 0:
+    appendAuditRecord(applyLogPath(stateDir, result.generationId), AuditRecord(
+      timestamp: getTime().toUnix(), operationKind: "addon.switch",
+      resourceAddress: "generation:" & result.generationId,
+      outcome: "failed-at-floor",
+      diagnostic: "rollback floor " & $opts.rollbackFloor & " is above " &
+        "sequence " & $generationAgentSequence(stateDir, committedPrevious) &
+        " of " & committedPrevious & "; not reverted: " &
+        hookFailedAtFloor.join("; "),
+      recordClass: AuditClassLiveState))
+    discard writeEvidenceRecord("failed-at-floor", %*{
+      "generation": result.generationId, "previous": committedPrevious,
+      "rollbackFloor": opts.rollbackFloor, "sequence": opts.agentSequence,
+      "failures": hookFailedAtFloor})
 
   # --- Step 9: committed by the infra apply; the generation's root takes
   # over everything the pending root held, the retention policy runs, and

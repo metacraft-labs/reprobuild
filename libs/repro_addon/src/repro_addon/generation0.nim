@@ -62,6 +62,19 @@ type
     deploySigners*: seq[string] ## deploy-manifest signer keys (hex), canonical
     cacheUrl*: string           ## the binary cache to substitute from, or ""
     cachePublishers*: seq[string] ## the only producer keys trusted for it
+    agent*: AgentUnitsInputs    ## the deploy agent's units (A8); none when
+                                ## ``agent.target`` is empty
+
+  AgentUnitsInputs* = object
+    ## What generation 0 needs to carry the deploy agent's two units (spec
+    ## §9.1): the target, the manifest sources, the addresses the fetch
+    ## unit may reach, and the names it resolves through its own hosts
+    ## file (it has no DNS).
+    target*: string
+    sources*: seq[string]
+    allowedAddresses*: seq[string]   ## sorted, for ``IPAddressAllow=``
+    hosts*: seq[tuple[address, name: string]]  ## sorted
+    profileCompiler*: string         ## "" when none is configured
 
 const
   SystemdUnitDir* = "/etc/systemd/system"
@@ -91,6 +104,29 @@ const
     ## /caches_config``): the cache list every substitution on the host reads,
     ## each cache with the only producer keys trusted for it.
   StoreRoot* = "/repro/store"
+  AgentConfPath* = "/etc/repro/agent.conf"
+    ## The deploy agent's configuration on an add-on host (A8): ``target``,
+    ## one ``source`` line per manifest source, ``profile-compiler``.
+  AgentHostsPath* = "/etc/repro/agent-hosts"
+    ## The fetch unit's ``/etc/hosts``: the origins named by host name,
+    ## with the addresses they had when generation 0 was rendered.
+  AgentFetchUnit* = "repro-agent-fetch.service"
+  AgentFetchTimer* = "repro-agent-fetch.timer"
+  AgentApplyUnit* = "repro-agent-apply.service"
+  AgentFetchStateName* = "repro-agent-fetch"
+    ## The fetch unit's ``StateDirectory=``: ``/var/lib/repro-agent-fetch``
+    ## (``/var/lib/private/...`` under ``DynamicUser=``), the staging area.
+  AgentApplyCapabilities* = ["CAP_CHOWN", "CAP_DAC_OVERRIDE",
+    "CAP_DAC_READ_SEARCH", "CAP_FOWNER", "CAP_FSETID", "CAP_KILL",
+    "CAP_SETGID", "CAP_SETUID", "CAP_SETPCAP", "CAP_SYS_ADMIN",
+    "CAP_SYS_PTRACE", "CAP_MKNOD", "CAP_IPC_LOCK", "CAP_AUDIT_WRITE",
+    "CAP_LINUX_IMMUTABLE"]
+    ## The apply unit's bounding set: what the switch's typed operations
+    ## need (file ownership and modes across /etc and the store, the
+    ## store's private writable mount view, account creation, mlock of
+    ## plaintext secrets, reading other units' /proc entries) and NOT
+    ## ``CAP_NET_ADMIN``: every class that would need it -- firewall,
+    ## network, sshd drop-ins -- is refused in agent applies (spec §9.1).
 
 proc unitPath*(name: string): string =
   ## The unit file the driver writes for ``name``: the driver's own
@@ -372,6 +408,98 @@ proc aptHook*(reproExe: string): string =
   "// " & AptHookLogPath & " and the journal.\n" &
   "DPkg::Post-Invoke { \"" & aptHookCommand(reproExe) & "\"; };\n"
 
+proc renderAgentConf*(a: AgentUnitsInputs): string =
+  ## ``/etc/repro/agent.conf``: ``key = value`` lines, ``#`` comments.
+  result = "# Reprobuild add-on: the deploy agent's target and manifest sources.\n"
+  result.add("target = " & a.target & "\n")
+  for src in a.sources: result.add("source = " & src & "\n")
+  if a.profileCompiler.len > 0:
+    result.add("profile-compiler = " & a.profileCompiler & "\n")
+
+proc renderAgentHosts*(a: AgentUnitsInputs): string =
+  ## The fetch unit's private ``/etc/hosts``.
+  result = "# Reprobuild add-on: the deploy agent's origins, pinned when\n" &
+           "# generation 0 was rendered (the fetch unit has no DNS).\n"
+  for h in a.hosts: result.add(h.address & " " & h.name & "\n")
+
+proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
+  ## ``repro-agent-fetch.service`` (spec §9.1): a dynamic user with no
+  ## capabilities, a read-only system, no access to the add-on's state
+  ## (the recipient key, the sequence floor), and egress to the pinned
+  ## origin addresses only. Its one product is the staging directory;
+  ## when it succeeds, systemd starts the apply unit.
+  let egress =
+    when mutated("agent-fetch-unrestricted-egress"): ""
+    else:
+      "IPAddressDeny=any\n" &
+      (if a.allowedAddresses.len > 0:
+         "IPAddressAllow=" & a.allowedAddresses.join(" ") & "\n" else: "")
+  let hostsBind = if a.hosts.len > 0:
+                    "BindReadOnlyPaths=" & AgentHostsPath & ":/etc/hosts\n"
+                  else: ""
+  let stateHidden = when mutated("agent-floor-in-fetch-state"): ""
+                    else: "InaccessiblePaths=-/var/lib/repro\n"
+  "[Unit]\n" &
+  "Description=Reprobuild add-on deploy agent: fetch (unprivileged)\n" &
+  "After=network-online.target repro-store.mount\n" &
+  "Wants=network-online.target\n" &
+  "OnSuccess=" & AgentApplyUnit & "\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "ExecStart=" & reproExe & " system addon agent-fetch\n" &
+  "DynamicUser=yes\n" &
+  "StateDirectory=" & AgentFetchStateName & "\n" &
+  "TimeoutStartSec=30min\n" &
+  "CapabilityBoundingSet=\n" &
+  "AmbientCapabilities=\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectSystem=strict\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  "PrivateDevices=yes\n" &
+  "ProtectKernelTunables=yes\n" &
+  "ProtectKernelModules=yes\n" &
+  "ProtectControlGroups=yes\n" &
+  "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
+  stateHidden & egress & hostsBind
+
+proc agentFetchTimer*(): string =
+  "[Unit]\n" &
+  "Description=Reprobuild add-on deploy agent: poll for desired state\n" &
+  "\n" &
+  "[Timer]\n" &
+  "OnBootSec=2min\n" &
+  "OnUnitActiveSec=5min\n" &
+  "RandomizedDelaySec=30s\n" &
+  "Unit=" & AgentFetchUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc agentApplyUnit*(reproExe: string): string =
+  ## ``repro-agent-apply.service`` (spec §9.1): root, but no network of
+  ## any kind, a bounded capability set without ``CAP_NET_ADMIN``, and,
+  ## because it opens sealed envelopes, plaintext locked in RAM and no
+  ## swap (§10.3, decision 25). It reads the fetch unit's staging only
+  ## through descriptors, into its own copy.
+  let net = when mutated("agent-apply-has-network"): ""
+            else: "PrivateNetwork=yes\nIPAddressDeny=any\n" &
+                  "RestrictAddressFamilies=AF_UNIX AF_NETLINK\n"
+  "[Unit]\n" &
+  "Description=Reprobuild add-on deploy agent: apply\n" &
+  "After=repro-store.mount " & AgentFetchUnit & "\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "ExecStart=" & reproExe & " system addon agent-apply\n" &
+  "TimeoutStartSec=3h\n" &
+  "NoNewPrivileges=yes\n" &
+  "CapabilityBoundingSet=" & AgentApplyCapabilities.join(" ") & "\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  net & NoSwapLine
+
 proc profileD(reproExe: string): string =
   let bindir = reproExe[0 ..< reproExe.rfind('/')]
   "# Reprobuild add-on: put the add-on's repro on PATH.\n" &
@@ -456,6 +584,24 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
     OwnObject(kind: ookEtcFile, path: ProfileDPath,
               content: profileD(inp.reproExe)),
   ]
+  if inp.agent.target.len > 0:
+    # The deploy agent's units (A8): present only on a host bootstrapped
+    # with a target and manifest sources, so a host without them keeps the
+    # generation 0 it had.
+    result.add(OwnObject(kind: ookEtcFile, path: AgentConfPath,
+                         content: renderAgentConf(inp.agent)))
+    if inp.agent.hosts.len > 0:
+      result.add(OwnObject(kind: ookEtcFile, path: AgentHostsPath,
+                           content: renderAgentHosts(inp.agent)))
+    result.add(OwnObject(kind: ookUnit, unit: AgentApplyUnit,
+      path: unitPath(AgentApplyUnit), content: agentApplyUnit(inp.reproExe),
+      enabled: false))
+    result.add(OwnObject(kind: ookUnit, unit: AgentFetchUnit,
+      path: unitPath(AgentFetchUnit),
+      content: agentFetchUnit(inp.reproExe, inp.agent), enabled: false))
+    result.add(OwnObject(kind: ookUnit, unit: AgentFetchTimer,
+      path: unitPath(AgentFetchTimer), content: agentFetchTimer(),
+      enabled: true))
 
 proc contentFileName*(o: OwnObject): string =
   ## The file under the generation's files prefix that holds ``o``'s body.

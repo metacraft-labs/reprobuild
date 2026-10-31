@@ -61,6 +61,9 @@ type
     cachePublishersPath*: string
     cacheUrl*: string
     stateDir*: string
+    agentTarget*: string          ## the deploy agent's target (A8), or ""
+    agentSources*: seq[string]    ## its manifest sources
+    profileCompiler*: string      ## the fetch unit's profile compiler, or ""
 
   BootstrapResult* = object
     planDigest*: string
@@ -187,7 +190,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let plan = runPreflight(PreflightInputs(
     deploySignersPath: opts.deploySignersPath,
     cachePublishersPath: opts.cachePublishersPath,
-    cacheUrl: opts.cacheUrl))
+    cacheUrl: opts.cacheUrl, agentTarget: opts.agentTarget,
+    agentSources: opts.agentSources, profileCompiler: opts.profileCompiler))
   if plan.digest != opts.planDigest:
     raise newException(AddonPlanMismatch,
       "the host's preflight plan is " & plan.digest & ", not the " &
@@ -213,7 +217,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let lockedPlan = runPreflight(PreflightInputs(
     deploySignersPath: opts.deploySignersPath,
     cachePublishersPath: opts.cachePublishersPath,
-    cacheUrl: opts.cacheUrl))
+    cacheUrl: opts.cacheUrl, agentTarget: opts.agentTarget,
+    agentSources: opts.agentSources, profileCompiler: opts.profileCompiler))
   if lockedPlan.digest != plan.digest:
     raise newException(AddonPlanMismatch,
       "the host's preflight plan changed to " & lockedPlan.digest &

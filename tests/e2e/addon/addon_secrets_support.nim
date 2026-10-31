@@ -8,7 +8,7 @@
 ## manifest reaches the guest as a file and the tick reads it from there
 ## (a plain-path source), so nothing listens on the network.
 
-import std/[base64, json, os, osproc, sequtils, strutils, sysrand]
+import std/[base64, json, os, osproc, sequtils, strutils, sysrand, times]
 
 import repro_deploy_agent/[manifest, secrets]
 import repro_peer_cache/auth as peerAuth
@@ -50,8 +50,11 @@ proc publishManifest*(g: Guest; signer: PeerKeypair; target: string;
   for s in secrets:
     files.add(SecretFile(path: s.path, mode: 0o400,
                          content: s.content.toSeq.mapIt(byte(it))))
+  # An add-on agent requires RDMF v3 with the attestation block (spec §13
+  # decision 14): fresh, with a day's maximum age and no floor.
   var m = DeployManifest(target: target, sequence: sequence,
-    deploymentId: "a7-" & $sequence, profileText: profileText)
+    deploymentId: "a7-" & $sequence, profileText: profileText,
+    issuedAt: uint64(getTime().toUnix()), maxAgeSeconds: 86_400'u64)
   if files.len > 0:
     m.hasSecrets = true
     m.secrets = sealSecrets(pubFromHex(sealToHex), target, files, noRevokedRecipientKeys("test"))
