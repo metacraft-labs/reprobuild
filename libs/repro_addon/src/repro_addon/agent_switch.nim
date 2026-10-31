@@ -13,8 +13,10 @@
 ## profile the agent last applied, read from its current generation. Every
 ## object that profile declares is on the host already, byte for byte, so
 ## the switch adopts each one without writing it and restarts nothing (spec
-## §9 "Migration"). The next apply then diffs the new manifest against that
-## generation like any other.
+## §9 "Migration"); generation-0 objects the profile declares (rpi2's
+## caches.conf and deploy-signer anchors) are superseded the same way. The
+## next apply then diffs the new manifest against that generation like any
+## other. `planLegacyMigration` is the same switch with nothing written.
 
 import std/[json, os, strutils]
 
@@ -129,6 +131,22 @@ proc legacyLastDeployment(legacyStateDir, target: string):
   except CatchableError:
     discard
 
+proc migrationOptions(stateDir, legacyStateDir, target,
+                      hostIdentity: string): AddonApplyOptions =
+  ## The switch a migration runs: the profile the legacy agent's current
+  ## generation applied, recorded as that agent's last deployment.
+  let gen = legacyAgentGeneration(legacyStateDir)
+  if gen.len == 0:
+    raise newException(AddonApplyError, legacyStateDir & " holds no " &
+      "current agent generation: nothing to migrate")
+  let env = readGenerationEnvelope(pointerPath(legacyStateDir, gen))
+  let last = legacyLastDeployment(legacyStateDir, target)
+  AddonApplyOptions(stateDir: stateDir, hostIdentity: hostIdentity,
+    userProfileText: env.profileText,
+    agentSequence: last.sequence,
+    agentRecord: AgentRecord(deploymentId: last.deploymentId,
+      sequence: last.sequence, migratedFrom: gen))
+
 proc migrateLegacyAgentState*(stateDir, legacyStateDir, target,
                               hostIdentity: string;
                               apply: AddonApplyFn = nil): AddonApplyResult =
@@ -136,14 +154,19 @@ proc migrateLegacyAgentState*(stateDir, legacyStateDir, target,
   ## generation. The objects are the agent's own writes, unchanged since, so
   ## the switch adopts them as they are (spec §4.3, "present, unowned,
   ## identical"): nothing is written and no unit is restarted. An object
-  ## that differs, or one generation 0 owns, refuses the switch with nothing
-  ## written, and the migration is retried by the next tick.
+  ## that differs refuses the switch with nothing written, and the migration
+  ## is retried by the next tick.
   let run = if apply != nil: apply else: defaultAddonApply()
-  let gen = legacyAgentGeneration(legacyStateDir)
-  let env = readGenerationEnvelope(pointerPath(legacyStateDir, gen))
-  let last = legacyLastDeployment(legacyStateDir, target)
-  run(AddonApplyOptions(stateDir: stateDir, hostIdentity: hostIdentity,
-    userProfileText: env.profileText,
-    agentSequence: last.sequence,
-    agentRecord: AgentRecord(deploymentId: last.deploymentId,
-      sequence: last.sequence, migratedFrom: gen)))
+  run(migrationOptions(stateDir, legacyStateDir, target, hostIdentity))
+
+proc planLegacyMigration*(stateDir, legacyStateDir, target,
+                          hostIdentity: string;
+                          apply: AddonApplyFn = nil): AddonApplyResult =
+  ## What the migration would do, decided and reported with nothing written
+  ## (``planOnly``): every object it would adopt, write or refuse, and the
+  ## service transitions. ``stateDir`` and ``legacyStateDir`` may be copies
+  ## of the host's (`repro system addon migration-plan`).
+  let run = if apply != nil: apply else: defaultAddonApply()
+  var o = migrationOptions(stateDir, legacyStateDir, target, hostIdentity)
+  o.planOnly = true
+  run(o)

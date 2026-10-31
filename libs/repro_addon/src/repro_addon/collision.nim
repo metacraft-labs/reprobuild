@@ -566,6 +566,15 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       result.verdict = cvCreate
       result.reason = "owned by the ledger but missing; recreated"
       return
+    if o.sha256 == inp.desiredSha256:
+      # Changed out of band to exactly what this apply wants (a writer
+      # outside the switch applied the same profile: the deploy agent
+      # before it applied through the switch, §9 "Migration"). Nothing
+      # conflicts and nothing is written; the ledger records the bytes.
+      result.verdict = cvNoOp
+      result.reason = "owned by the ledger, changed out of band to the " &
+        "profile's content; recorded as it is"
+      return
     if inp.reconcileDrift:
       result.verdict = cvReconcile
       result.preWriteBytes = readFile(o.path)

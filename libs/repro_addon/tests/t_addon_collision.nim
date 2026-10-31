@@ -161,6 +161,12 @@ suite "the decision table, file rows":
       discard d.decide(fileInputs("f", "v2\n", ledgerSha = sha256Hex("v0\n")), at("/etc/app/owned.conf"))
     let (rc, _) = d.decide(fileInputs("f", "v2\n", ledgerSha = sha256Hex("v0\n"), reconcile = true), at("/etc/app/owned.conf"))
     check rc.verdict == cvReconcile and rc.preWriteBytes == "v1\n"
+    # Changed out of band to exactly the desired bytes (a writer outside
+    # the switch applied the same profile; spec §9 "Migration"): nothing
+    # conflicts, nothing is written. At reprobuild 63757c8dd8 this was
+    # EDrift, which refused rpi2's caches.conf.
+    let (same, _) = d.decide(fileInputs("f", "v1\n", ledgerSha = sha256Hex("v0\n")), at("/etc/app/owned.conf"))
+    check same.verdict == cvNoOp
 
   test "package-owned conffile: EAddOnPackageOwned naming the package and the drop-in":
     # The fixture's dpkg index lists the dpkg-side path; the driver is

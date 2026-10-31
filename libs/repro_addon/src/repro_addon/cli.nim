@@ -50,6 +50,7 @@ import repro_local_store/store as local_store
 import ./addon_apply
 import ./addon_rollback
 import ./agent_record
+import ./agent_switch
 import ./apt_hook
 import ./base_identity
 import ./bootstrap
@@ -67,6 +68,7 @@ import ./agent_split
 import ./static_tree
 import ./store_root
 import ./switch
+import ./transitions
 import ./uninstall
 import ./verify
 
@@ -119,6 +121,13 @@ commands:
   agent-apply
       The apply unit (repro-agent-apply.service, root, no network): copy
       the staging area, verify everything again, apply.
+  migration-plan [--state-dir D] [--agent-state A] [--target T]
+      Plan, writing nothing, the migration the first tick of an agent that
+      applied outside the switch runs (spec §9 "Migration"): every object it
+      would adopt, write or refuse, and the service transitions. D and A
+      default to the add-on's and the agent's state directories; pass
+      copies to plan against a snapshot. Exit 0 when it would succeed, 2
+      when it would refuse, 1 when nothing can be planned.
   resume
       Let the deploy agent converge again after a local rollback paused it
       (spec §9.3): removes the pause marker of every agent the rollback
@@ -270,6 +279,9 @@ proc selfcheckManagedWrite*(path: string): string =
     AddOnMaterialisation(orchestrated: true)
   let post = applyFsSystemFile(FixtureContext(addOn: policy), op)
   "wrote " & path & " (digest " & post.digestHex[0 ..< 12] & ")"
+
+proc runMigrationPlanCli*(args: seq[string]): int
+  ## Below, beside the other plan verbs.
 
 proc runAddonCli*(args: seq[string]): int =
   ## Dispatch ``repro system addon <args>``.
@@ -424,6 +436,8 @@ proc runAddonCli*(args: seq[string]): int =
       return runAgentApplyCli(rest)
     of "resume":
       return runResumeCli(rest)
+    of "migration-plan":
+      return runMigrationPlanCli(rest)
     of "test-sleep":
       # Seam builds only (a hanging command in the store, for a gate);
       # every other build answers with a usage error.
@@ -701,6 +715,71 @@ proc noSwapIfSecrets*(): int =
   ## An apply, plan or rollback on a host that keeps sealed envelopes opens
   ## one: it runs where its heap cannot be swapped (spec §10.3).
   if isAddonHost() and hostHasSecrets(): reexecInNoSwapScope() else: -1
+
+proc runMigrationPlanCli*(args: seq[string]): int =
+  ## ``repro system addon migration-plan``: the migration's plan, nothing
+  ## written (spec §9 "Migration"). Read-only on the host and on the state
+  ## directories it is given, so it can run against copies before the
+  ## binary that would migrate is installed.
+  let reexec = noSwapIfSecrets()
+  if reexec >= 0: return reexec
+  var stateDir = hostAddonStateDir()
+  var agentState = AgentStateDir
+  var target = ""
+  var i = 0
+  try:
+    while i < args.len:
+      let a = args[i]
+      if a == "--state-dir" or a.startsWith("--state-dir="):
+        stateDir = takeValue(args, i, "--state-dir")
+      elif a == "--agent-state" or a.startsWith("--agent-state="):
+        agentState = takeValue(args, i, "--agent-state")
+      elif a == "--target" or a.startsWith("--target="):
+        target = takeValue(args, i, "--target")
+      else:
+        raise newException(ValueError, "unknown option " & a)
+      inc i
+  except ValueError as e:
+    stderr.write("repro system addon migration-plan: " & e.msg & "\n")
+    return 2
+  if target.len == 0: target = readHostname()
+  const verb = "repro system addon migration-plan"
+  if not isAddonHost(stateDir):
+    stderr.write(verb & ": " & stateDir & " is not an add-on state " &
+      "directory (no ownership ledger)\n")
+    return 1
+  if anyAgentGeneration(stateDir):
+    stdout.write("no migration: an add-on generation of " & stateDir &
+      " already carries an agent record\n")
+    return 0
+  let legacyGen = legacyAgentGeneration(agentState)
+  if legacyGen.len == 0:
+    stdout.write("no migration: " & agentState & " holds no agent " &
+      "generation\n")
+    return 0
+  stdout.write("migration of agent generation " & legacyGen & " (" &
+    agentState & ") into " & stateDir & "\n")
+  try:
+    let r = planLegacyMigration(stateDir, agentState, target, readHostname())
+    stdout.write(renderAddonSections(r))
+    var restarts = 0
+    for t in r.transitions:
+      if t.verb in {tvRestart, tvStopStart, tvStop}: inc restarts
+    stdout.write("units stopped or restarted: " & $restarts & "\n")
+    if r.drift.len > 0:
+      stdout.write("drift the migration would leave in place:\n")
+      for d in r.drift: stdout.write("  " & d & "\n")
+    stdout.write("plan only: nothing was written\n")
+    0
+  except EAddOn, AddonCollisionError, AddonDriftError, AddonApplyError,
+      ESystemProfileInvalid:
+    let e = getCurrentException()
+    stdout.write("the migration would refuse, with nothing written: " &
+      e.msg & "\n")
+    2
+  except CatchableError as e:
+    stderr.write(verb & ": " & e.msg & "\n")
+    1
 
 proc runAddonInfraApplyCli*(args: seq[string]): int =
   ## ``repro infra apply --profile <canonical text> [--reconcile-drift]``

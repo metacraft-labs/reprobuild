@@ -211,6 +211,13 @@ suite "migration of an agent that applied outside the switch":
     check o.buildActions.len == 0
     check o.agentRecord == AgentRecord(deploymentId: "hms-1-be4958",
       sequence: 3, migratedFrom: "66ac8b48")
+    check o.agentSequence == 3 and not o.planOnly
+    # `repro system addon migration-plan`: the same switch, plan only.
+    discard planLegacyMigration(addonState, legacy, "rpi2", "rpi2",
+      apply = recorder(r))
+    check r.calls.len == 2 and r.calls[1].planOnly and
+      r.calls[1].userProfileText == o.userProfileText and
+      r.calls[1].agentRecord == o.agentRecord
     # Once an agent generation is in the add-on store, never again.
     createDir(generationDir(addonState, "g1"))
     writeFile(agentRecordPath(addonState, "g1"), render(o.agentRecord))

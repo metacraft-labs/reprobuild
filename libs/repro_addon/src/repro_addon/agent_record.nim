@@ -16,6 +16,8 @@ import std/[os, strutils]
 import repro_deploy_agent/agent
 import repro_infra
 
+import ./ledger
+
 const
   AgentRecordName* = "addon-agent"
   AgentRecordHeader* = "# repro-addon-agent v1"
@@ -125,9 +127,10 @@ proc registerAgentState*(stateDir, agentStateDir: string) =
   known.add(d)
   let path = agentStatesPath(stateDir)
   createDir(parentDir(path))
-  let tmp = path & ".tmp-" & $getCurrentProcessId()
-  writeFile(tmp, known.join("\n") & "\n")
-  moveFile(tmp, path)
+  # Durable like every other add-on record (the file and its directory
+  # fsynced around the rename): a power cut after the agent's apply must
+  # not lose the registration a later rollback pauses it through.
+  writeFileAtomic(path, known.join("\n") & "\n", 0o644)
 
 proc agentStatesToPause*(stateDir: string): seq[string] =
   ## Every agent state directory on this host a pause must reach.

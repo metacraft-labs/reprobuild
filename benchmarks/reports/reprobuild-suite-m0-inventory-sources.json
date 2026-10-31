@@ -27486,6 +27486,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_addon",
         "repro_deploy_agent",
         "repro_infra",
         "repro_test_support"

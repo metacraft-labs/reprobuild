@@ -115,7 +115,9 @@ type
                            ## the observer does not cover
     collision*: string     ## how a collision was resolved: "" (none),
                            ## ``adopt``, ``divert``, ``dropIn``,
-                           ## ``replace``, ``reconcile``. ``adopt`` with an
+                           ## ``replace``, ``reconcile``, ``supersede``
+                           ## (a profile resource that took over one of
+                           ## generation 0's objects, spec §9). ``adopt`` with an
                            ## empty ``resource`` marks a pre-bootstrap input
                            ## bootstrap took over (spec §6.1): carried
                            ## forward by every apply, put back as found by

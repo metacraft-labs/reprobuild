@@ -100,6 +100,19 @@ const
   AnchorsDir* = "/etc/repro/anchors"
   DeploySignersPath* = AnchorsDir & "/deploy-signers.anchors"
   CachesConfPath* = "/etc/repro/caches.conf"
+  SupersedableOwnPaths* = [DeploySignersPath, CachesConfPath]
+    ## The generation-0 objects a profile may take over (spec §9,
+    ## "Generation-0 objects a profile supersedes"): the two configuration
+    ## files bootstrap only seeds -- whom manifests may be signed by, and
+    ## which cache with which publisher keys. A profile that declares one
+    ## becomes its single writer; generation 0's copy comes back when the
+    ## profile stops declaring it (a rollback to generation 0 among them).
+    ## Every other object of generation 0 is the add-on's runtime (its
+    ## units, the apt hook, /etc/profile.d) or the deploy agent's
+    ## confinement (agent.conf, the fetch unit's pinned hosts): a profile,
+    ## and so a deploy manifest, that could replace those could switch off
+    ## the add-on's recovery or widen the agent's sandbox, so they stay
+    ## refused.
     ## The system binary-cache client configuration (``repro_binary_cache_client
     ## /caches_config``): the cache list every substitution on the host reads,
     ## each cache with the only producer keys trusted for it.

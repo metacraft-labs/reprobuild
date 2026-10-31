@@ -857,6 +857,11 @@ proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry];
           (e.path == p.targetPath or e.class == lcUnitState):
         known = true
         prevMain = e
+  if p.own and prevMain.collision == "supersede":
+    # Generation 0 takes back an object a profile had superseded (§9): the
+    # address is the path's either way, so the entry, and with it the
+    # first-touch record, carries over; the `supersede` mark does not.
+    prevMain.collision = ""
   let replaced = if known: prevMain.replaced else: p.replaced
   let observation = if known and p.observation.len == 0: prevMain.observation
                     else: p.observation
@@ -1771,7 +1776,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   let adoptAddresses = if replaying: replayPlan.adopt else: opts.adoptAddresses
   var decisions = initTable[string, CollisionDecision]()
 
-  let own = parseSystemProfile(ownText)
+  var own = parseSystemProfile(ownText)
   let user =
     if adoptAddresses.len > 0:
       scopedAdoptProfile(parseSystemProfile(targetUserText),
@@ -1782,24 +1787,42 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   let secretsLayout = defaultSecretsLayout()
   let secretsSource = selectSecretsSource(stateDir, secretsLayout, opts,
                                           purpose, committedPrevious)
+  # Generation 0's objects in the profile (spec §9, "Generation-0 objects a
+  # profile supersedes"). A profile that declares one of
+  # ``SupersedableOwnPaths`` takes it over: generation 0's resource leaves
+  # this composition, so the generation has one writer of the path, and the
+  # ledger records the profile's resource with collision ``supersede``.
+  # Every other generation-0 object stays the add-on's and is refused.
+  var ownByIdentity = initTable[string, SystemResource]()
   var ownAddresses = initHashSet[string]()
-  var ownTargets = initHashSet[string]()
   for r in own.resources:
     ownAddresses.incl(r.address)
-    ownTargets.incl(realWorldIdentity(r))
+    ownByIdentity[realWorldIdentity(r)] = r
+  var superseded = initTable[string, string]()   # own address -> user address
+  var supersedingUser = initHashSet[string]()    # user addresses that do
   for r in user.resources:
-    if r.address in ownAddresses:
+    let id = realWorldIdentity(r)
+    if id in ownByIdentity:
+      let o = ownByIdentity[id]
+      if not (o.kind == srkFsSystemFile and r.kind == srkFsSystemFile and
+              targetPathOf(o) in SupersedableOwnPaths):
+        raise newException(AddonApplyError, "the profile declares " &
+          r.address & " (" & id & "), which is one of the add-on's own " &
+          "objects (generation 0); only " & SupersedableOwnPaths.join(", ") &
+          " may be taken over by a profile; drop it from the profile")
+      superseded[o.address] = r.address
+      supersedingUser.incl(r.address)
+    elif r.address in ownAddresses:
       raise newException(AddonApplyError, "the profile declares " &
         r.address & ", which is one of the add-on's own objects")
-    # The same object under another address: two writers of one path in
-    # one generation. Generation 0's objects (the deploy-signer anchors,
-    # caches.conf, the add-on's units) stay the add-on's; a profile that
-    # wants other content asks for it at bootstrap, not by overwriting.
-    let id = realWorldIdentity(r)
-    if id in ownTargets:
-      raise newException(AddonApplyError, "the profile declares " &
-        r.address & " (" & id & "), which is one of the add-on's own " &
-        "objects (generation 0); drop it from the profile")
+  if superseded.len > 0:
+    var kept: seq[SystemResource]
+    for r in own.resources:
+      if r.address notin superseded: kept.add(r)
+      else:
+        result.ledgerDiff.add("supersede\t" & targetPathOf(r) & "\t" &
+          superseded[r.address] & " (over generation 0's " & r.address & ")")
+    own.resources = kept
   for a in adoptAddresses:
     var declared = false
     for r in user.resources:
@@ -2107,7 +2130,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # package's postinst, wrote its `.ucf-dist` beside the store copy and
     # the upgrade failed on the read-only store (measured 2026-10-30,
     # Debian 13 and Ubuntu 24.04). Unit files are copies by kind, above.
+    # A profile's copy of a generation-0 object stays a copy, as
+    # generation 0's was: taking it over with the same bytes writes nothing.
     p.form = if held: prevForm.getOrDefault(path, "copy")
+             elif r.address in supersedingUser: "copy"
              elif r.kind in LinkFormKinds and
                 dec.verdict notin {cvAdopt, cvDivert}: "link"
              else: "copy"
@@ -2120,6 +2146,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if dec.verdict != cvNoOp and not held:
       result.ledgerDiff.add($dec.verdict & "\t" & path & "\t" & r.address)
     targets.add(targetFor(r.address, inp, path, dec, obs, saved))
+    if r.address in supersedingUser and p.collision.len == 0:
+      p.collision = "supersede"
     plans.add(p)
 
   # `repro system adopt`: the addressed resource must actually be claimed
@@ -2516,7 +2544,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         if depAddress.len == 0: continue
         if dep.kind == $srkSystemdSystemUnit:
           unitDeps.mgetOrPut(r.address, @[]).add(depAddress)
-        elif verdictByAddress.getOrDefault(depAddress, cvNoOp) != cvNoOp:
+        elif verdictByAddress.getOrDefault(depAddress, cvNoOp) notin
+            {cvNoOp, cvAdopt}:
+          # An adoption writes nothing (§4.3): the bytes the unit reads are
+          # the ones it already had, so it is not a change for its
+          # dependents. Only a write is.
           f.depsChanged = true
       facts.add(f)
       factUnits.incl(r.suName)

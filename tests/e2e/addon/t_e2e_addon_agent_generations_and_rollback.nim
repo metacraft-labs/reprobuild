@@ -25,11 +25,26 @@
 ## 4. *rolling forward again* (d) to manifest 2's generation also leaves the
 ##    unchanged unit untouched; `repro system addon resume` clears the
 ##    pause, and the next tick converges.
+## 5. *generation-0 objects* (§9, "Generation-0 objects a profile
+##    supersedes"). Like rpi2's, the profile declares /etc/repro/caches.conf
+##    with other content than generation 0's, which the legacy agent wrote
+##    over it (ledger drift), and the deploy-signer anchors byte for byte.
+##    The migration supersedes both without a refusal: caches.conf keeps the
+##    profile's bytes and has one ledger entry, the profile's (collision
+##    `supersede`); the anchors are not written (same inode, same mtime).
+##    A rollback to generation 0 puts generation 0's caches.conf back.
+##
+## keep-svc `depends_on` a file the migration adopts (rpi2's Alertmanager
+## and its alertmanager.yml), so step 1 also shows that an adoption is not a
+## change for a dependent.
 ##
 ## At reprobuild 3a1068e25b, before the change, step 1 committed no add-on
 ## generation (the tick reported aoConverged and did nothing), step 2's
 ## generation carried no agent record, and step 3 wrote no pause marker:
-## the gate is red there at the first assertion of each step.
+## the gate is red there at the first assertion of each step. At
+## 63757c8dd8 step 1 refused the profile for declaring generation 0's
+## objects, and with those dropped, restarted keep-svc for its adopted
+## dependency.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``. *Mocking.* None: real guests, the
 ## static add-on binary, manifests signed with the deploy agent's own code.
@@ -38,6 +53,7 @@ import std/[json, os, strutils, times, unittest]
 
 import repro_deploy_agent
 import repro_infra
+import repro_addon/ledger
 import repro_test_support/reasoned_skip
 
 import ./addon_testbed
@@ -51,12 +67,35 @@ proc unitText(name, marker: string): string =
   "[Unit]\nDescription=" & marker & "\n\n[Service]\nExecStart=/bin/sleep " &
     "infinity\n\n[Install]\nWantedBy=multi-user.target\n"
 
-proc unitResource(name, marker: string): string =
-  "systemd.systemUnit {\n  name = \"" & name & ".service\"\n  content = \"" &
-    unitText(name, marker) & "\"\n}\n\n"
+const
+  KeepConf = "/etc/repro-agent-fixture/keep.conf"
+  CachesConf = "/etc/repro/caches.conf"
+  Anchors = "/etc/repro/anchors/deploy-signers.anchors"
 
-proc profile(changeMarker: string): string =
-  unitResource("keep-svc", "keep") & unitResource("change-svc", changeMarker)
+proc unitResource(name, marker: string; extra = ""): string =
+  "systemd.systemUnit {\n  name = \"" & name & ".service\"\n  content = \"" &
+    unitText(name, marker) & "\"\n" & extra & "}\n\n"
+
+proc fileResource(path, content: string): string =
+  "fs.systemFile {\n  path = " & quoteSystemValue(path) & "\n  content = " &
+    quoteSystemValue(content) & "\n}\n\n"
+
+proc profile(changeMarker, caches, anchors: string): string =
+  ## keep-svc reads a file of the profile; caches.conf and the anchors are
+  ## generation 0's objects, declared as rpi2's profile declares them.
+  "addOn {\n  managedEtcPrefixes = [\"" & parentDir(KeepConf) & "/\"]\n}\n\n" &
+    fileResource(KeepConf, "keep = 1\n") &
+    unitResource("keep-svc", "keep",
+      "  depends_on = [\"fs.systemFile:" & KeepConf & "\"]\n") &
+    unitResource("change-svc", changeMarker) &
+    fileResource(CachesConf, caches) & fileResource(Anchors, anchors)
+
+proc entriesAt(g: Guest; path: string): seq[LedgerEntry] =
+  for e in parseLedger(g.ledgerOf()).entries:
+    if e.class == lcEtcFile and e.path == path: result.add(e)
+
+proc statOf(g: Guest; path: string): string =
+  g.run("stat -c '%i %y' " & path).strip()
 
 proc unitState(g: Guest; unit: string): string =
   ## MainPID and when the unit last became active: both change on a
@@ -70,14 +109,20 @@ proc currentGeneration(g: Guest): string =
 proc agentRecordOf(g: Guest; gen: string): string =
   g.exec("cat /var/lib/repro/system/generations/" & gen & "/addon-agent").stdout
 
-proc fakeLegacyAgent(g: Guest; text: string) =
+proc fakeLegacyAgent(g: Guest; text, caches: string) =
   ## What rpi2's agent left behind when it applied with `repro infra apply`
-  ## into its own state directory: the units written and running, and its
-  ## generation, sequence floor and last tick in /var/lib/repro/agent/state.
+  ## into its own state directory: its files and units written and running
+  ## (caches.conf over generation 0's copy), and its generation, sequence
+  ## floor and last tick in /var/lib/repro/agent/state.
   for (name, marker) in [("keep-svc", "keep"), ("change-svc", "v1")]:
     writeFile(g.runDir / (name & ".service"), unitText(name, marker))
     g.copyTo(g.runDir / (name & ".service"),
              "/etc/systemd/system/" & name & ".service")
+  discard g.run("mkdir -p " & parentDir(KeepConf))
+  writeFile(g.runDir / "keep.conf", "keep = 1\n")
+  g.copyTo(g.runDir / "keep.conf", KeepConf)
+  writeFile(g.runDir / "caches.conf", caches)
+  g.copyTo(g.runDir / "caches.conf", CachesConf)
   discard g.run("systemctl daemon-reload && systemctl enable --now " &
                 "keep-svc.service change-svc.service")
   let legacy = g.runDir / "legacy-state"
@@ -116,12 +161,31 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if not ok: return fails
     let signer = anchors.deploySignerKeys[0]
     let gen0 = g.currentGeneration()
+    let caches0 = g.run("cat " & CachesConf)
+    let anchorsText = g.run("cat " & Anchors)
+    let caches = caches0 & "# written by the deploy agent outside the switch\n"
+    proc prof(marker: string): string = profile(marker, caches, anchorsText)
     # 1. Migration (c).
-    g.fakeLegacyAgent(profile("v1"))
+    g.fakeLegacyAgent(prof("v1"), caches)
     let keep0 = g.unitState("keep-svc")
     let change0 = g.unitState("change-svc")
-    let m1 = g.publishManifest(signer, Target, 1, profile("v1"), @[], "")
-    var r = g.tick(repro, Target, @[m1])
+    let anchorsStat0 = g.statOf(Anchors)
+    # 0. The migration's plan, read-only, against copies of both state
+    # directories (what the operator runs before installing the binary).
+    var r = g.exec("rm -rf /var/tmp/plan-copy && mkdir -p /var/tmp/plan-copy && " &
+      "cp -a /var/lib/repro/system /var/tmp/plan-copy/system && " &
+      "cp -a /var/lib/repro/agent/state /var/tmp/plan-copy/agent && " &
+      repro & " system addon migration-plan --target " & Target &
+      " --state-dir /var/tmp/plan-copy/system --agent-state /var/tmp/plan-copy/agent")
+    step("the migration plan adopts everything, restarts nothing, writes nothing",
+         r.exitCode == 0 and "units stopped or restarted: 0" in r.stdout and
+         "supersede\t" & CachesConf in r.stdout and
+         "nothing was written" in r.stdout and g.currentGeneration() == gen0 and
+         g.statOf(Anchors) == anchorsStat0 and
+         g.unitState("keep-svc") == keep0,
+         r.stdout & r.stderr)
+    let m1 = g.publishManifest(signer, Target, 1, prof("v1"), @[], "")
+    r = g.tick(repro, Target, @[m1])
     let genMigrated = g.currentGeneration()
     let rec1 = g.agentRecordOf(genMigrated)
     step("the first tick migrates the agent into an add-on generation",
@@ -132,9 +196,17 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.unitState("keep-svc") == keep0 and g.unitState("change-svc") == change0,
          keep0 & " / " & g.unitState("keep-svc") & " ; " & change0 & " / " &
          g.unitState("change-svc"))
+    var cachesEntries = g.entriesAt(CachesConf)
+    step("caches.conf: the profile's bytes, one writer, superseding generation 0",
+         g.run("cat " & CachesConf) == caches and cachesEntries.len == 1 and
+         cachesEntries[0].collision == "supersede",
+         $cachesEntries)
+    step("the byte-identical anchors were taken over without a write",
+         g.statOf(Anchors) == anchorsStat0 and g.entriesAt(Anchors).len == 1,
+         anchorsStat0 & " / " & g.statOf(Anchors))
     # 2. An agent apply commits an add-on generation (a).
     let keep1 = g.unitState("keep-svc")
-    let m2 = g.publishManifest(signer, Target, 2, profile("v2"), @[], "")
+    let m2 = g.publishManifest(signer, Target, 2, prof("v2"), @[], "")
     r = g.tick(repro, Target, @[m2])
     let gen2 = g.currentGeneration()
     let rec2 = g.agentRecordOf(gen2)
@@ -176,6 +248,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     r = g.tick(repro, Target, @[m2])
     step("after resume the tick converges",
          r.outcomeOf() in ["aoConverged", "aoApplied"], r.stdout & r.stderr)
+    # 5. Generation 0 takes its caches.conf back (b of the supersede rule).
+    r = g.exec(repro & " system rollback " & gen0, timeoutSec = 1200)
+    cachesEntries = g.entriesAt(CachesConf)
+    step("a rollback to generation 0 restores generation 0's caches.conf",
+         r.exitCode == 0 and g.run("cat " & CachesConf) == caches0 and
+         cachesEntries.len == 1 and cachesEntries[0].collision == "",
+         r.stdout & r.stderr & $cachesEntries)
   except CatchableError as e:
     fails.add(b.name & ": raised: " & e.msg)
   finally:
