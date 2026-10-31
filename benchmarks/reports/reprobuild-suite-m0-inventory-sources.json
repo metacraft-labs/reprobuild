@@ -23956,8 +23956,8 @@
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
