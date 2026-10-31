@@ -192,6 +192,12 @@ const
                                    # when idle -- measured: active at one
                                    # fingerprint and gone at the next, ten
                                    # minutes later, in the A5 reset gate)
+    "fwupd.service",               # firmware updater (Ubuntu; D-Bus
+                                   # activated by fwupd-refresh and
+                                   # GNOME/PackageKit clients, exits when
+                                   # idle -- measured: active at one
+                                   # fingerprint and not at the other, in
+                                   # the A5 reset gate on ubuntu-24.04)
   ]
 
   VolatileUnitPrefixes* = [
