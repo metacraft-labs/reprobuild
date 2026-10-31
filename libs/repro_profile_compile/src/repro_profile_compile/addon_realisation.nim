@@ -75,6 +75,13 @@ type
     machineFields*: seq[FieldRule]
       ## The ReproOS machine configuration (`system "<host>":` and
       ## `hardware "<id>":`), by dotted path.
+    realisationDifferences*: seq[FieldRule]
+      ## How a SHARED kind's realisation differs on the host from the full
+      ## realisation's while its configuration is the same, each
+      ## `fcIgnored` with its reason, named `<kind>.<aspect>` (`bytes`,
+      ## `mode`, `owner`, `representation`). The parity gate
+      ## (`e2e_addon_reproos_service_parity`) fails on any difference of a
+      ## rendered file that is not listed here.
 
   ProjectionEntry* = object
     ## One classified field occurrence: the projection report's row.
@@ -276,6 +283,16 @@ proc addOnDebianProfile*(): RealisationProfile =
     FieldRule(field: "hardware.audioCards", class: fcInvalid,
       reason: kernel),
     FieldRule(field: "hardware.disko", class: fcInvalid, reason: disks)]
+  # Differences of a shared kind's realisation (spec ReproOS-Add-On-Mode
+  # §8.3, *As implemented by A12*); the configuration they carry is the
+  # same, which the parity gate checks byte for byte.
+  result.realisationDifferences = @[
+    FieldRule(field: "fs.systemFile.representation", class: fcIgnored,
+      reason: "on an add-on host a managed /etc file is a link into the " &
+        "generation's static tree (/etc/repro/static), so a switch is one " &
+        "rename (spec §7.2 steps 3-4); a full realisation writes the file " &
+        "in place. What a reader opens -- its bytes, mode and owner -- is " &
+        "the same")]
 
 proc findKind*(rp: RealisationProfile; kind: string): int =
   ## Index of `kind` in `rp.kinds`, or -1.

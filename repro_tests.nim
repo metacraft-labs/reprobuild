@@ -388,6 +388,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
+    binary: "build/test-bin/t_addon_retargeted_address_is_refused",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_secret_declarations.nim",
     binary: "build/test-bin/t_addon_secret_declarations",
     defines: @[],
@@ -453,6 +464,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let root = getTempDir() / (\"repro-addon-uninstall-kept-\" & $..."),
+  TestSpec(
+    source: "libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim",
+    binary: "build/test-bin/t_full_host_secrets_materialise_from_the_latest_envelope",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim",
     binary: "build/test-bin/t_rdmf_v3_closure_digests_are_enforced",
@@ -12199,7 +12221,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_no_plaintext_secret_on_disk.nim",
@@ -12210,7 +12232,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim",
@@ -12221,7 +12243,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_profile_compiles_unprivileged.nim",
@@ -12243,7 +12265,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim",
@@ -12254,7 +12276,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_refused_recovery_keeps_its_record.nim",
@@ -12265,7 +12287,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim",
@@ -12276,7 +12298,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/e2e/addon/t_e2e_addon_reproos_service_parity.nim",
+    binary: "build/test-bin/t_e2e_addon_reproos_service_parity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_secrets_follow_generations.nim",
@@ -12287,7 +12320,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_secrets_without_memory_controller.nim",
@@ -12298,7 +12331,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_sequence_floor_survives_and_is_root_only.nim",
@@ -12309,7 +12342,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_service_reads_only_its_credentials.nim",
@@ -12320,7 +12353,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_staging_swap_after_verify_is_refused.nim",
@@ -12331,7 +12364,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_stale_manifest_is_reported.nim",
@@ -12342,7 +12375,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim",
@@ -12353,7 +12386,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_survives_point_upgrades.nim",
@@ -12364,7 +12397,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_switch_is_planned_exactly.nim",
@@ -12375,7 +12408,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim",
@@ -12386,7 +12419,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim",
@@ -12397,7 +12430,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim",
@@ -12408,7 +12441,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim",
+    binary: "build/test-bin/t_e2e_addon_validator_never_double_signs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_write_time_recheck.nim",
@@ -12419,7 +12463,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim",
@@ -12430,7 +12474,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_system_profile_host_selection.nim",
@@ -12441,7 +12485,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/e2e/addon/t_validator_safety_checks.nim",
+    binary: "build/test-bin/t_validator_safety_checks",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim",

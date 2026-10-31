@@ -42,12 +42,14 @@ libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	5
 libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
+libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
+libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	5
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7
 libs/repro_agent_backend/tests/t_agent_preview_strategy.nim	nim	3
@@ -1123,6 +1125,7 @@ tests/e2e/addon/t_e2e_addon_recipient_key_rotation.nim	nim	1
 tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim	nim	1
 tests/e2e/addon/t_e2e_addon_refused_recovery_keeps_its_record.nim	nim	1
 tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim	nim	1
+tests/e2e/addon/t_e2e_addon_reproos_service_parity.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_follow_generations.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_without_memory_controller.nim	nim	1
 tests/e2e/addon/t_e2e_addon_sequence_floor_survives_and_is_root_only.nim	nim	1
@@ -1135,9 +1138,11 @@ tests/e2e/addon/t_e2e_addon_switch_is_planned_exactly.nim	nim	1
 tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
+tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	1
+tests/e2e/addon/t_validator_safety_checks.nim	nim	7
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
 tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim	nim	3
 tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim	nim	7

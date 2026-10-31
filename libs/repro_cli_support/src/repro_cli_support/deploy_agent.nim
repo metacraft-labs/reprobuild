@@ -42,7 +42,7 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[base64, json, os, strutils]
+import std/[base64, json, os, sets, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -178,13 +178,29 @@ const CompiledProfileStdioMarker* = "REPRO-COMPILED-PROFILE "
   ## JSON object ``{"canonical", "actions"}``, each base64), so whatever the
   ## compiler prints around it cannot be mistaken for it.
 
-proc compileTargetFor(host, platform, arch: string): SystemPlanTarget =
+proc compileTargetFor(host, platform, arch: string; systemMode = "";
+                      systemActivities: seq[string] = @[]): SystemPlanTarget =
   ## The plan target of an agent compile: the ``default`` activity, with the
   ## predicate facts overridden by whatever the caller names. A producer
   ## compiles for its target's facts, and the target's agent compiles with
   ## the same ones from the signed pin, so one compiler revision gives one
   ## output on both (Deploy-Agent.md §"The compiled-profile pin").
-  result = defaultSystemPlanTarget(host)
+  ##
+  ## ``systemMode`` (``addOn`` or ``full``) and ``systemActivities`` are the
+  ## producer's selection for a canonical-text manifest: the system
+  ## activities the target's host-registry entry selects and how they are
+  ## realised, exactly what ``system: {mode: ..., activities: [...]}`` gives
+  ## ``repro infra plan`` on that host. Without them the target is the
+  ## ``default`` activity realised in full, as before.
+  if systemMode.len == 0 and systemActivities.len == 0:
+    result = defaultSystemPlanTarget(host)
+  else:
+    let realisation = case systemMode
+      of "", "full": srFull
+      of "addOn": srAddOnDebian
+      else: raise newException(ValueError, "--system-mode must be addOn " &
+        "or full, got '" & systemMode & "'")
+    result = systemPlanTarget(host, toHashSet(systemActivities), realisation)
   if platform.len > 0: result.facts.platform = platform
   if arch.len > 0: result.facts.arch = arch
 
@@ -192,7 +208,8 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## ``repro deploy-agent compile-profile --staged <module.nim>
   ## --canonical-out <file> --actions-out <file> [--state-dir D]
   ## [--host H] [--platform P] [--arch A] [--digest-out F]
-  ## [--revision-out F]``: compile a
+  ## [--revision-out F] [--system-mode addOn|full]
+  ## [--system-activities a,b]``: compile a
   ## staged manifest profile (its bundle beside it, as
   ## ``stageProfileSources`` writes it) to the canonical resource text and
   ## the build actions, through the same Phase-F3 path ``repro infra apply``
@@ -212,7 +229,8 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## profile compiler, so the compiler never runs as root (ReproOS add-on
   ## §9.1).
   var staged, canonicalOut, actionsOut, stateDir, digestOut, revisionOut = ""
-  var host, platform, arch = ""
+  var host, platform, arch, systemMode = ""
+  var systemActivities: seq[string]
   var hostGiven, stdio = false
   var i = 0
   while i < args.len:
@@ -237,6 +255,10 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
       hostGiven = true
     of "--platform": platform = args[i + 1]
     of "--arch": arch = args[i + 1]
+    of "--system-mode": systemMode = args[i + 1]
+    of "--system-activities":
+      for name in args[i + 1].split(','):
+        if name.strip().len > 0: systemActivities.add(name.strip())
     else:
       stderr.writeLine("repro deploy-agent compile-profile: unknown option " & a)
       return 2
@@ -272,7 +294,8 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
     stderr.writeLine("usage: repro deploy-agent compile-profile --staged " &
       "<module.nim> --canonical-out <file> --actions-out <file> " &
       "[--state-dir D] [--host H] [--platform P] [--arch A] " &
-      "[--digest-out F] [--revision-out F]\n       repro deploy-agent compile-profile --stdio " &
+      "[--digest-out F] [--revision-out F] [--system-mode addOn|full] " &
+      "[--system-activities a,b]\n       repro deploy-agent compile-profile --stdio " &
       "[--host H] [--platform P] [--arch A]")
     return 2
   else:
@@ -285,11 +308,17 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   var actions: seq[ProfileBuildAction]
   if not hostGiven:
     host = try: selectHost("", false).name except CatchableError: ""
+  var target: SystemPlanTarget
+  try:
+    target = compileTargetFor(host, platform, arch, systemMode,
+                              systemActivities)
+  except ValueError as e:
+    stderr.writeLine("repro deploy-agent compile-profile: " & e.msg)
+    return 2
   if not resolveSystemProfileText(staged, profileText, stateDir,
       "repro deploy-agent compile-profile", text,
       planCommand = "repro infra plan", outBuildActions = addr actions,
-      target = compileTargetFor(host, platform, arch),
-      declaredInputs = bundlePaths):
+      target = target, declaredInputs = bundlePaths):
     return 1
   let actionsJson = $(%actions)
   if stdio:

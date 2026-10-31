@@ -817,6 +817,24 @@ proc targetPathOf*(r: SystemResource): string =
   of srkLinuxDpkgDiversion: r.ddPath
   else: ""
 
+proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
+    seq[tuple[address, was, now: string]] =
+  ## The addresses that name a different object now than in the previous
+  ## generation: same address, but another kind or another target path (a
+  ## unit renamed while its `address` was kept). The ledger and the
+  ## removal pass know objects by address, so such a resource would be
+  ## neither removed nor kept: its old file would stay on the host, out of
+  ## the ledger, and an old instance of a unit would keep running beside
+  ## the new one -- for an `exclusive` unit, exactly the overlap §7.3
+  ## forbids. The switch refuses it instead; a rename is a new address.
+  var before = initTable[string, string]()
+  for r in previous:
+    before[r.address] = $r.kind & " " & targetPathOf(r)
+  for r in wanted:
+    let now = $r.kind & " " & targetPathOf(r)
+    if r.address in before and before[r.address] != now:
+      result.add((r.address, before[r.address], now))
+
 proc preObserve(p: var ResourcePlan; driver: CollisionDriver) =
   case p.r.kind
   of srkFsSystemFile:
@@ -1992,11 +2010,17 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var decisions = initTable[string, CollisionDecision]()
 
   var own = parseSystemProfile(ownText)
-  let user =
+  var user =
     if adoptAddresses.len > 0:
       scopedAdoptProfile(parseSystemProfile(targetUserText),
                          previousUserText, adoptAddresses)
     else: parseSystemProfile(targetUserText)
+  when mutated("addon-unit-renders-differently"):
+    # FALSIFYING MUTATION (e2e_addon_reproos_service_parity): the add-on
+    # writes every unit with one line the full realisation does not.
+    for r in user.resources.mitems:
+      if r.kind == srkSystemdSystemUnit:
+        r.suContent.add("# rendered by the add-on\n")
   checkScope(user)
   # The envelope this switch's secrets come from (spec §10.3, A7).
   let secretsLayout = defaultSecretsLayout()
@@ -2484,7 +2508,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   if previousUserText.len > 0:
     previousUser = parseSystemProfile(previousUserText)
     var prevDropIns = initHashSet[string]()
-    for r in reshape(previousUser, prevDropIns):
+    let previousShaped = reshape(previousUser, prevDropIns)
+    when not mutated("retargeted-address-accepted"):
+      let moved = retargetedAddresses(previousShaped, composed.resources)
+      if moved.len > 0:
+        let m = moved[0]
+        raise newAddOnOutOfScope("address", "", m.address,
+          "the resource at address `" & m.address & "` now targets " &
+          m.now & ", and the current generation's targets " & m.was &
+          "; an address names one object, so a renamed unit or moved file " &
+          "needs a new address (the old one is then removed, and an " &
+          "exclusive unit's old instance stopped and confirmed first)")
+    for r in previousShaped:
       if r.address notin wanted:
         removed.add(r)
   removed.sort(proc(a, b: SystemResource): int =

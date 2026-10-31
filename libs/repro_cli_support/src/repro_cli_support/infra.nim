@@ -41,6 +41,11 @@ import repro_infra/addon_diagnostics
 when defined(linux):
   import repro_addon/addon_apply as addon_apply
   import repro_addon/cli as addon_cli
+  import repro_addon/addon_secrets as addon_secrets
+  import repro_addon/full_host_secrets
+  import repro_addon/locked_buffer
+  import repro_addon/secrets_ops as addon_secrets_ops
+  import repro_addon/switch as addon_switch
 import repro_infra/host_base
 import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
@@ -878,6 +883,34 @@ proc runInfraApply(args: openArray[string]): int =
         stderr.writeLine("repro infra apply: " & e.msg)
         return 1
 
+  # A host realised in full materialises the profile's secrets itself
+  # (ReproOS Add-On Mode §10.3, as a full host has them): from the latest
+  # envelope, through the add-on's secrets library, before any unit the
+  # apply starts loads them, refusing before anything is applied when one
+  # cannot be served. The units whose secrets changed are restarted after
+  # the apply if it did not restart them already.
+  var secretConsumers: seq[string]
+  when defined(linux):
+    let fullProfile = parseSystemProfile(profileText)
+    let layout = addon_secrets.defaultSecretsLayout()
+    if fullProfile.secretFiles.len > 0 or
+        addon_secrets_ops.hostHasSecrets(layout):
+      let nr = addon_secrets_ops.reexecInNoSwapScope()
+      if nr >= 0: return nr
+      var changed: seq[string]
+      try:
+        changed = materialiseFullHostSecrets(layout, fullProfile.secretFiles)
+      except CatchableError as e:
+        stderr.writeLine("repro infra apply: secrets: " & e.msg)
+        return 1
+      var units: seq[tuple[name: string; credentials: seq[string]]]
+      for r in fullProfile.resources:
+        if r.kind == srkSystemdSystemUnit:
+          units.add((r.suName, r.suCredentials))
+      secretConsumers = consumersOf(units, changed)
+      if changed.len > 0:
+        echo "  secrets      : materialised for " & changed.join(", ")
+
   var opts: ApplyOptions
   opts.stateDir = stateDir
   opts.hostIdentity = host
@@ -941,6 +974,17 @@ proc runInfraApply(args: openArray[string]): int =
     echo "  - " & d
   if applyResult.driftCount > 0 or applyResult.errorCount > 0:
     return 1
+  # A unit whose secrets changed reads them only at start: restart it if
+  # it runs (`try-restart` leaves a stopped unit stopped).
+  when defined(linux):
+    for unit in secretConsumers:
+      try:
+        addon_switch.tryRestartUnit(unit)
+      except CatchableError as e:
+        stderr.writeLine("repro infra apply: restarting " & unit &
+          " for its changed secrets failed: " & e.msg)
+        return 1
+      echo "  restarted    : " & unit & " (its secrets changed)"
   if applyResult.skippedCount > 0:
     # Partial success — the non-privileged subset applied, the
     # privileged ones were skipped.
@@ -1473,6 +1517,18 @@ proc runSystemCommand*(args: seq[string]): int =
           return addon_cli.runAddonRollbackCli(rest)
       return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
+    of "secret":
+      # `repro system secret put --service S --name N [--target T]`: an
+      # add-on host's verb is `repro system addon secret put`, which this
+      # hands over to; a host realised in full seals into its one envelope
+      # (`full_host_secrets`), materialised by the next `repro infra apply`.
+      when defined(linux):
+        if addon_apply.isAddonHost(resolveSystemStateDir()):
+          return addon_cli.runAddonCli(@["secret"] & rest)
+        return runFullHostSecretPutCli(rest)
+      else:
+        stderr.writeLine("repro system secret: supported only on Linux")
+        return 2
     of "addon":
       when defined(linux):
         return addon_cli.runAddonCli(rest)

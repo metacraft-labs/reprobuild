@@ -290,6 +290,14 @@
 ##                                            aliases not resolved
 ## ``floor-only-on-confirm``                  the rollback floor bounds only
 ##                                            confirmation failures
+## ``retargeted-address-accepted``           a resource whose address now
+##                                            names another unit or path is
+##                                            applied, leaving the old one
+##                                            running and unledgered (A12)
+## ``addon-unit-renders-differently``         every unit the add-on writes
+##                                            gains one comment line, so
+##                                            its bytes differ from the
+##                                            full realisation's (A12)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -336,6 +344,9 @@ const
                           "credentials-not-planned",
                           "rotation-not-reconciled",
                           "secrets-plaintext-swappable",
+                          # Milestone A12: the parity gate's falsifying build.
+                          "addon-unit-renders-differently",
+                          "retargeted-address-accepted",
                           "secrets-plaintext-unlocked",
                           "replay-reverts-on-secrets",
                           "retirement-not-resumed",
