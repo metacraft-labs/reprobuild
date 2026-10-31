@@ -210,8 +210,12 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       # ``<scratch>/parked/leaf``.
       let parked = scratch / "parked"
       initRepoWith(gitBin, consumer, consumerRecipe)
-      initRepoWith(gitBin, mid, midRecipe)
-      initRepoWith(gitBin, leaf, leafRecipe)
+      # External VCS dependencies are only lockable with a fetch URL, so the
+      # siblings carry an origin (the consumer is the lock's own project).
+      initRepoWith(gitBin, mid, midRecipe,
+        origin = scratch / "origin-mid.git")
+      initRepoWith(gitBin, leaf, leafRecipe,
+        origin = scratch / "origin-leaf.git")
       let lockPath = consumer / "repro.lock"
 
       # ---- (1) complete workspace: leaf's floor reaches the solve. ----------
@@ -253,7 +257,8 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       # ---- (4) control: a recipe-less leaf checkout is not a dropped solve. -
       # It is named by mid's `uses:` and is in the lock's develop set, but it
       # declares no constraints, so a solve without it loses nothing.
-      initRepoWith(gitBin, leaf, "")
+      initRepoWith(gitBin, leaf, "",
+        origin = scratch / "origin-leaf-recipeless.git")
       let recipeless = run(q(reproBinary) & " lock refresh " & q(consumer))
       checkpoint("recipe-less sibling refresh exit=" & $recipeless.code)
       checkpoint(recipeless.output)
