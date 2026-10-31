@@ -51,8 +51,14 @@ import repro_peer_cache/auth as peerAuth
 import repro_home_intent/host_identity
 import repro_profile
 import ./infra
-import repro_addon/addon_apply
-import repro_addon/agent_switch
+# Add-on mode owns Linux filesystem and ledger operations, so its closure
+# reaches `repro_addon/linux_fs` and its `<sys/vfs.h>` bindings. Keep those
+# imports out of the portable engine, exactly as `./infra` does -- this
+# module is linked into `apps/repro/repro.nim`, which builds for macOS and
+# Windows too. `scripts/check_portable_engine_closure.sh` is the gate.
+when defined(linux):
+  import repro_addon/addon_apply
+  import repro_addon/agent_switch
 import repro_elevation
 import repro_profile_compile
 
@@ -350,33 +356,43 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # host whose agent applied outside the switch before this build is first
   # taken over by one switch of the profile it last applied (§9
   # "Migration"), which adopts every object without writing or restarting.
-  let addonState = hostAddonStateDir()
+  #
+  # An add-on host is a Linux host by construction -- the switch is a btrfs
+  # subvolume and a dpkg-level ownership ledger -- so off Linux there is no
+  # add-on state to detect and the ordinary apply hook is the only arm. The
+  # detection lives inside the `when` with the imports, rather than beside
+  # them, because naming `hostAddonStateDir` or `isAddonHost` out here would
+  # pull the whole add-on closure back into a macOS or Windows engine.
   var deps: AgentDeps
-  if isAddonHost(addonState) and
-      absolutePath(addonState) != absolutePath(flags.stateDir):
-    if needsLegacyMigration(addonState, flags.stateDir):
-      let legacyGen = legacyAgentGeneration(flags.stateDir)
-      try:
-        let r = migrateLegacyAgentState(addonState, flags.stateDir,
-          flags.target, host)
-        echo "repro deploy-agent: migration: add-on generation " &
-          r.generationId & " took over agent generation " & legacyGen &
-          " (applied " & $r.infra.appliedCount & ", no-op " &
-          $r.infra.noOpCount & ")"
-      except CatchableError as e:
-        let msg = "migrating agent generation " & legacyGen & " into the " &
-          "add-on switch failed; nothing was applied: " & e.msg
-        stderr.writeLine("repro deploy-agent: " & msg)
-        var rec = tickStatusForRaise(flags.target, msg)
-        rec.exitCode = 1
-        rec.errorCode = "addon_migration_failed"
-        recordTick(flags.stateDir, flags.target, rec)
-        return 1
-    let ctx = FixtureContext(filePrefix: flags.stateDir)
-    deps = AgentDeps(
-      apply: addonAgentApplyHook(addonState, host, flags.stateDir, resolver,
-        mkBuildActionDispatcher(flags.cacheRoot, ctx)))
-  else:
+  var throughAddonSwitch = false
+  when defined(linux):
+    let addonState = hostAddonStateDir()
+    if isAddonHost(addonState) and
+        absolutePath(addonState) != absolutePath(flags.stateDir):
+      if needsLegacyMigration(addonState, flags.stateDir):
+        let legacyGen = legacyAgentGeneration(flags.stateDir)
+        try:
+          let r = migrateLegacyAgentState(addonState, flags.stateDir,
+            flags.target, host)
+          echo "repro deploy-agent: migration: add-on generation " &
+            r.generationId & " took over agent generation " & legacyGen &
+            " (applied " & $r.infra.appliedCount & ", no-op " &
+            $r.infra.noOpCount & ")"
+        except CatchableError as e:
+          let msg = "migrating agent generation " & legacyGen & " into the " &
+            "add-on switch failed; nothing was applied: " & e.msg
+          stderr.writeLine("repro deploy-agent: " & msg)
+          var rec = tickStatusForRaise(flags.target, msg)
+          rec.exitCode = 1
+          rec.errorCode = "addon_migration_failed"
+          recordTick(flags.stateDir, flags.target, rec)
+          return 1
+      let ctx = FixtureContext(filePrefix: flags.stateDir)
+      deps = AgentDeps(
+        apply: addonAgentApplyHook(addonState, host, flags.stateDir, resolver,
+          mkBuildActionDispatcher(flags.cacheRoot, ctx)))
+      throughAddonSwitch = true
+  if not throughAddonSwitch:
     deps = AgentDeps(
       apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
         hostIdentity = host,
