@@ -83,7 +83,7 @@ reprobuild-test-adapters=b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24
 # `agents` commit until the v0.1.0 tag carries it. Keep this revision aligned
 # with flake.nix's `test-certificates-tools-src` URL, flake.lock, package.nix
 # and repro.lock.
-test-certificates-tools=ddc6b18ee2987ca0fff177f51133eb3eadc9fc2a
+test-certificates-tools=40e62089e8d157ff0fb6f1eeb2cf331f274234b7
 reprobuild-ct-test-runner=dev
 
 # The reprobuild-packages catalog. A `uses:` name the stdlib does not bundle is
