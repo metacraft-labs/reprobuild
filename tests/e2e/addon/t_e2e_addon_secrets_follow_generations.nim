@@ -150,7 +150,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let m2 = g.publishManifest(signer, Target, 2, failingProfile(),
       @[("x-web/token", "X2"), ("h-web/token", "H2")], k1)
     r = g.tick(repro, Target, @[m2])
-    step("tick 2 fails and is rolled back", r.outcomeOf() == "aoApplyFailed" and
+    # A reverted apply is aoRolledBack since milestone A8 (the deployment is
+    # quarantined; spec §9.2), not the retryable aoApplyFailed.
+    step("tick 2 fails and is rolled back", r.outcomeOf() == "aoRolledBack" and
          "rolled back" in r.stdout, r.stdout & r.stderr)
     step("the latest envelope is unchanged and nothing is staged",
          g.run("sha256sum /var/lib/repro/agent/sealed-secrets") == latestBefore and
