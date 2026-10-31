@@ -22,7 +22,7 @@
 ## directory's apply lock, the same two the switch takes, so a secret is
 ## never re-materialised under a running switch.
 
-import std/[os, strutils]
+import std/[os, posix, strutils]
 
 import repro_core/host_apply_lock
 import repro_infra
@@ -43,6 +43,7 @@ import ./host_exec
 import ./ledger
 import ./mutations
 import ./preflight
+import ./seams
 import ./pending_plan
 import ./static_tree
 import ./switch
@@ -110,6 +111,20 @@ proc acceptSealedSection*(stateDir: string; l: SecretsLayout;
     withSecretsLocks(stateDir, "staging a sealed secrets section"):
       stageEnvelope(l, RetainedEnvelope(target: m.target, sealed: m.secrets),
                     decls)
+      # The declarations the apply will materialise are the stored
+      # profile's -- the manifest's plus those of any unit the switch would
+      # keep in place as drift -- so the switch's own plan decides whether
+      # the staged section serves them (it writes nothing), and a section
+      # that does not is refused here, as aoSecretsFailed, and discarded.
+      try:
+        discard runAddonApply(AddonApplyOptions(stateDir: stateDir,
+          hostIdentity: readHostname(), userProfileText: m.profileText,
+          planOnly: true, secretsEnvelope: stagedEnvelopePath(l)))
+      except AddonSecretsFailed as e:
+        discardStaged(l)
+        raise e
+      except CatchableError:
+        discard   # not a secrets refusal: the apply reports it
     ""
   except CatchableError as e:
     e.msg
@@ -194,8 +209,11 @@ proc secretPut*(stateDir: string; l: SecretsLayout; service, name: string;
     raise newException(AddonSecretsFailed, "secret put: --service and " &
       "--name must each be one path segment of letters, digits, '.', '-' " &
       "or '_', at most 64 bytes, not starting with '.'")
-  hardenProcessForSecrets()
+  guardPlaintext(l)
   withSecretsLocks(stateDir, "repro system addon secret put"):
+    # The seam build can hold this process here, with the secret in its
+    # heap, while a gate puts the guest under memory pressure.
+    seamPause(stateDir, "secrets-holding-plaintext")
     discard reconcileRotation(l, ledgerCopyPath(stateDir))
     let entry = secretEntryPath(service, name)
     let tgt = addEntry(l, latestEnvelopePath(l), entry, content, target,
@@ -217,10 +235,25 @@ proc secretPut*(stateDir: string; l: SecretsLayout; service, name: string;
     let source = currentEnvelope(stateDir, l)
     let changes = plannedSecretChanges(l, decls, source)
     let plan = planConsumers(stateDir, changes)
-    for u in plan.exclusive:
-      stopExclusive(u)
-      result.add(u & ": stopped and confirmed exited (exclusive)")
-    discard materialiseFromEnvelope(l, decls, source)
+    var stopped: seq[string]
+    try:
+      for u in plan.exclusive:
+        stopExclusive(u)
+        stopped.add(u)
+        result.add(u & ": stopped and confirmed exited (exclusive)")
+      discard materialiseFromEnvelope(l, decls, source)
+    except CatchableError:
+      # The exclusive units this put stopped are started again (confirmed
+      # exited first, as the switch does) before the failure is reported:
+      # a failed put must not leave a service down.
+      for u in stopped:
+        try:
+          confirmExited([u], u)
+          startUnit(u)
+        except CatchableError as e2:
+          stderr.writeLine("repro system addon secret put: restarting " & u &
+                           " failed: " & e2.msg)
+      raise
     if changes.len > 0:
       result.add("materialised: " & changes.join(", "))
     for u in plan.exclusive:
@@ -233,6 +266,32 @@ proc secretPut*(stateDir: string; l: SecretsLayout; service, name: string;
     for u in plan.pending:
       result.add(u & ": restart pending (restartIfChanged = false); the " &
         "re-assert unit reports it until the unit restarts")
+
+proc retryPendingSecretsCommit*(stateDir: string; l: SecretsLayout) =
+  ## A committed switch whose secrets were not yet kept (its record is still
+  ## there and no switch is pending): keep them now. Runs before a tick
+  ## stages a new section over the staged path, and in the re-assert.
+  if not hasPendingMarker(stateDir) and readSecretsSource(stateDir).len > 0:
+    commitSecretsOf(stateDir, l, readCurrentGenerationId(stateDir))
+
+proc tickApply*(stateDir: string; l: SecretsLayout; m: DeployManifest;
+                apply: proc(o: AddonApplyOptions): AddonApplyResult):
+    tuple[ok: bool; message: string] =
+  ## The add-on tick's apply of ``m``: from the section it staged, when it
+  ## carries one. When the apply did not commit, the staged section is
+  ## discarded (it never changes what the host runs); when it committed,
+  ## the commit promoted it -- or, if keeping it failed, it stays staged and
+  ## its record stays, for ``retryPendingSecretsCommit``.
+  let staged = if m.hasSecrets: stagedEnvelopePath(l) else: ""
+  try:
+    let r = apply(AddonApplyOptions(stateDir: stateDir,
+      hostIdentity: readHostname(), userProfileText: m.profileText,
+      secretsEnvelope: staged))
+    result = (true, "generation " & r.generationId)
+  except CatchableError as e:
+    result = (false, e.msg)
+    try: discardStaged(l)
+    except CatchableError: discard
 
 proc rotateKey*(stateDir: string; l: SecretsLayout):
     tuple[publicKeyHex: string; created: bool] =
@@ -290,9 +349,10 @@ proc reassertSecrets*(stateDir: string; l: SecretsLayout): SecretsCheck =
   try:
     if not hasPendingMarker(stateDir) and
         readSecretsSource(stateDir).len > 0:
-      # A switch committed and died before it kept its secrets.
-      commitSecretsOf(stateDir, l, readCurrentGenerationId(stateDir))
-      result.notes.add("secrets: finished keeping the committed " &
+      # A switch committed and did not keep its secrets (it died, or the
+      # copy failed).
+      retryPendingSecretsCommit(stateDir, l)
+      result.notes.add("secrets: retried keeping the committed " &
                        "generation's envelope")
     for line in reconcileRotation(l, ledgerCopyPath(stateDir)):
       result.notes.add("secrets: " & line)
@@ -346,6 +406,47 @@ proc bootSecrets*(stateDir: string; l = defaultSecretsLayout()):
   (r.status in ["ok", "drift", "deferred"],
    r.status & (if r.notes.len + r.findings.len > 0:
                  ": " & (r.notes & r.findings).join("; ") else: ""))
+
+# ---------------------------------------------------------------------------
+# Running where plaintext cannot be swapped.
+# ---------------------------------------------------------------------------
+
+proc hostHasSecrets*(l = defaultSecretsLayout()): bool =
+  ## Whether this host keeps any sealed envelope (so an apply or a
+  ## re-assert may open one).
+  fileExists(latestEnvelopePath(l)) or fileExists(stagedEnvelopePath(l)) or
+    envelopeCopies(DefaultStateDir).len > 0
+
+proc reexecInNoSwapScope*(): int =
+  ## Re-run this very command (same executable, same arguments, same stdin)
+  ## in a transient scope of PID 1 with ``MemorySwapMax=0``, unless this
+  ## process may already not swap. Returns -1 when the caller should go on
+  ## (it is in such a group); otherwise it does not return on success
+  ## (``execv``), and returns an exit status after printing why it could
+  ## not. A process re-executed this way whose group may still swap is
+  ## refused, never re-entered.
+  if not processMaySwap(): return -1
+  when mutated("secrets-scope-allows-swap"):
+    if getEnv(NoSwapScopeEnv) == "1": return -1
+  if getEnv(NoSwapScopeEnv) == "1":
+    stderr.write("repro-addon: this command runs in a scope with " &
+      "MemorySwapMax=0, and its control group still may swap (" &
+      "memory.swap.max is '" & ownCgroupSwapMax() & "'); refusing to " &
+      "handle plaintext secrets\n")
+    return 1
+  var argv: seq[string]
+  try:
+    argv = noSwapScopeArgv(getAppFilename(), commandLineParams())
+  except CatchableError as e:
+    stderr.write("repro-addon: " & e.msg & "\n")
+    return 1
+  putEnv(NoSwapScopeEnv, "1")
+  var cargs = allocCStringArray(argv)
+  discard posix.execv(argv[0].cstring, cargs)
+  deallocCStringArray(cargs)
+  stderr.write("repro-addon: cannot run " & argv[0] & ": " &
+    osErrorMsg(osLastError()) & "\n")
+  1
 
 # ---------------------------------------------------------------------------
 # The CLI.
@@ -461,20 +562,11 @@ proc runAgentTickCli*(args: seq[string]): int =
       # A manifest with a sealed section applies from the section it
       # staged; the commit promotes it, and whatever happens the staged
       # copy does not outlive this tick.
-      let staged = if m.hasSecrets: stagedEnvelopePath(layout) else: ""
-      try:
-        let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
-          hostIdentity: readHostname(), userProfileText: m.profileText,
-          secretsEnvelope: staged))
-        (true, "generation " & r.generationId)
-      except CatchableError as e:
-        (false, e.msg)
-      finally:
-        try: discardStaged(layout)
-        except CatchableError: discard
-  hardenProcessForSecrets()
+      tickApply(DefaultStateDir, layout, m, proc(o: AddonApplyOptions):
+          AddonApplyResult = runAddonApply(o))
   var hostLock = acquireHostApplyLock("repro system addon agent-tick")
   defer: hostLock.release()
+  retryPendingSecretsCommit(DefaultStateDir, layout)
   let outcome = runAgentTick(cfg, deps)
   stdout.write("outcome: " & $outcome.kind & "\n" &
                "sequence: " & $outcome.sequence & "\n" &

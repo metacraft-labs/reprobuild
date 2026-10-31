@@ -36,10 +36,16 @@
 ##    process fills more memory than the guest has with a known pattern;
 ##    the guest is powered off and the image scanned: the pattern is found
 ##    (vacuity guard: swap was written), C4 is not. The secrets directory
-##    is a ramfs, whose pages are never swapped.
+##    is a ramfs, whose pages are never swapped. During the pressure a
+##    second ``secret put`` is held at the seam ``secrets-holding-plaintext``
+##    with a 16 MiB secret C5 in its heap: it runs in a scope with
+##    ``MemorySwapMax=0`` (checked in its cgroup), so C5 is not on the image
+##    either; the boot secrets and re-assert units carry ``MemorySwapMax=0``.
 ##
 ## *Falsifying mutations*: ``secrets-on-tmpfs`` accepts a plain directory
 ## on /run's tmpfs, so the swap pass finds C4 in the swap file;
+## ``secrets-scope-allows-swap`` runs the plaintext-holding processes and
+## units without ``MemorySwapMax=0``, so the held C5 reaches the swap file;
 ## ``secrets-on-disk`` materialises into
 ## ``/var/lib/repro/secrets`` (the root filesystem) with the tmpfs check
 ## off; the scan then finds the canaries and the gate goes red
@@ -207,10 +213,17 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # ramfs page is never swapped; a tmpfs page would be.
       g.boot()
       discard g.waitReasserted()
+      # The canaries reach the guest through a ramfs of the test's own, so
+      # that no command line, environment or file on disk ever holds them:
+      # only the add-on's processes do.
+      discard g.run("mkdir -p /mnt/a7probe && mount -t ramfs -o mode=0700 " &
+                    "a7probe /mnt/a7probe")
       let c4 = randomBytes(32)
-      let c4hex = canaryForms(c4)[3].bytes
-      r = g.exec("python3 -c 'import sys; sys.stdout.buffer.write(bytes." &
-        "fromhex(\"" & c4hex & "\") * (16 * 32768))' | " & repro &
+      writeFile(g.runDir / "c4.bin", c4)
+      g.copyTo(g.runDir / "c4.bin", "/mnt/a7probe/c4")
+      const Gen = "python3 -c 'import sys; d=open(\"/mnt/a7probe/%s\",\"rb\")" &
+        ".read(); sys.stdout.buffer.write(d * (16 * 32768))'"
+      r = g.exec(Gen.replace("%s", "c4") & " | " & repro &
         " system addon secret put --service swap-probe --name big")
       step("swap pass: a 16 MiB secret of a repeated canary is put",
            r.exitCode == 0, r.stdout & r.stderr)
@@ -223,6 +236,42 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "/a7-swapfile && swapon --show --noheadings")
       step("swap pass: a swap file is in use", swapOn.exitCode == 0 and
            "a7-swapfile" in swapOn.stdout, swapOn.stdout & swapOn.stderr)
+      # The boot units that open envelopes may not swap, and an operator
+      # command that holds plaintext runs in a scope that may not: one is
+      # held, with a 16 MiB secret C5 in its heap, through the pressure.
+      var unitSwap: seq[string]
+      for u in ["repro-addon-secrets.service", "repro-addon-reassert.service"]:
+        unitSwap.add(g.exec("systemctl show -p MemorySwapMax --value " & u).stdout.strip())
+      step("swap pass: the boot secrets and re-assert units have MemorySwapMax=0",
+           unitSwap == @["0", "0"], $unitSwap)
+      let c5 = randomBytes(32)
+      writeFile(g.runDir / "c5.bin", c5)
+      g.copyTo(g.runDir / "c5.bin", "/mnt/a7probe/c5")
+      discard g.run("rm -f " & SeamDir & "/test-paused-at; printf " &
+        "'secrets-holding-plaintext\\n' > " & SeamDir & "/test-pause-at")
+      writeFile(g.runDir / "held.sh", Gen.replace("%s", "c5") & " | " & repro &
+        " system addon secret put --service swap-probe --name held " &
+        "> /root/addon/held.log 2>&1\n")
+      g.copyTo(g.runDir / "held.sh", "/root/addon/held.sh")
+      discard g.run("setsid nohup sh /root/addon/held.sh > /dev/null 2>&1 " &
+                    "< /dev/null &")
+      var held = false
+      for i in 0 ..< 120:
+        if g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null").stdout.strip() ==
+            "secrets-holding-plaintext":
+          held = true
+          break
+        sleep(500)
+      # The put itself (its command line starts with the binary's path), not
+      # the shell around the pipe.
+      let heldCg = g.exec("for p in $(pgrep -f '^/[^ ]*repro system addon " &
+        "secret put --service swap-probe --name held'); do cat " &
+        "/sys/fs/cgroup$(cut -d: -f3 /proc/$p/cgroup)/memory.swap.max; done").stdout
+      let heldLines = heldCg.strip().splitLines()
+      step("swap pass: a secret put holds C5 in a group that may not swap",
+           held and heldLines.len == 1 and heldLines[0] == "0",
+           heldCg & g.exec("cat /root/addon/held.log; ps -eo pid,cgroup,args | " &
+                           "grep '[s]ecret put'").stdout)
       let fill = randomBytes(32)
       let fillHex = canaryForms(fill)[3].bytes
       # Anonymous memory beyond RAM, filled with a known pattern: some of it
@@ -232,9 +281,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         ">/dev/null 2>&1; sync", timeoutSec = 900)
       let used = g.exec("swapon --show=NAME,USED --noheadings --bytes").stdout
       record["swapUsed"] = %used
+      discard g.exec("pkill -9 -f '[s]ecret put --service swap-probe'; sleep 1")
       g.shutdown()
       var n3 = needles
       for f in canaryForms(c4): n3.add(("c4-" & f.form, f.bytes))
+      for f in canaryForms(c5): n3.add(("c5-" & f.form, f.bytes))
       n3.add(("fill", fill))
       let hits3 = g.scanDiskImage(n3)
       record["scan3"] = hitsJson(hits3)

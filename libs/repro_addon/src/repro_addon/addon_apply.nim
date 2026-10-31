@@ -1507,14 +1507,25 @@ proc secretsSourcePath*(stateDir: string): string =
   ## commit is finished from it.
   stateDir / "addon" / "secrets-source"
 
+proc envelopeDigest(path: string): string =
+  if fileExists(path): sha256OfFile(path) else: ""
+
 proc writeSecretsSource(stateDir, source: string) =
+  ## The path and the digest of the envelope this switch uses: a later
+  ## retry of its commit copies it only while it is still that envelope
+  ## (the next tick re-stages over the staged path).
   createDir(stateDir / "addon")
-  writeFileAtomic(secretsSourcePath(stateDir), source & "\n", 0o600)
+  writeFileAtomic(secretsSourcePath(stateDir),
+    source & "\n" & envelopeDigest(source) & "\n", 0o600)
+
+proc readSecretsSourceRecord*(stateDir: string): tuple[path, digest: string] =
+  if fileExists(secretsSourcePath(stateDir)):
+    let lines = readFile(secretsSourcePath(stateDir)).splitLines()
+    if lines.len > 0: result.path = lines[0].strip()
+    if lines.len > 1: result.digest = lines[1].strip()
 
 proc readSecretsSource*(stateDir: string): string =
-  if fileExists(secretsSourcePath(stateDir)):
-    readFile(secretsSourcePath(stateDir)).strip()
-  else: ""
+  readSecretsSourceRecord(stateDir).path
 
 proc generationEnvelopeOf*(stateDir, generationId: string): string =
   generationEnvelopePath(generationDir(stateDir, generationId))
@@ -1547,14 +1558,25 @@ proc commitSecretsOf*(stateDir: string; l: SecretsLayout; generationId: string) 
   ## the source it recorded; idempotent, and a no-op once the record is
   ## gone. A failure here is reported, never undoes the commit: the
   ## generation stands, and the re-assert unit retries it.
-  let source = readSecretsSource(stateDir)
+  let rec = readSecretsSourceRecord(stateDir)
+  var source = rec.path
+  if source.len > 0 and rec.digest.len > 0 and
+      envelopeDigest(source) notin [rec.digest, ""]:
+    # The envelope at the recorded path is no longer the one the switch
+    # used (a later tick staged another): it is not copied as this
+    # generation's. A generation without a copy is handled as §10.3 says.
+    stderr.writeLine("repro-addon: " & source & " changed since generation " &
+      generationId & " used it; not kept as its envelope")
+    source = ""
   if generationId.len > 0:
     try:
       var reseal = envelopeCopies(stateDir)
       commitEnvelope(l, source, generationEnvelopeOf(stateDir, generationId),
         reseal, ledgerCopyPath(stateDir), seamStateDir = stateDir)
     except CatchableError as e:
-      stderr.writeLine("repro-addon: keeping the generation's secrets: " & e.msg)
+      # The record stays: the next tick or re-assert retries the copy.
+      stderr.writeLine("repro-addon: keeping the generation's secrets: " &
+        e.msg & " (retried by the next tick or re-assert)")
       return
   if fileExists(secretsSourcePath(stateDir)):
     removeFile(secretsSourcePath(stateDir))
@@ -2203,7 +2225,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # into the transitions (a unit reads its credentials when it starts).
   let secretDecls = stored.secretFiles
   if purpose notin ["revert", "replay"] and not opts.recordOnly:
-    checkSecretsAvailable(secretsLayout, secretDecls, secretsSource)
+    try:
+      checkSecretsAvailable(secretsLayout, secretDecls, secretsSource)
+    except AddonSecretsFailed as e:
+      if purpose == "rollback" and
+          secretsSource != generationEnvelopeOf(stateDir, opts.secretsFromGeneration):
+        # The target keeps no envelope copy (committed before copies were
+        # kept, or its copy could not be written): the latest envelope is
+        # used only when it covers the target's declarations.
+        e.msg = "generation " & opts.secretsFromGeneration & " keeps no " &
+          "envelope copy, and the latest envelope does not serve its " &
+          "declarations: " & e.msg
+      raise
   var credentialChanged: seq[string]
   try:
     credentialChanged = plannedSecretChanges(secretsLayout, secretDecls,

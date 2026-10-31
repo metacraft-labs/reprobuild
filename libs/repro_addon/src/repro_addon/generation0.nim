@@ -157,6 +157,12 @@ Options=bind,ro
 WantedBy=repro-addon.target
 """
 
+const NoSwapLine =
+  # Both boot units open sealed envelopes, so their heap holds plaintext
+  # secrets: their control group may not swap (spec §10.3).
+  when mutated("secrets-scope-allows-swap"): ""
+  else: "MemorySwapMax=0\n"
+
 proc reassertUnit(reproExe: string): string =
   # Boot-time re-assertion (§7.7): finishes or reverts an interrupted
   # switch, checks the current generation and reports ok / drift /
@@ -209,6 +215,7 @@ proc reassertUnit(reproExe: string): string =
   "NoNewPrivileges=yes\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
+  NoSwapLine &
   "\n" &
   "[Install]\n" &
   "WantedBy=" & wantedBy & "\n"
@@ -261,6 +268,7 @@ proc secretsUnit(reproExe: string): string =
   "NoNewPrivileges=yes\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
+  NoSwapLine &
   "\n" &
   "[Install]\n" &
   "WantedBy=repro-addon.target\n"

@@ -264,6 +264,15 @@ proc runAddonCli*(args: seq[string]): int =
     return (if args.len == 0: 2 else: 0)
   let cmd = args[0]
   let rest = args[1 .. ^1]
+  # The verbs that hold plaintext secrets run where their heap cannot be
+  # swapped (spec §10.3): `secret`, `rotate-recipient-key` and `agent-tick`
+  # always, the re-assert and secrets verbs on a host that keeps envelopes
+  # (their boot units carry MemorySwapMax=0 themselves).
+  if cmd in ["secret", "rotate-recipient-key", "agent-tick"] or
+      (cmd in ["reassert", "recover", "secrets"] and "--boot" notin rest and
+       hostHasSecrets()):
+    let r = reexecInNoSwapScope()
+    if r >= 0: return r
   try:
     case cmd
     of "fingerprint":
@@ -656,19 +665,30 @@ proc runAddonGeneration(verb: string; args: seq[string];
     stderr.write(verb & ": " & e.msg & "\n")
     1
 
+proc noSwapIfSecrets*(): int =
+  ## An apply, plan or rollback on a host that keeps sealed envelopes opens
+  ## one: it runs where its heap cannot be swapped (spec §10.3).
+  if isAddonHost() and hostHasSecrets(): reexecInNoSwapScope() else: -1
+
 proc runAddonInfraApplyCli*(args: seq[string]): int =
   ## ``repro infra apply --profile <canonical text> [--reconcile-drift]``
   ## on an add-on host.
+  let r = noSwapIfSecrets()
+  if r >= 0: return r
   runAddonGeneration("repro infra apply", args, planOnly = false)
 
 proc runAddonInfraPlanCli*(args: seq[string]): int =
   ## ``repro infra plan --profile <canonical text>`` on an add-on host:
   ## the ledger diff and the collision report, nothing written.
+  let r = noSwapIfSecrets()
+  if r >= 0: return r
   runAddonGeneration("repro infra plan", args, planOnly = true)
 
 proc runAddonRollbackCli*(args: seq[string]): int =
   ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
   ## add-on host: re-apply a retained generation through the switch.
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
   var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
                                   hostIdentity: readHostname())
   for a in args:
@@ -722,5 +742,7 @@ proc runAddonAdoptCli*(args: seq[string]): int =
   if address.len == 0:
     stderr.write("repro system adopt: <address> is required\n")
     return 2
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
   runAddonGeneration("repro system adopt", rest, planOnly = false,
                      adopt = @[address])

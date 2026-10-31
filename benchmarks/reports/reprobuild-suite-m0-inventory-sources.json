@@ -8319,7 +8319,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -32,12 +32,23 @@
 ##    ``recipient.pub`` is K3, ``verify`` reports ``ok``, and the next tick
 ##    applies manifest 5.
 ##
+## 5. *a retirement cut short after the overwrite.* Another rotation (K4);
+##    manifest 6's tick is paused at ``rotation-after-overwrite`` (the old
+##    key is all NUL bytes, the next key not yet renamed) and killed;
+##    ``recover`` finishes it (``recipient.pub`` is K4, ``verify`` ok) and the
+##    next tick applies manifest 6;
+## 6. *a failed put restarts what it stopped.* A ``secret put`` for the
+##    exclusive ``x-web`` is refused after x-web was stopped (another
+##    service's directory is a link); x-web is started again.
+##
 ## *Falsifying mutations*, each red on this gate:
 ## ``secrets-single-retained-envelope`` (the round-1 design: one retained
 ## envelope, replaced before the apply) fails step 1 -- after the reboot
 ## ``old-web`` has no secret; ``credentials-not-planned`` fails step 2 --
 ## ``x-web`` keeps its old instance and value; ``rotation-not-reconciled``
-## fails step 4 -- ``recipient.pub`` stays K2 and ``verify`` reports drift.
+## fails step 4 -- ``recipient.pub`` stays K2 and ``verify`` reports drift;
+## ``retirement-not-resumed`` fails step 5 -- the zeroed key is never
+## replaced and every later step fails on it.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``; the seam build, which
 ## ``scripts/run_addon_gate.sh`` selects for this gate.
@@ -225,6 +236,60 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("the next tick applies manifest 5",
          r.outcomeOf() in ["aoApplied", "aoConverged"] and
          g.waitValue("x-web", "X5") == "X5", r.stdout & r.stderr)
+    # 5. A retirement cut between the old key's overwrite and the rename.
+    r = g.exec(repro & " system addon rotate-recipient-key")
+    var k4 = ""
+    for line in r.stdout.splitLines:
+      if line.startsWith("next recipient public key: "): k4 = line.split(": ")[1].strip()
+    let m6 = g.publishManifest(signer, Target, 6, gen1Profile(),
+      @[("old-web/legacy", "L6"), ("x-web/token", "X6"), ("h-web/token", "H6")], k4)
+    discard g.run("rm -f " & SeamDir & "/test-paused-at; printf " &
+      "'rotation-after-overwrite\\n' > " & SeamDir & "/test-pause-at")
+    discard g.run("setsid nohup sh -c '" & repro & " system addon agent-tick " &
+      "--target " & Target & " --source " & m6 & " > /root/addon/tick6.log " &
+      "2>&1' > /dev/null 2>&1 < /dev/null &")
+    paused = false
+    for i in 0 ..< 600:
+      if g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null").stdout.strip() ==
+          "rotation-after-overwrite":
+        paused = true
+        break
+      sleep(500)
+    step("tick 6 paused after overwriting the old key", paused,
+         g.exec("cat /root/addon/tick6.log").stdout)
+    discard g.exec("pkill -9 -f '[a]ddon agent-tick'; sleep 1; rm -f " &
+                   SeamDir & "/test-paused-at")
+    step("the crash left the key all NUL bytes, the next key in place",
+         g.exec("test -e /var/lib/repro/agent/recipient.key.next && " &
+           "[ -z \"$(tr -d '\\000' < /var/lib/repro/agent/recipient.key)\" ]").exitCode == 0,
+         g.exec("ls -l /var/lib/repro/agent").stdout)
+    r = g.exec(repro & " system addon recover", timeoutSec = 1200)
+    step("recover finishes the retirement: recipient.pub is K4",
+         g.recipientPubHex() == k4 and
+         g.exec("test ! -e /var/lib/repro/agent/recipient.key.next").exitCode == 0,
+         r.stdout & r.stderr)
+    r = g.exec(repro & " system addon verify")
+    step("verify reports ok after the finished retirement", r.exitCode == 0,
+         r.stdout & r.stderr)
+    r = g.tick(repro, Target, @[m6])
+    step("the next tick applies manifest 6",
+         r.outcomeOf() in ["aoApplied", "aoConverged"] and
+         g.waitValue("x-web", "X6") == "X6", r.stdout & r.stderr)
+    # 6. A secret put that fails after stopping an exclusive consumer starts
+    # it again: h-web's directory is replaced by a link, so the put's
+    # materialisation is refused after x-web (whose token changes) stopped.
+    discard g.exec("echo --- >> /var/lib/a7-x-web.log")
+    discard g.run("mv /run/repro/secrets/h-web /run/repro/a7-h-web-aside && " &
+                  "ln -s /tmp /run/repro/secrets/h-web")
+    r = g.exec("printf X7 | " & repro & " system addon secret put " &
+               "--service x-web --name token")
+    let after = g.exec("cat /var/lib/a7-x-web.log").stdout.split("---")[^1]
+    step("the failed put refused, and x-web was stopped and started again",
+         r.exitCode != 0 and "stop" in after and "start " in after and
+         g.exec("systemctl is-active x-web.service").stdout.strip() == "active",
+         r.stdout & r.stderr & " / log: " & after)
+    discard g.run("rm /run/repro/secrets/h-web && " &
+                  "mv /run/repro/a7-h-web-aside /run/repro/secrets/h-web")
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

@@ -542,6 +542,10 @@ proc runInfraPlan(args: openArray[string]): int =
     # operator's profile (spec §7.1); it writes nothing and prints the
     # ledger diff and the collision report, then the plain plan follows.
     if addon_apply.isAddonHost(stateDir):
+      # A host that keeps sealed secrets: the plan opens an envelope, so
+      # this command re-runs where its heap cannot be swapped.
+      let nr = addon_cli.noSwapIfSecrets()
+      if nr >= 0: return nr
       try:
         let r = addon_apply.runAddonApply(addon_apply.AddonApplyOptions(
           stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
@@ -823,6 +827,8 @@ proc runInfraApply(args: openArray[string]): int =
     # ownership ledger decides what may be removed. A plain infra apply here
     # would bypass the ledger, so the apply goes through the add-on layer.
     if addon_apply.isAddonHost(stateDir):
+      let nr = addon_cli.noSwapIfSecrets()
+      if nr >= 0: return nr
       if profileBuildActions.len > 0:
         stderr.writeLine("repro infra apply: this is an add-on host, and " &
           "add-on generations do not carry build actions yet; the profile " &

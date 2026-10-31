@@ -184,6 +184,13 @@
 ##                                            restart or stop-start
 ## ``rotation-not-reconciled``                a rotation cut short after its
 ##                                            rename is never completed
+## ``secrets-scope-allows-swap``              the processes that hold
+##                                            plaintext run without
+##                                            MemorySwapMax=0 and are not
+##                                            refused for it
+## ``retirement-not-resumed``                 a key retirement interrupted
+##                                            between overwrite and rename
+##                                            is never finished
 ## ``recipient-key-mode-unchecked``           the recipient key is used
 ##                                            whatever its owner and mode
 ## ``secrets-write-then-narrow``              a secret file is written by
@@ -247,6 +254,8 @@ const
                           "secrets-single-retained-envelope",
                           "credentials-not-planned",
                           "rotation-not-reconciled",
+                          "secrets-scope-allows-swap",
+                          "retirement-not-resumed",
                           "recipient-key-mode-unchecked",
                           "secrets-write-then-narrow",
                           "rotation-keeps-old-key",

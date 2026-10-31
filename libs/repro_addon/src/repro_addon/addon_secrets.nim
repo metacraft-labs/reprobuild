@@ -164,6 +164,9 @@ type
     hostRoot*: string
       ## Prefix under which ``runDir`` is reached: ``/proc/1/root`` on a
       ## host (PID 1's mount namespace), "" in tests.
+    requireNoSwap*: bool
+      ## Refuse to open an envelope unless this process's control group may
+      ## not swap (``memory.swap.max`` 0): its heap holds plaintext.
 
   RetainedEnvelope* = object
     ## A sealed envelope kept on the host, with the target name it was
@@ -200,7 +203,8 @@ const
 proc defaultSecretsLayout*(): SecretsLayout =
   ## The add-on host's layout (spec §5.3, §10.3).
   result = SecretsLayout(agentDir: "/var/lib/repro/agent",
-    runDir: SecretsRunRoot, owner: 0, fs: sfRamfs, hostRoot: "/proc/1/root")
+    runDir: SecretsRunRoot, owner: 0, fs: sfRamfs, hostRoot: "/proc/1/root",
+    requireNoSwap: not mutated("secrets-scope-allows-swap"))
   when mutated("secrets-on-disk"):
     # FALSIFYING MUTATION (e2e_addon_no_plaintext_secret_on_disk): the
     # plaintext goes to a directory on the root filesystem, reached by the
@@ -250,6 +254,53 @@ proc hardenProcessForSecrets*() =
     fail("cannot set RLIMIT_CORE to 0: " & errText())
   if c_prctl(prSetDumpable, culong(0)) != 0:
     fail("cannot clear PR_SET_DUMPABLE: " & errText())
+
+const NoSwapScopeEnv* = "REPRO_ADDON_NOSWAP_SCOPE"
+  ## Set by ``noSwapScopeArgv`` in the re-executed process, so a scope that
+  ## did not take effect is refused instead of re-entered.
+
+proc ownCgroupSwapMax*(): string =
+  ## ``memory.swap.max`` of this process's own control group (cgroup v2),
+  ## "" when it cannot be read.
+  try:
+    for line in readFile("/proc/self/cgroup").splitLines():
+      if line.startsWith("0::"):
+        let p = "/sys/fs/cgroup" & line[3 .. ^1] / "memory.swap.max"
+        if fileExists(p): return readFile(p).strip()
+  except CatchableError:
+    discard
+  ""
+
+proc processMaySwap*(): bool =
+  ## Whether this process's anonymous memory may be written to swap: true
+  ## unless its control group's ``memory.swap.max`` is 0.
+  ownCgroupSwapMax() != "0"
+
+proc noSwapScopeArgv*(exe: string; args: openArray[string]): seq[string] =
+  ## The command that re-runs ``exe args`` in a transient scope of PID 1
+  ## that may not swap (``systemd-run --scope -p MemorySwapMax=0``): the
+  ## scope executes the command in place, so stdin, stdout and the exit
+  ## status are the caller's.
+  let run = resolveHostTool(SystemdRunCandidates)
+  if run.len == 0:
+    fail("systemd-run is not installed; a process that holds plaintext " &
+      "secrets must run in a scope that may not swap")
+  result = @[run, "--scope", "--quiet", "--collect"]
+  when not mutated("secrets-scope-allows-swap"):
+    result.add(["-p", "MemorySwapMax=0"])
+  result.add("--")
+  result.add(exe)
+  for a in args: result.add(a)
+
+proc guardPlaintext*(l: SecretsLayout) =
+  ## Before this process holds plaintext: ``hardenProcessForSecrets`` and,
+  ## on a host, a control group that may not swap -- the plaintext in this
+  ## process's heap then never reaches a swap device (spec §10.3).
+  hardenProcessForSecrets()
+  if l.requireNoSwap and processMaySwap():
+    fail("this process may be swapped (its control group's memory.swap.max " &
+      "is '" & ownCgroupSwapMax() & "'); plaintext secrets are handled only " &
+      "in a unit or scope with MemorySwapMax=0")
 
 proc wipe*(s: var string) =
   ## Zero a plaintext buffer this module owns before it is freed.
@@ -342,8 +393,15 @@ proc loadRecipientKeyChecked*(path: string; owner: int):
   var text = readAllFd(fd, path)
   try:
     result = peerAuth.parsePrivateKeyText(text, path)
-  except CatchableError as e:
-    fail("recipient key " & path & " is not usable: " & e.msg)
+  except CatchableError:
+    var zero = text.len > 0
+    for c in text:
+      if c != '\0': zero = false
+    fail("recipient key " & path & " does not hold an `ecdsa-p256:` " &
+      "private key" & (if zero: " (it is all NUL bytes: a retirement was " &
+      "interrupted after overwriting it; with no next key left to finish " &
+      "it, the key is gone and the host needs a new one)" else: "") &
+      "; it is left untouched")
   finally:
     wipe(text)
 
@@ -510,7 +568,7 @@ proc openEnvelope*(l: SecretsLayout; env: RetainedEnvelope): OpenedEnvelope =
   ## current one. Either key is checked at load. Raises
   ## ``AddonSecretsFailed`` when neither opens it. The caller owns the
   ## plaintext and ``wipe``s it.
-  hardenProcessForSecrets()
+  guardPlaintext(l)
   var tried: seq[string]
   if keyExists(nextRecipientKeyPath(l)):
     let k = loadRecipientKeyChecked(nextRecipientKeyPath(l), l.owner)
@@ -569,6 +627,44 @@ proc discardStaged*(l: SecretsLayout) =
   if keyExists(stagedEnvelopePath(l)):
     removeAgentLeaf(l, StagedEnvelopeName)
 
+proc keyBytesAllZero(path: string): bool =
+  ## The key file exists, is a regular file and holds only NUL bytes: the
+  ## state an interrupted retirement leaves between its overwrite and its
+  ## rename (``retireCurrentKey``).
+  let fd = posix.open(path.cstring, O_RDONLY or oNoFollow or oCloExec or oNonBlock)
+  if fd < 0: return false
+  defer: discard posix.close(fd)
+  var st: Stat
+  if fstat(fd, st) != 0 or not S_ISREG(st.st_mode) or st.st_size == 0:
+    return false
+  var text = readAllFd(fd, path)
+  result = true
+  for c in text:
+    if c != '\0': result = false
+  wipe(text)
+
+proc completeInterruptedRetirement*(l: SecretsLayout): bool =
+  ## Finish a retirement a crash cut between the old key's overwrite and the
+  ## rename: the next key exists and the current one is all NUL bytes. The
+  ## re-seal happened before the overwrite, so only the rename is left.
+  ## True when it was finished here.
+  when mutated("retirement-not-resumed"):
+    # FALSIFYING MUTATION (e2e_addon_secrets_follow_generations): the
+    # interrupted retirement is never finished.
+    return false
+  if not keyExists(nextRecipientKeyPath(l)) or
+      not keyBytesAllZero(recipientKeyPath(l)):
+    return false
+  discard loadRecipientKeyChecked(nextRecipientKeyPath(l), l.owner)
+  let dfd = openAgentDir(l)
+  defer: discard posix.close(dfd)
+  if c_renameat(dfd, NextRecipientKeyName.cstring, dfd,
+                RecipientKeyName.cstring) != 0:
+    fail("cannot finish retiring the old recipient key: " & errText())
+  if fsync(dfd) != 0:
+    fail("cannot flush " & l.agentDir & ": " & errText())
+  true
+
 proc derivedPubHex(l: SecretsLayout): string =
   peerAuth.publicKeyHex(peerAuth.derivePublicKey(
     loadRecipientKeyChecked(recipientKeyPath(l), l.owner)))
@@ -583,6 +679,8 @@ proc reconcileRotation*(l: SecretsLayout; ledgerPath: string): seq[string] =
     # FALSIFYING MUTATION: a rotation cut short after its rename is never
     # completed (the public half and the ledger keep the old key's).
     return
+  if completeInterruptedRetirement(l):
+    result.add(recipientKeyPath(l) & ": finished retiring the old key")
   if not keyExists(recipientKeyPath(l)): return
   let pubHex = derivedPubHex(l)
   var current = ""
@@ -633,6 +731,9 @@ proc retireCurrentKey*(l: SecretsLayout; resealPaths: openArray[string];
   ## only the name is gone. The spec states this residual (§10.3).
   let next = nextRecipientKeyPath(l)
   if not keyExists(next): return
+  if completeInterruptedRetirement(l):
+    discard reconcileRotation(l, ledgerPath)
+    return
   let oldKey = loadRecipientKeyChecked(recipientKeyPath(l), l.owner)
   let newKey = loadRecipientKeyChecked(next, l.owner)
   let newPub = peerAuth.derivePublicKey(newKey)
@@ -683,6 +784,8 @@ proc retireCurrentKey*(l: SecretsLayout; resealPaths: openArray[string];
         fail("cannot flush the overwritten old recipient key: " & errText())
     finally:
       discard posix.close(ofd)
+    if seamStateDir.len > 0:
+      seamPause(seamStateDir, "rotation-after-overwrite")
   if c_renameat(dfd, NextRecipientKeyName.cstring, dfd,
                 RecipientKeyName.cstring) != 0:
     fail("cannot retire the old recipient key: " & errText())
@@ -696,7 +799,10 @@ proc rotateRecipientKey*(l: SecretsLayout): tuple[publicKeyHex: string; created:
   ## Generate the next recipient key beside the current one (``0400`` at
   ## creation, never replacing anything: ``ensureRecipientKeyFile``) and
   ## return its public half for the producer to seal to. A rotation already
-  ## in progress returns the pending key's public half again.
+  ## in progress returns the pending key's public half again. A retirement
+  ## a crash interrupted is finished first.
+  if completeInterruptedRetirement(l):
+    discard reconcileRotation(l, "")
   discard loadRecipientKeyChecked(recipientKeyPath(l), l.owner)
   let next = nextRecipientKeyPath(l)
   if keyExists(next):
@@ -1002,7 +1108,7 @@ proc materialise*(l: SecretsLayout; decls: openArray[SecretFileDecl];
   if missing.len > 0:
     fail("the sealed envelope carries no entry for " & missing.join(", ") &
       "; nothing was materialised")
-  hardenProcessForSecrets()
+  guardPlaintext(l)
   let rfd = prepareRunDir(l)
   defer: discard posix.close(rfd)
   var services: seq[string]

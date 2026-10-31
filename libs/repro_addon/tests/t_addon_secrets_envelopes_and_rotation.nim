@@ -28,7 +28,8 @@ import repro_infra/profile
 import repro_deploy_agent/secrets
 import repro_peer_cache/auth as peerAuth
 
-import repro_addon/[addon_apply, addon_secrets, ledger, transitions]
+import repro_deploy_agent/manifest
+import repro_addon/[addon_apply, addon_secrets, fingerprint, ledger, secrets_ops, transitions]
 
 proc bytesOf(s: string): seq[byte] =
   for ch in s: result.add(byte(ch))
@@ -170,3 +171,85 @@ suite "envelopes and rotation":
     check rawCredentialDirective("[Service]\nLoadCredential=x:/run/a\n") == "LoadCredential"
     check rawCredentialDirective("[Service]\nSetCredential=x:y\n") == "SetCredential"
     check rawCredentialDirective("[Service]\n# LoadCredential=x\nExecStart=/bin/true\n") == ""
+
+  test "a retirement interrupted between overwrite and rename is finished":
+    let b = newBed("overwrite")
+    defer: removeDir(b.root)
+    let (nextHex, _) = rotateRecipientKey(b.layout)
+    # The crash: the old key overwritten with NUL bytes, the next key not
+    # yet renamed over it.
+    let n = getFileSize(recipientKeyPath(b.layout))
+    setFilePermissions(recipientKeyPath(b.layout), {fpUserRead, fpUserWrite})
+    writeFile(recipientKeyPath(b.layout), newString(int(n)))
+    setFilePermissions(recipientKeyPath(b.layout), {fpUserRead})
+    # Every later step finishes it instead of failing on the zero key.
+    discard reconcileRotation(b.layout, "")
+    check not fileExists(nextRecipientKeyPath(b.layout))
+    check readFile(recipientPubPath(b.layout)).strip() == nextHex
+    check peerAuth.publicKeyHex(b.pubOf(recipientKeyPath(b.layout))) == nextHex
+    # A zero key with no next key left: a diagnostic that says so.
+    writeFile(b.root / "agent" / "zero.key", newString(48))
+    setFilePermissions(b.root / "agent" / "zero.key", {fpUserRead})
+    var msg = ""
+    try:
+      discard loadRecipientKeyChecked(b.root / "agent" / "zero.key", b.layout.owner)
+    except AddonSecretsFailed as e:
+      msg = e.msg
+    check "all NUL bytes" in msg and "legacy" notin msg
+
+  test "a commit whose copy failed keeps its record and staged section; the retry keeps them":
+    let b = newBed("retry")
+    defer: removeDir(b.root)
+    let stateDir = b.root / "state"
+    let gen = stateDir / "generations" / "g1"
+    createDir(gen)
+    createDir(stateDir / "addon")
+    let pub = b.pubOf(recipientKeyPath(b.layout))
+    stageEnvelope(b.layout, env(pub, [("web/a", "v1")]), A)
+    writeFile(secretsSourcePath(stateDir), stagedEnvelopePath(b.layout) & "\n" &
+      sha256OfFile(stagedEnvelopePath(b.layout)) & "\n")
+    # The generation directory cannot be written: the copy fails.
+    setFilePermissions(gen, {fpUserRead, fpUserExec})
+    commitSecretsOf(stateDir, b.layout, "g1")
+    check fileExists(secretsSourcePath(stateDir))
+    check not fileExists(generationEnvelopeOf(stateDir, "g1"))
+    setFilePermissions(gen, {fpUserRead, fpUserWrite, fpUserExec})
+    commitSecretsOf(stateDir, b.layout, "g1")
+    check not fileExists(secretsSourcePath(stateDir))
+    check fileExists(generationEnvelopeOf(stateDir, "g1"))
+    check fileExists(latestEnvelopePath(b.layout))
+
+  test "a recorded source that changed since is not kept as the generation's":
+    let b = newBed("changed")
+    defer: removeDir(b.root)
+    let stateDir = b.root / "state"
+    createDir(stateDir / "generations" / "g1")
+    createDir(stateDir / "addon")
+    let pub = b.pubOf(recipientKeyPath(b.layout))
+    stageEnvelope(b.layout, env(pub, [("web/a", "v1")]), A)
+    writeFile(secretsSourcePath(stateDir), stagedEnvelopePath(b.layout) & "\n" &
+      sha256OfFile(stagedEnvelopePath(b.layout)) & "\n")
+    stageEnvelope(b.layout, env(pub, [("web/a", "v2")]), A)   # a later tick
+    commitSecretsOf(stateDir, b.layout, "g1")
+    check not fileExists(generationEnvelopeOf(stateDir, "g1"))
+
+  test "the tick discards its staged section only when the apply did not commit":
+    let b = newBed("tick")
+    defer: removeDir(b.root)
+    let pub = b.pubOf(recipientKeyPath(b.layout))
+    var m = DeployManifest(target: "t", sequence: 1, hasSecrets: true)
+    stageEnvelope(b.layout, env(pub, [("web/a", "v1")]), A)
+    let failed = tickApply(b.root / "state", b.layout, m,
+      proc(o: AddonApplyOptions): AddonApplyResult =
+        check o.secretsEnvelope == stagedEnvelopePath(b.layout)
+        raise newException(AddonApplyError, "rolled back"))
+    check not failed.ok
+    check not fileExists(stagedEnvelopePath(b.layout))
+    stageEnvelope(b.layout, env(pub, [("web/a", "v1")]), A)
+    let committed = tickApply(b.root / "state", b.layout, m,
+      proc(o: AddonApplyOptions): AddonApplyResult =
+        AddonApplyResult(generationId: "g1"))
+    check committed.ok
+    # The commit itself would have promoted it; when its copy failed it
+    # stays for the retry -- the tick does not delete it.
+    check fileExists(stagedEnvelopePath(b.layout))
