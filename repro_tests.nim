@@ -25842,6 +25842,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_cross_prefix_runtime_closure.nim",
+    binary: "build/test-bin/t_cross_prefix_runtime_closure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_cross_repo_runtime_tool_closure.nim",
     binary: "build/test-bin/t_cross_repo_runtime_tool_closure",
     defines: @[],

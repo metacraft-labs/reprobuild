@@ -48,6 +48,21 @@ proc inFetchGroup(g: Guest; cmd: string): int =
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
+  # The DNS channel under test is NSS's `resolve` module asking
+  # systemd-resolved over AF_UNIX. Debian 13's and Ubuntu 26.04's images
+  # route names that way; Debian 12's and Ubuntu 24.04's do not by default,
+  # where the check would hold for want of the channel (and the falsifying
+  # build would have nothing to open). The fixture gives every base the
+  # channel, so the check means the same thing everywhere.
+  let channel = g.exec("grep -q '^hosts:.*resolve' /etc/nsswitch.conf || " &
+    "{ DEBIAN_FRONTEND=noninteractive apt-get install -y -q libnss-resolve " &
+    "systemd-resolved >/dev/null 2>&1 || { apt-get update -q >/dev/null 2>&1 && " &
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y -q libnss-resolve " &
+    "systemd-resolved >/dev/null; }; }; systemctl enable --now " &
+    "systemd-resolved >/dev/null 2>&1; grep '^hosts:' /etc/nsswitch.conf", timeoutSec = 1800)
+  step("fixture: names resolve through systemd-resolved's NSS module",
+       channel.exitCode == 0 and "resolve" in channel.stdout,
+       channel.stdout & channel.stderr)
   # The evidence sink: a listener on every address of the test host, which
   # the guest reaches at the host's external address through its NAT.
   let hostIp = execCmdEx("ip -4 route get 1.1.1.1 | sed -n 's/.* src \\([0-9.]*\\).*/\\1/p'").output.strip()

@@ -3691,7 +3691,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # A8, spec §7.5: the rollback floor bounds EVERY automatic revert, not
     # only a failed confirmation. A failure after the flip is left in
     # place -- marker and all -- and reported, never reverted below it.
-    when not mutated("floor-only-on-confirm"):
+    # (`floor-ignored` removes the floor altogether, this path included;
+    # `floor-only-on-confirm` removes only this path.)
+    when not mutated("floor-only-on-confirm") and not mutated("floor-ignored"):
       if floorBlocksRevert and marker.step >= ssFlip and not opts.recordOnly:
         writeFileAtomic(floorHoldPath(stateDir), "rollbackFloor=" &
           $opts.rollbackFloor & "\nsequence=" & $opts.agentSequence &

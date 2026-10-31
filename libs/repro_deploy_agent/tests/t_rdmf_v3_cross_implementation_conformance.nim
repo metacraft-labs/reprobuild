@@ -373,6 +373,7 @@ suite "RDMF v3 cross-implementation conformance":
       "r = sorted(k.hex() for k in mod.load_revoked_recipient_keys(sys.argv[2]))\n" &
       "print(' '.join(a)); print(' '.join(r))\n")
     let p = execCmdEx(quoteShellCommand(@[python, "-I", probe, producer(), listFile]))
+    checkpoint p.output
     check p.exitCode == 0
     let lines = p.output.strip().splitLines()
     check lines.len == 2

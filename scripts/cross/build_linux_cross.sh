@@ -637,6 +637,31 @@ if [ "${skip_nim}" = 0 ]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# 6. The prefix's own runtime libraries (scripts/cross/runtime_closure.sh):
+#    clingo cross-built against the sysroot, every non-C-library dependency
+#    copied in from the sysroot, every image's RUNPATH pointed at the
+#    prefix's lib/, and the closure checked. Added for ReproOS add-on mode,
+#    whose hosts may not depend on the base's libraries.
+# ---------------------------------------------------------------------------
+echo "build_linux_cross: [6/6] runtime libraries"
+source "${repo_root}/scripts/cross/runtime_closure.sh"
+READELF="$(resolve_nixpkgs_out binutils-unwrapped)/bin/readelf"
+PATCHELF="$(resolve_nixpkgs_out patchelf)/bin/patchelf"
+CMAKE="$(resolve_nixpkgs_out cmake)/bin/cmake"
+cxx_wrapper="${toolchain_dir}/${triple}-c++"
+sed "s|exec \"${clang_bin}\"|exec \"${clang_bin}++\"|" "${cc_wrapper}" > "${cxx_wrapper}"
+chmod +x "${cxx_wrapper}"
+if build_target_clingo "${cc_wrapper}" "${cxx_wrapper}" "${sysroot}" \
+    "${stage}/lib" "${build_root}/clingo"; then
+  check_target_elf "${stage}/lib/libclingo.so" || true
+else
+  record_failure "clingo for ${triple}"
+fi
+bundle_runtime_closure "${stage}" "${sysroot}" "${triple}" ||
+  record_failure "bundling the runtime libraries"
+check_prefix_closure "${stage}" || record_failure "the prefix's runtime closure"
+
 if [ "${#failures[@]}" -gt 0 ]; then
   echo "" >&2
   echo "build_linux_cross: ${#failures[@]} step(s) failed:" >&2
