@@ -717,11 +717,26 @@ proc encodeLocked*(l: SecretsLayout;
     if p.len > 0: copyMem(addr result.data[pos], p.data, p.len)
     inc pos, p.len
 
+const HostRevokedRecipientKeysPath* = "/etc/repro/revoked-recipient-keys"
+  ## An optional revoked recipient-key list on the host (the anchor-file
+  ## format). The host seals only to its own keys -- ``secret put`` and a
+  ## rotation's re-seal -- so revoking its key is normally the rotation;
+  ## a key an operator listed here is refused all the same, as by every
+  ## other producer (spec §10.3, CRED-2).
+
+proc hostRevokedRecipientKeys*(path = HostRevokedRecipientKeysPath):
+    RevokedRecipientKeys =
+  ## The host's list when the file exists, else an explicitly empty one.
+  if fileExists(path) or symlinkExists(path): loadRevokedRecipientKeys(path)
+  else: noRevokedRecipientKeys("no " & path & " on this host")
+
 proc sealLocked*(pub: PublicKeyBytes; target: string;
                  payload: var LockedBytes): RetainedEnvelope =
-  ## Seal ``payload`` in place (it holds ciphertext afterwards).
+  ## Seal ``payload`` in place (it holds ciphertext afterwards). A key on
+  ## the host's revoked list is refused before anything is sealed.
   RetainedEnvelope(target: target,
-    sealed: sealSecretsInPlace(pub, target, payload.toPtr, payload.len))
+    sealed: sealSecretsInPlace(pub, target, payload.toPtr, payload.len,
+                               hostRevokedRecipientKeys()))
 
 proc openedFromFiles*(l: SecretsLayout; files: openArray[SecretFile]): OpenedEnvelope =
   ## An opened envelope holding ``files`` (test data; production opens

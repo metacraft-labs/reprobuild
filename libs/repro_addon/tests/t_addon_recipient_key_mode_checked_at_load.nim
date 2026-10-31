@@ -75,7 +75,7 @@ proc newBed(name: string): Bed =
 proc retainCanary(b: Bed) =
   writeRetained(b.layout, RetainedEnvelope(target: Target,
     sealed: sealSecrets(b.pub, Target, @[SecretFile(path: "web/token",
-      mode: 0o400, content: bytesOf("canary-7f3a"))])))
+      mode: 0o400, content: bytesOf("canary-7f3a"))], noRevokedRecipientKeys("test"))))
 
 const Decls = [SecretFileDecl(service: "web", name: "token")]
 
@@ -90,7 +90,7 @@ proc tick(b: Bed): AgentOutcome =
   var m = DeployManifest(target: Target, sequence: 1, deploymentId: "d1",
     profileText: "", hasSecrets: true,
     secrets: sealSecrets(b.pub, Target, @[SecretFile(path: "web/token",
-      mode: 0o400, content: bytesOf("canary-7f3a"))]))
+      mode: 0o400, content: bytesOf("canary-7f3a"))], noRevokedRecipientKeys("test")))
   signManifest(signer, m)
   let src = b.root / "manifest.rdmf"
   let enc = encodeManifest(m)

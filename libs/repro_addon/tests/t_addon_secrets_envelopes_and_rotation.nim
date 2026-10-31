@@ -62,7 +62,7 @@ proc env(pub: PublicKeyBytes; entries: openArray[(string, string)]): RetainedEnv
   var files: seq[SecretFile]
   for (p, c) in entries:
     files.add(SecretFile(path: p, mode: 0o400, content: bytesOf(c)))
-  RetainedEnvelope(target: "t", sealed: sealSecrets(pub, "t", files))
+  RetainedEnvelope(target: "t", sealed: sealSecrets(pub, "t", files, noRevokedRecipientKeys("test")))
 
 const A = [SecretFileDecl(service: "web", name: "a")]
 
@@ -287,7 +287,7 @@ suite "envelopes and rotation":
     let path = latestEnvelopePath(b.layout)
     writeEnvelopeFile(b.layout, path, RetainedEnvelope(target: "t",
       sealed: sealSecrets(pub, "t",
-        @[SecretFile(path: "web/a", mode: 0o400, content: first)])))
+        @[SecretFile(path: "web/a", mode: 0o400, content: first)], noRevokedRecipientKeys("test"))))
     let before = readFile(path)
     # One byte that brings the payload to exactly the bound is accepted ...
     var one = newLockedBytes(1, requireLock = false)

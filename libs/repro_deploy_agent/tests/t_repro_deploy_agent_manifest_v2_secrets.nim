@@ -56,7 +56,7 @@ suite "RDMF v2 envelope":
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
       @[SecretFile(path: "mcl.token", mode: 0o600'u32,
-                   content: bytesOf("REGISTRATION-TOKEN"))])
+                   content: bytesOf("REGISTRATION-TOKEN"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     check m.formatVersion == DeployManifestFormatVersionV2
 
@@ -76,7 +76,7 @@ suite "RDMF v2 envelope":
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
-      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))])
+      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     check verifySignature(m)
 
@@ -90,7 +90,7 @@ suite "RDMF v2 envelope":
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
-      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))])
+      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
 
     var swappedKey = m
@@ -127,7 +127,7 @@ suite "RDMF v2 envelope":
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
-      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))])
+      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     var wire = encodeManifest(m)
     wire.add(0'u8)
@@ -142,7 +142,7 @@ suite "RDMF v2 envelope":
     let recipient = peerAuth.generateKeypair()
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
-    m.secrets = sealSecrets(recipient.publicKey, m.target, @[])
+    m.secrets = sealSecrets(recipient.publicKey, m.target, @[], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     check m.formatVersion == DeployManifestFormatVersionV2
     let back = decodeManifest(encodeManifest(m))

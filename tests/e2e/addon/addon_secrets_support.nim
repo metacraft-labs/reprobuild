@@ -54,7 +54,7 @@ proc publishManifest*(g: Guest; signer: PeerKeypair; target: string;
     deploymentId: "a7-" & $sequence, profileText: profileText)
   if files.len > 0:
     m.hasSecrets = true
-    m.secrets = sealSecrets(pubFromHex(sealToHex), target, files)
+    m.secrets = sealSecrets(pubFromHex(sealToHex), target, files, noRevokedRecipientKeys("test"))
   signManifest(signer, m)
   let enc = encodeManifest(m)
   var bytes = newString(enc.len)

@@ -121,7 +121,7 @@ proc deployAgentExitCode*(kind: AgentOutcomeKind): int =
   ## 1 = apply failed / source error (retryable — the timer retries);
   ## 2 = rejected / ambiguous (non-retryable).
   case kind
-  of aoApplied, aoConverged, aoWaiting: 0
+  of aoApplied, aoConverged, aoWaiting, aoPaused: 0
   of aoApplyFailed, aoSourceError: 1
   # `2` is the "operator must act" class, alongside a rejected or ambiguous
   # manifest. A secrets failure is deliberately NOT `1`: retrying on the timer
@@ -129,7 +129,11 @@ proc deployAgentExitCode*(kind: AgentOutcomeKind): int =
   # it with the retryable failures would bury it in a loop that never converges.
   # An unsupported base (a release upgrade the matrix does not cover yet)
   # is the same class: no retry changes the host's distribution.
-  of aoRejected, aoAmbiguous, aoSecretsFailed, aoUnsupportedBase: 2
+  # A stale manifest (a frozen mirror) and a reverted, quarantined
+  # deployment are the same class: the timer cannot fix either. A pause is
+  # an operator's own choice and reports 0.
+  of aoRejected, aoAmbiguous, aoSecretsFailed, aoUnsupportedBase, aoStale,
+     aoRolledBack: 2
 
 proc toJsonNode*(rec: TickStatusRecord): JsonNode =
   %*{

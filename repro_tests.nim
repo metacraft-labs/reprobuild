@@ -3094,6 +3094,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_deploy_agent_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim",
+    binary: "build/test-bin/t_rdmf_v3_cross_implementation_conformance",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let producerPath = findProducer()"),
+  TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim",
     binary: "build/test-bin/t_repro_deploy_agent_converges_from_signed_manifest",
     defines: @[],

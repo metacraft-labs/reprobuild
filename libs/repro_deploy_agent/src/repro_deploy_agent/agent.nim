@@ -41,6 +41,7 @@ when defined(ssl):
 
 import repro_infra/addon_diagnostics
 
+import ./agent_mutations
 import ./manifest
 import ./secrets
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
@@ -104,6 +105,12 @@ type
     aoUnsupportedBase  ## the apply refused the host's base (ReproOS add-on
                        ## spec §7.9, ``EAddOnUnsupportedBase``): an operator
                        ## must act, a retry cannot fix it
+    aoStale            ## the selected manifest is older than the maximum age
+                       ## it carries (RDMF v3): a mirror may be frozen
+    aoRolledBack       ## the apply failed confirmation and was reverted; the
+                       ## deployment is quarantined and not retried
+    aoPaused           ## an operator rolled the host back locally; the agent
+                       ## does not re-converge until ``resume``
 
   AgentOutcome* = object
     kind*: AgentOutcomeKind
@@ -112,6 +119,12 @@ type
     deploymentId*: string
     message*: string
     errorCode*: string
+
+  EApplyRolledBack* = object of CatchableError
+    ## Raised by an apply hook whose apply was attempted, failed its
+    ## confirmation (or any later step) and was reverted to the generation
+    ## the host ran before. The agent quarantines the deployment
+    ## (``aoRolledBack``) instead of retrying it on every tick.
 
   ApplyHook* = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.}
     ## May raise ``EAddOnUnsupportedBase`` (and nothing else): the one
@@ -148,6 +161,12 @@ type
       ## the host's recipient key and the profile's declarations, staged
       ## sealed for the apply, and materialised only into a ramfs, per
       ## service, by the apply (`repro_addon/secrets_ops`).
+    requireAttestations*: bool
+      ## Refuse every manifest that does not carry the RDMF v3 attestation
+      ## block (closure digests, ``issuedAt`` and maximum age, rollback
+      ## floor): v1, v2, and a v3 envelope with the bundle alone. A ReproOS
+      ## add-on agent sets it (spec §13 decision 14); the refusal is
+      ## ``aoRejected`` with ``errorCode`` ``attestations_required``.
 
   DriftProbe* = proc(): seq[string] {.gcsafe.}
     ## Called once per tick, whatever the outcome: what changed on the host
@@ -163,6 +182,9 @@ type
       tuple[ok: bool; missing: bool; body: seq[byte]; error: string] {.gcsafe.}
     driftProbe*: DriftProbe
       ## nil: no drift is collected. ``runAgentTickRecorded`` calls it.
+    nowUnix*: proc(): int64 {.gcsafe.}
+      ## The clock the staleness check reads (seconds since the epoch);
+      ## nil: the system clock. A test pins it.
 
   Candidate = object
     source: string
@@ -220,6 +242,110 @@ proc writeLastAppliedSequence*(cfg: AgentConfig; sequence: uint64) =
   if dir.len > 0 and not dirExists(dir):
     createDir(dir)
   writeFile(path, $sequence & "\n")
+
+# ---------------------------------------------------------------------------
+# Quarantine (``aoRolledBack``) and the operator's pause (``aoPaused``).
+#
+# A deployment whose apply was reverted is recorded, with its sequence, in
+# ``<stateDir>/deploy-agent/<safe-target>.quarantine``; the agent does not
+# apply it again, and a strictly higher sequence clears the record when it
+# applies. A local operator rollback writes ``<stateDir>/deploy-agent/pause``
+# (``key=value`` lines: ``generation``, ``operator``, ``at``); while it
+# exists every tick reports ``aoPaused`` and applies nothing.
+# ---------------------------------------------------------------------------
+
+proc quarantinePath*(cfg: AgentConfig): string =
+  cfg.stateDir / "deploy-agent" / (safeTargetName(cfg.target) & ".quarantine")
+
+proc readQuarantine*(cfg: AgentConfig):
+    tuple[found: bool; sequence: uint64; deploymentId: string] =
+  ## The quarantined deployment, if any. A malformed record raises: a
+  ## quarantine silently dropped would re-apply a known-bad generation.
+  let path = quarantinePath(cfg)
+  if not fileExists(path): return
+  for raw in readFile(path).splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line[0] == '#': continue
+    let sp = line.find(' ')
+    if sp <= 0:
+      raise newException(CatchableError,
+        "corrupt quarantine record at " & path & ": " & line)
+    try:
+      result.sequence = parseBiggestUInt(line[0 ..< sp])
+    except ValueError:
+      raise newException(CatchableError,
+        "corrupt quarantine record at " & path & ": " & line)
+    result.deploymentId = line[sp + 1 .. ^1]
+    result.found = true
+
+proc writeQuarantine*(cfg: AgentConfig; sequence: uint64; deploymentId: string) =
+  let path = quarantinePath(cfg)
+  createDir(parentDir(path))
+  writeFile(path, "# deployment reverted by its own apply; not retried\n" &
+    $sequence & " " & deploymentId & "\n")
+
+proc clearQuarantine*(cfg: AgentConfig) =
+  let path = quarantinePath(cfg)
+  if fileExists(path): removeFile(path)
+
+proc pauseMarkerPath*(stateDir: string): string =
+  stateDir / "deploy-agent" / "pause"
+
+proc readPauseMarker*(stateDir: string):
+    tuple[paused: bool; generation, operator, at: string] =
+  let path = pauseMarkerPath(stateDir)
+  if not (fileExists(path) or symlinkExists(path)): return
+  result.paused = true
+  try:
+    for raw in readFile(path).splitLines():
+      let eq = raw.find('=')
+      if eq <= 0: continue
+      let (k, v) = (raw[0 ..< eq].strip(), raw[eq + 1 .. ^1].strip())
+      case k
+      of "generation": result.generation = v
+      of "operator": result.operator = v
+      of "at": result.at = v
+      else: discard
+  except CatchableError:
+    discard   # unreadable: still paused, which is the safe direction
+
+proc writePauseMarker*(stateDir, generation, operator: string) =
+  let path = pauseMarkerPath(stateDir)
+  createDir(parentDir(path))
+  writeFile(path, "generation=" & generation & "\noperator=" & operator &
+    "\nat=" & now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'") & "\n")
+
+proc clearPauseMarker*(stateDir: string): bool =
+  ## Remove the marker; true when there was one.
+  let path = pauseMarkerPath(stateDir)
+  if fileExists(path) or symlinkExists(path):
+    removeFile(path)
+    return true
+  false
+
+proc staleness*(m: DeployManifest; nowUnix: int64):
+    tuple[stale: bool; ageSeconds: int64] =
+  ## Whether ``m`` is older than the maximum age it carries. A manifest
+  ## without the attestation block makes no freshness claim and is never
+  ## stale here (an agent that needs the claim requires the block).
+  if not m.hasAttestations: return
+  result.ageSeconds = nowUnix - int64(m.issuedAt)
+  when agentMutated("rdmf-ignores-issued-at"):
+    return
+  result.stale = result.ageSeconds > 0 and
+    uint64(result.ageSeconds) > m.maxAgeSeconds
+
+proc attestationRefusal*(m: DeployManifest): string =
+  ## Why an agent that requires the v3 attestation block refuses ``m``,
+  ## or "".
+  if m.formatVersion < DeployManifestFormatVersionV3:
+    return "format version " & $m.formatVersion & " is refused: this agent " &
+      "requires RDMF v3 with closure digests, issuedAt and a maximum age"
+  if not m.hasAttestations:
+    return "this v3 manifest carries no attestation block (closure " &
+      "digests, issuedAt, maximum age, rollback floor), which this agent " &
+      "requires"
+  ""
 
 # ---------------------------------------------------------------------------
 # Source reading (HTTP(S) / file:// / plain path).
@@ -444,6 +570,38 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
           "sequence " & $selected.sequence,
         errorCode: "ambiguous_sequence")
 
+  # -- FORMAT (an agent that requires the v3 attestation block) ----------
+  if cfg.requireAttestations:
+    let refusal = attestationRefusal(selected)
+    if refusal.len > 0:
+      return AgentOutcome(kind: aoRejected, target: cfg.target,
+        sequence: selected.sequence, deploymentId: selected.deploymentId,
+        message: "manifest REJECTED: " & refusal,
+        errorCode: "attestations_required")
+
+  # -- FRESHNESS (RDMF v3) -----------------------------------------------
+  # Before monotonicity on purpose: a frozen mirror serves exactly the
+  # sequence already applied, which would otherwise read as converged.
+  let nowSec = if deps.nowUnix != nil: deps.nowUnix() else: getTime().toUnix()
+  let age = staleness(selected, nowSec)
+  if age.stale:
+    return AgentOutcome(kind: aoStale, target: cfg.target,
+      sequence: selected.sequence, deploymentId: selected.deploymentId,
+      message: "manifest at sequence " & $selected.sequence & " was issued " &
+        $age.ageSeconds & " s ago, past its maximum age of " &
+        $selected.maxAgeSeconds & " s: the source may be frozen",
+      errorCode: "stale_manifest")
+
+  # -- PAUSE (a local operator rollback, spec §9.3 of the add-on) --------
+  let pause = readPauseMarker(cfg.stateDir)
+  if pause.paused:
+    return AgentOutcome(kind: aoPaused, target: cfg.target,
+      sequence: selected.sequence, deploymentId: selected.deploymentId,
+      message: "paused by a local rollback to generation " &
+        pause.generation & " (operator " & pause.operator & ", " & pause.at &
+        "); `repro system addon resume` lets the agent converge again",
+      errorCode: "paused")
+
   # -- MONOTONICITY ------------------------------------------------------
   let lastApplied = readLastAppliedSequence(cfg)
   if selected.sequence <= lastApplied:
@@ -451,6 +609,19 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
       sequence: selected.sequence, deploymentId: selected.deploymentId,
       message: "already converged at sequence " & $lastApplied &
         " (selected " & $selected.sequence & " is not newer)")
+
+  # -- QUARANTINE --------------------------------------------------------
+  # A reverted deployment is not retried: each retry would take the
+  # service down for the confirmation timeout again. Only a strictly
+  # higher sequence moves on (and clears the record when it applies).
+  let q = readQuarantine(cfg)
+  if q.found and selected.sequence <= q.sequence:
+    return AgentOutcome(kind: aoRolledBack, target: cfg.target,
+      sequence: selected.sequence, deploymentId: selected.deploymentId,
+      message: "deployment " & q.deploymentId & " at sequence " &
+        $q.sequence & " was reverted and is quarantined; publish a higher " &
+        "sequence to move on",
+      errorCode: "quarantined")
 
   # -- SECRETS (before the apply, because the apply consumes them) -------
   #
@@ -500,6 +671,13 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
       message: "the host's base is outside the supported matrix at " &
         "sequence " & $selected.sequence & ": " & e.msg,
       errorCode: "unsupported_base")
+  except EApplyRolledBack as e:
+    writeQuarantine(cfg, selected.sequence, selected.deploymentId)
+    return AgentOutcome(kind: aoRolledBack, target: cfg.target,
+      sequence: selected.sequence, deploymentId: selected.deploymentId,
+      message: "apply of sequence " & $selected.sequence & " was reverted " &
+        "and the deployment is quarantined: " & e.msg,
+      errorCode: "rolled_back")
   if not applied.ok:
     return AgentOutcome(kind: aoApplyFailed, target: cfg.target,
       sequence: selected.sequence, deploymentId: selected.deploymentId,
@@ -510,6 +688,7 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   # Persist only AFTER a successful apply so a failed apply never advances
   # the monotonic floor (a wrong-signer/failed manifest can't poison it).
   writeLastAppliedSequence(cfg, selected.sequence)
+  clearQuarantine(cfg)
   return AgentOutcome(kind: aoApplied, target: cfg.target,
     sequence: selected.sequence, deploymentId: selected.deploymentId,
     message: "applied sequence " & $selected.sequence & ": " &

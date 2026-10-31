@@ -171,7 +171,7 @@ suite "deploy-agent recipient key generation":
     let key = ensureRecipientKeyFile(keyPath)
     let files = @[SecretFile(path: "token", mode: 0o600'u32,
                              content: bytesOf("registration-token"))]
-    let sealed = sealSecrets(key.publicKey, "addon-host-1", files)
+    let sealed = sealSecrets(key.publicKey, "addon-host-1", files, noRevokedRecipientKeys("test"))
     let opened = openSecrets(peerAuth.loadPrivateKeyFile(keyPath), "addon-host-1",
                              sealed)
     check opened.len == 1

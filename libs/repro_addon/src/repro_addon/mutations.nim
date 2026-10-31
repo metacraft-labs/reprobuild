@@ -233,6 +233,10 @@
 ##                                            generation's record
 ## =========================================  ==============================
 
+# The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
+# share this switch; a static add-on build accepts their names too.
+from repro_deploy_agent/agent_mutations import KnownAgentMutations
+
 const
   AddonMutation* {.strdefine: "reproAddonMutation".} = ""
   KnownAddonMutations* = ["uninstall-skips-diversion-removal",
@@ -284,7 +288,8 @@ const
                           "package-owner-absorbed",
                           "hook-ignores-vendor-units"]
 
-when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
+when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
+    AddonMutation notin KnownAgentMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}
 
 template mutated*(name: static string): bool =
