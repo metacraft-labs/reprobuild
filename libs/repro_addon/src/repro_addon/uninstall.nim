@@ -37,6 +37,8 @@
 
 import std/[algorithm, os, posix, sets, strutils]
 
+import repro_core/host_apply_lock
+
 import repro_elevation/posix_system_driver
 
 import ./addon_apply
@@ -44,6 +46,7 @@ import ./collision
 import ./etc_write
 import ./generation0
 import ./host_exec
+import ./addon_secrets
 import ./ledger
 import ./mutations
 import ./static_tree
@@ -190,6 +193,11 @@ proc restorePreBootstrapInputs*(captured: CapturedInputs; keepStore: bool;
 
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  # The host-wide apply lock for the whole uninstall: it removes the store,
+  # units and /etc objects an apply (a deploy-agent tick) would otherwise be
+  # writing at the same moment (``repro_core/host_apply_lock``).
+  var hostLock = acquireHostApplyLock("repro system addon uninstall")
+  defer: hostLock.release()
   let l = readLedger(ledgerCopyPath(stateDir))
   # Pre-bootstrap inputs the add-on took over go back exactly as found
   # (spec §6.1, §6.4). Their bytes are captured FIRST -- before any unit
@@ -324,6 +332,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       result.removed.add(ReproRoot)
     except OSError as ex:
       result.errors.add(ReproRoot & ": " & ex.msg)
+  # The secrets ramfs (A7) is unmounted, its plaintext gone, before the
+  # roots are removed.
+  try:
+    releaseRunDir(defaultSecretsLayout())
+  except CatchableError as ex:
+    result.errors.add(defaultSecretsLayout().runDir & ": " & ex.msg)
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
     if dirExists(root):
       try:

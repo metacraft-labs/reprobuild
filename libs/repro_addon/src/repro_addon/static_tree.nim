@@ -23,6 +23,7 @@ import std/[algorithm, os, posix, strutils]
 
 import repro_core
 import repro_local_store/store
+from repro_infra/apply_lock import currentBootId, processAlive
 
 import ./etc_write
 import ./fingerprint
@@ -73,6 +74,11 @@ type
     revertOf*: string         ## a revert: the failed attempt's generation id
                               ## ("" when it failed before it had one)
     revertReason*: string     ## a revert: why the attempt failed
+    ownerPid*: int            ## the process running the switch: the one
+                              ## that wrote the marker last (stamped by
+                              ## `writePendingMarker`); 0 for a marker an
+                              ## older build wrote
+    ownerBoot*: string        ## the kernel boot id when it was written
 
 const
   StaticLinkPath* = "/etc/repro/static"
@@ -280,6 +286,8 @@ proc render*(m: PendingMarker): string =
   result.add("purpose\t" & escapeField(m.purpose) & "\n")
   result.add("revert-of\t" & escapeField(m.revertOf) & "\n")
   result.add("revert-reason\t" & escapeField(m.revertReason) & "\n")
+  result.add("owner-pid\t" & $m.ownerPid & "\n")
+  result.add("owner-boot\t" & escapeField(m.ownerBoot) & "\n")
 
 proc parsePendingMarker*(text: string): PendingMarker =
   let lines = text.splitLines()
@@ -315,13 +323,31 @@ proc parsePendingMarker*(text: string): PendingMarker =
     of "purpose": result.purpose = v
     of "revert-of": result.revertOf = v
     of "revert-reason": result.revertReason = v
+    of "owner-pid":
+      try: result.ownerPid = parseInt(v)
+      except ValueError:
+        raise newException(StaticTreeError, "malformed owner-pid " & v)
+    of "owner-boot": result.ownerBoot = v
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
 
 proc writePendingMarker*(stateDir: string; m: PendingMarker) =
-  ## Atomic: a crash leaves the previous marker or this one.
+  ## Atomic: a crash leaves the previous marker or this one. The writer is
+  ## the switch, so the marker is stamped with this process and this boot:
+  ## that is how recovery and the apply guard tell the switch that owns a
+  ## marker from any other holder of the host apply lock.
+  var stamped = m
+  stamped.ownerPid = getCurrentProcessId()
+  stamped.ownerBoot = currentBootId()
   createDir(parentDir(pendingMarkerPath(stateDir)))
-  writeFileNoFollow(pendingMarkerPath(stateDir), m.render(), 0o600)
+  writeFileNoFollow(pendingMarkerPath(stateDir), stamped.render(), 0o600)
+
+proc markerOwnerLive*(m: PendingMarker): bool =
+  ## True when the process that owns the switch is still running it: the
+  ## recorded PID exists and the marker was written in this boot (a PID
+  ## from an earlier boot names some unrelated process now).
+  m.ownerPid > 0 and m.ownerBoot.len > 0 and
+    m.ownerBoot == currentBootId() and processAlive(m.ownerPid)
 
 proc readPendingMarker*(stateDir: string): PendingMarker =
   parsePendingMarker(readFile(pendingMarkerPath(stateDir)))

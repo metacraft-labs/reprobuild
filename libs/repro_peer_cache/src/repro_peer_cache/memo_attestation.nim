@@ -26,6 +26,15 @@
 ## signed, and an entry stripped of its level no longer verifies. An entry
 ## with no stated level keeps the v1 message its issuer signed.
 ##
+## An entry that also states its evidence source (memo entry v4, campaign M17
+## chunk 2) is signed under the v3 domain, with the source after the level:
+##
+##   "reprobuild/peer-cache/memo-attestation/v3\0" || ...as above...
+##   || u8 evidenceLevel || u16 sourceLen || source
+##
+## so stripping, relabelling or downgrading the source (to a v3 entry that
+## states none) breaks the signature too.
+##
 ## A consumer accepts an entry only when
 ##
 ##   * the leaf verifies against its OWN trust anchors at the CONSUMER'S
@@ -73,6 +82,8 @@ const
   AttestationDomain = "reprobuild/peer-cache/memo-attestation/v1\x00"
   AttestationDomainWithEvidence =
     "reprobuild/peer-cache/memo-attestation/v2\x00"
+  AttestationDomainWithSource =
+    "reprobuild/peer-cache/memo-attestation/v3\x00"
   PublishingRoles* = {lrDaemon, lrBuildWorker}
 
 type
@@ -91,7 +102,12 @@ proc putU32(dst: var seq[byte]; v: uint32) =
 
 proc attestationMessage*(entry: MemoEntry): seq[byte] =
   let stated = entry.evidenceLevel != elUnstated
-  for ch in (if stated: AttestationDomainWithEvidence else: AttestationDomain):
+  let sourced = entry.evidenceSource.kind != eskUnstated
+  let domain =
+    if sourced: AttestationDomainWithSource
+    elif stated: AttestationDomainWithEvidence
+    else: AttestationDomain
+  for ch in domain:
     result.add(byte(ord(ch)))
   for b in bytes(entry.weakFingerprint): result.add(b)
   for b in bytes(entry.pathSetDigest): result.add(b)
@@ -106,6 +122,12 @@ proc attestationMessage*(entry: MemoEntry): seq[byte] =
   for b in bytes(entry.issuerHostId): result.add(b)
   if stated:
     result.add(evidenceLevelByte(entry.evidenceLevel))
+  if sourced:
+    let text = $entry.evidenceSource
+    result.add(byte(text.len and 0xff))
+    result.add(byte((text.len shr 8) and 0xff))
+    for ch in text:
+      result.add(byte(ord(ch)))
 
 proc attest*(entry: var MemoEntry; leaf: LeafCredential; now = 0'i64) =
   ## Signs `entry` as `leaf`'s host. Raises `IdentityError` for a role that

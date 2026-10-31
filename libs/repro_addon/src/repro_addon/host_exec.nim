@@ -17,7 +17,7 @@
 ## terminal, which is what keeps the fingerprint and the preflight plan
 ## deterministic.
 
-import std/[os, osproc, streams, strtabs, strutils, times]
+import std/[os, osproc, posix, streams, strtabs, strutils, times]
 
 import repro_core/ambient_execution
 import repro_core/process_close
@@ -67,6 +67,9 @@ proc resolveHostTool*(candidates: openArray[string]): string =
         discard
   ""
 
+const BoundedOutputBytes* = 64 * 1024
+  ## What a bounded ``runHostTool`` keeps of a tool's output.
+
 proc runHostTool*(argv: openArray[string]; mergeStderr = true;
                   input = ""; timeoutSec = 0): HostToolResult =
   ## Run ``argv[0]`` (an absolute path) with ``argv[1..]`` and capture its
@@ -74,8 +77,9 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
   ## so a caller can tell "the tool said no" from "there is no tool".
   ## ``timeoutSec > 0`` bounds the wall time: the process is killed at the
   ## deadline and the result has exit code 124 (``timeout(1)``'s), with
-  ## whatever it printed. Its output must fit the pipe buffer while it
-  ## runs (the bounded callers -- health probes -- print a line).
+  ## whatever it printed. Its output is drained while it runs, so a tool
+  ## that prints more than a pipe holds is never blocked writing; only the
+  ## first ``BoundedOutputBytes`` are kept.
   if argv.len == 0:
     raise newException(ValueError, "runHostTool: empty argv")
   if not argv[0].isAbsolute:
@@ -93,19 +97,44 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
       p.inputStream.write(input)
     p.inputStream.close()
     if timeoutSec > 0:
+      # Drain the pipe as the tool writes (poll + read): a probe that
+      # prints more than the pipe buffer must not block on its write until
+      # the deadline kills it, and nothing it prints may grow without
+      # bound in this process.
       let deadline = epochTime() + timeoutSec.float
-      var code = p.peekExitCode()
-      while code == -1 and epochTime() < deadline:
-        sleep(50)
+      let fd = p.outputHandle.cint
+      var buf = newString(4096)
+      var eof = false
+      var code = -1
+      while true:
         code = p.peekExitCode()
+        let left = deadline - epochTime()
+        if eof or left <= 0:
+          if code != -1 or left <= 0: break
+          sleep(20)
+          continue
+        # Once the tool has exited, only what is already in the pipe is
+        # read (a zero poll timeout): a process it left behind holding the
+        # pipe open must not keep this waiting.
+        var pfd = TPollfd(fd: fd, events: POLLIN)
+        let wait = if code != -1: 0
+                   else: cint(max(1, min(200, int(left * 1000))))
+        let n = poll(addr pfd, 1, cint(wait))
+        if n == 0 and code != -1: break
+        if n > 0:
+          let got = posix.read(fd, addr buf[0], buf.len)
+          if got > 0:
+            if result.output.len < BoundedOutputBytes:
+              result.output.add(buf[0 ..< min(got,
+                BoundedOutputBytes - result.output.len)])
+          elif got == 0 or errno notin [EINTR, EAGAIN]:
+            eof = true
       if code == -1:
         p.kill()
         discard p.waitForExit()
-        result.output = p.outputStream.readAll() &
-          "\n(killed after " & $timeoutSec & " s)"
+        result.output.add("\n(killed after " & $timeoutSec & " s)")
         result.exitCode = 124
         return
-      result.output = p.outputStream.readAll()
       result.exitCode = code
     else:
       result.output = p.outputStream.readAll()

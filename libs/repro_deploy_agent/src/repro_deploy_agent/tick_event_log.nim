@@ -26,6 +26,7 @@
 ##     120  aoRejected          Error         exit 2  (operator must act)
 ##     121  aoAmbiguous         Error         exit 2  (operator must act)
 ##     122  aoSecretsFailed     Error         exit 2  (operator must act)
+##     123  aoUnsupportedBase   Error         exit 2  (operator must act)
 ##     190  tickRaised          Error         exit 1  (tick fell over)
 ##     199  <unrecognised>      Warning
 ##
@@ -84,6 +85,7 @@ const
   EventIdTickRejected* = 120
   EventIdTickAmbiguous* = 121
   EventIdTickSecretsFailed* = 122
+  EventIdTickUnsupportedBase* = 123
   EventIdTickRaised* = 190
   EventIdTickUnknownOutcome* = 199
 
@@ -120,6 +122,7 @@ proc tickEventId*(outcome: string): int =
   of "aoRejected": EventIdTickRejected
   of "aoAmbiguous": EventIdTickAmbiguous
   of "aoSecretsFailed": EventIdTickSecretsFailed
+  of "aoUnsupportedBase": EventIdTickUnsupportedBase
   of TickRaisedOutcome: EventIdTickRaised
   else: EventIdTickUnknownOutcome
 

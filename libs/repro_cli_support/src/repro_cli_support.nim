@@ -131,6 +131,7 @@ import sibling_ignores
 import repo_relocation
 import repro_tool_profiles
 import repro_local_store
+import repro_local_store/budget_gc
 # M9.R.77.5 — R11 Layer-1 CAS facade. ``runCasCommand`` uses the narrow
 # put / get / verify / path surface without touching the Layer-2 prefix
 # tables that ``runStoreCommand`` operates against.
@@ -38855,13 +38856,63 @@ proc runStoreDaemonCommand(args: seq[string]): int =
     stderr.writeLine("repro store daemon " & action & ": error: " & err.msg)
     return 1
 
+proc parseStoreByteSize(text: string; value: var int64): bool =
+  ## `123`, `512K`, `64M`, `384G`, `1.5T` (binary multiples; an optional
+  ## `iB` / `B` is accepted, so `384GiB` and `384G` are the same budget).
+  var t = text.strip()
+  var unit = 1'i64
+  for (suffix, mult) in [("TIB", 1'i64 shl 40), ("GIB", 1'i64 shl 30),
+                         ("MIB", 1'i64 shl 20), ("KIB", 1'i64 shl 10),
+                         ("TB", 1'i64 shl 40), ("GB", 1'i64 shl 30),
+                         ("MB", 1'i64 shl 20), ("KB", 1'i64 shl 10),
+                         ("T", 1'i64 shl 40), ("G", 1'i64 shl 30),
+                         ("M", 1'i64 shl 20), ("K", 1'i64 shl 10),
+                         ("B", 1'i64)]:
+    if t.toUpperAscii.endsWith(suffix):
+      t = t[0 ..< t.len - suffix.len].strip()
+      unit = mult
+      break
+  try:
+    let f = parseFloat(t)
+    if f <= 0: return false
+    value = int64(f * float(unit))
+    value > 0
+  except ValueError:
+    false
+
+proc parseStoreDuration(text: string; value: var int64): bool =
+  ## `3600`, `90s`, `30m`, `12h`, `2d`.
+  var t = text.strip().toLowerAscii()
+  var unit = 1'i64
+  if t.len > 0 and t[^1] in {'s', 'm', 'h', 'd'}:
+    unit = case t[^1]
+      of 'm': 60'i64
+      of 'h': 3600'i64
+      of 'd': 86400'i64
+      else: 1'i64
+    t = t[0 ..< t.len - 1]
+  try:
+    let n = parseBiggestInt(t)
+    if n < 0: return false
+    value = n * unit
+    true
+  except ValueError:
+    false
+
 proc runStoreCommand*(args: seq[string]): int =
   ## Implements `repro store <subcommand>` for the M56 unified local
   ## content-addressed store. Supported subcommands:
   ##
   ##   gc       — eager garbage collection (SQL dead-set query plus a
   ##              filesystem move into `gc/pending-deletion/` and a
-  ##              post-grace unlink sweep).
+  ##              post-grace unlink sweep). With `--budget=SIZE` it is the
+  ##              size-budgeted collector instead
+  ##              (`repro_local_store/budget_gc`): above SIZE it evicts the
+  ##              least recently used dead prefixes, action-cache entries
+  ##              and (with `--evict-cas`) unreferenced CAS blobs down to
+  ##              `--target=SIZE` (default 90% of the budget), never
+  ##              anything used within `--keep-recent=DURATION` (default
+  ##              2d). `--dry-run` plans without removing anything.
   ##   recover  — `PRAGMA quick_check`, sweep `tmp/`, and reconcile
   ##              on-disk `prefixes/...` directories against the
   ##              SQLite index.
@@ -38894,7 +38945,9 @@ proc runStoreCommand*(args: seq[string]): int =
   if args.len == 0:
     echo "usage: repro store {gc | recover | roots | list | optimise | " &
       "materialize <src-dir> <dst-dir>} " &
-      "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode]"
+      "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode] " &
+      "[--budget=SIZE [--target=SIZE] [--keep-recent=DURATION] " &
+      "[--evict-cas] [--dry-run]]"
     return 2
   if args[0] == "serve":
     # Executable-Consolidation M3: `repro store serve` is the store daemon
@@ -38914,9 +38967,36 @@ proc runStoreCommand*(args: seq[string]): int =
   # and it produces no error to notice. Declining it is therefore an
   # explicit flag rather than something a caller inherits by silence.
   var allowSharedInode = true
+  var budgetBytes = 0'i64
+  var targetBytes = 0'i64
+  var keepRecentSeconds = 2 * 86400'i64
+  var evictCas = false
+  var dryRun = false
+  var budgetFlagSeen = false
   var positionals: seq[string] = @[]
   for raw in args:
-    if raw.startsWith("--store-root="):
+    if raw.startsWith("--budget="):
+      if not parseStoreByteSize(raw[len("--budget=") .. ^1], budgetBytes):
+        stderr.writeLine("repro store: --budget wants a size such as 384G: " & raw)
+        return 2
+    elif raw.startsWith("--target="):
+      budgetFlagSeen = true
+      if not parseStoreByteSize(raw[len("--target=") .. ^1], targetBytes):
+        stderr.writeLine("repro store: --target wants a size such as 340G: " & raw)
+        return 2
+    elif raw.startsWith("--keep-recent="):
+      budgetFlagSeen = true
+      if not parseStoreDuration(raw[len("--keep-recent=") .. ^1],
+          keepRecentSeconds):
+        stderr.writeLine("repro store: --keep-recent wants a duration such as 2d: " & raw)
+        return 2
+    elif raw == "--evict-cas":
+      budgetFlagSeen = true
+      evictCas = true
+    elif raw == "--dry-run":
+      budgetFlagSeen = true
+      dryRun = true
+    elif raw.startsWith("--store-root="):
       storeRootOverride = raw[len("--store-root=") .. ^1]
     elif raw.startsWith("--grace-seconds="):
       graceSeconds = parseInt(raw[len("--grace-seconds=") .. ^1])
@@ -38935,6 +39015,16 @@ proc runStoreCommand*(args: seq[string]): int =
   let sub = positionals[0]
   if sub != "materialize" and positionals.len > 1:
     stderr.writeLine("repro store: unexpected argument: " & positionals[1])
+    return 2
+  if (budgetBytes > 0 or budgetFlagSeen) and sub != "gc":
+    stderr.writeLine("repro store: --budget and its options apply to `gc` only")
+    return 2
+  if budgetFlagSeen and budgetBytes <= 0:
+    stderr.writeLine("repro store gc: --target / --keep-recent / --evict-cas / " &
+      "--dry-run need --budget=SIZE")
+    return 2
+  if targetBytes > 0 and targetBytes > budgetBytes:
+    stderr.writeLine("repro store gc: --target must not exceed --budget")
     return 2
 
   if sub == "materialize":
@@ -38971,6 +39061,21 @@ proc runStoreCommand*(args: seq[string]): int =
       # — the gc equivalent of a root nobody can reach to delete. So the
       # pin roots are re-read from the locks they name first, and the sweep
       # then sees the truth. Every other root kind is untouched.
+      if budgetBytes > 0:
+        # The budget collector evicts a CHOSEN subset of what is dead, so
+        # the pin roots are re-derived first for the same reason as below:
+        # a version whose pin was removed must be evictable.
+        if not dryRun:
+          discard cli_selfhost.prunePinRootsForGc(root)
+        let report = budgetGc(root, BudgetGcPolicy(
+          budgetBytes: budgetBytes, targetBytes: targetBytes,
+          keepRecentSeconds: keepRecentSeconds, graceSeconds: graceSeconds,
+          evictCas: evictCas, dryRun: dryRun))
+        if emitJson:
+          echo renderBudgetGcJson(report, root)
+        else:
+          echo renderBudgetGcText(report, root)
+        return 0
       let pinOutcomes = cli_selfhost.prunePinRootsForGc(root)
       var droppedPins = 0
       for outcome in pinOutcomes:

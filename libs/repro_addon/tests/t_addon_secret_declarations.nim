@@ -44,11 +44,15 @@ suite "secrets.secretFile and credentials":
     # The editor's stanza walk skips it, as it skips the addOn stanza.
     check systemProfileStanzaLineSpans(profileText("", OneDecl)).len == 1
 
-  test "credentials render as LoadCredential= in [Service], ordered after re-assert":
+  test "credentials render as LoadCredential= in [Service], after the boot secrets unit":
     let p = parseSystemProfile(profileText("  credentials = [\"token\"]\n", OneDecl))
     let c = renderedSystemUnitContent(p.resources[0])
     check "LoadCredential=token:/run/repro/secrets/web/token" in c
-    check "After=repro-addon-reassert.service" in c
+    # Ordered after the bounded boot secrets unit, never after the
+    # recovery: the unit is wanted by multi-user.target (§7.7).
+    check "Wants=repro-addon-secrets.service" in c
+    check "After=repro-addon-secrets.service" in c
+    check "repro-addon-reassert" notin c
     # In the [Service] section, before [Install].
     let svc = c.find("[Service]")
     let ins = c.find("[Install]")

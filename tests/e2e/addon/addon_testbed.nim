@@ -105,6 +105,31 @@ const
       digest: "892d1f6228c85fb39638b07ccebf6c392fa5d9c84c956eeb7aa042c52a124483",
       file: "ubuntu-24.04-server-cloudimg-armhf-20261017.img",
       osId: "ubuntu", versionId: "24.04"),
+    # Milestone A10's upgrade sources: images from BEFORE a point release,
+    # so that upgrading them through the time-shifted snapshot mirror
+    # (snapshot_mirror.nim) crosses one. Debian 13.7 was published on
+    # 2026-09-12 and 12.15 on 2026-07-11 (the archives' Release files);
+    # Ubuntu's base-files 13ubuntu10.4 (24.04.4) reached noble-updates
+    # between 2026-01-01 and 2026-03-01 (snapshot.ubuntu.com). Each gate
+    # checks the version it crossed rather than trusting these notes.
+    BaseImage(name: "debian-13-20260831-amd64", debArch: "amd64",
+      url: "https://cloud.debian.org/images/cloud/trixie/20260831-2587/debian-13-genericcloud-amd64-20260831-2587.qcow2",
+      algo: "sha512",
+      digest: "8ea9faae810043a0b35b0149f05014f26705c2339ffb11ead308f33e844a87cc3ef46ec81d5262b38817b6a88af404874d48a5857ebe072ef6a31dfb6e371f50",
+      file: "debian-13-genericcloud-amd64-20260831-2587.qcow2",
+      osId: "debian", versionId: "13", note: "13.6, before 13.7"),
+    BaseImage(name: "debian-12-20260706-amd64", debArch: "amd64",
+      url: "https://cloud.debian.org/images/cloud/bookworm/20260706-2531/debian-12-genericcloud-amd64-20260706-2531.qcow2",
+      algo: "sha512",
+      digest: "ee13b9618400b521b83d92dec5106c853c3290d14f25efbacb851828abceac1847b63d3d1bac8059d980c7d443efcbc7451fdd6648b2a134796b28563cedfda9",
+      file: "debian-12-genericcloud-amd64-20260706-2531.qcow2",
+      osId: "debian", versionId: "12", note: "before 12.15"),
+    BaseImage(name: "ubuntu-24.04-20251213-amd64", debArch: "amd64",
+      url: "http://cloud-images-archive.ubuntu.com/releases/noble/release-20251213/ubuntu-24.04-server-cloudimg-amd64.img",
+      algo: "sha256",
+      digest: "2b5f90ffe8180def601c021c874e55d8303e8bcbfc66fee2b94414f43ac5eb1f",
+      file: "ubuntu-24.04-server-cloudimg-amd64-20251213.img",
+      osId: "ubuntu", versionId: "24.04", note: "24.04.3, before 24.04.4"),
   ]
 
   DefaultBases* = ["debian-12-amd64", "debian-13-amd64", "ubuntu-24.04-amd64"]
@@ -326,8 +351,9 @@ when defined(gostiAvailable):
     of "arm64": gaArm64
     else: gaArmv7
 
-proc newGuest*(b: BaseImage): Guest =
-  ## Claim a run and prepare (not boot) a guest of ``b``.
+proc newGuest*(b: BaseImage; diskGiB = 8): Guest =
+  ## Claim a run and prepare (not boot) a guest of ``b``. ``diskGiB`` is the
+  ## overlay's virtual size (a release upgrade needs more than 8).
   when not defined(gostiAvailable):
     raise newException(TestBedError,
       "gosti is not available: set GOSTI_SRC to gosti's src directory")
@@ -353,7 +379,7 @@ proc newGuest*(b: BaseImage): Guest =
     let fmt = if b.file.endsWith(".img"): "qcow2" else: "qcow2"
     if execCmd("qemu-img create -q -f qcow2 -F " & fmt & " -b " &
                quoteShell(image) & " " & quoteShell(result.diskPath) &
-               " 8G") != 0:
+               " " & $diskGiB & "G") != 0:
       raise newException(TestBedError, "qemu-img create failed")
     result.serialLog = dir / "serial.log"
     result.qemu = newQemuBootBackend(stateDir = cacheDir() / "qemu-state",
@@ -784,6 +810,35 @@ proc hardReset*(g: Guest) =
     if not g.waitPoweredOff(120):
       raise newException(TestBedError, "QEMU did not exit after system_reset")
 
+proc holdWriteback*(g: Guest) =
+  ## Make "not fsynced" mean "not on the disk" in this guest until its next
+  ## boot, so a durability falsifier is red every time rather than when
+  ## the kernel happens not to have written the data yet:
+  ##
+  ## - no periodic or background writeback: the flusher never wakes
+  ##   (``vm.dirty_writeback_centisecs=0``), dirty data never expires
+  ##   (``vm.dirty_expire_centisecs``) and the background and blocking
+  ##   thresholds are far above what a switch dirties
+  ##   (https://docs.kernel.org/admin-guide/sysctl/vm.html);
+  ## - ext4 on the root filesystem commits its journal only when something
+  ##   fsyncs (``commit=600``), and never flushes a file's data because it
+  ##   was renamed over another (``noauto_da_alloc``, the heuristic that
+  ##   otherwise papers over a missing fsync before a rename;
+  ##   https://docs.kernel.org/admin-guide/ext4.html).
+  ##
+  ## With delayed allocation a file renamed into place without an fsync
+  ## then reaches the disk, at the switch's next fsync of anything (which
+  ## commits the journal, renames included), as an empty file. The
+  ## settings are in memory only and end with the reset.
+  let r = g.exec("sysctl -q -w vm.dirty_writeback_centisecs=0 " &
+    "vm.dirty_expire_centisecs=360000 vm.dirty_background_ratio=90 " &
+    "vm.dirty_ratio=95 && mount -o remount,commit=600,noauto_da_alloc / " &
+    "&& findmnt -n -o FSTYPE,OPTIONS /")
+  if r.exitCode != 0 or not r.stdout.startsWith("ext4") or
+      "noauto_da_alloc" notin r.stdout:
+    raise newException(TestBedError, "could not hold writeback back: " &
+      r.stdout & r.stderr)
+
 proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
                           timeoutSec = 900): ExecOut =
   ## Start ``repro infra apply --profile <text>`` in the background with the
@@ -838,7 +893,21 @@ proc waitReasserted*(g: Guest; timeoutSec = 900): string =
                     "repro-addon-reassert.service").stdout.strip()
     if st in ["active", "failed"]: break
     sleep(1000)
-  g.exec("journalctl -b -o cat --no-pager -u repro-addon-reassert.service").stdout
+  result = g.exec("journalctl -b -o cat --no-pager -u " &
+                  "repro-addon-reassert.service").stdout
+  if testSeams():
+    # A hard reset can bring back a seam control file the paused switch had
+    # already consumed: its unlink is not fsynced (the seam must not sync,
+    # see seams.nim), and a reset that lands before the journal commits it
+    # resurrects ``test-pause-at``. The recovery ignores it (its points are
+    # ``replay:``-prefixed), but the next forward switch would match it and
+    # wait for a resume nobody sends. Measured on ubuntu-24.04-amd64: the
+    # ``back to A`` apply after the ``step-1`` reset paused at ``step-1``.
+    # The controls belong to the gate, so the gate clears them once the
+    # boot's recovery is over.
+    discard g.run("rm -f " & SeamDir & "/test-pause-at " & SeamDir &
+      "/test-paused-at " & SeamDir & "/test-resume " & SeamDir &
+      "/test-pause-recovery; sync")
 
 proc hardResetAfterSettle*(g: Guest; settleSec = 8) =
   ## Hard-reset a guest whose switch is paused, after ``settleSec``: long

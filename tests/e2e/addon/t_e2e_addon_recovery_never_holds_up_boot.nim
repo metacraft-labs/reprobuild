@@ -16,11 +16,23 @@
 ##
 ## Released, the recovery finishes and reports ``ok``.
 ##
+## Both generations carry a unit that loads a credential
+## (``secrets.secretFile``, ``credentials``). Such a unit is wanted by
+## multi-user.target and must start before its secret is needed, so it is
+## ordered after the add-on's bounded boot secrets unit
+## (``repro-addon-secrets.service``); while the recovery is held it must be
+## active, having read its secret.
+##
 ## Falsifying mutation ``addon-target-in-boot-order`` (``REPRO_ADDON_MUTATION``):
 ## ``repro-addon.target`` keeps systemd's default dependencies, so
 ## multi-user.target is ordered after it, and it after the recovery: the
 ## gate must go red (multi-user.target never becomes active while the
 ## recovery is held).
+##
+## Falsifying mutation ``secrets-after-recovery``: the credential unit is
+## ordered after the re-assert unit instead (the ordering A7 first
+## shipped), so multi-user.target waits for the held recovery through it:
+## red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``; QEMU only; the seam build.
 ##
@@ -41,7 +53,25 @@ proc unitText(gen: string): string =
   "[Unit]\nDescription=boot-order fixture\n[Service]\nEnvironment=GEN=" & gen &
     "\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n"
 
+const
+  CredService = "repro-fixture-cred"
+  CredSeen = "/run/repro-fixture-cred.seen"
+  CredValue = "a5-boot-credential"
+
+proc credentialUnit(gen: string): string =
+  ## A unit that loads a credential, wanted by multi-user.target like any
+  ## service, so whatever it is ordered after is on the base's boot path.
+  ## It copies what it read to a file the gate checks (root-only /run).
+  "secrets.secretFile {\n  service = \"" & CredService & "\"\n  name = \"token\"\n}\n\n" &
+    "systemd.systemUnit {\n  name = \"" & CredService & ".service\"\n" &
+    "  content = \"[Unit]\nDescription=credential boot-order fixture\n\n" &
+    "[Service]\nEnvironment=GEN=" & gen & "\nExecStart=/bin/sh -c 'cat " &
+    "$$CREDENTIALS_DIRECTORY/token > " & CredSeen & "; exec sleep infinity'\n\n" &
+    "[Install]\nWantedBy=multi-user.target\n\"\n" &
+    "  credentials = [\"token\"]\n}\n\n"
+
 proc profile(gen: string): string =
+  credentialUnit(gen) &
   "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n}\n\n" &
     "systemd.systemUnit {\n  name = \"repro-fixture-boot.service\"\n  content = \"" &
     unitText(gen) & "\"\n}\n\n" &
@@ -71,6 +101,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     if not g.bootstrapAddon(repro, step): return fails
+    let put = g.exec("printf %s " & CredValue & " | " & repro &
+      " system addon secret put --service " & CredService & " --name token")
+    step("secret put " & CredService, put.exitCode == 0, put.stdout & put.stderr)
     var r = g.applyProfile(repro, "a", profile("A"))
     step("generation A applied", r.exitCode == 0, r.stdout & r.stderr)
     # The reference: a clean boot of this guest with the add-on installed.
@@ -113,6 +146,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          seconds > 0 and seconds <= reference + MarginSeconds,
          "held boot " & $seconds & " s, reference " & $reference & " s; jobs:\n" &
          g.exec("systemctl list-jobs --no-pager").stdout)
+    # The unit that loads a credential started in this boot, before the
+    # recovery, with its secret: the boot secrets unit materialised it.
+    let credState = g.exec("systemctl is-active " & CredService & ".service").stdout.strip()
+    let seen = g.exec("cat " & CredSeen & " 2>/dev/null").stdout
+    step("the credential unit is active and read its secret while the " &
+         "recovery is held", credState == "active" and seen == CredValue,
+         "state=" & credState & " seen=" & seen & "; secrets unit: " &
+         g.exec("systemctl status --no-pager repro-addon-secrets.service " &
+                "2>&1 | tail -5").stdout)
     # Release the recovery; it finishes the switch.
     discard g.run("touch " & SeamDir & "/test-resume")
     let j = g.waitReasserted()

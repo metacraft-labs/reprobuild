@@ -540,9 +540,17 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       result.reason = "owned by the ledger but changed out of band; " &
         "--reconcile-drift replaces it and preserves the current bytes"
       return
+    # A package that unpacked its own file over the add-on's names
+    # itself here (spec §7.6: "the next plan shows actionable drift with
+    # the package named").
+    let byPackage =
+      if o.ownership.package.len > 0: "; package " & o.ownership.package &
+        " now ships this path" & (if o.ownership.conffile: " (conffile)"
+                                  else: "")
+      else: ""
     raise newException(AddonDriftError, "EDrift: " & o.path &
       " (" & inp.address & ") is owned by the ledger but its content " &
-      "changed out of band (sha256 " & o.sha256[0 ..< 12] & ", ledger " &
+      "changed out of band" & byPackage & " (sha256 " & o.sha256[0 ..< 12] & ", ledger " &
       inp.ledgerSha256[0 ..< min(12, inp.ledgerSha256.len)] & "); " &
       "review it, then re-run with --reconcile-drift to replace it " &
       "(the current bytes are kept in the ledger)")

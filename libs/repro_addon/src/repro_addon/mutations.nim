@@ -116,6 +116,23 @@
 ##                                            fsyncs the file it writes nor
 ##                                            its directory
 ##                                            (``repro_elevation``)
+## ``refused-recovery-forgets-marker``        a refusal (an exclusive unit
+##                                            that will not stop) inside a
+##                                            replay or a revert is undone
+##                                            like a fresh switch's: the
+##                                            pending marker and plan are
+##                                            removed while the host is
+##                                            half-switched
+## ``secrets-after-recovery``                 the boot secrets unit is
+##                                            ordered after the boot
+##                                            recovery
+##                                            (``repro-addon-reassert``),
+##                                            so every unit that loads
+##                                            credentials -- ordered after
+##                                            it -- and multi-user.target
+##                                            wait for the recovery again
+##                                            (the ordering A7 first
+##                                            shipped)
 ## ``path-based-write-follows-links``         the drivers write managed
 ##                                            files with a path-based
 ##                                            ``open``, following any link
@@ -154,6 +171,26 @@
 ##                                            ``/var/lib/repro/secrets`` (the
 ##                                            root filesystem) and the tmpfs
 ##                                            check is off
+## ``secrets-on-tmpfs``                       a plain directory on /run's
+##                                            tmpfs is accepted for the
+##                                            secrets (no ramfs: its pages
+##                                            can be swapped)
+## ``secrets-single-retained-envelope``       a deploy agent's sealed
+##                                            section replaces the one
+##                                            retained envelope before its
+##                                            apply, and every generation
+##                                            materialises from it
+## ``credentials-not-planned``                a credential change plans no
+##                                            restart or stop-start
+## ``rotation-not-reconciled``                a rotation cut short after its
+##                                            rename is never completed
+## ``secrets-scope-allows-swap``              the processes that hold
+##                                            plaintext run without
+##                                            MemorySwapMax=0 and are not
+##                                            refused for it
+## ``retirement-not-resumed``                 a key retirement interrupted
+##                                            between overwrite and rename
+##                                            is never finished
 ## ``recipient-key-mode-unchecked``           the recipient key is used
 ##                                            whatever its owner and mode
 ## ``secrets-write-then-narrow``              a secret file is written by
@@ -165,6 +202,19 @@
 ##                                            what is sealed to it (the
 ##                                            rotation gate's negative
 ##                                            control)
+## ``apt-hook-without-timeout``               the apt hook runs the
+##                                            verification with no
+##                                            deadline, so a hung one
+##                                            stalls dpkg
+## ``apt-hook-without-exit0``                 the apt hook exits with the
+##                                            verification's status, so a
+##                                            failing or timed-out one
+##                                            fails apt
+## ``base-coupling-unflagged``                no unit is ever flagged
+##                                            base-coupled
+## ``base-matrix-unchecked``                  an apply against a base
+##                                            outside the supported matrix
+##                                            is not refused
 ## =========================================  ==============================
 
 const
@@ -196,11 +246,23 @@ const
                           "addon-target-in-boot-order",
                           "current-remove-then-create",
                           "nofollow-write-skips-fsync",
+                          "refused-recovery-forgets-marker",
+                          "secrets-after-recovery",
                           "kept-units-still-stopped",
                           "secrets-on-disk",
+                          "secrets-on-tmpfs",
+                          "secrets-single-retained-envelope",
+                          "credentials-not-planned",
+                          "rotation-not-reconciled",
+                          "secrets-scope-allows-swap",
+                          "retirement-not-resumed",
                           "recipient-key-mode-unchecked",
                           "secrets-write-then-narrow",
-                          "rotation-keeps-old-key"]
+                          "rotation-keeps-old-key",
+                          "apt-hook-without-timeout",
+                          "apt-hook-without-exit0",
+                          "base-coupling-unflagged",
+                          "base-matrix-unchecked"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

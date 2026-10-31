@@ -70,6 +70,13 @@
 ## and the hardened case checks that the same edge under `ffpTimestamp` is
 ## not published.
 ##
+## The built edge is MONITORED by the engine's io-monitor (owner decision
+## 2026-10-29, Edge-Derived-Identities.md §3.4 item 1 rider: only a monitored
+## or builtin record crosses hosts; until then the compile was evidenced by
+## its make depfile, which the engine now keeps local). Where io-mon cannot
+## prove detached-descendant quiescence (`NoTreeLifetimeGuard`, macOS) no
+## monitored edge is published, and the cases are skipped with that reason.
+##
 ## MOCK POLICY — none: real sockets, real TLS with host-CA leaves, the real
 ## build engine and a real C compiler, real disk stores, the real sink
 ## binary. The "malicious" behaviour uses the server's production
@@ -86,6 +93,10 @@ import repro_peer_cache
 import repro_cli_support/peer_cache_wiring
 
 import ./m7_test_pki
+import repro_test_support/reasoned_skip
+from repro_test_support import prepareMonitorTools, ReprobuildRepoRoot
+from repro_test_support/descendant_guard_expectations import
+  NoTreeLifetimeGuard
 
 const
   ConfigV1 = "#define GREETING \"hello from config v1\"\n"
@@ -117,7 +128,7 @@ proc helloGraph(ws: string; policy = ffpChecksum;
   graph([action(ActionId,
     [ccPath(), "-O1", "-MD", "-MF", "out/hello.d", "-o", output, "main.c"],
     cwd = ws, inputs = ["main.c"], outputs = [output],
-    depfile = "out/hello.d", cacheable = true,
+    cacheable = true,
     weakFingerprint = weakFingerprintFromText(weakText),
     actionCachePolicy = policy,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())])
@@ -131,6 +142,14 @@ proc engineConfig(cacheRoot, ws: string;
   result.maxParallelism = 1'u32
   result.portableRoots = @[LogicalRoot(label: "project", path: ws,
     kind: lrkTracked)]
+  # The engine's own io-monitor over the compile (the graph-built `repro`
+  # driver and monitor shim), through the direct RunQuota-bypass path.
+  let tools = prepareMonitorTools(ReprobuildRepoRoot, getTempDir(),
+    "poisoned-record")
+  putEnv("REPRO_MONITOR_SHIM_LIB", tools.shim)
+  result.runQuotaCliPath = tools.monitorCliPath
+  result.monitorCliPath = tools.monitorCliPath
+  result.monitorCliArgs = tools.monitorCliArgs
   wireEngineConfig(result, hooks, ws)
 
 proc byId(res: BuildRunResult; id: string): ActionResult =
@@ -174,6 +193,13 @@ suite "Distributed-Execution M7: poisoned cache records":
     if ccPath().len == 0:
       checkpoint("no C compiler on PATH; the test needs a real build")
       fail()
+    elif NoTreeLifetimeGuard:
+      skip("io-mon cannot prove detached-descendant quiescence on this " &
+        "platform, so every monitored capture fails closed and no monitored " &
+        "edge is published; since the owner decision of 2026-10-29 a " &
+        "depfile-evidenced edge does not cross hosts either " &
+        "(Edge-Derived-Identities.md §3.4 item 1 rider), so no node here " &
+        "has a record to serve")
     else:
       let base = normalizedPath(absolutePath(getTempDir() /
         ("repro-m7-poison-" & $getCurrentProcessId())))
@@ -508,6 +534,13 @@ suite "Distributed-Execution M7: poisoned cache records":
     if ccPath().len == 0:
       checkpoint("no C compiler on PATH; the test needs a real build")
       fail()
+    elif NoTreeLifetimeGuard:
+      skip("io-mon cannot prove detached-descendant quiescence on this " &
+        "platform, so every monitored capture fails closed and no monitored " &
+        "edge is published; since the owner decision of 2026-10-29 a " &
+        "depfile-evidenced edge does not cross hosts either " &
+        "(Edge-Derived-Identities.md §3.4 item 1 rider), so no node here " &
+        "has a record to serve")
     else:
       let base = normalizedPath(absolutePath(getTempDir() /
         ("repro-m7-poison-trusted-" & $getCurrentProcessId())))

@@ -73,4 +73,8 @@ proc runAddonRollback*(opts: AddonRollbackOptions): AddonRollbackResult =
   result.apply = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: opts.hostIdentity, ownProfileText: g.own,
     userProfileText: g.user, reconcileDrift: opts.reconcileDrift,
-    driver: opts.driver, purpose: "rollback"))
+    driver: opts.driver, purpose: "rollback",
+    # Its secrets come from the target generation's own envelope copy; a
+    # copy that no longer opens refuses the rollback before anything is
+    # written (spec §10.3).
+    secretsFromGeneration: result.toGeneration))

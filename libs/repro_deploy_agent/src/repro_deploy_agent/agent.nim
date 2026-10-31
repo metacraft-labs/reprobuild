@@ -89,6 +89,10 @@ when defined(ssl):
         gAgentTlsCtx = newContext(verifyMode = CVerifyPeer)
       return gAgentTlsCtx
 
+const
+  UnsupportedBaseDiagnostic* = "EAddOnUnsupportedBase"
+    ## The leading word of the add-on apply's base refusal.
+
 type
   AgentOutcomeKind* = enum
     aoWaiting          ## no manifest for this target yet (all sources missed)
@@ -99,6 +103,9 @@ type
     aoSourceError      ## a source read/fetch failed (retryable)
     aoApplyFailed      ## the apply hook returned failure
     aoSecretsFailed    ## a sealed section could not be opened / materialised
+    aoUnsupportedBase  ## the apply refused the host's base (ReproOS add-on
+                       ## spec §7.9, ``EAddOnUnsupportedBase``): an operator
+                       ## must act, a retry cannot fix it
 
   AgentOutcome* = object
     kind*: AgentOutcomeKind
@@ -130,14 +137,16 @@ type
     secretsDir*: string
       ## Directory the opened secret files are materialised under. Securing it
       ## is the profile's job (see `materialiseSecrets`).
-    secretsSink*: proc(target: string; sealed: SealedSecrets): string {.gcsafe.}
+    secretsSink*: proc(m: DeployManifest): string {.gcsafe.}
       ## When set, takes the selected manifest's sealed section INSTEAD of
       ## opening it with `secretsKeyPath` and writing it under `secretsDir`,
       ## and returns "" when it was accepted or why not (reported as
-      ## `aoSecretsFailed`). A ReproOS add-on host sets it: there the
-      ## section is checked against the host's recipient key, retained
-      ## sealed, and materialised only into a tmpfs, per service, by the
-      ## apply (`repro_addon/secrets_ops`).
+      ## `aoSecretsFailed`, nothing applied). It sees the whole manifest,
+      ## so it can check the section against the profile it comes with. A
+      ## ReproOS add-on host sets it: there the section is checked against
+      ## the host's recipient key and the profile's declarations, staged
+      ## sealed for the apply, and materialised only into a ramfs, per
+      ## service, by the apply (`repro_addon/secrets_ops`).
 
   AgentDeps* = object
     ## Test seam. ``apply`` is the apply hook. ``httpGet`` overrides the
@@ -444,7 +453,7 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   # arrived produces a box that looks applied and cannot run a job -- the exact
   # shape of failure this campaign keeps rediscovering.
   if selected.hasSecrets and cfg.secretsSink != nil:
-    let refused = cfg.secretsSink(selected.target, selected.secrets)
+    let refused = cfg.secretsSink(selected)
     if refused.len > 0:
       return AgentOutcome(kind: aoSecretsFailed, target: cfg.target,
         sequence: selected.sequence, deploymentId: selected.deploymentId,
@@ -470,6 +479,16 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
 
   # -- APPLY (strictly-higher valid sequence) ----------------------------
   let applied = deps.apply(selected)
+  if not applied.ok and applied.message.startsWith(UnsupportedBaseDiagnostic):
+    # Every add-on diagnostic's message starts with its name (the add-on
+    # spec §8.4), so the refusal is recognised by that contract rather
+    # than by a type the generic apply hook cannot carry. The sequence is
+    # not recorded: once the base is fixed the same manifest applies.
+    return AgentOutcome(kind: aoUnsupportedBase, target: cfg.target,
+      sequence: selected.sequence, deploymentId: selected.deploymentId,
+      message: "the host's base is outside the supported matrix at " &
+        "sequence " & $selected.sequence & ": " & applied.message,
+      errorCode: "unsupported_base")
   if not applied.ok:
     return AgentOutcome(kind: aoApplyFailed, target: cfg.target,
       sequence: selected.sequence, deploymentId: selected.deploymentId,

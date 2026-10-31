@@ -32,9 +32,10 @@
 ## * It is an ``flock``, re-entrant within a process (a reference count),
 ##   and the kernel drops it when the holder dies: there is nothing to
 ##   reclaim. A second apply waits up to a deadline, then refuses naming the
-##   holder's PID. Switch recovery does not wait at all
-##   (``tryAcquireHostApplyLock``): a held lock means a switch is running,
-##   and that switch is what started the recovery unit.
+##   holder's PID. Switch recovery first tries without waiting
+##   (``tryAcquireHostApplyLock``): when the holder is the switch that owns
+##   the pending marker, that switch started the recovery unit and recovery
+##   defers to it; any other holder (a deploy-agent tick) is waited for.
 ##
 ## ``REPRO_HOST_APPLY_LOCK`` names another lock file for tests. An
 ## unprivileged process honours it (and then does lock); root honours it only
@@ -42,10 +43,10 @@
 ## production root apply can never be pointed at a private lock.
 
 import std/[os, strutils]
-when not defined(windows):
-  import std/posix
-
 import ./file_lock
+import ./process_privilege
+
+export process_privilege.processIsPrivileged
 
 const
   HostApplyLockEnvVar* = "REPRO_HOST_APPLY_LOCK"
@@ -65,11 +66,6 @@ var
   hostLock: ReproFileLock
   hostLockDepth = 0
 
-proc processIsPrivileged*(): bool =
-  ## Root on Linux and macOS. On Windows the caller says (it knows whether
-  ## its token is elevated); the default is unprivileged.
-  when defined(windows): false
-  else: geteuid() == 0
 
 proc hostApplyLockPathFor*(privileged: bool; env: string;
                            programData = ""): string =
@@ -120,13 +116,15 @@ proc acquireHostApplyLock*(what: string; waitMs = hostApplyLockWaitMs();
 
 proc tryAcquireHostApplyLock*(what: string;
                               privileged = processIsPrivileged()):
-    tuple[lock: HostApplyLock; holder: string] =
-  ## Zero-wait form: ``lock.held`` false and ``holder`` describing who has
-  ## it when another process holds it now.
+    tuple[lock: HostApplyLock; holder: string; holderPids: seq[int]] =
+  ## Zero-wait form: ``lock.held`` false, ``holder`` describing who has it
+  ## and ``holderPids`` naming them (from /proc/locks) when another process
+  ## holds it now.
   try:
     result.lock = acquireHostApplyLock(what, 0, privileged)
   except ELockTimeout as e:
     result.holder = e.msg
+    result.holderPids = e.holderPids
 
 proc release*(lock: var HostApplyLock) =
   ## Release one reference; the flock is dropped with the last.

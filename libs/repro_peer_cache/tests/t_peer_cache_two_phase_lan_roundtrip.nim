@@ -8,11 +8,15 @@
 ## its own host CA over TLS (M7: the memoization plane only accepts entries
 ## whose issuer attestation verifies), and backed by its own disk stores, build the same C program from two
 ## checkouts of one workspace that sit under DIFFERENT parent directories at
-## different depths (`.../pa/x/ws-a`, `.../pb/ws-b`). `main.c` includes
-## `config.h`, which the compiler's depfile reports — a DYNAMIC input the
-## static weak fingerprint does not see — and the build script also reports
-## the walk up its working directory's parents, as a monitored compile does,
-## so each record carries its own checkout's ancestors by absolute path.
+## different depths (`.../pa/x/ws-a`, `.../pb/ws-b`). The compile is a
+## MONITORED edge (owner decision 2026-10-29, Edge-Derived-Identities.md §3.4
+## item 1 rider: only a monitored or builtin record crosses hosts; until then
+## the gate's edge was evidenced by its make depfile). `main.c` includes
+## `config.h`, which the monitor observes the compiler read — a DYNAMIC input
+## the static weak fingerprint does not see — and the shell's and compiler's
+## walk up the working directory's parents is observed too, so each record
+## carries its own checkout's ancestors by absolute path. (The build script
+## still appends that walk to `out/hello.d`, the edge's depfile in step 7.)
 ##
 ##   1. Node A (child process) builds in ws-a and publishes through the
 ##      two-phase memo store: PathSet blob + output blob into its CAS, memo
@@ -66,6 +70,20 @@
 ##      the entry (`fetchTwoPhase`, naming the policy), installs nothing and
 ##      executes the action. The refusal is a miss, not a suspicion.
 ##
+## On a platform where io-mon cannot prove detached-descendant quiescence
+## (`NoTreeLifetimeGuard`, macOS) no monitored edge is published, so the gate
+## is skipped there with that reason.
+##
+## Owner decision 2026-10-29 ("builtins yes, depfiles no"; Edge-Derived-
+## Identities.md §3.4 item 1 rider, §10 decision 23), at both ends:
+##
+##   7. B builds the edge evidenced by its make depfile instead of the
+##      monitor: it runs and serves B, but it is not offered to the publisher
+##      and the trace names the format. A record of that edge, hand-injected
+##      into A's store as a producer that ignores the rule would publish it
+##      (Level 0, `ffpChecksum`, attested by A), is refused by B's lookup,
+##      naming `make-depfile`; B installs nothing and executes the action.
+##
 ## The peer key is the portable weak fingerprint, the action's static
 ## description over logical paths (Peer-Cache.md §"Two-phase memoization
 ## plane", Identities). A test-only `weakFingerprint` override is not part
@@ -80,6 +98,28 @@
 ## hardened nodes (one-hour host-CA leaves) and with trusted nodes (pinned
 ## long-lived host keys, the product default) — every node of a run in the
 ## same profile.
+##
+## WINDOWS (campaign M17 chunk 2). There is no `/bin/sh`, so the build step
+## is this test binary in its `--build-tool` mode, which compiles with the
+## same compiler and appends the same parent walk to the depfile
+## (`runBuildTool`). The host identities' key files are owner-only there
+## too (`owner_only_file.nim`); before chunk 2 node A could not even mint
+## its host CA on Windows.
+##
+## THE GATE DOES NOT PASS ON WINDOWS YET, for two reasons outside this test,
+## measured by the independent verification of chunk 2 (Windows 11 26200,
+## gcc 16.1.0, io-mon at the `flake.lock` pin):
+##   * every process of that toolchain (gcc, cc1, as, collect2, ld; not
+##     cmd.exe) draws entropy at start-up (`ProcessPrng`, `RtlGenRandom`,
+##     `caller=system`), and the engine withholds the cache record of an
+##     unblessed edge that read entropy (Windows-Build-Correctness M6), so
+##     node A records and publishes nothing ("unblessed-entropy");
+##   * with that waived (scratch only), A publishes but B misses: the
+##     monitored record lists gcc's random-named temporary files under
+##     `%TEMP%` (`cc*.s`, `cc*.o`, `cc*.res`, `cc*.cdtor.*`) as observed
+##     reads, so no two executions share a PathSet.
+## Where it ran that far, step 7's producer refusal (`make-depfile`) and
+## step 4's rejection behaved as asserted.
 ##
 ## MOCK POLICY — none. Real sockets (no in-process `TableRef` peer table),
 ## real processes, the real build engine, a real C compiler, real CAS /
@@ -97,6 +137,10 @@ import repro_local_store
 import repro_peer_cache
 import repro_cas_store
 import repro_cli_support/peer_cache_wiring
+from repro_test_support import prepareMonitorTools, ReprobuildRepoRoot
+import repro_test_support/reasoned_skip
+from repro_test_support/descendant_guard_expectations import
+  NoTreeLifetimeGuard
 
 import ./m7_test_pki
 
@@ -112,6 +156,9 @@ int main(void) {
 }
 """
   ActionId = "two-phase-hello"
+  HelloName = addFileExt("hello", ExeExt)
+    ## The compiled program: `hello`, or `hello.exe` on Windows, where the
+    ## compiler appends the extension to an output named without one.
   BuildScript = """#!/bin/sh
 # Compile, then report what a monitored compile reports beyond the depfile:
 # the walk up the parent chain of the working directory (every shell and
@@ -139,6 +186,33 @@ template ensure(cond: bool) =
   if not ok:
     raise newException(AssertionFailure, "precondition failed: " & astToStr(cond))
 
+proc runBuildTool(cc, output: string): int =
+  ## Windows: what `BuildScript` does under a POSIX shell, run by this test
+  ## binary (`--build-tool`): compile, then append to the depfile the walk up
+  ## the working directory's parents a monitored compile reports, as
+  ## absolute paths (forward slashes; the depfile reader takes a drive
+  ## prefix as such, not as the rule separator). Added by campaign M17
+  ## chunk 2 so the gate runs on Windows, where there is no `/bin/sh`.
+  result = execCmd(quoteShellCommand([cc, "-O1", "-MD", "-MF", "out/hello.d",
+    "-o", output, "main.c"]))
+  if result != 0:
+    return
+  var line = output.replace('\\', '/') & ":"
+  var dir = expandFilename(getCurrentDir())
+  while true:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+    line.add(" " & dir.replace('\\', '/'))
+  let f = open("out/hello.d", fmAppend)
+  f.write(line & "\n")
+  f.close()
+
+when defined(windows):
+  if paramCount() >= 3 and paramStr(1) == "--build-tool":
+    quit(runBuildTool(paramStr(2), paramStr(3)))
+
 proc ccPath(): string =
   result = findExe("cc")
   if result.len == 0:
@@ -154,7 +228,8 @@ proc writeWorkspace(ws: string; config: string) =
   writeFile(ws / "config.h", config)
   writeFile(ws / "build.sh", BuildScript)
 
-proc helloGraph(ws: string; policy = ffpChecksum; variant = ""): BuildGraph =
+proc helloGraph(ws: string; policy = ffpChecksum; variant = "";
+                depfileEvidence = false): BuildGraph =
   ## One compile+link action. Absolute output path (so the record names a
   ## path INSIDE the workspace that must be rebased), relative inputs, and
   ## a depfile that reports `config.h`.
@@ -163,19 +238,39 @@ proc helloGraph(ws: string; policy = ffpChecksum; variant = ""): BuildGraph =
   ## action declares, which is in the portable weak fingerprint peers key
   ## on (`portableStaticFieldsOf`), and into the local weak fingerprint.
   ## A weak text alone would change only the latter.
-  let output = ws / "out" / ("hello" & variant)
+  ##
+  ## The edge is MONITORED (the engine's io-monitor observes the compile,
+  ## the default dependency policy): only a monitored or builtin record may
+  ## cross hosts (owner decision 2026-10-29, Edge-Derived-Identities.md §3.4
+  ## item 1 rider). `depfileEvidence` builds the same edge evidenced by its
+  ## make depfile instead (`out/hello.d`, which the build script writes
+  ## either way), whose record stays on its host (step 7).
+  let output = ws / "out" / addFileExt("hello" & variant, ExeExt)
   let compile = action(ActionId,
-    ["/bin/sh", "build.sh", ccPath(), output],
+    (when defined(windows):
+       [getAppFilename(), "--build-tool", ccPath(), output]
+     else: ["/bin/sh", "build.sh", ccPath(), output]),
     cwd = ws,
     inputs = ["main.c", "build.sh"],
     outputs = [output],
-    depfile = "out/hello.d",
+    depfile = (if depfileEvidence: "out/hello.d" else: ""),
     cacheable = true,
     weakFingerprint = weakFingerprintFromText(
       "t-peer-cache-two-phase.hello" & variant),
     actionCachePolicy = policy,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
   graph([compile])
+
+proc withMonitor(config: var BuildEngineConfig) =
+  ## The engine's own io-monitor over every launch, as `repro build` runs it
+  ## (the graph-built `repro` driver and monitor shim), through the direct
+  ## RunQuota-bypass launch path, as the engine's other monitored tests do.
+  let tools = prepareMonitorTools(ReprobuildRepoRoot, getTempDir(),
+    "two-phase-lan")
+  putEnv("REPRO_MONITOR_SHIM_LIB", tools.shim)
+  config.runQuotaCliPath = tools.monitorCliPath
+  config.monitorCliPath = tools.monitorCliPath
+  config.monitorCliArgs = tools.monitorCliArgs
 
 proc nodeEngineConfig(cacheRoot, ws: string;
                       hooks: PeerCacheEngineHooks): BuildEngineConfig =
@@ -189,6 +284,7 @@ proc nodeEngineConfig(cacheRoot, ws: string;
   result.maxParallelism = 1'u32
   result.portableRoots = @[LogicalRoot(label: "project", path: ws,
     kind: lrkTracked)]
+  withMonitor(result)
   wireEngineConfig(result, hooks, ws)
 
 proc traceOf(res: BuildRunResult): string =
@@ -362,7 +458,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
         (if fileExists(logA): readFile(logA) else: "<no log>"))
     ensure producerReady
     let portA = Port(parseInt(readFile(readyFile).strip()))
-    check fileExists(wsA / "out" / "hello")
+    check fileExists(wsA / "out" / HelloName)
     # Node A's build REPORTED its checkout's ancestors (the build script
     # appends the parent walk to the depfile), so the evidence the engine
     # folded names them by absolute path — the shape that made checkouts
@@ -402,7 +498,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     let configB = nodeEngineConfig(cacheB, wsB, hooksB)
 
     # ---- (2) peer hit across roots ---------------------------------------
-    check not fileExists(wsB / "out" / "hello")
+    check not fileExists(wsB / "out" / HelloName)
     let first = runBuild(helloGraph(wsB), configB)
     let hit = first.byId(ActionId)
     checkpoint("first B build: status=" & $hit.status & " reason=" &
@@ -412,8 +508,8 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check hooksB.stats.installs == 1
     check hit.cacheDecision == cdHit
     check not hit.launched
-    check fileExists(wsB / "out" / "hello")
-    check execProcess(wsB / "out" / "hello").strip() == "hello from config v1"
+    check fileExists(wsB / "out" / HelloName)
+    check execProcess(wsB / "out" / HelloName).strip() == "hello from config v1"
     # Both blobs (PathSet + binary) crossed the wire, content-addressed.
     check hostB.client.fetchRoundTripCount >= 2
     check hostB.client.memoRoundTripCount >= 2
@@ -434,7 +530,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     # `$WORKSPACE/...`, never node A's checkout path.
     let recordA = decodeActionResultRecord(entryA.recordBytes)
     check recordA.outputs.len == 1
-    check recordA.outputs[0].path == WorkspaceMarker & "/out/hello"
+    check recordA.outputs[0].path == WorkspaceMarker & "/out/" & HelloName
     var sawWorkspaceInput = false
     for input in recordA.inputs:
       check not input.path.contains(wsA)
@@ -487,7 +583,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check hooksB.stats.hits == hitsBefore           # no false hit
     check rebuilt.status == asSucceeded
     check rebuilt.launched
-    check execProcess(wsB / "out" / "hello").strip() == "hello from config v2"
+    check execProcess(wsB / "out" / HelloName).strip() == "hello from config v2"
     check hooksB.stats.publishes == 1
 
     # Two selectors under ONE weak fingerprint on B; A's is byte-identical.
@@ -567,7 +663,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check rejections == 1
     check again.launched
     check again.status == asSucceeded
-    check execProcess(wsB / "out" / "hello").strip() == "hello from config v1"
+    check execProcess(wsB / "out" / HelloName).strip() == "hello from config v1"
     # The re-execution observed what A's execution observed, so its
     # selector is A's. The publisher ran, and writing an existing selector
     # is a no-op: B still holds exactly its two selectors, A's attested
@@ -619,6 +715,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     configT.deferLocalOutputBlobs = false
     configT.portableRoots = @[LogicalRoot(label: "project", path: wsT,
       kind: lrkTracked)]
+    withMonitor(configT)
     let madeT = runBuild(helloGraph(wsT, ffpTimestamp, tsVariant), configT)
     let tsMade = madeT.byId(ActionId)
     checkpoint("timestamp record build: status=" & $tsMade.status &
@@ -640,7 +737,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     let ctxT = TwoPhaseContext(peerKey: tsKey, cwd: wsT, workspaceRoot: wsT,
       portable: true)
     let normalizedT = normalizeRecord(tsRecord, ctxT)
-    let pathSetT = pathSetOf(normalizedT)
+    let pathSetT = pathSetOf(normalizedT, ctxT)
     let pathSetBytesT = encodePeerPathSet(pathSetT)
     let pathSetDigestT = digestOf(pathSetBytesT)
     var forged = MemoEntry(weakFingerprint: tsKey,
@@ -648,7 +745,8 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
       strongFingerprint: twoPhaseStrongFingerprint(tsKey, pathSetDigestT,
         identitiesFor(pathSetT, ctxT)),
       recordBytes: encodeActionResultRecord(normalizedT),
-      evidenceLevel: elComplete)
+      evidenceLevel: elComplete,
+      evidenceSource: MonitoredEvidence)
     block:
       var tsStore = openCasStore(cacheT)
       var aStore = openCasStore(cacheA)
@@ -683,6 +781,105 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check hooksB.stats.installs == installsBeforeT
     check "ffpTimestamp input-check policy" in hooksB.stats.lastFetchReason
 
+    # ---- (7) owner decision 2026-10-29: a depfile record stays local ----
+    # (7a) B builds an edge evidenced by its make depfile, not the monitor:
+    # it runs, its record serves B, and it is not offered to the publisher;
+    # the refusal names the format.
+    let wsBD = base / "pb" / "ws-b-depfile"
+    writeWorkspace(wsBD, ConfigV1)
+    let publishesBeforeD = hooksB.stats.publishes
+    let skipsBeforeD = hooksB.stats.publishSkips
+    let depBuilt = runBuild(helloGraph(wsBD, ffpChecksum,
+      "-depfile-producer", depfileEvidence = true),
+      nodeEngineConfig(cacheB, wsBD, hooksB))
+    let depItem = depBuilt.byId(ActionId)
+    checkpoint("depfile B build: status=" & $depItem.status & " publish=" &
+      hooksB.stats.lastPublishReason & traceOf(depBuilt))
+    check depItem.status == asSucceeded
+    check depItem.launched
+    check hooksB.stats.publishes == publishesBeforeD
+    check hooksB.stats.publishSkips == skipsBeforeD
+    var depRefusals = 0
+    for event in depBuilt.trace:
+      if event.event == "peer-cache-publish-refused" and
+          "make-depfile" in event.detail:
+        inc depRefusals
+    check depRefusals == 1
+    check storageB.memo.weakFingerprints() == @[weak]
+    # (7b) A serves an entry for a depfile record (Level 0, ffpChecksum,
+    # attested by A, as a producer that does not apply the rule publishes
+    # it); B, from a checkout with no record of the edge, refuses it, names
+    # the format, installs nothing and executes the action.
+    let depVariant = "-depfile-consumer"
+    let wsD = base / "pd" / "ws-d"
+    writeWorkspace(wsD, ConfigV1)
+    let cacheD = base / "node-d-cache"
+    var configD = defaultBuildEngineConfig(cacheD)
+    configD.bypassRunQuota = true
+    configD.maxParallelism = 1'u32
+    configD.deferLocalOutputBlobs = false
+    configD.portableRoots = @[LogicalRoot(label: "project", path: wsD,
+      kind: lrkTracked)]
+    let madeD = runBuild(helloGraph(wsD, ffpChecksum, depVariant,
+      depfileEvidence = true), configD)
+    let depMade = madeD.byId(ActionId)
+    checkpoint("depfile record build: status=" & $depMade.status &
+      traceOf(madeD))
+    ensure depMade.status == asSucceeded
+    ensure depMade.portableWeakHex.len == 64
+    let depKey = digestFromHex(depMade.portableWeakHex)
+    let depRaw = readFile(dependencyEvidencePath(cacheD, ActionId))
+    var depRecordBytes = newSeq[byte](depRaw.len)
+    if depRaw.len > 0:
+      copyMem(addr depRecordBytes[0], unsafeAddr depRaw[0], depRaw.len)
+    let depRecord = decodeActionResultRecord(depRecordBytes)
+    ensure depRecord.policy == ffpChecksum
+    ensure depRecord.outputPayloadKind == opkCasBlobs
+    let ctxD = TwoPhaseContext(peerKey: depKey, cwd: wsD, workspaceRoot: wsD,
+      portable: true, declaredInputs: @[wsD / "main.c", wsD / "build.sh"])
+    let normalizedD = normalizeRecord(depRecord, ctxD)
+    let pathSetD = pathSetOf(normalizedD, ctxD)
+    let pathSetBytesD = encodePeerPathSet(pathSetD)
+    let pathSetDigestD = digestOf(pathSetBytesD)
+    var depEntry = MemoEntry(weakFingerprint: depKey,
+      pathSetDigest: pathSetDigestD,
+      strongFingerprint: twoPhaseStrongFingerprint(depKey, pathSetDigestD,
+        identitiesFor(pathSetD, ctxD)),
+      recordBytes: encodeActionResultRecord(normalizedD),
+      evidenceLevel: elComplete,
+      evidenceSource: formatEvidence("make-depfile"))
+    block:
+      var dStore = openCasStore(cacheD)
+      var aStore = openCasStore(cacheA)
+      defer:
+        dStore.close()
+        aStore.close()
+      discard aStore.casPut(pathSetBytesD)
+      for output in depRecord.outputs:
+        depEntry.outputDigests.add(
+          blobDigestFromBytes(output.blob.digest.bytes))
+        discard aStore.casPut(dStore.casGet(
+          toContentHash(output.blob.digest.bytes)))
+    attest(depEntry, mintNodeCredential(nodeA.identity, lrDaemon,
+      identityPolicyOf(profile)))
+    check storageA.memo.writeMemoEntry(depEntry)
+    let wsBDC = base / "pb" / "ws-b-depfile-consumer"
+    writeWorkspace(wsBDC, ConfigV1)
+    let hitsBeforeD = hooksB.stats.hits
+    let installsBeforeD = hooksB.stats.installs
+    let consumedD = runBuild(helloGraph(wsBDC, ffpChecksum, depVariant),
+      nodeEngineConfig(base / "node-b-depfile-consumer-cache", wsBDC, hooksB))
+    let depConsumed = consumedD.byId(ActionId)
+    checkpoint("depfile consumer B build: status=" & $depConsumed.status &
+      " fetch=" & hooksB.stats.lastFetchReason & " install=" &
+      hooksB.stats.lastInstallReason & traceOf(consumedD))
+    check depConsumed.portableWeakHex == depMade.portableWeakHex
+    check depConsumed.status == asSucceeded
+    check depConsumed.launched
+    check hooksB.stats.hits == hitsBeforeD
+    check hooksB.stats.installs == installsBeforeD
+    check "make-depfile" in hooksB.stats.lastFetchReason
+
     # ---- no markSuspect false positives, and A really served -------------
     check hostB.client.suspectMarks == 0
     check queryClient.suspectMarks == 0
@@ -700,12 +897,25 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check statusInt(statusA, "fetch_hits_served") >= 2
     result = true
 
+const MonitoredEdgeUnpublishableHere =
+  "io-mon cannot prove detached-descendant quiescence on this platform, so " &
+  "every monitored capture fails closed and no monitored edge is " &
+  "published; since the owner decision of 2026-10-29 a depfile-evidenced " &
+  "edge does not cross hosts either (Edge-Derived-Identities.md §3.4 item " &
+  "1 rider), so the gate's compile has nothing to exchange here"
+
 suite "Distributed-Execution M0: two-phase peer cache over real LAN sockets":
 
   test "t_peer_cache_two_phase_lan_roundtrip":
     # Hardened nodes (one-hour host-CA leaves).
-    check runTwoPhaseRoundtrip(tpHardened)
+    if NoTreeLifetimeGuard:
+      skip(MonitoredEdgeUnpublishableHere)
+    else:
+      check runTwoPhaseRoundtrip(tpHardened)
 
   test "t_peer_cache_two_phase_lan_roundtrip (trusted profile, the default)":
     # Trusted nodes (pinned long-lived host keys) — the product default.
-    check runTwoPhaseRoundtrip(tpTrusted)
+    if NoTreeLifetimeGuard:
+      skip(MonitoredEdgeUnpublishableHere)
+    else:
+      check runTwoPhaseRoundtrip(tpTrusted)

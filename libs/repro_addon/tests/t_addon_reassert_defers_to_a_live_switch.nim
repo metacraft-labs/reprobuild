@@ -33,14 +33,15 @@ suite "switch recovery and the host apply lock":
     putEnv(HostApplyLockWaitEnvVar, "20")
     defer: delEnv(HostApplyLockWaitEnvVar)
     let stateDir = tmp / "state"
-    writePendingMarker(stateDir, PendingMarker(fromGeneration: "g0",
-      step: ssFlip, status: "in-progress"))
     var held, release: array[2, cint]
     doAssert pipe(held) == 0 and pipe(release) == 0
     let switchPid = fork()
     doAssert switchPid >= 0
     if switchPid == 0:
+      # The switch: holds the host lock and writes (so owns) the marker.
       var lock = acquireHostApplyLock("the switch")
+      writePendingMarker(stateDir, PendingMarker(fromGeneration: "g0",
+        step: ssFlip, status: "in-progress"))
       var c = 'h'
       discard posix.write(held[1], addr c, 1)
       discard posix.read(release[0], addr c, 1)
@@ -54,6 +55,7 @@ suite "switch recovery and the host apply lock":
     check elapsed < 5.0
     check rec.resolved
     check rec.deferred
+    check readPendingMarker(stateDir).ownerPid == switchPid.int
     # The marker is the live switch's; recovery did not touch it.
     check hasPendingMarker(stateDir)
     let report = runAddonReassert(stateDir, atBoot = false)
@@ -62,3 +64,48 @@ suite "switch recovery and the host apply lock":
     doAssert posix.write(release[1], addr c, 1) == 1
     var status: cint
     doAssert waitpid(switchPid, status, 0) == switchPid
+
+  test "a tick holding the lock over a stale marker is waited for, not deferred to":
+    # The deploy agent's tick holds the host apply lock too, and it does not
+    # own an interrupted switch's marker. At 9c51db884 recovery deferred to
+    # ANY holder: it reported `deferred` (exit 0, no drift check) and the
+    # half switch waited for the next boot while the agent kept applying.
+    let tmp = createTempDir("addon-reassert-stale-", "")
+    defer: removeDir(tmp)
+    putEnv(HostApplyLockEnvVar, tmp / "apply.lock")
+    defer: delEnv(HostApplyLockEnvVar)
+    putEnv(HostApplyLockWaitEnvVar, "1")
+    defer: delEnv(HostApplyLockWaitEnvVar)
+    let stateDir = tmp / "state"
+    # The interrupted switch: wrote its marker, then died.
+    let dead = fork()
+    doAssert dead >= 0
+    if dead == 0:
+      writePendingMarker(stateDir, PendingMarker(fromGeneration: "g0",
+        step: ssFlip, status: "in-progress"))
+      exitnow(0)
+    var st: cint
+    doAssert waitpid(dead, st, 0) == dead
+    check not markerOwnerLive(readPendingMarker(stateDir))
+    # The tick: holds the host lock for longer than recovery will wait.
+    var held, release: array[2, cint]
+    doAssert pipe(held) == 0 and pipe(release) == 0
+    let tick = fork()
+    doAssert tick >= 0
+    if tick == 0:
+      var lock = acquireHostApplyLock("a deploy-agent tick")
+      var c = 'h'
+      discard posix.write(held[1], addr c, 1)
+      discard posix.read(release[0], addr c, 1)
+      lock.release()
+      exitnow(0)
+    var c: char
+    doAssert posix.read(held[0], addr c, 1) == 1
+    let rec = recoverPendingSwitch(stateDir, atBoot = false)
+    check not rec.deferred
+    check not rec.resolved
+    check hasPendingMarker(stateDir)
+    check runAddonReassert(stateDir, atBoot = false).status == "degraded"
+    c = 'r'
+    doAssert posix.write(release[1], addr c, 1) == 1
+    doAssert waitpid(tick, st, 0) == tick

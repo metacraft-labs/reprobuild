@@ -118,7 +118,7 @@ proc newBed(name: string): Bed =
   createDir(result.root)
   result.layout = SecretsLayout(agentDir: result.root / "agent",
     runDir: result.root / "run" / "secrets", owner: int(geteuid()),
-    requireTmpfs: false)
+    fs: sfAny)
   createDir(result.root / "run")
   result.outside = result.root / "outside"
   createDir(result.outside)
@@ -212,6 +212,17 @@ suite "t_addon_secret_files_created_private_and_never_through_symlinks":
     check refused
     check readFile(b.outside / "victim") == "victim-bytes\n"
     check getFilePermissions(b.outside / "victim") != {fpUserRead}
+
+  test "a FIFO at a destination is refused without blocking":
+    let b = newBed("fifo")
+    defer: removeDir(b.root)
+    doAssert posix.mkdir(b.layout.runDir.cstring, Mode(0o700)) == 0
+    doAssert posix.mkdir(b.dirFor("svc").cstring, Mode(0o700)) == 0
+    doAssert mkfifo(cstring(b.dirFor("svc") / "token"), Mode(0o600)) == 0
+    expect AddonSecretsFailed:
+      discard materialise(b.layout, [SecretFileDecl(service: "svc",
+        name: "token")], [SecretFile(path: "svc/token", mode: 0o400,
+        content: @[byte('x')])])
 
   test "a service directory that is a link is refused; nothing lands outside":
     let b = newBed("svcdir")

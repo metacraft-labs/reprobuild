@@ -17,8 +17,8 @@
 ##   matches its digest. It never re-applies on drift, and it has no
 ##   network;
 ## - the apt hook ``/etc/apt/apt.conf.d/90repro-addon``: a report-only
-##   ``DPkg::Post-Invoke`` that can never fail a dpkg run, even when the
-##   binary it names is missing;
+##   ``DPkg::Post-Invoke`` that can never fail or stall a dpkg run, even when
+##   the binary it names is missing, fails or hangs (``aptHookCommand``);
 ## - ``/etc/profile.d/repro-addon.sh``: the add-on's ``repro`` on ``PATH``
 ##   (appended). The profile DSL's ``addOnToolPath()`` writes a file of its
 ##   own, ``/etc/profile.d/repro-addon-tools.sh`` (``repro_profile``
@@ -41,6 +41,7 @@
 import std/[algorithm, strutils]
 
 import repro_elevation/posix_system_parse
+from repro_infra/profile import SecretsBootUnit
 
 import ./fingerprint
 import ./mutations
@@ -67,6 +68,18 @@ const
   AddonTarget* = "repro-addon.target"
   StoreMountUnit* = "repro-store.mount"
   ReassertUnit* = "repro-addon-reassert.service"
+  ReassertTimeoutMin* = 90
+    ## The re-assert unit's start timeout: a recovery killed at it leaves
+    ## its marker for the next boot.
+  BootConfirmCapSec* = 30 * 60
+    ## At boot a recovery may run two confirms -- the replay's and, when it
+    ## fails, its revert's -- each capped at this, whatever the profile's
+    ## ``confirmTimeout``, so both fit inside ``ReassertTimeoutMin`` with
+    ## half an hour left for the transitions themselves.
+  SecretsUnit* = SecretsBootUnit
+    ## ``repro-addon-secrets.service`` (``secretsUnit``).
+  SecretsUnitTimeoutSec* = 60
+    ## The secrets unit's start timeout: it is on the base's boot path.
   ReassertReportPath* = "/var/lib/repro/system/addon/reassert-report"
     ## Where the re-assert unit's last report is kept (``reassert.nim``).
   AptHookPath* = "/etc/apt/apt.conf.d/90repro-addon"
@@ -144,6 +157,12 @@ Options=bind,ro
 WantedBy=repro-addon.target
 """
 
+const NoSwapLine =
+  # Both boot units open sealed envelopes, so their heap holds plaintext
+  # secrets: their control group may not swap (spec §10.3).
+  when mutated("secrets-scope-allows-swap"): ""
+  else: "MemorySwapMax=0\n"
+
 proc reassertUnit(reproExe: string): string =
   # Boot-time re-assertion (§7.7): finishes or reverts an interrupted
   # switch, checks the current generation and reports ok / drift /
@@ -155,8 +174,8 @@ proc reassertUnit(reproExe: string): string =
   # after recovery delays only the add-on's own target. It is only ORDERED
   # after the store mount (`After=`), never `Requires=` it -- a missing
   # store must still let it run and report `degraded`. A recovery may
-  # replay a switch with a confirmTimeout of up to an hour, hence the
-  # timeout; a recovery that is killed leaves its marker for the next boot. For the
+  # replay a switch and revert it, each confirm capped at
+  # `BootConfirmCapSec`, hence the timeout; a recovery that is killed leaves its marker for the next boot. For the
   # same reason the binary, which lives in the store, is tested before it
   # is executed: with the store gone the shell reports `degraded` itself
   # instead of the unit failing silently with ENOENT. `reassert --boot`
@@ -169,8 +188,13 @@ proc reassertUnit(reproExe: string): string =
                    "After=local-fs.target repro-store.mount\n"
     let wantedBy = "multi-user.target"
   else:
-    let unitDeps = "After=local-fs.target repro-store.mount\n" &
-                   "Before=repro-addon.target\n"
+    # After the secrets unit (its own step 3 then never races it); in the
+    # `secrets-after-recovery` build the order is the other way round,
+    # and both at once would be a cycle.
+    let secretsOrder = when mutated("secrets-after-recovery"): ""
+                       else: " " & SecretsUnit
+    let unitDeps = "After=local-fs.target repro-store.mount" & secretsOrder &
+                   "\n" & "Before=repro-addon.target\n"
     let wantedBy = "repro-addon.target"
   "[Unit]\n" &
   "Description=Reprobuild add-on boot-time re-assertion\n" &
@@ -179,7 +203,7 @@ proc reassertUnit(reproExe: string): string =
   "[Service]\n" &
   "Type=oneshot\n" &
   "RemainAfterExit=yes\n" &
-  "TimeoutStartSec=90min\n" &
+  "TimeoutStartSec=" & $ReassertTimeoutMin & "min\n" &
   # The fallback also rewrites the report, so a stale `ok` from an earlier
   # boot is never what an operator reads.
   "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " & reproExe &
@@ -191,19 +215,131 @@ proc reassertUnit(reproExe: string): string =
   "NoNewPrivileges=yes\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
+  NoSwapLine &
   "\n" &
   "[Install]\n" &
   "WantedBy=" & wantedBy & "\n"
 
-proc aptHook(reproExe: string): string =
-  # Report-only by construction: the whole hook is one shell command that
-  # tests for the binary and ends in ``|| true``, so a missing store, a
-  # missing binary or a failing verification can never fail dpkg or
-  # unattended-upgrades.
+proc secretsUnit(reproExe: string): string =
+  # Boot-time secrets (§7.7, §10.3): re-materialise the current
+  # generation's secrets into the tmpfs from the retained envelope, before
+  # the units that load them start. A unit with `credentials` wants this
+  # unit and is ordered after it (`SecretsOrderingUnit` in
+  # `repro_infra/profile`), and such a unit is wanted by multi-user.target,
+  # so THIS unit is on the base's boot path. It is therefore bounded and
+  # waits for nothing slow: no recovery (the re-assert unit is ordered
+  # after it, not before), no network, no lock wait (it tries the host
+  # apply lock once and, when an apply holds it, leaves the secrets to that
+  # apply), and a start timeout of a minute. It never fails the boot
+  # transaction: like the re-assert unit it tests the store binary before
+  # running it, and the verb always exits 0; a secret it cannot materialise
+  # is reported, and the unit that loads it then fails to start, which the
+  # re-assert unit reports as `degraded`.
+  when mutated("secrets-after-recovery"):
+    # The falsifying mutation: the secrets step waits for the boot
+    # recovery, so every unit that loads credentials does too -- the
+    # ordering A7 first shipped (credential units `After=` the re-assert
+    # unit) -- and multi-user.target with them.
+    let order = "After=local-fs.target repro-store.mount " & ReassertUnit &
+                "\nBefore=repro-addon.target\n"
+  else:
+    let order = "After=local-fs.target repro-store.mount\n" &
+                "Before=" & ReassertUnit & " repro-addon.target\n"
+  # Default dependencies (after basic.target, so after sockets.target and
+  # the system bus's socket): the secrets ramfs is mounted in the host's
+  # mount namespace by a transient unit (`runInHostNamespaces`, i.e.
+  # systemd-run), which needs the system bus. Measured on Debian 12/13 and
+  # Ubuntu 24.04 with `DefaultDependencies=no`: "Failed to connect to
+  # system scope bus via local transport", and every credential unit
+  # failed. A unit with credentials is an ordinary service, after
+  # basic.target itself, so this costs it nothing.
+  "[Unit]\n" &
+  "Description=Reprobuild add-on secrets for this boot\n" &
+  order &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "RemainAfterExit=yes\n" &
+  "TimeoutStartSec=" & $SecretsUnitTimeoutSec & "s\n" &
+  "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " & reproExe &
+    " system addon secrets --boot; else echo repro-addon secrets: " &
+    "degraded: the add-on binary " & reproExe & " is unavailable; fi'\n" &
+  "PrivateNetwork=yes\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  NoSwapLine &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+const
+  AptHookTimeoutSeconds* = 60
+    ## How long the apt hook lets one verification run (spec §7.8). At the
+    ## deadline ``timeout(1)`` sends SIGTERM to the verification's process
+    ## group, and SIGKILL five seconds later.
+  AptHookLogPath* = "/var/lib/repro/system/addon/apt-hook.log"
+    ## The hook's event log: one line per event, ``<UTC time> <kind>
+    ## <detail>``. The wrapper appends ``verify-missing``,
+    ## ``verify-failed`` and ``verify-timeout``; the verification appends
+    ## its findings (``apt_hook.nim``). Plain text, not JSON, because the
+    ## wrapper is a shell command inside an apt.conf string, which cannot
+    ## carry a double quote.
+  AptHookTimeoutTool* = "/usr/bin/timeout"   ## coreutils (Essential)
+  AptHookLoggerTool* = "/usr/bin/logger"     ## bsdutils (Essential)
+
+proc aptHookCommand*(reproExe: string;
+                     timeoutSeconds = AptHookTimeoutSeconds;
+                     logPath = AptHookLogPath;
+                     timeoutTool = AptHookTimeoutTool;
+                     loggerTool = AptHookLoggerTool): string =
+  ## The shell command of the ``DPkg::Post-Invoke`` hook (apt runs it with
+  ## ``/bin/sh -c``). Report-only by construction (threat model G19, T39):
+  ##
+  ## - the verification runs under ``timeout``, so a hung one ends at the
+  ##   deadline and dpkg -- or ``unattended-upgrades`` -- goes on;
+  ## - a missing binary (the store unreadable or gone) is never executed;
+  ## - every outcome other than a clean exit is recorded, in the journal
+  ##   (``logger``) and in the hook's event log, and the command ends in
+  ##   ``exit 0`` whatever happened.
+  ##
+  ## It uses no double quote and no backslash: apt.conf(5) strings carry
+  ## neither. Everything but ``reproExe`` is a parameter only for the
+  ## hermetic test, which runs this very command on a build host whose
+  ## tools live elsewhere; generation 0 uses the defaults.
+  let t = $timeoutSeconds
+  let run =
+    when mutated("apt-hook-without-timeout"):
+      # FALSIFYING MUTATION: no deadline; a hung verification stalls dpkg.
+      "$r system addon verify --after-dpkg; c=$?"
+    else:
+      timeoutTool & " -k 5 " & t & " $r system addon verify " &
+        "--after-dpkg; c=$?"
+  when mutated("apt-hook-without-exit0"):
+    # FALSIFYING MUTATION: the verification's status is the hook's, so a
+    # failing or timed-out verification fails dpkg's caller.
+    "r=" & reproExe & "; if [ -x $r ]; then " & timeoutTool &
+      " -k 5 " & t & " $r system addon verify --after-dpkg; fi"
+  else:
+    "r=" & reproExe & "; l=" & logPath & "; " &
+      "if [ -x $r ]; then " & run & "; else c=missing; fi; " &
+      "case $c in 0) ;; missing) k=verify-missing ;; " &
+      "124|137) k=verify-timeout ;; *) k=verify-failed ;; esac; " &
+      "if [ $c != 0 ]; then " &
+      loggerTool & " -t repro-addon-apt-hook -p user.warning " &
+      "repro-addon apt hook: $k exit=$c timeout=" & t & "s 2>/dev/null; " &
+      "echo $(date -u +%Y-%m-%dT%H:%M:%SZ) $k exit=$c timeout=" & t &
+      "s >> $l 2>/dev/null; fi; exit 0"
+
+proc aptHook*(reproExe: string): string =
+  ## ``/etc/apt/apt.conf.d/90repro-addon`` (spec §7.8).
   "// Reprobuild add-on: report-only verification after every dpkg run.\n" &
-  "// It never fails dpkg: the command always exits 0.\n" &
-  "DPkg::Post-Invoke { \"if [ -x " & reproExe & " ]; then " & reproExe &
-    " system addon verify --after-dpkg || true; fi\"; };\n"
+  "// It never fails or stalls dpkg: the verification is bounded by a\n" &
+  "// " & $AptHookTimeoutSeconds & " s timeout and the command always " &
+    "exits 0; a missing, failing or\n" &
+  "// hung verification is recorded in the journal and in " &
+    AptHookLogPath & ".\n" &
+  "DPkg::Post-Invoke { \"" & aptHookCommand(reproExe) & "\"; };\n"
 
 proc profileD(reproExe: string): string =
   let bindir = reproExe[0 ..< reproExe.rfind('/')]
@@ -280,6 +416,8 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
     OwnObject(kind: ookUnit, unit: StoreMountUnit,
               path: unitPath(StoreMountUnit), content: storeMountUnit(),
               enabled: true),
+    OwnObject(kind: ookUnit, unit: SecretsUnit, path: unitPath(SecretsUnit),
+              content: secretsUnit(inp.reproExe), enabled: true),
     OwnObject(kind: ookUnit, unit: ReassertUnit, path: unitPath(ReassertUnit),
               content: reassertUnit(inp.reproExe), enabled: true),
     OwnObject(kind: ookEtcFile, path: AptHookPath,

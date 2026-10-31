@@ -10,6 +10,7 @@
 ##   repro system addon verify [--boot | --after-dpkg]
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
+##   repro system addon secrets [--boot]
 ##   repro system addon probe <healthCheck>
 ##   repro system addon secret put --service S --name N [--target T] < secret
 ##   repro system addon rotate-recipient-key
@@ -37,6 +38,7 @@ import std/[options, os, strutils]
 
 import std/algorithm
 
+import repro_core/host_apply_lock
 import repro_infra
 
 import repro_infra/addon_diagnostics
@@ -47,6 +49,8 @@ import repro_local_store/store as local_store
 
 import ./addon_apply
 import ./addon_rollback
+import ./apt_hook
+import ./base_identity
 import ./bootstrap
 import ./collision
 import ./fingerprint
@@ -75,7 +79,10 @@ commands:
   uninstall [--keep-store]
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
-      Compare every ledger object with the host (report only).
+      Compare every ledger object with the host (report only). --after-dpkg
+      (the apt hook): also report packages that now own ledger paths and
+      changed vendor units, record findings in the journal and the hook's
+      event log, and always exit 0.
   reassert [--boot]
       Finish or revert an interrupted switch, check the current generation
       (static tree, store objects, ledger digests) and report ok, drift or
@@ -83,6 +90,10 @@ commands:
       always exits 0.
   recover
       The same, for an operator: exits 1 unless the host ends ok or drift.
+  secrets [--boot]
+      Re-materialise the current generation's secrets from the retained
+      envelope (the boot secrets unit; leaves them to an apply that holds
+      the host apply lock). --boot: always exits 0.
   probe <healthCheck>
       Run one tcp: or http:// health check here (the confirm step runs it
       in the host's namespaces); exits 0 when it passes.
@@ -253,6 +264,15 @@ proc runAddonCli*(args: seq[string]): int =
     return (if args.len == 0: 2 else: 0)
   let cmd = args[0]
   let rest = args[1 .. ^1]
+  # The verbs that hold plaintext secrets run where their heap cannot be
+  # swapped (spec §10.3): `secret`, `rotate-recipient-key` and `agent-tick`
+  # always, the re-assert and secrets verbs on a host that keeps envelopes
+  # (their boot units carry MemorySwapMax=0 themselves).
+  if cmd in ["secret", "rotate-recipient-key", "agent-tick"] or
+      (cmd in ["reassert", "recover", "secrets"] and "--boot" notin rest and
+       hostHasSecrets()):
+    let r = reexecInNoSwapScope()
+    if r >= 0: return r
   try:
     case cmd
     of "fingerprint":
@@ -325,6 +345,10 @@ proc runAddonCli*(args: seq[string]): int =
       for a in rest:
         if a in ["--boot", "--after-dpkg"]: reportOnly = true
         else: raise newException(ValueError, "unknown option " & a)
+      if "--after-dpkg" in rest:
+        # The apt hook (spec §7.8): ledger digests, new package owners of
+        # ledger paths, changed vendor units; recorded, always exit 0.
+        return runAfterDpkgCli()
       if reportOnly:
         # Report-only callers (the boot unit, the apt hook) must never fail
         # whatever invoked them, so nothing here may raise or exit non-zero.
@@ -352,6 +376,16 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
       return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
+    of "secrets":
+      # `repro system addon secrets [--boot]`: re-materialise the current
+      # generation's secrets (repro-addon-secrets.service at boot, §7.7).
+      var atBoot = false
+      for a in rest:
+        if a == "--boot": atBoot = true
+        else: raise newException(ValueError, "unknown option " & a)
+      let r = bootSecrets(DefaultStateDir)
+      stdout.write("repro-addon secrets: " & r.line & "\n")
+      return (if atBoot or r.ok: 0 else: 1)
     of "secret":
       return runSecretPutCli(rest)
     of "rotate-recipient-key":
@@ -460,6 +494,17 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   ## the sysctl values observed from the host's namespaces too.
   result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
     renderTransitions(r.transitions)
+  if r.baseIdentity.id.len > 0:
+    # The base the plan was computed against (§7.4) and, after a
+    # distribution upgrade, what changed since the current generation (§7.9).
+    result.add("base: " & describeBase(r.baseIdentity) & " (identity " &
+      baseIdentityDigest(r.baseIdentity)[0 ..< 16] & ", in the supported " &
+      "matrix)\n")
+    if r.baseChanges.len > 0:
+      result.add("base changed since generation " & r.previousGenerationId &
+        " (" & describeBase(r.previousBase) & "):\n")
+      for c in r.baseChanges: result.add("  " & c & "\n")
+    result.add(renderReleaseUpgradeChecklist(r.baseIdentity))
   if r.planId.len > 0:
     result.add("add-on plan-id: " & r.planId & "\n")
   if r.staticTree.len > 0:
@@ -481,6 +526,14 @@ proc runAddonStoreCli*(args: seq[string]): int =
     stdout.write("usage: repro store gc [--grace-seconds N] | roots | list\n")
     return (if args.len == 0: 2 else: 0)
   try:
+    # `gc` deletes prefixes no root holds; an apply realising a closure
+    # holds no root on it until it commits, so a collection during an apply
+    # could delete what that apply is about to bind. `gc` therefore runs
+    # under the host-wide apply lock, like every other store writer.
+    var hostLock: HostApplyLock
+    if args[0] == "gc":
+      hostLock = acquireHostApplyLock("repro store gc")
+    defer: hostLock.release()
     enterWritableStoreView()
     var s = openStore(StoreRoot)
     defer: s.close()
@@ -612,19 +665,30 @@ proc runAddonGeneration(verb: string; args: seq[string];
     stderr.write(verb & ": " & e.msg & "\n")
     1
 
+proc noSwapIfSecrets*(): int =
+  ## An apply, plan or rollback on a host that keeps sealed envelopes opens
+  ## one: it runs where its heap cannot be swapped (spec §10.3).
+  if isAddonHost() and hostHasSecrets(): reexecInNoSwapScope() else: -1
+
 proc runAddonInfraApplyCli*(args: seq[string]): int =
   ## ``repro infra apply --profile <canonical text> [--reconcile-drift]``
   ## on an add-on host.
+  let r = noSwapIfSecrets()
+  if r >= 0: return r
   runAddonGeneration("repro infra apply", args, planOnly = false)
 
 proc runAddonInfraPlanCli*(args: seq[string]): int =
   ## ``repro infra plan --profile <canonical text>`` on an add-on host:
   ## the ledger diff and the collision report, nothing written.
+  let r = noSwapIfSecrets()
+  if r >= 0: return r
   runAddonGeneration("repro infra plan", args, planOnly = true)
 
 proc runAddonRollbackCli*(args: seq[string]): int =
   ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
   ## add-on host: re-apply a retained generation through the switch.
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
   var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
                                   hostIdentity: readHostname())
   for a in args:
@@ -678,5 +742,7 @@ proc runAddonAdoptCli*(args: seq[string]): int =
   if address.len == 0:
     stderr.write("repro system adopt: <address> is required\n")
     return 2
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
   runAddonGeneration("repro system adopt", rest, planOnly = false,
                      adopt = @[address])

@@ -90,6 +90,11 @@ type
     fileChanged*: bool    ## the rendered unit file (or its closure) changed
     dropInsChanged*: bool ## a drop-in of the unit was created, changed or removed
     depsChanged*: bool    ## a resource it depends_on changed in this apply
+    credentialsChanged*: bool
+                          ## the secrets it loads (`credentials`) change in
+                          ## this apply (ReproOS Add-On Mode §10.3): a unit
+                          ## reads them when it starts, so this is a change
+                          ## a reload cannot deliver
     predecessors*: seq[string]
                           ## exclusive units: the `.service` units the
                           ## unit's own `Conflicts=` names
@@ -348,7 +353,8 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
         stops.add(Transition(unit: f.unit, verb: tvStop,
           reason: "unitState requires it stopped"))
       continue
-    let changed = f.fileChanged or f.dropInsChanged or f.depsChanged
+    let changed = f.fileChanged or f.dropInsChanged or f.depsChanged or
+                  f.credentialsChanged
     if not f.running:
       if f.owned and f.enabled and (f.isNew or changed):
         starts.add(Transition(unit: f.unit, verb: tvStart,
@@ -363,6 +369,7 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
     if f.fileChanged: what.add("unit file")
     if f.dropInsChanged: what.add("drop-in")
     if f.depsChanged: what.add("depends_on resource")
+    if f.credentialsChanged: what.add("credentials")
     let why = what.join(", ") & " changed"
     if f.restartHeld:
       starts.add(Transition(unit: f.unit, verb: tvLeave,
@@ -377,7 +384,8 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
            else: "") & after(f),
         exclusive: true, predecessors: predecessorsOf(f),
         triggers: f.triggers))
-    elif f.reloadIfChanged and not f.fileChanged and not f.dropInsChanged:
+    elif f.reloadIfChanged and not f.fileChanged and not f.dropInsChanged and
+        not f.credentialsChanged:
       starts.add(Transition(unit: f.unit, verb: tvReload,
         reason: why & " (reloadIfChanged)" &
           (if f.reloadDependents.len > 0: "; systemd also reloads " &

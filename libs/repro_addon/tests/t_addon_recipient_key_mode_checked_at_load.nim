@@ -65,7 +65,7 @@ proc newBed(name: string): Bed =
   doAssert posix.mkdir(agentDir.cstring, Mode(0o700)) == 0
   result.layout = SecretsLayout(agentDir: agentDir,
     runDir: result.root / "run" / "secrets", owner: int(geteuid()),
-    requireTmpfs: false)
+    fs: sfAny)
   result.stateDir = result.root / "state"
   createDir(result.stateDir)
   let key = ensureRecipientKeyFile(recipientKeyPath(result.layout))
@@ -102,9 +102,9 @@ proc tick(b: Bed): AgentOutcome =
     stateDir: b.root / "agent-state")
   let layout = b.layout
   let stateDir = b.stateDir
-  cfg.secretsSink = proc(t: string; sealed: SealedSecrets): string {.gcsafe.} =
+  cfg.secretsSink = proc(m: DeployManifest): string {.gcsafe.} =
     {.cast(gcsafe).}:
-      acceptSealedSection(stateDir, layout, t, sealed)
+      acceptSealedSection(stateDir, layout, m)
   var deps: AgentDeps
   deps.apply = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     (true, "recorded")
@@ -180,6 +180,18 @@ suite "t_addon_recipient_key_mode_checked_at_load":
     except AddonSecretsFailed as e:
       msg = e.msg
     check "symbolic link" in msg
+
+  test "a FIFO at the key's path is refused without blocking":
+    let b = newBed("fifo")
+    defer: removeDir(b.root)
+    removeFile(recipientKeyPath(b.layout))
+    doAssert mkfifo(recipientKeyPath(b.layout).cstring, Mode(0o400)) == 0
+    var msg = ""
+    try:
+      discard loadRecipientKeyChecked(recipientKeyPath(b.layout), b.layout.owner)
+    except AddonSecretsFailed as e:
+      msg = e.msg
+    check "not a regular file" in msg
 
   test "positive control: the same key at 0400 opens the envelope":
     let b = newBed("0400")

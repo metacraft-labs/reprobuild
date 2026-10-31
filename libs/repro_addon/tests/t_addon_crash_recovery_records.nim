@@ -13,7 +13,8 @@
 import std/[net, os, strutils, times, unittest]
 
 import repro_infra
-import repro_addon/[health, host_exec, ledger, pending_plan, seams, static_tree]
+import repro_addon/[addon_apply, generation0, health, host_exec, ledger, pending_plan,
+                    seams, static_tree]
 
 let root = getTempDir() / ("repro-addon-recovery-" & $getCurrentProcessId())
 removeDir(root)
@@ -209,6 +210,21 @@ suite "confirm (§7.5)":
     check r.exitCode == 124
     check epochTime() - start < 5
 
+  test "the bounded runner drains output larger than a pipe and keeps a bounded part":
+    # A probe that prints far more than the 64 KiB a pipe holds must not
+    # block on its write until the deadline kills it.
+    let start = epochTime()
+    let r = runHostTool(["/bin/sh", "-c",
+      # Shell builtins only (the fixed tool environment's PATH need not
+      # carry coreutils): 20000 lines of 50 bytes, about 1 MB.
+      "i=0; while [ $i -lt 20000 ]; do " &
+      "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; " &
+      "i=$((i+1)); done"],
+      timeoutSec = 20)
+    check r.exitCode == 0
+    check r.output.len == BoundedOutputBytes
+    check epochTime() - start < 10
+
   test "no checks: confirmed at once":
     let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string = "never"
     check confirm(@[], 60, runner).passed
@@ -233,6 +249,42 @@ suite "the commit point (§7.2 step 9)":
     check currentBootId().len > 0
     check parseApplyLockRecord(renderApplyLockRecord(rec)).bootId == currentBootId()
     check parseApplyLockRecord("pid=42\nacquired=1\n").bootId == ""
+
+suite "a failed replay reverts unless no revert is possible (§7.2)":
+  test "a failed revert, a first switch and a moved current keep the marker":
+    let sd = root / "replay-fail"
+    createDir(sd / "addon")
+    # A revert that failed is not reverted again.
+    let rv = revertAfterFailedReplay(sd, PendingMarker(purpose: "revert",
+      fromGeneration: "g1", step: ssPreStop), "boom")
+    check not rv.reverted and "revert" in rv.why
+    # Bootstrap's first switch has nothing to go back to.
+    let first = revertAfterFailedReplay(sd, PendingMarker(purpose: "apply",
+      step: ssPreStop), "boom")
+    check not first.reverted and "bootstrap" in first.why
+    # `current` names neither: never guessed.
+    let moved = revertAfterFailedReplay(sd, PendingMarker(purpose: "apply",
+      fromGeneration: "g1", step: ssPreStop), "boom")
+    check not moved.reverted and "current" in moved.why
+
+suite "boot ordering of the add-on's own units (§7.7, §10.3)":
+  test "the secrets unit is off the recovery's path and bounded":
+    let objs = generation0Objects(Gen0Inputs(
+      reproExe: "/repro/store/prefixes/x/1/bin/repro"))
+    var secrets, reassert = ""
+    for o in objs:
+      if o.unit == SecretsUnit: secrets = o.content
+      if o.unit == ReassertUnit: reassert = o.content
+    check secrets.len > 0 and reassert.len > 0
+    # Default dependencies: it mounts the ramfs through systemd-run, which
+    # needs the system bus (after basic.target).
+    check "DefaultDependencies=no" notin secrets
+    check ReassertUnit notin secrets.split("Before=")[0]
+    check "TimeoutStartSec=" & $SecretsUnitTimeoutSec & "s" in secrets
+    check "Before=" & ReassertUnit in secrets
+    check "After=local-fs.target repro-store.mount " & SecretsUnit in reassert
+    # Two capped confirms fit in the re-assert unit's timeout.
+    check 2 * BootConfirmCapSec < ReassertTimeoutMin * 60
 
 suite "test seams":
   test "a product build has no pause point":

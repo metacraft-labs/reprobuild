@@ -21,9 +21,12 @@
 ##    that ``current``'s store objects are there, and that every ledger
 ##    object matches its digest;
 ## 3. re-materialises the current generation's secrets into
-##    ``/run/repro/secrets`` from the retained sealed envelope
+##    ``/run/repro/secrets`` from that generation's own sealed envelope,
+##    under the switch's locks taken without waiting (it defers to an apply
+##    that holds them), finishing a commit or a rotation a crash cut short
 ##    (``secrets_ops.reassertSecrets``, milestone A7); a secret it cannot
-##    materialise makes the report ``degraded``;
+##    materialise makes the report ``degraded``, a running unit with
+##    credentials older than its secrets ``drift``;
 ## 4. **reports** ``ok``, ``drift`` (with the objects) or ``degraded`` (the
 ##    store, the ledger or a recovery is broken). It never re-applies on
 ##    drift: that would undo an out-of-band change before anyone saw it.
@@ -34,6 +37,7 @@
 
 import std/[os, strutils, times]
 
+import repro_core/file_lock
 import repro_core/host_apply_lock
 
 import repro_infra
@@ -74,7 +78,7 @@ proc reassertReportPath*(stateDir: string): string =
   stateDir / "addon" / "reassert-report"
 
 proc takeLockForRecovery(stateDir: string; atBoot: bool):
-    tuple[ok: bool; why: string] =
+    tuple[ok: bool; why: string; took: bool] =
   ## The apply lock, so recovery never races a live switch. A lock taken
   ## in a previous boot (its recorded boot id is not this boot's) belongs
   ## to a switch the reset or power cut killed, whatever process its PID
@@ -82,7 +86,9 @@ proc takeLockForRecovery(stateDir: string; atBoot: bool):
   ## its owner is dead; a lock that records no boot id (written by an
   ## older release) is judged by its owner's liveness alone.
   if applyLockOwner(stateDir) == getCurrentProcessId():
-    return (true, "")
+    # This process holds it already: an apply recovering first (see
+    # `installPendingSwitchGuard`). It is that apply's to release.
+    return (true, "", false)
   var policy = defaultApplyLockPolicy()
   let rec = readApplyLockRecord(stateDir)
   let boot = currentBootId()
@@ -90,9 +96,9 @@ proc takeLockForRecovery(stateDir: string; atBoot: bool):
       rec.bootId != boot:
     policy.forceUnlock = true
   let acq = tryAcquireApplyLock(stateDir, policy)
-  if acq.acquired: (true, "")
+  if acq.acquired: (true, "", true)
   else: (false, "a switch is in progress (" &
-         describeApplyLockHolder(stateDir, acq) & "); not touching it")
+         describeApplyLockHolder(stateDir, acq) & "); not touching it", false)
 
 proc removeTempLeftovers*(stateDir: string): seq[string] =
   ## A writer the crash interrupted between creating its temporary file
@@ -171,19 +177,35 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
   except CatchableError as e:
     return RecoveryOutcome(resolved: false,
       lines: @["the pending marker is unreadable: " & e.msg])
-  # Zero wait: repro-addon-reassert.service is a oneshot the switch itself
-  # (re)starts while holding the host apply lock, so waiting here would stall
-  # that switch for the whole deadline. A held lock means a switch is live.
-  var (hostLock, holder) = tryAcquireHostApplyLock("add-on switch recovery")
+  # The switch that owns this marker (re)starts repro-addon-reassert.service
+  # while it holds the host apply lock, so waiting on it would stall that
+  # switch for the whole deadline: when the holder IS the marker's owner,
+  # live in this boot, recovery is that switch's own and this run defers.
+  # Any other holder -- a deploy-agent tick, an operator apply -- does not
+  # own the marker: it is waited for like any apply, and if it still holds
+  # the lock at the deadline the run is degraded, never deferred, so an
+  # interrupted switch is not silently left to the next boot.
+  var (hostLock, holder, holderPids) =
+    tryAcquireHostApplyLock("add-on switch recovery")
   if holder.len > 0:
-    return RecoveryOutcome(resolved: true, deferred: true,
-      lines: @["a switch holds the host apply lock; recovery is its own " &
-               "(" & holder & ")"])
+    if markerOwnerLive(m) and m.ownerPid in holderPids:
+      return RecoveryOutcome(resolved: true, deferred: true,
+        lines: @["the switch that owns the pending marker (pid " &
+                 $m.ownerPid & ") holds the host apply lock; recovery is " &
+                 "its own"])
+    try:
+      hostLock = acquireHostApplyLock("add-on switch recovery")
+    except ELockTimeout as e:
+      return RecoveryOutcome(resolved: false,
+        lines: @["an interrupted switch is pending and another apply, not " &
+                 "the switch that owns it, holds the host apply lock: " &
+                 e.msg])
   defer: hostLock.release()
   let lock = takeLockForRecovery(stateDir, atBoot)
   if not lock.ok:
     return RecoveryOutcome(resolved: false, lines: @[lock.why])
-  defer: releaseApplyLock(stateDir)
+  defer:
+    if lock.took: releaseApplyLock(stateDir)
   seamPauseRecovery(stateDir)
   let swept = removeTempLeftovers(stateDir)
   if swept.len > 0:
@@ -202,12 +224,15 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
     except CatchableError as e:
       result.lines.add("finishing the committed switch failed: " & e.msg)
     return
+  # At boot the replay's confirm and, if it fails, its revert's run inside
+  # the re-assert unit's start timeout: each is capped (§7.7).
+  let cap = if atBoot: BootConfirmCapSec else: 0
   try:
     let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
       hostIdentity: readHostname(), replay: true, purpose: "replay",
       driver: driver, nonBlockingStarts: atBoot,
       revertOf: m.revertOf, revertReason: m.revertReason,
-      replayOf: m.purpose))
+      replayOf: m.purpose, confirmCapSec: cap))
     if m.purpose == "revert":
       # The interrupted switch was itself the revert of a failed one: the
       # failed attempt is recorded rolled-back now that the revert is done.
@@ -220,9 +245,26 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
     result.lines.add("the replay did not complete and was reverted: " & e.msg)
     result.resolved = true
   except CatchableError as e:
-    result.lines.add("the switch could be neither finished nor reverted; " &
-      "the marker stays for an operator (`repro system addon recover`): " &
-      e.msg)
+    # The replay failed without reverting itself. Revert from here
+    # whenever a revert is possible (spec §7.2); keep the marker only when
+    # it is not, or when the revert fails too.
+    let failed = e.msg
+    try:
+      let rv = revertAfterFailedReplay(stateDir, m, failed, driver,
+        nonBlockingStarts = atBoot, confirmCapSec = cap)
+      if rv.reverted:
+        result.lines.add("the replay failed (" & failed & "); reverted to " &
+          m.fromGeneration & " (re-applied as generation " &
+          rv.generationId & ")")
+        result.resolved = true
+      else:
+        result.lines.add("the switch could be neither finished nor " &
+          "reverted; the marker stays for an operator (`repro system " &
+          "addon recover`): " & failed & "; no revert: " & rv.why)
+    except CatchableError as e2:
+      result.lines.add("the switch could be neither finished nor " &
+        "reverted; the marker stays for an operator (`repro system addon " &
+        "recover`): " & failed & "; the revert failed too: " & e2.msg)
 
 proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## After a recovery: every unit the current generation started is
@@ -295,6 +337,32 @@ proc checkCurrent*(stateDir: string; r: var ReassertReport) =
     if e.class == lcUnit and e.collision == "replace":
       r.notes.add(e.unit & ": the add-on's /etc unit shadows the package's")
 
+proc installPendingSwitchGuard*(stateDir = DefaultStateDir) =
+  ## Make every `runInfraApply` on this host recover an interrupted switch
+  ## (the pending marker under ``stateDir``, its owner no longer running)
+  ## before it mutates anything, and refuse when recovery does not resolve
+  ## it. A marker whose owner is live belongs to the switch now running --
+  ## in practice the caller itself, the switch's own infra apply -- and is
+  ## left to it.
+  pendingSwitchGuard = proc (): tuple[ok: bool; why: string] {.closure,
+                                                              gcsafe.} =
+    {.cast(gcsafe).}:
+      if not hasPendingMarker(stateDir):
+        return (true, "")
+      var owner = PendingMarker()
+      try:
+        owner = readPendingMarker(stateDir)
+      except CatchableError:
+        discard                     # unreadable: no live owner to defer to
+      if markerOwnerLive(owner):
+        return (true, "")
+      let rec = recoverPendingSwitch(stateDir, atBoot = false)
+      if rec.resolved and not rec.deferred:
+        return (true, "")
+      (false, rec.lines.join("; "))
+
+installPendingSwitchGuard()
+
 proc renderReassert*(r: ReassertReport): string =
   result = "repro-addon reassert: " & r.status & "\n"
   for x in r.recovery: result.add("  recovery: " & x & "\n")
@@ -333,11 +401,12 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
     result.status = "degraded"
   # --- Step 3 (milestone A7): secrets. BEGIN A7 hook -------------------
   let sec = reassertSecrets(stateDir, defaultSecretsLayout())
-  if sec.ok:
-    result.notes.add(sec.line)
-  else:
-    result.findings.add(sec.line)
+  result.notes.add(sec.notes)
+  result.findings.add(sec.findings)
+  if sec.status == "degraded":
     result.status = "degraded"
+  elif sec.status == "drift" and result.status == "ok":
+    result.status = "drift"
   # --- END A7 hook -----------------------------------------------------
   try:
     createDir(stateDir / "addon")

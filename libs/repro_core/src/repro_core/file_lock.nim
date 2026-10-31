@@ -149,7 +149,7 @@ proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
 
 
 # ---------------------------------------------------------------------------
-# Deadline-bounded acquisition that names the holder (POSIX).
+# Deadline-bounded acquisition that names the holder (where the OS can).
 # ---------------------------------------------------------------------------
 
 type
@@ -209,9 +209,37 @@ proc acquireExclusiveLockWithin*(lockPath: string; deadlineMs: int;
   ## A lock still held then raises ``ELockTimeout`` naming the holder's
   ## PID, rather than waiting on a holder that may never let go.
   ## ``onBusy`` runs once, at the first refusal.
+  ##
+  ## Windows keeps the same contract with the exclusion it has: a
+  ## share-mode-0 handle (``tryAcquireExclusiveFileLock``), where a
+  ## sharing violation is the "held" answer. Windows has no ``/proc/locks``,
+  ## so ``ELockTimeout.holderPids`` is empty there. ``mode`` is a POSIX
+  ## permission and has no Windows meaning; the file inherits its
+  ## directory's ACL. ``directory`` locks are refused by name: only the
+  ## apt realisation (Linux-only) takes them, and ``CreateFileW`` opens a
+  ## directory only with ``FILE_FLAG_BACKUP_SEMANTICS``, which the lock
+  ## handle does not use, so it would fail anyway, less legibly.
   when defined(windows):
-    discard deadlineMs; discard directory; discard onBusy; discard mode
-    return acquireExclusiveFileLock(lockPath)
+    discard mode
+    if directory:
+      raise newException(IOError, "locking the directory " & lockPath &
+        " itself is not supported on Windows")
+    let start = epochTime()
+    var told = false
+    while true:
+      var lock: ReproFileLock
+      if tryAcquireExclusiveFileLock(lockPath, lock):
+        return lock
+      if not told:
+        told = true
+        if onBusy != nil: onBusy()
+      if int((epochTime() - start) * 1000) >= deadlineMs:
+        var e = newException(ELockTimeout, lockPath & " is still locked " &
+          "by another process (Windows does not name it) after " &
+          $deadlineMs & " ms; refusing to wait longer")
+        e.lockPath = lockPath
+        raise e
+      sleep(100)
   else:
     if not directory:
       createDir(extendedPath(parentDir(lockPath)))

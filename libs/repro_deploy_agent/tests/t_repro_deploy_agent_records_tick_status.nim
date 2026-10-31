@@ -309,13 +309,15 @@ suite "deploy agent records every tick's outcome durably":
     check deployAgentExitCode(aoAmbiguous) == 2
     # NOT 1: retrying on the timer will not fix a wrong recipient key.
     check deployAgentExitCode(aoSecretsFailed) == 2
+    # NOT 1 either: no retry changes the host's distribution.
+    check deployAgentExitCode(aoUnsupportedBase) == 2
 
     # Every kind is accounted for — a new one must not silently inherit 0.
     var seen = 0
     for kind in AgentOutcomeKind:
       check deployAgentExitCode(kind) in [0, 1, 2]
       inc seen
-    check seen == 8
+    check seen == 9
 
   test "a converged tick refreshes the record even with nothing to do":
     let f = newFixture("converged")

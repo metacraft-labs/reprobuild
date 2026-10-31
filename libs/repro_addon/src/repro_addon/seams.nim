@@ -33,7 +33,13 @@
 ## generation envelope is durable, `current` not moved yet) and, in the
 ## ``current-remove-then-create`` mutation build, ``commit-current-removed``;
 ## ``secrets-mid-write`` (``addon_secrets.materialise``: the first secret
-## file of a materialisation is in place, the others are not).
+## file of a materialisation is in place, the others are not) and
+## ``rotation-after-overwrite`` (the old key overwritten with NUL bytes,
+## not yet replaced), ``secrets-holding-plaintext`` (``secret put`` holds
+## the secret it read, before sealing it), and
+## ``rotation-after-rename`` (``addon_secrets.retireCurrentKey``: the next
+## key is renamed over the old one, ``recipient.pub`` and the ledger not yet
+## brought up to date).
 ## A switch that is a revert prefixes its points with ``revert:``, and a
 ## replay (a recovery) with ``replay:``.
 
