@@ -202,6 +202,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.exitCode == 0, r.stdout & r.stderr)
     step("after the rollback x-web reads generation 3's value",
          g.waitValue("x-web", "X3") == "X3", g.lastValue("x-web"))
+    # The rollback paused the deploy agent (spec §9.3, milestone A8); the
+    # operator lets it converge again before the next ticks.
+    r = g.exec(repro & " system addon resume")
+    step("the agent is resumed after the rollback", r.exitCode == 0,
+         r.stdout & r.stderr)
     discard gen1
     # 4. A rotation cut short after its rename.
     r = g.exec(repro & " system addon rotate-recipient-key")
