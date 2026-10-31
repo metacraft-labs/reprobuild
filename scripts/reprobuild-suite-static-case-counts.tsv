@@ -223,7 +223,7 @@ libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim	
 libs/repro_cli_support/tests/t_l9_a_typed_service_is_supervised_without_a_placeholder.nim	nim	17
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
-libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim	nim	8
+libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim	nim	9
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	8
 libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	nim	17
 libs/repro_cli_support/tests/t_loopback_node_admits_only_its_owner.nim	nim	2

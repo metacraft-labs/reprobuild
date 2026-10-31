@@ -30,7 +30,9 @@ const
     ## ``off`` (or ``0``, ``false``, ``no``) skips propagation for one push.
   CertificateHookTimeoutVariable* = "TEST_CERTIFICATES_HOOK_TIMEOUT"
     ## Whole seconds, at least 1, the hook's network operations may take in all.
-  ReportPrefix = "repro hooks: certificates: "
+  certificatePropagationReportPrefix* = "repro hooks: certificates: "
+    ## Starts every line this module reports; `repro push` passes those on.
+  ReportPrefix = certificatePropagationReportPrefix
 
 type
   CertificatePropagation* = enum

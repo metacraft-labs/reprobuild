@@ -1236,7 +1236,11 @@ suite "protocol v2 real-hook repro push closure":
       check first["repos"][1]["outcome"].getStr() == "failed"
       check first["stoppedRepo"].getStr() == "lib"
       check first["stoppedStage"].getStr() == "source-push"
-      check first["retryCommand"].getStr() == "repro push --sync --rebase"
+      # A refusal is not a lost race: nothing to integrate, and the plain retry
+      # below is what succeeds. Git's account of it reaches the report.
+      check first["retryCommand"].getStr() == "repro push"
+      check "pre-receive hook declined" in
+        first["repos"][1]["diagnostic"].getStr()
       check remoteHead(gitBin, fx.coreBare) == coreSha
       check remoteHead(gitBin, fx.libBare) != libSha
       check remoteHead(gitBin, fx.appBare) != appSha

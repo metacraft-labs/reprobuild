@@ -54194,6 +54194,16 @@ proc redactUrlUserinfo*(text: string): string =
       result.add(text[authorityStart ..< j])
     i = j
 
+proc pushOutputOneLine*(output: string): string =
+  ## A push's transcript as one line, because a diagnostic is carried as one
+  ## JSON/report field, with URL userinfo redacted (`redactUrlUserinfo`). Blank
+  ## lines are dropped so the join cannot produce "... /  / ...".
+  var kept: seq[string]
+  for raw in output.splitLines():
+    let line = raw.strip()
+    if line.len > 0: kept.add(line)
+  redactUrlUserinfo(kept.join(" / "))
+
 proc pushOutputHookRefusalLines*(output: string): seq[string] =
   ## The lines of a failed push transcript that a REPROBUILD MANAGED HOOK
   ## wrote, rather than the transport.
@@ -54979,13 +54989,7 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
       let attempted = "git push " & target.remote & " HEAD:" &
         target.branch & " failed; verified local lock-only commit retained; "
       let refusal = pushOutputHookRefusalLines(pushRes.output)
-      # One line, because a diagnostic is carried as one JSON/report field.
-      # Blank lines are dropped so the join cannot produce "... /  / ...".
-      var transcriptLines: seq[string]
-      for raw in pushRes.output.splitLines():
-        let line = raw.strip()
-        if line.len > 0: transcriptLines.add(line)
-      let transcript = redactUrlUserinfo(transcriptLines.join(" / "))
+      let transcript = pushOutputOneLine(pushRes.output)
       result.diagnostic =
         if refusal.len > 0:
           attempted & "REFUSED BY THE MANAGED HOOKS of the lock backend " &
@@ -71468,6 +71472,9 @@ type
     outcome: PushRepoOutcome
     diagnostic: string
     remediation: string
+    notices: seq[string]
+      ## What this member's push said about its certificates, and what it did not
+      ## carry. Informational: none of it changes the outcome.
 
   PushSyncResult = object
     ## One closure member's ``--sync`` reconcile outcome. ``integrated`` is
@@ -73072,11 +73079,22 @@ proc executePush(args: PushArgs): PushReport =
         discardHookCapability(identity.binaryPath, repoAbs, token)
     if pushRes.code != 0:
       entry.outcome = proFailed
+      # What the remote or a hook said is the only explanation there is, a
+      # gateway's refusal included. The credential concern is a URL's userinfo,
+      # and `pushOutputOneLine` redacts that.
+      let transcript = pushOutputOneLine(pushRes.output)
       entry.diagnostic = "git push " & rName & " HEAD:" & entry.branch &
-        " failed in " & repo.path &
-        "; transport output was withheld because remotes may contain credentials"
-      entry.remediation = "resolve the push failure in " & repo.path &
-        " (fetch + reconcile, then re-run 'repro push --sync')"
+        " failed in " & repo.path & (
+          if transcript.len > 0: "; git said: " & transcript
+          else: "; git wrote nothing to explain the failure")
+      let lostRace = pushOutputIsNonFastForward(pushRes.output)
+      entry.remediation =
+        if lostRace:
+          "resolve the push failure in " & repo.path &
+            " (fetch + reconcile, then re-run 'repro push --sync')"
+        else:
+          "resolve what git reported above in " & repo.path &
+            ", then re-run 'repro push'"
       result.repos.add(entry)
       result.stoppedRepo = repo.name
       result.stoppedStage = "source-push"
@@ -73092,10 +73110,14 @@ proc executePush(args: PushArgs): PushReport =
         if localHead.len > 0:
           localHeads.add(plan.root & "@" & localHead)
       result.verifiedLocalBackendHead = localHeads.join(", ")
-      result.retryCommand = "repro push --sync --rebase"
+      result.retryCommand =
+        if lostRace: "repro push --sync --rebase" else: "repro push"
       result.exitCode = 1
       return
     entry.outcome = proPushed
+    for line in pushRes.output.splitLines():
+      if line.startsWith(certificatePropagationReportPrefix):
+        entry.notices.add(redactUrlUserinfo(line))
     result.repos.add(entry)
     if members.len > 0:
       # The next component member must see the prefix that actually landed,
@@ -73202,6 +73224,8 @@ proc renderPushTextLines(report: PushReport): seq[string] =
     result.add(line)
     if entry.remediation.len > 0:
       result.add("    remedy: " & entry.remediation)
+    for notice in entry.notices:
+      result.add("    " & notice)
   if report.certifyDeferred:
     result.add("repro push: certification deferred to the " &
       "test-certificate campaign (not wired yet)")
@@ -73250,6 +73274,7 @@ proc toJsonNode(report: PushReport): JsonNode =
       of proFailed: "failed")
     o["diagnostic"] = %entry.diagnostic
     o["remediation"] = %entry.remediation
+    o["notices"] = %entry.notices
     repos.add(o)
   result["repos"] = repos
   result["certifyDeferred"] = %report.certifyDeferred

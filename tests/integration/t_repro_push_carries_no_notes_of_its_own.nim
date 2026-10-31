@@ -7,8 +7,8 @@
 ##
 ##   * WITH THE HOOK'S PROPAGATION OFF (``TEST_CERTIFICATES_HOOK=off``: the tool is
 ##     a linked library, so there is no process to replace with a stub), no notes
-##     ref reaches the gateway, it refuses the branch, and its diagnostic names
-##     the missing note. A
+##     ref reaches the gateway, it refuses the branch, and ``repro push`` passes on
+##     the gateway's own words, which name the missing note. A
 ##     notes step in ``repro push`` runs regardless of that variable.
 ##   * THE SAME ``repro push`` with propagation on is accepted, and the note is on
 ##     the upstream under the pushed tree. Removing the hook call reddens this.
@@ -67,9 +67,11 @@ suite "repro push carries no notes of its own":
     checkpoint("off: " & refused.output)
     check refused.code != 0
     check "stage=source-push" in refused.output
-    # ``repro push`` withholds the transport's output, so the gateway's diagnostic
-    # is not in this text; the plain-push test asserts its wording. That this
-    # refusal is about the note is shown by the same commit passing below.
+    # The gateway's refusal reaches the developer, with its remedy, and the
+    # retry advice is not the one for a lost race.
+    check "no certificate note on the pushed tree" in refused.output
+    check "retry: repro push\n" in refused.output & "\n"
+    check "--sync" notin refused.output
     check upstreamTip(fx) == before
     check not remoteHasNotes(fx.upstreamBare)
     check not remoteHasNotes(fx.gatewayBare)
@@ -78,6 +80,7 @@ suite "repro push carries no notes of its own":
     let accepted = reproPush(fx)
     checkpoint("on: " & accepted.output)
     check accepted.code == 0
+    check "repro hooks: certificates: " in accepted.output # What the hook did.
     check upstreamTip(fx) == commit
     check noteOnRemote(fx.upstreamBare, tree).count("# --- test-certificate ---") == 1
     check noteOnRemote(fx.upstreamBare, commit) == ""
