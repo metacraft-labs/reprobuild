@@ -923,7 +923,11 @@ jobs:
           ct_build_rc=${PIPESTATUS[0]}
           set -e
           if [ "$ct_build_rc" -ne 0 ]; then
-            grep -oE "/nix/store/[a-z0-9]+-[^']+\\.drv" "$ct_build_log" \
+            # Match every .drv the output names: `Cannot build '<drv>'`
+            # names only the DEPENDENTS, while nix names the derivation that
+            # actually failed on its own `For full logs, run: nix log <drv>`
+            # line -- excluding spaces from the class picks up both.
+            grep -oE "/nix/store/[a-z0-9]+-[^' ]+\\.drv" "$ct_build_log" \
               | sort -u \
               | while read -r drv; do
                   echo "=== nix log $drv ==="
