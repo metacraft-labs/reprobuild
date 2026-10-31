@@ -175,6 +175,10 @@ e2e_addon_net_sysctl_applies_in_host_namespace:
 # upgrade gates run against the time-shifted snapshot mirror
 # (tests/e2e/addon/snapshot_mirror.nim), from images published before the
 # point release they cross.
+# The static add-on artefact must not depend on the checkout's path.
+check-addon-static-reproducible ARCH="amd64":
+    bash ./scripts/check_addon_static_reproducible.sh {{ARCH}}
+
 e2e_addon_survives_point_upgrades:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-20260706-amd64,debian-13-20260831-amd64,ubuntu-24.04-20251213-amd64,ubuntu-26.04-20260731-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_survives_point_upgrades
 

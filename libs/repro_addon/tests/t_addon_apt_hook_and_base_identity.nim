@@ -287,3 +287,26 @@ suite "the agent's cursor over the hook's event log":
     appendEventLog(log, ["finding d"])
     let r = hookEventsSince(cur, log)
     check r.len == 2 and r[0].endsWith(" finding c") and r[1].endsWith(" finding d")
+
+suite "the agent's drift report reaches the evidence path":
+  test "event log first, then one journal hand-off; nothing for a clean tick":
+    let dir = createTempDir("repro-agent-drift-", "")
+    let log = dir / "agent-drift.log"
+    let seen = dir / "logger.out"
+    let logger = dir / "logger"
+    # The tool runs with the distribution's fixed PATH, which on a build
+    # host need not hold `cat`: the stand-in names it absolutely.
+    writeFile(logger, "#!/bin/sh\necho \"$@\" >> " & seen & "\n" &
+              tool("cat") & " >> " & seen & "\n")
+    setFilePermissions(logger, {fpUserRead, fpUserWrite, fpUserExec})
+    recordAgentDrift("aoConverged", 7, [], logPath = log, loggerExe = logger)
+    check not fileExists(log) and not fileExists(seen)
+    recordAgentDrift("aoConverged", 7,
+      ["2026-10-31T00:00:00Z finding package p now owns ledger path /etc/x"],
+      logPath = log, loggerExe = logger)
+    let l = readFile(log)
+    check "agent-tick aoConverged sequence 7: 1 drift event(s)" in l
+    check "drift 2026-10-31T00:00:00Z finding package p now owns ledger path /etc/x" in l
+    let j = readFile(seen)
+    check "-t repro-addon-agent -p user.warning" in j
+    check "repro-addon agent: drift" in j and "/etc/x" in j

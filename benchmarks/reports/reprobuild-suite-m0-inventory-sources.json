@@ -8102,8 +8102,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 16,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -77,6 +77,44 @@ mkdir -p "$out"
 exec 9>"$out/.build.lock"
 flock 9
 
+# THE BUILD PATH. Nim's RTTI hashes a type by the absolute path of the file
+# that defines it (compiler/sighashes.nim `hashTypeSym`: `customPath(
+# toFullPath(s.info))`, which only abbreviates the home directory), and the
+# hashes are compiled into every `of` check and type display. Two checkouts
+# of one commit at different paths therefore produced different binaries
+# (reprobuild-pm issue 2026-10-31-addon-static-artefact-differs-between-
+# checkouts-of-one-commit). The compiler runs with the checkout at one fixed
+# path instead: an unprivileged user and mount namespace binds the checkout
+# at $canonical_ws/reprobuild and every other entry of the workspace beside
+# it (the siblings the build resolves as ../<repo>), so the paths it sees do
+# not depend on where the checkout lives. Nothing outside the namespace
+# changes; the outputs land in the real checkout through the bind.
+canonical_ws=/mnt/repro-addon-build/ws
+in_canonical_path() {
+  local ws self
+  # REPRO_ADDON_BUILD_IN_PLACE=1 compiles at the checkout's own path: only
+  # the negative control of scripts/check_addon_static_reproducible.sh.
+  if [ "${REPRO_ADDON_BUILD_IN_PLACE:-}" = 1 ]; then "$@"; return; fi
+  ws="$(cd .. && pwd -P)"
+  self="$(basename "$(pwd -P)")"
+  unshare --user --map-root-user --mount --propagation private \
+    bash -euo pipefail -c '
+      ws="$1"; self="$2"; cws="$3"; shift 3
+      mount -t tmpfs repro-addon-build /mnt
+      mkdir -p "$cws/reprobuild"
+      for e in "$ws"/* "$ws"/.[!.]*; do
+        [ -d "$e" ] || continue
+        n="$(basename "$e")"
+        [ "$n" = "$self" ] || [ "$n" = reprobuild ] && continue
+        mkdir -p "$cws/$n"
+        mount --bind "$e" "$cws/$n"
+      done
+      mount --bind "$ws/$self" "$cws/reprobuild"
+      cd "$cws/reprobuild"
+      exec "$@"
+    ' in-canonical-path "$ws" "$self" "$canonical_ws" "$@"
+}
+
 command -v nim >/dev/null || {
   echo "build_addon_static: nim is not on PATH; run inside the reprobuild dev shell (nix develop)" >&2
   exit 2
@@ -135,14 +173,15 @@ for raw in "${arches[@]}"; do
     # libraries are glibc builds. Neither may reach a musl static link.
     unset NIX_LDFLAGS NIX_CFLAGS_COMPILE NIX_CFLAGS_LINK REPROBUILD_USE_SYSTEM_HASH_LIBS
     export SQLITE_LIBDIR="$sqlite_root/lib"
-    nim c --hints:off --warnings:off \
+    in_canonical_path nim c --hints:off --warnings:off \
       --os:linux --cpu:"$(nim_cpu "$arch")" \
       --cc:gcc --gcc.exe:"$cc" --gcc.linkerexe:"$cc" \
       --"$(nim_cpu "$arch")".linux.gcc.exe:"$cc" \
       --"$(nim_cpu "$arch")".linux.gcc.linkerexe:"$cc" \
       --define:release --opt:size --stackTrace:off --lineTrace:off \
       --passL:-static --passL:-s \
-      --passC:"-ffile-prefix-map=$PWD/=" \
+      --passC:"-ffile-prefix-map=$canonical_ws/reprobuild/=" \
+      --passC:"-ffile-prefix-map=$(pwd -P)/=" \
       ${defines[@]+"${defines[@]}"} \
       --nimcache:"build/nimcache/repro-addon-static-$arch${mutation:+-$mutation}${seams:+-seams}" \
       --out:"$tmp" \

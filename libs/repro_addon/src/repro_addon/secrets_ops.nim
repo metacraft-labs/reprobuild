@@ -615,4 +615,8 @@ proc runAgentTickCli*(args: seq[string]): int =
                  "sequence: " & $tick.outcome.sequence & "\n" &
                  "message: " & tick.outcome.message & "\n")
   for d in tick.addOnDrift: stdout.write("add-on drift: " & d & "\n")
+  # The evidence record and the journal message (spec §7.8, §9.2).
+  recordAgentDrift((if tick.raised: "tickRaised" else: $tick.outcome.kind),
+                   (if tick.raised: 0'u64 else: tick.outcome.sequence),
+                   tick.addOnDrift)
   tick.exitCode

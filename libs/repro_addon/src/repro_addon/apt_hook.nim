@@ -94,16 +94,18 @@ const
   JournalTimeoutSec* = 5
     ## Upper bound on the whole journal hand-off of one run.
 
-proc journal(priority: string; lines: openArray[string]) =
+proc journal(priority: string; lines: openArray[string];
+             tag = "repro-addon-apt-hook"; loggerExe = "") =
   ## Every line to the journal through ONE ``logger`` (util-linux /
   ## bsdutils), reading them from stdin, bounded by ``JournalTimeoutSec``
   ## in all. Best effort, never raising: the event log, written first, is
   ## the record.
   if lines.len == 0: return
   try:
-    let exe = resolveHostTool(LoggerCandidates)
+    let exe = if loggerExe.len > 0: loggerExe
+              else: resolveHostTool(LoggerCandidates)
     if exe.len == 0: return
-    discard runHostTool([exe, "-t", "repro-addon-apt-hook", "-p",
+    discard runHostTool([exe, "-t", tag, "-p",
                          "user." & priority], input = lines.join("\n") & "\n",
                         timeoutSec = JournalTimeoutSec)
   except CatchableError:
@@ -227,3 +229,24 @@ proc hookEventsSince*(cursorPath: string; logPath = AptHookLogPath): seq[string]
     moveFile(cursorPath & ".tmp", cursorPath)
   except CatchableError:
     discard
+
+const AgentDriftLogPath* = "/var/lib/repro/system/addon/agent-drift.log"
+  ## The deploy agent's evidence record of drift (spec §7.8, §9.2): one line
+  ## per event a tick reported, in the hook log's format. Kept apart from
+  ## the hook's own log because the agent reads that one from a cursor.
+
+proc recordAgentDrift*(outcome: string; sequence: uint64;
+                       events: openArray[string];
+                       logPath = AgentDriftLogPath; loggerExe = "") =
+  ## What one agent tick reported as drift: appended to the agent's event
+  ## log first (fsynced, rotated like the hook's), then sent to the journal
+  ## under ``repro-addon-agent`` at priority warning. Nothing on a tick with
+  ## no drift; best effort, never raising, never changing the tick.
+  if events.len == 0: return
+  var lines = @["agent-tick " & outcome & " sequence " & $sequence & ": " &
+                $events.len & " drift event(s)"]
+  for e in events: lines.add("drift " & e)
+  appendEventLog(logPath, lines)
+  var jl: seq[string]
+  for l in lines: jl.add("repro-addon agent: " & l)
+  journal("warning", jl, tag = "repro-addon-agent", loggerExe = loggerExe)
