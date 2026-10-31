@@ -32,7 +32,7 @@ libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	11
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_collision.nim	nim	35
-libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	23
+libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	24
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8

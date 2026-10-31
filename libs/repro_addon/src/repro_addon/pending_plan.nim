@@ -64,6 +64,11 @@ type
     targetOwnText*: string
     targetUserText*: string
     fromUserText*: string
+    fromOwnText*: string
+      ## The own profile the switch began from (``from-own.profile``;
+      ## empty in a plan an older build wrote). With ``fromUserText`` it is
+      ## what a revert re-applies when the generation it goes back to keeps
+      ## no copy of its profiles (one applied before those copies existed).
     fromLedgerText*: string
     reconcileDrift*: bool
     adopt*: seq[string]
@@ -146,6 +151,7 @@ proc writePendingPlan*(stateDir: string; p: PendingPlan) =
   writeFileNoFollow(dir / "target-own.profile", p.targetOwnText, 0o600)
   writeFileNoFollow(dir / "target-user.profile", p.targetUserText, 0o600)
   writeFileNoFollow(dir / "from-user.profile", p.fromUserText, 0o600)
+  writeFileNoFollow(dir / "from-own.profile", p.fromOwnText, 0o600)
   writeFileNoFollow(dir / "from-ledger", p.fromLedgerText, 0o600)
   writeFileNoFollow(dir / "plan", renderPlanFile(p), 0o600)
 
@@ -159,8 +165,28 @@ proc readPendingPlan*(stateDir: string): PendingPlan =
   result.targetOwnText = readFile(dir / "target-own.profile")
   result.targetUserText = readFile(dir / "target-user.profile")
   result.fromUserText = readFile(dir / "from-user.profile")
+  if fileExists(dir / "from-own.profile"):
+    result.fromOwnText = readFile(dir / "from-own.profile")
   result.fromLedgerText = readFile(dir / "from-ledger")
   parsePlanFile(readFile(dir / "plan"), result)
+
+proc pendingFromProfiles*(stateDir: string):
+    tuple[found: bool; own, user: string] =
+  ## The profiles the interrupted switch began from, read from their own
+  ## files in the write-ahead record -- independently of the ``plan`` file,
+  ## so they are there for a revert even when the plan itself is unusable.
+  ## ``found`` only when both are present and the own profile is not empty
+  ## (a record an older build wrote has no ``from-own.profile``).
+  let dir = pendingPlanDir(stateDir)
+  try:
+    if fileExists(dir / "from-own.profile") and
+        fileExists(dir / "from-user.profile"):
+      let own = readFile(dir / "from-own.profile")
+      if own.strip().len > 0:
+        return (true, own, readFile(dir / "from-user.profile"))
+  except IOError, OSError:
+    discard
+  (false, "", "")
 
 proc hasPendingPlan*(stateDir: string): bool =
   fileExists(pendingPlanDir(stateDir) / "plan")
@@ -175,6 +201,6 @@ proc clearPendingPlan*(stateDir: string) =
   ## After the marker is gone: the plan means nothing without it.
   let dir = pendingPlanDir(stateDir)
   for f in ["plan", "target-own.profile", "target-user.profile",
-            "from-user.profile", "from-ledger"]:
+            "from-user.profile", "from-own.profile", "from-ledger"]:
     discard removeLeafNoFollow(dir / f)
   discard removeEmptyDirNoFollow(dir)

@@ -2789,8 +2789,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                 else: CollisionDecision(verdict: cvNoOp,
                                         observation: p.observation)
       saved.add(toSaved(p, dec, targetByAddress.getOrDefault(p.r.address)))
+    # The own profile the switch begins from, beside the user one: a
+    # revert needs both, and a generation applied before generations kept
+    # their own copies (`generationProfiles`) has nowhere else to get it
+    # once this switch has replaced the stored profiles.
+    let previousOwnText = if fileExists(ownProfilePath(stateDir)):
+                            readFile(ownProfilePath(stateDir)) else: ""
     writePendingPlan(stateDir, PendingPlan(targetOwnText: ownText,
       targetUserText: targetUserText, fromUserText: previousUserText,
+      fromOwnText: previousOwnText,
       fromLedgerText: previous.render(), reconcileDrift: reconcileDrift,
       adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved))
   var secretsFailure = ""
@@ -3495,6 +3502,7 @@ type
                            ## interrupted switch began from
     generationId*: string  ## the revert's generation (when reverted)
     why*: string           ## why no revert was possible (when not)
+    source*: string        ## what the revert re-applied (when reverted)
 
 proc ledgerRecordsAttempt(stateDir, fromGeneration: string): bool =
   ## The ledger copy was rewritten since ``fromGeneration`` was committed:
@@ -3524,10 +3532,12 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
   ## - the switch being recovered is itself a revert (or the replay's own
   ##   revert failed): a failed revert keeps its marker;
   ## - a first switch (bootstrap's): there is no generation to go back to;
-  ## - ``current`` no longer names the generation the switch began from;
-  ## - the write-ahead record is unusable AND the switch may have written
-  ##   (it had passed step 2) without the ledger recording it: no revert
-  ##   can tell its writes apart. (This case and the two before it are
+  ## - ``current`` no longer names the generation the switch began from,
+  ##   or no profile to go back to survives (no generation copy, none in
+  ##   the write-ahead record, the stored ones already replaced);
+  ## - the write-ahead record is unusable or cannot be planned AND the
+  ##   switch may have written (it had passed step 2) without the ledger
+  ##   recording it: no revert can tell its writes apart. (These are the
   ##   approved exceptions to always reverting; see the spec, §7.2.)
   ##
   ## A revert that is attempted and fails raises, with its own marker
@@ -3551,6 +3561,29 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     return FailedReplayRevert(why: "`current` names " &
       (if current.len > 0: current else: "no generation") &
       ", not " & fromGen & ", the generation the switch began from")
+  # What to go back to, decided before anything below can replace the
+  # stored profiles: the generation's own copies; for a generation applied
+  # before those were kept, the profiles the write-ahead record saved (in
+  # their own files, readable even when the plan is not); failing that,
+  # the stored profiles, while the ledger copy shows the interrupted switch
+  # has not yet replaced them (it rewrites both together).
+  var back = generationProfiles(stateDir, fromGen)
+  var backFrom = "generation " & fromGen & "'s own profile copies"
+  if not back.found:
+    let rec = pendingFromProfiles(stateDir)
+    if rec.found:
+      back = (true, rec.own, rec.user)
+      backFrom = "the profiles the write-ahead record saved"
+    elif not ledgerRecordsAttempt(stateDir, fromGen) and
+        fileExists(ownProfilePath(stateDir)) and
+        fileExists(userProfilePath(stateDir)):
+      back = (true, readFile(ownProfilePath(stateDir)),
+              readFile(userProfilePath(stateDir)))
+      backFrom = "the stored profiles, which the switch had not replaced"
+  if not back.found:
+    return FailedReplayRevert(why: "generation " & fromGen & " keeps no " &
+      "copy of its profiles, and neither the write-ahead record nor the " &
+      "stored profiles still hold them")
   # Nothing but stops (and the flip of the static tree, which the revert's
   # own flip undoes) happens before step 3's drivers write.
   let wroteNothing = prior.step <= ssPreStop and now.step <= ssPreStop
@@ -3584,13 +3617,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
   if planUsable:
     for u in plan.activeUnits:
       if u notin assume: assume.add(u)
-  # The generation's own copies, never the stored profiles: the
-  # interrupted switch may already have replaced those with its own.
-  let back = generationProfiles(stateDir, fromGen)
-  if not back.found:
-    return FailedReplayRevert(why: "generation " & fromGen & " keeps no " &
-      "copy of its profiles to go back to")
-  let reason = "the replay of the interrupted switch failed: " & replayError
+  let reason = "the replay of the interrupted switch failed: " & replayError &
+    " (reverted from " & backFrom & ")"
   let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: readHostname(), ownProfileText: back.own,
     userProfileText: back.user, driver: driver, purpose: "revert",
@@ -3613,7 +3641,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
       discard        # reported by the next check as drift
   recordRolledBack(stateDir, prior.attempt, fromGen, r.generationId, reason,
                    false)
-  FailedReplayRevert(reverted: true, generationId: r.generationId)
+  FailedReplayRevert(reverted: true, generationId: r.generationId,
+                     source: backFrom)
 
 proc renderLedgerDiff*(r: AddonApplyResult): string =
   ## The plan's ledger diff section (spec §7.1).

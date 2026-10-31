@@ -257,7 +257,7 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
       if rv.reverted:
         result.lines.add("the replay failed (" & failed & "); reverted to " &
           m.fromGeneration & " (re-applied as generation " &
-          rv.generationId & ")")
+          rv.generationId & ", from " & rv.source & ")")
         result.resolved = true
       else:
         result.lines.add("the switch could be neither finished nor " &
