@@ -71,6 +71,12 @@ proc installEngine(g: Guest) =
   else:
     doAssert g.base.debArch == "armhf" and enginePrefixTar.len > 0,
       "an " & g.base.debArch & " base needs REPRO_ADDON_ENGINE_PREFIX_ARMHF"
+    # The prefix brings its own libraries (clingo among them): the base
+    # must provide none of them, so the gate runs where it has no clingo.
+    let distClingo = g.exec("ldconfig -p | grep -c libclingo; " &
+      "dpkg-query -W -f='${Package}\\n' '*clingo*' 2>/dev/null | wc -l").stdout
+    doAssert distClingo.splitWhitespace() == @["0", "0"],
+      "the armhf guest has a distribution clingo: " & distClingo
     g.copyTo(enginePrefixTar, "/root/engine-prefix.tar")
     discard g.run("mkdir -p /usr/local/repro && tar -xf /root/engine-prefix.tar " &
       "-C /usr/local/repro && rm /root/engine-prefix.tar && ln -sfn " &
