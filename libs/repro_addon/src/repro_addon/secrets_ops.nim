@@ -27,6 +27,7 @@ import std/[os, strutils]
 import repro_core/host_apply_lock
 import repro_infra
 import repro_infra/apply_lock
+import repro_infra/state_dir
 
 import repro_deploy_agent/agent
 import repro_deploy_agent/manifest
@@ -38,9 +39,14 @@ import ./addon_apply
 import ./addon_secrets
 import ./fingerprint
 import ./generation0
+import ./host_exec
 import ./ledger
+import ./mutations
 import ./preflight
+import ./pending_plan
+import ./static_tree
 import ./switch
+import ./transitions
 
 template withSecretsLocks(stateDir, what: string; body: untyped) =
   ## The switch's two locks, in the switch's order (host first).
@@ -60,9 +66,9 @@ template withSecretsLocks(stateDir, what: string; body: untyped) =
   finally:
     hostLock.release()
 
-proc currentSecretDecls*(stateDir: string): seq[SecretFileDecl] =
-  ## The current generation's ``secrets.secretFile`` declarations, from the
-  ## operator profile it applied (none on a host with no generation yet).
+proc currentGenerationProfile(stateDir: string): SystemProfile =
+  ## The operator profile the current generation applied (empty on a host
+  ## with no generation yet).
   let current = readCurrentGenerationId(stateDir)
   var text = ""
   if current.len > 0:
@@ -70,118 +76,137 @@ proc currentSecretDecls*(stateDir: string): seq[SecretFileDecl] =
     if g.found: text = g.user
   if text.len == 0 and fileExists(userProfilePath(stateDir)):
     text = readFile(userProfilePath(stateDir))
-  if text.len == 0: return
-  parseSystemProfile(text).secretFiles
+  if text.len > 0: parseSystemProfile(text) else: SystemProfile()
 
-proc currentCredentialUnits(stateDir: string): seq[SystemResource] =
+proc currentSecretDecls*(stateDir: string): seq[SecretFileDecl] =
+  ## The current generation's ``secrets.secretFile`` declarations.
+  currentGenerationProfile(stateDir).secretFiles
+
+proc currentEnvelope*(stateDir: string; l: SecretsLayout): string =
+  ## The envelope the current generation materialises from: its own copy,
+  ## or -- for a generation committed before copies were kept -- the latest.
   let current = readCurrentGenerationId(stateDir)
-  if current.len == 0: return
-  let g = generationProfiles(stateDir, current)
-  if not g.found: return
-  for r in parseSystemProfile(g.user).resources:
-    if r.kind == srkSystemdSystemUnit and r.suCredentials.len > 0:
-      result.add(r)
+  when mutated("secrets-single-retained-envelope"):
+    return latestEnvelopePath(l)
+  if current.len > 0 and fileExists(generationEnvelopeOf(stateDir, current)):
+    generationEnvelopeOf(stateDir, current)
+  else:
+    latestEnvelopePath(l)
 
-proc recordKeyRotation*(stateDir: string; l: SecretsLayout) =
-  ## The recipient key and its public half are ledger objects (``lcKey``,
-  ## pinned by digest; bootstrap recorded them). A completed rotation
-  ## replaced both on purpose, so the ledger copy -- the record every later
-  ## apply carries them forward from, and what ``verify`` and the re-assert
-  ## unit compare against -- is brought up to date, never reported as
-  ## drift.
-  let lp = ledgerCopyPath(stateDir)
-  if not fileExists(lp): return
-  var led = readLedger(lp)
-  var changed = false
-  for e in led.entries.mitems:
-    if e.class == lcKey and e.path in [recipientKeyPath(l), recipientPubPath(l)] and
-        fileExists(e.path):
-      let st = statOwner(e.path)
-      e.sha256 = sha256OfFile(e.path)
-      e.mode = st.mode
-      e.owner = st.owner
-      changed = true
-  if changed:
-    writeLedger(lp, led)
-
-proc acceptSealedSection*(stateDir: string; l: SecretsLayout; target: string;
-                          sealed: SealedSecrets): string =
+proc acceptSealedSection*(stateDir: string; l: SecretsLayout;
+                          m: DeployManifest): string =
   ## The deploy agent's ``secretsSink`` on an add-on host: the section must
-  ## open with the host's checked key, becomes the retained envelope, and
-  ## retires the old key when the next one opened it. "" when accepted,
-  ## else why not (the tick reports ``aoSecretsFailed``). Nothing is
-  ## materialised here: the apply that follows does that for exactly what
-  ## its generation declares.
+  ## open with the host's checked key and carry every entry the manifest's
+  ## profile declares; then it is staged for the apply that follows
+  ## (``stageEnvelope``). Nothing the host runs changes here: the apply's
+  ## commit promotes it, a failed apply discards it. "" when staged, else
+  ## why not (the tick reports ``aoSecretsFailed`` and applies nothing).
   try:
-    withSecretsLocks(stateDir, "accepting a sealed secrets section"):
-      let opened = acceptEnvelope(l, RetainedEnvelope(target: target,
-                                                      sealed: sealed))
-      if opened.byNextKey:
-        recordKeyRotation(stateDir, l)
+    var decls: seq[SecretFileDecl]
+    try:
+      decls = parseSystemProfile(m.profileText).secretFiles
+    except CatchableError:
+      discard        # the apply refuses an unreadable profile itself
+    withSecretsLocks(stateDir, "staging a sealed secrets section"):
+      stageEnvelope(l, RetainedEnvelope(target: m.target, sealed: m.secrets),
+                    decls)
     ""
   except CatchableError as e:
     e.msg
 
-proc restartConsumers(stateDir: string; services: seq[string]): seq[string] =
-  ## Restart the running units of the current generation that load a
-  ## credential of ``services`` (they read credentials at start).
-  for r in currentCredentialUnits(stateDir):
-    if credentialServiceOf(r.suName) notin services: continue
-    if not unitIsActive(r.suName): continue
-    if r.suExclusive or r.suRestartHeld:
-      result.add(r.suName & ": restart pending (exclusive or restart held)")
+type ConsumerPlan = object
+  exclusive, restart, pending: seq[string]
+
+proc planConsumers(stateDir: string; services: seq[string]): ConsumerPlan =
+  ## How the running units of the current generation that load a credential
+  ## of ``services`` take the change (they read credentials at start), by
+  ## the switch's own rule (§7.3): an exclusive unit -- the field or its
+  ## content's ``X-Repro-Exclusive=true`` -- is stopped and confirmed
+  ## exited before the secret changes and started after; another is
+  ## restarted after; one with ``restartIfChanged = false`` is left, and the
+  ## re-assert unit reports it until it restarts.
+  for r in currentGenerationProfile(stateDir).resources:
+    if r.kind != srkSystemdSystemUnit or r.suCredentials.len == 0 or
+        credentialServiceOf(r.suName) notin services:
       continue
-    restartUnit(r.suName)
-    result.add(r.suName & ": restarted")
+    let exclusive = isExclusiveUnit(r)
+    if not (unitIsActive(r.suName) or
+            (exclusive and unitAliveness(r.suName) != uaEmpty)):
+      continue
+    if r.suRestartHeld: result.pending.add(r.suName)
+    elif exclusive: result.exclusive.add(r.suName)
+    else: result.restart.add(r.suName)
+
+proc addEntry(l: SecretsLayout; path, entry, content, target: string;
+              createIfAbsent: bool): string =
+  ## Re-seal the envelope at ``path`` with ``entry`` added or replaced, to
+  ## the key that opens it (the current key when there is no envelope and
+  ## ``createIfAbsent``). Returns the target it was sealed for, "" when
+  ## nothing was there to change.
+  let (present, env) = readEnvelopeFile(l, path)
+  if not present and not createIfAbsent: return ""
+  var files: seq[SecretFile]
+  var tgt = target
+  var sealTo: PublicKeyBytes
+  if present:
+    if target.len > 0 and target != env.target:
+      raise newException(AddonSecretsFailed, "secret put: the envelope at " &
+        path & " is sealed for target '" & env.target & "', not '" &
+        target & "'")
+    tgt = env.target
+    let opened = openEnvelope(l, env)
+    files = opened.files
+    let keyPath = if opened.byNextKey: nextRecipientKeyPath(l)
+                  else: recipientKeyPath(l)
+    sealTo = derivePublicKey(loadRecipientKeyChecked(keyPath, l.owner))
+  else:
+    if tgt.len == 0: tgt = readHostname()
+    sealTo = derivePublicKey(loadRecipientKeyChecked(recipientKeyPath(l),
+                                                     l.owner))
+  var bytes = newSeq[byte](content.len)
+  for i, c in content: bytes[i] = byte(c)
+  var replaced = false
+  for f in files.mitems:
+    if f.path == entry:
+      f.content = bytes
+      f.mode = uint32(SecretFileMode)
+      replaced = true
+  if not replaced:
+    files.add(SecretFile(path: entry, mode: uint32(SecretFileMode),
+                         content: bytes))
+  writeEnvelopeFile(l, path, RetainedEnvelope(target: tgt,
+    sealed: sealSecrets(sealTo, tgt, files)))
+  wipe(files)
+  if bytes.len > 0: zeroMem(addr bytes[0], bytes.len)
+  tgt
 
 proc secretPut*(stateDir: string; l: SecretsLayout; service, name: string;
                 content: string; target = ""): seq[string] =
   ## ``repro system addon secret put``: seal ``content`` as the entry
   ## ``<service>/<name>`` to the host's own recipient key, merged into the
-  ## retained envelope (the other entries are kept), then re-materialise
-  ## the current generation's secrets. Returns what was done, line by line.
+  ## latest envelope and into the current generation's own copy (the other
+  ## entries are kept), then re-materialise the current generation's
+  ## secrets and take the change into its running consumers. On a host the
+  ## deploy agent drives, the producer's next section replaces the latest
+  ## envelope whole, so a put entry lasts there only until the producer's
+  ## next generation, unless the producer seals it too (spec §10.3).
   if not isSafeSecretComponent(service) or not isSafeSecretComponent(name):
     raise newException(AddonSecretsFailed, "secret put: --service and " &
       "--name must each be one path segment of letters, digits, '.', '-' " &
       "or '_', at most 64 bytes, not starting with '.'")
+  hardenProcessForSecrets()
   withSecretsLocks(stateDir, "repro system addon secret put"):
-    let (present, env) = readRetained(l)
-    var files: seq[SecretFile]
-    var tgt = target
-    var sealTo: PublicKeyBytes
-    if present:
-      if target.len > 0 and target != env.target:
-        raise newException(AddonSecretsFailed, "secret put: the retained " &
-          "envelope is sealed for target '" & env.target & "', not '" &
-          target & "'")
-      tgt = env.target
-      let opened = openEnvelope(l, env)
-      files = opened.files
-      let keyPath = if opened.byNextKey: nextRecipientKeyPath(l)
-                    else: recipientKeyPath(l)
-      sealTo = derivePublicKey(loadRecipientKeyChecked(keyPath, l.owner))
-    else:
-      if tgt.len == 0: tgt = readHostname()
-      sealTo = derivePublicKey(loadRecipientKeyChecked(recipientKeyPath(l),
-                                                       l.owner))
+    discard reconcileRotation(l, ledgerCopyPath(stateDir))
     let entry = secretEntryPath(service, name)
-    var bytes = newSeq[byte](content.len)
-    for i, c in content: bytes[i] = byte(c)
-    var replaced = false
-    for f in files.mitems:
-      if f.path == entry:
-        f.content = bytes
-        f.mode = uint32(SecretFileMode)
-        replaced = true
-    if not replaced:
-      files.add(SecretFile(path: entry, mode: uint32(SecretFileMode),
-                           content: bytes))
-    let opened = acceptEnvelope(l, RetainedEnvelope(target: tgt,
-      sealed: sealSecrets(sealTo, tgt, files)))
-    if opened.byNextKey:
-      recordKeyRotation(stateDir, l)
-    result.add((if replaced: "replaced " else: "added ") & entry &
-      " in the retained envelope (target " & tgt & ")")
+    let tgt = addEntry(l, latestEnvelopePath(l), entry, content, target,
+                       createIfAbsent = true)
+    result.add("sealed " & entry & " into " & latestEnvelopePath(l) &
+               " (target " & tgt & ")")
+    let current = readCurrentGenerationId(stateDir)
+    if current.len > 0:
+      let copy = generationEnvelopeOf(stateDir, current)
+      if addEntry(l, copy, entry, content, tgt, createIfAbsent = false).len > 0:
+        result.add("sealed " & entry & " into " & copy)
     let decls = currentSecretDecls(stateDir)
     var declared = false
     for d in decls:
@@ -189,28 +214,107 @@ proc secretPut*(stateDir: string; l: SecretsLayout; service, name: string;
     if not declared:
       result.add("note: the current generation declares no " &
         "secrets.secretFile for " & entry & "; it is not materialised")
-    let changed = materialiseFromRetained(l, decls)
-    if changed.len > 0:
-      result.add("materialised: " & changed.join(", "))
-      result.add(restartConsumers(stateDir, changed))
+    let source = currentEnvelope(stateDir, l)
+    let changes = plannedSecretChanges(l, decls, source)
+    let plan = planConsumers(stateDir, changes)
+    for u in plan.exclusive:
+      stopExclusive(u)
+      result.add(u & ": stopped and confirmed exited (exclusive)")
+    discard materialiseFromEnvelope(l, decls, source)
+    if changes.len > 0:
+      result.add("materialised: " & changes.join(", "))
+    for u in plan.exclusive:
+      confirmExited([u], u)
+      startUnit(u)
+      result.add(u & ": started")
+    for u in plan.restart:
+      restartUnit(u)
+      result.add(u & ": restarted")
+    for u in plan.pending:
+      result.add(u & ": restart pending (restartIfChanged = false); the " &
+        "re-assert unit reports it until the unit restarts")
 
 proc rotateKey*(stateDir: string; l: SecretsLayout):
     tuple[publicKeyHex: string; created: bool] =
   ## ``repro system addon rotate-recipient-key``.
   withSecretsLocks(stateDir, "repro system addon rotate-recipient-key"):
+    discard reconcileRotation(l, ledgerCopyPath(stateDir))
     result = rotateRecipientKey(l)
 
-proc reassertSecrets*(stateDir: string; l: SecretsLayout):
-    tuple[ok: bool; line: string] =
-  ## Step 3 of the re-assert unit (§7.7): re-materialise the current
-  ## generation's secrets from the retained envelope. Never raises.
+proc unitStartedAt(unit: string): int64 =
+  ## When the unit last became active (seconds since the epoch), 0 unknown.
   try:
-    let decls = currentSecretDecls(stateDir)
-    let changed = materialiseFromRetained(l, decls, seamStateDir = stateDir)
-    (true, "secrets: " & $decls.len & " declared" &
+    let r = runSystemctl(["show", "--timestamp=unix", "-p",
+                          "ActiveEnterTimestamp", "--value", "--", unit])
+    let v = r.output.strip()
+    if r.exitCode == 0 and v.startsWith("@"):
+      return parseBiggestInt(v[1 .. ^1])
+  except CatchableError:
+    discard
+  0
+
+type SecretsCheck* = object
+  status*: string            ## ok | deferred | degraded | drift
+  notes*: seq[string]
+  findings*: seq[string]
+
+proc reassertSecrets*(stateDir: string; l: SecretsLayout): SecretsCheck =
+  ## Step 3 of the re-assert unit (§7.7): under the switch's two locks,
+  ## taken without waiting -- a switch or a ``secret put`` that holds one
+  ## materialises the secrets itself, so this run defers to it -- finish
+  ## what a crash may have cut short (the commit's envelope copy and key
+  ## retirement, a rotation's public half and ledger digests), then
+  ## re-materialise the current generation's secrets from its own
+  ## envelope, and report every running unit that loads credentials older
+  ## than its secrets (a pending restart). Never raises.
+  result.status = "ok"
+  var (hostLock, holder, _) = tryAcquireHostApplyLock(
+    "re-materialising secrets")
+  if holder.len > 0:
+    result.status = "deferred"
+    result.notes.add("secrets: deferred, an apply holds the host apply " &
+                     "lock (" & holder & ")")
+    return
+  defer: hostLock.release()
+  var ownLock = false
+  if applyLockOwner(stateDir) != getCurrentProcessId():
+    let acq = tryAcquireApplyLock(stateDir)
+    if not acq.acquired:
+      result.status = "deferred"
+      result.notes.add("secrets: deferred, an apply holds " & stateDir &
+                       "'s lock")
+      return
+    ownLock = true
+  defer:
+    if ownLock: releaseApplyLock(stateDir)
+  try:
+    if not hasPendingMarker(stateDir) and
+        readSecretsSource(stateDir).len > 0:
+      # A switch committed and died before it kept its secrets.
+      commitSecretsOf(stateDir, l, readCurrentGenerationId(stateDir))
+      result.notes.add("secrets: finished keeping the committed " &
+                       "generation's envelope")
+    for line in reconcileRotation(l, ledgerCopyPath(stateDir)):
+      result.notes.add("secrets: " & line)
+    let profile = currentGenerationProfile(stateDir)
+    let changed = materialiseFromEnvelope(l, profile.secretFiles,
+      currentEnvelope(stateDir, l), seamStateDir = stateDir)
+    result.notes.add("secrets: " & $profile.secretFiles.len & " declared" &
       (if changed.len > 0: ", materialised for " & changed.join(", ") else: ""))
+    for r in profile.resources:
+      if r.kind != srkSystemdSystemUnit or r.suCredentials.len == 0: continue
+      if not unitIsActive(r.suName): continue
+      let svc = credentialServiceOf(r.suName)
+      let since = unitStartedAt(r.suName)
+      let newest = runDirMtimes(l, svc)
+      if since > 0 and newest > since:
+        result.findings.add("drift: " & r.suName & " runs with credentials " &
+          "older than its secrets (they changed after it started); restart " &
+          "it to load them")
+        if result.status == "ok": result.status = "drift"
   except CatchableError as e:
-    (false, "degraded: secrets: " & e.msg)
+    result.findings.add("degraded: secrets: " & e.msg)
+    result.status = "degraded"
 
 # ---------------------------------------------------------------------------
 # The CLI.
@@ -251,7 +355,13 @@ proc runSecretPutCli*(args: seq[string]): int =
   except ValueError as e:
     stderr.write("repro system addon secret put: " & e.msg & "\n")
     return 2
-  let content = stdin.readAll()
+  try:
+    hardenProcessForSecrets()   # before the plaintext is read
+  except CatchableError as e:
+    stderr.write("repro system addon secret put: " & e.msg & "\n")
+    return 1
+  var content = stdin.readAll()
+  defer: wipe(content)
   if content.len == 0:
     stderr.write("repro system addon secret put: no secret on stdin\n")
     return 2
@@ -311,18 +421,27 @@ proc runAgentTickCli*(args: seq[string]): int =
   var cfg = AgentConfig(target: target, sources: sources,
     anchors: peerAuth.loadTrustAnchors(signers), stateDir: AgentStateDir,
     fetchTimeoutMs: 30_000)
-  cfg.secretsSink = proc(t: string; sealed: SealedSecrets): string {.gcsafe.} =
+  cfg.secretsSink = proc(m: DeployManifest): string {.gcsafe.} =
     {.cast(gcsafe).}:
-      acceptSealedSection(DefaultStateDir, layout, t, sealed)
+      acceptSealedSection(DefaultStateDir, layout, m)
   var deps: AgentDeps
   deps.apply = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     {.cast(gcsafe).}:
+      # A manifest with a sealed section applies from the section it
+      # staged; the commit promotes it, and whatever happens the staged
+      # copy does not outlive this tick.
+      let staged = if m.hasSecrets: stagedEnvelopePath(layout) else: ""
       try:
         let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
-          hostIdentity: readHostname(), userProfileText: m.profileText))
+          hostIdentity: readHostname(), userProfileText: m.profileText,
+          secretsEnvelope: staged))
         (true, "generation " & r.generationId)
       except CatchableError as e:
         (false, e.msg)
+      finally:
+        try: discardStaged(layout)
+        except CatchableError: discard
+  hardenProcessForSecrets()
   var hostLock = acquireHostApplyLock("repro system addon agent-tick")
   defer: hostLock.release()
   let outcome = runAgentTick(cfg, deps)

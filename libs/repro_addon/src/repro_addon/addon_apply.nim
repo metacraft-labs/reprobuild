@@ -167,6 +167,15 @@ type
       ## date with what it wrote, never starting or committing anything:
       ## what a revert needs when the switch failed before it recorded
       ## its ledger.
+    secretsEnvelope*: string
+      ## The sealed envelope this switch materialises from (spec §10.3):
+      ## the deploy agent's tick names the section it staged; "" selects by
+      ## purpose -- the latest accepted envelope for an apply, the
+      ## committed generation's own copy for a revert, the target's copy
+      ## for a rollback (``secretsFromGeneration``), the interrupted
+      ## switch's own choice for a replay.
+    secretsFromGeneration*: string
+      ## A rollback: the generation whose envelope copy it materialises.
     nonBlockingStarts*: bool
       ## Queue step 7's jobs without waiting for them (``--no-block``): a
       ## recovery at boot, which must never wait on the boot transaction.
@@ -334,6 +343,25 @@ proc addOnNameError*(r: SystemResource): string =
     else:
       discard
 
+const RawCredentialDirectives* = ["LoadCredential", "LoadCredentialEncrypted",
+                                  "SetCredential", "SetCredentialEncrypted",
+                                  "ImportCredential"]
+  ## systemd's credential directives (systemd.exec(5) "Credentials"). In an
+  ## add-on unit or drop-in they are refused: a unit gets secrets only
+  ## through its ``credentials`` field, which names its own service's
+  ## secrets and nothing else (spec §10.3, CRED-3).
+
+proc rawCredentialDirective*(content: string): string =
+  ## The first credential directive written into ``content`` by hand, or "".
+  for line in joinUnitContinuations(content):
+    let t = line.strip()
+    if t.len == 0 or t[0] in {'#', ';'}: continue
+    let eq = t.find('=')
+    if eq <= 0: continue
+    let key = t[0 ..< eq].strip()
+    if key in RawCredentialDirectives: return key
+  ""
+
 proc checkScope*(user: SystemProfile) =
   ## Refuse, with ``EAddOnOutOfScope``, what an add-on generation may not
   ## carry: a kind outside the add-on's classes, and an ``/etc`` path
@@ -358,6 +386,16 @@ proc checkScope*(user: SystemProfile) =
     let badName = addOnNameError(r)
     if badName.len > 0:
       raise newAddOnOutOfScope($r.kind & ".name", "", r.address, badName)
+    let rawContent = case r.kind
+      of srkSystemdSystemUnit: r.suContent
+      of srkSystemdSystemDropIn: r.diContent
+      else: ""
+    let rawKey = rawCredentialDirective(rawContent)
+    if rawKey.len > 0:
+      raise newAddOnOutOfScope($r.kind & ".content", "", r.address,
+        "the content writes " & rawKey & "= by hand; on an add-on host a " &
+        "unit loads secrets only through its `credentials` field (spec " &
+        "§10.3), which names its own service's secrets and nothing else")
     case r.kind
     of srkLinuxTmpfilesRule:
       # Spec §4.1: the tmpfiles class lives at /etc/tmpfiles.d/repro-<name>.conf.
@@ -1444,6 +1482,69 @@ proc seamCommitPoint(stateDir, seamPrefix: string): proc(point: string) {.gcsafe
   else:
     nil
 
+# ---------------------------------------------------------------------------
+# Secrets (milestone A7, spec §10.3): which envelope a switch materialises
+# from, and what its commit keeps.
+# ---------------------------------------------------------------------------
+
+proc secretsSourcePath*(stateDir: string): string =
+  ## The envelope the switch in progress materialises from, written before
+  ## its pending marker: a replay uses the same one, and a crash after the
+  ## commit is finished from it.
+  stateDir / "addon" / "secrets-source"
+
+proc writeSecretsSource(stateDir, source: string) =
+  createDir(stateDir / "addon")
+  writeFileAtomic(secretsSourcePath(stateDir), source & "\n", 0o600)
+
+proc readSecretsSource*(stateDir: string): string =
+  if fileExists(secretsSourcePath(stateDir)):
+    readFile(secretsSourcePath(stateDir)).strip()
+  else: ""
+
+proc generationEnvelopeOf*(stateDir, generationId: string): string =
+  generationEnvelopePath(generationDir(stateDir, generationId))
+
+proc selectSecretsSource(stateDir: string; l: SecretsLayout;
+                         opts: AddonApplyOptions; purpose,
+                         committedPrevious: string): string =
+  when mutated("secrets-single-retained-envelope"):
+    return latestEnvelopePath(l)
+  if opts.secretsEnvelope.len > 0:
+    return opts.secretsEnvelope
+  case purpose
+  of "replay":
+    let recorded = readSecretsSource(stateDir)
+    if recorded.len > 0 and fileExists(recorded): return recorded
+  of "revert":
+    if committedPrevious.len > 0 and
+        fileExists(generationEnvelopeOf(stateDir, committedPrevious)):
+      return generationEnvelopeOf(stateDir, committedPrevious)
+  of "rollback":
+    if opts.secretsFromGeneration.len > 0 and
+        fileExists(generationEnvelopeOf(stateDir, opts.secretsFromGeneration)):
+      return generationEnvelopeOf(stateDir, opts.secretsFromGeneration)
+  else:
+    discard
+  latestEnvelopePath(l)
+
+proc commitSecretsOf*(stateDir: string; l: SecretsLayout; generationId: string) =
+  ## What a committed switch keeps of its secrets (``commitEnvelope``), from
+  ## the source it recorded; idempotent, and a no-op once the record is
+  ## gone. A failure here is reported, never undoes the commit: the
+  ## generation stands, and the re-assert unit retries it.
+  let source = readSecretsSource(stateDir)
+  if generationId.len > 0:
+    try:
+      var reseal = envelopeCopies(stateDir)
+      commitEnvelope(l, source, generationEnvelopeOf(stateDir, generationId),
+        reseal, ledgerCopyPath(stateDir), seamStateDir = stateDir)
+    except CatchableError as e:
+      stderr.writeLine("repro-addon: keeping the generation's secrets: " & e.msg)
+      return
+  if fileExists(secretsSourcePath(stateDir)):
+    removeFile(secretsSourcePath(stateDir))
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -1547,15 +1648,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                          previousUserText, adoptAddresses)
     else: parseSystemProfile(targetUserText)
   checkScope(user)
-  # --- Secrets (milestone A7, spec §10.3): everything the generation's
-  # `secrets.secretFile` declarations need -- a recipient key that passes
-  # its owner and mode check, a retained envelope it opens, an entry per
-  # declaration -- is checked here, before anything is observed or
-  # written; step 6 materialises them. A revert or a replay goes back to
-  # what was there and is not refused for it (step 6 reports instead).
+  # The envelope this switch's secrets come from (spec §10.3, A7).
   let secretsLayout = defaultSecretsLayout()
-  if purpose notin ["revert", "replay"] and not opts.recordOnly:
-    checkSecretsAvailable(secretsLayout, user.secretFiles)
+  let secretsSource = selectSecretsSource(stateDir, secretsLayout, opts,
+                                          purpose, committedPrevious)
   var ownAddresses = initHashSet[string]()
   for r in own.resources: ownAddresses.incl(r.address)
   for r in user.resources:
@@ -2047,6 +2143,28 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           if d.service == credentialServiceOf(r.suName) and d notin stored.secretFiles:
             stored.secretFiles.add(d)
 
+  # --- Secrets (milestone A7, spec §10.3). One set of declarations is
+  # materialised here and at boot: the stored profile's, which keeps the
+  # declarations of a unit left in place as drift. Everything they need --
+  # a recipient key that passes its owner and mode check, an envelope it
+  # opens, an entry per declaration -- is checked now, before anything is
+  # written; a revert or a replay goes back to what was there and is not
+  # refused for it. The services whose secrets will change are planned
+  # into the transitions (a unit reads its credentials when it starts).
+  let secretDecls = stored.secretFiles
+  if purpose notin ["revert", "replay"] and not opts.recordOnly:
+    checkSecretsAvailable(secretsLayout, secretDecls, secretsSource)
+  var credentialChanged: seq[string]
+  try:
+    credentialChanged = plannedSecretChanges(secretsLayout, secretDecls,
+                                             secretsSource)
+  except AddonSecretsFailed:
+    if purpose notin ["revert", "replay"] and not opts.recordOnly: raise
+  when mutated("credentials-not-planned"):
+    # FALSIFYING MUTATION: a credential change is not planned into the
+    # transitions (no restart, no exclusive stop-start).
+    credentialChanged = @[]
+
   # --- The service transition list (spec §7.3). ---
   # In the composed profile's dependency order, so step 7 starts a unit
   # after what it depends on.
@@ -2105,7 +2223,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           (r.suName in prevUnits and
            unitContentDeclaresExclusive(readFile(prevUnits[r.suName].path))),
         restartHeld: r.suRestartHeld, reloadIfChanged: r.suReloadIfChanged,
-        stopHeld: r.suStopHeld)
+        stopHeld: r.suStopHeld,
+        credentialsChanged: r.suCredentials.len > 0 and
+          credentialServiceOf(r.suName) in credentialChanged)
       observed(f)
       f.isNew = r.suName notin prevUnits
       let closureMissing = r.suAptClosureLock.len > 0 and
@@ -2369,6 +2489,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       targetUserText: targetUserText, fromUserText: previousUserText,
       fromLedgerText: previous.render(), reconcileDrift: reconcileDrift,
       adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved))
+  var secretsFailure = ""
+  if not opts.planOnly:
+    writeSecretsSource(stateDir, secretsSource)
   var marker = PendingMarker(fromGeneration: committedPrevious,
     newStatic: treePath, previousStatic: previousStatic, step: ssRealise,
     status: "in-progress", purpose: purpose, revertOf: opts.revertOf,
@@ -2598,19 +2721,20 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       except CatchableError as ex:
         problems.add("step 6 (fragment tools): " & ex.msg)
       # --- Step 6, secrets (milestone A7; ``addon_secrets``): the
-      # generation's declared secrets are materialised into the tmpfs
+      # generation's declared secrets are materialised into the ramfs
       # before step 7 starts the units that load them, and what it no
       # longer declares is removed. A revert that cannot materialise them
-      # still goes back (its units then fail to load their credentials,
-      # which the re-assert unit reports); any other switch reverts.
-      var credentialChanged: seq[string]
+      # still goes back, and the failure is recorded in the generation's
+      # apply log (and reported by the re-assert unit as degraded); any
+      # other switch reverts.
       if not opts.recordOnly:
         try:
-          credentialChanged = materialiseFromRetained(secretsLayout,
-            user.secretFiles, seamStateDir = stateDir)
+          discard materialiseFromEnvelope(secretsLayout, secretDecls,
+            secretsSource, seamStateDir = stateDir)
         except CatchableError as ex:
           if purpose == "revert":
-            stderr.writeLine("repro-addon: step 6 (secrets): " & ex.msg)
+            secretsFailure = "step 6 (secrets): " & ex.msg
+            stderr.writeLine("repro-addon: " & secretsFailure)
           else:
             problems.add("step 6 (secrets): " & ex.msg)
       marker.step = ssFragmentTools
@@ -2638,24 +2762,6 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                   not unitIsActive(r.suName) and
                   unitAliveness(r.suName) == uaEmpty:
                 startUnit(r.suName, opts.nonBlockingStarts)
-          # A unit reads its credentials when it starts: one that is
-          # running and whose secrets changed in step 6 is restarted, unless
-          # this step already (re)started it, or it is exclusive or holds
-          # its restarts (reported as pending, spec §7.3).
-          for r in composed.resources:
-            if r.kind != srkSystemdSystemUnit or r.suCredentials.len == 0 or
-                credentialServiceOf(r.suName) notin credentialChanged:
-              continue
-            var handled = false
-            for t in stepTransitions:
-              if t.unit == r.suName and t.verb in {tvStart, tvRestart, tvStopStart}:
-                handled = true
-            if handled or not unitIsActive(r.suName): continue
-            if r.suExclusive or r.suRestartHeld:
-              stderr.writeLine("repro-addon: " & r.suName & ": its " &
-                "credentials changed; restart pending")
-              continue
-            restartUnit(r.suName, opts.nonBlockingStarts)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
       marker.step = ssStart
@@ -2963,6 +3069,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   marker.step = ssCommit
   writePendingMarker(stateDir, marker)
   seamPause(stateDir, seamPrefix & "step-9")
+  # Secrets (A7): the committed generation keeps its own copy of the
+  # envelope it materialised from, a staged section becomes the latest,
+  # and a rotation whose next key opened it is completed. Before the
+  # marker goes, so a crash here is finished by the recovery's re-assert
+  # (``secrets_ops.reassertSecrets`` completes it from the source record).
+  commitSecretsOf(stateDir, secretsLayout, result.generationId)
+  if secretsFailure.len > 0:
+    appendAuditRecord(applyLogPath(stateDir, result.generationId), AuditRecord(
+      timestamp: getTime().toUnix(), operationKind: "addon.secrets",
+      resourceAddress: "generation:" & result.generationId,
+      outcome: "secrets-failed", diagnostic: secretsFailure,
+      recordClass: AuditClassLiveState))
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
 

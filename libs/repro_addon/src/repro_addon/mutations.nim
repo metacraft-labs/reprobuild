@@ -154,6 +154,19 @@
 ##                                            ``/var/lib/repro/secrets`` (the
 ##                                            root filesystem) and the tmpfs
 ##                                            check is off
+## ``secrets-on-tmpfs``                       a plain directory on /run's
+##                                            tmpfs is accepted for the
+##                                            secrets (no ramfs: its pages
+##                                            can be swapped)
+## ``secrets-single-retained-envelope``       a deploy agent's sealed
+##                                            section replaces the one
+##                                            retained envelope before its
+##                                            apply, and every generation
+##                                            materialises from it
+## ``credentials-not-planned``                a credential change plans no
+##                                            restart or stop-start
+## ``rotation-not-reconciled``                a rotation cut short after its
+##                                            rename is never completed
 ## ``recipient-key-mode-unchecked``           the recipient key is used
 ##                                            whatever its owner and mode
 ## ``secrets-write-then-narrow``              a secret file is written by
@@ -198,6 +211,10 @@ const
                           "nofollow-write-skips-fsync",
                           "kept-units-still-stopped",
                           "secrets-on-disk",
+                          "secrets-on-tmpfs",
+                          "secrets-single-retained-envelope",
+                          "credentials-not-planned",
+                          "rotation-not-reconciled",
                           "recipient-key-mode-unchecked",
                           "secrets-write-then-narrow",
                           "rotation-keeps-old-key"]

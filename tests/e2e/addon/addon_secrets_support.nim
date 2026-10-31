@@ -96,6 +96,7 @@ proc scanFile*(path: string; needles: seq[tuple[form, bytes: string]]):
     let total = carry + got
     if total == 0: break
     for i, n in needles:
+      if n.bytes.len == 0: continue    # nothing to look for (counted 0)
       var off = 0
       while off + n.bytes.len <= total:
         let p = c_memmem(addr buf[off], csize_t(total - off),

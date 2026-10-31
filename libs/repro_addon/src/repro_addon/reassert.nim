@@ -21,9 +21,12 @@
 ##    that ``current``'s store objects are there, and that every ledger
 ##    object matches its digest;
 ## 3. re-materialises the current generation's secrets into
-##    ``/run/repro/secrets`` from the retained sealed envelope
+##    ``/run/repro/secrets`` from that generation's own sealed envelope,
+##    under the switch's locks taken without waiting (it defers to an apply
+##    that holds them), finishing a commit or a rotation a crash cut short
 ##    (``secrets_ops.reassertSecrets``, milestone A7); a secret it cannot
-##    materialise makes the report ``degraded``;
+##    materialise makes the report ``degraded``, a running unit with
+##    credentials older than its secrets ``drift``;
 ## 4. **reports** ``ok``, ``drift`` (with the objects) or ``degraded`` (the
 ##    store, the ledger or a recovery is broken). It never re-applies on
 ##    drift: that would undo an out-of-band change before anyone saw it.
@@ -375,11 +378,12 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
     result.status = "degraded"
   # --- Step 3 (milestone A7): secrets. BEGIN A7 hook -------------------
   let sec = reassertSecrets(stateDir, defaultSecretsLayout())
-  if sec.ok:
-    result.notes.add(sec.line)
-  else:
-    result.findings.add(sec.line)
+  result.notes.add(sec.notes)
+  result.findings.add(sec.findings)
+  if sec.status == "degraded":
     result.status = "degraded"
+  elif sec.status == "drift" and result.status == "ok":
+    result.status = "drift"
   # --- END A7 hook -----------------------------------------------------
   try:
     createDir(stateDir / "addon")

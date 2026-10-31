@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2505,
+    "nimTestBinaries": 2507,
     "pureUnitConsolidationGroups": 72,
     "pureUnitTests": 700,
     "staticallyDetectedRuntimeCompilerFlowTests": 132,
-    "testEntries": 2545
+    "testEntries": 2547
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1447,10 +1447,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1383,
+      "integration": 1384,
       "platform/destructive": 159,
       "pure unit": 700,
-      "unclassified": 285
+      "unclassified": 286
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1658,9 +1658,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2505,
+    "nimTestBinaryCount": 2507,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2545
+    "testEntryCount": 2547
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8242,7 +8242,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8280,7 +8280,27 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_secrets_envelopes_and_rotation",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_infra",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27549,6 +27569,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_secrets_follow_generations",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_secrets_follow_generations.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

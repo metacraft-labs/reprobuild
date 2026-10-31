@@ -46,6 +46,7 @@ import ./collision
 import ./etc_write
 import ./generation0
 import ./host_exec
+import ./addon_secrets
 import ./ledger
 import ./mutations
 import ./static_tree
@@ -331,6 +332,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       result.removed.add(ReproRoot)
     except OSError as ex:
       result.errors.add(ReproRoot & ": " & ex.msg)
+  # The secrets ramfs (A7) is unmounted, its plaintext gone, before the
+  # roots are removed.
+  try:
+    releaseRunDir(defaultSecretsLayout())
+  except CatchableError as ex:
+    result.errors.add(defaultSecretsLayout().runDir & ": " & ex.msg)
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
     if dirExists(root):
       try:
