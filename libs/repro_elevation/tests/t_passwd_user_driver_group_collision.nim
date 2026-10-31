@@ -88,5 +88,42 @@ when defined(linux):
       discard applyPasswdUser(userOp(@["nut"]))
       check h.createArgs == @["nut", "--shell", "/usr/sbin/nologin",
         "--groups", "nut"]
+  suite "passwd.group: the plan compares what the resource declares":
+    teardown:
+      passwdArgvRunner = nil
+
+    proc groupWith(line: string) =
+      passwdArgvRunner = proc (exe: string; args: seq[string]):
+          tuple[output: string; code: int] {.closure, gcsafe.} =
+        if exe == "getent" and args.len == 2 and args[0] == "group":
+          if line.len == 0: return ("", 2)
+          return (line & "\n", 0)
+        ("unexpected command " & exe, 127)
+
+    proc groupOp(members: seq[string]; gid = ""): PrivilegedOperation =
+      PrivilegedOperation(kind: pokPasswdGroup, address: "nutGroup",
+        pgName: "nut", pgGid: gid, pgMembers: members)
+
+    proc plansNoOp(op: PrivilegedOperation): bool =
+      observePasswdGroup(op).digestHex == posixSystemDesiredDigestHex(op)
+
+    test "an undeclared live member is a no-op; a missing declared one is not":
+      # rpi2 at 76f0f4f7a9: the driver only ever adds members, but the plan
+      # compared the UNMASKED member list, so a group with any member the
+      # profile does not name planned "update" on every tick.
+      groupWith("nut:x:1002:nut,upsmon")
+      check plansNoOp(groupOp(@["nut"]))
+      check plansNoOp(groupOp(@[]))
+      groupWith("nut:x:1002:upsmon")
+      check not plansNoOp(groupOp(@["nut"]))
+      groupWith("")
+      check not plansNoOp(groupOp(@["nut"]))
+
+    test "a pinned gid still counts; an unpinned one does not":
+      groupWith("nut:x:1002:nut")
+      check plansNoOp(groupOp(@["nut"], gid = "1002"))
+      check not plansNoOp(groupOp(@["nut"], gid = "1003"))
+      check plansNoOp(groupOp(@["nut"]))
+
 else:
   echo "passwd.user driver group-collision cases are Linux-only (useradd)"

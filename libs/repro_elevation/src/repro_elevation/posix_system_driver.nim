@@ -3065,14 +3065,17 @@ elif defined(macosx):
 
 proc observePasswdGroup*(op: PrivilegedOperation): ObservedOperationState =
   ## Re-observe a group account. `present` is true when the group
-  ## exists; the digest covers the canonical observed state (gid +
-  ## sorted member list).
+  ## exists; the digest covers the observed state masked by what the
+  ## resource declares (`canonicalPasswdGroupStateMaskedBy`): the gid when
+  ## it is pinned, and the declared members that are present.
   when defined(linux) or defined(macosx):
     let obs = observePasswdGroupRaw(op.pgName)
     result.present = obs.present
     result.digestHex =
       if not obs.present: ZeroDigestHex
-      else: posixDigestHexOfText(canonicalPasswdGroupState(obs))
+      else: posixDigestHexOfText(canonicalPasswdGroupStateMaskedBy(obs,
+        PasswdGroupDesired(name: op.pgName, gid: op.pgGid,
+          members: op.pgMembers)))
   else:
     raiseNotImplementedPlatform("passwd.group observe")
 
@@ -3194,7 +3197,7 @@ proc applyPasswdGroup*(op: PrivilegedOperation):
         afterDiff.missingMembers.join(", ") & ".")
     result.present = true
     result.digestHex = posixDigestHexOfText(
-      canonicalPasswdGroupState(after))
+      canonicalPasswdGroupStateMaskedBy(after, desiredOf(op)))
   elif defined(macosx):
     if op.pgDestroy:
       return destroyPasswdGroup(op)
@@ -3267,7 +3270,7 @@ proc applyPasswdGroup*(op: PrivilegedOperation):
         afterDiff.missingMembers.join(", ") & ".")
     result.present = true
     result.digestHex = posixDigestHexOfText(
-      canonicalPasswdGroupState(after))
+      canonicalPasswdGroupStateMaskedBy(after, desiredOf(op)))
   else:
     raiseNotImplementedPlatform("passwd.group apply")
 
