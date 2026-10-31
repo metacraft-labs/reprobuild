@@ -20,7 +20,10 @@
 
 import std/[os, strutils]
 
+from test_certificates/certificate as tccert import nil
+from test_certificates/find as tcfind import nil
 from test_certificates/hook as tchook import nil
+from test_certificates/note_framing as tcframing import nil
 from test_certificates/notes as tcnotes import nil
 from test_certificates/roots as tcroots import nil
 from test_certificates/scopes as tcscopes import nil
@@ -110,6 +113,32 @@ proc propagateCertificates*(repoRoot, remoteName, remoteLocation,
     except Exception:
       discard
   cpNotPropagated
+
+proc storedCertificatesNotInNote*(contentId, note: string): int =
+  ## How many of the local store's certificates for ``contentId`` the note blob
+  ## does not hold, compared as the writer rule does, by payload hash (Transport
+  ## §3.1). A candidate that cannot be read counts for nothing: `notes publish`
+  ## reports those, and this is only a hint to run it. Never raises.
+  try:
+    var noted: seq[string]
+    for piece in tcframing.splitNote(note):
+      if piece.kind == tcframing.pkRecord:
+        noted.add(piece.payloadSha256)
+    for candidate in tcfind.findById(tcroots.nativeRoots(), contentId).candidates:
+      if not candidate.parsed:
+        continue
+      let parsed = tccert.parseCertificate(readFile(candidate.path))
+      if not parsed.ok:
+        continue
+      let record = tccert.canonicalRecord(parsed.certificate)
+      if not record.ok:
+        continue
+      let piece = tcframing.recordPiece(record.payload)
+      if piece.kind == tcframing.pkRecord and piece.payloadSha256 notin noted:
+        noted.add(piece.payloadSha256)
+        inc result
+  except CatchableError:
+    return 0
 
 proc certificatePropagationEnvironmentFindings*(): seq[string] =
   ## What in this process's environment would stop every push made from it. An

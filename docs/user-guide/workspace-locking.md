@@ -302,9 +302,29 @@ install anything.
 
 `repro test` and `repro certify` only write the store: reprobuild writes no git
 notes itself. `repro push` has no notes step either, because its own `git push`
-runs this hook. So a member `repro push` reports as `already-published` runs no
-hook and carries no note, and a certificate issued after its commit was published
-waits for a later push that introduces that content.
+runs this hook, and it prints the hook's `repro hooks: certificates:` lines and,
+when a push fails, what the remote or a hook said.
+
+The hook carries only what a push introduces: commits the remote has not got, as
+far as your clone can tell. Two cases therefore carry nothing, however many
+certificates the store holds:
+
+- a certificate issued after its commit was published. `repro push` reports that
+  member as `already-published`, runs no hook, and says the certificate is not in
+  the local notes;
+- a new branch at a commit a remote-tracking ref already reaches. A gateway at
+  `required` refuses it unless the tree already has a note, and says what to run.
+
+In both, publish and push the notes yourself, then push again if you were refused:
+
+```sh
+test-certificates notes publish <commit>
+test-certificates notes push <remote>
+```
+
+`test-certificates` is the executable of the same library, and `repro` does not
+install it: `nix run github:metacraft-labs/test-certificates-tools -- notes publish
+<commit>` runs it without installing anything.
 
 The hook never fails your push:
 

@@ -66917,7 +66917,10 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
              certificateNotesRef & ": nothing propagated one. The managed " &
              "pre-push hook carries them from the local certificate store, " &
              "and --no-verify skips it; otherwise push that ref with the " &
-             "branch)"
+             "branch. The hook carries only what a push introduces, so for a " &
+             "commit the remote or a remote-tracking ref already has, run " &
+             "'test-certificates notes publish <commit>' and " &
+             "'test-certificates notes push <remote>' first)"
          else: "") &
         (if verdict.outcome == voNotCovered and remedies.len > 0:
            " — " & remedies.join("; ") else: "")
@@ -72590,6 +72593,28 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
   result.ok = true
   result.verifiedLocalHead = localOid
 
+proc uncarriedCertificateNotice(identity: GitToolIdentity; repoAbs, headSha,
+                                remote: string): string =
+  ## What to say about a member that is already published: it is not pushed, so
+  ## no hook runs for it (Tooling §4.2), and a certificate issued since then is
+  ## still only in the store. Empty when there is nothing to say. Never fails the
+  ## push: a note or tree that cannot be read just yields no notice.
+  let tree = revParse(identity, repoAbs, headSha & "^{tree}")
+  if tree.len == 0:
+    return ""
+  let note = readNoteBlob(identity.binaryPath, repoAbs, tree,
+    certificateNotesRef)
+  if note.status == gorUnreadable:
+    return ""
+  let missing = storedCertificatesNotInNote(formatContentId(
+    if tree.len == 64: caGitTreeSha256 else: caGitTreeSha1, tree), note.body)
+  if missing == 0:
+    return ""
+  $missing & " stored certificate(s) for this content are not in the local " &
+    "notes, and an already-published member runs no hook. To carry them: " &
+    "test-certificates notes publish " & headSha &
+    " && test-certificates notes push " & remote
+
 proc executePush(args: PushArgs): PushReport =
   result.workspaceRoot = args.workspaceRoot
   result.syncMode =
@@ -72961,6 +72986,10 @@ proc executePush(args: PushArgs): PushReport =
       return
     if observed.published:
       entry.outcome = proAlreadyPublished
+      let uncarried = uncarriedCertificateNotice(identity, repoAbs, entry.headSha,
+        rName)
+      if uncarried.len > 0:
+        entry.notices.add(uncarried)
       result.repos.add(entry)
       continue
     if entry.branch.len == 0:

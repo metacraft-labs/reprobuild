@@ -44837,7 +44837,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_push_carries_no_notes_of_its_own.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
