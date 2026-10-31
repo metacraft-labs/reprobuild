@@ -298,6 +298,12 @@
 ##                                            gains one comment line, so
 ##                                            its bytes differ from the
 ##                                            full realisation's (A12)
+## ``confirm-overruns-deadline``              the confirm step keeps
+##                                            probing for twice
+##                                            ``confirmTimeout`` before it
+##                                            gives up, so a failing or
+##                                            hanging check holds the
+##                                            switch past its deadline
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -387,7 +393,10 @@ const
                           "agent-install-trusts-cwd",
                           "agent-dns-via-resolved",
                           "agent-management-path-names-only",
-                          "floor-only-on-confirm"]
+                          "floor-only-on-confirm",
+                          # Milestone A5: the confirm-or-revert gate's
+                          # timing falsifier.
+                          "confirm-overruns-deadline"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -8271,7 +8271,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_crash_recovery_records.nim",
       "sourceSuiteCount": 9,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27975,6 +27975,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_addon",
+        "repro_infra",
         "repro_test_support"
       ],
       "owner": "tests/e2e",

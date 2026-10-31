@@ -3587,9 +3587,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                               hostNamespaceProbe(probeExe))
         if not hookConfirm.passed:
           hookHealthFailed = true
-          problems.add("step 8 (confirm): " & $hookConfirm.failures.len &
-            " health check(s) did not pass within confirmTimeout (" &
-            $confirmTimeout & " s): " & hookConfirm.failures.join("; "))
+          problems.add("step 8 (confirm): " &
+            failureSummary(hookConfirm, confirmTimeout))
       marker.step = ssConfirm
       writePendingMarker(stateDir, marker)
       # Objects a removed resource adopted or replaced go back to what they
