@@ -22,6 +22,20 @@ function Assert-Rejected([scriptblock]$Operation, [string]$Pattern) {
   }
   throw "Expected rejection matching '$Pattern'."
 }
+function Read-Shared([string]$Path) {
+  # The origin appends to these logs while the test reads them. ReadAllText
+  # opens with FileShare.Read, which permits other readers and DENIES the
+  # writer, so polling here made the origin's AppendAllText fail with a sharing
+  # violation and silently lose a completion record -- the test then blamed the
+  # origin for never finishing the stalled connection. Share write as well.
+  if (-not (Test-Path -LiteralPath $Path)) { return '' }
+  $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $reader = [IO.StreamReader]::new($stream)
+    try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+  } finally { $stream.Dispose() }
+}
+
 function Assert-NoPartials([string]$Directory) {
   Require (@(Get-ChildItem -LiteralPath $Directory -Recurse -Filter '*.partial').Count -eq 0) 'A failed transfer retained partial output.'
 }
@@ -122,7 +136,7 @@ try {
   $output = Join-Path $work 'download.tar'
   Download-VerifiedFileFromMirrors -Urls @("$base/missing/a", "$base/good/a") -OutFile $output -ExpectedSha256 $sha
   Assert-FileSha256 -Path $output -Expected $sha
-  Require (([IO.File]::ReadAllText($requests)) -eq "/missing/a`n/good/a`n") 'Sources were not tried in order exactly once.'
+  Require (((Read-Shared $requests)) -eq "/missing/a`n/good/a`n") 'Sources were not tried in order exactly once.'
   Write-Host 'PASS: primary HTTP failure falls through to the verified mirror'
 
   Download-VerifiedFileFromMirrors -Urls @("$base/bad/b", "$base/partial/b", "$base/good/b") -OutFile $output -ExpectedSha256 $sha
@@ -152,7 +166,7 @@ try {
   # Do not let the preceding stalled connection hold the single-threaded
   # origin: the next control must actually receive its progressing body.
   $deadline = [DateTime]::UtcNow.AddSeconds(10)
-  while (-not ([IO.File]::ReadAllText($completed)).Contains("/stall/e`n")) {
+  while (-not ((Read-Shared $completed)).Contains("/stall/e`n")) {
     if ([DateTime]::UtcNow -gt $deadline) {
       # Say why. The origin is single-threaded, so reaching here means it never
       # finished that connection -- but Receive-Job and $server.State are
@@ -160,9 +174,11 @@ try {
       # reported as this timeout and nothing else. That is how this failure
       # stayed reproducible and undiagnosed across two runs.
       $fixtureState = $server.State
-      $fixtureOutput = Receive-Job $server | Out-String
-      $requestsSeen = [IO.File]::ReadAllText($requests)
-      $completedSeen = [IO.File]::ReadAllText($completed)
+      $fixtureOutput = ''
+      try { $fixtureOutput = (Receive-Job $server 2>&1 | Out-String) }
+      catch { $fixtureOutput = "Receive-Job threw: $_" }
+      $requestsSeen = (Read-Shared $requests)
+      $completedSeen = (Read-Shared $completed)
       Write-Host "FIXTURE STATE: $fixtureState"
       Write-Host "FIXTURE OUTPUT: $fixtureOutput"
       Write-Host "REQUESTS SEEN: $requestsSeen"
@@ -180,7 +196,7 @@ try {
     $refused = $true
   }
   $timer.Stop()
-  Require (([IO.File]::ReadAllText($requests)).EndsWith("/trickle/f`n")) 'The progressing-body control did not reach the origin.'
+  Require (((Read-Shared $requests)).EndsWith("/trickle/f`n")) 'The progressing-body control did not reach the origin.'
   if (-not $refused) {
     Assert-FileSha256 -Path $output -Expected $sha
     Write-Host 'CONTROL: progressing response completed with the valid payload hash'
@@ -204,7 +220,7 @@ try {
       Write-Host 'CONTROL: insecure redirect delivered a valid payload hash'
     }
     Require $refused 'An insecure redirect was accepted.'
-    Require (-not ([IO.File]::ReadAllText($requests)).Contains('/good/redirect-target')) 'An insecure redirected request reached its target.'
+    Require (-not ((Read-Shared $requests)).Contains('/good/redirect-target')) 'An insecure redirected request reached its target.'
     Require (-not (Test-Path -LiteralPath $output)) 'An insecure redirect published an archive.'
   }
   Assert-NoPartials $work
@@ -247,16 +263,16 @@ try {
   }
   $metadata = Read-KeyValueFile -Path (Join-Path $installed 'openssl.install.meta')
   Require ($metadata.openssl_archive_sha256 -eq $sha.ToLowerInvariant()) 'Install metadata did not retain the verified hash.'
-  $log = [IO.File]::ReadAllText($requests)
+  $log = (Read-Shared $requests)
   Require ($log.EndsWith("/missing/$asset`n/good/$asset`n")) 'Ensure-OpenSsl did not use the fallback downloader.'
   Write-Host 'PASS: Ensure-OpenSsl uses fallback, extracts verified bytes and writes pinned metadata'
 
   $stamp = (Get-Item -LiteralPath (Join-Path $installed 'lib/libssl.dll.a')).LastWriteTimeUtc
   $again = Ensure-OpenSsl -Root $root -Arch x64 -Toolchain $pins
-  Require ($again -eq $installed -and [IO.File]::ReadAllText($requests) -eq $log -and (Get-Item -LiteralPath (Join-Path $installed 'lib/libssl.dll.a')).LastWriteTimeUtc -eq $stamp) 'Warm installation was not reused without a request.'
+  Require ($again -eq $installed -and (Read-Shared $requests) -eq $log -and (Get-Item -LiteralPath (Join-Path $installed 'lib/libssl.dll.a')).LastWriteTimeUtc -eq $stamp) 'Warm installation was not reused without a request.'
   Remove-Item -LiteralPath $installed -Recurse -Force
   $again = Ensure-OpenSsl -Root $root -Arch x64 -Toolchain $pins
-  Require ([IO.File]::ReadAllText($requests) -eq $log) 'A validated cached archive was downloaded again.'
+  Require ((Read-Shared $requests) -eq $log) 'A validated cached archive was downloaded again.'
   Write-Host 'PASS: matching installs and validated archive caches need no network'
 
   Remove-Item -LiteralPath $installed -Recurse -Force
