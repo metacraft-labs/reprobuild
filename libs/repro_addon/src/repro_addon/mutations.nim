@@ -231,6 +231,15 @@
 ## ``hook-ignores-vendor-units``              the apt hook does not compare
 ##                                            vendor units with the
 ##                                            generation's record
+## ``apt-closure-unrecorded``                 the apt closure realiser
+##                                            renames its prefixes into the
+##                                            store with no receipt or index
+##                                            row (``apt_closure.nim``)
+## ``apt-deb-reader-follows-symlinks``        the realiser's ``data.tar``
+##                                            reader writes through a
+##                                            symlink the archive planted,
+##                                            and the union builder's link
+##                                            check is off
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -286,7 +295,12 @@ const
                           "base-coupling-unflagged",
                           "base-matrix-unchecked",
                           "package-owner-absorbed",
-                          "hook-ignores-vendor-units"]
+                          "hook-ignores-vendor-units",
+                          # Read by repro_dsl_stdlib's apt_closure.nim, which
+                          # cannot import this module; listed so a static
+                          # build accepts them.
+                          "apt-closure-unrecorded",
+                          "apt-deb-reader-follows-symlinks"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
