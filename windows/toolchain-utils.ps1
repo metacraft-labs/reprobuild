@@ -196,7 +196,20 @@ function Download-VerifiedFileFromMirrors {
       } catch {
         $reason = if ($deadline.IsCancellationRequested) {
           "Source deadline exceeded after $TimeoutSeconds seconds."
-        } else { $_.Exception.Message }
+        } else {
+          # Keep the whole chain. HttpClient reports a TLS or certificate
+          # failure as the generic "An error occurred while sending the
+          # request." and names the cause only in its inner exceptions, so
+          # carrying the outermost message alone told the reader nothing and
+          # left a trust refusal indistinguishable from a refused connection.
+          $parts = @()
+          $inner = $_.Exception
+          while ($null -ne $inner) {
+            if ($parts -notcontains $inner.Message) { $parts += $inner.Message }
+            $inner = $inner.InnerException
+          }
+          $parts -join ' -> '
+        }
         $failures += "${url}: $reason"
         Write-Warning "Verified download from '$url' failed. $reason"
       } finally {
