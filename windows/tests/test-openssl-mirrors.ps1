@@ -153,7 +153,22 @@ try {
   # origin: the next control must actually receive its progressing body.
   $deadline = [DateTime]::UtcNow.AddSeconds(10)
   while (-not ([IO.File]::ReadAllText($completed)).Contains("/stall/e`n")) {
-    if ([DateTime]::UtcNow -gt $deadline) { throw 'HTTP fixture did not finish the stalled connection.' }
+    if ([DateTime]::UtcNow -gt $deadline) {
+      # Say why. The origin is single-threaded, so reaching here means it never
+      # finished that connection -- but Receive-Job and $server.State are
+      # consulted on the startup path alone, so a fixture that faults HERE
+      # reported as this timeout and nothing else. That is how this failure
+      # stayed reproducible and undiagnosed across two runs.
+      $fixtureState = $server.State
+      $fixtureOutput = Receive-Job $server | Out-String
+      $requestsSeen = [IO.File]::ReadAllText($requests)
+      $completedSeen = [IO.File]::ReadAllText($completed)
+      Write-Host "FIXTURE STATE: $fixtureState"
+      Write-Host "FIXTURE OUTPUT: $fixtureOutput"
+      Write-Host "REQUESTS SEEN: $requestsSeen"
+      Write-Host "COMPLETED SEEN: $completedSeen"
+      throw 'HTTP fixture did not finish the stalled connection.'
+    }
     Start-Sleep -Milliseconds 20
   }
   $timer.Restart()
