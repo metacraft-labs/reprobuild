@@ -8102,8 +8102,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 11,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13237,13 +13237,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_deploy_agent",
+        "repro_infra",
         "repro_peer_cache"
       ],
       "owner": "libs/repro_deploy_agent",
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

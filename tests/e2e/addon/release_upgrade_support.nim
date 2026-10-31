@@ -57,7 +57,7 @@ proc runReleaseUpgrade*(m: SnapshotMirror; b: BaseImage; stamp: string;
     m.setTimestamp(stamp)
     record["snapshot"] = %stamp
     let closure = busyboxClosure(m, b)
-    g = newGuest(b, diskGiB = 20)
+    g = newMirroredGuest(b, m, diskGiB = 20)
     g.boot()
     g.prepareMirroredBase(m)
     if prepare != nil: prepare(g, m)
@@ -148,6 +148,22 @@ proc runReleaseUpgrade*(m: SnapshotMirror; b: BaseImage; stamp: string;
          ("id\t" & toVersion.split(' ')[0]) in base and
          ("version-id\t" & toVersion.split(' ')[1]) in base, base)
     record["hookEvents"] = %g.hookLogLines()
+
+    # Owner decision (2026-10-31): on a base outside the matrix a rollback
+    # is refused like any apply -- it re-plans the saved profile against the
+    # current base -- and only a switch's own replay and revert, and
+    # uninstall, bypass the matrix.
+    discard g.run("sed 's/^VERSION_ID=.*/VERSION_ID=\"99\"/' /usr/lib/os-release " &
+      "> /root/os-release-99 && mount --bind /root/os-release-99 /usr/lib/os-release")
+    let rb = g.exec(repro & " system rollback", timeoutSec = 1200)
+    step("on an unsupported base, rollback is refused (EAddOnUnsupportedBase)",
+         rb.exitCode != 0 and "EAddOnUnsupportedBase" in rb.stdout & rb.stderr,
+         "exit " & $rb.exitCode & "\n" & rb.stdout & rb.stderr)
+    let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
+    discard g.exec("umount /usr/lib/os-release")
+    step("on an unsupported base, uninstall still runs to the end",
+         un.exitCode == 0 and g.exec("test -e /var/lib/repro/system/addon-ledger").exitCode != 0,
+         "exit " & $un.exitCode & "\n" & un.stdout & un.stderr)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

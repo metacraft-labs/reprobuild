@@ -73,13 +73,18 @@ const
   BaseIdentityFileName* = "addon-base"
     ## Under ``generations/<id>/``, beside the generation's ledger.
   DpkgStatusPath* = "/var/lib/dpkg/status"
-  AddonBasePackages* = ["systemd", "dpkg", "apt", "coreutils", "dash",
-                        "bsdutils"]
-    ## What the add-on itself runs on every base: PID 1 and ``systemctl``,
+  AddonBaseTools* = ["/usr/bin/systemctl", "/usr/bin/dpkg", "/usr/bin/apt-get",
+                     "/usr/bin/timeout", "/usr/bin/logger", "/bin/sh"]
+    ## What the add-on itself runs on every base: PID 1's ``systemctl``,
     ## the package database the collision observer reads, apt (the hook),
-    ## ``timeout`` and ``logger`` (the hook's wrapper), and ``/bin/sh``.
+    ## ``timeout`` and ``logger`` (the hook's wrapper) and ``/bin/sh``. The
+    ## packages are whatever owns these files on the base -- ``coreutils``
+    ## on Debian, ``coreutils-from-uutils`` / ``rust-coreutils`` on Ubuntu
+    ## 26.04 -- found through dpkg's records, the link followed.
   ExecKeys = ["ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop",
               "ExecStopPost", "ExecReload", "ExecCondition"]
+    ## Every command-line setting of systemd.service(5) ("Command lines";
+    ## there is no ``ExecStopPre=``).
   SystemdExecSearchPath = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin",
                            "/usr/bin"]
     ## Where systemd resolves a bare command name (systemd.service(5),
@@ -89,14 +94,19 @@ const
 # dpkg status.
 # ---------------------------------------------------------------------------
 
-proc parseDpkgStatus*(text: string): Table[string, BasePackage] =
+proc parseDpkgPackages*(text: string; nativeArch = ""): Table[string, BasePackage] =
   ## ``Package`` -> its status fields, from ``/var/lib/dpkg/status``
-  ## (deb-control(5) stanzas). A multi-arch package keeps the first stanza
-  ## per name, which is the native one on every base of the matrix.
+  ## (deb-control(5) stanzas). A package installed for several
+  ## architectures (multiarch) has one stanza per architecture: the one for
+  ## ``nativeArch`` (``dpkg --print-architecture``) or ``all`` wins over a
+  ## foreign one whatever the order; with no ``nativeArch``, the first.
   result = initTable[string, BasePackage]()
   var cur: BasePackage
+  proc native(p: BasePackage): bool =
+    nativeArch.len > 0 and p.architecture in [nativeArch, "all"]
   proc flush(r: var Table[string, BasePackage]; p: var BasePackage) =
-    if p.name.len > 0 and p.name notin r: r[p.name] = p
+    if p.name.len > 0 and (p.name notin r or (native(p) and not native(r[p.name]))):
+      r[p.name] = p
     p = BasePackage()
   for raw in text.splitLines():
     if raw.strip().len == 0:
@@ -143,6 +153,31 @@ proc execPrograms*(unitContent: string): seq[string] =
     if v.len == 0: continue
     result.add(v.splitWhitespace()[0])
 
+proc unitSettings*(unitContent: string; keys: openArray[string]):
+    seq[tuple[key, value: string]] =
+  ## Every assignment of one of ``keys`` (logical lines, comments skipped).
+  for line in joinUnitContinuations(unitContent):
+    let l = line.strip()
+    if l.len == 0 or l[0] in {'#', ';'}: continue
+    let eq = l.find('=')
+    if eq <= 0: continue
+    let k = l[0 ..< eq].strip()
+    if k in keys: result.add((k, l[eq + 1 .. ^1].strip()))
+
+proc shebangInterpreter*(path: string): string =
+  ## The interpreter a script names on its ``#!`` line, "" when ``path`` is
+  ## not a readable script.
+  try:
+    var f: File
+    if not open(f, path, fmRead): return ""
+    defer: f.close()
+    var line = ""
+    if not f.readLine(line) or not line.startsWith("#!"): return ""
+    let w = line[2 .. ^1].strip().splitWhitespace()
+    if w.len > 0: w[0] else: ""
+  except CatchableError:
+    ""
+
 proc isUsrPath(p: string): bool =
   ## A path a closure's ``BindReadOnlyPaths=<closure>/usr:/usr`` serves:
   ## under ``/usr``, or under the merged-``/usr`` links ``/bin``, ``/sbin``
@@ -151,9 +186,13 @@ proc isUsrPath(p: string): bool =
     if p.startsWith(pfx): return true
   false
 
-proc unitCouplings*(r: SystemResource): seq[CoupledUnit] =
+proc unitCouplings*(r: SystemResource;
+                    interpreterOf: proc(path: string): string = shebangInterpreter):
+    seq[CoupledUnit] =
   ## Why ``r`` depends on the base, one entry per reason; empty when it
-  ## runs only from the store.
+  ## runs only from the store. Read: every ``Exec*=`` program (a store
+  ## script also by the interpreter its ``#!`` names, via
+  ## ``interpreterOf``), ``EnvironmentFile=`` and ``ExecSearchPath=``.
   case r.kind
   of srkSystemdSystemUnit:
     if r.suCollision == "dropIn":
@@ -164,15 +203,36 @@ proc unitCouplings*(r: SystemResource): seq[CoupledUnit] =
       result.add(CoupledUnit(unit: r.suName, reason: "replaces the " &
         "distribution's " & r.suName & "; its vendor unit may change"))
     let closure = r.suAptClosureLock.len > 0
+    proc fromBase(p: string): bool =
+      not p.startsWith(AddOnSystemStoreRoot & "/") and
+        not (closure and isUsrPath(p))
+    # ExecSearchPath= (systemd 250+) replaces the search path of bare names.
+    var searchPath = @SystemdExecSearchPath
+    for (_, v) in unitSettings(r.suContent, ["ExecSearchPath"]):
+      searchPath = v.split(':')
+    var baseSearch: seq[string]
+    for d in searchPath:
+      if d.len > 0 and fromBase(d & "/"): baseSearch.add(d)
+    for (_, v) in unitSettings(r.suContent, ["EnvironmentFile"]):
+      var f = v
+      if f.startsWith("-"): f = f[1 .. ^1]
+      if f.len > 0 and fromBase(f):
+        result.add(CoupledUnit(unit: r.suName, reason: "reads " & f &
+          " from the base (EnvironmentFile=)"))
     var seen = initHashSet[string]()
     for prog in execPrograms(r.suContent):
       if prog in seen: continue
       seen.incl(prog)
-      if prog.startsWith(AddOnSystemStoreRoot & "/"): continue
+      if prog.startsWith(AddOnSystemStoreRoot & "/"):
+        let interp = interpreterOf(prog)
+        if interp.len > 0 and fromBase(interp):
+          result.add(CoupledUnit(unit: r.suName, reason: prog &
+            " is a script run by " & interp & " from the base"))
+        continue
       if not prog.startsWith("/"):
-        if closure: continue    # resolved in the closure's /usr
+        if baseSearch.len == 0: continue  # resolved in the store or closure
         result.add(CoupledUnit(unit: r.suName, reason: "runs `" & prog &
-          "` from the base's " & SystemdExecSearchPath.join(":")))
+          "` from the base's " & baseSearch.join(":")))
       elif closure and isUsrPath(prog):
         continue
       else:
@@ -183,13 +243,15 @@ proc unitCouplings*(r: SystemResource): seq[CoupledUnit] =
       r.diName & ") of the distribution's " & r.diUnit))
   else: discard
 
-proc baseCoupledUnits*(resources: openArray[SystemResource]): seq[CoupledUnit] =
+proc baseCoupledUnits*(resources: openArray[SystemResource];
+                       interpreterOf: proc(path: string): string = shebangInterpreter):
+    seq[CoupledUnit] =
   ## Every coupling of every unit, in profile order.
   when mutated("base-coupling-unflagged"):
     # FALSIFYING MUTATION: no unit is ever flagged.
     return @[]
   for r in resources:
-    result.add(unitCouplings(r))
+    result.add(unitCouplings(r, interpreterOf))
 
 # ---------------------------------------------------------------------------
 # Rendering.
@@ -223,6 +285,8 @@ proc parseBaseIdentity*(text: string): BaseIdentity =
   for l in lines[1 .. ^1]:
     if l.len == 0: continue
     let f = l.split('\t')
+    if f.len < 2:
+      raise newException(ValueError, "base identity line without a value: " & l)
     case f[0]
     of "id": result.id = f[1]
     of "version-id": result.versionId = f[1]
@@ -319,13 +383,6 @@ proc vendorUnitDigest*(fragment: string): string =
   if fragment.len == 0 or not fileExists(fragment): "absent"
   else: sha256OfFile(fragment)
 
-proc packageOfObservation*(observation: string): string =
-  ## The package an ownership observation names (``package:``,
-  ## ``conffile:``, ``ucf:``, ``diversion:``), or "".
-  for pfx in ["package:", "conffile:", "ucf:", "diversion:"]:
-    if observation.startsWith(pfx): return observation[pfx.len .. ^1]
-  ""
-
 proc vendorUnitsOf*(l: Ledger): seq[string] =
   ## The distribution units a generation's ledger sits on: a ``replace``d
   ## unit's name and the unit every drop-in modifies, sorted.
@@ -371,6 +428,16 @@ proc mergedUsrAliases(p: string): seq[string] =
     if p.startsWith(a): result.add(b & p[a.len .. ^1])
     elif p.startsWith(b): result.add(a & p[b.len .. ^1])
 
+proc dpkgNativeArchitecture*(): string =
+  ## ``dpkg --print-architecture``; "" when dpkg cannot say.
+  try:
+    let exe = resolveHostTool(["/usr/bin/dpkg"])
+    if exe.len == 0: return ""
+    let r = runHostTool([exe, "--print-architecture"], timeoutSec = 10)
+    if r.exitCode == 0: r.output.strip() else: ""
+  except CatchableError:
+    ""
+
 proc observeBaseIdentity*(ledger: Ledger;
                           resources: openArray[SystemResource];
                           driver: CollisionDriver): BaseIdentity =
@@ -393,7 +460,17 @@ proc observeBaseIdentity*(ledger: Ledger;
   # names, the owners of the vendor units and of every base binary a
   # coupled unit runs.
   var names = initHashSet[string]()
-  for n in AddonBasePackages: names.incl(n)
+  for tool in AddonBaseTools:
+    var cands = mergedUsrAliases(tool)
+    try:
+      let real = expandFilename(tool)
+      if real != tool: cands.add(mergedUsrAliases(real))
+    except OSError: discard
+    for c in cands:
+      let p = driver.packageOwner(c).package
+      if p.len > 0:
+        names.incl(p)
+        break
   for e in ledger.entries:
     let p = packageOfObservation(e.observation)
     if p.len > 0: names.incl(p)
@@ -424,7 +501,7 @@ proc observeBaseIdentity*(ledger: Ledger;
           names.incl(p)
           break
   let status =
-    try: parseDpkgStatus(readFile(DpkgStatusPath))
+    try: parseDpkgPackages(readFile(DpkgStatusPath), dpkgNativeArchitecture())
     except IOError, OSError: initTable[string, BasePackage]()
   var sorted: seq[string]
   for n in names: sorted.add(n)

@@ -32,11 +32,14 @@ import repro_infra/state_dir
 import repro_deploy_agent/agent
 import repro_deploy_agent/manifest
 import repro_deploy_agent/secrets as agentSecrets
+import repro_deploy_agent/tick_record
 import repro_deploy_agent/tick_status
+import repro_infra/addon_diagnostics
 import repro_peer_cache/auth as peerAuth
 
 import ./addon_apply
 import ./addon_secrets
+import ./apt_hook
 import ./fingerprint
 import ./generation0
 import ./host_exec
@@ -287,7 +290,14 @@ proc tickApply*(stateDir: string; l: SecretsLayout; m: DeployManifest;
     let r = apply(AddonApplyOptions(stateDir: stateDir,
       hostIdentity: readHostname(), userProfileText: m.profileText,
       secretsEnvelope: staged))
-    result = (true, "generation " & r.generationId)
+    result = (true, "generation " & r.generationId &
+      (if r.drift.len > 0: "; " & $r.drift.len & " object(s) left as " &
+         "actionable drift" else: ""))
+  except EAddOnUnsupportedBase:
+    # Typed through to the agent: aoUnsupportedBase, exit 2 (spec §7.9).
+    try: discardStaged(l)
+    except CatchableError: discard
+    raise
   except CatchableError as e:
     result = (false, e.msg)
     try: discardStaged(l)
@@ -557,18 +567,35 @@ proc runAgentTickCli*(args: seq[string]): int =
     {.cast(gcsafe).}:
       acceptSealedSection(DefaultStateDir, layout, m)
   var deps: AgentDeps
+  # What the apply left as actionable drift: reported with the tick, never
+  # dropped (a committed generation with drift is still applied).
+  var applyDrift: seq[string]
   deps.apply = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     {.cast(gcsafe).}:
       # A manifest with a sealed section applies from the section it
       # staged; the commit promotes it, and whatever happens the staged
       # copy does not outlive this tick.
       tickApply(DefaultStateDir, layout, m, proc(o: AddonApplyOptions):
-          AddonApplyResult = runAddonApply(o))
+          AddonApplyResult =
+        result = runAddonApply(o)
+        for d in result.drift: applyDrift.add("apply drift " & d))
   var hostLock = acquireHostApplyLock("repro system addon agent-tick")
   defer: hostLock.release()
   retryPendingSecretsCommit(DefaultStateDir, layout)
-  let outcome = runAgentTick(cfg, deps)
-  stdout.write("outcome: " & $outcome.kind & "\n" &
-               "sequence: " & $outcome.sequence & "\n" &
-               "message: " & outcome.message & "\n")
-  deployAgentExitCode(outcome.kind)
+  # Every tick, a converged one included, reports what the apt hook
+  # recorded since the previous tick, and what this tick's apply left as
+  # drift (spec §7.8, §9.2): in the tick status record (`addOnDrift`) and
+  # on stdout. The outcome and exit code stay the tick's.
+  deps.driftProbe = proc(): seq[string] {.gcsafe.} =
+    {.cast(gcsafe).}:
+      result = hookEventsSince(AgentStateDir / AptHookCursorName)
+      result.add(applyDrift)
+  let tick = runAgentTickRecorded(cfg, deps)
+  if tick.raised:
+    stdout.write("outcome: tickRaised\nmessage: " & tick.error & "\n")
+  else:
+    stdout.write("outcome: " & $tick.outcome.kind & "\n" &
+                 "sequence: " & $tick.outcome.sequence & "\n" &
+                 "message: " & tick.outcome.message & "\n")
+  for d in tick.addOnDrift: stdout.write("add-on drift: " & d & "\n")
+  tick.exitCode

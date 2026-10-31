@@ -143,12 +143,24 @@ proc setGuestClock*(g: Guest; stamp: string; plusHours = 1) =
     "systemctl stop systemd-timesyncd 2>/dev/null; date -u -s @" &
     $t.toTime.toUnix & " >/dev/null")
 
+proc guestProxyUrl*(g: Guest; m: SnapshotMirror): string =
+  ## Where the guest reaches the mirror: the restricted network's one
+  ## forward when the guest has it, else the host through QEMU's alias.
+  if g.relayPort > 0: "http://" & GuestProxyAddress & ":" & $GuestProxyPort
+  else: m.proxyUrl
+
+proc newMirroredGuest*(b: BaseImage; m: SnapshotMirror; diskGiB = 8): Guest =
+  ## A guest whose network reaches nothing but the mirror (QEMU
+  ## ``restrict=on``; the mirror relayed in by ``socat``): an upgrade gate
+  ## then cannot depend on a live service without failing.
+  newGuest(b, diskGiB, relayPort = m.port)
+
 proc useMirror*(g: Guest; m: SnapshotMirror) =
   ## Point apt at the mirror. The stock sources stay as they are; any
   ## ``https://`` spelling of the archives is turned into ``http://`` so the
   ## proxy sees the request (apt still verifies every signature).
   discard g.run("printf 'Acquire::http::Proxy \"%s\";\\nAcquire::https::Proxy \"%s\";\\n' " &
-    m.proxyUrl & " " & m.proxyUrl & " > " & ProxyConf & "; " &
+    g.guestProxyUrl(m) & " " & g.guestProxyUrl(m) & " > " & ProxyConf & "; " &
     # Debian's cloud images name their mirrors in /etc/apt/mirrors/*.list
     # (``URIs: mirror+file:...``).
     "for f in /etc/apt/sources.list /etc/apt/sources.list.d/* /etc/apt/mirrors/*; do " &
@@ -169,6 +181,14 @@ proc prepareMirroredBase*(g: Guest; m: SnapshotMirror) =
     "systemctl stop apt-daily.service apt-daily-upgrade.service " &
     "unattended-upgrades.service 2>/dev/null; " &
     "systemctl mask --now unattended-upgrades.service 2>/dev/null; true")
+  if g.relayPort > 0:
+    # Vacuity guard of the restriction: nothing but the mirror answers.
+    let direct = g.exec("timeout 10 bash -c 'exec 3<>/dev/tcp/1.1.1.1/80' " &
+      "2>/dev/null && echo reached; getent hosts deb.debian.org " &
+      "archive.ubuntu.com && echo resolved; true", timeoutSec = 60)
+    if "reached" in direct.stdout or "resolved" in direct.stdout:
+      raise newException(TestBedError, "the guest's network is not " &
+        "restricted to the mirror: " & direct.stdout)
   g.setGuestClock(m.timestamp)
   g.useMirror(m)
   # Every index must come from the mirror: an update with a source it could

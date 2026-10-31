@@ -105,6 +105,14 @@ const
       digest: "892d1f6228c85fb39638b07ccebf6c392fa5d9c84c956eeb7aa042c52a124483",
       file: "ubuntu-24.04-server-cloudimg-armhf-20261017.img",
       osId: "ubuntu", versionId: "24.04"),
+    # Ubuntu 26.04 (A10: it joined the matrix with the 24.04 -> 26.04
+    # release-upgrade gate; its coreutils is uutils' rust-coreutils).
+    BaseImage(name: "ubuntu-26.04-amd64", debArch: "amd64",
+      url: "https://cloud-images.ubuntu.com/releases/resolute/release-20261016/ubuntu-26.04-server-cloudimg-amd64.img",
+      algo: "sha256",
+      digest: "5645d0318ad21f643ebb1ac4567514620e9893380b07b0201fda163baa5b7eb5",
+      file: "ubuntu-26.04-server-cloudimg-amd64-20261016.img",
+      osId: "ubuntu", versionId: "26.04"),
     # Milestone A10's upgrade sources: images from BEFORE a point release,
     # so that upgrading them through the time-shifted snapshot mirror
     # (snapshot_mirror.nim) crosses one. Debian 13.7 was published on
@@ -130,6 +138,13 @@ const
       digest: "2b5f90ffe8180def601c021c874e55d8303e8bcbfc66fee2b94414f43ac5eb1f",
       file: "ubuntu-24.04-server-cloudimg-amd64-20251213.img",
       osId: "ubuntu", versionId: "24.04", note: "24.04.3, before 24.04.4"),
+    BaseImage(name: "ubuntu-26.04-20260731-amd64", debArch: "amd64",
+      url: "https://cloud-images.ubuntu.com/releases/resolute/release-20260731/ubuntu-26.04-server-cloudimg-amd64.img",
+      algo: "sha256",
+      digest: "9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05",
+      file: "ubuntu-26.04-server-cloudimg-amd64-20260731.img",
+      osId: "ubuntu", versionId: "26.04",
+      note: "base-files 14ubuntu6.1; 6.2 (26.04.1) reached resolute-updates in August 2026"),
   ]
 
   DefaultBases* = ["debian-12-amd64", "debian-13-amd64", "ubuntu-24.04-amd64"]
@@ -288,6 +303,11 @@ type
     serialLog*: string
     booted*: bool
     log*: seq[string]
+    relayPort*: int
+      ## > 0: the guest's network is restricted (QEMU ``restrict=on``) and
+      ## its only reachable service is ``GuestProxyAddress:GuestProxyPort``,
+      ## relayed by ``socat`` to this loopback port on the host (the
+      ## time-shifted snapshot mirror).
     when defined(gostiAvailable):
       qemu*: QemuBootBackend
       incus*: IncusBackend
@@ -351,9 +371,15 @@ when defined(gostiAvailable):
     of "arm64": gaArm64
     else: gaArmv7
 
-proc newGuest*(b: BaseImage; diskGiB = 8): Guest =
+const
+  GuestProxyAddress* = "10.0.2.100"
+  GuestProxyPort* = 3128
+
+proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0): Guest =
   ## Claim a run and prepare (not boot) a guest of ``b``. ``diskGiB`` is the
   ## overlay's virtual size (a release upgrade needs more than 8).
+  ## ``relayPort > 0`` restricts the guest's network to one service: the
+  ## host's loopback ``relayPort``, at ``GuestProxyAddress:GuestProxyPort``.
   when not defined(gostiAvailable):
     raise newException(TestBedError,
       "gosti is not available: set GOSTI_SRC to gosti's src directory")
@@ -361,7 +387,8 @@ proc newGuest*(b: BaseImage; diskGiB = 8): Guest =
     let name = QemuNamePrefix & $getCurrentProcessId() & "-" & randomHex(6)
     let (dir, token) = claimRunDir(name)
     result = Guest(base: b, name: name, runDir: dir, ownerToken: token,
-                   kind: (if useIncus(): gkIncus else: gkQemu))
+                   kind: (if useIncus(): gkIncus else: gkQemu),
+                   relayPort: relayPort)
     if result.kind == gkIncus:
       if b.name notin IncusImages:
         raise newException(TestBedError, "no Incus image for " & b.name)
@@ -391,6 +418,17 @@ proc bootTimeout(g: Guest): int =
   else: 2400            # TCG emulation
 
 when defined(gostiAvailable):
+  proc restrictNetwork(g: Guest; spec: var BootMediaSpec) =
+    if g.relayPort <= 0: return
+    let socat = findExe("socat")
+    if socat.len == 0:
+      raise newException(TestBedError, "socat is not on PATH; a restricted " &
+        "guest reaches the snapshot mirror through it")
+    spec.networkRestricted = true
+    spec.guestForwards = @[GuestForward(guestAddress: GuestProxyAddress,
+      guestPort: GuestProxyPort,
+      command: @[socat, "STDIO", "TCP:127.0.0.1:" & $g.relayPort])]
+
   proc bootQemu(g: Guest; readonly: bool) =
     var spec = BootMediaSpec(name: g.name, kind: bmkQcow2,
       mediaPath: g.diskPath, secondaryIsoPath: g.seedPath,
@@ -400,7 +438,9 @@ when defined(gostiAvailable):
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
       diskReadonly: readonly, diskInPlace: true)
-    g.note("booting " & g.base.name & (if readonly: " (disk read-only)" else: ""))
+    g.restrictNetwork(spec)
+    g.note("booting " & g.base.name & (if readonly: " (disk read-only)" else: "") &
+           (if g.relayPort > 0: " (network restricted to the mirror)" else: ""))
     g.vm = g.qemu.bootFromMedia(spec)
     g.qemu.startAndAwaitReady(g.vm, timeoutSec = g.bootTimeout())
     g.booted = true
@@ -442,6 +482,7 @@ proc bootNoWait*(g: Guest) =
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
       diskInPlace: true)
+    g.restrictNetwork(spec)
     g.note("booting " & g.base.name & " (serial only)")
     g.vm = g.qemu.bootFromMedia(spec)
     g.booted = true
@@ -770,11 +811,14 @@ proc buildEquivsPackage*(g: Guest; pkg, version: string;
   ## point: the package then owns a conffile the add-on collides with.
   let dir = "/root/fixture/" & pkg & "-" & version
   var script = "set -e\nmkdir -p " & dir & "\ncd " & dir & "\n"
-  var fileLines = ""
-  for f in files:
+  # One ``Files:`` field, one ``<file> <destination>`` per line: a second
+  # ``Files:`` field would replace the first (deb-control(5) fields are
+  # unique), and equivs would ship only the last file.
+  var fileLines = "Files:"
+  for i, f in files:
     script.add("cat > " & f.name & " <<'REPRO_FIXTURE_EOF'\n" & f.content &
                "REPRO_FIXTURE_EOF\n")
-    fileLines.add("Files: " & f.name & " " & f.destDir & "\n")
+    fileLines.add((if i == 0: " " else: " ") & f.name & " " & f.destDir & "\n")
   script.add("cat > control <<'REPRO_FIXTURE_EOF'\n" &
     "Section: misc\nPriority: optional\nStandards-Version: 4.6.2\n" &
     "Package: " & pkg & "\nVersion: " & version & "\n" &

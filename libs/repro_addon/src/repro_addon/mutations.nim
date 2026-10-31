@@ -215,6 +215,14 @@
 ## ``base-matrix-unchecked``                  an apply against a base
 ##                                            outside the supported matrix
 ##                                            is not refused
+## ``package-owner-absorbed``                 a ledger path a package came to
+##                                            own is decided as the ledger's
+##                                            (the pre-round-2 behaviour:
+##                                            the plan absorbs the package's
+##                                            ownership)
+## ``hook-ignores-vendor-units``              the apt hook does not compare
+##                                            vendor units with the
+##                                            generation's record
 ## =========================================  ==============================
 
 const
@@ -262,7 +270,9 @@ const
                           "apt-hook-without-timeout",
                           "apt-hook-without-exit0",
                           "base-coupling-unflagged",
-                          "base-matrix-unchecked"]
+                          "base-matrix-unchecked",
+                          "package-owner-absorbed",
+                          "hook-ignores-vendor-units"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations:
   {.error: "unknown -d:reproAddonMutation=" & AddonMutation.}

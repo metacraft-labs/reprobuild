@@ -276,69 +276,98 @@ proc secretsUnit(reproExe: string): string =
 const
   AptHookTimeoutSeconds* = 60
     ## How long the apt hook lets one verification run (spec §7.8). At the
-    ## deadline ``timeout(1)`` sends SIGTERM to the verification's process
-    ## group, and SIGKILL five seconds later.
+    ## deadline the hook's watchdog sends SIGTERM to the verification's
+    ## whole process group, and SIGKILL five seconds later.
+  AptHookKillGraceSeconds* = 5
   AptHookLogPath* = "/var/lib/repro/system/addon/apt-hook.log"
     ## The hook's event log: one line per event, ``<UTC time> <kind>
     ## <detail>``. The wrapper appends ``verify-missing``,
     ## ``verify-failed`` and ``verify-timeout``; the verification appends
-    ## its findings (``apt_hook.nim``). Plain text, not JSON, because the
+    ## its findings (``apt_hook.nim``), and rotates the file at
+    ## ``apt_hook.AptHookLogMaxBytes``. Plain text, not JSON, because the
     ## wrapper is a shell command inside an apt.conf string, which cannot
     ## carry a double quote.
-  AptHookTimeoutTool* = "/usr/bin/timeout"   ## coreutils (Essential)
-  AptHookLoggerTool* = "/usr/bin/logger"     ## bsdutils (Essential)
+  AptHookSetsidTool* = "/usr/bin/setsid"     ## util-linux (Essential)
+  AptHookLoggerTool* = "/usr/bin/logger"     ## bsdutils / util-linux
 
 proc aptHookCommand*(reproExe: string;
                      timeoutSeconds = AptHookTimeoutSeconds;
                      logPath = AptHookLogPath;
-                     timeoutTool = AptHookTimeoutTool;
-                     loggerTool = AptHookLoggerTool): string =
+                     setsidTool = AptHookSetsidTool;
+                     loggerTool = AptHookLoggerTool;
+                     pidDir = "/run"): string =
   ## The shell command of the ``DPkg::Post-Invoke`` hook (apt runs it with
   ## ``/bin/sh -c``). Report-only by construction (threat model G19, T39):
   ##
-  ## - the verification runs under ``timeout``, so a hung one ends at the
-  ##   deadline and dpkg -- or ``unattended-upgrades`` -- goes on;
-  ## - a missing binary (the store unreadable or gone) is never executed;
-  ## - every outcome other than a clean exit is recorded, in the journal
-  ##   (``logger``) and in the hook's event log, and the command ends in
-  ##   ``exit 0`` whatever happened.
+  ## - the verification runs as its own session and process group
+  ##   (``setsid``), and the test for its binary runs inside it, so even a
+  ##   store that hangs on ``stat`` is bounded;
+  ## - a watchdog, a second group, kills the verification's whole group
+  ##   at the deadline (SIGTERM, then SIGKILL after five seconds), so a
+  ##   verification that ignores SIGTERM or leaves children still ends and
+  ##   nothing of it keeps apt's or ``unattended-upgrades``' terminal open.
+  ##   The deadline does not use ``timeout(1)``: uutils' ``timeout`` (Ubuntu
+  ##   26.04's coreutils) signals only its child, not the child's group
+  ##   (measured 2026-10-31, uutils 0.10.0: a grandchild survived ``-k``);
+  ## - a non-clean outcome is first appended to the hook's event log, then
+  ##   sent to the journal by a ``logger`` the hook does not wait for; the
+  ##   command ends in ``exit 0`` whatever happened.
   ##
   ## It uses no double quote and no backslash: apt.conf(5) strings carry
   ## neither. Everything but ``reproExe`` is a parameter only for the
   ## hermetic test, which runs this very command on a build host whose
   ## tools live elsewhere; generation 0 uses the defaults.
   let t = $timeoutSeconds
-  let run =
+  let g = $AptHookKillGraceSeconds
+  # The verification's shell records its own pid -- its session's and
+  # process group's id -- in ``$f``: ``setsid`` forks first when its
+  # caller leads a process group, so the background job's pid is not
+  # always the group's (measured on a NixOS build host; ``-w`` keeps the
+  # job's exit status the verification's either way).
+  # ``$f`` is on ``/run`` (tmpfs, always writable by root): the deadline
+  # must not depend on the state directory being writable.
+  let verify = "f=" & pidDir & "/repro-addon-hook.$$; rm -f $f; " &
+    setsidTool & " -w /bin/sh -c " &
+    "'echo $$ > $2; [ -x $1 ] || exit 127; exec $1 system addon verify " &
+    "--after-dpkg' repro-addon-hook $r $f & p=$!; "
+  let watchdog =
     when mutated("apt-hook-without-timeout"):
       # FALSIFYING MUTATION: no deadline; a hung verification stalls dpkg.
-      "$r system addon verify --after-dpkg; c=$?"
+      "w=0; "
     else:
-      timeoutTool & " -k 5 " & t & " $r system addon verify " &
-        "--after-dpkg; c=$?"
-  when mutated("apt-hook-without-exit0"):
-    # FALSIFYING MUTATION: the verification's status is the hook's, so a
-    # failing or timed-out verification fails dpkg's caller.
-    "r=" & reproExe & "; if [ -x $r ]; then " & timeoutTool &
-      " -k 5 " & t & " $r system addon verify --after-dpkg; fi"
-  else:
-    "r=" & reproExe & "; l=" & logPath & "; " &
-      "if [ -x $r ]; then " & run & "; else c=missing; fi; " &
-      "case $c in 0) ;; missing) k=verify-missing ;; " &
-      "124|137) k=verify-timeout ;; *) k=verify-failed ;; esac; " &
-      "if [ $c != 0 ]; then " &
-      loggerTool & " -t repro-addon-apt-hook -p user.warning " &
-      "repro-addon apt hook: $k exit=$c timeout=" & t & "s 2>/dev/null; " &
-      "echo $(date -u +%Y-%m-%dT%H:%M:%SZ) $k exit=$c timeout=" & t &
-      "s >> $l 2>/dev/null; fi; exit 0"
+      # The watchdog acts only while ``$f`` exists: the hook removes it as
+      # soon as the verification has ended, so a watchdog that outlives it
+      # can never signal a group a later process reused the id of.
+      setsidTool & " -w /bin/sh -c 'sleep $1; [ -f $2 ] || exit 0; " &
+        "g=$(cat $2); kill -TERM -$g; sleep " & g & "; [ -f $2 ] || exit 0; " &
+        "kill -KILL -$g' repro-addon-hook-watchdog " & t &
+        " $f </dev/null >/dev/null 2>&1 & w=$!; "
+  let ending =
+    when mutated("apt-hook-without-exit0"):
+      # FALSIFYING MUTATION: the verification's status is the hook's, so a
+      # failing or timed-out verification fails dpkg's caller.
+      "exit $c"
+    else:
+      "exit 0"
+  "r=" & reproExe & "; l=" & logPath & "; " & verify & watchdog &
+    "wait $p; c=$?; [ $w = 0 ] || kill -KILL $w 2>/dev/null; rm -f $f; " &
+    "case $c in 0) ;; 127) k=verify-missing ;; " &
+    "137|143) k=verify-timeout ;; *) k=verify-failed ;; esac; " &
+    "if [ $c != 0 ]; then " &
+    "echo $(date -u +%Y-%m-%dT%H:%M:%SZ) $k exit=$c timeout=" & t &
+    "s >> $l 2>/dev/null; " &
+    loggerTool & " -t repro-addon-apt-hook -p user.warning " &
+    "repro-addon apt hook: $k exit=$c timeout=" & t & "s " &
+    "</dev/null >/dev/null 2>&1 & fi; " & ending
 
 proc aptHook*(reproExe: string): string =
   ## ``/etc/apt/apt.conf.d/90repro-addon`` (spec §7.8).
   "// Reprobuild add-on: report-only verification after every dpkg run.\n" &
   "// It never fails or stalls dpkg: the verification is bounded by a\n" &
-  "// " & $AptHookTimeoutSeconds & " s timeout and the command always " &
-    "exits 0; a missing, failing or\n" &
-  "// hung verification is recorded in the journal and in " &
-    AptHookLogPath & ".\n" &
+  "// " & $AptHookTimeoutSeconds & " s deadline over its whole process " &
+    "group and the command always\n" &
+  "// exits 0; a missing, failing or hung verification is recorded in\n" &
+  "// " & AptHookLogPath & " and the journal.\n" &
   "DPkg::Post-Invoke { \"" & aptHookCommand(reproExe) & "\"; };\n"
 
 proc profileD(reproExe: string): string =

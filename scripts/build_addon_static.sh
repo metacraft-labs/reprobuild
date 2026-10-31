@@ -68,6 +68,15 @@ if [ -z "$out" ]; then
   elif [ -n "$mutation" ]; then out="build/addon-mutations/$mutation"
   else out="build/addon"; fi
 fi
+# One build per output directory at a time: concurrent gate runs from the
+# same checkout share it and its nimcache. The artefact itself is replaced
+# by a rename, so a run that is reading it never sees it missing or half
+# written (it used to be deleted first; reprobuild-pm issue
+# 2026-10-31-addon-gate-runs-race-on-the-shared-static-artefact).
+mkdir -p "$out"
+exec 9>"$out/.build.lock"
+flock 9
+
 command -v nim >/dev/null || {
   echo "build_addon_static: nim is not on PATH; run inside the reprobuild dev shell (nix develop)" >&2
   exit 2
@@ -112,12 +121,16 @@ for raw in "${arches[@]}"; do
   [ -n "$sqlite_root" ] || { echo "build_addon_static: no static sqlite among ${paths[*]}" >&2; exit 1; }
   dest="$out/$arch"
   mkdir -p "$dest"
-  rm -f "$dest/repro" "$dest/repro.sha256"
+  tmp="$dest/repro.tmp.$$"
+  # Any failure below leaves no artefact and no digest behind: never the
+  # previous build's, which a gate would otherwise run as if it were this
+  # tree's.
+  fail() { rm -f "$tmp" "$dest/repro" "$dest/repro.sha256"; exit 1; }
   defines=()
   [ -n "$mutation" ] && defines+=("--define:reproAddonMutation=$mutation")
   [ -n "$seams" ] && defines+=("--define:reproAddonTestSeams")
   echo "build_addon_static: $arch with $cc${mutation:+ (mutation $mutation)}"
-  (
+  if ! (
     # The dev shell's link flags name glibc libraries; the system hash
     # libraries are glibc builds. Neither may reach a musl static link.
     unset NIX_LDFLAGS NIX_CFLAGS_COMPILE NIX_CFLAGS_LINK REPROBUILD_USE_SYSTEM_HASH_LIBS
@@ -129,32 +142,37 @@ for raw in "${arches[@]}"; do
       --"$(nim_cpu "$arch")".linux.gcc.linkerexe:"$cc" \
       --define:release --opt:size --stackTrace:off --lineTrace:off \
       --passL:-static --passL:-s \
+      --passC:"-ffile-prefix-map=$PWD/=" \
       ${defines[@]+"${defines[@]}"} \
       --nimcache:"build/nimcache/repro-addon-static-$arch${mutation:+-$mutation}${seams:+-seams}" \
-      --out:"$dest/repro.tmp" \
+      --out:"$tmp" \
       apps/repro-addon/repro_addon_main.nim
-  )
+  ); then
+    echo "build_addon_static: $arch build failed" >&2
+    fail
+  fi
   # Static linking is verified, not assumed.
-  desc="$(file -b "$dest/repro.tmp")"
+  desc="$(file -b "$tmp")"
   case "$desc" in
     *"statically linked"*) ;;
-    *) echo "build_addon_static: $arch artefact is not static: $desc" >&2; rm -f "$dest/repro.tmp"; exit 1 ;;
+    *) echo "build_addon_static: $arch artefact is not static: $desc" >&2; fail ;;
   esac
   case "$desc" in
     *"$(elf_machine_word "$arch")"*) ;;
-    *) echo "build_addon_static: $arch artefact has the wrong machine: $desc" >&2; rm -f "$dest/repro.tmp"; exit 1 ;;
+    *) echo "build_addon_static: $arch artefact has the wrong machine: $desc" >&2; fail ;;
   esac
-  if readelf -lW "$dest/repro.tmp" | grep -q 'INTERP'; then
+  if readelf -lW "$tmp" | grep -q 'INTERP'; then
     echo "build_addon_static: $arch artefact has a PT_INTERP (dynamic loader)" >&2
-    rm -f "$dest/repro.tmp"; exit 1
+    fail
   fi
-  if ldd "$dest/repro.tmp" >/dev/null 2>&1; then
+  if ldd "$tmp" >/dev/null 2>&1; then
     echo "build_addon_static: ldd resolves libraries for the $arch artefact" >&2
-    rm -f "$dest/repro.tmp"; exit 1
+    fail
   fi
-  mv "$dest/repro.tmp" "$dest/repro"
-  digest="$(sha256sum "$dest/repro" | cut -d' ' -f1)"
-  echo "$digest  repro" > "$dest/repro.sha256"
+  digest="$(sha256sum "$tmp" | cut -d' ' -f1)"
+  echo "$digest  repro" > "$dest/repro.sha256.tmp.$$"
+  mv "$tmp" "$dest/repro"
+  mv "$dest/repro.sha256.tmp.$$" "$dest/repro.sha256"
   echo "$digest  $arch/repro" >> "$sums.tmp"
   echo "build_addon_static: $arch/repro $digest ($desc)"
 done

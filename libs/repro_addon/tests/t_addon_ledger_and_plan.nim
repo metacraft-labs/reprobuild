@@ -145,8 +145,8 @@ suite "generation 0":
       if o.path == AptHookPath:
         # Bounded, never executing a missing binary, always exit 0
         # (the hook's behaviour is run in t_addon_apt_hook_and_base_identity).
-        check "/usr/bin/timeout -k 5 60 " in o.content
-        check "if [ -x " in o.content
+        check "/usr/bin/setsid -w /bin/sh -c 'echo $$ > $2; [ -x $1 ]" in o.content
+        check "repro-addon-hook-watchdog 60 " in o.content
         check o.content.strip().endsWith("exit 0\"; };")
 
   test "the re-assert unit is off the base's boot path and has no network":

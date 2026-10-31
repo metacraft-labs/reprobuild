@@ -69,7 +69,7 @@ else
 fi
 export GOSTI_SRC
 if [ "${REPRO_ADDON_BACKEND:-}" != "incus" ]; then
-  for tool in qemu-system-x86_64 qemu-img ssh ssh-keygen scp curl; do
+  for tool in qemu-system-x86_64 qemu-img ssh ssh-keygen scp curl socat flock; do
     command -v "$tool" >/dev/null || { echo "run_addon_gate: $tool is not on PATH" >&2; exit 2; }
   done
   [ -w /dev/kvm ] || { echo "run_addon_gate: /dev/kvm is not writable" >&2; exit 2; }
@@ -88,6 +88,15 @@ esac
 bash ./scripts/build_addon_static.sh ${mutation_args[@]+"${mutation_args[@]}"} "${arches[@]}"
 
 mkdir -p build/test-bin
-nim c --hints:off --warnings:off --nimcache:"build/nimcache/${test}" \
-  --out:"build/test-bin/${test}" "$src"
-REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "build/test-bin/${test}"
+# Concurrent runs of the same gate share its nimcache: the compile takes a
+# lock, and each run executes its own copy of the binary.
+mkdir -p build/test-bin build/nimcache
+bin="build/test-bin/${test}.run-$$"
+(
+  flock 8
+  nim c --hints:off --warnings:off --nimcache:"build/nimcache/${test}" \
+    --out:"build/test-bin/${test}" "$src"
+  cp "build/test-bin/${test}" "$bin"
+) 8>"build/nimcache/${test}.lock"
+trap 'rm -f "$bin"' EXIT
+REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin"

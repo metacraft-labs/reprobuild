@@ -39,6 +39,8 @@ when defined(ssl):
   import std/net
   import wrappers/openssl
 
+import repro_infra/addon_diagnostics
+
 import ./manifest
 import ./secrets
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
@@ -89,10 +91,6 @@ when defined(ssl):
         gAgentTlsCtx = newContext(verifyMode = CVerifyPeer)
       return gAgentTlsCtx
 
-const
-  UnsupportedBaseDiagnostic* = "EAddOnUnsupportedBase"
-    ## The leading word of the add-on apply's base refusal.
-
 type
   AgentOutcomeKind* = enum
     aoWaiting          ## no manifest for this target yet (all sources missed)
@@ -116,6 +114,9 @@ type
     errorCode*: string
 
   ApplyHook* = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.}
+    ## May raise ``EAddOnUnsupportedBase`` (and nothing else): the one
+    ## refusal the agent reports as an operator action of its own
+    ## (``aoUnsupportedBase``). Every other failure is ``ok = false``.
     ## Injected apply. Production wires the M4 ``runInfraApply`` path
     ## (see ``runInfraApplyHook``); tests inject a recording hook. Returns
     ## ``ok = true`` when the desired state converged.
@@ -148,6 +149,11 @@ type
       ## sealed for the apply, and materialised only into a ramfs, per
       ## service, by the apply (`repro_addon/secrets_ops`).
 
+  DriftProbe* = proc(): seq[string] {.gcsafe.}
+    ## Called once per tick, whatever the outcome: what changed on the host
+    ## underneath the agent since the previous tick (a ReproOS add-on host:
+    ## the apt hook's new events). Must not raise.
+
   AgentDeps* = object
     ## Test seam. ``apply`` is the apply hook. ``httpGet`` overrides the
     ## HTTP fetch (nil ⇒ the real ``std/httpclient`` path). The hermetic
@@ -155,6 +161,8 @@ type
     apply*: ApplyHook
     httpGet*: proc(url: string; timeoutMs: int):
       tuple[ok: bool; missing: bool; body: seq[byte]; error: string] {.gcsafe.}
+    driftProbe*: DriftProbe
+      ## nil: no drift is collected. ``runAgentTickRecorded`` calls it.
 
   Candidate = object
     source: string
@@ -478,16 +486,19 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
         errorCode: "secrets_failed")
 
   # -- APPLY (strictly-higher valid sequence) ----------------------------
-  let applied = deps.apply(selected)
-  if not applied.ok and applied.message.startsWith(UnsupportedBaseDiagnostic):
-    # Every add-on diagnostic's message starts with its name (the add-on
-    # spec §8.4), so the refusal is recognised by that contract rather
-    # than by a type the generic apply hook cannot carry. The sequence is
-    # not recorded: once the base is fixed the same manifest applies.
+  # An add-on host whose base left the supported matrix refuses every apply
+  # with the typed ``EAddOnUnsupportedBase`` (add-on spec §7.9), which an
+  # apply hook lets through rather than folding it into a message: an
+  # operator must act, a retry cannot fix it. The sequence is not recorded,
+  # so the same manifest applies once the base is fixed.
+  var applied: tuple[ok: bool; message: string]
+  try:
+    applied = deps.apply(selected)
+  except EAddOnUnsupportedBase as e:
     return AgentOutcome(kind: aoUnsupportedBase, target: cfg.target,
       sequence: selected.sequence, deploymentId: selected.deploymentId,
       message: "the host's base is outside the supported matrix at " &
-        "sequence " & $selected.sequence & ": " & applied.message,
+        "sequence " & $selected.sequence & ": " & e.msg,
       errorCode: "unsupported_base")
   if not applied.ok:
     return AgentOutcome(kind: aoApplyFailed, target: cfg.target,

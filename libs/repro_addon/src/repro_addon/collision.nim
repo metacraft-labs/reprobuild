@@ -440,6 +440,13 @@ proc observeTarget*(d: CollisionDriver; path: string;
   if unit.len > 0:
     result.unit = d.unitProvision(unit)
 
+proc packageOfObservation*(observation: string): string =
+  ## The package an ownership observation names (``package:``,
+  ## ``conffile:``, ``ucf:``, ``diversion:``), or "".
+  for pfx in ["package:", "conffile:", "ucf:", "diversion:"]:
+    if observation.startsWith(pfx): return observation[pfx.len .. ^1]
+  ""
+
 proc observationText*(o: TargetObservation; kind: TargetKind): string =
   ## The ledger's one-word summary of who owns the target.
   if o.diversion.present and o.diversion.package != ":":
@@ -466,6 +473,9 @@ type
     desiredContent*: string    ## the bytes themselves (for preservation)
     ledgerSha256*: string      ## the current ledger's digest, "" if unowned
     ledgerOwns*: bool
+    ledgerObservation*: string ## the ledger entry's plan-time ownership
+                               ## observation (``absent``, ``conffile:<pkg>``,
+                               ## ...), "" if unowned
     ledgerOwnsDiversion*: bool ## the ledger lists a diversion of the path
     collision*: string         ## the resource's opt-in, "" for none
     divertedByProfile*: bool   ## a `linux.dpkgDiversion` of the path is declared
@@ -524,7 +534,22 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
   if o.exists and not o.isRegular:
     raise newException(AddonCollisionError, "refusing " & inp.address &
       ": " & o.path & " exists and is not a regular file")
-  # Row 2: the ledger owns it.
+  # Row 2: the ledger owns it -- unless a package came to own the path
+  # since (spec §4.3, §7.6, §7.8): that is a package-owned path, refused by
+  # name until the operator resolves it, never absorbed by rewriting the
+  # ledger's observation to the package's name. Removing the resource
+  # hands the path back to the package (``handback.nim``).
+  if inp.ledgerOwns and o.ownership.package.len > 0 and
+      packageOfObservation(inp.ledgerObservation) != o.ownership.package:
+    when not mutated("package-owner-absorbed"):
+      var e = newAddOnPackageOwned(o.path, o.ownership.package,
+                                   o.ownership.conffile, d.dropInHint(o.path))
+      e.msg.add(" -- package " & o.ownership.package & " came to own this " &
+        "ledger path after the add-on took it (" & inp.address &
+        "). Remove the resource to hand the path back to the package, " &
+        "then declare it again with `collision = \"divert\"` if the " &
+        "add-on should still own its content")
+      raise e
   if inp.ledgerOwns:
     if o.exists and o.sha256 == inp.ledgerSha256:
       result.verdict = (if o.sha256 == inp.desiredSha256: cvNoOp else: cvUpdate)

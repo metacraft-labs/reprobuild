@@ -85,6 +85,12 @@ type
     message*: string             ## the human-readable outcome message
     errorCode*: string           ## the machine-readable outcome error code
     error*: string               ## exception text; empty unless the tick raised
+    addOnDrift*: seq[string]
+      ## On a ReproOS add-on host: what the apt hook recorded since the
+      ## previous tick (``AgentDeps.driftProbe``), one event per line. It
+      ## never changes the outcome or the exit code: drift underneath a
+      ## converged host is still a converged host, and an operator acts on
+      ## the drift, not the timer (add-on spec §7.8, §9.2).
 
   RecordedTick* = object
     ## What `runAgentTickRecorded` observed. `raised` distinguishes "the tick
@@ -94,6 +100,7 @@ type
     exitCode*: int
     raised*: bool
     error*: string
+    addOnDrift*: seq[string]       ## what the drift probe returned
 
 proc tickStatusPath*(stateDir, target: string): string =
   ## Sibling of `sequenceStatePath` — same directory, same per-target
@@ -137,7 +144,8 @@ proc toJsonNode*(rec: TickStatusRecord): JsonNode =
     "deploymentId": rec.deploymentId,
     "message": rec.message,
     "errorCode": rec.errorCode,
-    "error": rec.error
+    "error": rec.error,
+    "addOnDrift": rec.addOnDrift
   }
 
 proc renderTickStatus*(rec: TickStatusRecord): string =

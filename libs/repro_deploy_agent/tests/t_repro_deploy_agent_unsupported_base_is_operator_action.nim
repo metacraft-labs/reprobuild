@@ -6,7 +6,11 @@
 ## report that as ``aoUnsupportedBase`` -- exit 2, an operator must act --
 ## not as a retryable ``aoApplyFailed`` the timer would repeat forever, and
 ## it must not record the sequence as applied, so the same manifest applies
-## once the base is fixed. Any other apply failure stays ``aoApplyFailed``.
+## once the base is fixed. The refusal is the typed ``EAddOnUnsupportedBase``
+## the apply hook lets through, never recognised by its message: a hook that
+## returns ``ok = false`` with a message that merely starts with the name
+## stays ``aoApplyFailed``. Also here: the drift probe of a recorded tick
+## runs on a converged tick and lands in the tick status record.
 ##
 ## *Mocking.* The apply hook is a recording stub returning the add-on
 ## apply's refusal text: what is under test is the agent's classification
@@ -14,18 +18,24 @@
 ## gated on real guests (the release-upgrade gates). Manifest signing,
 ## verification and the state directory are the real ones.
 
-import std/[os, strutils, unittest]
+import std/[json, os, strutils, unittest]
 
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import ../src/repro_deploy_agent/agent
 import ../src/repro_deploy_agent/manifest
 import ../src/repro_deploy_agent/tick_status
 import ../src/repro_deploy_agent/tick_event_log
+import ../src/repro_deploy_agent/tick_record
+import repro_infra/addon_diagnostics
 
 var gReply = ""
+var gRaise = false
 
 proc refusingApply(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
   {.cast(gcsafe).}:
+    if gRaise:
+      raise newAddOnUnsupportedBase("ubuntu 28.04", "the base is ID=ubuntu " &
+        "VERSION_ID=28.04, which is not in the add-on's supported matrix")
     if gReply.len == 0: (ok: true, message: "applied")
     else: (ok: false, message: gReply)
 
@@ -54,8 +64,7 @@ suite "an unsupported base is an operator action":
   test "EAddOnUnsupportedBase -> aoUnsupportedBase, exit 2, sequence not recorded":
     let h = setup("refused")
     publish(h.source, h.producer, h.cfg.target, 7)
-    gReply = "EAddOnUnsupportedBase: the base is ID=ubuntu VERSION_ID=28.04, " &
-      "which is not in the add-on's supported matrix"
+    gRaise = true
     let o = runAgentTick(h.cfg, AgentDeps(apply: refusingApply))
     check o.kind == aoUnsupportedBase
     check deployAgentExitCode(o.kind) == 2
@@ -64,6 +73,7 @@ suite "an unsupported base is an operator action":
     check readLastAppliedSequence(h.cfg) == 0'u64
     check tickEventId($o.kind) == EventIdTickUnsupportedBase
     # Fixed base: the same sequence applies on the next tick.
+    gRaise = false
     gReply = ""
     let again = runAgentTick(h.cfg, AgentDeps(apply: refusingApply))
     check again.kind == aoApplied
@@ -76,3 +86,27 @@ suite "an unsupported base is an operator action":
     let o = runAgentTick(h.cfg, AgentDeps(apply: refusingApply))
     check o.kind == aoApplyFailed
     check deployAgentExitCode(o.kind) == 1
+    # A message that only LOOKS like the refusal is not one.
+    gReply = "EAddOnUnsupportedBase: said by a hook that returned instead of raising"
+    check runAgentTick(h.cfg, AgentDeps(apply: refusingApply)).kind == aoApplyFailed
+
+  test "the drift probe runs on a converged tick and is recorded":
+    let h = setup("drift")
+    publish(h.source, h.producer, h.cfg.target, 4)
+    gReply = ""
+    gRaise = false
+    discard runAgentTick(h.cfg, AgentDeps(apply: refusingApply))
+    var calls = 0
+    let probe: DriftProbe = proc(): seq[string] {.gcsafe.} =
+      {.cast(gcsafe).}:
+        inc calls
+        @["finding package p now owns ledger path /etc/x"]
+    let t = runAgentTickRecorded(h.cfg, AgentDeps(apply: refusingApply,
+                                                  driftProbe: probe))
+    check t.outcome.kind == aoConverged
+    check t.exitCode == 0
+    check calls == 1
+    check t.addOnDrift == @["finding package p now owns ledger path /etc/x"]
+    let rec = parseJson(readFile(tickStatusPath(h.cfg.stateDir, h.cfg.target)))
+    check rec["addOnDrift"].len == 1
+    check rec["outcome"].getStr() == "aoConverged"

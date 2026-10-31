@@ -35,7 +35,8 @@ import ./upgrade_support
 const
   Gate = "e2e_addon_unattended_upgrades_week"
   FirstDay = [("debian-13-20260831-amd64", "20260914T060000Z"),
-              ("ubuntu-24.04-20251213-amd64", "20260112T060000Z")]
+              ("ubuntu-24.04-20251213-amd64", "20260112T060000Z"),
+              ("ubuntu-26.04-20260731-amd64", "20260810T060000Z")]
   WeekConf = "/etc/apt/apt.conf.d/52repro-testbed-week"
 
 proc firstDay(b: BaseImage): string =
@@ -54,7 +55,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let day0 = parseStamp(firstDay(b))
     m.setTimestamp(firstDay(b))
     let closure = busyboxClosure(m, b)
-    g = newGuest(b)
+    g = newMirroredGuest(b, m)
     g.boot()
     g.prepareMirroredBase(m)
     # The base as an operator runs it: unattended-upgrades installed and on,

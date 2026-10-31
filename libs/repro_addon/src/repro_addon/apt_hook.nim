@@ -25,7 +25,7 @@
 ## wrapper exits 0 anyway, but a verification that fails is recorded as
 ## ``verify-failed`` rather than as what it found.
 
-import std/[os, strutils, times]
+import std/[os, posix, strutils, times]
 
 import repro_infra/state_dir
 
@@ -35,6 +35,7 @@ import ./collision
 import ./generation0
 import ./host_exec
 import ./ledger
+import ./mutations
 import ./verify
 
 type
@@ -48,6 +49,9 @@ const
 
 proc vendorUnitFindings*(base: BaseIdentity): seq[string] =
   ## Every vendor unit whose file differs from the generation's record.
+  when mutated("hook-ignores-vendor-units"):
+    # FALSIFYING MUTATION: the third finding is never made.
+    return @[]
   for v in base.vendorUnits:
     let now = vendorUnitDigest(vendorUnitFragment(v.unit))
     if now != v.sha256:
@@ -80,20 +84,45 @@ proc renderAfterDpkg*(r: AfterDpkgReport): string =
   result = "repro-addon apt hook: " & r.status & "\n"
   for f in r.findings: result.add("  " & f & "\n")
 
-proc journal(priority, msg: string) =
-  ## One journal line through ``logger`` (bsdutils, Essential); best
-  ## effort and bounded, never raising.
+const
+  AptHookLogMaxBytes* = 1 shl 20
+    ## The event log is rotated when it reaches 1 MiB: the file becomes
+    ## ``apt-hook.log.1`` (replacing an older one), so the hook keeps at most
+    ## about 2 MiB on the host. A finding stays reported by every run until
+    ## it is resolved, so a long-unresolved one fills the log; rotation
+    ## keeps the latest runs, which say the same.
+  JournalTimeoutSec* = 5
+    ## Upper bound on the whole journal hand-off of one run.
+
+proc journal(priority: string; lines: openArray[string]) =
+  ## Every line to the journal through ONE ``logger`` (util-linux /
+  ## bsdutils), reading them from stdin, bounded by ``JournalTimeoutSec``
+  ## in all. Best effort, never raising: the event log, written first, is
+  ## the record.
+  if lines.len == 0: return
   try:
     let exe = resolveHostTool(LoggerCandidates)
     if exe.len == 0: return
     discard runHostTool([exe, "-t", "repro-addon-apt-hook", "-p",
-                         "user." & priority, "--", msg], timeoutSec = 5)
+                         "user." & priority], input = lines.join("\n") & "\n",
+                        timeoutSec = JournalTimeoutSec)
   except CatchableError:
     discard
 
-proc appendEventLog*(path: string; lines: openArray[string]) =
-  ## Append ``<UTC time> <line>`` for each line; best effort.
+proc rotateEventLog*(path: string; maxBytes = AptHookLogMaxBytes) =
+  ## Move ``path`` to ``path.1`` once it has reached ``maxBytes``.
+  try:
+    if fileExists(path) and getFileSize(path) >= maxBytes:
+      moveFile(path, path & ".1")
+  except CatchableError:
+    discard
+
+proc appendEventLog*(path: string; lines: openArray[string];
+                     maxBytes = AptHookLogMaxBytes) =
+  ## Append ``<UTC time> <line>`` for each line, flushed and fsynced;
+  ## rotate first when the log is full. Best effort.
   if lines.len == 0: return
+  rotateEventLog(path, maxBytes)
   let stamp = now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
   var text = ""
   for l in lines:
@@ -105,12 +134,14 @@ proc appendEventLog*(path: string; lines: openArray[string]) =
       defer: f.close()
       f.write(text)
       f.flushFile()
+      discard posix.fsync(f.getFileHandle())
   except CatchableError:
     discard
 
 proc runAfterDpkgCli*(stateDir = DefaultStateDir;
                       logPath = AptHookLogPath): int =
-  ## The hook's entry point: report, record, exit 0.
+  ## The hook's entry point: report, record (event log first, then the
+  ## journal), exit 0.
   var r: AfterDpkgReport
   try:
     r = runAfterDpkgVerify(stateDir)
@@ -118,13 +149,81 @@ proc runAfterDpkgCli*(stateDir = DefaultStateDir;
     r = AfterDpkgReport(status: "degraded", findings: @[e.msg])
   stdout.write(renderAfterDpkg(r))
   if r.status == "ok":
-    journal("info", "repro-addon apt hook: ok")
+    journal("info", ["repro-addon apt hook: ok"])
     return 0
   var lines = @[r.status & " " & $r.findings.len & " finding(s)"]
-  journal("warning", "repro-addon apt hook: " & r.status & ", " &
-          $r.findings.len & " finding(s)")
+  var jl = @["repro-addon apt hook: " & r.status & ", " & $r.findings.len &
+             " finding(s)"]
   for f in r.findings:
     lines.add("finding " & f)
-    journal("warning", "repro-addon apt hook: " & f)
+    jl.add("repro-addon apt hook: " & f)
   appendEventLog(logPath, lines)
+  journal("warning", jl)
   0
+
+# ---------------------------------------------------------------------------
+# The deploy agent's view: the hook's events since its previous tick.
+# ---------------------------------------------------------------------------
+
+proc fileIdentity(path: string): string =
+  ## ``<device>:<inode>`` of ``path``, "" when absent.
+  var st: Stat
+  if stat(path.cstring, st) != 0: return ""
+  $st.st_dev & ":" & $st.st_ino
+
+proc readFrom(path: string; offset: int64): string =
+  try:
+    var f: File
+    if not open(f, path, fmRead): return ""
+    defer: f.close()
+    let size = getFileSize(f)
+    if offset >= size: return ""
+    f.setFilePos(offset)
+    result = newString(int(size - offset))
+    let n = f.readBuffer(addr result[0], result.len)
+    result.setLen(max(n, 0))
+  except CatchableError:
+    result = ""
+
+const AptHookCursorName* = "apt-hook.cursor"
+  ## Under the agent's state directory: how far the agent has read the
+  ## hook's event log.
+
+proc hookEventsSince*(cursorPath: string; logPath = AptHookLogPath): seq[string] =
+  ## Every event line the hook appended since the cursor in ``cursorPath``
+  ## (``<device>:<inode> <offset>`` of the log as last read), then moves the
+  ## cursor to the end. A rotation since (the log is a new file) is
+  ## followed: the rest of the rotated file, then the new one from its
+  ## start. With no cursor yet, everything in the log counts -- a first
+  ## tick on a host that already has drift reports it. Never raises.
+  var savedId = ""
+  var savedOff = 0'i64
+  try:
+    let parts = readFile(cursorPath).strip().splitWhitespace()
+    if parts.len == 2:
+      savedId = parts[0]
+      savedOff = parseBiggestInt(parts[1])
+  except CatchableError:
+    discard
+  let curId = fileIdentity(logPath)
+  var text = ""
+  var newOff = 0'i64      # the cursor ends where THIS read ended, so an
+                          # event appended meanwhile is read next time
+  if savedId.len > 0 and savedId == curId:
+    let t = readFrom(logPath, savedOff)
+    text = t
+    newOff = savedOff + t.len
+  else:
+    if savedId.len > 0 and fileIdentity(logPath & ".1") == savedId:
+      text = readFrom(logPath & ".1", savedOff)
+    let t = readFrom(logPath, 0)
+    text.add(t)
+    newOff = t.len
+  for l in text.splitLines():
+    if l.strip().len > 0: result.add(l)
+  try:
+    createDir(parentDir(cursorPath))
+    writeFile(cursorPath & ".tmp", curId & " " & $newOff & "\n")
+    moveFile(cursorPath & ".tmp", cursorPath)
+  except CatchableError:
+    discard

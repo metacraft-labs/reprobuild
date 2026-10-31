@@ -45,6 +45,7 @@ import ./addon_apply
 import ./collision
 import ./etc_write
 import ./generation0
+import ./handback
 import ./host_exec
 import ./addon_secrets
 import ./ledger
@@ -74,12 +75,37 @@ proc ok*(r: UninstallResult): bool = r.drift.len == 0 and r.errors.len == 0
 
 proc entryKey(e: LedgerEntry): string = $e.class & " " & e.path
 
-proc removeOwned(e: LedgerEntry; r: var UninstallResult) =
+proc removeOwned(e: LedgerEntry; r: var UninstallResult;
+                 driver: CollisionDriver = nil) =
   ## Undo one file or link the ledger owns, if it is unchanged: put back
   ## the bytes the ledger preserved for an adopted, replaced or reconciled
   ## object (spec §6.4 step 2), else remove it. An entry whose object is
   ## undone here, or was already gone, is recorded in ``r.undone`` so the
-  ## kept ledger of an incomplete run no longer lists it.
+  ## kept ledger of an incomplete run no longer lists it. A path a package
+  ## came to own since is handed back to it, never removed
+  ## (``handback.nim``): a link of the add-on's becomes a regular file with
+  ## the same bytes, and the entry counts as undone.
+  if driver == nil and e.class in HandBackClasses:
+    r.drift.add(e.path & ": left in place: the package database could not " &
+      "be read, so whether a package owns it now is unknown")
+    return
+  var pkg = ""
+  try: pkg = newPackageOwner(e, driver)
+  except CatchableError as ex:
+    r.errors.add(e.path & ": cannot read package ownership: " & ex.msg)
+    return
+  if pkg.len > 0:
+    try:
+      if symlinkExists(e.path) and not fileExists(e.path):
+        r.drift.add(e.path & ": owned by package " & pkg & " but the " &
+          "add-on's link there no longer resolves; left in place")
+        return
+      materialiseHandBack(e, handBackBytes(e))
+      r.removed.add(e.path & " (handed back to package " & pkg & ")")
+      r.undone.incl(entryKey(e))
+    except CatchableError as ex:
+      r.errors.add(e.path & ": " & ex.msg)
+    return
   let d = observeDrift(e)
   if d.len > 0:
     if d.startsWith("missing"):
@@ -208,6 +234,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let captured = capturePreBootstrapInputs(l)
   for d in captured.drift: result.drift.add(d)
 
+  # The collision observer, to tell a path a package came to own since
+  # (handed back, never removed). Unreadable: no hand-back is possible, so
+  # nothing is removed on a guess -- every file is left as drift.
+  var driver: CollisionDriver = nil
+  try: driver = detectCollisionDriver()
+  except CatchableError as ex:
+    result.errors.add("the package database cannot be read (" & ex.msg &
+      "); the add-on's files are left in place")
   var byClass: array[LedgerClass, seq[LedgerEntry]]
   for e in l.entries:
     byClass[e.class].add(e)
@@ -235,9 +269,9 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   for li in byClass[lcInstallLink]:
     removeOwned(li, result)
   for u in byClass[lcUnit]:
-    removeOwned(u, result)
+    removeOwned(u, result, driver)
   for di in byClass[lcDropIn]:
-    removeOwned(di, result)
+    removeOwned(di, result, driver)
 
   # 3. Diversions: the profile's file at the path, then the diversion.
   var handled = initHashSet[string]()
@@ -245,7 +279,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     for dv in byClass[lcDiversion]:
       for f in byClass[lcEtcFile]:
         if f.path == dv.path:
-          removeOwned(f, result)
+          removeOwned(f, result, driver)
           handled.incl(f.path)
       if fileExists(dv.path) or symlinkExists(dv.path):
         result.drift.add(dv.path & ": the file on the diverted path is not " &
@@ -266,7 +300,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   for f in byClass[lcEtcFile]:
     if f.path in handled:
       continue
-    removeOwned(f, result)
+    removeOwned(f, result, driver)
   for sl in byClass[lcStaticLink]:
     if symlinkExists(sl.path):
       try:

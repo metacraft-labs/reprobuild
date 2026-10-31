@@ -16,6 +16,7 @@ import std/[os, strutils]
 
 import repro_elevation
 import repro_infra
+import repro_infra/addon_diagnostics
 from repro_core/source_root import publicCliImagePath
 import repro_profile_compile
 # For `ProfileBuildAction`, which the resolver signature below names
@@ -189,5 +190,8 @@ proc mkRunInfraApplyHook*(stateDir: string;
           message: "generation " & res.generationId & ", applied " &
             $res.appliedCount & ", substituted-from-cache " &
             $res.substitutedFromCacheCount)
+      except EAddOnUnsupportedBase:
+        # Typed through to the agent: an operator action, not a retry.
+        raise
       except CatchableError as e:
         return (ok: false, message: "runInfraApply raised: " & e.msg)

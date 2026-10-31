@@ -48,7 +48,7 @@ proc upToDate(g: Guest; m: SnapshotMirror) =
 proc ubuntuUpgrade(g: Guest; m: SnapshotMirror;
                    step: proc(name: string; ok: bool; detail: string)): bool =
   let r = g.exec("export DEBIAN_FRONTEND=noninteractive http_proxy=" &
-    m.proxyUrl & " HTTP_PROXY=" & m.proxyUrl & "; " &
+    g.guestProxyUrl(m) & " HTTP_PROXY=" & g.guestProxyUrl(m) & "; " &
     "do-release-upgrade -f DistUpgradeViewNonInteractive < /dev/null 2>&1",
     timeoutSec = 7200)
   let tail = r.stdout[max(0, r.stdout.len - 6000) .. ^1]

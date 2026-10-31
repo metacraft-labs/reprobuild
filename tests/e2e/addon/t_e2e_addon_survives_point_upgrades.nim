@@ -37,9 +37,10 @@ const
   ## The archive moment each base is upgraded to: after its point release.
   UpgradeTo = [("debian-13-20260831-amd64", "20260920T000000Z"),
                ("debian-12-20260706-amd64", "20260720T000000Z"),
-               ("ubuntu-24.04-20251213-amd64", "20260301T000000Z")]
+               ("ubuntu-24.04-20251213-amd64", "20260301T000000Z"),
+               ("ubuntu-26.04-20260731-amd64", "20260915T000000Z")]
   DefaultPointBases = "debian-12-20260706-amd64,debian-13-20260831-amd64," &
-                      "ubuntu-24.04-20251213-amd64"
+                      "ubuntu-24.04-20251213-amd64,ubuntu-26.04-20260731-amd64"
 
 proc stampFor(b: BaseImage): string =
   for (n, s) in UpgradeTo:
@@ -57,7 +58,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     m.setTimestamp(stampFor(b))
     record["snapshot"] = %m.timestamp
     let closure = busyboxClosure(m, b)
-    g = newGuest(b)
+    g = newMirroredGuest(b, m)
     g.boot()
     g.prepareMirroredBase(m)
     let (repro, sha) = g.installArtefact()

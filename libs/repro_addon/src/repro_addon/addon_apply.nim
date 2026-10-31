@@ -77,6 +77,7 @@ import ./base_identity
 import ./etc_write
 import ./fingerprint
 import ./generation0
+import ./handback
 import ./host_exec
 import ./health
 import ./ledger
@@ -1720,9 +1721,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # the plan, without re-reading every file list for every operation.
   let driver = if opts.driver != nil: opts.driver else: detectCollisionDriver()
   # --- The base (A10; spec §7.4, §7.9): observed at plan time, recorded
-  # with the generation, and gated by the supported matrix before anything
-  # is observed or written. A replay or a revert finishes or undoes a
-  # switch already under way and is never refused for the base.
+  # with the generation, and gated by the supported matrix. The gate runs
+  # after the base itself and the previous ledger were read (they are what
+  # it checks) and before the collision pass observes any target and before
+  # anything is written. A replay or a revert finishes or undoes a switch
+  # already under way and is never refused for the base; uninstall does not
+  # come through here (spec §6.4, §13 decision 25).
   block:
     var planned = own.resources
     planned.add(user.resources)
@@ -1744,8 +1748,17 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # A package installed or upgraded since that owns a ledger path (spec
   # §7.6, §7.8): the apt hook reported it; every plan and apply reports it
   # as actionable drift, naming the package.
-  for why in newOwnerFindings(previous, driver):
-    result.drift.add(why)
+  # A resource that leaves the profile in this apply is not drift: its
+  # removal hands the path back to the package (``handback.nim``).
+  block:
+    var stillDeclared = Ledger(generation: previous.generation)
+    var declared = initHashSet[string]()
+    for r in own.resources: declared.incl(r.address)
+    for r in user.resources: declared.incl(r.address)
+    for e in previous.entries:
+      if e.resource in declared: stillDeclared.entries.add(e)
+    for why in newOwnerFindings(stillDeclared, driver):
+      result.drift.add(why)
   let newDriver: DriverFactory = proc(): CollisionDriver = driver
   var dropIns = initHashSet[string]()
   var userResources = reshape(user, dropIns)
@@ -1779,10 +1792,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if e.class in FileClasses and e.resource.len > 0:
       prevForm[e.path] = (if e.isLink: "link" else: "copy")
   var prevSha = initTable[string, string]()   # target path -> ledger digest
+  var prevObs = initTable[string, string]()   # target path -> its observation
   var prevOwned = initHashSet[string]()
   for e in previous.entries:
     if e.class in {lcEtcFile, lcUnit, lcDropIn} and e.resource.len > 0:
       prevSha[e.path] = e.sha256
+      prevObs[e.path] = e.observation
       prevOwned.incl(e.path)
     elif e.class == lcDiversion:
       prevOwned.incl("diversion:" & e.path)
@@ -1823,6 +1838,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     inp.desiredSha256 = sha256Hex(inp.desiredContent)
     inp.ledgerOwns = p.targetPath in prevOwned
     inp.ledgerSha256 = prevSha.getOrDefault(p.targetPath)
+    inp.ledgerObservation = prevObs.getOrDefault(p.targetPath)
     var dec: CollisionDecision
     var obs: TargetObservation
     if saved.found: dec = savedDecision(saved.plan)
@@ -1918,6 +1934,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                       else: path in prevOwned)
     inp.ledgerOwnsDiversion = ("diversion:" & path) in prevOwned
     inp.ledgerSha256 = prevSha.getOrDefault(path)
+    inp.ledgerObservation = prevObs.getOrDefault(path)
     var dec: CollisionDecision
     var obs: TargetObservation
     if saved.found: dec = savedDecision(saved.plan)
@@ -2076,6 +2093,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                                           # the state stays, accounted for
   var removedUnits: seq[SystemResource]   # units whose files go
   var removedSysctl: seq[LedgerEntry]     # keys to restore in step 6
+  var handedBack = initHashSet[string]()
+    # `<class> <path>` of every entry whose path a package came to own: its
+    # removal hands the path back (``handback.nim``), so the commit drops
+    # the entry whatever is at the path.
   var planDrift = initTable[string, string]()
     # `<class> <path>` -> what `observeDrift` said when the removal was
     # decided. Before each destroy and each restore the object is observed
@@ -2119,6 +2140,31 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       result.ledgerDiff.add("unlisted\t" & r.address & "\t" & r.address)
       # Its directory entries go with it; a directory something else put a
       # file in is kept, as below.
+      removedEntries.add(entries)
+      continue
+    # A path a package came to own since (spec §4.3, §7.8) is handed back
+    # to it, never deleted: the entry leaves the ledger, the file stays,
+    # and an add-on link there becomes a regular file with the same bytes
+    # (written with the restores, from bytes read now: after the flip the
+    # link no longer resolves).
+    var packageNow = ""
+    for e in entries:
+      let pkg = newPackageOwner(e, driver)
+      if pkg.len > 0:
+        packageNow = pkg
+        handedBack.incl(entryKeyOf(e))
+        if isOwnLinkStill(e):
+          var back = e
+          back.preserved = deferPreserve(handBackBytes(e))
+          back.replaced = "f " & (if e.mode.len > 0: e.mode else: "0644") &
+            " " & (if e.owner.len > 0: e.owner else: "0:0") & " sha256:" &
+            sha256Hex(handBackBytes(e))
+          restore.add(back)
+    if packageNow.len > 0:
+      result.removed.add(r.address)
+      # A resolution, not drift: the ledger diff says what happened.
+      result.ledgerDiff.add("hand-back\t" & entries[^1].path & "\t" &
+        r.address & " (to package " & packageNow & ")")
       removedEntries.add(entries)
       continue
     var drifted: seq[string]
@@ -2966,6 +3012,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           else: false
         if stillThere: put(e)
       for e in removedEntries:
+        if entryKeyOf(e) in handedBack:
+          continue                 # the package's now (``handback.nim``)
         if e.resource in hookKept:
           # Left in place at write time: still the add-on's, kept in the
           # ledger like drift found at plan time.

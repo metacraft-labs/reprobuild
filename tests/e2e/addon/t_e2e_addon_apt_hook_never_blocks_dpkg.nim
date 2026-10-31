@@ -7,9 +7,10 @@
 ## - *removed*: the verify binary is gone (an empty directory is bind-mounted
 ##   over the store directory that holds it) -> ``verify-missing``;
 ## - *fails*: the binary exits 1 -> ``verify-failed``;
-## - *hangs*: the binary ignores SIGTERM and never returns ->
-##   ``verify-timeout``; apt completes within the hook's timeout (60 s) plus
-##   60 s, and nothing of the hung process is left.
+## - *hangs*: the binary ignores SIGTERM, starts a grandchild and never
+##   returns -> ``verify-timeout``; apt completes within the hook's timeout
+##   (60 s) plus 60 s, and nothing of the hung process group is left (the
+##   grandchild included: uutils' ``timeout`` would leave it on 26.04).
 ##
 ## A positive control first: with the real binary the same install succeeds
 ## and records nothing.
@@ -31,17 +32,20 @@ import std/[json, os, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 
 import ./addon_testbed
+import ./snapshot_mirror
+import ./upgrade_support
 
 const
   Gate = "e2e_addon_apt_hook_never_blocks_dpkg"
   HookTimeoutSec = 60
   HangBoundSec = HookTimeoutSec + 60     ## the milestone's bound
   HangDeadlineSec = 300                  ## the gate gives up on apt here
+  Snapshot = "20261028T000000Z"
 
 proc hookExe(g: Guest): string =
   g.run("sed -n 's/.*r=\\([^;]*\\);.*/\\1/p' /etc/apt/apt.conf.d/90repro-addon").strip()
 
-proc runBase(b: BaseImage; record: JsonNode): seq[string] =
+proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest
   let steps = newJArray()
   var fails: seq[string]
@@ -49,9 +53,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
   try:
-    g = newGuest(b)
+    m.setTimestamp(Snapshot)
+    g = newMirroredGuest(b, m)
     g.boot()
-    g.prepareBase()
+    g.prepareMirroredBase(m)
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     g.installEquivs()
@@ -64,7 +69,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          exe.startsWith("/repro/store/"), exe)
     discard g.run("mkdir -p /root/fault-empty; " &
       "printf '#!/bin/sh\\necho forced failure >&2\\nexit 1\\n' > /root/fault-fail; " &
-      "printf '#!/bin/sh\\ntrap \"\" TERM\\nwhile :; do sleep 1; done\\n' > /root/fault-hang; " &
+      "printf '#!/bin/sh\\ntrap \"\" TERM\\nsleep 1717 &\\nwhile :; do sleep 1; done\\n' > /root/fault-hang; " &
       "chmod 0755 /root/fault-fail /root/fault-hang")
     proc install(name: string; deadline: int): tuple[code: int; secs: float; output: string] =
       let t0 = epochTime()
@@ -107,7 +112,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              $r.secs & " s (bound " & $HangBoundSec & " s)")
         step("hangs: nothing of the hung verification is left",
              # The bracket keeps pgrep from matching this shell's own line.
-             g.exec("pgrep -f '[s]ystem addon verify --after-dpkg'").exitCode != 0,
+             g.exec("pgrep -f '[s]ystem addon verify --after-dpkg' || " &
+                    "pgrep -f '[s]leep 1717' || ls /run/repro-addon-hook.* 2>/dev/null").exitCode != 0,
              g.exec("ps axf").stdout)
       let lines = logLines()
       step(f.name & ": the event is recorded (" & f.expect & ")",
@@ -135,15 +141,19 @@ suite Gate:
     if not gatesEnabled():
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just e2e_addon_apt_hook_never_blocks_dpkg)")
     else:
+      let m = startSnapshotMirror(Snapshot)
       var failures: seq[string]
-      for b in selectedBases():
-        let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
-          "backend": "qemu", "mutation": mutation(), "reprobuild": gitHead(),
-          "started": $now().utc}
-        let f = runBase(b, record)
-        record["verdict"] = %(if f.len == 0: "green" else: "red")
-        record["finished"] = %($now().utc)
-        echo "record: ", writeRecord(Gate, record)
-        failures.add(f)
+      try:
+        for b in selectedBases():
+          let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
+            "backend": "qemu", "mutation": mutation(), "reprobuild": gitHead(),
+            "started": $now().utc, "snapshot": Snapshot}
+          let f = runBase(m, b, record)
+          record["verdict"] = %(if f.len == 0: "green" else: "red")
+          record["finished"] = %($now().utc)
+          echo "record: ", writeRecord(Gate, record)
+          failures.add(f)
+      finally:
+        m.stop()
       for f in failures: echo "FAIL ", f
       check failures.len == 0

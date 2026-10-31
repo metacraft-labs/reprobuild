@@ -195,14 +195,24 @@ proc fetchCached(sh: ptr MirrorShared; r: Route): tuple[path: string; code: int]
   if fileExists(path): return (path, 200)
   createDir(parentDir(path))
   let part = path & ".part-" & $getThreadId()
+  # A transfer is published to the cache only when curl finished it: exit 0
+  # (a short body is curl's exit 18, a timeout 28) and the bytes on disk
+  # equal what it downloaded. Anything else is retried, then a 502 -- a
+  # partial file is never cached, so it can never be served again.
   var code = 0
+  var complete = false
   for attempt in 1 .. 3:
+    removeFile(part)
     let (o, rc) = execCmdEx("curl -sS -L --max-time 1800 -o " &
-      quoteShell(part) & " -w '%{http_code}' " & quoteShell(r.upstream))
-    code = (try: parseInt(o.strip()[^3 .. ^1]) except CatchableError: 0)
-    if rc == 0 and code in [200, 404]: break
+      quoteShell(part) & " -w '%{http_code} %{size_download}' " &
+      quoteShell(r.upstream))
+    let w = o.strip().splitWhitespace()
+    code = (try: parseInt(w[^2]) except CatchableError: 0)
+    let got = (try: parseBiggestInt(w[^1]) except CatchableError: -1)
+    complete = rc == 0 and fileExists(part) and getFileSize(part) == got
+    if complete and code in [200, 404]: break
     sleep(2000 * attempt)
-  if code == 200:
+  if code == 200 and complete:
     if r.pinned.len > 0:
       let (d, _) = execCmdEx("sha256sum " & quoteShell(part))
       if d.splitWhitespace()[0] != r.pinned:
@@ -211,7 +221,7 @@ proc fetchCached(sh: ptr MirrorShared; r: Route): tuple[path: string; code: int]
     moveFile(part, path)
     return (path, 200)
   removeFile(part)
-  if code == 404:
+  if code == 404 and complete:
     # Only a timestamped answer is immutable; a missing pool file may be a
     # transient upstream fault, and is not remembered.
     if not immutableByName(r.cacheKey): writeFile(path & ".404", "")
