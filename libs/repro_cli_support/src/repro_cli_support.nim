@@ -1,6 +1,7 @@
 import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
     sets, streams, strtabs, strutils, sysrand, tables, tempfiles, terminal,
     times]
+import std/monotimes
 
 when defined(windows):
   import std/[importutils, winlean]
@@ -25981,7 +25982,15 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       raise
     var startupStdout, startupStderr: StartupOutput
   var readinessError = ""
-  for _ in 0 ..< 300:
+  # A DEADLINE ON THE MONOTONIC CLOCK, NOT AN ITERATION COUNT. 300 polls of
+  # 50 ms gave a live daemon ~15 s to bind, and on a host under heavy load
+  # (~200) a healthy runquotad routinely took longer, so builds failed with
+  # "did not become reachable" against a daemon that was about to answer.
+  # The longer bound only ever applies to a daemon that is ALIVE but slow: the
+  # liveness check below still ends the wait at once when it has exited.
+  const RunQuotaDaemonReadinessTimeout = initDuration(seconds = 120)
+  let readinessDeadline = getMonoTime() + RunQuotaDaemonReadinessTimeout
+  while getMonoTime() < readinessDeadline:
     when not defined(windows):
       drainStartupOutput(startupStdout, cint(result.outputHandle))
       drainStartupOutput(startupStderr, cint(result.errorHandle))

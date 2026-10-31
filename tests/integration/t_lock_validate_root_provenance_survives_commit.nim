@@ -234,6 +234,10 @@ suite "committed root provenance validation":
     withFixture("sibling"):
       let sibling = project / "deps" / "sibling"
       seedRepo(sibling)
+      # An external VCS dependency is only lockable with a fetch URL; stable
+      # coordinates keep the record independent of the scratch path.
+      discard mustRun(["git", "remote", "add", "origin",
+        "https://example.invalid/sibling.git"], sibling)
       writeFile(sibling / "repro.nim", "import repro_project_dsl\npackage sib:\n  build:\n    discard aggregate(\"sib\", actions = @[])\n")
       discard mustRun(["git", "add", "repro.nim"], sibling)
       discard mustRun(["git", "commit", "-m", "Declare sibling"], sibling)

@@ -919,7 +919,17 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # `connectDefault` client, the same connect
                # `isRunQuotaDaemonReachable` makes. None starts a process.
                "declareRunQuotaPools", "reportPoolDeclarationUnsupported",
-               "runQuotaDaemonMemoryBudget"]),
+               "runQuotaDaemonMemoryBudget",
+               # The daemon handover (7e1206be34, "make way for runquotad
+               # from another build"). `decideRunQuotaHandover` digests the
+               # candidate image file and sends a `RetireDaemon` request over
+               # a `connectDefault` client; it may ask a daemon to EXIT but
+               # never starts one — starting this install's replacement stays
+               # with the caller's existing spawn path. The other two close
+               # or report the connection held to an adopted daemon. None
+               # starts a process.
+               "decideRunQuotaHandover", "holdsAdoptedDaemon",
+               "releaseAdoptedDaemonHold"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
@@ -2560,11 +2570,18 @@ suite "every_launch_path_is_monitored":
     check countOccurrences(testSupport,
       "ioMonitorCliArgs* = " & Triple) == 1
 
-    # 2. The definition in repro_cli_support.
+    # 2. The definition. Since e6e5f5ffe9 it lives in the self-spawn image
+    #    guard module, `repro_cli_support/self_spawn_image`, which
+    #    ``repro_cli_support`` re-exports; both halves are pinned, so the
+    #    constant cannot move again (or lose its re-export) unnoticed.
     let cliSupport = readFile(root /
       "libs/repro_cli_support/src/repro_cli_support.nim")
-    check countOccurrences(cliSupport,
+    let selfSpawnImage = readFile(root /
+      "libs/repro_cli_support/src/repro_cli_support/self_spawn_image.nim")
+    check countOccurrences(selfSpawnImage,
       "const internalIoMonitorArgs* = " & Triple) == 1
+    check countOccurrences(cliSupport,
+      "self_spawn_image.internalIoMonitorArgs") == 1
 
     # 3. The dispatcher that has to recognise it, both for the self-spawn
     #    (``internal``) and for the operator-facing (``debug``) spelling.

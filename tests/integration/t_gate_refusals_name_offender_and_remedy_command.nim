@@ -745,7 +745,12 @@ suite "RA-28 — refusals name the offender and a remedy command":
         reproBin, "develop", "--all", "--reset",
         "--workspace-root=" & workspaceRoot]))
       checkpoint("repro develop --all --reset: " & res.output)
-      check res.code == 1
+      # Exit 2: develop reads the committed lock strictly, so the lock
+      # parser's refusal of the escaping revision surfaces as a public
+      # backend that could not be read, which CLI/develop.md refuses with
+      # exit 2 ("a public or team backend that cannot be read → refuse").
+      # The parser's own diagnostic is carried through unchanged.
+      check res.code == 2
       # The offender is the dependency AND the value that made it
       # undeliverable; the remedy is the command that rewrites the lock,
       # because a lock is machine-written and "edit it" is not an
