@@ -52,8 +52,10 @@ proc materialiseHandBack*(e: LedgerEntry; bytes: string) =
   ## ``bytes`` (the ledger's mode and owner, else ``0644 root``). A regular
   ## file is left as it is: it is the package's bytes, or the add-on's kept
   ## by dpkg, and in both cases dpkg's now.
+  ## The file is written beside the link, fsynced and renamed over it: the
+  ## path never goes missing, and a crash leaves the link or the file.
   if not isOwnLinkStill(e): return
-  discard removeLeafNoFollow(e.path)
   let mode = if e.mode.len > 0: e.mode else: "0644"
   let (uid, gid) = parseOwner(if e.owner.len > 0: e.owner else: "0:0")
-  writeFileNoFollow(e.path, bytes, parseOctInt(mode), uid, gid)
+  writeFileNoFollow(e.path, bytes, parseOctInt(mode), uid, gid,
+                    replacingLinkTo = e.linkTarget)

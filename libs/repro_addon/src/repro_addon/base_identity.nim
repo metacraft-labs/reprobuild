@@ -74,13 +74,16 @@ const
     ## Under ``generations/<id>/``, beside the generation's ledger.
   DpkgStatusPath* = "/var/lib/dpkg/status"
   AddonBaseTools* = ["/usr/bin/systemctl", "/usr/bin/dpkg", "/usr/bin/apt-get",
-                     "/usr/bin/timeout", "/usr/bin/logger", "/bin/sh"]
+                     "/bin/sh", "/usr/bin/setsid", "/usr/bin/sleep",
+                     "/usr/bin/cat", "/usr/bin/date", "/usr/bin/logger"]
     ## What the add-on itself runs on every base: PID 1's ``systemctl``,
     ## the package database the collision observer reads, apt (the hook),
-    ## ``timeout`` and ``logger`` (the hook's wrapper) and ``/bin/sh``. The
-    ## packages are whatever owns these files on the base -- ``coreutils``
-    ## on Debian, ``coreutils-from-uutils`` / ``rust-coreutils`` on Ubuntu
-    ## 26.04 -- found through dpkg's records, the link followed.
+    ## and every program the hook's wrapper runs (``generation0.
+    ## aptHookCommand``: ``/bin/sh``, ``setsid``, ``sleep``, ``cat``,
+    ## ``date``, ``logger``). The packages are whatever owns these files on
+    ## the base -- every owner along the link chain, so on Ubuntu 26.04 both
+    ## ``coreutils-from-uutils`` (the ``/usr/bin`` links) and
+    ## ``rust-coreutils`` (their targets) -- found through dpkg's records.
   ExecKeys = ["ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop",
               "ExecStopPost", "ExecReload", "ExecCondition"]
     ## Every command-line setting of systemd.service(5) ("Command lines";
@@ -438,6 +441,33 @@ proc dpkgNativeArchitecture*(): string =
   except CatchableError:
     ""
 
+proc linkChain*(path: string): seq[string] =
+  ## ``path`` and every path its symbolic links lead to, in order (at most
+  ## 40 hops, the kernel's own limit); each relative target is resolved
+  ## against the link's directory.
+  result = @[path]
+  var cur = path
+  for _ in 0 ..< 40:
+    if not symlinkExists(cur): break
+    var t: string
+    try: t = expandSymlink(cur)
+    except OSError: break
+    if not t.isAbsolute: t = cur.parentDir / t
+    t = normalizedPath(t)
+    if t in result: break
+    result.add(t)
+    cur = t
+
+proc toolOwners*(tool: string; driver: CollisionDriver): seq[string] =
+  ## Every package that owns a path on ``tool``'s link chain (each path in
+  ## both of its merged-``/usr`` spellings).
+  for p in linkChain(tool):
+    for c in mergedUsrAliases(p):
+      let o = driver.packageOwner(c).package
+      if o.len > 0 and o notin result:
+        result.add(o)
+        break
+
 proc observeBaseIdentity*(ledger: Ledger;
                           resources: openArray[SystemResource];
                           driver: CollisionDriver): BaseIdentity =
@@ -461,16 +491,7 @@ proc observeBaseIdentity*(ledger: Ledger;
   # coupled unit runs.
   var names = initHashSet[string]()
   for tool in AddonBaseTools:
-    var cands = mergedUsrAliases(tool)
-    try:
-      let real = expandFilename(tool)
-      if real != tool: cands.add(mergedUsrAliases(real))
-    except OSError: discard
-    for c in cands:
-      let p = driver.packageOwner(c).package
-      if p.len > 0:
-        names.incl(p)
-        break
+    for p in toolOwners(tool, driver): names.incl(p)
   for e in ledger.entries:
     let p = packageOfObservation(e.observation)
     if p.len > 0: names.incl(p)

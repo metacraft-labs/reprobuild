@@ -373,13 +373,17 @@ proc aptHookCommand*(reproExe: string;
       # FALSIFYING MUTATION: no deadline; a hung verification stalls dpkg.
       "w=0; "
     else:
-      # The watchdog acts only while ``$f`` exists: the hook removes it as
-      # soon as the verification has ended, so a watchdog that outlives it
-      # can never signal a group a later process reused the id of.
-      setsidTool & " -w /bin/sh -c 'sleep $1; [ -f $2 ] || exit 0; " &
-        "g=$(cat $2); kill -TERM -$g; sleep " & g & "; [ -f $2 ] || exit 0; " &
-        "kill -KILL -$g' repro-addon-hook-watchdog " & t &
-        " $f </dev/null >/dev/null 2>&1 & w=$!; "
+      # The watchdog acts only while the verification's job (``$p``) is
+      # alive -- the hook kills the watchdog as soon as it has ended, so a
+      # watchdog that outlives it cannot signal a group whose id a later
+      # process reused -- and it signals the group named in ``$f``, or ``$p``
+      # itself when ``$f`` is empty or missing (``/run`` full): a background
+      # job of a non-interactive shell never leads a process group, so
+      # ``setsid`` did not fork and ``$p`` is the group's id.
+      setsidTool & " -w /bin/sh -c 'sleep $1; kill -0 $3 2>/dev/null || exit 0; " &
+        "g=$(cat $2 2>/dev/null); [ -z $g ] && g=$3; kill -TERM -$g; " &
+        "sleep " & g & "; kill -0 $3 2>/dev/null || exit 0; kill -KILL -$g' " &
+        "repro-addon-hook-watchdog " & t & " $f $p </dev/null >/dev/null 2>&1 & w=$!; "
   let ending =
     when mutated("apt-hook-without-exit0"):
       # FALSIFYING MUTATION: the verification's status is the hook's, so a

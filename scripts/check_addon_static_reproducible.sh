@@ -10,15 +10,18 @@
 # at one path is reused at the other. Both are removed afterwards. Run inside
 # the reprobuild dev shell (scripts/build_addon_static.sh needs it).
 #
-# Negative control: REPRO_ADDON_BUILD_IN_PLACE=1 (passed through to the
-# builds) compiles each worktree at its own path, and the check must fail.
+# Negative control: REPRO_ADDON_CHECK_NIM=<a nim binary> builds with that
+# compiler instead of the dev shell's; with the fork before a0fabc99 (it
+# hashed types by absolute path) the check must fail.
 #
-# Why it can differ at all: Nim hashes types by the absolute path of the file
-# that defines them, so the build runs at a canonical path
-# (build_addon_static.sh, `in_canonical_path`); this check fails if that, or
-# anything else path-dependent, regresses.
+# Why it could differ: the Nim compiler hashed each type by the absolute path
+# of the file defining it, and compiled the hashes into every `of` check.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [ -n "${REPRO_ADDON_CHECK_NIM:-}" ]; then
+  export PATH="$(dirname "$REPRO_ADDON_CHECK_NIM"):$PATH"
+fi
+echo "check_addon_static_reproducible: compiler $(command -v nim)"
 arch="${1:-amd64}"
 rev="$(git rev-parse HEAD)"
 ws="$(cd .. && pwd -P)"

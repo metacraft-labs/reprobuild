@@ -7,6 +7,10 @@
 ## - *removed*: the verify binary is gone (an empty directory is bind-mounted
 ##   over the store directory that holds it) -> ``verify-missing``;
 ## - *fails*: the binary exits 1 -> ``verify-failed``;
+## - *hangs-run-full*: the same with ``/run`` full (filled to its last block),
+##   so the hook cannot record the verification's group id there and its
+##   watchdog must fall back to the job's pid -> ``verify-timeout``, bounded
+##   the same way;
 ## - *hangs*: the binary ignores SIGTERM, starts a grandchild and never
 ##   returns -> ``verify-timeout``; apt completes within the hook's timeout
 ##   (60 s) plus 60 s, and nothing of the hung process group is left (the
@@ -95,6 +99,12 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       (name: "fails", setup: "mount --bind /root/fault-fail " & exe,
        expect: "verify-failed exit=1"),
       (name: "hangs", setup: "mount --bind /root/fault-hang " & exe,
+       expect: "verify-timeout"),
+      # /run full: the watchdog cannot learn the group id from its file and
+      # must fall back to the verification job's own pid.
+      (name: "hangs-run-full", setup: "mount --bind /root/fault-hang " & exe &
+         "; dd if=/dev/zero of=/run/repro-fixture-fill bs=1M >/dev/null 2>&1; " &
+         "test \"$(df --output=avail /run | tail -1)\" -eq 0",
        expect: "verify-timeout")]
     var timings = newJObject()
     for f in faults:
@@ -106,11 +116,11 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       timings[f.name] = %r.secs
       step(f.name & ": apt-get install succeeds", r.code == 0,
            "exit " & $r.code & " after " & $r.secs & " s\n" & r.output)
-      if f.name == "hangs":
-        step("hangs: apt completed within the timeout plus 60 s",
+      if f.name in ["hangs", "hangs-run-full"]:
+        step(f.name & ": apt completed within the timeout plus 60 s",
              r.code == 0 and r.secs <= HangBoundSec.float,
              $r.secs & " s (bound " & $HangBoundSec & " s)")
-        step("hangs: nothing of the hung verification is left",
+        step(f.name & ": nothing of the hung verification is left",
              # The bracket keeps pgrep from matching this shell's own line.
              g.exec("pgrep -f '[s]ystem addon verify --after-dpkg' || " &
                     "pgrep -f '[s]leep 1717' || ls /run/repro-addon-hook.* 2>/dev/null").exitCode != 0,
@@ -121,7 +131,8 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       step(f.name & ": the event is in the journal",
            f.expect.split(' ')[0] in g.exec("journalctl -o cat --no-pager " &
              "-t repro-addon-apt-hook").stdout, "")
-      discard g.exec("umount " & (if f.name == "removed": parentDir(exe) else: exe))
+      discard g.exec("umount " & (if f.name == "removed": parentDir(exe) else: exe) &
+                     "; rm -f /run/repro-fixture-fill")
     record["installSeconds"] = timings
     let v = g.exec(repro & " system addon verify")
     step("after the faults: verify reports ok", v.exitCode == 0, v.stdout & v.stderr)

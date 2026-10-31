@@ -31,22 +31,23 @@
 ## stub because the build host's systemd is not a guest's (the driver's
 ## documented seam).
 
-import std/[os, osproc, strutils, tables, tempfiles, times, unittest]
+import std/[os, osproc, posix, strutils, tables, tempfiles, times, unittest]
 
 import repro_infra/[addon_diagnostics, profile]
 
-import repro_addon/[apt_hook, base_identity, collision, fingerprint, generation0, ledger, mutations]
+import repro_addon/[apt_hook, base_identity, collision, etc_write, fingerprint, generation0, handback, ledger, mutations]
 
 proc tool(name: string): string =
   result = findExe(name, followSymlinks = false)
   doAssert result.len > 0, name & " is not on PATH"
 
-proc runHook(exe, logPath: string; timeoutSec, boundSec: int):
-    tuple[code: int; secs: float; timedOut: bool] =
+proc runHook(exe, logPath: string; timeoutSec, boundSec: int;
+             pidDir = ""): tuple[code: int; secs: float; timedOut: bool] =
   ## Run the hook command; give up (and kill it) after ``boundSec``.
   let cmd = aptHookCommand(exe, timeoutSeconds = timeoutSec,
     logPath = logPath, setsidTool = tool("setsid"),
-    loggerTool = "/nonexistent/logger", pidDir = logPath.parentDir)
+    loggerTool = "/nonexistent/logger",
+    pidDir = (if pidDir.len > 0: pidDir else: logPath.parentDir))
   let t0 = epochTime()
   let p = startProcess(tool("sh"), args = ["-c", cmd],
                        options = {poStdErrToStdOut})
@@ -86,6 +87,24 @@ suite "the apt hook's wrapper":
     let r = runHook(dir / "absent", log, 2, 20)
     check r.code == 0
     check "verify-missing" in readFile(log)
+
+  test "a hung verification is bounded when the group id cannot be recorded":
+    # ``/run`` full (or unwritable): ``$f`` is never written, and the
+    # watchdog must fall back to the job's own pid, which is the group's.
+    removeFile(log)
+    let ro = dir / "full-run"
+    createDir(ro)
+    setFilePermissions(ro, {fpUserRead, fpUserExec})
+    let marker = $(100000 + (getCurrentProcessId() + 7) mod 800000)
+    let r = runHook(script("hang2", "trap '' TERM\nsleep " & marker & " &\n" &
+                    "while :; do sleep 1; done"), log, 2, 20, pidDir = ro)
+    check not r.timedOut
+    check r.code == 0
+    check r.secs < 2.0 + 5.0 + 3.0
+    check fileExists(log) and "verify-timeout" in readFile(log)
+    sleep(500)
+    check execCmd("pgrep -x -f 'sleep " & marker & "' >/dev/null") != 0
+    discard execCmd("pkill -KILL -x -f 'sleep " & marker & "' >/dev/null 2>&1")
 
   test "the binary test runs inside the bounded group":
     let c = aptHookCommand("/repro/store/x/bin/repro")
@@ -310,3 +329,52 @@ suite "the agent's drift report reaches the evidence path":
     let j = readFile(seen)
     check "-t repro-addon-agent -p user.warning" in j
     check "repro-addon agent: drift" in j and "/etc/x" in j
+
+suite "the add-on's own tools and a hand-back":
+  test "every package along a tool's link chain is an owner":
+    let root = createTempDir("repro-chain-", "")
+    createDir(root / "usr/bin")
+    createDir(root / "usr/lib/cargo")
+    writeFile(root / "usr/lib/cargo/coreutils", "#!/bin/sh\n")
+    createSymlink("../lib/cargo/coreutils", root / "usr/bin/timeout")
+    createDir(root / "var/lib/dpkg/info")
+    writeFile(root / "var/lib/dpkg/status", "")
+    writeFile(root / "var/lib/dpkg/info/coreutils-from-uutils.list",
+              root / "usr/bin/timeout" & "\n")
+    writeFile(root / "var/lib/dpkg/info/rust-coreutils.list",
+              root / "usr/lib/cargo/coreutils" & "\n")
+    let d = newDpkgDriver(root, proc(u: string): UnitProvision =
+      UnitProvision(loadState: "not-found"))
+    check linkChain(root / "usr/bin/timeout") ==
+      @[root / "usr/bin/timeout", root / "usr/lib/cargo/coreutils"]
+    check toolOwners(root / "usr/bin/timeout", d) ==
+      @["coreutils-from-uutils", "rust-coreutils"]
+
+  test "the hook's programs are the identity's tools":
+    for t in ["/usr/bin/setsid", "/usr/bin/sleep", "/usr/bin/logger", "/bin/sh"]:
+      check t in AddonBaseTools
+    check "/usr/bin/timeout" notin AddonBaseTools
+
+  test "a hand-back renames a file over the add-on's link":
+    let dir = createTempDir("repro-handback-", "")
+    writeFile(dir / "target", "add-on bytes\n")
+    createSymlink(dir / "target", dir / "x.conf")
+    let owner = $getuid() & ":" & $getgid()
+    let e = LedgerEntry(class: lcEtcFile, path: dir / "x.conf", form: "link",
+                        linkTarget: dir / "target", mode: "0644", owner: owner)
+    materialiseHandBack(e, "add-on bytes\n")
+    check not symlinkExists(dir / "x.conf")
+    check readFile(dir / "x.conf") == "add-on bytes\n"
+    var leftovers = 0
+    for k, f in walkDir(dir):
+      if ".repro-tmp-" in f: inc leftovers
+    check leftovers == 0
+    # A link that is not the add-on's (another target) is refused.
+    createSymlink(dir / "elsewhere", dir / "y.conf")
+    let e2 = LedgerEntry(class: lcEtcFile, path: dir / "y.conf", form: "link",
+                         linkTarget: dir / "target", mode: "0644", owner: owner)
+    materialiseHandBack(e2, "x")          # not its link: left as it is
+    check symlinkExists(dir / "y.conf")
+    expect CatchableError:
+      writeFileNoFollow(dir / "y.conf", "x", 0o644,
+                        replacingLinkTo = dir / "target")

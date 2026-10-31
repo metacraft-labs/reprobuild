@@ -788,15 +788,17 @@ proc restorePreserved*(e: LedgerEntry): bool =
   if not fileExists(e.preserved):
     raise newException(AddonApplyError, "preserved bytes for " & e.path &
       " are missing at " & e.preserved)
-  if e.isLink and symlinkExists(e.path) and expandSymlink(e.path) == e.linkTarget:
-    # The add-on's own link into the static tree (the ledger names its
-    # target; the restore loop checked nothing else moved it). The writer
-    # below rightly refuses a link on the leaf, so the link goes first:
-    # the restored bytes are a regular file where the link was.
-    discard removeLeafNoFollow(e.path)
+  # The add-on's own link into the static tree (the ledger names its
+  # target; the restore loop checked nothing else moved it) is replaced by
+  # the restored file in one rename, never removed first: the path is never
+  # missing, and a crash leaves the link or the file. The writer refuses a
+  # link to anything else.
+  let ownLink = e.isLink and symlinkExists(e.path) and
+                expandSymlink(e.path) == e.linkTarget
   let (mode, owner) = parseEtcFileValue(e.replaced)
   let (uid, gid) = parseOwner(owner)
-  writeFileNoFollow(e.path, readFile(e.preserved), parseOctInt(mode), uid, gid)
+  writeFileNoFollow(e.path, readFile(e.preserved), parseOctInt(mode), uid, gid,
+                    replacingLinkTo = (if ownLink: e.linkTarget else: ""))
   true
 
 # ---------------------------------------------------------------------------

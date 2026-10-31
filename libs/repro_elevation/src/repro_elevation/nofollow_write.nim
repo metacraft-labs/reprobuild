@@ -203,12 +203,16 @@ proc syncDir(dirfd: cint; what: string) =
     raiseOSError(osLastError(), "fsync directory of " & what)
 
 proc writeFileNoFollow*(path, content: string; mode: int;
-                        uid = -1; gid = -1) =
+                        uid = -1; gid = -1; replacingLinkTo = "") =
   ## Write ``content`` to ``path`` atomically, never through a link (see
   ## the module header). ``mode`` is the final mode; ``uid``/``gid`` set
   ## the owner when non-negative. The parent directory must exist. Raises
   ## ``SymlinkOnPath`` for a link anywhere on the path, ``OSError`` for
   ## any other failure; a failure leaves no temporary file behind.
+  ## ``replacingLinkTo``: the leaf may be a symbolic link, but only one
+  ## pointing at exactly this target; the file is renamed over it, so the
+  ## path goes from the link to the file with no moment in which it is
+  ## missing.
   let parts = components(path)
   let leaf = parts[^1]
   let dirfd = openDirNoFollow(parentDir(path))
@@ -216,7 +220,15 @@ proc writeFileNoFollow*(path, content: string; mode: int;
   # The leaf itself: a link is refused by name, before any write.
   let (kind, _) = statLeaf(dirfd, leaf)
   if kind == lkLink:
-    raiseSymlinkOnPath(path)
+    if replacingLinkTo.len == 0:
+      raiseSymlinkOnPath(path)
+    var buf = newString(4096)
+    let n = c_readlinkat(dirfd, leaf.cstring, buf.cstring, csize_t(buf.len))
+    if n < 0:
+      raiseOSError(osLastError(), "readlink " & path)
+    buf.setLen(n)
+    if buf != replacingLinkTo:
+      raiseSymlinkOnPath(path)
   if kind == lkDir:
     raise newException(NoFollowError, path & " is a directory")
   let tmp = tmpName(leaf)
