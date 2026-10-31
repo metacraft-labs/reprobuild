@@ -69,8 +69,10 @@ import repro_elevation/posix_system_driver
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
+from repro_profile import ProfileBuildAction
 import repro_local_store/store
 
+import ./agent_record
 import ./collision
 import ./addon_secrets
 import ./base_identity
@@ -188,6 +190,17 @@ type
       ## Queue step 7's jobs without waiting for them (``--no-block``): a
       ## recovery at boot, which must never wait on the boot transaction.
       ## The confirm step still waits for the health checks.
+    buildActions*: seq[ProfileBuildAction]
+      ## The action edges the deploy agent's compiled profile carries (its
+      ## build outputs: substitute-only, digest-pinned store prefixes), run
+      ## by the infra apply before the live state as for any apply. Empty
+      ## for an operator apply of canonical text, a rollback and a replay:
+      ## their prefixes are already realised and held by the generations'
+      ## store roots.
+    buildActionDispatcher*: BuildActionDispatcher
+    agentRecord*: AgentRecord
+      ## A deploy-agent apply: the manifest's ``deploymentId`` and sequence,
+      ## recorded in the generation it commits (spec §7.4).
     confirmCapSec*: int
       ## When > 0, step 8 waits at most this long, whatever the profile's
       ## ``confirmTimeout``: a recovery at boot runs a replay's confirm
@@ -1625,6 +1638,24 @@ proc commitSecretsOf*(stateDir: string; l: SecretsLayout; generationId: string) 
   if fileExists(secretsSourcePath(stateDir)):
     removeFile(secretsSourcePath(stateDir))
 
+proc unitFileChanged*(isNew: bool; verdict: string;
+                      prevSha256, renderedSha256: string;
+                      closureMissing, loadedStale: bool): bool =
+  ## Whether a unit's definition changes in this apply, for the §7.3 table
+  ## (a running unit whose definition changed is restarted).
+  ##
+  ## A unit the previous ledger does not know is a change, except one the
+  ## switch adopts (§4.3: present, unowned, identical -- or claimed): the
+  ## switch writes nothing, so the definition systemd runs is the one on
+  ## disk, unless systemd has not loaded those bytes yet (``loadedStale``,
+  ## its ``NeedDaemonReload``). This is what lets a migration (§9) take over
+  ## the units an agent applied outside the switch without restarting them.
+  if closureMissing: return true
+  if isNew:
+    return verdict != $cvAdopt or loadedStale
+  prevSha256 != renderedSha256 or
+    verdict in [$cvCreate, $cvUpdate, $cvReconcile, $cvReplace]
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -1632,6 +1663,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## reports an error -- after recording, in the ledger, every object that
   ## apply did create, so uninstall still finds them.
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  if opts.agentRecord.present and opts.agentSequence > 0'u64 and
+      opts.agentRecord.sequence != opts.agentSequence:
+    # The generation would carry two different sequences, and the floor
+    # (§7.5) and the agent record (§7.4) would disagree about its age.
+    raise newException(AddonApplyError, "the agent record's sequence " &
+      $opts.agentRecord.sequence & " is not the apply's sequence " &
+      $opts.agentSequence)
   if not opts.planOnly:
     # The before-each-write re-check runs on the in-process apply path,
     # which is the one an add-on apply takes: as root, in this process. A
@@ -1745,11 +1783,23 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   let secretsSource = selectSecretsSource(stateDir, secretsLayout, opts,
                                           purpose, committedPrevious)
   var ownAddresses = initHashSet[string]()
-  for r in own.resources: ownAddresses.incl(r.address)
+  var ownTargets = initHashSet[string]()
+  for r in own.resources:
+    ownAddresses.incl(r.address)
+    ownTargets.incl(realWorldIdentity(r))
   for r in user.resources:
     if r.address in ownAddresses:
       raise newException(AddonApplyError, "the profile declares " &
         r.address & ", which is one of the add-on's own objects")
+    # The same object under another address: two writers of one path in
+    # one generation. Generation 0's objects (the deploy-signer anchors,
+    # caches.conf, the add-on's units) stay the add-on's; a profile that
+    # wants other content asks for it at bootstrap, not by overwriting.
+    let id = realWorldIdentity(r)
+    if id in ownTargets:
+      raise newException(AddonApplyError, "the profile declares " &
+        r.address & " (" & id & "), which is one of the add-on's own " &
+        "objects (generation 0); drop it from the profile")
   for a in adoptAddresses:
     var declared = false
     for r in user.resources:
@@ -2348,7 +2398,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var dropInsChangedFor = initHashSet[string]()     # unit names
   for p in plans:
     if p.r.kind == srkSystemdSystemDropIn and p.verdict != $cvNoOp:
-      dropInsChangedFor.incl(p.r.diUnit)
+      # An adopted drop-in is not written (§4.3), so it changes the unit
+      # only when systemd has not loaded it yet (see `unitFileChanged`).
+      if p.verdict != $cvAdopt or
+          readUnitProvision(p.r.diUnit).needDaemonReload:
+        dropInsChangedFor.incl(p.r.diUnit)
   for r in removed:
     if r.kind == srkSystemdSystemDropIn: dropInsChangedFor.incl(r.diUnit)
   var addressByKey = initTable[string, string]()
@@ -2402,9 +2456,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       let closureMissing = r.suAptClosureLock.len > 0 and
         not aptClosureRealised(AddOnSystemStoreRoot,
                                parseAptClosureLock(r.suAptClosureLock))
-      f.fileChanged = f.isNew or closureMissing or
-        prevUnits[r.suName].sha256 != sha256Hex(rendered) or
-        p.verdict in [$cvCreate, $cvUpdate, $cvReconcile, $cvReplace]
+      f.fileChanged = unitFileChanged(f.isNew, p.verdict,
+        (if f.isNew: "" else: prevUnits[r.suName].sha256), sha256Hex(rendered),
+        closureMissing,
+        loadedStale = f.isNew and p.verdict == $cvAdopt and
+          readUnitProvision(r.suName).needDaemonReload)
       f.dropInsChanged = r.suName in dropInsChangedFor
       if f.exclusive:
         # Conflicts= as systemd reads it -- drop-ins, continuations,
@@ -3125,9 +3181,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                         renderProfileText(storedNow), 0o600)
         # The base it was applied on (spec §7.4).
         writeFileAtomic(gd / BaseIdentityFileName, baseIdentityText, 0o644)
+        # The manifest sequence (A8's floor, §7.5) and the deploy-agent
+        # record it belongs to (§7.4). One value: `runAddonApply` refuses
+        # options whose two copies differ.
         if opts.agentSequence > 0'u64:
           writeFileAtomic(gd / AgentSequenceFileName,
                           $opts.agentSequence & "\n", 0o644)
+        if opts.agentRecord.present:
+          writeFileAtomic(gd / AgentRecordName, render(opts.agentRecord),
+                          0o644)
       seamPause(stateDir, seamPrefix & "step-8")
       # A8: below the rollback floor the new generation stays, and what
       # failed is reported (`failed-at-floor`) instead of withholding the
@@ -3143,6 +3205,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     result.infra = runInfraApply(composedText, ApplyOptions(
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
       noPreview: true, elevationMode: emBroker,
+      buildActions: opts.buildActions,
+      buildActionDispatcher: opts.buildActionDispatcher,
       extraDestroyResources: destroy, destroysFirst: true,
       preWriteGuard: seamedGuard(stateDir, seamPrefix,
         (when mutated("pause-before-write-no-recheck"):

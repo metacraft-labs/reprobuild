@@ -50,8 +50,11 @@ import repro_deploy_agent/secrets
 import repro_peer_cache/auth as peerAuth
 import repro_home_intent/host_identity
 import repro_profile
-from repro_profile_compile import defaultSystemPlanTarget
 import ./infra
+import repro_addon/addon_apply
+import repro_addon/agent_switch
+import repro_elevation
+import repro_profile_compile
 
 type
   DeployAgentFlags = object
@@ -338,10 +341,46 @@ proc runDeployAgentCommand*(args: seq[string]): int =
         outBuildActions = addr outBuildActions, target = capturedTarget,
         declaredInputs = bundlePaths)
 
-  let deps = AgentDeps(
-    apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
-      hostIdentity = host,
-      profileResolver = resolver))
+  # On a ReproOS add-on host every agent apply goes through the add-on
+  # switch (spec §9, §9.1): it is ledgered, retained as an add-on generation
+  # recording the manifest's deployment and sequence (§7.4), reachable by
+  # `repro system rollback` (§7.5), and an operator rollback pauses the
+  # agent (§9.3). The legacy `--secrets-dir` delivery above is unchanged:
+  # the tick still opens the sealed section into it before the apply. A
+  # host whose agent applied outside the switch before this build is first
+  # taken over by one switch of the profile it last applied (§9
+  # "Migration"), which adopts every object without writing or restarting.
+  let addonState = hostAddonStateDir()
+  var deps: AgentDeps
+  if isAddonHost(addonState) and
+      absolutePath(addonState) != absolutePath(flags.stateDir):
+    if needsLegacyMigration(addonState, flags.stateDir):
+      let legacyGen = legacyAgentGeneration(flags.stateDir)
+      try:
+        let r = migrateLegacyAgentState(addonState, flags.stateDir,
+          flags.target, host)
+        echo "repro deploy-agent: migration: add-on generation " &
+          r.generationId & " took over agent generation " & legacyGen &
+          " (applied " & $r.infra.appliedCount & ", no-op " &
+          $r.infra.noOpCount & ")"
+      except CatchableError as e:
+        let msg = "migrating agent generation " & legacyGen & " into the " &
+          "add-on switch failed; nothing was applied: " & e.msg
+        stderr.writeLine("repro deploy-agent: " & msg)
+        var rec = tickStatusForRaise(flags.target, msg)
+        rec.exitCode = 1
+        rec.errorCode = "addon_migration_failed"
+        recordTick(flags.stateDir, flags.target, rec)
+        return 1
+    let ctx = FixtureContext(filePrefix: flags.stateDir)
+    deps = AgentDeps(
+      apply: addonAgentApplyHook(addonState, host, flags.stateDir, resolver,
+        mkBuildActionDispatcher(flags.cacheRoot, ctx)))
+  else:
+    deps = AgentDeps(
+      apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
+        hostIdentity = host,
+        profileResolver = resolver))
 
   # `runAgentTickRecorded`, not `runAgentTick`: it runs the same tick, resolves
   # the same exit code, and additionally leaves the durable record — including

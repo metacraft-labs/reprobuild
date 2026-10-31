@@ -49,6 +49,7 @@ import repro_local_store/store as local_store
 
 import ./addon_apply
 import ./addon_rollback
+import ./agent_record
 import ./apt_hook
 import ./base_identity
 import ./bootstrap
@@ -119,7 +120,9 @@ commands:
       The apply unit (repro-agent-apply.service, root, no network): copy
       the staging area, verify everything again, apply.
   resume
-      Let the deploy agent converge again after a local rollback paused it.
+      Let the deploy agent converge again after a local rollback paused it
+      (spec §9.3): removes the pause marker of every agent the rollback
+      paused. Exits 0 whether or not one was there.
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -735,9 +738,14 @@ proc runAddonRollbackCli*(args: seq[string]): int =
       r.toGeneration & " (applied as generation " & r.apply.generationId &
       ")\n")
     # The deploy agent only moves forward: a local rollback pauses it
-    # until `repro system addon resume` (spec §9.3).
+    # until `repro system addon resume` (spec §9.3). The rollback itself
+    # paused every agent registered with the add-on (`pausedAgents`);
+    # A8's pause covers a configured agent that has not applied yet.
     pauseAfterRollback(r.apply.generationId)
-    if fileExists(AgentConfPath):
+    if r.pausedAgents.len > 0:
+      stdout.write("paused the deploy agent of " & r.pausedAgents.join(", ") &
+        " (spec §9.3); `repro system addon resume` lets it apply again\n")
+    elif fileExists(AgentConfPath):
       stdout.write("the deploy agent is paused (aoPaused) until " &
         "`repro system addon resume`\n")
     0

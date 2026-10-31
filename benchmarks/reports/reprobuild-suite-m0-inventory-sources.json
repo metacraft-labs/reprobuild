@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2538,
+    "nimTestBinaries": 2540,
     "pureUnitConsolidationGroups": 73,
-    "pureUnitTests": 702,
+    "pureUnitTests": 703,
     "staticallyDetectedRuntimeCompilerFlowTests": 132,
-    "testEntries": 2578
+    "testEntries": 2580
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1460,9 +1460,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1410,
+      "integration": 1411,
       "platform/destructive": 161,
-      "pure unit": 702,
+      "pure unit": 703,
       "unclassified": 287
     },
     "graphOwnedTestArtifacts": [
@@ -1671,9 +1671,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2538,
+    "nimTestBinaryCount": 2540,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2578
+    "testEntryCount": 2580
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8086,6 +8086,27 @@
       "source": "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_agent_applies_through_the_switch",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_infra",
+        "repro_peer_cache",
+        "repro_profile"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27453,6 +27474,25 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_agent_generations_and_rollback",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_deploy_agent",
+        "repro_infra",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

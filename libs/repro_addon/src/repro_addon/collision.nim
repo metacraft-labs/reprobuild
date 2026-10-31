@@ -65,6 +65,11 @@ type
     dropInPaths*: seq[string]
     unitFileState*: string  ## enabled / disabled / static / ... / ""
     activeState*: string    ## active / inactive / failed / ...
+    needDaemonReload*: bool
+      ## systemd's loaded definition is older than the unit's files on disk
+      ## (``NeedDaemonReload``). Read fail-safe: anything but an explicit
+      ## ``no`` counts as stale, because the one consumer (an adopted unit's
+      ## restart decision) must restart when it cannot tell.
 
   CollisionDriver* = ref object
     ## The per-distribution observations (spec §4.3, §4.3.1).
@@ -296,6 +301,7 @@ proc unitProvisionFromShow*(text: string): UnitProvision =
     result.dropInPaths.add(p)
   result.unitFileState = kv.getOrDefault("UnitFileState")
   result.activeState = kv.getOrDefault("ActiveState")
+  result.needDaemonReload = kv.getOrDefault("NeedDaemonReload") != "no"
 
 proc readUnitProvision*(unit: string): UnitProvision =
   ## ``systemctl show`` for one unit. Fails closed: a missing systemctl,
@@ -308,7 +314,8 @@ proc readUnitProvision*(unit: string): UnitProvision =
   var r: HostToolResult
   try:
     r = runSystemctl(["show", "-p",
-      "LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState",
+      "LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState," &
+        "NeedDaemonReload",
       "--", unit])
   except HostToolMissing as e:
     raise newException(AddonCollisionError, "cannot observe unit " & unit &

@@ -116,6 +116,13 @@ e2e_addon_write_time_recheck:
 # (exclusive_never_overlaps), sysctl-in-apply-namespace
 # (net_sysctl_applies_in_host_namespace), path-based-write-follows-links
 # (writes_never_follow_symlinks); the gate is then expected to fail.
+# The deploy agent on an add-on host applies through the switch: migration
+# of an agent that applied outside it restarts nothing, agent generations
+# record deployment and sequence, rollback reaches them and pauses the agent
+# (spec §7.4, §7.5, §9, §9.3).
+e2e_addon_agent_generations_and_rollback:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_agent_generations_and_rollback
+
 e2e_addon_switch_is_planned_exactly:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_switch_is_planned_exactly
 

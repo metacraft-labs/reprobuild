@@ -49,6 +49,8 @@ import repro_deploy_agent/tick_status
 
 import ./addon_apply
 import ./addon_secrets
+import ./agent_record
+import ./agent_switch
 import ./apt_hook
 import ./evidence
 import ./fingerprint
@@ -632,6 +634,7 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
         var o2 = o
         o2.userProfileText = text
         o2.agentSequence = m.sequence
+        o2.agentRecord = agentRecordOf(m)
         o2.rollbackFloor = m.rollbackFloor
         if copyDir.len > 0: o2.aptFetch = stagedAptFetcher(copyDir)
         try:
@@ -675,6 +678,25 @@ proc runAddonAgentTick*(cfg: AgentConfig; ctx: var AgentApplyContext;
   var hostLock = acquireHostApplyLock(what)
   defer: hostLock.release()
   retryPendingSecretsCommit(DefaultStateDir, layout)
+  # An operator rollback pauses this agent (spec §9.3): it is registered
+  # with the add-on, whose rollback writes the agent's pause marker.
+  registerAgentState(DefaultStateDir, cfg.stateDir)
+  # A host whose agent applied outside the switch before (its generations
+  # in the agent's own state directory) is taken over first (§9
+  # "Migration"): one switch that adopts what that agent applied.
+  if needsLegacyMigration(DefaultStateDir, cfg.stateDir):
+    let legacyGen = legacyAgentGeneration(cfg.stateDir)
+    try:
+      let r = migrateLegacyAgentState(DefaultStateDir, cfg.stateDir,
+                                      cfg.target, readHostname())
+      stdout.write("migration: add-on generation " & r.generationId &
+        " took over agent generation " & legacyGen & "\n")
+    except CatchableError as e:
+      return RecordedTick(exitCode: deployAgentExitCode(aoApplyFailed),
+        outcome: AgentOutcome(kind: aoApplyFailed, target: cfg.target,
+          errorCode: "addon_migration_failed",
+          message: "migrating agent generation " & legacyGen & " into " &
+            "the add-on switch failed; nothing was applied: " & e.msg))
   result = runAgentTickRecorded(cfg, deps)
   if not result.raised: recordStale(result.outcome)
   recordAgentDrift((if result.raised: "tickRaised" else: $result.outcome.kind),
@@ -815,9 +837,14 @@ proc runResumeCli*(args: seq[string]): int =
   if args.len != 0:
     stderr.write("usage: repro system addon resume\n")
     return 2
-  if clearPauseMarker(AgentStateDir):
-    stdout.write("the deploy agent is no longer paused; the next tick " &
-      "converges to the latest manifest\n")
+  # The configured agent's marker, and every agent the add-on's rollback
+  # pauses (registered with it, or at a well-known state directory).
+  var resumed = resumeAgents(DefaultStateDir)
+  if clearPauseMarker(AgentStateDir) and AgentStateDir notin resumed:
+    resumed.add(AgentStateDir)
+  if resumed.len > 0:
+    stdout.write("the deploy agent of " & resumed.join(", ") & " is no " &
+      "longer paused; the next tick converges to the latest manifest\n")
   else:
     stdout.write("the deploy agent was not paused\n")
   0
