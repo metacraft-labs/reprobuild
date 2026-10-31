@@ -154,6 +154,11 @@ package cargo:
       # original ``declaredOnly`` opt-out is still avoided.
 
       subcmd "build":
+        # The vendored-sources configuration, by path: cargo reads
+        # `.cargo/config.toml` from its WORKING directory upward, not from
+        # the `--manifest-path` directory
+        # (https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure).
+        flag config is string, alias = "--config"
         dependencyPolicy makeDepfile,
           depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
         boolFlag locked is bool, alias = "--locked"
@@ -187,6 +192,11 @@ package cargo:
         flag target is string, alias = "--target"
 
       subcmd "install":
+        # The vendored-sources configuration, by path: cargo reads
+        # `.cargo/config.toml` from its WORKING directory upward, not from
+        # the `--manifest-path` directory
+        # (https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure).
+        flag config is string, alias = "--config"
         ## The canonical way to land a built binary in an FHS-shaped tree:
         ## ``cargo install --root <dir>`` writes ``<dir>/bin/<binary>``,
         ## which is what the standard component layout already expects.

@@ -104,7 +104,15 @@ proc rustSysrootMergeScript*(hostRustcVersion, triple, extracted,
   "HOST_PREFIX=$(CDPATH= cd -- \"$(dirname -- \"$HOST_RUSTC\")/..\" && pwd); " &
   "OUT=" & q(sysroot) & "; rm -rf \"$OUT\"; " &
   "mkdir -p \"$OUT/bin\" \"$OUT/lib/rustlib\"; " &
-  "cp \"$HOST_RUSTC\" \"$OUT/bin/rustc\"; " &
+  # `$OUT/bin/rustc` runs the host rustc with `--sysroot "$OUT"`. Copying
+  # the binary does not move its sysroot: rustc derives it from the
+  # `librustc_driver` it loads, and a Nix-built rustc loads that from an
+  # absolute RUNPATH into its own prefix whatever sits beside the copy
+  # (measured 2026-10-31 with rust-overlay 1.94.0). `--sysroot` is rustc's
+  # own switch for this (https://doc.rust-lang.org/rustc/command-line-arguments.html).
+  "printf '#!/bin/sh\\nexec %s --sysroot %s \"$@\"\\n' " &
+    "\"'$HOST_RUSTC'\" \"'$OUT'\" > \"$OUT/bin/rustc\"; " &
+    "chmod 755 \"$OUT/bin/rustc\"; " &
   "for f in \"$HOST_PREFIX\"/bin/*; do n=$(basename \"$f\"); " &
     "[ \"$n\" = rustc ] || ln -s \"$f\" \"$OUT/bin/$n\"; done; " &
   "for f in \"$HOST_PREFIX\"/lib/*; do n=$(basename \"$f\"); " &
@@ -181,4 +189,4 @@ proc emitRustTargetSysrootAction*(projectRoot, packageName, triple: string;
     # puts that prefix on the edge's PATH even when the `rustc` selector
     # resolved to another arm (the path-mode nix arm, see the merge script).
     toolIdentityRefs = @["sh", "rustc", "cargo", "cp", "ln", "mkdir", "rm",
-                         "dirname", "basename", "grep"])
+                         "dirname", "basename", "grep", "chmod"])

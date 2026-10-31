@@ -310,7 +310,7 @@ libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	37
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
-libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	26
+libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	27
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
@@ -2477,7 +2477,7 @@ tests/unit/t_m9r7_target_triple_cache_namespacing.nim	nim	14
 tests/unit/t_m9r81_dep_root_env_vars.nim	nim	5
 tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
 tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	8
-tests/unit/t_m9r83_install_mirror_publish.nim	nim	8
+tests/unit/t_m9r83_install_mirror_publish.nim	nim	9
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_manifest_editor_edge_cases.nim	nim	28

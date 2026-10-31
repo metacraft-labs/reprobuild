@@ -410,6 +410,21 @@ proc packageInstallMirrorHumanFriendlyPath*(recipesRoot, depName: string):
 proc shellDoubleQuote(value: string): string =
   "\"" & value.replace("\\", "/").replace("\"", "\\\"") & "\""
 
+proc installMirrorPublishToolCommand*(): string =
+  ## How an emitted mirror fragment invokes the publish helper: the one
+  ## beside the engine running this build, by absolute path, when the engine
+  ## named itself (`REPRO_INVOKING_CLI`); the bare name otherwise. An edge's
+  ## PATH is assembled from its tools' DIRECTORIES, so a declared tool that
+  ## lives in a shared bin directory (a system profile's `ssh`) can bring an
+  ## older release's helper ahead of this one -- measured 2026-10-31, an
+  ## 0.2.18 helper answering `unknown argument: --check-target`.
+  let invoking = getEnv("REPRO_INVOKING_CLI")
+  if invoking.len > 0:
+    let sibling = invoking.parentDir / InstallMirrorPublishToolName
+    if fileExists(sibling):
+      return shellDoubleQuote(sibling)
+  InstallMirrorPublishToolName
+
 proc emitInstallMirrorTargetCheck*(sourceDir: string): string =
   ## Under ``--target``: the shell fragment that runs the object check over
   ## the staged mirror ``sourceDir`` and, on a mismatch, removes the mirror
@@ -420,7 +435,7 @@ proc emitInstallMirrorTargetCheck*(sourceDir: string): string =
   if triple.len == 0 or sourceDir.len == 0:
     return ""
   let dir = shellDoubleQuote(sourceDir)
-  result.add(InstallMirrorPublishToolName)
+  result.add(installMirrorPublishToolCommand())
   result.add(" --check-target ")
   result.add(shellDoubleQuote(triple))
   result.add(" --source ")
@@ -440,7 +455,7 @@ proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
   result.add("case \"${")
   result.add(InstallMirrorModeEnvVar)
   result.add(":-legacy}\" in hashed|hashed-with-legacy-fallback) ")
-  result.add(InstallMirrorPublishToolName)
+  result.add(installMirrorPublishToolCommand())
   result.add(" --recipes-root ")
   result.add(shellDoubleQuote(recipesRoot))
   result.add(" --package ")
