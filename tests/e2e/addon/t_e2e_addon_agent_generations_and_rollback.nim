@@ -180,6 +180,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("the migration plan adopts everything, restarts nothing, writes nothing",
          r.exitCode == 0 and "units stopped or restarted: 0" in r.stdout and
          "supersede\t" & CachesConf in r.stdout and
+         "accepted-out-of-band\t" & CachesConf in r.stdout and
          "nothing was written" in r.stdout and g.currentGeneration() == gen0 and
          g.statOf(Anchors) == anchorsStat0 and
          g.unitState("keep-svc") == keep0,

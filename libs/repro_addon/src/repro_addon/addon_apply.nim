@@ -622,6 +622,7 @@ proc savedDecision(s: SavedPlan): CollisionDecision =
   result.observation = s.observation
   result.observedSha256 = s.observedSha256
   result.reason = s.reason & " (replayed)"
+  result.acceptedOutOfBand = s.reason == AcceptedOutOfBandReason
   if result.verdict in {cvAdopt, cvReconcile}:
     if s.preserved.len == 0 or not fileExists(s.preserved):
       raise newException(AddonApplyError, "the pending plan's preserved " &
@@ -1969,6 +1970,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       p.collision = "adopt"
       p.preserved = deferPreserve(dec.preWriteBytes)
     verdictByAddress[r.address] = dec.verdict
+    if dec.acceptedOutOfBand:
+      # Nothing is written, but the out-of-band write is reported on
+      # every apply, a rollback's included (spec §4.3).
+      result.ledgerDiff.add("accepted-out-of-band\t" & p.targetPath &
+        "\t" & r.address)
     result.collisions.add(CollisionLine(address: r.address, target: p.targetPath,
       observation: dec.observation, verdict: $dec.verdict, reason: dec.reason))
     targets.add(targetFor(r.address, inp, p.targetPath, dec, obs, saved))
@@ -2085,6 +2091,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     p.verdict = $dec.verdict
     p.content = inp.desiredContent
     verdictByAddress[r.address] = dec.verdict
+    if dec.acceptedOutOfBand:
+      # Nothing is written, but the out-of-band write is reported on
+      # every apply, a rollback's included (spec §4.3).
+      result.ledgerDiff.add("accepted-out-of-band\t" & p.targetPath &
+        "\t" & r.address)
     # `repro system adopt` changes the addressed resource only. Every other
     # resource is the current generation's; one the ledger owns with bytes
     # that differ from what its declaration renders (an earlier adoption

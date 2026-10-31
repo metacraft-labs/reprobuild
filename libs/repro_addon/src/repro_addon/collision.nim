@@ -121,6 +121,11 @@ type
       ## them (adopt, reconcile): the ledger keeps them.
     reason*: string
       ## One line for the collision report.
+    acceptedOutOfBand*: bool
+      ## A ledger-owned target changed out of band to exactly the desired
+      ## bytes: a no-op (nothing is written), which the apply still reports
+      ## (``accepted-out-of-band`` in the ledger diff), so the out-of-band
+      ## write does not vanish from the record.
 
   CollisionLine* = object
     address*: string
@@ -285,6 +290,9 @@ proc loadDpkgIndex(root: string; idx: DpkgIndex) =
   let registry = root / UcfRegistry
   if fileExists(registry):
     idx.ucf = parseUcfRegistry(readFile(registry))
+
+const AcceptedOutOfBandReason* = "owned by the ledger, changed out of " &
+  "band to the profile's content; recorded as it is"
 
 proc parseSystemctlShow*(text: string): Table[string, string] =
   ## ``Key=Value`` lines of ``systemctl show``.
@@ -572,8 +580,8 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       # before it applied through the switch, §9 "Migration"). Nothing
       # conflicts and nothing is written; the ledger records the bytes.
       result.verdict = cvNoOp
-      result.reason = "owned by the ledger, changed out of band to the " &
-        "profile's content; recorded as it is"
+      result.acceptedOutOfBand = true
+      result.reason = AcceptedOutOfBandReason
       return
     if inp.reconcileDrift:
       result.verdict = cvReconcile
