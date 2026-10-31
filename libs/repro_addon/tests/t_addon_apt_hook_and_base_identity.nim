@@ -53,7 +53,7 @@ proc runHook(exe, logPath: string; timeoutSec, boundSec: int):
   defer: p.close()
   while p.peekExitCode() == -1:
     if epochTime() - t0 > boundSec.float:
-      # The whole group: the hook's sleeping child too.
+      # The stand-in; its grandchild is the caller's to clean up.
       discard execCmd("pkill -KILL -f " & quoteShell(exe) & " >/dev/null 2>&1")
       p.kill()
       discard p.waitForExit()
@@ -103,14 +103,19 @@ suite "the apt hook's wrapper":
     # Ignores SIGTERM, and leaves a grandchild: only the follow-up SIGKILL
     # to the whole group ends it (uutils' timeout would leave the
     # grandchild behind).
-    let r = runHook(script("hang", "trap '' TERM\nsleep 1717 &\n" &
+    # A grandchild with a duration unique to this run, so a leftover of an
+    # earlier (mutated) run cannot be mistaken for this one's.
+    let marker = $(100000 + getCurrentProcessId() mod 800000)
+    let r = runHook(script("hang", "trap '' TERM\nsleep " & marker & " &\n" &
                     "while :; do sleep 1; done"), log, 2, 20)
     check not r.timedOut
     check r.code == 0
     check r.secs < 2.0 + 5.0 + 3.0
     check fileExists(log) and "verify-timeout" in readFile(log)
     sleep(500)
-    check execCmd("pgrep -f '[s]leep 1717' >/dev/null") != 0
+    check execCmd("pgrep -x -f 'sleep " & marker & "' >/dev/null") != 0
+    # This run's grandchild, if a mutated hook left it (never anyone else's).
+    discard execCmd("pkill -KILL -x -f 'sleep " & marker & "' >/dev/null 2>&1")
     var leftovers: seq[string]
     for k, f in walkDir(dir):
       if "repro-addon-hook." in f: leftovers.add(f)
