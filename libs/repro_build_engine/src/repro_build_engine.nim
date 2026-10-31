@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
@@ -1101,6 +1102,18 @@ type
       ## tool installed. ``nil`` keeps the engine ignorant of the
       ## catalog (legacy behaviour); the action's argv must then
       ## reference absolute paths.
+    objectCheckTriple*: string
+      ## The non-native triple of this build (``repro build --target``), or
+      ## "". When set, an action tagged ``publishToBinaryCache`` is not a
+      ## success until every native object among its declared outputs is an
+      ## object for this triple (CLI/build.md §"Cross Targets: `--target`",
+      ## the object check): otherwise its evidence is unpublishable, so the
+      ## action fails, its outputs are removed, and nothing is recorded or
+      ## published under the target identity. Defaults from
+      ## ``REPRO_VARIANTS``, the channel the stdlib reads the target from, so
+      ## the engine and the recipes agree on one value. Kept apart from
+      ## ``targetTripleResolver``, which namespaces tool-reference cache
+      ## keys and is not wired for ``--target``.
     targetTripleResolver*: TargetTripleResolver
       ## DSL-port M9.R.7. Optional ``targetTriple`` variant
       ## resolver closure. When non-nil, the engine consults it
@@ -2634,6 +2647,7 @@ proc defaultBuildEngineConfig*(cacheRoot: string;
   BuildEngineConfig(
     cacheRoot: cacheRoot,
     actionCacheRoot: actionCacheRoot,
+    objectCheckTriple: objectCheckTripleFromVariants(getEnv("REPRO_VARIANTS")),
     runQuotaCliPath: "",
     monitorCliPath: "",
     maxParallelism: 8'u32,
@@ -9322,6 +9336,48 @@ proc resetScratchDirs*(action: BuildAction): string =
       return "cannot empty scratch directory '" & dir & "': " & err.msg
   ""
 
+proc refuseForeignTargetOutputs(action: BuildAction; triple: string;
+                                result: var EvidenceCollection) =
+  ## The object check at the publication boundary. Under ``--target`` an
+  ## action tagged ``publishToBinaryCache`` publishes its outputs under the
+  ## target's identity, so every native object among them must be for
+  ## ``triple``. A mismatch makes the evidence unpublishable -- every launch
+  ## route then fails the action before it records or publishes anything --
+  ## and removes the outputs, so a consumer never resolves them either.
+  ## Checking HERE rather than in one convention's edges is what covers every
+  ## tagged edge (the install-mirror edge, the autotools stage copies, any
+  ## edge a recipe tags itself).
+  var paths: seq[string]
+  for path in action.recordedOutputPaths():
+    if path.len > 0:
+      paths.add(materialPath(action.cwd, path))
+  # The package's declared exemptions ride in the action's environment
+  # (part of its identity). Stale ones are the mirror check's to report: one
+  # action's outputs are not the package's whole tree.
+  var exemptionsRaw = ""
+  for entry in action.env:
+    if entry.startsWith(TargetObjectExemptionsEnvVar & "="):
+      exemptionsRaw = entry[TargetObjectExemptionsEnvVar.len + 1 .. ^1]
+  let found =
+    try:
+      applyTargetObjectExemptions(targetObjectMismatchesInPaths(paths, triple),
+        decodeTargetObjectExemptions(exemptionsRaw), requireUse = false)
+    except UnknownTargetCpu, ValueError:
+      @[getCurrentExceptionMsg()]
+  if found.len == 0:
+    return
+  var msg = "action '" & action.id & "': " & $found.len &
+    " output object(s) are not for --target '" & triple & "', so the action " &
+    "is refused before anything is recorded or published under the target " &
+    "(CLI/build.md \"Cross Targets: `--target`\", the object check):"
+  for line in found:
+    msg.add("\n  " & line)
+  result.evidence.diagnostics.add(msg)
+  result.publishable = false
+  for path in paths:
+    try: removePathNoFollow(extendedPath(path))
+    except CatchableError: discard
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil):
@@ -9754,6 +9810,9 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # the head of this proc included — grade the set the key is actually built
   # from. Rule 7. See `gradeKeyedInputSet`.
   gradeKeyedInputSet(action, result)
+  if strict and config != nil and config[].objectCheckTriple.len > 0 and
+      action.publishToBinaryCache:
+    refuseForeignTargetOutputs(action, config[].objectCheckTriple, result)
   if strict and not result.publishable:
     discard
 

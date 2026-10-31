@@ -60,6 +60,10 @@ import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
 from repro_core/link_target import readSymlinkTarget
 from repro_core/relocation import recipeSourceName
+from repro_core/target_object_check import TargetObjectExemption,
+  TargetObjectExemptionsEnvVar, encodeTargetObjectExemptions,
+  validateTargetObjectExemption
+export TargetObjectExemption
 import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/shell_fetch
 import repro_project_dsl/source_cache_identity

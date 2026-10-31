@@ -2,7 +2,7 @@ import std/[os, strutils]
 
 import repro_project_dsl/install_mirror_resolver
 import repro_project_dsl/install_mirror_publish
-import repro_project_dsl/target_object_check
+import repro_core/target_object_check
 
 proc usage(): string =
   "usage: repro-install-mirror-publish --recipes-root <dir> " &
@@ -59,9 +59,15 @@ proc runInstallMirrorPublishCommand*(args: seq[string]): int =
       if sourceDir.len == 0:
         raise newException(ValueError, usage())
       try:
-        refuseTargetObjectMismatches(sourceDir, checkTarget,
-          "install mirror")
-      except TargetObjectMismatch, UnknownTargetCpu:
+        # The package's declared exemptions arrive in this action's
+        # environment. The mirror is the package's whole staged tree, so an
+        # exemption that covers nothing here is stale and refused.
+        let exemptions = decodeTargetObjectExemptions(
+          getEnv(TargetObjectExemptionsEnvVar))
+        refuseTargetObjectMismatches(applyTargetObjectExemptions(
+          targetObjectMismatches(sourceDir, checkTarget), exemptions,
+          requireUse = true), sourceDir, checkTarget, "install mirror")
+      except TargetObjectMismatch, UnknownTargetCpu, ValueError:
         stderr.writeLine("repro-install-mirror-publish: " &
           getCurrentExceptionMsg())
         return 1

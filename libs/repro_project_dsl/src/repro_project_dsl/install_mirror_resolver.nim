@@ -12,7 +12,19 @@ import repro_platform
 # and a profile compile's ``--path`` set deliberately excludes the store
 # runtime's SQLite binding and shm-index/shm-queue dependencies.
 import repro_local_store/prefix_paths
-import ./target_object_check
+import repro_core/target_object_check
+
+const TargetObjectExemptionSidecarKey* = "target-object-exemption"
+  ## Sidecar key under which each declared object-check exemption is
+  ## recorded, as ``<path>\t<reason>``. Readers that do not know it skip it.
+
+proc exemptionSidecarLines*(raw: string): string =
+  ## The sidecar lines recording the exemptions in ``raw`` (the
+  ## ``TargetObjectExemptionsEnvVar`` value), each ``<key>=<path>\t<reason>``.
+  for line in raw.split('\n'):
+    if line.len > 0:
+      result.add(TargetObjectExemptionSidecarKey & "=" & line & "\n")
+
 
 const InstallMirrorModeEnvVar* = "REPRO_INSTALL_MIRROR_MODE"
 
@@ -241,7 +253,8 @@ proc writeRealizationInfoFile*(recipesRoot, depName, version,
   let payload = "platform=" & currentRealizationPlatformTag() & "\n" &
                 "version=" & version & "\n" &
                 "realization-hash=" & realizationHashHex & "\n" &
-                "store-relative-path=" & rel & "\n"
+                "store-relative-path=" & rel & "\n" &
+                exemptionSidecarLines(getEnv(TargetObjectExemptionsEnvVar))
   if fileExists(path):
     let existing = try:
       readFile(path)
@@ -443,6 +456,15 @@ proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
   result.add("; printf '%s\\n' 'platform=")
   result.add(currentRealizationPlatformTag())
   result.add("' > ")
+  result.add(shellDoubleQuote(sidecarPath))
+  # The declared object-check exemptions, one line each, from the action's
+  # environment (CLI/build.md: they are recorded beside the mirror).
+  result.add("; printf '%s\\n' \"${")
+  result.add(TargetObjectExemptionsEnvVar)
+  result.add(":-}\" | while IFS= read -r l; do [ -n \"$l\" ] && ")
+  result.add("printf '")
+  result.add(TargetObjectExemptionSidecarKey)
+  result.add("=%s\\n' \"$l\"; done >> ")
   result.add(shellDoubleQuote(sidecarPath))
   result.add("; ;; esac; ")
 

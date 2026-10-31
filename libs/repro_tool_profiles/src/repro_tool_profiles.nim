@@ -53,7 +53,7 @@ import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/in_process as bcInProcess
 import repro_binary_cache_server/types as bcTypes
 import repro_project_dsl/install_mirror_resolver
-import repro_project_dsl/target_object_check
+import repro_core/target_object_check
 import repro_project_dsl/reprobuild_packages_catalog
 # Tarball realization is a build-graph edge (Dependency-Provisioning-In-Build-
 # Graph.md sections 2 and 4): this module builds the `bakForeignProvision`
@@ -1930,53 +1930,68 @@ const NixOutputNames = ["out", "bin", "dev", "lib", "man", "doc", "info",
   ## Output names nixpkgs appends as ``-<output>`` to a non-``out`` output's
   ## store entry. None starts with a digit.
 
-proc nixStorePathVersion*(path: string): string =
-  ## The version a nixpkgs store path's name carries, or "".
+const NixVersionWords = ["unstable", "pre", "rc", "alpha", "beta", "git",
+  "snapshot"]
+  ## Words nixpkgs writes INSIDE a dashed version (``0-unstable-2024-01-15``,
+  ## ``2.0-rc-1``); any other word after the version (``perl-5.38.2-env``) is
+  ## a name suffix, not part of the version.
+
+proc isVersionSegment(segment: string): bool =
+  ## A dash-separated segment that reads as (the start of) a version: all
+  ## digits, or digits holding a dot (``1.0.4``, ``9.6p1``). ``100dpi``
+  ## does not.
+  segment.len > 0 and segment[0] in Digits and
+    (segment.allCharsInSet(Digits) or
+     ('.' in segment and segment.allCharsInSet(Digits + Letters + {'.'})))
+
+proc nixStorePathNameVersion*(path: string): tuple[pname, version: string] =
+  ## The ``(pname, version)`` a nixpkgs store path's name carries, or
+  ## ``("", "")`` for a path that is not a store entry.
   ##
   ## nixpkgs names a derivation ``<pname>-<version>`` and an output other
-  ## than ``out`` adds ``-<output>``
-  ## (https://nixos.org/manual/nixpkgs/stable/#sec-package-naming). The
-  ## pname may itself hold a dash followed by a digit
-  ## (``font-adobe-100dpi-1.0.4``) and dashes before the version
-  ## (``zlib-ng-compat-2.2.4``), so the version is NOT the first ``-`` a
-  ## digit follows. Nor is it the last: a nixpkgs unstable version is itself
-  ## dashed (``0-unstable-2024-01-01``,
-  ## https://nixos.org/manual/nixpkgs/stable/#sec-package-naming), and the
-  ## last dash-digit there opens ``01``. After dropping a trailing
-  ## ``-<output>``, the version opens at the first ``-`` whose segment reads
-  ## as a version -- all digits, or digits holding a dot (``1.0.4``,
-  ## ``9.6p1``) -- which skips a pname segment like ``100dpi``. Only when no
-  ## segment reads so does the last dash-digit open it. That is the version
-  ## the pinned nixpkgs built, which is what a range is held against for a
-  ## realization with no version probe -- a library has no ``--version`` to
-  ## ask.
+  ## than ``out`` adds ``-<output>``; an unstable version is itself dashed
+  ## (``0-unstable-2024-01-15``)
+  ## (https://nixos.org/manual/nixpkgs/stable/#sec-package-naming). A pname
+  ## may hold a dash-digit (``font-adobe-100dpi``) and several dashes
+  ## (``zlib-ng-compat``), and a wrapper can append a word after the version
+  ## (``perl-5.38.2-env``). So, after dropping a trailing ``-<output>``: the
+  ## version opens at the first ``-`` whose segment reads as a version (all
+  ## digits, or digits holding a dot), and runs on through following
+  ## segments that are numeric or one of ``NixVersionWords``; it stops before
+  ## any other word. When no segment reads as a version the last dash-digit
+  ## opens it, and the rest of the name is the version.
   const StorePrefix = "/nix/store/"
   let at = path.find(StorePrefix)
   if at < 0:
-    return ""
+    return
   var entry = path[at + StorePrefix.len .. ^1]
   let slash = entry.find('/')
   if slash >= 0:
     entry = entry[0 ..< slash]
   let dash = entry.find('-')
   if dash < 0:
-    return ""
+    return
   var name = entry[dash + 1 .. ^1]
   let lastDash = name.rfind('-')
   if lastDash > 0 and name[lastDash + 1 .. ^1] in NixOutputNames:
     name = name[0 ..< lastDash]
-  for i in 0 .. name.len - 2:
-    if name[i] == '-' and name[i + 1] in Digits:
-      var stop = name.find('-', i + 1)
-      if stop < 0: stop = name.len
-      let segment = name[i + 1 ..< stop]
-      if segment.allCharsInSet(Digits) or
-          ('.' in segment and segment.allCharsInSet(Digits + Letters + {'.'})):
-        return name[i + 1 .. ^1]
+  let parts = name.split('-')
+  for i in 1 ..< parts.len:
+    if isVersionSegment(parts[i]):
+      var stop = i + 1
+      while stop < parts.len and (parts[stop].len > 0 and
+          (parts[stop][0] in Digits or parts[stop] in NixVersionWords)):
+        inc stop
+      return (parts[0 ..< i].join("-"), parts[i ..< stop].join("-"))
   for i in countdown(name.len - 2, 0):
     if name[i] == '-' and name[i + 1] in Digits:
-      return name[i + 1 .. ^1]
-  ""
+      return (name[0 ..< i], name[i + 1 .. ^1])
+  (name, "")
+
+proc nixStorePathVersion*(path: string): string =
+  ## The version a nixpkgs store path's name carries, or "". See
+  ## ``nixStorePathNameVersion``.
+  nixStorePathNameVersion(path).version
 
 proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
                               realizedVersion, realization: string): string =
@@ -2011,6 +2026,21 @@ proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
     "(a tarball arm, or `" & useDef.executableName &
     "` on PATH), or widen the range"
 
+proc storePathNamesRequestedPackage(pname: string; useDef: InterfaceToolUse;
+                                    profile: PathOnlyToolProfile): bool =
+  ## Whether a store path's pname is the package the use requested: the
+  ## use's selector, or the nix attribute it was realized through (the part
+  ## of ``nixSelector`` after ``#``, last dotted component).
+  if pname.len == 0: return false
+  let p = pname.toLowerAscii()
+  if p == useDef.packageSelector.toLowerAscii(): return true
+  var attr = profile.nixSelector
+  let hash = attr.rfind('#')
+  if hash >= 0: attr = attr[hash + 1 .. ^1]
+  let dot = attr.rfind('.')
+  if dot >= 0: attr = attr[dot + 1 .. ^1]
+  attr.len > 0 and p == attr.toLowerAscii()
+
 proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
                               useDef: InterfaceToolUse) =
   ## Raise ``OSError`` for a profile whose realized version is outside the
@@ -2020,9 +2050,17 @@ proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
   # nixpkgs store path names instead.
   var version = realizedVersionOf(profile)
   if version.len == 0:
-    version = nixStorePathVersion(
+    let named = nixStorePathNameVersion(
       if profile.selectedStorePath.len > 0: profile.selectedStorePath
       else: profile.resolvedExecutablePath)
+    # A store path's version is in ITS package's numbering. When the path
+    # names another package -- nixpkgs' `zlib` attribute realized by
+    # `zlib-ng-compat` -- that version says nothing about the requested
+    # package's range, so it is not used: the refusal below then reports the
+    # realization as unverifiable rather than holding zlib's range against
+    # zlib-ng's 2.x.
+    if storePathNamesRequestedPackage(named.pname, useDef, profile):
+      version = named.version
   let refusal = usesVersionRangeRefusal(useDef, version,
     "nix://" & profile.nixSelector & " (" & profile.resolvedExecutablePath & ")")
   if refusal.len > 0:
@@ -8804,6 +8842,13 @@ proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
     practicalHardening: phNone)
   refreshProfileIdentity(result)
 
+var consumeScanMemo: TargetObjectScanMemo
+  ## Consume-time object-check scans of sibling target mirrors, reused while
+  ## a mirror's stat fingerprint is unchanged: one resolution session asks
+  ## for the same sibling once per consuming tool use, and the scan reads
+  ## every native object in the mirror. Process-wide like the resolver's
+  ## other per-session state; an entry is only reused for an unchanged tree.
+
 proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
                                   recipeRoot: string): FromSourceResolveResult =
   ## DSL-port M9.R.9 — non-raising variant of ``resolveFromSourceTool``.
@@ -9118,8 +9163,10 @@ proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
   let consumeTriple = effectiveInstallMirrorTarget()
   if consumeTriple.len > 0:
     let context = "sibling '" & name & "' consumed under --target"
-    refuseTargetObjectMismatches(recipeDir / installMirrorSubpath(),
-      consumeTriple, context)
+    let mirror = recipeDir / installMirrorSubpath()
+    refuseTargetObjectMismatches(
+      targetObjectMismatches(consumeScanMemo, mirror, consumeTriple),
+      mirror, consumeTriple, context)
     if fileExists(extendedPath(absolute)):
       let bad = targetObjectMismatchesInFile(absolute,
         targetObjectRuleFor(consumeTriple))
@@ -9382,7 +9429,20 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
           " with `repro build --target=" & crossTriple & "` first. A host " &
           "build from PATH is not used for a cross build's link inputs.")
       of rrSiblingMissing:
-        discard
+        # No source recipe to build it for the target. PATH, the tarball
+        # arm and the nix arm all realize it for the BUILD HOST (the tool
+        # profile selects arms by the host's cpu/os), so each would hand a
+        # cross build host objects to link (CLI/build.md §"Cross Targets:
+        # `--target`": a `buildDeps:` library of a cross build is found
+        # through a sibling's target-keyed mirror, never through an arm
+        # selected for the host). Refuse by name.
+        raise newException(OSError, "'" & useDef.packageSelector &
+          "' (" & useDef.depKind & " dependency) cannot be realized for " &
+          "--target '" & crossTriple & "': it has no source recipe at " &
+          sibling.attemptedRecipeManifest & ", and PATH, the tarball arm " &
+          "and the nix arm realize it for the build host only. Add a " &
+          "source recipe that builds it for the target, or move it to " &
+          "`nativeBuildDeps:` if it is a tool that runs on the build host.")
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:

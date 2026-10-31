@@ -43,7 +43,7 @@ import std/[os, strutils, tables]
 
 import repro_lock_files
 import repro_project_dsl
-import repro_project_dsl/target_object_check
+import repro_core/target_object_check
 
 import ./configurables/variants
 

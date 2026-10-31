@@ -263,6 +263,18 @@ suite "a nix realization is held to the declared range":
     check nixStorePathVersion("/nix/store/abc-openssh-9.6p1/bin/ssh") == "9.6p1"
     # no segment reads as a version: the last dash-digit still opens it.
     check nixStorePathVersion("/nix/store/abc-foo-1a") == "1a"
+    check nixStorePathVersion("/nix/store/abc-foo-0-unstable-2024-01-15") ==
+      "0-unstable-2024-01-15"
+    # a word after the version is a name suffix, not part of it.
+    check nixStorePathVersion("/nix/store/abc-perl-5.38.2-env") == "5.38.2"
+    check nixStorePathNameVersion("/nix/store/abc-perl-5.38.2-env") ==
+      ("perl", "5.38.2")
+    check nixStorePathNameVersion("/nix/store/abc-zlib-ng-compat-2.2.4") ==
+      ("zlib-ng-compat", "2.2.4")
+    check nixStorePathNameVersion("/nix/store/abc-font-adobe-100dpi-1.0.4") ==
+      ("font-adobe-100dpi", "1.0.4")
+    check nixStorePathNameVersion("/nix/store/abc-foo-0-unstable-2024-01-15") ==
+      ("foo", "0-unstable-2024-01-15")
 
   test "a library with no version probe is held to its store path's version":
     # zlib has no `--version`: before the store path was read, every nix
@@ -282,6 +294,30 @@ suite "a nix realization is held to the declared range":
     except OSError as err:
       check "1.3.1" in err.msg
       check "zlib >=1.4" in err.msg
+
+  test "a store path naming another package is not that package's version":
+    # nixpkgs' `zlib` attribute realized by `zlib-ng-compat`: 2.2.4 is
+    # zlib-ng's numbering, not zlib's, so it is not held against zlib's range
+    # (it would pass `zlib >=1.2.11` for the wrong reason). The realization
+    # is refused as unverifiable instead.
+    let zlib = InterfaceToolUse(packageSelector: "zlib",
+      executableName: "zlib", rawConstraint: "zlib >=1.2.11")
+    let ng = PathOnlyToolProfile(installMethod: "nix", nixSelector: "nixpkgs#zlib",
+      resolvedExecutablePath: "/nix/store/abc-zlib-ng-compat-2.2.4/lib/libz.so",
+      selectedStorePath: "/nix/store/abc-zlib-ng-compat-2.2.4")
+    try:
+      enforceUsesVersionRange(ng, zlib)
+      check false
+    except OSError as err:
+      check "report no version" in err.msg
+    # Realized through an attribute that IS the pname: its numbering holds.
+    let viaAttr = PathOnlyToolProfile(installMethod: "nix",
+      nixSelector: "nixpkgs#zlib-ng-compat",
+      resolvedExecutablePath: "/nix/store/abc-zlib-ng-compat-2.2.4/lib/libz.so",
+      selectedStorePath: "/nix/store/abc-zlib-ng-compat-2.2.4")
+    let ngUse = InterfaceToolUse(packageSelector: "zlib",
+      executableName: "zlib", rawConstraint: "zlib >=2.0")
+    enforceUsesVersionRange(viaAttr, ngUse)
 
   test "the probe outranks the store path name":
     # A wrapper's store path names the wrapper's version, not the tool's.

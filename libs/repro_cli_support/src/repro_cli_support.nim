@@ -15,6 +15,7 @@ else:
   # this module's namespace.
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN,
     ENOENT
+from repro_core/target_object_check import objectCheckTripleFromVariants
 import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
@@ -11942,6 +11943,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # populated ``cacheEntryIdentity`` — the from-source conventions
     # tag install + stage-copy actions accordingly.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # The cross build's object check at the publication boundary
+    # (CLI/build.md §"Cross Targets: `--target`"): the triple `--target`
+    # wrote into REPRO_VARIANTS. This literal config does not go through
+    # `defaultBuildEngineConfig`, so it is set here, on both BUILD configs.
+    engineConfig.objectCheckTriple =
+      objectCheckTripleFromVariants(getEnv("REPRO_VARIANTS"))
     # L3 PUBLISH-SCOPE: resolve the target cache's scope. An INTERMEDIATE
     # cache publishes every built store output; a RELEASE cache (default)
     # only the public-interface members tagged ``publishToBinaryCache``.
@@ -13613,6 +13620,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``publishToBinaryCache = true`` + populated
     # ``cacheEntryIdentity``.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # The cross build's object check at the publication boundary
+    # (CLI/build.md §"Cross Targets: `--target`"): the triple `--target`
+    # wrote into REPRO_VARIANTS. This literal config does not go through
+    # `defaultBuildEngineConfig`, so it is set here, on both BUILD configs.
+    engineConfig.objectCheckTriple =
+      objectCheckTripleFromVariants(getEnv("REPRO_VARIANTS"))
     # L3 PUBLISH-SCOPE: intermediate cache → publish everything;
     # release cache (default) → only tagged public-interface members.
     engineConfig.binaryCacheIntermediateScope =

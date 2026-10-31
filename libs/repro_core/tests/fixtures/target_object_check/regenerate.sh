@@ -23,3 +23,10 @@ gcc -c "$work/a.c" -o x86_64.o
 rm -f mixed.a armhf.a
 ar rcs armhf.a armhf.o armhf-asm.o
 ar rcs mixed.a armhf.o x86_64.o
+# Added 2026-10-31 (nixpkgs zig 0.13.0, gcc): dynamically linked images with
+# a real PT_INTERP, linked by lld straight over armhf.o so they stay tiny;
+# an x32 object (x86-64 ISA, ELFCLASS32); an LTO object, i.e. LLVM bitcode.
+zig ld.lld -pie -dynamic-linker /lib/ld-musl-armhf.so.1 -e f -s armhf.o -o armhf-musl-exe
+zig ld.lld -pie -dynamic-linker /lib/ld-linux-armhf.so.3 -e f -s armhf.o -o armhf-glibc-exe
+gcc -mx32 -c "$work/a.c" -o x32.o
+zig cc -target arm-linux-musleabihf -flto -c "$work/a.c" -o armhf-lto.o

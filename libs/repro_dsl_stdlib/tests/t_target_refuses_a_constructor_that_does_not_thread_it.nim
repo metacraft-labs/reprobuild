@@ -203,3 +203,47 @@ suite "nested frames, helper reads and host triples":
       check isCrossTriple("x86_64-unknown-linux-musl")
     check isCrossTriple(Triple)
     check not isCrossTriple("native")
+
+suite "declared object-check exemptions":
+  proc exemptionsEnvOf(a: BuildActionDef): string =
+    for (k, v) in a.env:
+      if k == "REPRO_TARGET_OBJECT_EXEMPTIONS": return v
+
+  test "every action the package emits carries its exemptions":
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/bpf/prog.o", "an eBPF program")
+      let first = buildAction(id = "x-first", call = inlineExecCall(@["true"]))
+      let inner = beginBuildBlock(Recipe, ownerKind = "executable",
+        ownerName = "hello")
+      try:
+        let nested = buildAction(id = "x-nested",
+          call = inlineExecCall(@["true"]))
+        check exemptionsEnvOf(nested) == "usr/lib/bpf/prog.o\tan eBPF program"
+      finally:
+        endBuildBlock(inner)
+      check exemptionsEnvOf(first) == "usr/lib/bpf/prog.o\tan eBPF program")
+
+  test "an exemption after the package emitted an action is refused":
+    inBuild(proc() =
+      discard buildAction(id = "x-early", call = inlineExecCall(@["true"]))
+      check "after the package emitted an action" in refusal(proc() =
+        targetObjectExemption("usr/lib/fw.bin", "firmware")))
+
+  test "a duplicate, a pattern and a missing reason are refused":
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/fw.bin", "firmware")
+      check "declared twice" in refusal(proc() =
+        targetObjectExemption("usr/lib/fw.bin", "again"))
+      check refusal(proc() =
+        targetObjectExemption("usr/lib/*.bin", "firmware")).len > 0
+      check "no reason" in refusal(proc() =
+        targetObjectExemption("usr/lib/other.bin", "")))
+
+  test "a new evaluation of the package starts with no exemptions or seal":
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/fw.bin", "firmware")
+      discard buildAction(id = "x-a", call = inlineExecCall(@["true"])))
+    inBuild(proc() =
+      targetObjectExemption("usr/lib/other.bin", "firmware")
+      let a = buildAction(id = "x-b", call = inlineExecCall(@["true"]))
+      check exemptionsEnvOf(a) == "usr/lib/other.bin\tfirmware")

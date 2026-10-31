@@ -42,10 +42,24 @@
 ## `emitInstallMirrorStorePublish`, the run exits 0 and mirrors an x86-64
 ## `install@armv7-…/usr/bin/hello`.
 ##
+## The third case is the publication boundary: every edge tagged for
+## publication (the install mirror AND the autotools stage copies) is checked
+## by the engine before it counts as succeeded, so the stage copy itself is
+## reported failed, never recorded -- the binary-cache and peer-cache
+## publishers run only on a recorded success -- and leaves no
+## `hello@<triple>`. Measured why a cache server is not part of this test:
+## a path-mode recipe like this one has no complete cache identity
+## (`binary-cache-identity-incomplete`: source closure, dependencies and
+## toolchain unbound), so not even the native build publishes; a server
+## could only ever count zero. Falsifiability: against an engine without
+## the boundary (reprobuild 600a079f4, whose only check sat in the mirror
+## edge) the stage copy succeeds and writes an x86-64
+## `hello@armv7-…/hello`.
+##
 ## Skip rule: `sh`, `cc` or `make` missing on PATH, or `build/bin/repro`
 ## unbuilt -- except in a gate run (`REPROBUILD_GATE_RUN=1`, exported by
-## `scripts/run_tests.sh`, which builds `build/bin/repro` first), where an
-## unbuilt binary FAILS the case instead of skipping it.
+## `scripts/run_tests.sh`, which builds `build/bin/repro` first), where any
+## of them FAILS the case instead of skipping it.
 
 import std/[algorithm, monotimes, os, osproc, strtabs, strutils, tempfiles,
   unittest]
@@ -141,6 +155,25 @@ proc runBuild(root, project: string; args: seq[string]):
   p.close()
   (code, readFile(log))
 
+proc unmetPrecondition(): string =
+  ## Why this file's cases cannot run here, or "". A gate run
+  ## (`REPROBUILD_GATE_RUN=1`, exported by `scripts/run_tests.sh`) FAILS on
+  ## any of these instead of skipping, so a gate never passes by skipping.
+  if not fileExists(reproBinary): return reproBinary & " is not built"
+  for tool in ["sh", "cc", "make"]:
+    if findExe(tool).len == 0: return tool & " is not on PATH"
+  ""
+
+template requirePreconditions(body: untyped) =
+  let unmet = unmetPrecondition()
+  if unmet.len > 0 and getEnv("REPROBUILD_GATE_RUN") == "1":
+    checkpoint(unmet & " in a gate run")
+    check false
+  elif unmet.len > 0:
+    skip(unmet)
+  else:
+    body
+
 proc launchedActions(output: string): int =
   for line in output.splitLines():
     if line.startsWith("action: ") and " launched=true " in line:
@@ -158,13 +191,7 @@ proc outputDigest(project: string): seq[string] =
 suite "--target refuses a recipe that does not thread it, end to end":
 
   test "t_target_build_refuses_a_recipe_that_does_not_thread_it":
-    if not fileExists(reproBinary) and getEnv("REPROBUILD_GATE_RUN") == "1":
-      checkpoint(reproBinary & " is missing in a gate run")
-      check false
-    elif not fileExists(reproBinary) or findExe("sh").len == 0 or
-        findExe("cc").len == 0 or findExe("make").len == 0:
-      skip("build/bin/repro unbuilt, or sh/cc/make missing on PATH")
-    else:
+    requirePreconditions:
       let root = createTempDir("target-refusal-", "")
       defer: removeDir(root)
       let project = createProject(root)
@@ -200,13 +227,7 @@ suite "--target refuses a recipe that does not thread it, end to end":
       check outputDigest(project) == before
 
   test "t_target_build_refuses_host_objects_a_recipe_claims_to_thread":
-    if not fileExists(reproBinary) and getEnv("REPROBUILD_GATE_RUN") == "1":
-      checkpoint(reproBinary & " is missing in a gate run")
-      check false
-    elif not fileExists(reproBinary) or findExe("sh").len == 0 or
-        findExe("cc").len == 0 or findExe("make").len == 0:
-      skip("build/bin/repro unbuilt, or sh/cc/make missing on PATH")
-    else:
+    requirePreconditions:
       let root = createTempDir("target-object-check-", "")
       defer: removeDir(root)
       let project = createProject(root, DishonestRecipe)
@@ -219,3 +240,27 @@ suite "--target refuses a recipe that does not thread it, end to end":
       check not fileExists(keyed / "usr/bin/hello")
       check not fileExists(project / ".repro/output/.realization-info@" &
         Triple)
+      # The stage copy is a second edge tagged for publication; it is refused
+      # at the publication boundary, not only the mirror edge.
+      check not fileExists(project / ".repro/output/hello@" & Triple / "hello")
+
+  test "t_target_build_fails_every_publication_edge_holding_host_objects":
+    requirePreconditions:
+      let root = createTempDir("target-publish-gate-", "")
+      defer: removeDir(root)
+      let project = createProject(root, DishonestRecipe)
+      let cross = runBuild(root, project, @["--target=" & Triple])
+      checkpoint(cross.output)
+      check cross.code != 0
+      # The stage copy is not the mirror edge; it fails at the engine's
+      # publication boundary, so it is never recorded -- and the binary-cache
+      # and peer-cache publishers only run on a recorded success.
+      var stageFailed = false
+      for line in cross.output.splitLines():
+        if line.startsWith("action: autotools-stage-executable-") and
+            " status=asFailed " in line:
+          stageFailed = true
+      check stageFailed
+      check "output object(s) are not for --target '" & Triple & "'" in
+        cross.output
+      check not fileExists(project / ".repro/output/hello@" & Triple / "hello")

@@ -141,6 +141,39 @@ suite "path-mode dispatch resolves a sibling for its side of the split":
       except OSError as e:
         check "has no build for --target '" & Triple & "'" in e.msg)
 
+  test "a library with no source sibling is refused under --target":
+    # `buildDeps: zlib` where no `packages/source/zlib` exists: PATH holds a
+    # host zlib, and the arms realize one for the host. None may be linked.
+    let tmp = freshTmp()
+    defer: removeDir(tmp)
+    let recipes = tmp / "packages" / "source"
+    createDir(recipes)
+    let pathDir = tmp / "path-bin"
+    writeTool(pathDir / "zlib", "path")
+    proc zlibUse(kind: string): InterfaceToolUse =
+      InterfaceToolUse(packageSelector: "zlib", executableName: "zlib",
+                       rawConstraint: "zlib", depKind: kind)
+    proc resolveZlib(kind: string): string =
+      var resolved = ""
+      withEnv(FromSourceRootEnvVar, recipes, proc() =
+        let identity = pathOnlyBuildIdentity(ProjectInterfaceArtifact(
+          projectInterface: ProjectInterface(projectName: "consumer",
+            toolUses: @[zlibUse(kind)])), pathDir)
+        resolved = identity.profiles[0].resolvedExecutablePath)
+      resolved
+    withTarget(Triple, proc() =
+      for kind in [DepKindTarget, DepKindRuntime]:
+        try:
+          discard resolveZlib(kind)
+          check false
+        except OSError as e:
+          check "cannot be realized for --target '" & Triple & "'" in e.msg
+          check "no source recipe" in e.msg
+      # A build-host tool is still found on PATH.
+      check resolveZlib(DepKindNative) == pathDir / "zlib")
+    withTarget("", proc() =
+      check resolveZlib(DepKindTarget) == pathDir / "zlib")
+
   test "a target mirror without its keyed sidecar is not a build":
     let tmp = freshTmp()
     defer: removeDir(tmp)
@@ -157,7 +190,7 @@ suite "path-mode dispatch resolves a sibling for its side of the split":
       check fromSourceRecipeRoot(tmp) == recipes)
 
 const ObjectFixtures = currentSourcePath().parentDir.parentDir.parentDir /
-  "repro_project_dsl" / "tests" / "fixtures" / "target_object_check"
+  "repro_core" / "tests" / "fixtures" / "target_object_check"
 
 suite "a target mirror is verified when it is consumed":
   # The round-1 `--target` mirrored host bytes under `install@armv7-…`;

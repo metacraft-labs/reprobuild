@@ -8,8 +8,11 @@
 ## not thread a target; this module checks the BYTES, so an edge a recipe
 ## wrote itself (``shell``, a raw ``buildAction``) that compiled for the host
 ## is refused too. It runs where a target mirror is written
-## (``repro-install-mirror-publish --check-target``) and where one is
-## consumed (the tool-profile sibling resolver).
+## (``repro-install-mirror-publish --check-target``), in the engine before an
+## action tagged for publication counts as succeeded under ``--target`` (so
+## nothing reaches a store or a binary cache under a target identity
+## unchecked), and where a mirror is consumed (the tool-profile sibling
+## resolver).
 ##
 ## Formats, by their leading bytes:
 ##
@@ -17,7 +20,10 @@
 ##   for ARM, the ``EF_ARM_ABI_FLOAT_*`` bits of ``e_flags``
 ##   (https://refspecs.linuxfoundation.org/elf/gabi4+/ch4.eheader.html;
 ##   ARM ELF ABI, "ELF Header" e_flags:
-##   https://github.com/ARM-software/abi-aa/blob/main/aaelf32/aaelf32.rst).
+##   https://github.com/ARM-software/abi-aa/blob/main/aaelf32/aaelf32.rst);
+##   on a Linux triple ``EI_OSABI`` must be System V or GNU, and a
+##   ``PT_INTERP`` loader must belong to the triple's C library (glibc's
+##   ``ld-linux*``, musl's ``ld-musl-*``).
 ## * ``ar`` archives (``!<arch>\n``), System V/GNU and BSD member naming
 ##   (https://www.freebsd.org/cgi/man.cgi?query=ar&sektion=5); every member
 ##   is classified as a file of its own. A thin archive's members live
@@ -26,12 +32,18 @@
 ##   (``MZ`` + ``PE\0\0`` at ``e_lfanew``,
 ##   https://learn.microsoft.com/windows/win32/debug/pe-format): never an
 ##   object for a Linux target.
+## * LLVM bitcode (``BC\xC0\xDE`` and its wrapper): refused under a target,
+##   because its triple is not decoded here.
 ##
-## Everything else -- scripts, text, data -- is out of scope and passes.
-## Pure ``std`` on purpose: this module is imported by the install-mirror
-## publisher and the resolver, both of which keep a narrow import closure.
+## A symlink in a staged tree is resolved inside that tree: an absolute target
+## is the path the link will name once installed, so it is read under the
+## staged root, never on the build host, and a link that climbs out of the
+## root is refused unread. Everything else -- scripts, text, data, compressed
+## objects such as ``.ko.xz`` -- is out of scope and passes. Pure ``std`` on
+## purpose: the build engine, the install-mirror publisher and the resolver
+## all import it and each keeps a narrow import closure.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, strutils, times]
 
 type
   TargetOsFamily* = enum
@@ -39,6 +51,11 @@ type
 
   ArmFloatAbi* = enum
     afaNotArm, afaHard, afaSoft
+
+  TargetLibc* = enum
+    ## The C library a Linux triple's dynamically linked images load
+    ## through, as its ABI field names it. ``tlcOther`` checks nothing.
+    tlcOther, tlcGnu, tlcMusl
 
   TargetObjectRule* = object
     ## What a native object must carry to belong to ``triple``.
@@ -49,6 +66,7 @@ type
     elfData*: uint8           ## 1 = ELFDATA2LSB, 2 = ELFDATA2MSB
     os*: TargetOsFamily
     armFloat*: ArmFloatAbi
+    libc*: TargetLibc
 
   UnknownTargetCpu* = object of ValueError
     ## The triple names a CPU this check has no rule for. Refused rather
@@ -64,6 +82,9 @@ const
   EM_AARCH64 = 183'u16
   EM_RISCV = 243'u16
   EF_ARM_ABI_FLOAT_HARD = 0x400'u32
+  EF_ARM_ABI_FLOAT_SOFT = 0x200'u32
+  ELFOSABI_NONE = 0'u8        ## System V; what Linux toolchains write
+  ELFOSABI_GNU = 3'u8         ## ELFOSABI_LINUX; GNU extensions (IFUNC, …)
 
 proc machineName(machine: uint16): string =
   case machine
@@ -145,7 +166,8 @@ proc targetObjectRuleFor*(triple: string): TargetObjectRule =
     result.elfClass = 2
   of "x86_64":
     result.machine = EM_X86_64
-    result.elfClass = 2
+    # x32 (`x86_64-*-gnux32`) is the x86-64 ISA in ELFCLASS32 images.
+    result.elfClass = if tripleEnv(t).endsWith("x32"): 1 else: 2
   of "i386":
     result.machine = EM_386
     result.elfClass = 1
@@ -158,6 +180,12 @@ proc targetObjectRuleFor*(triple: string): TargetObjectRule =
       "staged objects cannot be verified; refusing rather than leaving them " &
       "unchecked (CLI/build.md §\"Cross Targets: `--target`\")")
   result.machineName = machineName(result.machine)
+  if result.os == tofLinux:
+    let env = tripleEnv(t)
+    result.libc =
+      if env.startsWith("musl"): tlcMusl
+      elif env.startsWith("gnu"): tlcGnu
+      else: tlcOther
 
 # ---------------------------------------------------------------------------
 # Byte reading
@@ -186,6 +214,8 @@ const
   ElfMagic = "\x7fELF"
   ArMagic = "!<arch>\n"
   ThinArMagic = "!<thin>\n"
+  BitcodeMagic = "BC\xC0\xDE"
+  BitcodeWrapperMagic = "\xDE\xC0\x17\x0B"   ## 0x0B17C0DE, little-endian
 
 proc isMachO(head: string): bool =
   if head.len < 8: return false
@@ -288,6 +318,60 @@ proc readArmAttributes(f: File; offset, size: int64; head: string;
       if at < 0 or len <= 0 or len > 1_048_576 or at + len > size: return
       return parseArmAttributes(readAt(f, offset + at, int(len)))
 
+const
+  PT_INTERP = 3'u32
+  MaxInterpLen = 4096
+
+proc u64(s: string; at: int; lsb: bool): uint64 =
+  let lo = uint64(u32(s, at, lsb))
+  let hi = uint64(u32(s, at + 4, lsb))
+  if lsb: lo or (hi shl 32) else: (lo shl 32) or hi
+
+proc readInterpreter(f: File; offset, size: int64; head: string;
+                     is64, lsb: bool): string =
+  ## The ``PT_INTERP`` path of the ELF image at ``offset``, or "" when it has
+  ## none (a static executable, a relocatable object, most shared objects).
+  ## Program-header layout: gABI "Program Header"
+  ## (https://refspecs.linuxfoundation.org/elf/gabi4+/ch5.pheader.html).
+  let phoff = if is64: int64(u64(head, 32, lsb)) else: int64(u32(head, 28, lsb))
+  let phentsize = int64(u16(head, if is64: 54 else: 42, lsb))
+  let phnum = int64(u16(head, if is64: 56 else: 44, lsb))
+  let need = if is64: 56'i64 else: 32'i64
+  if phoff <= 0 or phentsize < need or phnum <= 0 or
+      phoff + phentsize * phnum > size:
+    return ""
+  for i in 0'i64 ..< phnum:
+    let ph = readAt(f, offset + phoff + i * phentsize, int(need))
+    if ph.len < int(need): return ""
+    if u32(ph, 0, lsb) != PT_INTERP: continue
+    let at = if is64: int64(u64(ph, 8, lsb)) else: int64(u32(ph, 4, lsb))
+    let len = if is64: int64(u64(ph, 32, lsb)) else: int64(u32(ph, 16, lsb))
+    if at < 0 or len <= 0 or len > MaxInterpLen or at + len > size:
+      return ""
+    return readAt(f, offset + at, int(len)).strip(chars = {'\0'},
+      leading = false)
+  ""
+
+proc interpreterProblem(interp: string; rule: TargetObjectRule): string =
+  ## Why a dynamically linked image's loader does not belong to the triple's
+  ## C library, or "". glibc's loaders are ``ld-linux*.so.*`` (``ld64.so.*``
+  ## on some 64-bit ports); musl's are ``ld-musl-<arch>.so.1``
+  ## (https://wiki.musl-libc.org/guidelines-for-distributions.html).
+  if interp.len == 0 or rule.libc == tlcOther: return ""
+  let base = interp.extractFilename()
+  let isMusl = base.startsWith("ld-musl-")
+  let isGlibc = base.startsWith("ld-linux") or base.startsWith("ld64.so") or
+    base.startsWith("ld.so")
+  case rule.libc
+  of tlcMusl:
+    if not isMusl:
+      return "loads through " & interp & ", the triple is musl (ld-musl-*)"
+  of tlcGnu:
+    if not isGlibc:
+      return "loads through " & interp & ", the triple is glibc (ld-linux*)"
+  of tlcOther: discard
+  ""
+
 proc checkElf(f: File; offset, size: int64; head: string;
               rule: TargetObjectRule): string =
   ## "" when the ELF image at ``offset`` fits ``rule``, else why.
@@ -309,6 +393,15 @@ proc checkElf(f: File; offset, size: int64; head: string;
   if data != rule.elfData:
     problems.add((if lsb: "little" else: "big") & "-endian, the triple needs " &
       (if rule.elfData == 1: "little" else: "big") & "-endian")
+  if rule.os == tofLinux:
+    let osabi = uint8(ord(head[7]))
+    if osabi notin [ELFOSABI_NONE, ELFOSABI_GNU]:
+      problems.add("EI_OSABI " & $osabi & ", a Linux triple needs 0 " &
+        "(System V) or 3 (GNU/Linux)")
+  if problems.len == 0 and cls in [1'u8, 2'u8]:
+    let why = interpreterProblem(
+      readInterpreter(f, offset, size, head, cls == 2, lsb), rule)
+    if why.len > 0: problems.add(why)
   if problems.len == 0 and rule.armFloat != afaNotArm:
     # The float ABI. A LINKED image (executable, shared object) carries it
     # in e_flags, which the linker sets from the target: hard-float needs
@@ -340,6 +433,10 @@ proc checkElf(f: File; offset, size: int64; head: string;
         if (flags and EF_ARM_ABI_FLOAT_HARD) == 0:
           problems.add("not a hard-float image (e_flags 0x" &
             toHex(flags, 8) & " lacks EF_ARM_ABI_FLOAT_HARD), the triple " &
+            "is hard-float")
+        elif (flags and EF_ARM_ABI_FLOAT_SOFT) != 0:
+          problems.add("an image claiming both float ABIs (e_flags 0x" &
+            toHex(flags, 8) & " sets EF_ARM_ABI_FLOAT_SOFT), the triple " &
             "is hard-float")
       of afaSoft:
         if (flags and EF_ARM_ABI_FLOAT_HARD) != 0:
@@ -415,6 +512,13 @@ proc checkBlob(f: File; offset, size: int64; rule: TargetObjectRule;
   elif head.startsWith(ThinArMagic):
     acc.add(where & ": a thin archive; its members live outside the staged " &
       "tree and cannot be checked")
+  elif head.startsWith(BitcodeMagic) or head.startsWith(BitcodeWrapperMagic):
+    # LLVM bitcode (an LTO object, or one inside an archive). Its target
+    # triple is a record of the bitstream's MODULE_BLOCK
+    # (https://llvm.org/docs/BitCodeFormat.html), which this module does not
+    # decode; an unverified object is refused rather than passed.
+    acc.add(where & ": LLVM bitcode, whose target triple this check does " &
+      "not decode; refused under --target rather than left unverified")
   elif isMachO(head):
     if rule.os != tofDarwin:
       acc.add(where & ": a Mach-O image, the triple is not a Darwin target")
@@ -438,25 +542,98 @@ proc targetObjectMismatchesInFile*(path: string; rule: TargetObjectRule;
   finally:
     close(f)
 
+const MaxSymlinkHops = 40
+
+proc resolveInStagedRoot*(root, rel: string): tuple[rel: string; ok: bool] =
+  ## Resolve ``rel`` under the staged tree ``root`` without ever leaving it.
+  ## Each symlink met on the way is read and followed RELATIVE TO ``root``:
+  ## an absolute link target names the path it will have once the tree is
+  ## installed (a DESTDIR-style staging tree), so ``/usr/lib/x`` resolves to
+  ## ``<root>/usr/lib/x``, never to the build host's ``/usr/lib/x``. A ``..``
+  ## that would climb above ``root``, or a chain of more than
+  ## ``MaxSymlinkHops`` links, is ``ok = false``.
+  var pending = rel.replace('\\', '/').split('/')
+  var resolved: seq[string]
+  var hops = 0
+  while pending.len > 0:
+    let c = pending[0]
+    pending.delete(0)
+    if c.len == 0 or c == ".": continue
+    if c == "..":
+      if resolved.len == 0: return ("", false)
+      resolved.setLen(resolved.len - 1)
+      continue
+    let candidate = root / (resolved & @[c]).join("/")
+    if symlinkExists(candidate):
+      inc hops
+      if hops > MaxSymlinkHops: return ("", false)
+      let target = expandSymlink(candidate).replace('\\', '/')
+      if target.startsWith("/"): resolved.setLen(0)
+      pending = target.split('/') & pending
+    else:
+      resolved.add(c)
+  (resolved.join("/"), true)
+
+proc treeMismatches(root: string; rule: TargetObjectRule;
+                    display: string): seq[string] =
+  ## Every mismatch under the staged tree ``root``. Regular files are read
+  ## in place; a symlink is resolved by ``resolveInStagedRoot`` and its
+  ## target read only when that lands on a regular file inside ``root``. A
+  ## link that leaves the tree is a mismatch line (its target is not read);
+  ## a dangling link, or one naming a directory, is skipped.
+  let prefix = if display.len > 0: display & "/" else: ""
+  for rel in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile,
+                        pcLinkToDir}, relative = true, skipSpecial = true):
+    let shown = prefix & rel.replace('\\', '/')
+    let abs = root / rel
+    if not symlinkExists(abs):
+      result.add(targetObjectMismatchesInFile(abs, rule, shown))
+      continue
+    let (target, ok) = resolveInStagedRoot(root, rel)
+    if not ok:
+      result.add(shown & ": a symlink leading outside the staged tree (-> " &
+        expandSymlink(abs) & "); not followed")
+      continue
+    let resolvedAbs = root / target
+    if fileExists(resolvedAbs) and not symlinkExists(resolvedAbs):
+      result.add(targetObjectMismatchesInFile(resolvedAbs, rule, shown))
+
 proc targetObjectMismatches*(root, triple: string): seq[string] =
   ## Every mismatch under the staged tree ``root`` against ``triple``,
-  ## sorted by path. Raises ``UnknownTargetCpu``. A symlink is followed
-  ## when it names a file; a dangling one is skipped.
+  ## sorted by path. Raises ``UnknownTargetCpu``.
   let rule = targetObjectRuleFor(triple)
   if not dirExists(root):
     return
-  for rel in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile},
-                        relative = true, skipSpecial = true):
-    let abs = root / rel
-    if not fileExists(abs): continue
-    result.add(targetObjectMismatchesInFile(abs, rule,
-      rel.replace('\\', '/')))
+  result = treeMismatches(root, rule, "")
   result.sort()
 
-proc refuseTargetObjectMismatches*(root, triple, context: string) =
-  ## Raise ``TargetObjectMismatch`` naming every offending path when the
-  ## staged tree ``root`` holds an object that is not for ``triple``.
-  let found = targetObjectMismatches(root, triple)
+proc targetObjectMismatchesInPaths*(paths: openArray[string];
+                                    triple: string): seq[string] =
+  ## Every mismatch in ``paths`` -- an action's declared outputs, each a
+  ## file or a directory tree -- against ``triple``, sorted. A directory is
+  ## its own staged root; a file is checked in place, and a file that is a
+  ## symlink is resolved with its directory as the root. Absent paths are
+  ## skipped (an action's optional outputs). Raises ``UnknownTargetCpu``.
+  let rule = targetObjectRuleFor(triple)
+  for path in paths:
+    if dirExists(path) and not symlinkExists(path):
+      result.add(treeMismatches(path, rule, path))
+    elif symlinkExists(path):
+      let dir = path.parentDir()
+      let (target, ok) = resolveInStagedRoot(dir, path.extractFilename())
+      if not ok:
+        result.add(path & ": a symlink leading outside its directory (-> " &
+          expandSymlink(path) & "); not followed")
+      elif fileExists(dir / target) and not symlinkExists(dir / target):
+        result.add(targetObjectMismatchesInFile(dir / target, rule, path))
+    elif fileExists(path):
+      result.add(targetObjectMismatchesInFile(path, rule, path))
+  result.sort()
+
+proc refuseTargetObjectMismatches*(found: seq[string];
+                                   root, triple, context: string) =
+  ## Raise ``TargetObjectMismatch`` naming every line of ``found`` (a scan
+  ## of the staged tree ``root`` against ``triple``) when it is not empty.
   if found.len == 0: return
   var msg = context & ": " & $found.len & " staged object(s) under " & root &
     " are not for --target '" & triple & "' (CLI/build.md §\"Cross " &
@@ -464,3 +641,172 @@ proc refuseTargetObjectMismatches*(root, triple, context: string) =
   for line in found:
     msg.add("\n  " & line)
   raise newException(TargetObjectMismatch, msg)
+
+proc refuseTargetObjectMismatches*(root, triple, context: string) =
+  ## Raise ``TargetObjectMismatch`` naming every offending path when the
+  ## staged tree ``root`` holds an object that is not for ``triple``.
+  refuseTargetObjectMismatches(targetObjectMismatches(root, triple), root,
+    triple, context)
+
+proc objectCheckTripleFromVariants*(raw: string): string =
+  ## The triple a build's published outputs are checked against, from a
+  ## ``REPRO_VARIANTS`` value (``name=value`` pairs, comma separated; the
+  ## channel ``repro build --target`` writes and the stdlib reads), or ""
+  ## for a native build: no ``targetTriple``, ``native``, or the build
+  ## host's own triple. The last assignment wins, as it does for the
+  ## stdlib's reader.
+  for item in raw.split(','):
+    let kv = item.split('=', 1)
+    if kv.len == 2 and kv[0].strip() == "targetTriple":
+      result = kv[1].strip()
+  if result.len == 0 or result.toLowerAscii() == "native" or
+      isHostTriple(result):
+    result = ""
+
+proc stagedTreeStatFingerprint*(root: string): string =
+  ## A fingerprint of the staged tree ``root`` from ``lstat`` alone: every
+  ## entry's relative path, kind, size and modification time, in sorted
+  ## order, links not followed (a link contributes its own target string).
+  ## Two equal fingerprints mean the tree was not rewritten in between, so a
+  ## scan of it can be reused; any write, rename, removal or relink changes
+  ## it. Cheap next to the scan it guards, which reads every native object.
+  var rows: seq[string]
+  if not dirExists(root):
+    return ""
+  for rel in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile, pcDir,
+                        pcLinkToDir}, relative = true, skipSpecial = true):
+    let abs = root / rel
+    if symlinkExists(abs):
+      rows.add(rel & "\0L\0" & expandSymlink(abs))
+    else:
+      let info = getFileInfo(abs, followSymlink = false)
+      rows.add(rel & "\0" & $info.kind & "\0" & $info.size & "\0" &
+        $info.lastWriteTime.toUnix() & "." &
+        $info.lastWriteTime.nanosecond())
+  rows.sort()
+  rows.join("\n")
+
+type
+  TargetObjectScanMemo* = object
+    ## Scans of staged trees, keyed by (root, triple) and valid while the
+    ## tree's ``stagedTreeStatFingerprint`` is unchanged. Owned by the
+    ## caller, so its lifetime is the caller's (one resolution session).
+    entries: seq[tuple[root, triple, fingerprint: string;
+                       found: seq[string]]]
+
+proc targetObjectMismatches*(memo: var TargetObjectScanMemo;
+                             root, triple: string): seq[string] =
+  ## ``targetObjectMismatches(root, triple)``, answered from ``memo`` when
+  ## the tree has not changed since it was last scanned.
+  let fingerprint = stagedTreeStatFingerprint(root)
+  for entry in memo.entries:
+    if entry.root == root and entry.triple == triple and
+        entry.fingerprint == fingerprint:
+      return entry.found
+  result = targetObjectMismatches(root, triple)
+  for entry in memo.entries.mitems:
+    if entry.root == root and entry.triple == triple:
+      entry.fingerprint = fingerprint
+      entry.found = result
+      return
+  memo.entries.add((root, triple, fingerprint, result))
+
+# ---------------------------------------------------------------------------
+# Declared exemptions
+# ---------------------------------------------------------------------------
+
+type
+  TargetObjectExemption* = object
+    ## A path a recipe declares to hold a foreign-architecture object it
+    ## ships on purpose (an ``EM_BPF`` program, device firmware), with why.
+    ## Declared one path at a time with a reason; there is no pattern and no
+    ## implicit allowlist (CLI/build.md §"Cross Targets: `--target`").
+    path*: string    ## relative to the installed prefix, ``/``-separated
+    reason*: string
+
+const TargetObjectExemptionsEnvVar* = "REPRO_TARGET_OBJECT_EXEMPTIONS"
+  ## The channel a package's exemptions travel to every action it emits:
+  ## one ``<path>\t<reason>`` per line. Part of each action's environment,
+  ## and so of its identity: changing an exemption changes the cache key.
+
+proc validateTargetObjectExemption*(e: TargetObjectExemption) =
+  ## Raise ``ValueError`` for an exemption that is not one relative path
+  ## with a reason.
+  if e.reason.strip().len == 0:
+    raise newException(ValueError, "target object exemption '" & e.path &
+      "' has no reason; an exemption must say why the object is foreign")
+  if e.path.len == 0 or e.path.startsWith("/") or '\\' in e.path:
+    raise newException(ValueError, "target object exemption '" & e.path &
+      "' must be one /-separated path relative to the installed prefix")
+  for c in e.path & e.reason:
+    if c in {'\0', '\t', '\n', '\r'}:
+      raise newException(ValueError, "target object exemption '" & e.path &
+        "' holds a control character")
+  for part in e.path.split('/'):
+    if part in ["", ".", ".."] or '*' in part or '?' in part or '[' in part:
+      raise newException(ValueError, "target object exemption '" & e.path &
+        "' must name one path: no empty, '.', '..' or wildcard components")
+
+proc encodeTargetObjectExemptions*(es: openArray[TargetObjectExemption]):
+    string =
+  var lines: seq[string]
+  for e in es:
+    validateTargetObjectExemption(e)
+    lines.add(e.path & "\t" & e.reason)
+  lines.join("\n")
+
+proc decodeTargetObjectExemptions*(raw: string): seq[TargetObjectExemption] =
+  ## Raises ``ValueError`` on a malformed line rather than dropping it: an
+  ## exemption that cannot be read must not silently widen or narrow.
+  for line in raw.split('\n'):
+    if line.len == 0: continue
+    let tab = line.find('\t')
+    if tab < 1:
+      raise newException(ValueError, TargetObjectExemptionsEnvVar &
+        ": malformed entry '" & line & "'")
+    let e = TargetObjectExemption(path: line[0 ..< tab],
+                                  reason: line[tab + 1 .. ^1])
+    validateTargetObjectExemption(e)
+    result.add(e)
+
+proc mismatchPath(line: string): string =
+  ## The path a mismatch line names: before ``(`` (an archive member) or
+  ## ``: `` (the reason), whichever comes first.
+  var stop = line.find(": ")
+  if stop < 0: stop = line.len
+  let paren = line.find('(')
+  if paren >= 0 and paren < stop: stop = paren
+  line[0 ..< stop]
+
+proc namesExemptPath(shown, exempt: string): bool =
+  ## Whether the reported path ``shown`` is ``exempt``, matched on whole
+  ## path components at the end (a mirror reports ``usr/lib/x``, the engine
+  ## an absolute output path ending in it).
+  let s = shown.replace('\\', '/')
+  s == exempt or s.endsWith("/" & exempt)
+
+proc applyTargetObjectExemptions*(found: seq[string];
+                                  exemptions: openArray[TargetObjectExemption];
+                                  requireUse: bool): seq[string] =
+  ## ``found`` without the lines an exemption covers. With ``requireUse`` --
+  ## where the scan saw the package's whole staged tree, i.e. the mirror --
+  ## an exemption that covered no line is reported as stale: it names
+  ## nothing the check refuses, so it must be removed rather than linger as a
+  ## silent allowance for whatever lands there next.
+  var used = newSeq[bool](exemptions.len)
+  for line in found:
+    let shown = mismatchPath(line)
+    var covered = false
+    for i, e in exemptions:
+      if namesExemptPath(shown, e.path):
+        covered = true
+        used[i] = true
+    if not covered:
+      result.add(line)
+  if requireUse:
+    for i, e in exemptions:
+      if not used[i]:
+        result.add(e.path & ": declared exempt from the object check (" &
+          e.reason & ") but holds nothing the check refuses; remove the " &
+          "exemption")
+  result.sort()

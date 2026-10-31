@@ -253,6 +253,17 @@ proc setFeatureSet*(ctx: BuildContext; fs: FeatureSet) =
   validate(fs)
   ctx.state.featureSetSlot = fs
 
+proc targetObjectExemption*(path: string; reason: string) =
+  ## Declare that the staged ``path`` -- relative to the installed prefix,
+  ## e.g. ``"usr/lib/firmware/brcm/fw.bin"`` -- holds a foreign-architecture
+  ## object this package ships on purpose (an ``EM_BPF`` program, firmware),
+  ## so the cross build's object check passes it (CLI/build.md §"Cross
+  ## Targets: `--target`", declared exemptions). One path, a reason, and
+  ## declared before the package emits its first edge. The mirror refuses an
+  ## exemption that covers nothing, and records each one in the
+  ## ``.realization-info@<triple>`` sidecar.
+  declareTargetObjectExemption(path, reason)
+
 proc requireCrossTargetConsulted*(caller: string) =
   ## ReproOS-Add-On-Mode A15 fail-closed guard, called first by every
   ## constructor that does not thread the target itself. Under a non-native
