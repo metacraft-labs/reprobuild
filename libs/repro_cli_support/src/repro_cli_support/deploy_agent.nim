@@ -65,6 +65,8 @@ when defined(linux):
   from repro_core/source_root import publicCliImagePath
 import repro_elevation
 import repro_profile_compile
+from repro_profile_compile/compile import CompileFailure,
+  resolveProfileNimCompiler, resolveProfileCCompiler
 
 type
   DeployAgentFlags = object
@@ -232,6 +234,20 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   var host, platform, arch, systemMode = ""
   var systemActivities: seq[string]
   var hostGiven, stdio = false
+  if args == @["--probe-c-compiler"]:
+    # The toolchain a compile here would use, without compiling: the Nim
+    # compiler and the C compiler (ReproOS add-on mode §13 decision 31: a
+    # host that compiles profiles needs both). Exit 1, naming what is
+    # missing, when either does not resolve. Bootstrap's preflight asks it.
+    try:
+      let nim = resolveProfileNimCompiler()
+      let cc = resolveProfileCCompiler()
+      echo "nim: " & nim
+      echo "cc: " & (if cc.len > 0: cc else: "the Nim default (on PATH)")
+      return 0
+    except CompileFailure as e:
+      stderr.writeLine(e.msg)
+      return 1
   var i = 0
   while i < args.len:
     let a = args[i]
