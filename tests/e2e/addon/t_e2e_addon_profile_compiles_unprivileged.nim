@@ -77,6 +77,14 @@ proc installEngine(g: Guest) =
       "dpkg-query -W -f='${Package}\\n' '*clingo*' 2>/dev/null | wc -l").stdout
     doAssert distClingo.splitWhitespace() == @["0", "0"],
       "the armhf guest has a distribution clingo: " & distClingo
+    # The declared prerequisite of a host that compiles profiles (§13
+    # decision 31): a C compiler from the base. The amd64 bases' cloud
+    # images carry one; this one does not.
+    let cc = g.exec("command -v cc gcc >/dev/null || { apt-get update -q " &
+      ">/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -q " &
+      "gcc >/dev/null; }; command -v gcc", timeoutSec = 3600)
+    doAssert cc.exitCode == 0, "cannot install the C compiler prerequisite: " &
+      cc.stdout & cc.stderr
     g.copyTo(enginePrefixTar, "/root/engine-prefix.tar")
     discard g.run("mkdir -p /usr/local/repro && tar -xf /root/engine-prefix.tar " &
       "-C /usr/local/repro && rm /root/engine-prefix.tar && ln -sfn " &
