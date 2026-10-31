@@ -328,12 +328,14 @@
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
 
-import std/[algorithm, compilesettings, os, osproc, sequtils, sets, streams,
-            strutils, tables, tempfiles, unittest]
+import std/[algorithm, compilesettings, os, osproc, sequtils, sets,
+            streams, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
 import repro_test_support
+import repro_test_support/process_fixtures
+import repro_test_support/descendant_guard_expectations
 
 type
   LaunchPathKind = enum
@@ -520,6 +522,17 @@ int main(int argc, char **argv) {
     ts.tv_nsec = (hold_ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
   }
+  /* Remove a file this action did not create: `<out>.stale`, which the
+     launch-path cases seed before each run. io-mon records the unlink as an
+     `mrPathMutation`, the engine folds it into `monitorRemovals`, and without
+     it that field renders `[]` on every launch path, so the identity
+     comparison cannot fail for a difference in it. Where nothing was seeded
+     the unlink fails, and a failed removal records nothing. See the header. */
+  {
+    char stale[4096];
+    int written = snprintf(stale, sizeof(stale), "%s.stale", argv[2]);
+    if (written > 0 && (size_t)written < sizeof(stale)) unlink(stale);
+  }
   FILE *out = fopen(argv[2], "w");
   if (out == NULL) return 82;
   fputs(buffer, out);
@@ -581,8 +594,8 @@ type EngineSourceFile = object
 ## row here.
 const SpawnPrimitives: array[45, tuple[name: string; expected: int;
                                        why: string]] = [
-  ("startProcess", 3,
-    "post-build converter, the L2 RunQuota helper, the nix daemon"),
+  ("startProcess", 4,
+    "post-build converter, L2 RunQuota helper, nix daemon, config-free Nim metadata"),
   # In-Process-Monitor-Hosting HM-4. ``startMonitor`` is a REAL spawn — it is
   # io-mon's only spawn site for a monitored tree — so the engine hosting the
   # monitor is a launch path in its own right and is pinned like any other.
@@ -839,7 +852,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "runquota_process", audit: caFullSurface,
       sourceRels: @["libs/runquota_process/src/runquota_process.nim"],
       spawning: @["commandSpec", "launchProcess"],
-      inert: @["libraryInfo", "backendProfile", "launchResult", "running",
+      inert: @["libraryInfo", "shellScriptDir", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
                "waitForExit", "cancelAndWait", "close"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
@@ -856,7 +869,8 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                   "acquireCliArgs", "helperCliArgs"],
       inert: @["toRunQuotaRequest", "grantHeartbeatMs", "grantUnresponsiveMs",
                "grantBoundedReadMs", "reportGrantHeartbeat", "awaitGrantLoop",
-               "isRunQuotaDaemonReachable", "processId", "pollCompletion",
+               "isRunQuotaDaemonReachable", "processId", "leaseId",
+               "pollCompletion",
                "finishCompleted", "cancelAndWait", "openRunQuotaSession",
                "close", "maxOfferBatchSize", "pollRunQuotaGrants",
                "cancelQueued", "defaultRunQuotaWindowsPipePath",
@@ -895,7 +909,17 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "runQuotaLeaseHolders", "summarizeRunQuotaLeaseHolders",
                "runQuotaEndpointText", "runQuotaQueueTimeoutMs",
                "initRunQuotaQueueWait", "stepRunQuotaQueueWait",
-               "runQuotaQueueWaitMessage", "runQuotaQueueTimeoutMessage"]),
+               "runQuotaQueueWaitMessage", "runQuotaQueueTimeoutMessage",
+               # Build-declared pools (8dd3ac277, "A RunQuota daemon
+               # reprobuild starts now follows the host's configuration").
+               # `declareRunQuotaPools` is a `DeclarePools` request over the
+               # session's existing connection; the unsupported-daemon
+               # report is one stderr line; the memory-budget read is an
+               # `inspectionJson("topology")` round trip on a
+               # `connectDefault` client, the same connect
+               # `isRunQuotaDaemonReachable` makes. None starts a process.
+               "declareRunQuotaPools", "reportPoolDeclarationUnsupported",
+               "runQuotaDaemonMemoryBudget"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
@@ -999,14 +1023,22 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # 0, 1 and 2 and nothing else — by marking the engine's other descriptors
     # close-on-exec across io-mon's spawn and saving the stdio copies
     # close-on-exec from birth. ``fcntl`` changes a descriptor flag and
-    # starts nothing; the other four are constants.
+    # starts nothing; the other four are constants. The marking has since
+    # moved to ``repro_core/descriptor_inheritance`` (shared with the CLI's
+    # spawn of the ``runquotad`` an invocation owns), which starts nothing
+    # either, so the engine's own import is down to ``fcntl`` and
+    # ``F_DUPFD_CLOEXEC`` and the allowlist below with it.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
-      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl"],
+      # `lstat` and the `S_IS*` tests: `endpointRootOwned` reads the
+      # ownership and type of a daemon endpoint's path components
+      # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
+      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
-                        "Mode", "umask", "dup2", "close", "fcntl", "F_GETFD",
-                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC"]),
+                        "Mode", "umask", "dup2", "close", "fcntl",
+                        "F_DUPFD_CLOEXEC",
+                        "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],
       spawning: @[],
@@ -1330,8 +1362,6 @@ type DaemonHandle = object
   process: Process
   socket: string
   started: bool
-  previousSocket, previousBypass: string
-  hadSocket, hadBypass: bool
 
 proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
                          cpuMilli: int): DaemonHandle =
@@ -1369,15 +1399,13 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
   var died = false
   for _ in 0 ..< 400:
     if statExists(socketPath):
-      result = DaemonHandle(process: daemon, socket: socketPath, started: true,
-        previousSocket: getEnv("RUNQUOTA_SOCKET"),
-        previousBypass: getEnv("REPROBUILD_NO_RUNQUOTA"),
-        hadSocket: existsEnv("RUNQUOTA_SOCKET"),
-        hadBypass: existsEnv("REPROBUILD_NO_RUNQUOTA"))
+      result = DaemonHandle(process: daemon, socket: socketPath, started: true)
       putEnv("RUNQUOTA_SOCKET", socketPath)
       # Graph actions inherit bypass to avoid reacquiring the outer leased
       # pool. This fixture has its own authority, so exercise real leases here.
-      # The caller's policy is restored on stop; the engine policy is unchanged.
+      # Only this process's environment changes, and the daemon lives exactly
+      # as long as the process does (see ``ensureFixture``); the engine
+      # policy is unchanged.
       delEnv("REPROBUILD_NO_RUNQUOTA")
       return
     # A REFUSAL EXITS; it does not hang. Noticing that here turns a
@@ -1399,18 +1427,6 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
     "runquotad did not bind " & socketPath &
     (if died: " (it exited first)" else: " (timed out)") &
     (if output.len > 0: "; it said: " & output else: "; it said nothing"))
-
-proc stop(handle: var DaemonHandle) =
-  if not handle.started: return
-  handle.process.terminate()
-  discard handle.process.waitForExit()
-  handle.process.close()
-  removeFile(handle.socket)
-  if handle.hadSocket: putEnv("RUNQUOTA_SOCKET", handle.previousSocket)
-  else: delEnv("RUNQUOTA_SOCKET")
-  if handle.hadBypass: putEnv("REPROBUILD_NO_RUNQUOTA", handle.previousBypass)
-  else: delEnv("REPROBUILD_NO_RUNQUOTA")
-  handle.started = false
 
 proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     BuildEngineConfig =
@@ -1533,16 +1549,17 @@ proc resultById(run: BuildRunResult; id: string): ActionResult =
 ## Cross-path evidence identity.
 ##
 ## ``checkMonitoredEvidence`` below asserts each path's evidence is
-## non-empty and complete. That is weaker than what is actually true:
+## non-empty and readable. That is weaker than what is actually true:
 ## for the same fixture, all four launch paths produce the SAME
-## evidence — one read, no writes recorded as differences, no
-## diagnostics. Asserting the identity rather than each half separately
+## evidence, including the required platform limitation diagnostic where
+## the backend has no tree-lifetime guard. Asserting identity
 ## costs nothing and turns "monitored" into "monitored the same way",
 ## which is the property a change to how the monitor is hosted has to
 ## preserve.
 ##
-## Everything that legitimately differs between cases is a path prefix
-## or a per-case filename, so those are substituted out and the whole
+## Legitimate differences are path prefixes, per-case filenames, and the
+## run ID in the exact platform limitation diagnostic. Those are
+## substituted out and the whole
 ## ``PathSetEvidence`` is rendered to one comparable string. Rendering
 ## every field (not just ``monitorReads``) is deliberate: a change that
 ## moved a path from ``monitorReads`` into ``monitorProbes`` on one path
@@ -1608,17 +1625,47 @@ proc renderEntropyObservations(observations: seq[EntropyObservation]):
     result.add observation.source & "@" & $observation.origin & "@" &
       observation.image
 
+proc renderEvidencePaths(name: string; paths: seq[string];
+                         subs: seq[(string, string)]): string =
+  ## Darwin records both lexical /tmp paths and canonical /private/tmp
+  ## companions. Compare the set of names after mapping both spellings.
+  var items: seq[string] = @[]
+  for p in paths:
+    var value = p
+    for sub in subs:
+      value = value.replace(sub[0], sub[1])
+    if value notin items:
+      items.add value
+  items.sort()
+  name & "=[" & items.join(" ") & "]"
+
+const MonitorLossSummary =
+  "monitor depfile is incomplete (unknown-scope loss); " &
+  "action-cache publish skipped this session per " &
+  "Failure-Semantics.md §Monitoring Failures"
+const MonitorLossDiagnosticPrefix = "monitor loss: "
+
+proc renderEvidenceDiagnostics(diagnostics: seq[string]): string =
+  ## Compare the full diagnostic multiset. Only the run ID of the exact
+  ## required platform marker varies legitimately between captures. Do not
+  ## apply path substitutions or deduplicate: either can conceal extra loss.
+  var items: seq[string]
+  for diagnostic in diagnostics:
+    var value = diagnostic
+    if diagnostic.startsWith(MonitorLossDiagnosticPrefix):
+      let detail = diagnostic[MonitorLossDiagnosticPrefix.len .. ^1]
+      if detail.isTreeLifetimeLimitation and
+          detail[TreeLifetimeLimitationPrefix.len .. ^1].find(Whitespace) < 0:
+        value = MonitorLossDiagnosticPrefix & TreeLifetimeLimitationPrefix & "<run>"
+    items.add value
+  items.sort()
+  # Quote entries so one diagnostic cannot compare equal to two fragments.
+  "diagnostics=[" & items.mapIt(it.escape).join(" ") & "]"
+
 proc evidenceShape(res: ActionResult;
                    subs: seq[(string, string)]): string =
   proc render(name: string; paths: seq[string]): string =
-    var items: seq[string] = @[]
-    for p in paths:
-      var value = p
-      for sub in subs:
-        value = value.replace(sub[0], sub[1])
-      items.add value
-    items.sort()
-    name & "=[" & items.join(" ") & "]"
+    renderEvidencePaths(name, paths, subs)
 
   let ev = res.evidence
   @[
@@ -1627,6 +1674,7 @@ proc evidenceShape(res: ActionResult;
     render("depfileInputs", ev.depfileInputs.paths),
     render("monitorReads", ev.monitorReads.paths),
     render("monitorWrites", ev.monitorWrites.paths),
+    render("monitorRemovals", ev.monitorRemovals.paths),
     render("monitorProbes", ev.monitorProbes.paths),
     # P10. The EIGHTH field, and the last one this rendering was blind to.
     # An enumeration lands in `monitorProbes` too, so a difference in this
@@ -1636,7 +1684,7 @@ proc evidenceShape(res: ActionResult;
     # in `evidence is identical across launch paths`.
     render("monitorDirectoryEnumerations",
       ev.monitorDirectoryEnumerations.paths),
-    render("diagnostics", ev.diagnostics),
+    renderEvidenceDiagnostics(ev.diagnostics),
 
     # THE THREE FIELDS `PathSetEvidence` GREW AFTER P10, and the ninth /
     # tenth / eleventh instance of the same shape. `monitorEnvReads` arrived
@@ -1673,7 +1721,7 @@ proc evidenceShape(res: ActionResult;
     #     said the class could not be produced here, because an unblessed
     #     action that reads entropy collects `applyEntropyBlessingPolicy`'s
     #     "action-cache publish skipped" diagnostic and that would cost the
-    #     `diagnostics=[]` pin. FALSE: the policy returns at
+    #     healthy-fixture diagnostic pin. FALSE: the policy returns at
     #     `if not action.cacheable`, and `monitoredFixtureAction` leaves
     #     `cacheable` at its `false` default. `FixtureSource` therefore
     #     draws eight bytes from `getentropy` — io-mon hooks it on BOTH
@@ -1681,7 +1729,7 @@ proc evidenceShape(res: ActionResult;
     #     `shim/macos_interpose.nim`'s `repro_hook_getentropy`) and emits
     #     `mrNonDeterministic` — and all five recorded actions render
     #     `entropyObservations=[getentropy@ecoUnattributed]` with
-    #     `diagnostics=[]` intact. The presence pin below is what says so.
+    #     no entropy-policy diagnostic. The presence pin below is what says so.
     render("monitorEnvReads", ev.monitorEnvReads),
     render("entropyObservations", renderEntropyObservations(
       ev.entropyObservations)),
@@ -1753,13 +1801,19 @@ proc looksLikeSharedObject(path: string): bool =
 proc caseSubstitutions(tempRoot, caseDir, workRoot, marker,
                        outPath: string): seq[(string, string)] =
   ## Longest and most specific first — the absolute forms have to be
-  ## consumed before the directory prefixes they contain.
+  ## consumed before the directory prefixes they contain. Include canonical
+  ## companions for outputs and directories as well as inputs; otherwise a
+  ## recorded /private/tmp write becomes /private<out> instead of <out>.
   result = @[
     (expandFilename(marker), "<marker>"),
     (marker, "<marker>"),
+    (expandFilename(outPath), "<out>"),
     (outPath, "<out>"),
+    (expandFilename(workRoot), "<work>"),
     (workRoot, "<work>"),
+    (expandFilename(caseDir), "<case>"),
     (caseDir, "<case>"),
+    (expandFilename(tempRoot), "<temp>"),
     (tempRoot, "<temp>"),
     (marker.extractFilename, "<marker>"),
     (outPath.extractFilename, "<out>")
@@ -1865,13 +1919,90 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
       "\n  diagnostics: ", res.evidence.diagnostics.join("; ")
   check mentionsPath(res.evidence.monitorReads.paths, markerPath)
 
-  # And the evidence is COMPLETE, not merely non-empty.
+  # The depfile must be readable and a monitor must have been selected.
+  # The required platform limitation is checked separately below.
   for diagnostic in res.evidence.diagnostics:
     check not diagnostic.contains("monitor depfile read failed")
     check not diagnostic.contains(
       "requires monitor evidence but no iomon path is selected")
 
 suite "every_launch_path_is_monitored":
+
+  test "evidence shape normalizes only exact platform limitation run IDs":
+    # Synthetic evidence exercises the comparison boundary; the real capture
+    # cases below still require every launch path and its complete evidence.
+    const lossPrefix = "monitor loss: "
+    const markerPrefix = lossPrefix &
+      "detached-descendant quiescence cannot be established: "
+    proc shape(diagnostics: seq[string]; subs: seq[(string, string)] = @[]): string =
+      var res: ActionResult
+      res.evidence.diagnostics = diagnostics
+      evidenceShape(res, subs)
+
+    const summary = "monitor depfile is incomplete (unknown-scope loss); " &
+      "action-cache publish skipped this session per " &
+      "Failure-Semantics.md §Monitoring Failures"
+    let empty = shape(@[])
+    for platform in ["macos", "windows"]:
+      let prefix = markerPrefix & platform &
+        " backend has no complete tree-lifetime guard run="
+      let first = prefix & "1792337726.916988-47315-4"
+      let second = prefix & "1792337727.326327-49434-1"
+      let normalized = prefix & "<run>"
+      let expected = shape(@[summary, normalized])
+      let actual = shape(@[summary, first])
+      if NoTreeLifetimeGuard and
+          prefix == lossPrefix & TreeLifetimeLimitationPrefix:
+        check actual == expected
+        check shape(@[summary, second]) == expected
+      else:
+        # A marker for another backend is evidence of a real difference.
+        check actual != expected
+        check shape(@[summary, second]) != actual
+      check actual != empty
+      check shape(@[first]) != actual
+      check shape(@[summary]) != actual
+      check shape(@[summary, summary, first]) != actual
+      check shape(@[summary, first, first]) != actual
+      check shape(@[summary, first, "additional monitor loss"]) != actual
+      check shape(@[summary, first, second]) != actual
+      check shape(@[summary & " " & first]) != actual
+      for malformed in [prefix, first & " trailing loss", first & "\t",
+          first & "\r", first & "\n", first & "\v", first & "\f"]:
+        check shape(@[summary, malformed]) != expected
+      # Path substitutions must never rewrite arbitrary diagnostic text.
+      check shape(@["unrelated run=" & first], @[(first, "<run>")]) ==
+        shape(@["unrelated run=" & first])
+    check shape(@["other loss", "other loss"]) != shape(@["other loss"])
+
+  when defined(linux) or defined(macosx):
+    test "evidence shape folds aliases while retaining distinct and missing writes":
+      let root = createTempDir("repro-evidence-shape-", "", "/tmp")
+      defer: removeDir(root)
+      let actual = root / "actual"
+      let alias = root / "alias"
+      createDir(actual)
+      createSymlink(actual, alias)
+      let caseDir = alias / "case"
+      let workRoot = caseDir / "work"
+      createDir(workRoot)
+      let marker = workRoot / "marker.txt"
+      let output = workRoot / "out.txt"
+      writeFile(marker, "marker")
+      writeFile(output, "output")
+      let subs = caseSubstitutions(root, caseDir, workRoot, marker, output)
+      let shape = renderEvidencePaths("monitorWrites",
+        @[output, expandFilename(output)], subs)
+      check shape == "monitorWrites=[<out>]"
+      # An unrelated output with the same basename is still another write.
+      let extraDir = actual / "elsewhere"
+      createDir(extraDir)
+      let extra = extraDir / "out.txt"
+      writeFile(extra, "extra")
+      let extraShape = renderEvidencePaths("monitorWrites", @[output, extra], subs)
+      check shapeList(extraShape, "monitorWrites").len == 2
+      check extraShape != "monitorWrites=[<out>]"
+      check renderEvidencePaths("monitorWrites", @[], subs) == "monitorWrites=[]"
 
   test "the enumeration matches the engine source":
     ## A list nobody tested is not an enumeration. This re-derives the
@@ -1981,8 +2112,11 @@ suite "every_launch_path_is_monitored":
     check countOccurrences(src,
       "startBypassRunQuotaProcess(plan.action, config)") == 1          # L1
     check countOccurrences(src, "proc startRunQuotaProcess(") == 1
+    # The L2 call site takes the action pool's declared capacity as a
+    # fourth argument since 8dd3ac277 (the helper declares that pool on its
+    # own session), so the needle stops at the shared prefix.
     check countOccurrences(src,
-      "startRunQuotaProcess(plan.action, config, resultPath)") == 1    # L2
+      "startRunQuotaProcess(plan.action, config, resultPath,") == 1    # L2
     check countOccurrences(src, "offerWithRunQuotaBatch(") == 1        # L3
     check countOccurrences(src, "startGrantedWithRunQuota(") == 1      # L3b
 
@@ -2505,21 +2639,46 @@ suite "every_launch_path_is_monitored":
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
     # The fixture's Unix socket must fit sun_path even with a deep TMPDIR.
-    let tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
-    let fixtureSource = tempRoot / "fixture.c"
-    let fixtureBin = tempRoot / "fixture"
-    writeFile(fixtureSource, FixtureSource)
-    compileFixture(fixtureSource, fixtureBin)
+    var tempRoot = ""
+    var fixtureBin = ""
 
     # One host budget of 1000 cpu-milli; the L3b actions ask for 800
     # each, so the daemon can grant exactly one at a time and the other
     # comes back `rqokQueued`.
     var daemon: DaemonHandle
     var runQuotaError = ""
-    try:
-      daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
-    except CatchableError as err:
-      runQuotaError = err.msg
+    var fixtureUp = false
+
+    proc ensureFixture() =
+      ## THE FIXTURE COMES UP INSIDE THE CASE THAT NEEDS IT, NOT AT MODULE
+      ## LEVEL, AND GOES AWAY WITH THE PROCESS THAT STARTED IT. Module-level
+      ## code also runs for the runner's ``--list-json`` probe and for every
+      ## case process, and a "teardown" case stopped only its own process's
+      ## daemon, so each probe and each other case left a ``runquotad`` and a
+      ## scratch tree behind for good — dozens accumulated on a dev host over
+      ## a week of runs — and every probe compiled the C fixture.
+      ##
+      ## The release is ``repro_test_support/process_fixtures``, not an
+      ## ``addExitProc`` closure over ``daemon`` and ``tempRoot``: ORC
+      ## destroys those globals when the module's top-level code ends, before
+      ## any exit hook runs, so such a closure reads freed memory. Measured at
+      ## reprobuild 6aa91f75 with that closure in place: one per-case run of
+      ## this file left five ``repro-hm4-launch-paths*`` trees in ``/tmp``.
+      if fixtureUp: return
+      fixtureUp = true
+      tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
+      releaseDirAtProcessExit(tempRoot)
+      let fixtureSource = tempRoot / "fixture.c"
+      fixtureBin = tempRoot / "fixture"
+      writeFile(fixtureSource, FixtureSource)
+      compileFixture(fixtureSource, fixtureBin)
+      try:
+        daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
+        # Registered after the directory, so it runs first: the daemon is
+        # stopped before the tree holding its socket is removed.
+        terminateAtProcessExit(daemon.process.processID)
+      except CatchableError as err:
+        runQuotaError = err.msg
 
     ## Which enumerated paths this run actually EXECUTED, as opposed to
     ## reported something about. Written by the case bodies below and
@@ -2540,6 +2699,7 @@ suite "every_launch_path_is_monitored":
       ## them, which holds only when every case runs in one process; the
       ## production runner runs each case in its own, so both saw empty sets
       ## and failed on every run.
+      ensureFixture()
       # A fresh directory per DRIVE, not per path: the coverage cases below
       # drive every path again in their own process, and a second drive that
       # reused the first one's cache root would be a cache hit, not a launch.
@@ -2560,6 +2720,7 @@ suite "every_launch_path_is_monitored":
         for i in 0 .. 1:
           let marker = workRoot / ("marker-" & $i & ".txt")
           writeFile(marker, "hm4 marker payload " & $i & "\n")
+          writeFile(workRoot / ("out-" & $i & ".txt.stale"), "stale\n")
           actions.add monitoredFixtureAction("queued-" & $i, fixtureBin,
             marker, workRoot / ("out-" & $i & ".txt"), workRoot,
             holdMs = 400, cpuMilli = 800'u32)
@@ -2588,6 +2749,7 @@ suite "every_launch_path_is_monitored":
       else:
         let marker = workRoot / "marker.txt"
         writeFile(marker, "hm4 marker payload\n")
+        writeFile(workRoot / "out.txt.stale", "stale\n")
         let act = monitoredFixtureAction("monitored-" & $ord(lp.kind),
           fixtureBin, marker, workRoot / "out.txt", workRoot,
           holdMs = 0, cpuMilli = 100'u32)
@@ -2619,6 +2781,7 @@ suite "every_launch_path_is_monitored":
     for launchPath in EnumeratedLaunchPaths:
       let lp = launchPath
       test "monitored evidence is complete via " & lp.name:
+        ensureFixture()
         if lp.needsRunQuota and runQuotaError.len > 0:
           # A FAILURE, NOT A SKIP, and the distinction is the whole point.
           #
@@ -2644,6 +2807,7 @@ suite "every_launch_path_is_monitored":
           driveLaunchPath(lp)
 
     test "explicit bypass is honored even with a reachable private authority":
+      ensureFixture()
       require runQuotaError.len == 0
       let workRoot = tempRoot / "explicit-bypass"
       let cacheRoot = workRoot / "cache"
@@ -2692,6 +2856,7 @@ suite "every_launch_path_is_monitored":
       ## here, so the verdict does not depend on which other cases ran in
       ## this process. A path that needs RunQuota is not driven when the
       ## fixture did not come up, and is then reported missing below.
+      ensureFixture()
       executedPaths.clear()
       recordedEvidence.setLen(0)
       for lp in EnumeratedLaunchPaths:
@@ -2730,6 +2895,7 @@ suite "every_launch_path_is_monitored":
       ## does not. Second, it is a baseline: a change to how the monitor
       ## is hosted has to reproduce this exact shape, and that is only a
       ## usable comparison if the shape was recorded before the change.
+      ensureFixture()
       if runQuotaError.len > 0:
         # Not a skip, for the reason spelled out on the per-path cases:
         # this comparison is the only place the two HOSTING MECHANISMS
@@ -2754,7 +2920,8 @@ suite "every_launch_path_is_monitored":
           # NOT VACUOUS. Identical-but-empty would satisfy the
           # comparison below while proving nothing, so the shared shape
           # is pinned: the fixture's own read is there, nothing else that
-          # is not a mapped library is, and there are no diagnostics.
+          # is not a mapped library is, and the diagnostics contain exactly
+          # the platform limitation and its unknown-scope summary, if required.
           #
           # THIS PIN WAS STALE, AND THE SKIP IS WHY NOBODY SAW IT. It
           # read ``monitorReads=[<marker>]`` — an EXACT set — which was
@@ -2870,7 +3037,17 @@ suite "every_launch_path_is_monitored":
               "shared object: ", unexplained.join(" "), "\n", shape
           check unexplained.len == 0
           check shape.contains("\nmonitorWrites=[<out>]\n")
-          check shape.contains("\ndiagnostics=[]")
+          let expectedDiagnostics =
+            if NoTreeLifetimeGuard:
+              "diagnostics=[" & MonitorLossSummary.escape & " " &
+                (MonitorLossDiagnosticPrefix & TreeLifetimeLimitationPrefix &
+                  "<run>").escape & "]"
+            else:
+              "diagnostics=[]"
+          # Check every path independently, including marker multiplicity;
+          # agreement alone would accept five equally broken captures.
+          for entry in recordedEvidence:
+            check entry.shape.contains("\n" & expectedDiagnostics & "\n")
 
           # AND THE PROBE SET IS NOT EMPTY, WHICH IS THE ONE THAT KEEPS
           # THIS CASE FROM GOING BLIND AGAIN.
@@ -2928,6 +3105,19 @@ suite "every_launch_path_is_monitored":
           # `opendir` as an enumeration, or the engine stops folding it into
           # this field, it reddens HERE rather than turning the comparison
           # below into a tautology.
+          # AND THE REMOVAL SET IS NOT EMPTY: the same pin for
+          # `monitorRemovals`, the paths the action removed without having
+          # made them. The fixture unlinks a seeded `<out>.stale`; if it stops,
+          # or io-mon stops recording the unlink, or the engine stops folding
+          # it here, the comparison below compares empty sets for this field.
+          let removals = shapeList(shape, "monitorRemovals")
+          if "<out>.stale" notin removals:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape carries no removal of the ",
+              "seeded `<out>.stale`, so the cross-path comparison of ",
+              "`monitorRemovals` below is vacuous:\n", shape
+          check "<out>.stale" in removals
+
           let enumerations = shapeList(shape,
             "monitorDirectoryEnumerations")
           if "<work>" notin enumerations:
@@ -3003,7 +3193,7 @@ suite "every_launch_path_is_monitored":
           # reason it is not here. The reasoning was: an unblessed action
           # that reads entropy collects `applyEntropyBlessingPolicy`'s
           # "action-cache publish skipped" diagnostic, so making the fixture
-          # draw randomness would cost the `diagnostics=[]` pin above, and
+          # draw randomness would cost the diagnostic pin above, and
           # the render line would have to stand as the vacuous half. That is
           # wrong, and the compiler was not going to say so. That policy
           # opens with `if not action.cacheable: return`, and
@@ -3012,7 +3202,8 @@ suite "every_launch_path_is_monitored":
           # Measured, not reasoned: with the `getentropy` call below in
           # `FixtureSource`, all five recorded actions carry
           # `entropyObservations=[getentropy@ecoUnattributed]` AND
-          # `diagnostics=[]`, and this case is 11/0/0.
+          # no entropy-policy diagnostic. The platform limitation, where
+          # required, is independent of this entropy policy.
           #
           # So the class is produced, exactly as `monitorProbes` and
           # `monitorDirectoryEnumerations` produce theirs, and the render
@@ -3129,6 +3320,7 @@ suite "every_launch_path_is_monitored":
       ##
       ## NO MOCKS: two real builds through the real engine, and one real
       ## `repro` subprocess. The oracle is a file the monitored child wrote.
+      ensureFixture()
       const EngineRequest =
         "file-reads,path-probes,file-writes,proc,lib,env,entropy,ambient," &
         "legacy-padding,file,nondet,ipc"
@@ -3258,15 +3450,3 @@ suite "every_launch_path_is_monitored":
           "`childEnv` overwrites whatever the engine puts there."
       check countOccurrences(engineSrc,
         "\"--interest\", interestToTokens(") == 1
-
-    test "teardown":
-      daemon.stop()
-      check existsEnv("RUNQUOTA_SOCKET") == daemon.hadSocket
-      check getEnv("RUNQUOTA_SOCKET") == daemon.previousSocket
-      check existsEnv("REPROBUILD_NO_RUNQUOTA") == daemon.hadBypass
-      check getEnv("REPROBUILD_NO_RUNQUOTA") == daemon.previousBypass
-      removeDir(tempRoot)
-      # ``check true`` could not fail, so a teardown that silently left the
-      # daemon running or the scratch tree on disk still reported [OK].
-      # Assert the post-state the teardown exists to produce.
-      check not dirExists(tempRoot)

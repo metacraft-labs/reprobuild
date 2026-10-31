@@ -3,7 +3,8 @@
 ## Wires the deploy agent's injected ``ApplyHook`` to the M4
 ## ``runInfraApply`` path so a converged manifest applies its desired
 ## state with build-action outputs SUBSTITUTED FROM THE BINARY CACHE
-## (when ``REPRO_BINARY_CACHE_URL`` is set) instead of built locally.
+## (when ``caches.conf`` names a cache with its trusted publisher keys)
+## instead of built locally.
 ##
 ## Kept in its own module (separate from ``agent.nim``) so the poll/verify/
 ## monotonic core stays free of the heavyweight ``repro_infra`` +
@@ -15,6 +16,8 @@ import std/[os, strutils]
 
 import repro_elevation
 import repro_infra
+import repro_infra/addon_diagnostics
+from repro_core/source_root import publicCliImagePath
 import repro_profile_compile
 # For `ProfileBuildAction`, which the resolver signature below names
 # explicitly. It was previously reachable only implicitly, through the typed
@@ -25,10 +28,13 @@ import ./manifest
 import ./agent
 
 type
-  ProfileResolver* = proc(profileText: string; outText: var string;
+  ProfileResolver* = proc(profileText: string;
+                          profileFiles: seq[ProfileFile];
+                          outText: var string;
                           outBuildActions: var seq[ProfileBuildAction]):
                        bool {.gcsafe.}
-    ## Turn a manifest's ``profileText`` into the canonical resource text
+    ## Turn a manifest's ``profileText`` (with its ``profileFiles`` bundle
+    ## staged beside it, RDMF v3) into the canonical resource text
     ## ``runInfraApply`` consumes, returning ``false`` (with a diagnostic
     ## already emitted) when the profile does not compile.
     ##
@@ -41,12 +47,20 @@ type
 
 proc mkRunInfraApplyHook*(stateDir: string;
                           cacheRoot: string;
-                          hostIdentity = "reprobuild-deploy-agent";
+                          hostIdentity: string;
                           reproExe = "";
                           profileResolver: ProfileResolver = nil): ApplyHook =
   ## Build the production apply hook. Each converged manifest is applied
   ## via ``runInfraApply`` with the M4 ``mkBuildActionDispatcher`` closure
   ## injected — the SAME closure ``repro infra apply`` uses.
+  ##
+  ## ``hostIdentity`` is required and must be non-empty: it is recorded in
+  ## every generation the hook commits and is an input to the generation
+  ## id. It has no default because the only right value is the one the
+  ## shared resolver (``host_identity.selectHost``) gives, which the CLI
+  ## resolves; a literal default (it used to be ``reprobuild-deploy-agent``)
+  ## is an invented identity (reprobuild-pm issue
+  ## 2026-10-18-deploy-agent-invents-a-host-identity-instead-of-resolving-one).
   ##
   ## ``cacheRoot`` is the apply-scoped engine/action cache root (the M4
   ## substitute scratch lives under ``cacheRoot/binary-cache-substitute``).
@@ -69,10 +83,14 @@ proc mkRunInfraApplyHook*(stateDir: string;
   ## The resolver is optional so the hermetic gates — which inject canonical
   ## text directly and must not drag in a compiler — keep working unchanged;
   ## production passes one. A nil resolver preserves the old behaviour exactly.
+  if hostIdentity.len == 0:
+    raise newException(ValueError,
+      "mkRunInfraApplyHook: hostIdentity must name the host")
   let capturedStateDir = stateDir
   let capturedCacheRoot = cacheRoot
   let capturedHost = hostIdentity
-  let capturedReproExe = if reproExe.len > 0: reproExe else: getAppFilename()
+  let capturedReproExe =
+    if reproExe.len > 0: reproExe else: publicCliImagePath()
   let capturedResolver = profileResolver
   result = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     {.cast(gcsafe).}:
@@ -108,7 +126,8 @@ proc mkRunInfraApplyHook*(stateDir: string;
         var applyText = m.profileText
         var resolvedActions: seq[ProfileBuildAction] = @[]
         if capturedResolver != nil and m.profileText.strip().len > 0:
-          if not capturedResolver(m.profileText, applyText, resolvedActions):
+          if not capturedResolver(m.profileText, m.profileFiles, applyText,
+              resolvedActions):
             return (ok: false,
               message: "profile did not compile; see the diagnostic above")
 
@@ -124,8 +143,15 @@ proc mkRunInfraApplyHook*(stateDir: string;
         #
         # So: an explicit producer-supplied set wins (it is a deliberate act),
         # and otherwise the compiled profile speaks for its own edges.
-        let effectiveActions =
+        let chosenActions =
           if m.buildActions.len > 0: m.buildActions else: resolvedActions
+        # RDMF v3: every action is bound to the output digest the signed
+        # manifest pins, so the substitute path refuses other bytes before
+        # materialising any (Deploy-Agent.md §"Version 3").
+        let pinned = pinActionsToClosureDigests(m, chosenActions)
+        if pinned.refusal.len > 0:
+          return (ok: false, message: "closure digests: " & pinned.refusal)
+        let effectiveActions = pinned.actions
 
         # `emBroker`, NOT `emNoElevate`, and the difference is the whole value
         # of the agent on Windows.
@@ -171,5 +197,8 @@ proc mkRunInfraApplyHook*(stateDir: string;
           message: "generation " & res.generationId & ", applied " &
             $res.appliedCount & ", substituted-from-cache " &
             $res.substitutedFromCacheCount)
+      except EAddOnUnsupportedBase:
+        # Typed through to the agent: an operator action, not a retry.
+        raise
       except CatchableError as e:
         return (ok: false, message: "runInfraApply raised: " & e.msg)

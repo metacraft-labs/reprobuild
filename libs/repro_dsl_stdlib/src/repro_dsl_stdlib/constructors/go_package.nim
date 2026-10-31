@@ -45,6 +45,7 @@ import std/[options, os, strutils]
 import repro_project_dsl
 
 import ../types/package_result
+import ../active_context
 
 const
   FetchScratchSubdir = ".repro/fetch"
@@ -159,6 +160,7 @@ proc go_package*(binaryName: string;
   ## CGO-enabled build would silently acquire a dependency on whatever C
   ## toolchain and system headers the host happens to have — which is a
   ## dependency the recipe has not declared.
+  requireCrossTargetConsulted("go_package")
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
 
@@ -251,6 +253,18 @@ proc go_package*(binaryName: string;
     inputs = @[downloadStamp],
     outputs = @[outputPath],
     pool = "compile",
+    # ``effectiveDestdir`` is also this edge's declared write ROOT below, so
+    # the engine DERIVES the enumeration ignore for it
+    # (``repro_build_engine.enumerationIgnoredRoots``) and the entry here is
+    # redundant for that channel. It is kept, and this is why: the write-root
+    # declaration below is guarded on ``projectRoot.len > 0`` while this
+    # policy is not, so without a project root there is nothing to derive
+    # from and this entry is the only ignore the edge has. Unlike the other
+    # eight duplicate entries in the tree, this one is NOT load-bearing for
+    # the read channel -- ``go build -o`` writes the destdir and does not
+    # read it back -- so the asymmetric guard is the whole reason it stays.
+    # ``modCache`` is a genuine exception: read back on every run and not a
+    # declared output of anything.
     dependencyPolicy = automaticMonitorPolicy(@[effectiveDestdir, modCache]),
     commandStatsId = "go_package.build",
     toolIdentityRefs = @["sh", "mkdir", "go"])

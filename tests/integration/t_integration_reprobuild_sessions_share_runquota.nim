@@ -1,4 +1,5 @@
-import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
+import std/[json, monotimes, os, osproc, streams, strutils, tempfiles, times,
+  unittest]
 
 import repro_test_support
 
@@ -133,6 +134,9 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
     "        outputs = @[" & nimString(outputRel) & "],\n" &
     "        cacheable = false)\n")
 
+const DaemonStartDeadlineMs = 30_000
+  ## How long a freshly started runquotad may take to bind its socket.
+
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
@@ -150,12 +154,33 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     "--no-write-stats"
   ], options = {poUsePath, poStdErrToStdOut})
   putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
+  # The deadline is for a daemon that is starting, on a host that may be
+  # running a full suite beside this case. Five seconds was not enough there
+  # once (full run 37, eight cases in parallel at a load average above 100),
+  # and the case then said only that the socket "did not appear". A daemon
+  # that has EXITED is a different failure and is reported at once, with its
+  # status and output, rather than waited out.
+  let deadline = getMonoTime() + initDuration(milliseconds =
+    DaemonStartDeadlineMs)
+  while getMonoTime() < deadline:
     if pathExists(socketPath):
       return (process: daemon, socket: socketPath, cli: cliBin)
+    if not daemon.running:
+      let code = daemon.peekExitCode()
+      let output =
+        if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+      daemon.close()
+      raise newException(OSError, "runquotad exited with status " & $code &
+        " before its socket appeared (" & daemonBin & "): " & output)
     sleep(25)
   daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+  discard daemon.waitForExit()
+  let output =
+    if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+  daemon.close()
+  raise newException(OSError, "runquotad socket did not appear within " &
+    $DaemonStartDeadlineMs & " ms (" & daemonBin & "); daemon output: " &
+    output)
 
 proc runQuotaJson(cliPath: string; args: openArray[string]): JsonNode =
   let res = runShell(shellCommand(@[cliPath] & @args))
@@ -302,19 +327,47 @@ suite "integration_reprobuild_sessions_share_runquota":
       # compile that precedes the action can be slow, so poll against a
       # generous deadline rather than a fixed iteration count. If the action
       # never starts, ``check pathExists`` below still fails.
-      let startStampDeadline = nowMillis() + 300000
+      #
+      # The wait follows the first session: it ends at once if that build
+      # exits, so the cap is only the backstop for one alive and stuck. A
+      # 300 s cap was a wall-clock budget on the cold interface extraction and
+      # provider compile of the copied CodeTracer project (each case copies it
+      # to a fresh temp dir, so both always run cold): measured alone at load
+      # ~20 the action started at ~190 s (extraction ~140 s, compile ~40 s);
+      # at load 55-68 it missed 300 s while every later assertion -- the
+      # action ran, the second session queued behind it, the two intervals
+      # did not overlap -- still passed.
+      let startStampDeadline = nowMillis() + 1_200_000
       while nowMillis() < startStampDeadline:
         if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
           break
         sleep(25)
+      if not pathExists(codeStartStamp):
+        checkpoint("first session's action never started; build " &
+          (if codeBuild.peekExitCode() == -1: "still running at the backstop"
+           else: "exited with " & $codeBuild.peekExitCode()))
       check pathExists(codeStartStamp)
 
+      # The two sessions must OVERLAP: the second is launched while the first
+      # is still alive (its action is parked on the release gate, holding the
+      # only slot). That is what the original ``launchEnd - launchStart <
+      # 1000`` check established when both sessions were launched back to
+      # back (34b16ebb8). e9a91a7c8 put the wait for the first session's
+      # action start between the two launches and widened the bound to
+      # 150 s, which turned it into a wall-clock budget on the first
+      # session's cold interface extraction, provider compile and lease waits
+      # under a one-slot daemon -- none of which is what this gate claims.
+      # Assert the overlap itself; the 300 s wait above stays a liveness
+      # bound, enforced by ``check pathExists(codeStartStamp)``.
+      let firstSessionAlive = codeBuild.peekExitCode() == -1
       let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
         args = ["build", fixtureProject, "--daemon=off",
           "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
       let launchEnd = nowMillis()
-      check launchEnd - launchStart < 150000
+      checkpoint("first session reached its action after " &
+        $(launchEnd - launchStart) & " ms")
+      check firstSessionAlive
 
       var lastLeases = ""
       var observedQueue = false

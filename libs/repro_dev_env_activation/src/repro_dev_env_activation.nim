@@ -1,7 +1,11 @@
 import std/[os, osproc, sequtils, strtabs, strutils]
 
+when defined(posix):
+  import std/posix
+
 import repro_dev_env_artifacts
 import repro_provider_runtime
+import repro_platform
 
 type
   DevEnvPrintFormat* = enum
@@ -328,6 +332,35 @@ proc applyShellOp*(env: StringTableRef; op: DevEnvShellOp;
       workingDirectory = op.value
       env["PWD"] = op.value
 
+proc declaresMsvcConsumer(artifact: DevEnvArtifact): bool =
+  for profile in artifact.toolProfiles:
+    if profile.activityRequirements.allIt(it in artifact.selectedActivities) and
+        isMsvcConsumerTool(profile.logicalName):
+      return true
+
+proc mergeDevEnvWithMsvcEnv*(artifact: DevEnvArtifact;
+                            environment: StringTableRef;
+                            platformEnv: MsvcDevEnv;
+                            hostCpu: string): StringTableRef =
+  ## Merge an existing host facility below caller and recipe overrides. Keep
+  ## this Windows-semantic merge pure so its precedence and architecture
+  ## boundary can be checked on hosts without Visual Studio installed.
+  ## The existing platform locator activates x64 only; this does not extend
+  ## that locator to native ARM or attach MSVC to a MinGW-only environment.
+  result = newStringTable(modeCaseInsensitive)
+  for key, value in environment.pairs:
+    result[key] = value
+  if hostCpu notin ["amd64", "x86_64"] or
+      not artifact.declaresMsvcConsumer():
+    return
+  var entries: seq[string] = @[]
+  for key, value in environment.pairs:
+    entries.add(key & "=" & value)
+  for entry in mergeActionEnvWithMsvcEnv(platformEnv, entries):
+    let eq = entry.find('=')
+    if eq > 0:
+      result[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+
 proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
                            defaultWorkingDirectory = "";
                            extraOps: openArray[DevEnvShellOp] = [];
@@ -341,6 +374,13 @@ proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
       artifact.projectRoot
   for op in activationOps(artifact, artifactPath, extraOps, preOps):
     result.env.applyShellOp(op, result.workingDirectory)
+  when defined(windows) and defined(amd64):
+    if artifact.declaresMsvcConsumer():
+      # Merge the final recipe environment: ordinary explicit values win,
+      # while replaced search lists retain the MSVC-owned tool directories.
+      # This activates an existing facility, not DSL/package provisioning.
+      result.env = mergeDevEnvWithMsvcEnv(artifact, result.env,
+        activateMsvcDevEnv(), hostCPU)
 
 proc containsPathSeparator(value: string): bool =
   value.contains(DirSep) or value.contains(AltSep)
@@ -396,6 +436,51 @@ proc runActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
     options = {poUsePath, poParentStreams})
   result = process.waitForExit()
   process.close()
+
+proc execActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
+                           command: openArray[string];
+                           defaultWorkingDirectory = "";
+                           extraOps: openArray[DevEnvShellOp] = [];
+                           preOps: openArray[DevEnvShellOp] = []): int =
+  ## Replace the caller with one activated command on POSIX, preserving its
+  ## PID and direct signal/exit status for supervisors. Use
+  ## ``runActivatedCommand`` when the library caller needs to resume afterward.
+  ## Windows has no equivalent process replacement, so it retains spawn/wait.
+  when not defined(posix):
+    return runActivatedCommand(artifact, artifactPath, command,
+      defaultWorkingDirectory, extraOps, preOps)
+  else:
+    if command.len == 0:
+      raise newException(ValueError, "dev-env command is empty")
+    let activation = activatedEnvironment(artifact, artifactPath,
+      defaultWorkingDirectory, extraOps, preOps)
+    let executable = resolveFromActivatedPath(command[0], activation.env,
+      activation.workingDirectory)
+    # A bare unresolved name must not accidentally execute a file in cwd
+    # when cwd is absent from the activated PATH.
+    if not executable.containsPathSeparator():
+      raiseOSError(OSErrorCode(ENOENT), "cannot execute " & command[0])
+    var environment: seq[string] = @[]
+    for key, value in activation.env.pairs:
+      environment.add(key & "=" & value)
+    let previousDirectory = getCurrentDir()
+    let argv = allocCStringArray(command)
+    let envp = allocCStringArray(environment)
+    try:
+      if activation.workingDirectory.len > 0:
+        setCurrentDir(activation.workingDirectory)
+      stdout.flushFile()
+      stderr.flushFile()
+      # execve uses the activated environment explicitly: mutating the
+      # engine's ambient environment first could leave a library caller in a
+      # partially activated state if replacement fails.
+      discard execve(executable.cstring, argv, envp)
+      let error = osLastError()
+      raiseOSError(error, "cannot execute " & command[0])
+    finally:
+      deallocCStringArray(argv)
+      deallocCStringArray(envp)
+      setCurrentDir(previousDirectory)
 
 proc spawnActivatedShell*(artifact: DevEnvArtifact; artifactPath,
                           shellPath: string;

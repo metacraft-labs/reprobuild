@@ -8,8 +8,9 @@
 
 import std/[os, osproc, streams, strutils, unittest]
 from repro_core/paths import extendedPath
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/test-m10-home-gc-cli"
+let FixtureRoot = "build/test-tmp/test-m10-home-gc-cli" / testCaseScratchSlug()
 
 proc reproRepoMarker(p: string): bool =
   fileExists(extendedPath(p / "apps" / "entrypoints.txt")) and

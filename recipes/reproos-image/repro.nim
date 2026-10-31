@@ -241,7 +241,7 @@ package reproosImage:
 
   devEnv:
     task "boot-vm",
-      command = "vm-harness boot --backend auto --source-image .repro/output/install --kind qcow2 --keep",
+      command = "gosti boot --backend auto --source-image .repro/output/install --kind qcow2 --keep",
       description = "Boot the newest built ReproOS image in a transient VM"
 
   uses:

@@ -289,8 +289,8 @@ proc requireGit(gitBin, args: string): string =
 proc writeFragment(path, name, checkoutPath: string;
                    remote = "org"; depends: seq[string] = @[]) =
   var body =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-    "[repo]\nname = \"" & name & "\"\npath = \"" & checkoutPath & "\"\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+    "[repo]\nmainline = \"main\"\nname = \"" & name & "\"\npath = \"" & checkoutPath & "\"\n" &
     "remote = \"" & remote & "\"\n"
   if depends.len > 0:
     var quoted: seq[string]
@@ -760,8 +760,8 @@ suite "a declared checkout path cannot escape the workspace root":
           fileUrl(keeperOrigin) & "\"\n\n"
       writeFile(workspaceRoot / "projects" / "rooted.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" & remotes &
+        "[project]\nname = \"rooted\"\n" &
+        "\n" & remotes &
         "includes = [\n  \"repos/ws-root.toml\",\n" &
         "  \"repos/only-mine.toml\",\n]\n")
       # A second project stays enabled. `disable` refuses to record an EMPTY
@@ -769,8 +769,8 @@ suite "a declared checkout path cannot escape the workspace root":
       # loop is reached at all — and the removal loop is what is under test.
       writeFile(workspaceRoot / "projects" / "keeper.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"keeper\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" & remotes &
+        "[project]\nname = \"keeper\"\n" &
+        "\n" & remotes &
         "includes = [\n  \"repos/keeper.toml\",\n]\n")
 
       writeWorkspaceProjects(workspaceRoot, @["rooted", "keeper"])
@@ -892,16 +892,16 @@ suite "a declared checkout path cannot escape the workspace root":
 
       writeFile(workspaceRoot / "projects" / "rooted.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"rooted\"\n" &
+        "\n" &
         "[[remote]]\nname = \"org\"\nfetch = \"" &
           fileUrl(onlyMineOrigin) & "\"\n\n" &
         "[[remote]]\nname = \"keeper-origin\"\nfetch = \"" &
           fileUrl(keeperOrigin) & "\"\n\n" &
         "includes = [\n  \"repos/ws-root.toml\",\n" &
         "  \"repos/only-mine.toml\",\n  \"repos/keeper.toml\",\n]\n")
-      writeFile(workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"rooted\"\nbranch = \"main\"\n")
 
       discard requireGit(gitBin, "clone --quiet " &
@@ -1043,15 +1043,15 @@ suite "a declared checkout path cannot escape the workspace root":
         remote = "lib-origin")
       writeFile(workspaceRoot / "projects" / "demo.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"demo\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"demo\"\n" &
+        "\n" &
         "[[remote]]\nname = \"root-origin\"\nfetch = \"" &
           fileUrl(rootOrigin) & "\"\n\n" &
         "[[remote]]\nname = \"lib-origin\"\nfetch = \"" &
           fileUrl(libOrigin) & "\"\n\n" &
         "includes = [\n  \"repos/ws-root.toml\",\n  \"repos/lib.toml\",\n]\n")
-      writeFile(workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"demo\"\nbranch = \"main\"\n")
 
       discard requireGit(gitBin, "clone --quiet " & q(fileUrl(libOrigin)) &
@@ -1112,7 +1112,9 @@ suite "a declared checkout path cannot escape the workspace root":
 
   test "t_develop_all_reset_refuses_a_lock_path_that_names_the_workspace":
     ## W5 (second pass) — the FIFTH delete site, on the plane that had no
-    ## boundary at all.
+    ## boundary at all. (Updated for `reprobuild.solved-graph-lock.v3`: a lock
+    ## no longer records a checkout path, and a v2 one's is ignored, so the
+    ## hostile values below are now inert rather than refused — see the loop.)
     ##
     ## The manifest plane got a schema boundary and four delete sites that
     ## each ask for themselves. The LOCK plane got neither, and both feed the
@@ -1181,9 +1183,17 @@ suite "a declared checkout path cannot escape the workspace root":
 
       # Every spelling that collapses onto the workspace root, and every
       # spelling that collapses onto an ancestor of it. `./.` is the one that
-      # was measured; the rest are the same defect with different arithmetic,
-      # and a guard that keys on one string is how this happened in the first
-      # place.
+      # was measured; the rest are the same defect with different arithmetic.
+      #
+      # SINCE `reprobuild.solved-graph-lock.v3` NONE OF THEM REACHES A
+      # CONSUMER. A lock records no checkout path, and the `path` a v2 lock
+      # still carries is not believed: the dependency is placed by its NAME
+      # (`lockedDepCheckoutPath` — here the one-level sibling default,
+      # `../dep`). So the hostile value is no longer refused; it is IGNORED,
+      # and that is the stronger outcome — the run places `dep` where its
+      # name puts it and the workspace is never a candidate. What this loop
+      # still asserts is the property the W5 guard existed for: the workspace
+      # survives, whatever the lock says.
       const degenerate = ["./.", "./", "a/..", ".//.", "..", "../..",
                           "../sib/.."]
       for value in degenerate:
@@ -1203,46 +1213,54 @@ suite "a declared checkout path cannot escape the workspace root":
         if fileExists(workspaceRoot / "PRECIOUS.txt"):
           check readFile(workspaceRoot / "PRECIOUS.txt") == "must survive\n"
 
-        # ...and the run FAILED, naming the offending value and a remedy. A
-        # refusal that exited 0 would be the `repro remove` defect again.
-        check res.code == 1
-        check res.output.contains(value)
-        check res.output.contains("repro lock refresh")
+        # ...and the recorded value was not used: the dependency is placed at
+        # the location its name derives, and the run succeeds.
+        check res.code == 0
+        check dirExists(scratch / "dep" / ".git")
 
-      # A path the lock boundary ACCEPTS — it is a real sibling shape, not a
-      # collapse — but that lands outside the develop plane's documented
-      # placement scope. Nothing refuses this at the reader (nor should:
-      # `../name` is legitimate and the reader cannot know where the
-      # workspace sits), so the placement proof is the only thing between a
-      # lock and a `removeDir` on an arbitrary directory two levels up.
+      # The placement proof still stands in front of the delete for a target
+      # the LOCK cannot supply any more but local state can: a develop
+      # override is the specified home of a local materialization, and the
+      # placement rule honours it first. One aimed two levels up lands outside
+      # the develop plane's documented placement scope, and the placement
+      # proof is the only thing between it and a `removeDir` on an arbitrary
+      # directory.
       block:
-        let farHome = scratch / "far-home"
-        createDir(farHome)
+        let farHome = createTempDir("repro-lock-outside-scope-", "")
+        defer: removeDir(farHome)
+        let farPath = relativePath(farHome, workspaceRoot).replace('\\', '/')
         writeFile(farHome / "not-ours.txt", "leave me\n")
-        writeLock("../../far-home")
+        writeLock("../sib")
+        createDir(workspaceRoot / ".repro")
+        writeFile(workspaceRoot / ".repro" / "develop-overrides.toml",
+          "schema = \"reprobuild.workspace.develop-overrides.v1\"\n\n" &
+          "[[override]]\npackage = \"dep\"\n" &
+          "local_path = \"" & farPath & "\"\nstate = \"editable\"\n" &
+          "created_at = \"2026-10-18T00:00:00Z\"\n")
         let far = runShell(shellCommand([repro, "develop", "--all", "--reset",
           "--workspace-root=" & workspaceRoot]))
-        checkpoint("develop --all --reset with path='../../far-home': " &
-          far.output)
+        checkpoint("develop --all --reset with an override at " &
+          "'" & farPath & "': " & far.output)
         check fileExists(farHome / "not-ours.txt")
         check far.code == 1
         check far.output.contains("outside the develop placement scope")
         # The scope is NAMED, so an operator can see what it is rather than
         # guessing, and `--into` is offered as the deliberate way out.
         check far.output.contains("--into")
+        removeFile(workspaceRoot / ".repro" / "develop-overrides.toml")
 
       # The preview modes answer the same way. This is the half that made the
       # measured incident so much worse than a bad exit code: `--list` and
       # `--dry-run` both ANNOUNCED the workspace root as the node's checkout
-      # target, so the operator was shown the plan, saw nothing alarming in
-      # it, and then ran it.
+      # target. With the recorded value ignored, the preview names the
+      # name-derived sibling instead.
       writeLock("./.")
       for mode in ["--list", "--dry-run"]:
         let preview = runShell(shellCommand([repro, "develop", "--all", mode,
           "--workspace-root=" & workspaceRoot]))
         checkpoint("develop --all " & mode & ": " & preview.output)
-        check preview.code == 1
-        check preview.output.contains("repro lock refresh")
+        check preview.code == 0
+        check preview.output.contains(scratch / "dep")
 
       # And the constraint: the documented sibling topology still places a
       # sibling. Asserted last and asserted POSITIVELY — a boundary that
@@ -1252,7 +1270,9 @@ suite "a declared checkout path cannot escape the workspace root":
         "--reset", "--workspace-root=" & workspaceRoot]))
       checkpoint("develop --all --reset with path='../sib': " &
         sibling.output)
-      check dirExists(scratch / "sib" / ".git")
+      # Placed by NAME — `../dep` — not at the `../sib` the v2 record names.
+      check dirExists(scratch / "dep" / ".git")
+      check not dirExists(scratch / "sib")
       check sibling.code == 0
       # The workspace root is untouched by the sibling placement, too.
       check dirExists(workspaceRoot / ".git")
@@ -1388,13 +1408,14 @@ suite "a declared checkout path cannot escape the workspace root":
       check absRes.output.contains("repro lock refresh")
 
       # The constraint, asserted positively and asserted last: a real revision
-      # still runs, and still places the sibling the lock asks for.
+      # still runs, and still places the sibling — at the location derived
+      # from its NAME (`../dep`); the lock records none.
       writeLock(depSha)
       let ok = runShell(shellCommand([repro, "develop", "--all", "--reset",
         "--workspace-root=" & workspaceRoot]))
       checkpoint("develop --all --reset with revision=<real sha>: " & ok.output)
       check ok.code == 0
-      check dirExists(scratch / "sib" / ".git")
+      check dirExists(scratch / "dep" / ".git")
       check fileExists(victim / "not-ours.txt")
       check fileExists(workspaceRoot / "PRECIOUS.txt")
 
@@ -1839,7 +1860,11 @@ suite "a declared checkout path cannot escape the workspace root":
         let parent = scratch / ("hostile-" & reparseKindName(kind)) / "parent"
         let workspaceRoot = parent / "workspace"
         seedWorkspace(workspaceRoot)
-        let sib = parent / "sib"
+        # Named after the DEPENDENCY: a lock records no checkout path, so
+        # `../dep` — the location derived from the name — is where the
+        # placement lands, and therefore where the hostile reparse point has
+        # to be for this case to test anything.
+        let sib = parent / "dep"
         let made = makeDirReparsePoint(kind, sib, workspaceRoot)
         if not made.ok:
           checkpoint("reparse tag '" & reparseKindName(kind) &
@@ -1894,7 +1919,7 @@ suite "a declared checkout path cannot escape the workspace root":
         checkpoint("develop --all --reset onto a REAL sibling: " &
           placed.output)
         check placed.code == 0
-        check dirExists(parent / "sib" / ".git")
+        check dirExists(parent / "dep" / ".git")
         check dirExists(workspaceRoot / ".git")
         check fileExists(workspaceRoot / "PRECIOUS.txt")
 
@@ -1906,7 +1931,7 @@ suite "a declared checkout path cannot escape the workspace root":
         checkpoint("develop --all --reset onto an EXISTING sibling: " &
           again.output)
         check again.code == 0
-        check dirExists(parent / "sib" / ".git")
+        check dirExists(parent / "dep" / ".git")
         check dirExists(workspaceRoot / ".git")
         check fileExists(workspaceRoot / "PRECIOUS.txt")
 
@@ -2142,13 +2167,13 @@ suite "a declared checkout path cannot escape the workspace root":
             fileUrl(keeperOrigin) & "\"\n\n"
         writeFile(workspaceRoot / "projects" / "rooted.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\n" & remotes &
+          "[project]\nname = \"rooted\"\n" &
+          "\n" & remotes &
           "includes = [\n  \"repos/only-mine.toml\",\n]\n")
         writeFile(workspaceRoot / "projects" / "keeper.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"keeper\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\n" & remotes &
+          "[project]\nname = \"keeper\"\n" &
+          "\n" & remotes &
           "includes = [\n  \"repos/keeper.toml\",\n]\n")
         writeWorkspaceProjects(workspaceRoot, @["rooted", "keeper"])
         discard requireGit(gitBin, "clone --quiet " &
@@ -2250,16 +2275,16 @@ suite "a declared checkout path cannot escape the workspace root":
           "keeper", "keeper", remote = "keeper-origin")
         writeFile(workspaceRoot / "projects" / "rooted.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"rooted\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\n" &
+          "[project]\nname = \"rooted\"\n" &
+          "\n" &
           "[[remote]]\nname = \"org\"\nfetch = \"" &
             fileUrl(hubOrigin) & "\"\n\n" &
           "[[remote]]\nname = \"keeper-origin\"\nfetch = \"" &
             fileUrl(keeperOrigin) & "\"\n\n" &
           "includes = [\n  \"repos/hub.toml\",\n" &
           "  \"repos/linked.toml\",\n  \"repos/keeper.toml\",\n]\n")
-        writeFile(workspaceRoot / ".repro" / "workspace.toml",
-          "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+        writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+          "schema = \"reprobuild.workspace.state.v1\"\n\n" &
           "[workspace]\nproject = \"rooted\"\nbranch = \"main\"\n")
 
         discard requireGit(gitBin, "clone --quiet " & q(fileUrl(hubOrigin)) &

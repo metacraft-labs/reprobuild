@@ -120,7 +120,7 @@ Configuration composes from layers, in increasing precedence:
    on Windows).
 3. **User dotfiles** — `~/.config/reprobuild/config.toml` (override with
    `REPROBUILD_USER_CONFIG`).
-4. **Parent workspace repo** — a `.repro-workspace.toml` `[locking]`
+4. **Parent workspace repo** — a `repro-workspace.toml` `[locking]`
    table in a shared `repro-workspace` repo.
 5. **VCS-private local metadata** — `<git-common-dir>/repro/config.toml`
    (override with `REPROBUILD_VCS_PRIVATE_CONFIG`). Never tracked, never
@@ -161,10 +161,11 @@ fits how your team already works.
 ### Form A — a parent `repro-workspace` repo
 
 If your team already shares a workspace repo (the star topology),
-declare the team routes in its `.repro-workspace.toml` (layer 4):
+declare the team routes in its `repro-workspace.toml` (layer 4):
 
 ```toml
-# .repro-workspace.toml (committed in the shared repro-workspace repo)
+# repro-workspace.toml (committed in the shared repro-workspace repo)
+schema = "reprobuild.workspace.settings.v1"
 [locking]
 route = [
   { visibility = "team", backend = "git-checkout", path = ".repo/manifests-team", repos = ["acme-internal", "acme-shared"] },
@@ -265,7 +266,7 @@ backend, and **which configuration layer declared it** — run:
 $ repro locking explain
 repro locking explain — resolved (tier, backend) per repo:
   acme-app (apps/acme-app): tier=public backend=committed-lock layer=built-in default
-  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [.repro-workspace.toml]
+  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [repro-workspace.toml]
   my-scratch-fork (vendor/my-scratch-fork): tier=personal backend=git-checkout layer=dotfiles [~/dotfiles/reprobuild/personal-routes.toml]
 ```
 
@@ -279,7 +280,46 @@ Use this whenever a repo isn't landing in the tier you expect: the
 
 `repro push` runs the client `pre-push` gate. Most refusals name the
 offending repo, its tier, its backend, and a copy-pasteable next step.
+The gate reports independent blockers together, so a history refusal does not
+hide stale sibling pins that also need attention. The console output and the
+structured check report include each refusal. Invalid workspace identity or
+push protocol still stops checks that depend on it. Refused pushes do not
+create, refresh or publish locks.
 Here is what each one means.
+
+### Certificates travel through the pre-push hook
+
+A gateway that requires test certificates reads them from git notes on the
+pushed tree. It has no access to your local certificate store. The managed
+`pre-push` hook gets them there: before the publication gate reports, it runs
+the hook body of the
+[`test_certificates`](https://github.com/metacraft-labs/test-certificates-tools)
+library linked into `repro`. That publishes the store's certificates for the
+commits the push introduces and pushes
+`refs/notes/test-certificates/certificates` to the same remote, so the notes are
+on the remote when the gateway judges the branch update. You do not need to
+install anything.
+
+The hook never fails your push:
+
+| Situation | What you see | What the gateway sees |
+| --------- | ------------ | --------------------- |
+| No certificate in the store for these commits | `nothing to propagate` | No note |
+| The remote refuses the notes ref, or does not answer within the time budget | `NOT fully propagated`, with the reason | Whatever arrived before it stopped |
+| An invalid `testCertificatesScope` declaration | `NOT fully propagated`, with the reason | No note |
+| `TEST_CERTIFICATES_HOOK=off git push …` | A line saying it was not propagated | No note |
+| `git push --no-verify` | Nothing: every `pre-push` hook is skipped | No note |
+
+The time budget defaults to 60 seconds. `TEST_CERTIFICATES_HOOK_TIMEOUT` changes
+it, in whole seconds, and it cannot be switched off. A gateway at `required`
+refuses a push whose tree has no note, and says the note is missing rather than
+asking you to certify again. A later ordinary push of the same commit carries it.
+
+`repro health` reports problems in that configuration in its
+`certificate-propagation` row: an invalid scope declaration, a
+`testCertificates.notesRef` other than the default, which sends notes to a ref
+gateways do not read, `TEST_CERTIFICATES_HOOK=off` left set in the environment,
+or a certificate store with no root it can resolve.
 
 ### Refreshing hooks after a protocol mismatch
 
@@ -297,6 +337,28 @@ Run the same `hooks ensure` command for a separately checked-out lock backend
 named by the diagnostic. The command preserves existing user hooks; preserved
 hooks run without Reprobuild's internal capability or legacy recursion marker
 in their environment.
+
+### The managed hooks do not run in a linked worktree
+
+A **relative** `core.hooksPath` — typically `.git/hooks`, which the
+`git-hooks.nix` installer writes — is resolved by Git against the top level
+of whichever worktree is running the hook. In a linked worktree (`git worktree
+add`, `repro branch`) `.git` is a *file*, so that path names nothing and Git
+runs **no hooks at all** there: commits and pushes from the worktree bypass the
+publication gate without a word.
+
+Reprobuild reports it in three places. A commit or checkout in the repository
+prints a `repro hooks: core.hooksPath in <repo> is the relative path …`
+diagnosis and leaves the value alone (it is your git config, and you did not
+run a hooks command). A `pre-push` from the main worktree rewrites the value,
+or refuses the push when it cannot. And `repro health` reports the repository
+as `PATH-UNSAFE` in its `vcs-hooks` row, after any `STALE` hooks and before any
+shadowed or missing ones. The repair rewrites the value to the absolute path it
+was meant to name, which every worktree then shares:
+
+```console
+$ repro hooks ensure --vcs <repo-or-workspace>    # or: repro health --fix
+```
 
 ### The hook does not recognize the `repro` it found
 
@@ -344,6 +406,13 @@ remote. It does not make an unpublished dependency publishable. Use
 $ repro push --sync --rebase
 ```
 
+When repository dependencies form a cycle, `repro push` preflights the exact
+clean commits and publishes that component together in a deterministic order.
+Each hook still checks the lock pins and other publication policies. A raw
+`git push` cannot authorize the other unpublished members of the component.
+If a later member fails, the command reports the published prefix and the
+remaining work; fix the cause and retry.
+
 Unrelated repositories outside that closure do not block the operation.
 
 ### A source push succeeded but a later step failed
@@ -361,6 +430,10 @@ report and then retry `repro push`. If a prior attempt committed a valid
 lock-only chain locally but failed to push it, retry verifies every commit and
 record before resuming an ordinary fast-forward backend push. Dirty, divergent,
 or non-lock history is left untouched for manual inspection.
+
+If the managed backend hook observes a destination change after Git advertised
+it, publication uses the same bounded, verified recovery as a non-fast-forward
+race. Integrity and workspace-policy refusals remain failures.
 
 ### `lock-backend-unreachable` (team or public backend down)
 
@@ -394,7 +467,7 @@ and it will fail no matter how often you retry.
 
 | Artifact | What it is | Re-pin it with |
 |---|---|---|
-| Committed lock | `repro.lock` at a repo root, schema `reprobuild.solved-graph-lock.v2`, solved from a recipe's solver inputs | `repro lock refresh [<path>]` |
+| Committed lock | `repro.lock` at a repo root, schema `reprobuild.solved-graph-lock.v3` (v2 still read), solved from a recipe's solver inputs | `repro lock refresh [<path>]` |
 | Workspace lock | `locks/<project>/<repo>/<sha>.toml` inside a tier's backend (a git-checkout manifest store, an external DB, …) | `repro workspace lock [<project>] [--workspace-root=PATH]` |
 
 `repro lock refresh` needs solver inputs. Run at a workspace root that
@@ -414,15 +487,285 @@ line of the sibling's history, is spelled out:
 `repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
 (or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
 `pre-commit` re-pin honors). Each pin's `ref` is a published branch that
-contains the pinned commit (`agents` first, then `dev`, then the
-checkout's branch, the remote's default, or any other published branch
-containing it) and is empty when no published branch contains it; a
-local-only branch name is never recorded.
+contains the pinned commit — the branch of the repo's `unstable` role
+first, then the branch of its `mainline` role, as the workspace manifest
+and settings file declare them (no branch name is built into `repro`),
+then the checkout's branch, the remote's default, or any other published
+branch containing it — and is empty when no published branch contains it; a
+local-only branch name is never recorded. Neither is a branch the
+branching policy deletes after use: a stabilisation branch
+`agents-to-dev-<date>` is skipped, so a refresh run on one records the
+next durable branch containing the commit, or an empty `ref` when only
+the stabilisation branch contains it, and a lock that already records
+one has it replaced on the next refresh or commit.
+
+Refresh also names every sibling pin it removes, including pins in HEAD's
+committed lock that a previous working-copy refresh already removed. The
+report gives the pinned revision and the manifest checkout revisions whose
+resolved `depends` closure no longer names the sibling.
+
+Before writing, refresh checks local remote-tracking refs for the flat
+manifest checkout and configured manifest layers. A manifest that lacks
+commits already fetched from its upstream gets a warning naming both
+revisions and `repro sync` as the remedy; refresh does not fetch or move
+manifest checkouts itself. If committed sibling pins would disappear while
+any manifest is known behind (including divergence), refresh leaves the lock
+untouched and exits 6. To proceed deliberately, pass
+`--allow-stale-manifest`; the warnings still appear. An intentional removal
+using current manifests succeeds and still reports the removed pins.
+`--json` puts a single report on stdout with `droppedPins` and
+`behindManifests` arrays, including on this refusal; diagnostics stay on stderr.
+
+A committed lock is solved for one platform, recorded as its `platform`
+(for example `amd64-linux`). The solve reads the recipe as it evaluates on
+the host, so a host of another platform cannot redo that solve, and
+re-solving there would replace it with the host's own. On such a host,
+`repro lock refresh` therefore **re-pins sibling revisions only**, exactly as
+the managed `pre-commit` hook does. It re-observes each sibling the lock
+pins, adds develop-set siblings the lock does not carry yet, and removes
+nothing. It leaves `platform`, `packages`, `inputs_digest` and the lock's own
+entry as committed. It says so before it writes. The pin-regression gate
+(exit 4) applies as it does to a full refresh. `--repin`, `--provisioning`,
+`--strategy` (and `--lowest` / `--highest`), `--inputs` and `--registry` shape
+a solve, so on such a host they exit 2 and write nothing. To re-solve
+anyway, refresh on a host of the lock's platform, or pass
+`--platform=<host platform>` to re-target the lock to this host on purpose.
+
+`repro lock refresh` also **refuses to write a lock from an incomplete
+solve**. A recipe's `uses:` pulls sibling recipes into the solve
+transitively; when a `uses:` names a develop-set sibling (one the
+workspace manifest's `depends` declare, even when the project containing
+it is not enabled in this workspace, or one the committed lock already
+pins) whose recipe the refresh cannot read — the sibling is
+not checked out, or is checked out where `uses:` discovery does not find
+it — that recipe's version constraints would be missing from the solve,
+and the lock would pin versions the next build in a complete workspace
+refuses. The refresh then writes nothing, exits 5, and names the sibling,
+the recipe whose `uses:` reaches it, and where it was expected. Check the
+sibling out (`repro sync`, or `repro ws enable` the project that declares
+it) and refresh again. A sibling checked out without any recipe declares
+no constraints and is not a reason to refuse. `repro lock solve` without
+`--write` prints the same finding as a warning.
+
+#### `ELockConflict`: re-pin one package, not the whole lock
+
+A committed lock is a pin, so a build refuses with `ELockConflict` when
+the recipe now declares a range the lock's version does not satisfy. The
+usual cause is a **new** constraint: a `uses:` line added to the project,
+or a sibling it consumes, after the lock was written. A sibling consumed
+as a pure-Nim-source library counts: this project's compiler compiles
+its modules, so its toolchain floor (`nim >=2.2 <3.0`) binds this lock.
+When the declaring package belongs to such a sibling, the diagnostic
+says it is a **cross-repo producer**, so look for the constraint in that
+repo's recipe, not in yours.
+
+The first remedy the diagnostic names is the targeted re-pin:
+
+```
+repro lock refresh --repin=<package>[,<package>…]
+```
+
+It re-solves only the named packages and holds every other entry. The
+solve runs with every other committed package version and variant value
+supplied as a hard pin, the same pins a build applies. The written lock
+differs from the committed one only in the named packages' `packages`
+entries, plus **added** entries for packages the lock did not record yet
+(a newly declared producer's own package, for example). It never changes
+or removes another entry. Sibling revision pins (`deps`) already in the
+lock, provisioning records and the certificate-policy snapshot are carried
+forward; a sibling the lock does not pin yet (the newly declared producer
+itself) is added at the revision the solve saw. The one
+`deps` entry it rewrites is the repo's own (marked `self = "true"`), which records
+the tree the lock was solved from.
+
+- When another held pin **also** contradicts a declared range, the
+  re-pin fails with that pin's `ELockConflict` and writes nothing. Add
+  that package to `--repin` and run it again. The flag never re-solves a
+  package you did not name.
+- It needs a committed lock and package names the solve actually has.
+  If either is missing it exits 2 and writes nothing.
+- The incomplete-solve refusal (exit 5) and the pin-regression gate
+  (exit 4) apply as they do to a full refresh.
+
+A full `repro lock refresh` (every version pin and every sibling
+revision pin re-solved) and relaxing the declared constraint are still
+available. Use them when that is the change you want.
 
 `repro workspace lock` resolves a bare invocation against the **current
 directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be
 pasted as printed.
+
+### An intended upgrade: `repro lock update`
+
+```
+repro lock update <dependency> [--to <rev>] [--repo-root=<dir>]
+                  [--allow-pin-regression=<name>[,<name>…]]
+```
+
+A recipe states a **constraint** and a lock records a **resolution**: a
+`repro.nim` `uses:` range or exact version against a `repro.lock` entry,
+a `flake.nix` input URL (a branch, or an exact `rev=<sha>` /
+`github:o/r/<sha>`) against a `flake.lock` node. The managed `pre-commit`
+hook re-pins resolutions from your sibling checkouts on every commit, but
+it **never rewrites a constraint**: when an exact pin (or a range) excludes
+the revision a sibling is at, it refuses the commit and names this
+command, because only you know whether the newer checkout is an upgrade or
+an experiment. A `repro test` or `repro certify` run that issues a test
+certificate refreshes both locks before its tests with the same writers and
+the same rules; where the hook would refuse the commit, that run writes
+nothing and issues no certificate, and its tests still run.
+
+`repro lock update` is that upgrade, in one step and for both systems:
+
+- **The dependency** may be named by its `flake.nix` input name, its
+  `repro.lock` dependency name or its workspace repo name. All of them must
+  mean one repository, identified by canonical URL (`github:o/r`,
+  `git+https://github.com/o/r` and `https://github.com/o/r.git` are one
+  repository). A name that means two repositories is refused with every
+  candidate; name one as `input:<name>`, `dep:<name>` or `repo:<name>`.
+- **The target** is `--to <rev>` (a commit id, or a ref resolved in the
+  sibling checkout); else the sibling checkout's `HEAD`; else, for a flake
+  input that follows a branch, the tip nix resolves. A `repro.lock`
+  dependency entry with no checkout needs `--to`: the entry records a
+  checkout's revision, and the solver selects package versions, never a
+  dependency's revision.
+- **Every resolution moves**: each `flake.lock` root input and each
+  `repro.lock` dependency entry of that repository.
+- **An exact pin that excludes the target is rewritten** in whichever recipe
+  states it. In `flake.nix` the revision in the input's URL changes and
+  nothing else in the file does; the node is then re-locked through nix
+  (`nix flake update <input>`), which is what computes its new `narHash`. In
+  `repro.nim` an exact `uses:` version is replaced by the version whose
+  producer `versions:` entry maps to the target; if none does, the command
+  refuses (exit 3) and asks you to add that entry.
+- **A pin you removed is finished for you.** To switch a `flake.nix` input
+  from an exact revision to a branch, remove the revision from its URL and
+  run this command. nix keeps the removed revision in the node's
+  `original.rev` until it re-locks the node, so the command re-locks it
+  through nix (`nix flake update <input>`) and then moves it to the target
+  like any branch-following input, under the same rules below.
+- **A `uses:` range is never rewritten.** One that admits the target is left
+  alone; one that excludes it is refused (exit 3), naming the line, because
+  widening a range is the author's decision.
+- **A pin never moves backward silently**: a target behind, or diverged
+  from, a current resolution is refused (exit 4) unless
+  `--allow-pin-regression=<name>` or `REPRO_ALLOW_PIN_REGRESSION=<name>`
+  names the dependency (any of its names).
+- **A pin names published content.** A target that exists only in the
+  sibling checkout (reachable from no remote-tracking ref, judged locally,
+  never over the network) is refused (exit 1) when a `flake.lock`
+  resolution would name it, because nix cannot fetch it for anyone else;
+  the message names the `git push` that publishes it. A move of
+  `repro.lock` alone is written with a warning, and the push gate refuses
+  the push until the target is published.
+- **A modified checkout is not its `HEAD`.** When the target defaults to the
+  sibling's `HEAD` and that checkout has uncommitted changes, the command
+  refuses (exit 1); commit or stash them, or name the commit with `--to`.
+- **All or nothing.** If anything fails — nix is missing or cannot fetch
+  the target, a rewrite does not land, the result would not pass the
+  recipe/lock consistency checks — every file is put back byte for byte
+  (exit 1). The result is left in the working tree; nothing is staged or
+  committed.
+
+When the target is not what the sibling checkout is at, the command says
+so: unless a recipe pins the dependency exactly, the next commit's re-pin
+records whatever is checked out, so check the sibling out at the target
+before committing.
+
+`repro flake refresh-lock --only=<names>` does the same for each input it
+names, with the sibling's `HEAD` as the target (`--record-downgrade` allows
+a target behind the current pin). Without an explicit
+`--only`, `refresh-lock` keeps refreshing only the branch-following inputs
+and declines an exact pin.
+
+### A temporary experiment: develop overrides and exact pins
+
+```
+repro develop --only=<dependency>     # substitute one dependency, pinned or not
+repro develop --all                   # substitute the lock set, exact pins excepted
+repro develop --drop=<dependency> [--workspace-root=<dir>] [--project-root=<dir>]
+```
+
+When materializing a consumer's dependencies, `repro develop` keeps the
+revisions in that consumer's `repro.lock`. A participating producer's own
+self-record may fill a missing pin, but cannot replace a consumer dependency
+pin. Workspace inventory queries continue to aggregate producer self-records.
+
+Debugging against a sibling checkout uses a develop override, which never
+writes a recipe or a lock. How it meets an exact recipe pin depends on how
+the dependency was selected:
+
+- **A bulk selection skips an exact pin.** `repro develop --all` (and every
+  other mode or pattern selection) does not substitute a dependency whose
+  `flake.nix` pins a revision (`rev=<sha>`, `github:o/r/<sha>`) or whose
+  `repro.nim` pins an exact `uses:` version. It records no override for it
+  and lists it as `pinned by recipe at <file>:<line>`; so do `--dry-run`,
+  `--list` (state `pinned`) and their `--json` forms. The flake override
+  verb's automatic mode (`repro flake override-args --all`, which
+  `useFlakeDevShell` runs at shell entry) leaves such an input on its
+  `flake.lock` pin in the same way. A pin means "this revision, not whatever
+  is checked out", and building against the checkout anyway would quietly
+  build something the recipe disclaims. The managed hooks do not compare a
+  skipped pin with its checkout, so a sibling that has moved on neither
+  re-pins nor refuses a commit.
+- **An explicit selection substitutes it.** `repro develop --only=<dependency>`
+  does, and so does `repro flake override-args --only=<dependency>` or an
+  explicit `overrideInputs` entry of `useFlakeDevShell`. This is how a pinned
+  dependency is debugged. Once the checkout moves past the pin, the next
+  commit is refused (H3), so the experiment is not published by accident.
+- **Dropping the override ends the experiment.** `repro develop
+  --drop=<dependency>` removes that dependency's override from the
+  workspace's `.repro/develop-overrides.toml` and from the per-project
+  override documents (`repro develop <dependency> --into`) of the workspace
+  root and of `--project-root` (default: the project you are in). It matches
+  an entry by the dependency's name or by its checkout, as the hooks do. It
+  touches no checkout and no lock, and naming a dependency with no override
+  is a reported no-op. The H3 refusal prints this command, with the right
+  roots, as its "temporary experiment" remedy.
+
+Which kind of selection recorded an override is kept in its `provenance`:
+`repro develop --only=<dependency>` for an explicit one, `repro develop --all`
+for a bulk one. **Overrides recorded before this distinction existed count
+as bulk**, because `--all` and `--only` both wrote `repro develop --all`
+then and the two cannot be told apart; so does an entry with no provenance.
+After upgrading, an exact pin under such an entry is therefore not
+substituted: the hooks do not compare it with its checkout, the flake override
+verbs leave it on its pin, `repro build` resolves it from the lock rather
+than the checkout (and says so once, naming the two commands below), and
+`--list` shows it `pinned` and names the ignored entry. An explicit entry
+still substitutes it in `repro build`, and an override of a dependency that is
+not exactly pinned is followed exactly as before, whatever its provenance. To
+keep substituting it, run `repro develop --only=<dependency>` again, which
+records the explicit provenance; to clear it, run `repro develop
+--drop=<dependency>`.
+
+### Exact pins of workspace siblings: guidance, never a refusal
+
+An exact revision in a recipe is legitimate, so no rule refuses one. But a
+repository you develop side by side as a workspace sibling is usually better
+tracked through the lock: the recipe names it on a branch (or a range), and the
+commit-time re-pin moves the lock as you work. Reprobuild says so in two
+places, and neither changes whether anything is refused or the exit status:
+
+- **In refusals.** An H1, H2 or H3 refusal about an exact pin of a repository
+  that has a sibling checkout adds one `Guidance:` line naming the sibling and
+  the conversion: replace the exact revision with a branch reference (a range
+  in `repro.nim`), then run the printed `repro lock update <dependency>`. That
+  one command finishes the job for a `flake.nix` input too: a `flake.lock`
+  node that still records the removed revision (`original.rev`) is re-locked
+  through nix from `flake.nix` before it is moved.
+- **In `repro check` and `repro health`.** Every exact recipe pin of a
+  workspace sibling, in `flake.nix` and in `repro.nim`, is listed as an
+  informational finding with its file and line, and with the comment written
+  beside the pin, or `no reason stated` when there is none. `repro check`
+  prints each as a `repro check: info:` line and in the `findings` array of
+  its JSON report; `repro health` lists them in its `sibling-exact-pins` row,
+  which is always `ok`. Write the reason next to a pin you mean to keep.
+
+Both point to "your organisation's dependency guidelines". Set
+`REPRO_DEPENDENCY_GUIDELINES_URL` to make them name your guidelines' address
+instead.
 
 ### `locked-integrity-mismatch` (a lock that no longer verifies)
 
@@ -515,6 +858,40 @@ Verify with `repro locking explain`.
 
 ## The hook boundary
 
+Separate Git-checkout record stores have a publication boundary. Their managed
+hook set contains only `pre-push`, which permits new lock records and refuses
+changes to records already published at the destination. Workspace lock
+refresh, dependency publication, and source-cache hooks do not run there.
+Other files in the store, including membership metadata, remain editable.
+Lock records must be regular files; symlinks and submodules within `locks/`
+are refused because they can hide records behind editable targets. Duplicate
+paths anywhere in the lock namespace, including its directories, are refused
+because Git's lookup could otherwise shadow a published record. The guard
+reads the actual destination refs and objects, so a stale local tracking ref,
+a new branch name, or a local replacement ref cannot exempt an existing record.
+
+`repro hooks ensure --vcs <store>` recognizes the conventional `.repro/records`
+checkout and the legacy `.repro/manifests` checkout, as well as configured
+Git-checkout backends. For a standalone or custom checkout, register it with:
+
+```console
+$ repro hooks ensure --vcs --record-store <store>
+```
+
+Registration writes `reprobuild.recordStore = true` in Git's local config.
+Later hook repair retains this identity and removes obsolete managed workspace
+hooks while restoring any displaced user hooks. A participating workspace
+repository cannot register as a record store. The lock publisher also registers
+backend identity for the checkout it explicitly selects before publication,
+using `reprobuild.recordStoreBackend = true`. A legacy backend that shares
+workspace duties retains the full workspace hook set; its pre-push enforces
+record immutability before the workspace publication gate. An internal nested
+publication capability cannot exempt it from record verification. A separate
+store's verified additions also pass with an expired or malformed internal token;
+that token is cleanup bookkeeping, and the record guard decides the push. The managed
+pre-push contract includes its immutable-record policy, so a servicing build
+that predates this guard refuses the hook instead of silently allowing a push.
+
 Three VCS hooks participate in locking. Knowing what each does — and
 what it can and cannot see — is what makes the refusal messages above
 make sense.
@@ -553,6 +930,22 @@ make sense.
   merely pending: it is not running. Any stranded record, any refusal,
   and any writer failure also prints a line to stderr, which git shows
   you at the terminal. The commit still succeeds in every case.
+
+  That stderr line is easy to miss, so `repro health` reads the log for
+  you. Its `lock-writer` row sorts the outcomes above into *wrote*
+  (`published`, `written-*`), *refused* (`no-lock-dirty-siblings`,
+  `no-lock-failed`) and *no record due* (`no-manifest-record`, the
+  `skipped-*` outcomes and `inert-git-state-unknown`, which change
+  nothing), and counts the refusals since the last written record.
+  `no-manifest-record` is not a refusal: the record lives elsewhere, in
+  the in-repo `repro.lock` of a public-only workspace or in a per-repo
+  route. One refusal is a `warn`; two or more in a row are a `fail`. The
+  row lists every distinct refusal reason in that run, newest first,
+  because fixing the reason on the last line can leave an older one
+  standing. A log that exists but cannot be read is a `warn` naming the
+  error. The row reads only the last 4 MiB of the log and never changes
+  anything: after fixing the reason, run `repro workspace lock` to confirm
+  the writer succeeds.
 
   **`skipped-no-workspace` has no report file, by design.** When the hook
   decides the root is not a workspace, it writes nothing at all and says so
@@ -595,8 +988,8 @@ personal fork. The public repo needs no config. The team route lives in
 the shared workspace repo; the personal route comes from your dotfiles.
 
 ```toml
-# .repro-workspace.toml (committed in the shared repro-workspace repo)
-schema = "reprobuild.config.v1"
+# repro-workspace.toml (committed in the shared repro-workspace repo)
+schema = "reprobuild.workspace.settings.v1"
 [locking]
 route = [
   { visibility = "team", backend = "git-checkout", path = ".repo/manifests-team", repos = ["acme-internal"] },
@@ -625,7 +1018,7 @@ route = [
 $ repro locking explain
 repro locking explain — resolved (tier, backend) per repo:
   acme-app (apps/acme-app): tier=public backend=committed-lock layer=built-in default
-  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [.repro-workspace.toml]
+  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [repro-workspace.toml]
   my-scratch-fork (vendor/my-scratch-fork): tier=personal backend=git-checkout layer=dotfiles [~/dotfiles/reprobuild/personal-routes.toml]
 ```
 
@@ -651,3 +1044,96 @@ fix it.
 The design specs behind this page (`Unified-Locking-And-Hooks.md`,
 `CLI/hooks.md`, `CLI/push-hook-publication-protocol.md`) live in
 Reprobuild's non-public specification repository.
+
+## Restore a project set in a fresh directory
+
+`repro ws restore` checks out a selected project union at the exact commits in
+a workspace lock or named snapshot:
+
+```sh
+repro ws restore ../workspace ../restored --projects=compiler,tools \
+  --record=/path/to/record.toml
+repro ws restore https://example.com/org/workspace.git ../release \
+  --at=<metadata-commit> --projects=compiler,tools --snapshot=release
+```
+
+A local source uses its committed metadata `HEAD`; `--at` selects another
+metadata revision and is required for URL sources. Uncommitted source changes
+are ignored. Relative record paths resolve from the invoking directory.
+Alternatively, `--record=project/repo@<full-commit>` reads the exact record from
+a separate record store. Local sources discover `.repro/records` (with the
+legacy `.repro/manifests` fallback); `--record-store=PATH|URL` selects one
+explicitly. Automatic discovery covers only those conventional local locations;
+configured Git stores elsewhere require `--record-store`. Read its committed
+`HEAD` or `--record-store-at=REV`; URL stores
+require the revision flag. The resolved store commit is reported and retained
+at `<destination>/.repro/records`.
+
+Every selected Git repository must have a matching full commit pin. Checkouts
+are detached, the active project selection is recorded, and output lists the
+verified commit for each checkout. Other VCS members are refused. The
+source workspace is preserved. Use an absent or empty destination outside the
+local source workspace and input repositories, with an existing parent directory. Failed restores
+remove staging and preserve an initially empty destination.
+
+## Detecting a repository renamed on GitHub
+
+GitHub redirects an old repository URL after a rename or transfer. Git can
+clone and fetch successfully while your manifest still names the old owner
+or repository. `repro health` reports these redirects in its
+`repository-identities` row, using the composed manifest fetch URL and the
+canonical name returned by `gh api`. It compares GitHub names without regard
+to case and reports both identities when they differ.
+
+Update the declaration's URL composition to the canonical owner/repository.
+If you also change the manifest repo name or checkout path, record the old
+values so sync can recognize the existing checkout:
+
+```toml
+[extensions]
+previously = [{ name = "old-name", path = "old-path" }]
+```
+
+Before sync relocates the checkout, the pre-push gate recognizes its declared
+previous path, linked worktrees sharing that checkout's Git common directory,
+or a unique declared previous URL. It reports the prior identity and recommends
+`repro ws sync` to complete relocation. These recovery matches apply only while
+the current declared path is absent; an occupied path must be reconciled first.
+The usual cleanliness, publication and lock checks still apply.
+
+Keeping the checkout path is valid; `previously` does not by itself change
+the fetch URL. Health only reports the finding, including under `--fix`.
+It never migrates a checkout or shared clone for this row.
+
+The check supports public `github.com` HTTP(S), SSH, Git and SCP URLs. Other
+forges and nonstandard ports are explicitly unconfirmed; local repositories
+need no forge check. Install and authenticate GitHub CLI (`gh auth login
+--hostname github.com`) to enable resolution. API/authentication failures and
+timeouts are reported as unconfirmed warnings. Each query has a five-second
+deadline; after a timeout, remaining queries are explicitly unconfirmed.
+
+`repro health --offline` skips these API queries and reports that identities
+were not confirmed. This flag applies to forge identity queries; other health
+checks retain their existing fetch behavior. Use `--verbose` for every
+finding and its remedy, or `--json` for complete structured results.
+
+## Moving a checkout between shared clone pools
+
+`repro ws shared-clones rewire` adds the canonical pool for each manifest URL.
+It preserves existing alternates, and reports an incomplete migration when a
+checkout still borrows from another pool (including an old organisation or
+repository name under the same cache root).
+
+Run `repro ws shared-clones consolidate [<project>]` to finish the migration.
+It copies the checkout's reachable and reflog objects into its own store,
+hydrates promised objects through the available upstreams, replaces its local
+commit graph, and verifies connectivity before removing the old alternates.
+Tags, safety refs, linked worktrees, reflogs, the index and working files are
+preserved. `repro-pool` then points at the canonical pool. An unresolved object
+or dangling symbolic ref refuses migration and preserves the old wiring;
+repair the reported corruption and rerun the command. The command never deletes
+refs or changes a foreign shared pool.
+
+`repro health` reports how many checkouts with alternates it examined out of
+all checked-out participating repositories. It names foreign pools and reports
+broken connectivity even when the checkout does not yet use reprobuild's pool.

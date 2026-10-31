@@ -87,7 +87,12 @@ suite "NF-2: a behind-pin refusal names the sibling, distance and remedies":
         isolateNf2Config(fx)
         defer: releaseNf2Config()
 
-        let gammaPinned = advanceSibling(fx, "gamma", 3)
+        # The pin names a PUBLISHED revision, as every recorded pin does
+        # (Nix-Flake-Coexistence.md §4: only published revisions are
+        # recorded): the deliberate downgrade below re-reads the pinned
+        # source to compare dependency locks, and an unfetchable one is
+        # withheld, not recorded.
+        let gammaPinned = advancePublishedSibling(fx, "gamma", 3)
         let gammaCheckout = rewindSibling(fx, "gamma", 3)
         check gammaCheckout == fx.seedSha[2]
         setFlakePins(fx, fx.seedSha[0], fx.seedSha[1], gammaPinned)

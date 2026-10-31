@@ -32,6 +32,7 @@
 ## brief.
 
 import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_hcr_agent
 from repro_test_support import requireBinary, monitorShimPath
@@ -384,14 +385,20 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       check requestA.patchRequest.targetSymbols == @["patchable_value_a"]
       check requestA.patchRequest.directPatchPayload.bytes.len > 0
       check requestA.patchRequest.sourceGenerationMap.len == 1
-      check requestA.patchRequest.sourceGenerationMap[0].sourcePath == sourceA
+      # The watch reports the paths it observed canonicalised; under the stock
+      # macOS TMPDIR (`/var` a symlink to `/private/var`) ``sourceA`` is not.
+      # ``tempRoot`` itself stays as created: the agent sockets live under it
+      # and the canonical spelling is 8 bytes nearer the platform sun_path.
+      let canonicalSourceA = expandFilename(sourceA)
+      check requestA.patchRequest.sourceGenerationMap[0].sourcePath ==
+        canonicalSourceA
       # HLX-M8 residue, 2026-09-18 — both fields, NON-EMPTY, over the real
       # ``repro watch --hcr`` wire. Until this date no gate on any platform
       # drove either one through this command, and the command itself filled
       # neither: it sent ``changedFiles: []`` while holding the edited file in
       # ``session.metadata.sourcePath``, so ``rb_hcr_file_changed`` could not
       # answer true for any watch-driven reload.
-      check requestA.patchRequest.changedFiles == @[sourceA]
+      check requestA.patchRequest.changedFiles == @[canonicalSourceA]
       check requestA.patchRequest.changedTypes.len == 1
       check requestA.patchRequest.changedTypes[0].typeName ==
         "HcrWatchProbeState"

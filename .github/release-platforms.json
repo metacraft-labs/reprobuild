@@ -81,6 +81,19 @@
       "asset": "reprobuild-{version}-1.x86_64.rpm"
     }
   ],
+  "addon_static": {
+    "$comment": [
+      "The musl-static add-on `repro` (apps/repro-addon), one per Debian",
+      "architecture, built by scripts/build_addon_static.sh on the `from` leg",
+      "(which cross-compiles arm64 and armhf with the flake's pinned",
+      "toolchains). An add-on host fetches one and pins its digest from",
+      "SHA256SUMS on the command line that runs it. `asset` is a template;",
+      "{version} is the reprobuild.nimble version, {arch} the architecture."
+    ],
+    "from": "linux-x86_64",
+    "arches": ["amd64", "arm64", "armhf"],
+    "asset": "repro-addon-{version}-linux-{arch}"
+  },
   "$deliberately-absent": {
     "linux-aarch64": [
       "The runner class is real -- eph-linux-arm64 (Tart Linux guest on m3,",
@@ -117,8 +130,8 @@
       "No runner exists and none is planned. metacraft-dev-guidelines",
       "policies/ci-workflow-standards.md marks macOS AMD64 'N/A -- no Intel-Mac",
       "runner': the macOS fleet is Apple-silicon only (eph-macos-arm64 on m3).",
-      "flake.nix still lists x86_64-darwin among its systems, which is what makes",
-      "this leg look available; it is not."
+      "flake.nix no longer lists x86_64-darwin among its systems either: the",
+      "pinned nixpkgs (26.11) dropped it, so nothing can be built there."
     ],
     "windows-aarch64": [
       "A runner DOES exist (eph-win-arm64, m3, qemu-windows-arm + swtpm,",

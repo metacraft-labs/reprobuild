@@ -35,6 +35,7 @@ import std/[json, os, osproc, streams, strtabs, strutils]
 import "../hcr-linux-direct/elf_rel_reader"
 
 import repro_project_dsl
+from repro_test_support import testScratchSlug
 
 const
   PatchSymbol* = "hcr_lx_m5_patch_body"
@@ -96,7 +97,11 @@ proc runOrFail*(command, cwd: string): string =
   res.output
 
 proc m5WorkDir*(repoRoot: string): string =
-  result = repoRoot / "build" / "hcr-linux-m5"
+  # Private to the process running ONE case of ONE binary: several binaries
+  # import this helper and the suite runs them (and their cases) concurrently,
+  # so a shared directory had one process relink a fixture or rewrite a patch
+  # object while another was executing or parsing it.
+  result = repoRoot / "build" / "hcr-linux-m5" / testScratchSlug()
   createDir(result)
 
 proc m5CaseDir*(repoRoot: string): string =

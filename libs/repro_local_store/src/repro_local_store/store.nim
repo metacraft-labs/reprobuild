@@ -182,6 +182,12 @@ type
       ## Audited rather than merely returned, because "the GC declined to
       ## delete something" is exactly the event an operator later wants
       ## to find when a store did not shrink.
+    gaExpire = "expire"
+      ## A root whose `ttl_seconds` had elapsed was deleted, releasing what
+      ## it held. See `expireRoots`.
+    gaBudget = "budget"
+      ## One summary row per `repro store gc --budget` run that evicted
+      ## something: what it measured, what it took and what it could not.
 
   GcPrefixResult* = object
     ## The outcome of collecting ONE named prefix.
@@ -291,6 +297,14 @@ const
     ## on disk before this upgrade remain readable without
     ## re-sealing).
   DefaultGcGraceSeconds* = 5 * 60       ## five minutes per the spec
+  LastUseResolutionSeconds* = 24 * 3600
+    ## A use of a prefix or a CAS blob is RECORDED at most once per object
+    ## per this interval (the `relatime` rule). Last use is an eviction
+    ## ORDER, so day resolution is all it needs, and it bounds the index
+    ## writes a hot read path can cause to one per object per day.
+  StoreBusyTimeoutMs = 30_000
+    ## `sqlite3_binding.open`'s default, restored after a use record that
+    ## ran without waiting (see `recordUseWithoutWaiting`).
   StoreRootEnvVar* = "REPRO_STORE_ROOT"
 
 # ---------------------------------------------------------------------------
@@ -460,7 +474,10 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
   result.realizationHash = readPrefixId(buf, pos)
   result.realizedPath = readString(buf, pos)
   result.declaredExecutablePath = readString(buf, pos)
-  let exportedCount = int(readU32Le(buf, pos))
+  let exportedCountRaw = readU32Le(buf, pos)
+  if not elementCountFits(exportedCountRaw, bodyEnd - pos, 4):
+    raise newException(EReceiptCorrupt, "element count exceeds remaining body")
+  let exportedCount = int(exportedCountRaw)
   result.exportedExecutables = newSeq[string](exportedCount)
   for i in 0 ..< exportedCount:
     result.exportedExecutables[i] = readString(buf, pos)
@@ -476,7 +493,10 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
     # Recipe-Val M8 v2 trailing fields. v1 receipts decode with
     # both fields empty (single-output legacy semantics).
     result.outputName = readString(buf, pos)
-    let siblingCount = int(readU32Le(buf, pos))
+    let siblingCountRaw = readU32Le(buf, pos)
+    if not elementCountFits(siblingCountRaw, bodyEnd - pos, 8):
+      raise newException(EReceiptCorrupt, "element count exceeds remaining body")
+    let siblingCount = int(siblingCountRaw)
     for i in 0 ..< siblingCount:
       let key = readString(buf, pos)
       let value = readString(buf, pos)
@@ -488,7 +508,10 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
     # nothing, because "empty" and "unknown" are the same bytes here.
     result.declaredExecutableAlias = readString(buf, pos)
     result.declaredLauncher = readString(buf, pos)
-    let pruneCount = int(readU32Le(buf, pos))
+    let pruneCountRaw = readU32Le(buf, pos)
+    if not elementCountFits(pruneCountRaw, bodyEnd - pos, 4):
+      raise newException(EReceiptCorrupt, "element count exceeds remaining body")
+    let pruneCount = int(pruneCountRaw)
     result.declaredPrunePaths = newSeq[string](pruneCount)
     for i in 0 ..< pruneCount:
       result.declaredPrunePaths[i] = readString(buf, pos)
@@ -614,6 +637,35 @@ proc initSchema(db: Database) =
     try: db.exec("ROLLBACK") except CatchableError: discard
     raise
 
+proc ensureUsageColumns(db: Database) =
+  ## Shared-Store-Budgeted-Eviction §5: the per-object LAST-USE record and
+  ## the cached prefix size the budget GC needs.
+  ##
+  ## ADDITIVE and therefore NOT a schema-version bump. `user_version` stays
+  ## at `StoreSchemaVersion`, because a version bump makes every older
+  ## build refuse the store (`EStoreSchemaTooNew`), and a shared store is
+  ## opened by whatever `repro` each CI guest happens to carry. Every
+  ## statement an older build runs names its columns, so two extra nullable
+  ## columns and an extra table are invisible to it; a row an older build
+  ## inserts carries NULL here, read as "last used when created" and "size
+  ## not yet measured".
+  var have: seq[string] = @[]
+  var info = db.prepare("PRAGMA table_info(prefixes)")
+  while info.step() == SqliteRow:
+    have.add(info.columnText(1))
+  info.finalize()
+  for (column, decl) in [("last_used_at", "INTEGER"), ("size_bytes", "INTEGER")]:
+    if column notin have:
+      try:
+        db.exec("ALTER TABLE prefixes ADD COLUMN " & column & " " & decl)
+      except SqliteError as err:
+        # Two openers raced to add it; the loser's error is the only one
+        # that can occur here, and it means the column now exists.
+        if "duplicate column" notin err.msg:
+          raise
+  db.exec("CREATE TABLE IF NOT EXISTS cas_use (" &
+    "digest BLOB PRIMARY KEY, last_used_at INTEGER NOT NULL)")
+
 # ---------------------------------------------------------------------------
 # Store lifecycle
 # ---------------------------------------------------------------------------
@@ -673,6 +725,14 @@ proc openStore*(root: string): Store =
       result.db.exec("PRAGMA foreign_keys = ON")
       result.db.exec("PRAGMA journal_mode = WAL")
       result.db.exec("PRAGMA synchronous = NORMAL")
+    try:
+      result.db.ensureUsageColumns()
+    except SqliteError:
+      # A store this process may read but not write (a read-only mount, an
+      # index owned by another user) opens as it always did. Use records
+      # then fail and are dropped, and only the budget GC, which has to
+      # write anyway, needs the columns.
+      discard
     opened = true
   finally:
     if not opened:
@@ -688,6 +748,118 @@ proc close*(s: var Store) =
 
 proc casPath*(s: Store; digest: PrefixIdBytes): string =
   s.root / casBlobRelative(digest)
+
+# ---------------------------------------------------------------------------
+# Last-use record (Shared-Store-Budgeted-Eviction §5)
+# ---------------------------------------------------------------------------
+#
+# What the budget GC evicts first is what was used least recently, so a use
+# has to be recorded where it happens: a prefix that realize found already
+# present, a CAS blob that was read, materialized, or stored again. Neither
+# file times nor atime can carry this. A CAS blob ingested by hardlink IS a
+# build output's inode, so touching its times would move the output's ctime
+# and fail the action cache's output witnesses; and the fleet's stores sit on
+# `atime=off` datasets.
+#
+# A use is recorded at most once per object per `LastUseResolutionSeconds`,
+# after a READ shows the record is stale, so the common case on a hot path is
+# one indexed SELECT. The write never waits for the index lock: a use that
+# loses a race with a writer is simply not recorded this time, and a read
+# never fails or stalls because its use could not be noted.
+
+template recordUseWithoutWaiting(db: Database; body: untyped) =
+  try:
+    db.exec("PRAGMA busy_timeout = 0")
+    try:
+      body
+    finally:
+      db.exec("PRAGMA busy_timeout = " & $StoreBusyTimeoutMs)
+  except CatchableError:
+    discard
+
+proc nowOr(now: int64): int64 =
+  if now != 0: now else: getTime().toUnix
+
+proc touchPrefix*(s: Store; prefixId: PrefixIdBytes; now: int64 = 0): bool =
+  ## Record a use of `prefixId`. Returns true when the record moved (it was
+  ## older than `LastUseResolutionSeconds`), false when it was recent enough,
+  ## the prefix is not indexed, or the index was busy.
+  if s.db.handle == nil:
+    return false
+  let t = nowOr(now)
+  var stale = false
+  recordUseWithoutWaiting(s.db):
+    var q = s.db.prepare(
+      "SELECT COALESCE(last_used_at, created_at) FROM prefixes " &
+      "WHERE prefix_id = ?")
+    q.bindBlob(1, prefixId)
+    if q.step() == SqliteRow:
+      stale = q.columnInt(0) <= t - LastUseResolutionSeconds
+    q.finalize()
+    if stale:
+      var u = s.db.prepare(
+        "UPDATE prefixes SET last_used_at = ? WHERE prefix_id = ?")
+      u.bindInt(1, t)
+      u.bindBlob(2, prefixId)
+      discard u.step()
+      u.finalize()
+      result = s.db.changes() > 0
+
+proc prefixLastUsed*(s: Store; prefixId: PrefixIdBytes): int64 =
+  ## The recorded last use of `prefixId` (its creation time until a use is
+  ## recorded), or 0 when it is not indexed.
+  var q = s.db.prepare(
+    "SELECT COALESCE(last_used_at, created_at) FROM prefixes " &
+    "WHERE prefix_id = ?")
+  defer: q.finalize()
+  q.bindBlob(1, prefixId)
+  if q.step() == SqliteRow:
+    return q.columnInt(0)
+  0
+
+proc fileMtimeOrZero(path: string): int64 =
+  try: getLastModificationTime(extendedPath(path)).toUnix
+  except OSError, IOError: 0'i64
+
+proc touchCasBlob*(s: Store; digest: PrefixIdBytes; now: int64 = 0): bool =
+  ## Record a use of the CAS blob `digest`. A blob with no use record is
+  ## taken to have been used when it was written (its mtime), so a blob
+  ## stored within the last day costs no write at all.
+  if s.db.handle == nil:
+    return false
+  let t = nowOr(now)
+  recordUseWithoutWaiting(s.db):
+    var last = 0'i64
+    var q = s.db.prepare("SELECT last_used_at FROM cas_use WHERE digest = ?")
+    q.bindBlob(1, digest)
+    if q.step() == SqliteRow:
+      last = q.columnInt(0)
+    q.finalize()
+    if last == 0:
+      last = fileMtimeOrZero(s.casPath(digest))
+    if last <= t - LastUseResolutionSeconds:
+      var u = s.db.prepare(
+        "INSERT INTO cas_use(digest, last_used_at) VALUES (?, ?) " &
+        "ON CONFLICT(digest) DO UPDATE SET last_used_at = excluded.last_used_at")
+      u.bindBlob(1, digest)
+      u.bindInt(2, t)
+      discard u.step()
+      u.finalize()
+      result = true
+
+proc casLastUseTable*(s: Store): Table[string, int64] =
+  ## Every recorded CAS use, keyed by lower-case hex digest. A blob absent
+  ## from the table was last used when it was written.
+  var q = s.db.prepare("SELECT digest, last_used_at FROM cas_use")
+  defer: q.finalize()
+  while q.step() == SqliteRow:
+    result[hexOf(q.columnBlob(0))] = q.columnInt(1)
+
+proc forgetCasUse*(s: Store; digest: PrefixIdBytes) =
+  var d = s.db.prepare("DELETE FROM cas_use WHERE digest = ?")
+  defer: d.finalize()
+  d.bindBlob(1, digest)
+  discard d.step()
 
 proc uniqueStoreToken(s: var Store): string =
   inc s.nonce
@@ -717,6 +889,7 @@ proc storeCasBlobWithStatus*(s: var Store; payload: openArray[byte]):
   result.digest = blake3.digest(payload)
   let finalPath = s.casPath(result.digest)
   if fileExists(extendedPath(finalPath)):
+    discard s.touchCasBlob(result.digest)
     return
   createDir(extendedPath(parentDir(finalPath)))
   let stagePath = s.casStageDir() & ".blob"
@@ -922,6 +1095,7 @@ proc commitCasStage(s: var Store; stagePath: string; digest: PrefixIdBytes;
   if fileExists(extendedPath(finalPath)):
     casIngestQuietRemove(stagePath)
     outcome.alreadyPresent = true
+    discard s.touchCasBlob(digest)
     return
   createDir(extendedPath(parentDir(finalPath)))
   try:
@@ -1163,6 +1337,7 @@ proc readCasBlob*(s: Store; digest: PrefixIdBytes): seq[byte] =
       "CAS digest mismatch for " & hexOf(digest) &
       " (bytes hash to " & hexOf(actual) & ")")
     raise e
+  discard s.touchCasBlob(digest)
 
 proc verifyCasBlob*(s: Store; digest: PrefixIdBytes) =
   discard s.readCasBlob(digest)
@@ -1209,6 +1384,48 @@ proc listPrefixes*(s: Store): seq[PrefixRow] =
     for i in 0 ..< 32: row.receiptDigest[i] = rd[i]
     row.createdAtUnix = stmt.columnInt(6)
     result.add(row)
+
+proc lookupPrefixByRealizedPath*(s: Store; realizedPath: string):
+    tuple[found: bool; row: PrefixRow] =
+  ## The index row whose store-relative, forward-slash `realized_path` is
+  ## exactly `realizedPath`.
+  var stmt = s.db.prepare(
+    "SELECT prefix_id FROM prefixes WHERE realized_path = ?")
+  defer: stmt.finalize()
+  stmt.bindText(1, realizedPath)
+  if stmt.step() != SqliteRow:
+    return (false, PrefixRow())
+  var pid: PrefixIdBytes
+  let raw = stmt.columnBlob(0)
+  for i in 0 ..< 32: pid[i] = raw[i]
+  s.lookupPrefix(pid)
+
+proc prefixOwningPath*(s: Store; path: string):
+    tuple[found: bool; row: PrefixRow] =
+  ## The realized prefix that contains `path` -- an installed executable, a
+  ## launcher, a library -- or `found = false` when `path` is not inside a
+  ## prefix of this store.
+  ##
+  ## Symlinks are resolved first, so a profile launcher or a `bin/` link
+  ## that points into the store resolves to the prefix it points at. The
+  ## owner is the deepest indexed prefix among `path`'s ancestors; a
+  ## directory under the store root that the index does not know is not a
+  ## prefix, however it is named.
+  let real =
+    try: expandFilename(path)
+    except OSError: return (false, PrefixRow())
+  let root =
+    try: expandFilename(s.root)
+    except OSError: return (false, PrefixRow())
+  if not real.startsWith(root & DirSep):
+    return (false, PrefixRow())
+  let parts = toForwardSlash(real[root.len + 1 .. ^1]).split('/')
+  for n in countdown(parts.len, 1):
+    let candidate = parts[0 ..< n].join("/")
+    let hit = s.lookupPrefixByRealizedPath(candidate)
+    if hit.found:
+      return hit
+  (false, PrefixRow())
 
 proc insertPrefixOrIgnore*(s: Store; row: PrefixRow): bool =
   ## Returns true if this caller actually inserted a row, false if the
@@ -1585,6 +1802,7 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
     result.outcome = roAlreadyPresent
     result.row = lookup.row
     if dirExists(extendedPath(result.absolutePath)):
+      discard s.touchPrefix(prefixId)
       return result
     # Index says we have it but the directory was wiped externally; fall
     # through and re-materialize.
@@ -1713,6 +1931,95 @@ proc listRoots*(s: Store): seq[RootRow] =
       row.hasTtl = true
     result.add(row)
 
+proc renewRoot*(s: var Store; rootId: string; now: int64 = 0): bool =
+  ## Restart `rootId`'s TTL from `now`. A holder with a TTL'd root renews it
+  ## for as long as it is using what the root holds; a holder that dies
+  ## stops renewing, and `expireRoots` releases the root once the TTL
+  ## passes. Unlike re-registering (an `INSERT OR REPLACE`, which deletes the
+  ## row and with it every hold the root had), a renewal keeps the holds.
+  var u = s.db.prepare("UPDATE roots SET created_at = ? WHERE root_id = ?")
+  defer: u.finalize()
+  u.bindInt(1, nowOr(now))
+  u.bindText(2, rootId)
+  discard u.step()
+  s.db.changes() > 0
+
+type
+  PrefixUsage* = object
+    ## One prefix as the budget GC sees it.
+    row*: PrefixRow
+    lastUsedUnix*: int64   ## recorded last use, else creation
+    sizeBytes*: int64      ## cached size, -1 when not yet measured
+    held*: bool            ## some root holds it
+
+proc prefixUsage*(s: Store): seq[PrefixUsage] =
+  var q = s.db.prepare(
+    "SELECT prefix_id, package_name, version, realized_path, adapter, " &
+    "receipt_digest, created_at, COALESCE(last_used_at, created_at), " &
+    "size_bytes, EXISTS (SELECT 1 FROM root_holds_prefix h " &
+    "WHERE h.prefix_id = prefixes.prefix_id) FROM prefixes")
+  defer: q.finalize()
+  while q.step() == SqliteRow:
+    var u: PrefixUsage
+    let pid = q.columnBlob(0)
+    for i in 0 ..< 32: u.row.prefixId[i] = pid[i]
+    u.row.packageName = q.columnText(1)
+    u.row.version = q.columnText(2)
+    u.row.realizedPath = q.columnText(3)
+    u.row.adapter = q.columnText(4)
+    let rd = q.columnBlob(5)
+    for i in 0 ..< 32: u.row.receiptDigest[i] = rd[i]
+    u.row.createdAtUnix = q.columnInt(6)
+    u.lastUsedUnix = q.columnInt(7)
+    u.sizeBytes = if q.columnIsNull(8): -1'i64 else: q.columnInt(8)
+    u.held = q.columnInt(9) != 0
+    result.add(u)
+
+proc setPrefixSize*(s: var Store; prefixId: PrefixIdBytes; sizeBytes: int64) =
+  ## Cache a prefix's measured size. A realized prefix is immutable, so it is
+  ## measured once.
+  var u = s.db.prepare("UPDATE prefixes SET size_bytes = ? WHERE prefix_id = ?")
+  defer: u.finalize()
+  u.bindInt(1, sizeBytes)
+  u.bindBlob(2, prefixId)
+  discard u.step()
+
+proc appendAuditNoPrefix(s: var Store; action: GcAction; reason: string)
+
+proc expireRoots*(s: var Store; now: int64 = 0): seq[string] =
+  ## Delete every root whose TTL has elapsed (`created_at + ttl_seconds <=
+  ## now`), releasing what it held, and return their ids. A root without a
+  ## TTL never expires. Each expiry is audited.
+  ##
+  ## Before this, `ttl_seconds` was stored and ignored, so a TTL'd root whose
+  ## holder died held its prefixes forever.
+  let t = nowOr(now)
+  s.db.exec("BEGIN IMMEDIATE")
+  var committed = false
+  try:
+    var q = s.db.prepare(
+      "SELECT root_id, ttl_seconds, created_at FROM roots " &
+      "WHERE ttl_seconds IS NOT NULL AND created_at + ttl_seconds <= ? " &
+      "ORDER BY root_id")
+    q.bindInt(1, t)
+    var expired: seq[(string, int64, int64)] = @[]
+    while q.step() == SqliteRow:
+      expired.add((q.columnText(0), q.columnInt(1), q.columnInt(2)))
+    q.finalize()
+    for (rootId, ttl, created) in expired:
+      var d = s.db.prepare("DELETE FROM roots WHERE root_id = ?")
+      d.bindText(1, rootId)
+      discard d.step()
+      d.finalize()
+      s.appendAuditNoPrefix(gaExpire, "root " & rootId & " expired: ttl " &
+        $ttl & "s from " & $created & " passed at " & $t)
+      result.add(rootId)
+    s.db.exec("COMMIT")
+    committed = true
+  finally:
+    if not committed:
+      try: s.db.exec("ROLLBACK") except CatchableError: discard
+
 # ---------------------------------------------------------------------------
 # Garbage collection
 # ---------------------------------------------------------------------------
@@ -1795,6 +2102,10 @@ proc appendAuditNoPrefix(s: var Store; action: GcAction; reason: string) =
   stmt.bindText(2, $action)
   stmt.bindText(3, reason)
   discard stmt.step()
+
+proc auditBudgetRun*(s: var Store; reason: string) =
+  ## The budget GC's one summary row per run (`gaBudget`).
+  s.appendAuditNoPrefix(gaBudget, reason)
 
 proc listAudit*(s: Store): seq[GcAuditRow] =
   var stmt = s.db.prepare(
@@ -1922,12 +2233,16 @@ proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
 
   result.reason = "collected"
 
+proc sweepPendingDeletion*(s: var Store; graceSeconds = DefaultGcGraceSeconds):
+    seq[string]
+
 proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
   ## Runs the spec's eager GC: dead-set query, move to
   ## `gc/pending-deletion/`, audit row, plus a sweep of the
   ## pending-deletion area for entries older than `graceSeconds`.
   result.graceSeconds = graceSeconds
   result.ranAt = getTime().toUnix
+  discard s.expireRoots(result.ranAt)
   let dead = s.deadSet()
   for row in dead:
     var movedTo = ""
@@ -1968,7 +2283,14 @@ proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
     if movedTo.len > 0:
       result.quarantinedPaths.add(movedTo)
 
-  # Sweep pending-deletion entries past grace.
+  result.reclaimed.add(s.sweepPendingDeletion(graceSeconds))
+
+proc sweepPendingDeletion*(s: var Store; graceSeconds = DefaultGcGraceSeconds):
+    seq[string] =
+  ## Unlink every quarantined tree in `gc/pending-deletion/` whose grace has
+  ## elapsed, and return what was unlinked. `gc` ends with this sweep; the
+  ## budget GC calls it alone, because it quarantines a CHOSEN subset of the
+  ## dead set and must not collect the rest.
   if dirExists(extendedPath(s.gcPendingRoot)):
     let now = getTime().toUnix
     # TODO(win-longpath): walk results escape; needs review
@@ -1991,7 +2313,7 @@ proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
           removeFile(entry)
         s.appendAuditNoPrefix(gaReclaim, "unlinked " & entry &
           " (age " & $age & "s >= grace " & $graceSeconds & "s)")
-        result.reclaimed.add(entry)
+        result.add(entry)
       except OSError:
         discard
 
@@ -2303,6 +2625,7 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
     let lookup = s.lookupPrefix(p.prefixId)
     if lookup.found and dirExists(extendedPath(p.absolutePath)):
       entry.outcome = roAlreadyPresent
+      discard s.touchPrefix(p.prefixId)
       result.perOutput.add(entry)
       continue
     var perHint = hint

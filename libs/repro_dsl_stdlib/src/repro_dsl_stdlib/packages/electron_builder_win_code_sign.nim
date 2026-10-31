@@ -42,6 +42,7 @@ package `electron-builder-win-code-sign`:
       archiveType = "7z",
       nonRedistributable = true,
       executablePath = "windows-10/x64/signtool.exe",
+      version = ElectronBuilderWinCodeSignTag,
       packageId = "electron-builder-win-code-sign@" &
         ElectronBuilderWinCodeSignTag,
       cpu = "x86_64",

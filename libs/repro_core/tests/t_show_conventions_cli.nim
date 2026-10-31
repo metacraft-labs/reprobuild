@@ -17,6 +17,7 @@
 ## this test covers the CLI plumbing.
 
 import std/[json, os, osproc, strutils, tables, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 
 const

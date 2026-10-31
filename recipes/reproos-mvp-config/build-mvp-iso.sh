@@ -140,10 +140,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SIBLINGS_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
 [ -z "${BEARSSL_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/nim-bearssl" ] && \
   export BEARSSL_SRC="$SIBLINGS_ROOT/nim-bearssl"
-[ -z "${VM_HARNESS_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/vm-harness/src" ] && \
-  export VM_HARNESS_SRC="$SIBLINGS_ROOT/vm-harness/src"
+[ -z "${GOSTI_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/gosti/src" ] && \
+  export GOSTI_SRC="$SIBLINGS_ROOT/gosti/src"
 
-# Optional overrides — useful for testing or for the vm-harness
+# Optional overrides — useful for testing or for the gosti
 # integration test which builds into a per-test temp dir.
 OUT_DIR="${MVP_OUT_DIR:-$REPO_ROOT/build/d1-mvp}"
 CONFIG_PATH="${MVP_CONFIG_PATH:-$REPO_ROOT/recipes/reproos-mvp-config.nim}"
@@ -1066,7 +1066,7 @@ if [ "$STAGE" = "iso" ] || [ "$STAGE" = "initramfs" ]; then
   # ANY shell-env dependency (no LD_LIBRARY_PATH, no /etc/profile.d
   # sourcing, no login-shell requirement). Critical for the case where
   # gnome-shell / kwin_wayland / etc are invoked from a non-login
-  # subshell context (e.g. the vm-harness assertion runner).
+  # subshell context (e.g. the gosti assertion runner).
   #
   # Only runs if ld.so.conf.d/00-reproos-linux.conf was planted (i.e.
   # DE0-G ran). Idempotent (re-runs are cheap).

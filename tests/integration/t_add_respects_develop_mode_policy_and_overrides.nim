@@ -5,8 +5,8 @@
 ## single-project workspace via ``execCmdEx`` (non-TTY by nature). Local bare
 ## git origins stand in for the company-org and third-party remotes.
 ##
-## The policy default is DATA: a host bootstrap config
-## (``.repro-workspace.toml``) carries ``[develop] org_urls`` listing the
+## The policy default is DATA: the workspace settings file
+## (``repro-workspace.toml``) carries ``[develop] org_urls`` listing the
 ## fetch-URL prefix whose repos default to DEVELOP mode. A repo whose remote
 ## begins with that prefix defaults to develop (a local sibling checkout +
 ## a ``depends`` edge); every other repo defaults to BINARY (no checkout).
@@ -19,8 +19,9 @@
 ##   3. develop-org repo, ``--binary``  → binary (override; NO checkout).
 ##   4. third-party repo, ``--develop`` → develop (override; checkout present).
 ##   5. ``--no-membership``             → clones but NO depends edge / membership.
-##   6. no ``default_revision``         → the fragment PINS the revision it was
-##      cloned at, because there is nothing to inherit.
+##   6. a ``[workspace] default_profile`` supplying a mainline → the fragment
+##      declares none of its own and resolves to the profile's; a commit
+##      ``--revision`` is written as a pin beside that mainline.
 ##
 ## Two properties of the fragment written by case 1 are asserted there rather
 ## than left to inspection, because both are load-bearing and silent when they
@@ -34,10 +35,10 @@
 ##     develop-set ``depends`` edge it writes names the target and the closure
 ##     keys off ``[repo].name``. A rename would leave that edge dangling and
 ##     quietly shrink every pre-push dependency closure.
-##   * No ``revision`` key is written when it would merely restate the
-##     project's ``default_revision`` — a redundant pin freezes the repo on the
+##   * The fragment declares the BRANCH it follows as ``mainline`` and writes
+##     no ``revision`` for it — a redundant pin would freeze the repo on the
 ##     day it was added while still resolving to the same value, so nothing
-##     fails until the project's default moves and this repo silently does not.
+##     would fail until the branch moved and this repo silently did not.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as the RA suites).
 ##
@@ -90,21 +91,20 @@ proc seedGitOrigin(gitBin, originPath, workPath: string; branch = "main") =
 # A develop-mode "root" repo already present in the workspace, so a
 # ``--depends-of`` edge has somewhere to land.
 const rootFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "app"
 path = "app"
 remote = "app-origin"
-revision = "main"
+mainline = "main"
 """
 
-proc projectToml(appUrl: string; withDefaultRevision = true): string =
+proc projectToml(appUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"demo\"\n" &
-  (if withDefaultRevision: "default_revision = \"main\"\n" else: "") &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"app-origin\"\nfetch = \"" & appUrl & "\"\n\n" &
   "includes = [\n" &
   "  \"repos/app.toml\",\n" &
@@ -121,7 +121,7 @@ type
     orgRepoUrl: string        ## a repo UNDER the org prefix.
     thirdPartyUrl: string     ## a repo NOT under the org prefix.
 
-proc setupFixture(gitBin, slug: string; withDefaultRevision = true): Fixture =
+proc setupFixture(gitBin, slug: string; withDefaultProfile = false): Fixture =
   result.scratch = createTempDir("repro-ra22-add-" & slug & "-", "")
   result.reproBin = reproBinary()
 
@@ -150,8 +150,7 @@ proc setupFixture(gitBin, slug: string; withDefaultRevision = true): Fixture =
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   result.projectFile = manifestsRoot / "projects" / "demo.toml"
-  writeFile(result.projectFile,
-    projectToml(fileUrl(appOrigin), withDefaultRevision))
+  writeFile(result.projectFile, projectToml(fileUrl(appOrigin)))
   result.appFragment = manifestsRoot / "repos" / "app.toml"
   writeFile(result.appFragment, rootFragmentToml)
 
@@ -161,15 +160,19 @@ proc setupFixture(gitBin, slug: string; withDefaultRevision = true): Fixture =
 
   # The host bootstrap config carrying the develop-by-default policy: any
   # repo under the org prefix defaults to develop mode.
-  writeFile(workspaceRoot / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\nurl = \"" & fileUrl(appOrigin) & "\"\n\n" &
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    (if withDefaultProfile:
+       "[workspace]\ndefault_profile = \"lib\"\n\n" &
+         "[profiles.lib]\nmainline = \"main\"\n\n"
+     else: "") &
+    "[records]\nurl = \"" & fileUrl(appOrigin) & "\"\n\n" &
     "[develop]\norg_urls = [\"" & result.orgPrefix & "\"]\n")
 
   # Metadata-only workspace.toml so the project resolves without `init`.
   createDir(workspaceRoot / ".repro")
-  writeFile(workspaceRoot / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nbranch = \"main\"\n")
   result.workspaceRoot = workspaceRoot
 
@@ -235,14 +238,15 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       # `file://…/org` base would be to name the repo `orglib.git`; that plan
       # is declined and a per-repo `orglib-origin` remote carrying the full
       # URL is used instead, leaving `[repo].name` — which the `depends` edge
-      # above keys off — intact. No `revision` is written either: it would
-      # only restate the project's `default_revision`.
+      # above keys off — intact. The branch it follows is its `mainline`, and
+      # no `revision` restates it.
       check fragmentOf(fx, "orglib") ==
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\n" &
         "name = \"orglib\"\n" &
         "path = \"orglib\"\n" &
-        "remote = \"orglib-origin\"\n"
+        "remote = \"orglib-origin\"\n" &
+        "mainline = \"main\"\n"
 
       # The declined plan minted nothing shared: the org base never becomes a
       # `[[remote]]`, only the per-repo entry is added.
@@ -351,22 +355,43 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       check not appDependsContains(fx, "orglib")
 
   test "test_ra22_pins_revision_only_when_there_is_nothing_to_inherit":
-    # The counterpart to the omission asserted in the first case: the same add
-    # against a project WITHOUT `default_revision` must write the `revision`
-    # key, because nothing would supply it otherwise. Omission is therefore
-    # conditional on the inherited value being identical, not unconditional.
+    # The counterpart to the first case: where the workspace's default
+    # profile supplies the mainline, the fragment does not restate it — and a
+    # commit `--revision` is a PIN beside that mainline, never a mainline.
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
     else:
-      let fx = setupFixture(gitBin, "no-default-revision",
-        withDefaultRevision = false)
+      let fx = setupFixture(gitBin, "default-profile",
+        withDefaultProfile = true)
       defer: removeDir(fx.scratch)
 
-      check not readFile(fx.projectFile).contains("default_revision")
       let res = invokeAdd(fx, @["orglib", "--remote=" & fx.orgRepoUrl])
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0
-      check fragmentOf(fx, "orglib").contains("revision = \"main\"\n")
-      check resolvedRepo(fx, "orglib").revision == "main"
+      let text = fragmentOf(fx, "orglib")
+      checkpoint(text)
+      check "mainline" notin text
+      check "revision" notin text
+      let resolved = resolvedRepo(fx, "orglib")
+      check resolved.branch == "main"
+      check resolved.revision == "main"
+
+      # A commit pin sits beside the mainline the profile supplies (a fresh
+      # workspace, so the add is the first declaration of the repo).
+      let fx2 = setupFixture(gitBin, "default-profile-pin",
+        withDefaultProfile = true)
+      defer: removeDir(fx2.scratch)
+      let pin = requireGit(q(gitBin) & " ls-remote " & q(fx2.orgRepoUrl) &
+        " HEAD").strip().split('\t')[0]
+      check pin.len == 40
+      let pinned = invokeAdd(fx2, @["orglib", "--remote=" & fx2.orgRepoUrl,
+        "--revision=" & pin])
+      if pinned.code != 0:
+        checkpoint("output: " & pinned.output)
+      check pinned.code == 0
+      check fragmentOf(fx2, "orglib").contains("revision = \"" & pin & "\"\n")
+      check "mainline" notin fragmentOf(fx2, "orglib")
+      check resolvedRepo(fx2, "orglib").revision == pin
+      check resolvedRepo(fx2, "orglib").branch == "main"

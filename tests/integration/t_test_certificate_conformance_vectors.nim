@@ -13,40 +13,75 @@
 ## (explicitly non-normative) or from CodeTracer's walker; the only inputs are
 ## the directory contract in ``vectors/README.md`` and the bytes on disk.
 ##
-## All three groups run, because partial conformance is not a status the
-## standard recognises:
-##   * ``payload/``   — byte-exact canonical serialization (17 cases)
-##   * ``signature/`` — detached-signature verification (6 cases)
-##   * ``verify/``    — the three-valued verification decision (15 cases)
-## and ``index.json`` is cross-checked in BOTH directions, so a case that
-## silently disappears is a failure rather than a quietly smaller suite.
+## Every group runs, because partial conformance is not a status the standard
+## recognises (counts at the pinned revision):
+##   * ``payload/``   — byte-exact canonical serialization (18 cases), and
+##                      EVERY supplied ``received.toml`` read back to the same
+##                      bytes through reprobuild's reader (Conformance §1:
+##                      required of an implementation with a TOML reader),
+##                      including ``crlf-multiline``'s physical CRLF read as
+##                      LF beside an escaped CR kept as CR;
+##   * ``signature/`` — detached-signature verification (6 cases), checking
+##                      the REASON ``wrong-namespace`` fails, not only that it
+##                      does;
+##   * ``content/``   — content ids (7 cases, 29 ids) computed from the entry
+##                      lists with the TC-8a library (``t_content_id_vectors_
+##                      match_the_conformance_suite`` re-derives them through
+##                      git three ways as well);
+##   * ``verify/``    — the three-valued decision (19 cases), the state given
+##                      as the content ids ``state.json`` lists, so an
+##                      algorithm it does not list is one this consumer cannot
+##                      compute;
+##   * ``store/``     — the store path of each certificate (8 cases), derived
+##                      from the PARSED certificate and compared with the
+##                      hand-derived ``expected-path.txt``;
+##   * ``notes/``     — note framing (33 cases): ``note.txt`` read through
+##                      reprobuild's note reader (``readCertificateNote``),
+##                      which must yield exactly the records and skipped pieces
+##                      ``expected.json`` lists; for the 13 writer cases,
+##                      ``add.txt`` added as a RELAY through the note writer
+##                      (``addCertificateToNote``), which must produce
+##                      ``expected-note.txt`` byte for byte; and for the 15
+##                      ``merge-*`` cases, ``other.txt`` merged into
+##                      ``base.txt`` (``mergeCertificateNotes``): the exact
+##                      bytes, the reported categories in order, and an
+##                      idempotent re-merge.
 ##
-## Skip rule: the ``test-certificates-spec`` sibling is absent (set
-## ``TEST_CERTIFICATES_SPEC`` to point at it), or ``ssh-keygen`` is missing
-## (the signature group needs the real ed25519 verifier).
+## reprobuild LINKS the reference ``test_certificates`` library for the TOML
+## reader, note framing and the merge. That does not make this walker the
+## library's: it is still written from the directory contract alone, and it
+## drives reprobuild's own entry points (the record classification, the
+## signing-writer rule and the report categories are reprobuild's).
+## ``index.json`` is cross-checked in BOTH directions over every group, and a
+## group the walker does not know — on disk or in the index — is a FAILURE:
+## a fifth group once arrived that the previous walker silently ignored.
+##
+## Which revision: the suite is read at the revision pinned in
+## ``content_id/test-certificates-spec-content-vectors.pin`` (``spec_vectors_
+## pin``), extracted from the sibling's object store with ``git archive``. The
+## walker prints that revision. An absent sibling, or a pin missing from its
+## object store, FAILS naming what to fetch; it never skips.
+## ``TEST_CERTIFICATES_SPEC`` still overrides where the sibling is.
 
-import std/[algorithm, json, os, sequtils, sets, strutils, unittest]
+import std/[algorithm, base64, json, os, osproc, sequtils, sets, strutils, tempfiles,
+            unittest]
 
 import repro_cli_support
+import repro_cli_support/content_id
+import spec_vectors_pin
 
-proc repoRoot(): string =
-  currentSourcePath().parentDir.parentDir.parentDir
-
-proc vectorsRoot(): string =
-  ## ``$TEST_CERTIFICATES_SPEC`` first (an explicit operator override), then
-  ## the workspace sibling. Returns "" when neither carries the suite.
-  for candidate in [getEnv("TEST_CERTIFICATES_SPEC"),
-                    repoRoot().parentDir / "test-certificates-spec"]:
-    if candidate.len > 0 and fileExists(candidate / "vectors" / "index.json"):
-      return candidate / "vectors"
-  ""
+const
+  knownGroups = ["payload", "signature", "content", "verify", "store",
+                 "notes"]
+  expectedCounts = {"payload": 18, "signature": 6, "content": 7,
+                    "verify": 19, "store": 8, "notes": 33}
 
 # ---------------------------------------------------------------------------
 # fields.json -> TestCertificate
 #
 # The values are INPUTS, not canonical output: targets and paths arrive in
 # whatever order the producer observed them and may contain duplicates, and
-# key_id / paths / worktree are absent when they do not apply. Sorting,
+# key_id / paths / base are absent when they do not apply. Sorting,
 # deduplication and omission are the serializer's job, which is exactly what
 # this group measures.
 # ---------------------------------------------------------------------------
@@ -69,16 +104,10 @@ proc certificateFromFields(fields: JsonNode): TestCertificate =
   if c.hasKey("key_id"): result.keyId = c["key_id"].getStr()
   let v = c{"vcs"}
   result.vcs.repo = v{"repo"}.getStr()
-  result.vcs.commit = v{"commit"}.getStr()
   if v.hasKey("paths"): result.vcs.paths = strings(v["paths"])
-  result.vcs.clean = v{"clean"}.getBool()
+  result.vcs.content = v{"content"}.getStr()
   result.vcs.untracked = v{"untracked"}.getBool()
-  if v.hasKey("worktree"):
-    let w = v["worktree"]
-    result.vcs.worktree.present = true
-    result.vcs.worktree.tree = w{"tree"}.getStr()
-    result.vcs.worktree.format = w{"format"}.getStr()
-    result.vcs.worktree.patchDigest = w{"patch_digest"}.getStr()
+  if v.hasKey("base"): result.vcs.base = v["base"].getStr()
   if c.hasKey("command"):
     for entry in c["command"]:
       result.commands.add(TestCertificateCommand(argv: strings(entry{"argv"})))
@@ -116,6 +145,17 @@ proc requirementFromJson(node: JsonNode): VerificationRequirement =
   if node.hasKey("paths") and node["paths"].kind == JArray:
     result.paths = strings(node["paths"])
 
+proc stateFromJson(node: JsonNode): CertificateState =
+  ## The state is what the consumer can compute for it, handed over as ids.
+  ## ``commit`` is informational and deliberately NOT carried: nothing may
+  ## compare a certificate with it (Verification §4.1.1).
+  var known: seq[KnownContentId]
+  if node.hasKey("content"):
+    for entry in node["content"]:
+      known.add(KnownContentId(algorithm: entry{"algorithm"}.getStr(),
+        paths: strings(entry{"paths"}), id: entry{"id"}.getStr()))
+  stateWithKnownContent(known, repo = node{"repo"}.getStr())
+
 proc namesOf(notes: seq[CertificateNote]): HashSet[string] =
   for n in notes: result.incl(n.certificate)
 
@@ -124,28 +164,62 @@ proc expectedNames(node: JsonNode; key: string): HashSet[string] =
     for entry in node[key]:
       result.incl(entry{"certificate"}.getStr())
 
+proc caseDirs(root, group: string): seq[string] =
+  for kind, path in walkDir(root / group):
+    if kind != pcDir: continue
+    if group == "signature" and path.extractFilename == "keys":
+      continue                      # the published, worthless keys
+    result.add(path)
+  sort(result)
+
 suite "test-certificate.v1 conformance vectors":
 
   test "t_test_certificate_conformance_vectors":
-    let root = vectorsRoot()
-    if root.len == 0:
-      checkpoint("test-certificates-spec sibling not found; set " &
-        "TEST_CERTIFICATES_SPEC to the checkout that carries vectors/")
-      skip("test-certificates-spec sibling not found — set TEST_CERTIFICATES_SPEC to the checkout carrying vectors/")
+    let scratch = createTempDir("repro-tc-vectors-", "")
+    defer: removeDir(scratch)
+    let extracted = extractPinnedVectors(scratch)
+    if extracted.error.len > 0:
+      checkpoint(extracted.error)
+      fail()
     elif findExe("ssh-keygen").len == 0:
+      # The signature group needs the real ed25519 verifier, and it is the
+      # ONLY guard against the armored-signature framing defect TC-7 found, so
+      # a missing verifier fails the walker rather than skipping a group.
       checkpoint("ssh-keygen is required for the signature group")
-      skip("ssh-keygen not on PATH — required for the signature group")
+      fail()
     else:
+      let root = extracted.root
+      echo "  conformance vectors: test-certificates-spec ", extracted.pin,
+        " (", extracted.sibling, ")"
       let index = parseFile(root / "index.json")
       # The suite's own namespace declaration must be the one we sign under.
       check index{"namespace"}.getStr() == certificateSignatureNamespace
 
+      # --- the groups themselves ------------------------------------------
+      # A group the walker does not know is a failure, in either place. The
+      # previous walker silently ignored ``content/``; a sixth group must not
+      # repeat that.
+      var onDisk, inIndex: HashSet[string]
+      for kind, path in walkDir(root):
+        if kind == pcDir: onDisk.incl(path.extractFilename)
+      for group, _ in index{"groups"}.pairs:
+        inIndex.incl(group)
+      let known = toHashSet(knownGroups)
+      if onDisk != known or inIndex != known:
+        checkpoint("vector groups: on disk " & $onDisk & ", in index.json " &
+          $inIndex & ", walked by this walker " & $known)
+      check onDisk == known
+      check inIndex == known
+
+      var walked: array[knownGroups.len, HashSet[string]]
+      template walkedOf(group: string): untyped =
+        walked[knownGroups.find(group)]
+
       # --- group 1: payload/ — byte-exact canonical serialization ---------
-      var walkedPayload: HashSet[string]
-      for kind, path in walkDir(root / "payload"):
-        if kind != pcDir: continue
+      var receivedWalked: HashSet[string]
+      for path in caseDirs(root, "payload"):
         let name = path.extractFilename
-        walkedPayload.incl(name)
+        walkedOf("payload").incl(name)
         let fields = parseFile(path / "fields.json")
         let expected = readFile(path / "canonical.txt")
         let produced = canonicalCertificatePayload(certificateFromFields(fields))
@@ -155,12 +229,21 @@ suite "test-certificate.v1 conformance vectors":
             "\n--- produced ---\n" & renderBytes(produced) &
             "\n--- expected ---\n" & renderBytes(expected))
         check produced == expected
-        # OPTIONAL: a deliberately non-canonical rendering of the SAME field
-        # values must parse to exactly the same bytes. This is the property
-        # that lets a cosmetically reformatted certificate still verify
-        # against its own signature (Canonical-Payload §5).
+        # The canonical bytes, parsed back, reproduce themselves.
+        let reread = readCertificateRecord(expected)
+        if reread.status != crsOk:
+          checkpoint("payload/" & name & "/canonical.txt: " & reread.detail)
+        check reread.status == crsOk
+        check canonicalCertificatePayload(reread.cert) == expected
+        # A deliberately non-canonical rendering of the SAME field values
+        # must parse to exactly the same bytes. This is the property that
+        # lets a cosmetically reformatted certificate still verify against
+        # its own signature (Canonical-Payload §5), and Conformance §1 makes
+        # it REQUIRED of an implementation with a TOML reader, which
+        # reprobuild is.
         let received = path / "received.toml"
         if fileExists(received):
+          receivedWalked.incl(name)
           let read = readCertificateRecord(readFile(received))
           if read.status != crsOk:
             checkpoint("payload/" & name & "/received.toml: " & read.detail)
@@ -171,13 +254,35 @@ suite "test-certificate.v1 conformance vectors":
               firstDifference(reserialized, expected))
           check reserialized == expected
 
+      # The received renderings the 9ebbcb3 revision added are REACHED, not
+      # merely tolerated: ``crlf-multiline`` (physical CRLF inside multi-line
+      # basic and literal strings, inside an array too, is read as LF while
+      # an escaped ``\r`` and ``\r\n`` stay CR and CR LF — Canonical-Payload
+      # §5) and ``escapes``. ``content-unknown-algorithm`` has no received
+      # rendering; its canonical bytes carry an opaque, well-formed unknown
+      # content id verbatim, which the loop above reproduced and re-read.
+      check "crlf-multiline" in receivedWalked
+      check "escapes" in receivedWalked
+      check "content-unknown-algorithm" in walkedOf("payload")
+      block crlfIsPhysicalNewlinesOnly:
+        # Both halves of the rule, field by field, so a reader that folds
+        # EVERY CR (or none) is named here and not only by a byte diff:
+        # physical CRLF inside a multi-line basic (``project``) and literal
+        # (``issuer``) string reads as LF; ``\r``, ``\u000D`` and ``\r\n``
+        # escapes stay CR, CR and CR LF.
+        let read = readCertificateRecord(readFile(root / "payload" /
+          "crlf-multiline" / "received.toml"))
+        require read.status == crsOk
+        check read.cert.project == "x\ny"
+        check read.cert.issuer == "x\ny"
+        require read.cert.commands.len == 1
+        check read.cert.commands[0].argv ==
+          @["example-test", "a\rb", "a\rb", "a\r\nb"]
+
       # --- group 2: signature/ — verification, not reproduction -----------
-      var walkedSignature: HashSet[string]
-      for kind, path in walkDir(root / "signature"):
-        if kind != pcDir: continue
+      for path in caseDirs(root, "signature"):
         let name = path.extractFilename
-        if name == "keys": continue      # the published, worthless keys
-        walkedSignature.incl(name)
+        walkedOf("signature").incl(name)
         let payload = readFile(path / "canonical.txt")
         let publicKey = readFile(path / "key.pub").strip()
         let signature = readFile(path / "signature.b64").strip()
@@ -203,17 +308,43 @@ suite "test-certificate.v1 conformance vectors":
           check verifyDetachedCertificateSignature(
             payload, publicKey, signature, namespace = "git") == scValid
 
-      # --- group 3: verify/ — the three-valued decision -------------------
-      var walkedVerify: HashSet[string]
-      for kind, path in walkDir(root / "verify"):
-        if kind != pcDir: continue
+      # --- group 3: content/ — content ids from entry lists ---------------
+      var contentIds = 0
+      for path in caseDirs(root, "content"):
         let name = path.extractFilename
-        walkedVerify.incl(name)
-        let stateJson = parseFile(path / "state.json")
-        let state = VerificationState(
-          repo: stateJson{"repo"}.getStr(),
-          commit: stateJson{"commit"}.getStr(),
-          tree: stateJson{"tree"}.getStr())
+        walkedOf("content").incl(name)
+        var entries: seq[ContentEntry]
+        for node in parseFile(path / "entries.json"):
+          entries.add(ContentEntry(path: node["path"].getStr(),
+            mode: node["mode"].getStr(),
+            content: decode(node["content_b64"].getStr())))
+        for expectedNode in parseFile(path / "expected.json"):
+          let algorithmName = expectedNode["algorithm"].getStr()
+          let scope = strings(expectedNode["paths"])
+          let expected = expectedNode["id"].getStr()
+          let (algorithmKnown, algorithm) = lookupContentAlgorithm(algorithmName)
+          # Every algorithm the suite uses is one this implementation
+          # computes; skipping an implemented algorithm's vectors would test
+          # nothing.
+          check algorithmKnown
+          let produced =
+            if algorithm == caManifestV1Sha256: manifestV1Sha256(entries, scope)
+            else: gitTreeIdOfEntries(entries, algorithm, scope)
+          if produced.id != expected:
+            checkpoint("content/" & name & " " & algorithmName & " " &
+              $scope & ": produced " & produced.id & " (" & produced.reason &
+              "), expected " & expected)
+          check produced.outcome == cioComputed
+          check produced.id == expected
+          inc contentIds
+      check contentIds == 29
+
+      # --- group 4: verify/ — the three-valued decision -------------------
+      var verifyOutcomes: HashSet[string]
+      for path in caseDirs(root, "verify"):
+        let name = path.extractFilename
+        walkedOf("verify").incl(name)
+        let state = stateFromJson(parseFile(path / "state.json"))
         let requirement = requirementFromJson(parseFile(path / "requirement.json"))
         let loaded = readRegisteredKeyStoreChecked(path / "registered-keys.toml")
         var found: seq[FoundCertificate]
@@ -232,6 +363,7 @@ suite "test-certificate.v1 conformance vectors":
         let report = evaluateCertificates(found, state, requirement,
           loaded.store, loaded.availability)
         let expected = parseFile(path / "expected.json")
+        verifyOutcomes.incl(name & "=" & $report.outcome)
         if $report.outcome != expected{"outcome"}.getStr():
           checkpoint("verify/" & name & ": expected " &
             expected{"outcome"}.getStr() & ", got " & $report.outcome &
@@ -274,23 +406,383 @@ suite "test-certificate.v1 conformance vectors":
             checkpoint("verify/" & name & ": " & label & " mismatch — " &
               "produced " & $produced & ", expected " & $want)
           check produced == want
+      # The cases the content binding exists for are REACHED, with the
+      # outcome each pins (the loop above asserts it; this asserts they ran).
+      for reached in ["content-matches-other-base=covered",
+                      "content-differs=not-covered",
+                      "content-unknown-algorithm=unverifiable",
+                      "content-malformed=not-covered",
+                      "earlier-draft-record=not-covered",
+                      "unknown-keys=not-covered",
+                      "content-algorithm-name=not-covered"]:
+        check reached in verifyOutcomes
+      # WHY they are rejected matters as much as THAT they are: an
+      # earlier-draft record carries ``vcs.commit`` / ``vcs.clean``, keys the
+      # v1 schema no longer defines, and must still be classified as the
+      # earlier draft (whose remedy is "re-issue") — the classification runs
+      # AHEAD of the unknown-key rejection (Standard §3.4). Every
+      # ``unknown-keys`` record, one per level, is malformed for its unknown
+      # key or table, not for anything else.
+      for (kind, certPath) in walkDir(root / "verify" /
+          "earlier-draft-record" / "certificates"):
+        if kind == pcFile and certPath.endsWith(".toml"):
+          let read = readCertificateRecord(readFile(certPath))
+          checkpoint("earlier-draft-record/" & certPath.extractFilename &
+            ": " & $read.status & " " & read.detail)
+          check read.status == crsEarlierDraft
+      var unknownKeyRecords = 0
+      for (kind, certPath) in walkDir(root / "verify" / "unknown-keys" /
+          "certificates"):
+        if kind == pcFile and certPath.endsWith(".toml"):
+          inc unknownKeyRecords
+          let read = readCertificateRecord(readFile(certPath))
+          checkpoint("unknown-keys/" & certPath.extractFilename & ": " &
+            $read.status & " " & read.detail)
+          check read.status == crsMalformed
+          check "unknown key or table" in read.detail
+      check unknownKeyRecords == 7
 
-      # --- index.json cross-check, BOTH directions ------------------------
+      # Direct API callers must obey the same content-id grammar as record
+      # verification. Rejection happens before any store directory is touched.
+      var invalidStoreIds = @["git-tree-sha1:abc", "future:xyz", "future:AB"]
+      for algorithm in ["../escape", "future/hash", "future\\hash", ".", "..",
+          "Upper", "future_hash", "future hash", "future\n", "future\0",
+          "futuré", repeat('a', 65), "con", "prn", "aux", "nul"]:
+        invalidStoreIds.add(algorithm & ":abc")
+      for prefix in ["com", "lpt"]:
+        for number in 1 .. 9:
+          invalidStoreIds.add(prefix & $number & ":abc")
+      let templateCert = readCertificateRecord(readFile(root / "store" /
+        "unsigned" / "certificate.toml"))
+      require templateCert.status == crsOk
+      for id in invalidStoreIds:
+        checkpoint("invalid store content id: " & id.escape())
+        var cert = templateCert.cert
+        cert.vcs.content = id
+        check certificateStoreRelativePath(cert) == ""
+        check not storeContentDir(id).ok
+        let writeRoot = scratch / "invalid-store-root"
+        # JSON string quoting supplies TOML-compatible escapes even for NUL,
+        # which the canonical serializer rightly refuses to emit.
+        let document = serializeCertificateToToml(templateCert.cert).replace(
+          "content = " & $(%templateCert.cert.vcs.content),
+          "content = " & $(%id))
+        let published = publishCertificateDocument(writeRoot, document)
+        check published.error.len > 0
+        check published.path == ""
+        check not dirExists(writeRoot)
+        let roots = CertificateStoreRoots(user: writeRoot)
+        let issued = publishCertificateToLocalStore(cert, "", roots)
+        check not issued.written
+        check issued.error.len > 0
+        check issued.path == ""
+        let state = stateWithKnownContent(@[KnownContentId(id: id)])
+        let lookup = findCertificatesInLocalStore(state, roots)
+        check lookup.searched.len == 0
+        check lookup.problems.len > 0
+        check not dirExists(writeRoot)
+
+      # Relaying an opaque but well-formed claim must remain possible through
+      # the same public APIs that reject the malformed inputs above.
+      var unknownCert = templateCert.cert
+      unknownCert.vcs.content = "future-v2:a"
+      let unknownRoot = scratch / "unknown-store-root"
+      let unknownPath = certificateStoreRelativePath(unknownCert)
+      check unknownPath.startsWith("v1/future-v2/a/")
+      let unknownDocument = serializeCertificateToToml(unknownCert)
+      let relayed = publishCertificateDocument(unknownRoot, unknownDocument)
+      check relayed.error == ""
+      check relayed.path == unknownRoot / unknownPath.replace('/', DirSep)
+      check fileExists(relayed.path)
+      let unknownState = stateWithKnownContent(@[
+        KnownContentId(algorithm: "future-v2", id: "future-v2:a")])
+      let foundUnknown = findCertificatesInLocalStore(unknownState,
+        CertificateStoreRoots(user: unknownRoot))
+      check foundUnknown.problems.len == 0
+      require foundUnknown.found.len == 1
+      check foundUnknown.found[0].read.cert.vcs.content == "future-v2:a"
+
+      # --- group 5: store/ — where the local store keeps a certificate ----
+      for path in caseDirs(root, "store"):
+        let name = path.extractFilename
+        walkedOf("store").incl(name)
+        # The name is derived from the PARSED certificate — its canonical
+        # payload — never from the file, which may be non-canonical and may
+        # carry a signature block (Transport §2.2).
+        let read = readCertificateRecord(readFile(path / "certificate.toml"))
+        if read.status != crsOk:
+          checkpoint("store/" & name & "/certificate.toml: " & read.detail)
+        check read.status == crsOk
+        let canonical = readFile(path / "canonical.txt")
+        let payload = canonicalCertificatePayload(read.cert)
+        if payload != canonical:
+          checkpoint("store/" & name & ": " & firstDifference(payload, canonical) &
+            "\n--- produced ---\n" & renderBytes(payload))
+        check payload == canonical
+        # One line terminated by a single LF that is not part of the path.
+        var expectedPath = readFile(path / "expected-path.txt")
+        check expectedPath.endsWith("\n")
+        expectedPath.setLen(expectedPath.len - 1)
+        check '\n' notin expectedPath
+        let produced = certificateStoreRelativePath(read.cert)
+        if produced != expectedPath:
+          checkpoint("store/" & name & ": produced " & produced &
+            ", expected " & expectedPath)
+        check produced == expectedPath
+        # TC-8c: and the WRITER puts it there. The vector's own bytes, written
+        # through the producer's store writer into an empty root, land at
+        # exactly the expected path, verbatim.
+        let writeRoot = scratch / "store-roots" / name
+        let document = readFile(path / "certificate.toml")
+        let published = publishCertificateDocument(writeRoot, document)
+        check published.error == ""
+        check published.path ==
+          writeRoot / expectedPath.replace('/', DirSep)
+        check fileExists(published.path) and
+          readFile(published.path) == document
+
+      # --- store/: a name collision (Transport §2.3) ----------------------
+      # ``signed-non-canonical-no-block`` is ``signed`` with its signature
+      # block removed: the same canonical payload, so the same name. Written
+      # into one root, the SIGNED copy replaces an unsigned one, and an
+      # unsigned one never replaces a signed one.
+      block:
+        let twins = scratch / "store-twins"
+        let unsignedDoc = readFile(root / "store" /
+          "signed-non-canonical-no-block" / "certificate.toml")
+        let signedDoc = readFile(root / "store" / "signed" /
+          "certificate.toml")
+        let first = publishCertificateDocument(twins, unsignedDoc)
+        check first.error == "" and not first.kept
+        let second = publishCertificateDocument(twins, signedDoc)
+        check second.error == "" and not second.kept
+        check second.path == first.path
+        check readFile(second.path) == signedDoc
+        let third = publishCertificateDocument(twins, unsignedDoc)
+        check third.error == "" and third.kept
+        check readFile(third.path) == signedDoc
+        var damaged = readCertificateRecord(signedDoc).cert
+        damaged.signature.value = "U1NIU0lHAAAAAg"
+        let damagedDoc = serializeCertificateToToml(damaged)
+        let relayed = publishCertificateDocument(twins, damagedDoc)
+        check relayed.error == "" and relayed.kept
+        check readFile(relayed.path) == signedDoc
+        let originalNote = certificateNoteDelimiter & "\n" &
+          certificateNoteRecord(readCertificateRecord(signedDoc).cert)
+        let relayedNote = addCertificateToNote(originalNote, damaged)
+        check not relayedNote.changed
+        check relayedNote.note == originalNote
+        # Only a signer can repair a previously damaged signed copy.
+        writeFile(first.path, damagedDoc)
+        let reissued = publishCertificateDocument(twins, signedDoc,
+          signatureMade = true)
+        check reissued.error == "" and not reissued.kept
+        check readFile(reissued.path) == signedDoc
+        let damagedNote = certificateNoteDelimiter & "\n" &
+          certificateNoteRecord(damaged)
+        let reissuedNote = addCertificateToNote(damagedNote,
+          readCertificateRecord(signedDoc).cert, signatureMade = true)
+        check reissuedNote.changed
+        check reissuedNote.note == originalNote
+        # A relay cannot establish that malformed or misfiled bytes are an
+        # unsigned twin; leave those bytes untouched and report the failure.
+        for bad in ["not a certificate\n", unsignedDoc.replace(
+            "2026-", "2025-")]:
+          writeFile(first.path, bad)
+          for incoming in [signedDoc, unsignedDoc]:
+            let refused = publishCertificateDocument(twins, incoming)
+            check refused.error.len > 0
+            check readFile(first.path) == bad
+        when not defined(windows):
+          writeFile(first.path, signedDoc)
+          let permissions = getFilePermissions(first.path)
+          setFilePermissions(first.path, {})
+          try:
+            for incoming in [signedDoc, unsignedDoc]:
+              let refused = publishCertificateDocument(twins, incoming)
+              check refused.error.len > 0
+              check getFilePermissions(first.path) == {}
+          finally:
+            setFilePermissions(first.path, permissions)
+          check readFile(first.path) == signedDoc
+
+      # A relay that built a note against an unsigned snapshot must retry
+      # after a concurrent signer publishes; the new signed copy survives.
+      block:
+        let repo = scratch / "notes-cas"
+        createDir(repo)
+        proc git(args: varargs[string]): string =
+          let run = execCmdEx(quoteShellCommand(@["git", "-C", repo] & @args))
+          doAssert run.exitCode == 0, run.output
+          run.output.strip()
+        discard git("init", "-q")
+        discard git("config", "user.name", "Certificate test")
+        discard git("config", "user.email", "certificate@example.invalid")
+        let signedDoc = readFile(root / "store" / "signed" / "certificate.toml")
+        let cert = readCertificateRecord(signedDoc).cert
+        var unsigned = cert
+        unsigned.signature.value = ""
+        unsigned.signature.algorithm = ""
+        let blob = repo / "object"
+        writeFile(blob, "certificate race object\n")
+        let annotated = git("hash-object", "-w", "--", blob)
+        check attachCertificateRecord("git", repo, annotated, unsigned).ok
+        var damaged = cert
+        damaged.signature.value = "U1NIU0lHAAAAAg"
+        var interleaved = false
+        let relayed = attachCertificateRecord("git", repo, annotated, damaged,
+          beforePublish = proc(attempt: int) =
+            if not interleaved:
+              interleaved = true
+              check attachCertificateRecord("git", repo, annotated, cert,
+                signatureMade = true).ok)
+        check interleaved and relayed.ok
+        let final = readNoteBlob("git", repo, annotated, certificateNotesRef)
+        check final.status == gorPresent
+        check final.body == certificateNoteDelimiter & "\n" & certificateNoteRecord(cert)
+
+      # --- group 6: notes/ — note framing (Transport §3.1) ----------------
+      # Through reprobuild's REAL note reader and writer — the code that reads
+      # the note a push carries and writes the note an issuance attaches —
+      # not a second splitter written for the test.
+      let vectorKey = readFile(root / "signature" / "keys" /
+        "insecure-test-key.pub").strip()
+      var writerCases, mergeCases, lfRepairsReported = 0
+      for path in caseDirs(root, "notes"):
+        let name = path.extractFilename
+        walkedOf("notes").incl(name)
+        if name.startsWith("merge-"):
+          # Two-blob merge cases (vectors/README.md, "Two-blob merge cases"):
+          # ``base.txt`` is the published side. The exact bytes, the report
+          # categories in processing order, and a re-merge that changes
+          # nothing.
+          inc mergeCases
+          check not fileExists(path / "note.txt")
+          let base = readFile(path / "base.txt")
+          let other = readFile(path / "other.txt")
+          let expectedNote = readFile(path / "expected-note.txt")
+          let merged = mergeCertificateNotes(base, other)
+          if merged.note != expectedNote:
+            checkpoint("notes/" & name & ": " &
+              firstDifference(merged.note, expectedNote) &
+              "\n--- produced ---\n" & renderBytes(merged.note))
+          check merged.note == expectedNote
+          check merged.changed == (expectedNote != base)
+          var categories: seq[string]
+          for report in merged.reports:
+            check report.kind != nmrOther
+            check report.message.len > 0
+            categories.add($report.kind)
+            if report.kind == nmrLfRepair: inc lfRepairsReported
+          var wantCategories: seq[string]
+          for c in parseFile(path / "expected.json"){"reports"}:
+            wantCategories.add(c.getStr())
+          if categories != wantCategories:
+            checkpoint("notes/" & name & ": reported " & $categories &
+              ", expected " & $wantCategories)
+          check categories == wantCategories
+          let again = mergeCertificateNotes(merged.note, other)
+          check again.note == merged.note
+          check not again.changed
+          # A repeat may report a signed tie again, and nothing else.
+          check again.reports.allIt(it.kind == nmrSignedConflict)
+          continue
+        let note = readFile(path / "note.txt")
+        let want = parseFile(path / "expected.json"){"pieces"}
+        let got = readCertificateNote(note)
+        if got.len != want.len:
+          checkpoint("notes/" & name & ": read " & $got.len &
+            " pieces, expected " & $want.len)
+        check got.len == want.len
+        for i in 0 ..< min(got.len, want.len):
+          let entry = got[i]
+          let expected = want[i]
+          let label = "notes/" & name & " piece " & $(i + 1)
+          if expected{"skipped"}.getBool():
+            # Reported and skipped: never yielded as a record. A leading
+            # piece is never even parsed, though ``foreign-preamble``'s would
+            # parse.
+            if entry.read.status == crsOk:
+              checkpoint(label & ": expected skipped, read a record")
+            check entry.read.status != crsOk
+            check entry.read.detail.len > 0
+            if i == 0 and name == "foreign-preamble":
+              check entry.piece.leading
+              check certificateNoteDelimiter in entry.read.detail
+            continue
+          check not entry.piece.leading
+          if entry.read.status != crsOk:
+            checkpoint(label & ": " & entry.read.detail)
+            check entry.read.status == crsOk
+            continue
+          # The canonical payload REBUILT FROM THE PARSED FIELDS.
+          let payload = canonicalCertificatePayload(entry.read.cert)
+          let expectedPayload = expected{"payload"}.getStr()
+          if payload != expectedPayload:
+            checkpoint(label & ": " & firstDifference(payload,
+              expectedPayload) & "\n--- produced ---\n" & renderBytes(payload))
+          check payload == expectedPayload
+          check entry.read.cert.isSigned == expected{"signed"}.getBool()
+          if entry.read.cert.isSigned:
+            let verdict = verifyDetachedCertificateSignature(payload,
+              vectorKey, entry.read.cert.signature.value)
+            if verdict != scValid:
+              checkpoint(label & ": signature " & $verdict)
+            check verdict == scValid
+          # A conforming note holds records in the §3.1 record form, which is
+          # exactly what the writer renders — except that the LAST piece of
+          # a note may lack its final LF (``unterminated-*``), which is still
+          # that record.
+          let rendered = certificateNoteRecord(entry.read.cert)
+          check rendered == entry.piece.text or
+            (i == got.high and rendered == entry.piece.text & "\n")
+        # Writer half: add ``add.txt`` as a RELAY and produce
+        # ``expected-note.txt`` (Conformance §6).
+        if fileExists(path / "add.txt"):
+          inc writerCases
+          check fileExists(path / "expected-note.txt")
+          let addText = readFile(path / "add.txt")
+          let added = readCertificateRecord(addText)
+          if added.status != crsOk:
+            checkpoint("notes/" & name & "/add.txt: " & added.detail)
+          check added.status == crsOk
+          # The record the writer renders for it is ``add.txt`` itself.
+          check certificateNoteRecord(added.cert) == addText
+          let produced = addCertificateToNote(note, added.cert)
+          let expectedNote = readFile(path / "expected-note.txt")
+          if produced.note != expectedNote:
+            checkpoint("notes/" & name & ": " &
+              firstDifference(produced.note, expectedNote) &
+              "\n--- produced ---\n" & renderBytes(produced.note))
+          check produced.note == expectedNote
+          check produced.changed == (expectedNote != note)
+        else:
+          check not fileExists(path / "expected-note.txt")
+      check writerCases == 13
+      check mergeCases == 15
+      # Transport §3.1: a merge that appends after an unterminated piece
+      # REPORTS the LF it supplied — reached, not only permitted.
+      check lfRepairsReported > 0
+
+      # --- index.json cross-check, BOTH directions, EVERY group -----------
       # A case that has silently gone missing is a case that stops testing
       # anything, and a case on disk that the index does not know about is a
       # suite drifting out of its own contract.
       let groups = index{"groups"}
-      for (group, walked) in [("payload", walkedPayload),
-                              ("signature", walkedSignature),
-                              ("verify", walkedVerify)]:
+      for group in knownGroups:
         var listed: HashSet[string]
-        for entry in groups{group}:
-          listed.incl(entry{"name"}.getStr())
-        if listed != walked:
+        if groups.hasKey(group):
+          for entry in groups[group]:
+            listed.incl(entry{"name"}.getStr())
+        let walkedHere = walkedOf(group)
+        if listed != walkedHere:
           checkpoint("index.json/" & group & ": listed-but-absent " &
-            $(listed - walked) & ", present-but-unlisted " & $(walked - listed))
-        check listed == walked
-      # The counts the milestone names, so a suite that shrinks is loud.
-      check walkedPayload.len == 17
-      check walkedSignature.len == 6
-      check walkedVerify.len == 15
+            $(listed - walkedHere) & ", present-but-unlisted " &
+            $(walkedHere - listed))
+        check listed == walkedHere
+      # The counts at the pinned revision, so a suite that shrinks is loud.
+      for (group, count) in expectedCounts:
+        if walkedOf(group).len != count:
+          checkpoint(group & ": walked " & $walkedOf(group).len &
+            " cases, expected " & $count)
+        check walkedOf(group).len == count

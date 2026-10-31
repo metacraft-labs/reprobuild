@@ -1,4 +1,5 @@
-## A REPO'S OWN COMMITTED LOCK OUTRANKS THE WORKSPACE ROOT REPO'S LOCK.
+## WORKSPACE INVENTORY: a repo's own committed lock outranks the root lock.
+## Consumer-specific dependency pins are a separate case covered below.
 ##
 ## This file REPLACES the assertion it used to carry ("DS-1, invariant VB — the
 ## per-repo committed locks fill GAPS in the workspace root's lock; they never
@@ -87,6 +88,7 @@
 ## tier. Skip: `git` missing or `repro` unbuilt.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import repro_workspace_manifests
@@ -166,18 +168,18 @@ proc lockDoc(deps: string): string =
 
 proc projectToml(libaUrl, libbUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\nname = \"ws\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+  "[project]\nname = \"ws\"\n\n" &
   "[[remote]]\nname = \"liba-origin\"\nfetch = \"" & libaUrl & "\"\n\n" &
   "[[remote]]\nname = \"libb-origin\"\nfetch = \"" & libbUrl & "\"\n\n" &
   "includes = [\n  \"repos/liba.toml\",\n  \"repos/libb.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 type ListedRow = object
   found: bool
@@ -276,7 +278,7 @@ suite "a repo's own committed lock outranks the workspace root repo's lock":
       except CatchableError as err:
         checkpoint("unparseable --json output: " & err.msg & "\n" &
           listed.output)
-      check report != nil
+      check not report.isNil
       if report != nil:
         check report["exitCode"].getInt() == 0
         check report["errors"].len == 0
@@ -333,3 +335,128 @@ suite "a repo's own committed lock outranks the workspace root repo's lock":
       check libaOwnSha in listedText.output
       check libaPinnedSha in listedText.output # in the disagreement notice
       check "disagree" in listedText.output
+
+      # A real membership checkout can itself have dev-shell recipes. Those
+      # files must not turn its aggregate inventory into a consumer lock.
+      copyDir(manifestsRoot / "projects", ws / "projects")
+      copyDir(manifestsRoot / "repos", ws / "repos")
+      discard requireGit(q(gitBin) & " init -b main " & q(ws))
+      discard requireGit(q(gitBin) & " -C " & q(ws) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(ws) &
+        " config user.name 'Inventory Tester'")
+      writeFile(ws / "flake.nix", "{}\n")
+      writeFile(ws / "repro.nim", "# Workspace dev shell recipe.\n")
+      discard requireGit(q(gitBin) & " -C " & q(ws) &
+        " add repro.lock flake.nix repro.nim projects repos")
+      discard requireGit(q(gitBin) & " -C " & q(ws) &
+        " commit -m 'record membership inventory and dev shell'")
+      let inventory = runCmd(q(reproBin) &
+        " develop --list --json --tool-provisioning=path --workspace-root=" & q(ws))
+      checkpoint(inventory.output)
+      require inventory.code == 0
+      let inventoryReport = parseJson(inventory.output)
+      require inventoryReport["errors"].len == 0
+      check rowFor(inventoryReport, "liba").revision == libaOwnSha
+      check rowFor(inventoryReport, "libb").revision == libbSha
+      check inventoryReport["repos"].len == 2
+
+  test "consumer dependency pins survive participating producer self records":
+    # Unlike the inventory case above, this root is a consumer: its committed
+    # lock identifies itself and pins liba. Producer self-records describe the
+    # producers; they cannot repin a dependency the consumer already resolved.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let scratch = createTempDir("ds1-consumer-pins-", "")
+    defer: removeDir(scratch)
+    let reproBin = reproBinary()
+    let libaOrigin = scratch / "origin-liba.git"
+    let libbOrigin = scratch / "origin-libb.git"
+    let consumerOrigin = scratch / "origin-consumer.git"
+    let producerSelfSha = seedOrigin(gitBin, libaOrigin, scratch / "seed-liba")
+    let consumerPin = advanceOrigin(gitBin, scratch / "seed-liba")
+    let libbSha = seedOrigin(gitBin, libbOrigin, scratch / "seed-libb")
+    let ws = scratch / "consumer"
+    let consumerSha = seedOrigin(gitBin, consumerOrigin, ws)
+    require producerSelfSha != consumerPin
+    let manifests = ws / ".repro" / "manifests"
+    createDir(manifests / "projects")
+    createDir(manifests / "repos")
+    writeFile(manifests / "projects" / "ws.toml",
+      projectToml(fileUrl(libaOrigin), fileUrl(libbOrigin)))
+    writeFile(manifests / "repos" / "liba.toml",
+      repoFragment("liba", "liba-origin"))
+    writeFile(manifests / "repos" / "libb.toml",
+      repoFragment("libb", "libb-origin"))
+    writeWorkspaceBranch(ws, project = "ws", branch = "main")
+    cloneInto(gitBin, libaOrigin, ws / "liba")
+    writeFile(ws / "liba" / "repro.lock", lockDoc(
+      depInline("liba", ".", fileUrl(libaOrigin), producerSelfSha)))
+    discard requireGit(q(gitBin) & " -C " & q(ws / "liba") &
+      " add repro.lock")
+    discard requireGit(q(gitBin) & " -C " & q(ws / "liba") &
+      " commit -m 'record producer self pin'")
+    require requireGit(q(gitBin) & " -C " & q(ws / "liba") &
+      " status --porcelain").strip().len == 0
+    putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
+    putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")
+    putEnv("REPROBUILD_VCS_PRIVATE_CONFIG", scratch / "no-vcs.toml")
+    defer:
+      delEnv("REPROBUILD_SYSTEM_CONFIG")
+      delEnv("REPROBUILD_USER_CONFIG")
+      delEnv("REPROBUILD_VCS_PRIVATE_CONFIG")
+
+    for withSelf in [true, false]:
+      let consumerLock = lockDoc(
+        (if withSelf: depInline("consumer", ".", fileUrl(consumerOrigin), consumerSha) & ","
+         else: "") &
+        depInline("liba", "liba", fileUrl(libaOrigin), consumerPin) & "," &
+        depInline("libb", "libb", fileUrl(libbOrigin), libbSha))
+      writeFile(ws / "repro.lock", consumerLock)
+      discard requireGit(q(gitBin) & " -C " & q(ws) & " add repro.lock")
+      discard requireGit(q(gitBin) & " -C " & q(ws) &
+        " commit -m 'record consumer dependency pins'")
+
+      let listed = runCmd(q(reproBin) &
+        " develop --list --json --tool-provisioning=path --workspace-root=" & q(ws))
+      checkpoint(listed.output)
+      require listed.code == 0
+      let report = parseJson(listed.output)
+      require report["errors"].len == 0
+      let liba = rowFor(report, "liba")
+      require liba.found
+      check liba.revision == consumerPin
+      check liba.revision != producerSelfSha
+      let libb = rowFor(report, "libb")
+      require libb.found
+      check libb.revision == libbSha
+      check libb.state == "absent"
+      check report["repos"].len == 2
+
+      let producerHead = requireGit(q(gitBin) & " -C " & q(ws / "liba") &
+        " rev-parse HEAD").strip()
+      let planned = runCmd(q(reproBin) &
+        " develop --only=liba,libb --reset --dry-run --json" &
+        " --tool-provisioning=path --workspace-root=" & q(ws) &
+        " --into=" & q(ws))
+      checkpoint(planned.output)
+      require planned.code == 0
+      let plan = parseJson(planned.output)
+      require plan["nodes"].len == 2
+      var plannedNames: seq[string]
+      for outcome in plan["nodes"]:
+        plannedNames.add(outcome["node"].getStr())
+        if outcome["node"].getStr() == "liba":
+          check outcome["revision"].getStr() == consumerPin
+        elif outcome["node"].getStr() == "libb":
+          check outcome["revision"].getStr() == libbSha
+        else:
+          check false
+      check "liba" in plannedNames
+      check "libb" in plannedNames
+      check not dirExists(ws / "libb")
+      check requireGit(q(gitBin) & " -C " & q(ws / "liba") &
+        " rev-parse HEAD").strip() == producerHead
+      check readFile(ws / "repro.lock") == consumerLock
+      check requireGit(q(gitBin) & " -C " & q(ws / "liba") &
+        " status --porcelain").strip().len == 0

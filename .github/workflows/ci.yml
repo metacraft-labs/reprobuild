@@ -5,6 +5,25 @@ on:
     branches: [main, dev]
   pull_request:
     branches-ignore: [agents]
+  # Dispatchable on any branch, which every other workflow here already is
+  # (benchmark, hcr-lanes, release, deploy-get, attestation-collateral) and
+  # this one was not.
+  #
+  # That omission is not cosmetic: it is why a check that fails ONLY under CI
+  # conditions could not be worked on. `just lint`'s sibling-pin gate failed on
+  # every run for five days because `actions/checkout` persists an
+  # `http.https://github.com/.extraheader` into the repo-local git config while
+  # the dev-env exports a second `extraHeader` for the same host through
+  # `GIT_CONFIG_*`. `http.extraHeader` is multi-valued, so git sent BOTH and
+  # github answered `Duplicate header: "Authorization"` with HTTP 400 -- in
+  # about 400ms, which reads like being offline. That is a condition that cannot
+  # be reproduced on a laptop, where there is exactly one credential, and, with
+  # the triggers above, could not be reproduced on a branch either. The only
+  # way to get a verdict was to push to `dev` or open a pull request into it,
+  # so the fix for a gate that blocks promotions could not be tested without
+  # doing the thing the gate blocks. Promotions landed on locally-substituted
+  # evidence instead.
+  workflow_dispatch:
 
 # This workflow supersedes its own older runs, on branches as well as pull
 # requests, and that is deliberate rather than merely inherited.
@@ -89,6 +108,8 @@ jobs:
             reprobuild-packages
             reprobuild-test-adapters
             runquota
+            test-certificates-spec
+            test-certificates-tools
             tree-sitter-aiken
             tree-sitter-cadence
             tree-sitter-cairo
@@ -125,21 +146,51 @@ jobs:
       # This copy is a convenience, not the gate: it shares this job's fate,
       # and this workflow supersedes its own branch runs. The gate that
       # always reaches a verdict is `suite-case-counts.yml`.
+      #
+      # FIRST, BUT NOT IN FRONT. These artifacts are bookkeeping: they go
+      # stale whenever anyone lands a test without regenerating them, so this
+      # step can be red through no fault of the change under test. When it
+      # was the only guard on the steps below, a stale baseline SKIPPED them:
+      # for five `dev` commits no content lint ran at all (reprobuild-pm issue
+      # 2026-10-01). So every audit after it carries `!cancelled()` and runs
+      # regardless of this step's outcome; the job still ends red because
+      # this step failed. `steps.suite_baseline.outcome != 'skipped'` keeps
+      # them from running when the dev env itself never came up, where each
+      # would only fail again for the same unrelated reason.
+      #
+      # The base revision lets the refusal say which stale entries this
+      # change introduced and which it inherited (see the script header). A
+      # pull request's checkout is the merge commit, so its base is the base
+      # branch tip; a push's is the previous tip, all zeros for a new branch.
+      # The fetch is best effort: without the commit there is no attribution,
+      # and the verdict is the same either way.
       - name: Suite case-count baseline and inventory entry set
-        run: dev-exec bash scripts/check_suite_case_counts.sh
+        id: suite_baseline
+        env:
+          ATTRIBUTION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base=""
+          if [ -n "${ATTRIBUTION_BASE}" ] && [ -n "${ATTRIBUTION_BASE//0/}" ] &&
+             git fetch --no-tags --depth=1 origin "${ATTRIBUTION_BASE}"; then
+            base="${ATTRIBUTION_BASE}"
+          fi
+          dev-exec env "SUITE_CASE_COUNTS_BASE=${base}" bash scripts/check_suite_case_counts.sh
       # The vacuous-case gate, for the same reason and at the same point:
       # a source scan that answers in seconds, so it is asked before the
       # multi-minute `nim check` sweep and its failure annotation names
       # this step rather than a lint log. `just lint` runs it too.
       - name: No test case asserts only `check true`
+        if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
         run: dev-exec python3 scripts/check_vacuous_test_cases.py
       # Graph-Owned-Test-Artifacts M3, same class of gate: a source scan that
       # refuses a new test compiling a helper program at execution time. Named
       # as its own step so the failure annotation says what is wrong instead of
       # pointing at a lint log.
       - name: No test body compiles a helper program
+        if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
         run: dev-exec python3 scripts/check_test_body_helper_compilation.py
       - name: just lint
+        if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
         run: dev-exec just lint
       - name: Upload logs
         if: always()
@@ -147,6 +198,7 @@ jobs:
         with:
           name: lint-logs
           path: test-logs/
+          if-no-files-found: error
           retention-days: 1
       - name: Mirror logs to S3 (non-blocking)
         if: always()
@@ -173,6 +225,18 @@ jobs:
       - name: Check Windows PowerShell bootstrap syntax
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
         run: .\scripts\check_windows_bootstrap_syntax.ps1
+
+      - name: Verify OpenSSL mirror failures and provisioning
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: .\windows\tests\test-openssl-mirrors.ps1
+
+      - name: Verify live pinned OpenSSL mirror downloads
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: .\windows\tests\test-openssl-mirrors-live.ps1
+
+      - name: Verify authenticated local HTTPS redirects and download deadlines
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: .\windows\tests\test-openssl-redirects.ps1
 
       - name: Mint installation token for Windows dev environment
         id: ci_token
@@ -207,6 +271,14 @@ jobs:
           & nim @nimArgs
           if ($LASTEXITCODE -ne 0) {
             throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify native Windows release DLL staging
+        shell: pwsh
+        run: |
+          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/windows-release-dll-staging --out:build/test-bin/windows_release_dll_staging_boundary.exe tests/windows/windows_release_dll_staging_boundary.nim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release DLL staging boundary failed with exit code $LASTEXITCODE"
           }
 
       - name: Verify Windows Python provisioning
@@ -295,12 +367,26 @@ jobs:
     # too small (4 vCPU / 16 GB) — the parallel nim c phase trips OOM
     # and the test runner hits an fd race at higher concurrency. The
     # metacraft-labs bare-metal pool has nixos hosts with plenty of
-    # cores + RAM. Twelve concurrent engine actions keep the full graph
-    # within its CI budget without the tail stalls observed at sixteen.
+    # cores + RAM. Twelve concurrent engine actions avoid the tail stalls
+    # observed at sixteen; see the note on REPROBUILD_MAX_PARALLELISM below.
     # EXEMPTION (CIP-5): bare-metal runner — the parallel `nim c` phase OOMs on
     # small ephemeral runners; kept on the persistent big-iron nixos bare-metal
     # pool rather than the eph-linux-x64 class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
+    # THE CEILING AND THE SUITE ARE A CHECKED PAIR. Until 2026-10-18 nothing
+    # here set a timeout, so GitHub's 360-minute default ended every run that
+    # needed longer -- `cancelled`, read as a verdict on the code, including
+    # run 38428391026 whose suite had finished 7m45s earlier. Now every step
+    # carries its own `timeout-minutes`, chosen above its worst measured
+    # duration; `just test` pins run_tests.sh's backstops so they fire, with
+    # their legible messages, before the step limit; and this job limit
+    # covers the sum of the steps, so a step limit (after which the
+    # `if: always()` steps still upload the logs) fires before it.
+    # scripts/check_ci_test_budget.py enforces all of that in `just lint`,
+    # against the measurements recorded in it; change a number here and
+    # there together. Self-hosted jobs may run up to 7200 minutes; this
+    # stays under 24h, the lifetime of the job's GITHUB_TOKEN.
+    timeout-minutes: 1425
     env:
       # REPROBUILD_MAX_PARALLELISM governs the BUILD phase. Twelve is not a
       # placeholder and must not be raised to track `nproc`: the bare-metal
@@ -312,22 +398,23 @@ jobs:
       # REPROBUILD_TEST_THREADS governs the EXECUTION phase, which is a
       # separate resource profile: test processes spend most of their time
       # waiting on nested builds and subprocesses rather than pinning a core.
-      # One thread cannot finish ~6,800 cases in any plausible budget. The
-      # only full-suite execution measurement available
-      # (test-logs/parallel-run.json) used eight threads and took 2h15m for
-      # 6828 cases, so eight is the value with evidence behind it.
+      # One thread cannot finish ~10,700 cases in any plausible budget. Eight
+      # is the value with evidence behind it: an earlier local run took 2h15m
+      # for 6828 cases, and CI run 38428391026 (dev @ 9aaa2a918) ran all
+      # 10691 cases in 2h08m25s at eight threads.
       #
-      # NB: raising this has never been exercised in CI, because no recent CI
-      # run has reached the execution phase at all -- the build phase
-      # consumes the whole job. See the note above the `just test` step.
+      # NB: a value other than eight has not been measured in CI. See the
+      # note above the `just test` step.
       REPROBUILD_TEST_THREADS: "8"
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 10
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app for the sibling-repo clones + setup-dev-env below.  See the
       # comment in the `lint` job for the rationale.
       - name: Mint installation token for cross-repo sibling access
+        timeout-minutes: 15
         id: ci_token
         uses: actions/create-github-app-token@v2
         with:
@@ -340,7 +427,7 @@ jobs:
           # These are EXACT current repository names. The mint does NOT follow
           # the rename redirect that the REST API does, so a renamed entry
           # fails the whole token with a 422 and every later step is skipped,
-          # including `just test`. `gosti` below was `vm-harness`.
+          # including `just test`.
           # NB: the list is a literal block scalar -- a `#` line inside it is
           # sent as a repository name, not treated as a comment.
           repositories: |
@@ -372,6 +459,8 @@ jobs:
             reprobuild-packages
             reprobuild-test-adapters
             runquota
+            test-certificates-spec
+            test-certificates-tools
             tree-sitter-aiken
             tree-sitter-cadence
             tree-sitter-cairo
@@ -384,6 +473,8 @@ jobs:
             reprobuild-cmake
             reprobuild-examples
             gosti
+            codetracer-native-backend
+            codetracer-visual-replay
           permission-contents: read
 
       # Sibling clones: setup-dev-env clones the CodeTracer sibling declared in
@@ -391,6 +482,7 @@ jobs:
       # Local clones let CI pick up sibling changes without waiting for a
       # flake.lock bump.
       - name: Clone runquota sibling
+        timeout-minutes: 10
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/runquota
@@ -407,6 +499,7 @@ jobs:
       # test job must clone it and scripts/run_tests.sh builds it as a
       # prerequisite. Pinned to the ``reprobuild`` branch (the fork).
       - name: Clone reprobuild-cmake sibling
+        timeout-minutes: 10
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/reprobuild-cmake
@@ -423,6 +516,7 @@ jobs:
       # path baked in via currentSourcePath() at compile time points at
       # a non-existent file on the CI runner.
       - name: Clone reprobuild-examples sibling
+        timeout-minutes: 10
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/reprobuild-examples
@@ -430,28 +524,55 @@ jobs:
           path: ${{ github.workspace }}/../reprobuild-examples
           gh-token: ${{ steps.ci_token.outputs.token }}
 
-      # vm-harness ships the ``vm_harness`` library that the ReproOS
+      # The `ct-mcr` recorder bundle (`.#test-cross-repo-fixtures` edge
+      # `reprobuild.test_fixtures.hcr_ct_mcr_bundle`, which
+      # e2e_hcr_linux_replay_of_patched_recording records and replays with)
+      # is built by the recorder's own `just build-ct-mcr`. Its licensing
+      # prerequisite builds `ct_license_ffi` in ../codetracer-native-backend,
+      # and ct_cli imports ../codetracer-visual-replay; the recorder,
+      # codetracer, codetracer-trace-format and codetracer-trace-format-nim
+      # already come from .github/sibling-repos. Cloned here rather than added
+      # to sibling-repos because only this job builds that collection.
+      - name: Clone codetracer-native-backend sibling
+        timeout-minutes: 10
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-native-backend
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-native-backend
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      - name: Clone codetracer-visual-replay sibling
+        timeout-minutes: 10
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-visual-replay
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-visual-replay
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      # gosti ships the ``gosti`` library that the ReproOS
       # R2 / R9 boot integration tests import unconditionally at the
-      # top of the file.  ``addPackagePath("VM_HARNESS_SRC", …)`` in
-      # ``config.nims`` falls back to ``../vm-harness/src`` when the
+      # top of the file.  ``addPackagePath("GOSTI_SRC", …)`` in
+      # ``config.nims`` falls back to ``../gosti/src`` when the
       # env var isn't set, so a sibling clone is all the test runner
       # needs.  Without this clone, ``tests/integration/t_r2_iso_boot.
       # nim`` and ``tests/integration/t_r9_systemd_boot.nim`` fail at
-      # the ``import vm_harness`` line and ``repro build
-      # .#test-builds`` surfaces ``Error: cannot open file: vm_harness``
+      # the ``import gosti`` line and ``repro build
+      # .#test-builds`` surfaces ``Error: cannot open file: gosti``
       # long before the ``when not defined(windows): quit(0)`` skip
       # block can run.  The tests still skip at runtime on Linux /
       # macOS because the Hyper-V backend they exercise is Windows-
       # only.
-      - name: Clone vm-harness sibling
+      - name: Clone gosti sibling
+        timeout-minutes: 10
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
-          # The REPO was renamed to gosti; the local PATH stays ../vm-harness
-          # because that is what `config.nims` falls back to (see above), so
-          # the checkout must keep the directory name the build expects.
+          # The PATH is ../gosti because that is what `config.nims` falls
+          # back to (see above).
           repo: metacraft-labs/gosti
           ref: dev
-          path: ${{ github.workspace }}/../vm-harness
+          path: ${{ github.workspace }}/../gosti
           gh-token: ${{ steps.ci_token.outputs.token }}
 
       # metacraft-github-actions hosts the shared CI composite actions. Two of
@@ -470,6 +591,7 @@ jobs:
       # than skipping when the checkout is absent, so without this clone the
       # test fails loudly instead of silently asserting nothing.
       - name: Clone metacraft-github-actions sibling
+        timeout-minutes: 10
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/metacraft-github-actions
@@ -485,6 +607,7 @@ jobs:
       # (public) plugin repo next to codetracer so the preferred sibling path is
       # taken. Not a metacraft-labs repo, and public, so clone it directly.
       - name: Clone direnv-nix-flake-overrides sibling (codetracer .envrc plugin)
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           dest="${{ github.workspace }}/../direnv-nix-flake-overrides"
@@ -493,7 +616,9 @@ jobs:
             https://github.com/blocksense-network/direnv-nix-flake-overrides.git \
             "$dest"
 
-      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+      - name: Set up the dev environment
+        timeout-minutes: 30
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
@@ -510,6 +635,7 @@ jobs:
       # its descendants. The bootstrap needs only the private native-recorder
       # flake input; public GitHub fetches continue to use github.token.
       - name: Refresh installation token for Reprobuild bootstrap
+        timeout-minutes: 15
         id: ci_token_bootstrap
         uses: actions/create-github-app-token@v2
         with:
@@ -520,6 +646,7 @@ jobs:
           permission-contents: read
 
       - name: Bootstrap Reprobuild
+        timeout-minutes: 150
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
@@ -532,41 +659,120 @@ jobs:
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_bootstrap.outputs.token }}
         run: |
           set -euo pipefail
-          repro_root="${{ github.workspace }}"
-          repro_bin="$repro_root/build/bin/repro"
-          # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
-          dev-exec just bootstrap
-          # The bootstrapped `repro` carries bare dlopen()s for its runtime
-          # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
-          # the binary-cache client) because build_apps.sh strips rpath per the
-          # .rodata-bake guard, relying on a runtime LD_LIBRARY_PATH. The build below
-          # runs it inside CODETRACER's dev shell, which does not carry those libs,
-          # so bake reprobuild's own dev-shell library dirs into repro's RPATH.
-          # Mirrors the flake's zstd DT_RPATH postFixup for the package build.
-          repro_ld="$(dev-exec sh -c 'printf %s "${LD_LIBRARY_PATH:-}"')"
-          echo "ct-build: reprobuild dev-shell lib dirs = ${repro_ld:-<EMPTY>}"
-          if [ -n "$repro_ld" ]; then
-            # `repro build ct` self-spawns a repro-daemon and other helper
-            # binaries; patch every bootstrapped binary, not just `repro`.
-            for b in "$repro_root"/build/bin/*; do
-              [ -f "$b" ] && dev-exec patchelf --print-rpath "$b" >/dev/null 2>&1 || continue
-              cur_rpath="$(dev-exec patchelf --print-rpath "$b" 2>/dev/null || true)"
-              dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$b" \
-                || echo "ct-build: patchelf failed for $b"
-            done
-            echo "ct-build: repro RPATH now = $(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null)"
-          else
-            echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
-          fi
+          mkdir -p test-logs
+          # Keep evidence even when dev-exec fails before just creates its log.
+          # Use a separate file: just bootstrap owns test-logs/bootstrap.log.
+          {
+            repro_root="${{ github.workspace }}"
+            repro_bin="$repro_root/build/bin/repro"
+            # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
+            dev-exec just bootstrap
+            # The bootstrapped `repro` carries bare dlopen()s for its runtime
+            # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
+            # the binary-cache client) because build_apps.sh strips rpath per the
+            # .rodata-bake guard, relying on a runtime LD_LIBRARY_PATH. The build below
+            # runs it inside CODETRACER's dev shell, which does not carry those libs,
+            # so bake reprobuild's own dev-shell library dirs into repro's RPATH.
+            # Mirrors the flake's zstd DT_RPATH postFixup for the package build.
+            repro_ld="$(dev-exec sh -c 'printf %s "${LD_LIBRARY_PATH:-}"')"
+            echo "ct-build: reprobuild dev-shell lib dirs = ${repro_ld:-<EMPTY>}"
+            if [ -n "$repro_ld" ]; then
+              # `repro build ct` self-spawns a repro-daemon and other helper
+              # binaries; patch every bootstrapped binary, not just `repro`.
+              for b in "$repro_root"/build/bin/*; do
+                [ -f "$b" ] && dev-exec patchelf --print-rpath "$b" >/dev/null 2>&1 || continue
+                cur_rpath="$(dev-exec patchelf --print-rpath "$b" 2>/dev/null || true)"
+                dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$b" \
+                  || echo "ct-build: patchelf failed for $b"
+              done
+              echo "ct-build: repro RPATH now = $(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null)"
+            else
+              echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
+            fi
+          } 2>&1 | tee test-logs/ci-bootstrap.log
 
-      # Reconcile the public lock-pinned source siblings after preparing the
-      # freshly bootstrapped binaries, without inheriting the setup action's
-      # persistent Git credentials.
+      # Reconcile CodeTracer's lock-pinned source siblings, after preparing
+      # the freshly bootstrapped binaries.
+      #
+      # WHICH REPOSITORIES, AND WHY SOME ARE PRIVATE. `develop --all` clones
+      # every `coord_kind = "vcs"` dep of CodeTracer's committed repro.lock.
+      # That set is NOT anonymously cloneable, and nothing promises it is:
+      # reprobuild-pm/spec/Unified-Locking-And-Hooks.md §14.1 makes the
+      # committed lock the default home of every develop-set sibling, and a
+      # lock entry's `visibility = "public"` names the configuration TIER that
+      # declared it, never who can read it on its forge. CodeTracer's lock
+      # names forge-private repos (codetracer-launcher, -native-backend,
+      # -native-recorder, -test-mirror, -visual-replay) marked "public", and
+      # the anonymous clone failed with `could not read Username`. So the step
+      # carries a credential, minted for exactly the set the lock names: the
+      # next two steps derive the list from the lock itself (ignoring
+      # `visibility`) and mint a read-only installation token for it.
+      - name: List the repositories CodeTracer's lock clones
+        timeout-minutes: 10
+        id: ct_lock_repos
+        run: |
+          set -euo pipefail
+          ct_root="$(cd "${{ github.workspace }}/../codetracer" && pwd)"
+          # Fails loudly on a missing or unparseable lock, or on an empty set
+          # (an empty `repositories:` would mint an all-repositories token).
+          # Deps under other owners are reported on stderr: they are cloned
+          # without a credential.
+          repos="$(dev-exec python3 scripts/ci_lock_source_credentials.py repositories \
+            --lock "$ct_root/repro.lock" --owner metacraft-labs)"
+          printf '%s\n' "$repos"
+          delim="ct_lock_repos_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "repositories<<$delim"
+            printf '%s\n' "$repos"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      # Installation tokens expire after one hour and the job-wide `ci_token`
+      # was minted at job start, so mint this one immediately before the
+      # clones that use it.
+      - name: Refresh installation token for CodeTracer source dependencies
+        timeout-minutes: 15
+        id: ci_token_reconcile
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          repositories: ${{ steps.ct_lock_repos.outputs.repositories }}
+          permission-contents: read
+
+      # WHAT THE MASKING GUARDS AGAINST. These runners are self-hosted and
+      # reused: their HOME, global git config and workspace outlive the job.
+      # The setup action's persistent credential (a global helper or a broad
+      # `url.<token>@github.com/.insteadOf`) would hand this phase an
+      # org-wide token for every github.com URL. A token carried in a URL is
+      # also exposed beyond the request: a rewrite puts it into the argv of
+      # every `git-remote-https`, readable by any process on the host, and a
+      # token in a clone URL is written into that clone's `.git/config`, in a
+      # workspace that outlives the job. So global and system configuration
+      # stay masked (/dev/null, NOSYSTEM, no prompts), and the only credential
+      # this phase sees is the scoped, freshly minted token above, as an
+      # `http.<repo-url>/.extraHeader` per lock repository in a 0600 file
+      # under $RUNNER_TEMP that is deleted when the step exits. The header is
+      # sent on the wire and never persisted into a clone, and git matches it
+      # by slash-delimited path prefix, so it reaches only those repositories.
+      #
+      # WHY GIT_CONFIG_GLOBAL AND NOT GIT_CONFIG_COUNT. The engine runs its git
+      # actions with `scrubbedGitRepositoryEnv()`
+      # (libs/repro_workspace_vcs/src/git_tool.nim, GitRepositoryLocalEnv and
+      # GitRepositoryLocalEnvPrefixes), which drops GIT_CONFIG_COUNT /
+      # GIT_CONFIG_KEY_* / GIT_CONFIG_VALUE_*. The mechanism the ct build step
+      # below uses would therefore never reach `develop`'s clones;
+      # GIT_CONFIG_GLOBAL is not scrubbed. It is exported only inside the
+      # subshell that runs `develop`, so the local-config cleanup keeps the
+      # masked /dev/null.
       - name: Reconcile CodeTracer source dependencies
+        timeout-minutes: 30
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
+          GH_TOKEN: ${{ steps.ci_token_reconcile.outputs.token }}
         run: |
           set -euo pipefail
           repro_root="${{ github.workspace }}"
@@ -575,8 +781,9 @@ jobs:
           test -x "$repro_bin" || { echo "repro not bootstrapped at $repro_bin" >&2; exit 1; }
           # setup-dev-env's inherited checkout token may leave a broad rewrite
           # in CodeTracer's local config. Remove that exact entry silently and
-          # restore the canonical origin before syncing submodule URLs. Global
-          # and system configuration remain masked for this public-only phase.
+          # restore the canonical origin before syncing submodule URLs, so the
+          # job-wide token is not what `develop` (or anything after it)
+          # authenticates with.
           git -C "$ct_root" config --local --unset-all \
             "url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/.insteadOf" \
             >/dev/null 2>&1 || true
@@ -585,17 +792,33 @@ jobs:
               https://github.com/metacraft-labs/codetracer.git
           fi
           git -C "$ct_root" submodule sync --recursive
+          # The scoped credential (see the comment above this step). mktemp -d
+          # gives a fresh 0700 directory; the script creates the file inside
+          # it exclusively with mode 0600, and the trap removes both on every
+          # exit path. --emit-actions-mask masks the header's base64 form,
+          # which GitHub does not mask on its own.
+          git_auth_dir="$(mktemp -d "$RUNNER_TEMP/ct-lock-git-auth.XXXXXX")"
+          trap 'rm -rf "$git_auth_dir"' EXIT
+          git_auth_config="$git_auth_dir/gitconfig"
+          dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
+            --lock "$ct_root/repro.lock" --owner metacraft-labs \
+            --out "$git_auth_config" --emit-actions-mask
+          # The file now holds the credential; nothing below needs it in the
+          # environment, so do not hand it to every descendant of `develop`.
+          unset GH_TOKEN
           # L2 (CI-PROVISION-FROM-LOCK): provision codetracer's dependency
           # siblings FROM THE LOCK, not from a hard-coded name list. codetracer
-          # ships a committed `repro.lock` enumerating its from-source deps
-          # (isonim + the nim-* libs it `uses:`) at pinned revisions; a single
-          # `repro develop --all` resolves that set over the solved graph and
-          # records the develop-mode override map so reprobuild splices each
-          # sibling's Nim source into the ct consumer graph. The sibling
-          # checkouts already sit adjacent to $ct_root (cloned by setup-dev-env
-          # from reprobuild's .github/sibling-repos), so `develop --all` ADOPTS
-          # them in place when they match the locked revision; --into=<siblings>
-          # names that adjacency explicitly. Fails loud if the lock is missing.
+          # ships a committed `repro.lock` enumerating its from-source deps at
+          # pinned revisions -- isonim, the nim-* libs it `uses:`, and the
+          # codetracer-* repos, several of them forge-private (see the comment
+          # above this step) -- and a single `repro develop --all` resolves
+          # that set over the solved graph and records the develop-mode
+          # override map so reprobuild splices each sibling's Nim source into
+          # the ct consumer graph. The sibling checkouts already sit adjacent
+          # to $ct_root (cloned by setup-dev-env from reprobuild's
+          # .github/sibling-repos), so `develop --all` ADOPTS them in place
+          # when they match the locked revision; --into=<siblings> names that
+          # adjacency explicitly. Fails loud if the lock is missing.
           #
           # --reset: the siblings were pre-cloned by clone-siblings at their
           # `=dev` BRANCH TIPS, which in general differ from the revisions
@@ -607,12 +830,14 @@ jobs:
           # lock-pinned sources, not the moving `=dev` tips. This is the crux
           # that keeps this step green as the sibling `dev` tips advance.
           siblings_root="$(cd "$ct_root/.." && pwd)"
-          ( cd "$ct_root" && "$repro_bin" develop --all --reset --into="$siblings_root" )
+          ( cd "$ct_root" && export GIT_CONFIG_GLOBAL="$git_auth_config" && \
+            "$repro_bin" develop --all --reset --into="$siblings_root" )
 
       # CodeTracer's Nix graph reads native-recorder, while its submodule graph
       # also reads tree-sitter-nim. Mint exactly that repository set immediately
       # before entering CodeTracer's direnv environment.
       - name: Refresh installation token for the CodeTracer build
+        timeout-minutes: 15
         id: ci_token_build
         uses: actions/create-github-app-token@v2
         with:
@@ -633,7 +858,11 @@ jobs:
       # reprobuild content-addressed cache (persistent /nix/store + repro's own
       # cache on the self-hosted runners) makes rebuilds fast once warm.
       - name: Build codetracer ct (via reprobuild)
+        timeout-minutes: 190
         env:
+          # This prerequisite must exercise this job's freshly built engine;
+          # a pre-existing host daemon can carry another source/runtime closure.
+          REPRO_DAEMON: 'off'
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
@@ -687,49 +916,79 @@ jobs:
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
 
       - name: Refresh installation token for tests
+        timeout-minutes: 15
         id: ci_token_test
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
-          repositories: codetracer-native-recorder
+          # codetracer-rr (a private flake input of the recorder's dev shell)
+          # and lldb-sys.rs (a private cargo git dependency of the backend's
+          # `ct_license_ffi`) are fetched while `.#test-cross-repo-fixtures`
+          # builds the `ct-mcr` bundle for
+          # e2e_hcr_linux_replay_of_patched_recording.
+          repositories: |
+            codetracer-native-recorder
+            codetracer-rr
+            lldb-sys.rs
           permission-contents: read
 
-      # BUDGET NOTE (measured on run 31716928161, dev @ 910cb956, and on
-      # run 31724249825, the 6h00m27s ceiling kill):
+      # BUDGET NOTE (rewritten 2026-10-18 against runs 38428391026 and
+      # 36583430437; the note it replaces was measured on 31716928161 and
+      # 31724249825 at 910cb956, and later runs had falsified it).
       #
-      #   setup + sibling clones + dev-env      ~5m
-      #   Bootstrap Reprobuild                  23m   (58m on a cold host)
-      #   Build codetracer ct                   37m   (1h25m cold)
-      #   just test: prereqs (shim/runquota/cmake) 17m
-      #   just test: .#apps/.#test-helpers/.#test-fixtures  12m
-      #   just test: .#test-builds              3h46m  <-- dominant
-      #   just test: Python inventory           30m
-      #   just test: Nim execution              never reached
+      # The suite RUNS TO A VERDICT in CI. Run 38428391026 (dev @ 9aaa2a918,
+      # Test job 115403755907):
       #
-      # The Nim suite has NOT executed in CI in any recent run; the job is
-      # consumed before it starts, and 910cb956 then failed on a Python
-      # inventory pin (6844 != 6847) at 5h54m rather than on a timeout.
+      #   Bootstrap Reprobuild                     16m25s
+      #   Build codetracer ct                      25m14s
+      #   just test: start -> runner summary       5h03m28s
+      #     of which the test runner               2h08m25s  (all 10691 cases:
+      #                                             pass=10280 fail=105 skip=306)
+      #   just test: runner summary -> killed      7m45s, no output at all
       #
-      # The 3h46m is not a parallelism problem. Every one of the ~1213
-      # test-compile actions is declared `cacheable = false` at
-      # repro.nim:537, so the content-addressed cache is bypassed for the
-      # single most expensive phase in CI and every run recompiles the whole
-      # test tree from scratch. Confirmed two ways: the runner's persistent
-      # CAS at ~/.cache/repro/action-cache holds zero blobs, and a local
-      # `repro build --dry-run .#test-builds` against a fully warm tree
-      # reports all 1213 actions as cacheDecision=cdNotCacheable /
-      # reason="not-cacheable".
+      # The verdict landed 7m45s before GitHub's 360-minute default ended the
+      # step, and the run was recorded `cancelled` -- a red result on 105
+      # failing cases, reported as a timeout. The silent tail is most likely the
+      # Python phase (run_tests.sh runs the `tests/**/test_*.py` modules after
+      # the runner, and unittest's progress dots carry no newline, so the log
+      # shows nothing); that is inferred from the script's order, not measured.
       #
-      # Until that is addressed the job cannot fit six hours: even with a
-      # warm bootstrap the phases above plus a measured 2h15m execution
-      # phase total ~8h. Raising REPROBUILD_MAX_PARALLELISM is not the
-      # lever -- see the note on that variable in `env:` above.
+      # Run 36583430437 (on the slower host class) is the other
+      # bound: the 1759-action `.#test-builds` graph took 4h08m51s and the whole
+      # build phase 4h27m37s; the runner then reached 1697 of 10605 cases in
+      # 51m06s and estimated 4h28m15s more before the ceiling killed it.
       #
-      # RUNNER-CLASS NOTE. `runs-on` selects a POOL, and the two host classes
-      # in it are not interchangeable for this job. Measured over the last 60
-      # CI runs, by the runner that picked up the Test job:
+      # THE BUILD PHASE GOT LONGER WHEN ITS COMPILES BECAME CACHEABLE. The
+      # 3h46m measured on 31716928161 was attributed to the test compiles being
+      # declared `cacheable = false`. 1cb62e84 (2026-08-20) removed that
+      # argument from the `buildNimUnittest.build` edges: `build` for
+      # `BuildNimUnittest` (libs/ct_test_nim_unittest) now defaults to
+      # `cacheable = true`, which `compileDependencyPolicy` maps to the
+      # automatic monitor policy. The phase then measured 4h08m on
+      # 36583430437, not less. Why the runners' persistent cache does not turn
+      # that into cross-run hits is an open question; the flag was not the
+      # cause.
+      #
+      # WHAT BOUNDS THIS STEP. Its `timeout-minutes` covers
+      # REPROBUILD_BUILD_TIMEOUT + REPROBUILD_RUNNER_TIMEOUT (pinned in `env:`
+      # below) plus an allowance for the rest of `just test` -- prerequisite
+      # sibling builds (reprobuild-cmake alone took 1h08m45s on 36590087746),
+      # the smaller collections, the Python phase. So run_tests.sh's own
+      # backstops fire first, with their legible messages ("Timed out building
+      # ... the build did NOT fail"; a runner summary marked cut_short), then
+      # this step's limit, then the job's -- never GitHub's silent default.
+      # The backstops are sized to the slower class: 5h over the 4h08m graph,
+      # 330m over the runner's 5h19m projection. scripts/check_ci_test_budget.py
+      # holds these numbers to each other and to the measurements in it. The
+      # "Declare suite coverage" step after this one then states, from the
+      # runner's summary, whether the run is a verdict or a partial run.
+      #
+      # RUNNER-CLASS NOTE (measured before 2026-09-09). `runs-on` selects a
+      # POOL, and the host classes in it are not interchangeable for this job.
+      # Measured then over the last 60 CI runs, by the runner that picked up
+      # the Test job:
       #
       #   gpu-server-002-*   every run that reached the END of the suite --
       #                      build phase plus Nim execution, terminating on
@@ -782,33 +1041,70 @@ jobs:
       # the probe was on and whether it self-spawns, before asking which host
       # picked the job up.
       #
-      # So `REPROBUILD_BUILD_TIMEOUT` (4h, scripts/run_tests.sh) is not a
-      # budget this host class overruns by a little, and the timeouts are not
-      # noise. On `high-mem-server-*` the build phase alone consumes most of
-      # the six-hour ceiling, so raising the 4h backstop would not buy a
-      # completed suite: it would only move where the job dies, from a legible
-      # "Timed out building .#test-builds" to an illegible ceiling kill. The
-      # timeout is a symptom of the `cacheable = false` phase above, amplified
-      # by scheduling this job onto a host class roughly 2x slower for it --
-      # not a number that is merely set too low.
-      #
-      # Documented here rather than acted on: narrowing `runs-on` to the
-      # faster class is a fleet-capacity decision, not a workflow edit, and
-      # making the phase cacheable is the fix that would make either class
-      # fit.
+      # The class gap is why the budgets here follow the slower class's
+      # numbers (36583430437) rather than the faster one's (38428391026).
+      # Narrowing `runs-on` to the faster class is a fleet-capacity decision,
+      # not a workflow edit, and is documented here rather than acted on.
       - name: just test
+        id: just_test
+        timeout-minutes: 750
         env:
+          # run_tests.sh's backstops, pinned so that they fire before this
+          # step's limit (see WHAT BOUNDS THIS STEP above). coreutils
+          # `timeout` durations: a single number and suffix, so 330m, not
+          # 5h30m. The build one applies to each collection build in turn.
+          REPROBUILD_BUILD_TIMEOUT: "5h"
+          REPROBUILD_RUNNER_TIMEOUT: "330m"
           CT_BIN: ${{ env.CT_BIN }}
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
-          GIT_CONFIG_COUNT: '1'
+          # The second rewrite, and cargo fetching through the git CLI so that
+          # it honours these GIT_CONFIG_* rewrites at all, serve the `ct-mcr`
+          # bundle edge (scripts/build_hcr_ct_mcr_fixture.sh forwards exactly
+          # these variables into the recorder's otherwise cleared shell).
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          GIT_CONFIG_COUNT: '2'
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/lldb-sys.rs.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/metacraft-labs/lldb-sys.rs
           NIX_CONFIG: >-
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_test.outputs.token }}
+            github.com/metacraft-labs/codetracer-rr=${{ steps.ci_token_test.outputs.token }}
         run: dev-exec just test
+      # Say, where the conclusion is read, whether this run is a VERDICT on the
+      # code or a partial run. A `cancelled` or truncated run used to look like
+      # a result; scripts/ci_suite_coverage.py reads the runner's summary,
+      # run_tests.sh's end-of-script marker (written only once its Python
+      # phase is done, so a step killed after the Nim verdict is still
+      # PARTIAL) and the `just test` outcome, and prints COMPLETE or PARTIAL
+      # as an annotation and in the step summary. It always exits 0 and is
+      # continue-on-error besides: the `just test` step's own status is the
+      # gate, and this step must never change the job's conclusion. Runs even
+      # when an earlier step failed (outcome `skipped`), and falls back to a
+      # bare python3 when setup-dev-env never provided dev-exec.
+      - name: Declare suite coverage
+        timeout-minutes: 10
+        if: always()
+        continue-on-error: true
+        env:
+          JUST_TEST_OUTCOME: ${{ steps.just_test.outcome }}
+        run: |
+          set -uo pipefail
+          args=(scripts/ci_suite_coverage.py
+                --summary test-logs/parallel-run.json
+                --finished-marker test-logs/suite-finished.json
+                --outcome "$JUST_TEST_OUTCOME"
+                --step-summary "$GITHUB_STEP_SUMMARY")
+          if command -v dev-exec >/dev/null 2>&1; then
+            dev-exec python3 "${args[@]}"
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 "${args[@]}"
+          else
+            echo "::warning title=Suite coverage::PARTIAL: neither dev-exec nor python3 is available to read the runner summary -- this job's conclusion is NOT known to be a verdict on the code"
+          fi
       # RunQuota daemon diagnostics, collected whether or not anything
       # failed.
       #
@@ -827,6 +1123,7 @@ jobs:
       # daemon state (sqlite stores, sockets) that is neither small nor
       # copyable.
       - name: Collect runquotad diagnostics
+        timeout-minutes: 10
         if: always()
         continue-on-error: true
         run: |
@@ -843,13 +1140,16 @@ jobs:
           echo "collected runquotad diagnostics:"
           find "$dest" -type f -printf '  %p (%s bytes)\n' || true
       - name: Upload logs
+        timeout-minutes: 15
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-logs
           path: test-logs/
+          if-no-files-found: error
           retention-days: 1
       - name: Mirror logs to S3 (non-blocking)
+        timeout-minutes: 50
         if: always()
         continue-on-error: true
         uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@dev
@@ -904,6 +1204,8 @@ jobs:
             reprobuild-packages
             reprobuild-test-adapters
             runquota
+            test-certificates-spec
+            test-certificates-tools
             tree-sitter-aiken
             tree-sitter-cadence
             tree-sitter-cairo
@@ -927,6 +1229,16 @@ jobs:
         run: |
           git diff --exit-code -- flake.lock
           dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
+      - name: Check the trace-format pin against CodeTracer's lock
+        # Decided at evaluation time, so it builds nothing: it fails when
+        # ``ct-trace-format-src`` is not the revision the pinned
+        # ``codetracer-src``'s ``repro.lock`` names (see the check in
+        # flake.nix). Nothing else would run it -- CI builds only
+        # ``.#default``, not ``checks.*``.
+        run: |
+          system="$(dev-exec nix eval --impure --raw --expr builtins.currentSystem)"
+          dev-exec nix build --no-update-lock-file --no-link \
+            ".#checks.${system}.ct-trace-format-pin-coherence"
       - name: nix build
         # ``--log-lines 200`` widens nix's failure tail from its default 25.
         # Twenty-five lines is not enough to see WHICH entrypoint's ``nim c``

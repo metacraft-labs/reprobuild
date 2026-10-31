@@ -1,0 +1,82 @@
+{
+  "format": "repro.home.export",
+  "schemaVersion": 5,
+  "selection": {
+    "host": "m1",
+    "hostDeclared": false,
+    "activities": [
+      "default"
+    ],
+    "unknownActivities": []
+  },
+  "intent": {
+    "name": "gm5CompileTime",
+    "activities": [
+      {
+        "name": "default",
+        "body": [
+          {
+            "kind": "packageRef",
+            "name": "bash",
+            "version": ""
+          }
+        ]
+      }
+    ],
+    "configOverrides": [],
+    "hosts": {},
+    "resources": [
+      {
+        "kind": "env.userVariable",
+        "address": "env.userVariable:GM5_EVERYWHERE",
+        "fields": {
+          "name": {
+            "kind": "string",
+            "value": "GM5_EVERYWHERE"
+          },
+          "value": {
+            "kind": "string",
+            "value": "1"
+          },
+          "valueKind": {
+            "kind": "string",
+            "value": "string"
+          }
+        },
+        "dependsOn": [],
+        "guard": null,
+        "activity": null
+      }
+    ],
+    "buildActions": [],
+    "adapterPreference": {}
+  },
+  "platforms": {
+    "x86_64-linux": "same",
+    "aarch64-linux": "same",
+    "x86_64-darwin": "differs",
+    "aarch64-darwin": "differs",
+    "x86_64-windows": "same",
+    "aarch64-windows": "same"
+  },
+  "provenance": {
+    "repro": {
+      "version": "0.2.18",
+      "sourceRevision": "01e2eaf5f4f69afbe438c7b5fe1111364c2089c7-dirty"
+    },
+    "hostSource": "env",
+    "profile": {
+      "root": "home.nim",
+      "digest": null,
+      "inputs": []
+    },
+    "dataFiles": [],
+    "compile": {
+      "target": "x86_64-linux",
+      "os": "linux",
+      "cpu": "amd64",
+      "defines": [],
+      "probe": {}
+    }
+  }
+}

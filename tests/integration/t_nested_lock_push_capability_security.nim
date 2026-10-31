@@ -20,6 +20,7 @@
 
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
   times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_cli_support/push_hook_protocol
 import repro_test_support
@@ -175,6 +176,20 @@ if paramCount() == 6:
     writeFile(paramStr(6), issued.token & "\n")
     sleep(60_000)
     quit 4
+  of "--issue-two-and-wait", "--issue-two-discard-first-and-wait":
+    let head = require(q(paramStr(2)) & " -C " & q(paramStr(3)) &
+      " rev-parse HEAD").strip()
+    var tokens: seq[string]
+    for _ in 0 ..< 2:
+      let issued = issueHookCapability(paramStr(2), paramStr(3), "origin",
+        paramStr(4), "HEAD", head, "refs/heads/main", head)
+      if not issued.ok: quit 3
+      tokens.add(issued.token)
+    if paramStr(1) == "--issue-two-discard-first-and-wait":
+      discardHookCapability(paramStr(2), paramStr(3), tokens[0])
+    writeFile(paramStr(6), tokens.join("\n") & "\n")
+    sleep(60_000)
+    quit 4
   of "--wrong-owner-helper":
     when defined(posix):
       let head = require(q(paramStr(2)) & " -C " & q(paramStr(3)) &
@@ -230,19 +245,19 @@ proc initializeSingleRepoWorkspace(fx: var Fixture) =
   let manifestBare = fx.scratch / "manifests.git"
   createDir(manifests / "projects")
   createDir(manifests / "repos")
-  writeFile(fx.scratch / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(fx.scratch / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
   writeFile(manifests / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n[[remote]]\nname = \"origin\"\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n[[remote]]\nname = \"origin\"\n" &
     "fetch = \"" & fx.origin.replace('\\', '/') & "\"\n\n" &
     "includes = [\"repos/app.toml\"]\n")
   writeFile(manifests / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"repo\"\nremote = \"origin\"\n" &
-    "revision = \"main\"\n")
+    "mainline = \"main\"\n")
   discard require(q(fx.gitBin) & " init --bare -b main " & q(manifestBare))
   discard require(q(fx.gitBin) & " init -b main " & q(manifests))
   discard require(q(fx.gitBin) & " -C " & q(manifests) &
@@ -266,6 +281,30 @@ proc consume(fx: Fixture; token: string; remoteName = "origin";
   consumeHookCapability(fx.gitBin, fx.repo, token, remoteName,
     if remoteLocation.len > 0: remoteLocation else: fx.origin,
     if refsPath.len > 0: refsPath else: fx.refs)
+
+proc publicationMember(fx: Fixture; name: string): HookPublicationMember =
+  ## These protocol-only cases bind real repositories and advertisements.
+  ## Whether the repositories form one workspace component is independently
+  ## checked by the full gate, covered by the real-hook publication suite.
+  let attached = run(q(fx.gitBin) & " -C " & q(fx.repo) &
+    " symbolic-ref --quiet --short HEAD")
+  let branch = if attached.code == 0: attached.output.strip() else: ""
+  HookPublicationMember(name: name,
+    worktree: normalizedPath(expandFilename(fx.repo)).replace('\\', '/'),
+    commonDir: commonGitDir(fx.gitBin, fx.repo),
+    objectFormat: storageObjectFormat(fx.gitBin, fx.repo), headOid: fx.head,
+    remoteName: "origin", remoteLocationsDigest: remoteLocationDigest(fx.origin),
+    branch: branch, advertisementFingerprint: remoteLocationDigest(
+      require(q(fx.gitBin) & " ls-remote " & q(fx.origin))),
+    published: true, pushable: branch.len > 0,
+    remoteRef: (if branch.len > 0: "refs/heads/" & branch else: ""),
+    remoteOid: fx.head)
+
+proc issueComponent(fx, peer: Fixture): CapabilityIssueResult =
+  issueHookCapability(fx.gitBin, fx.repo, "origin", fx.origin,
+    "HEAD", fx.head, "refs/heads/main", fx.head,
+    publicationMembers = @[publicationMember(fx, "app"),
+      publicationMember(peer, "peer")], publicationWorkspace = fx.scratch)
 
 proc sourceRoot(): string = currentSourcePath().parentDir.parentDir.parentDir
 
@@ -295,6 +334,113 @@ proc installHooks(fx: Fixture; target = "") =
     quit 1
 
 suite "nested lock-push capability security":
+  test "source component capability returns a typed one-use publication plan":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setupFixture(gitBin)
+    defer: removeDir(fx.scratch)
+    let peer = setupFixture(gitBin)
+    defer: removeDir(peer.scratch)
+    let issued = issueComponent(fx, peer)
+    check issued.ok
+    let consumed = fx.consume(issued.token)
+    check consumed.authorized
+    check consumed.purpose == SourceComponentCapabilityPurpose
+    check consumed.publicationWorkspace ==
+      normalizedPath(expandFilename(fx.scratch)).replace('\\', '/')
+    check consumed.publicationMembers == @[
+      publicationMember(fx, "app"), publicationMember(peer, "peer")]
+    check not fileExists(capabilityPath(gitBin, fx.repo, issued.token))
+    let replay = fx.consume(issued.token)
+    check not replay.authorized
+    check replay.claimLost
+
+  test "relabelled capabilities cannot change their publication purpose":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setupFixture(gitBin)
+    defer: removeDir(fx.scratch)
+    let peer = setupFixture(gitBin)
+    defer: removeDir(peer.scratch)
+    let nested = issue(fx)
+    check nested.ok
+    mutateString(capabilityPath(gitBin, fx.repo, nested.token), "purpose",
+      SourceComponentCapabilityPurpose)
+    let missingPlan = fx.consume(nested.token)
+    check not missingPlan.authorized
+    check "publication plan" in missingPlan.diagnostic
+    let component = issueComponent(fx, peer)
+    check component.ok
+    mutateString(capabilityPath(gitBin, fx.repo, component.token), "purpose",
+      CapabilityPurpose)
+    let excessPlan = fx.consume(component.token)
+    check not excessPlan.authorized
+    check "publication plan" in excessPlan.diagnostic
+
+  test "published detached peer retains its exact identity without a push ref":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setupFixture(gitBin)
+    defer: removeDir(fx.scratch)
+    let peer = setupFixture(gitBin)
+    defer: removeDir(peer.scratch)
+    discard require(q(gitBin) & " -C " & q(peer.repo) & " checkout --detach")
+    let issued = issueComponent(fx, peer)
+    check issued.ok
+    let consumed = fx.consume(issued.token)
+    check consumed.authorized
+    check consumed.purpose == SourceComponentCapabilityPurpose
+    check consumed.publicationMembers.len == 2
+    check consumed.publicationMembers[1] == publicationMember(peer, "peer")
+    check consumed.publicationMembers[1].published
+    check not consumed.publicationMembers[1].pushable
+    check consumed.publicationMembers[1].branch.len == 0
+    check consumed.publicationMembers[1].remoteRef.len == 0
+
+  test "malformed component membership is refused and consumed":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setupFixture(gitBin)
+    defer: removeDir(fx.scratch)
+    let peer = setupFixture(gitBin)
+    defer: removeDir(peer.scratch)
+    for mutation in ["duplicate-name", "duplicate-worktree", "missing-current",
+        "missing-member", "wrong-format", "zero-head", "wrong-branch",
+        "empty-advertisement", "relative-workspace"]:
+      checkpoint(mutation)
+      let issued = issueComponent(fx, peer)
+      check issued.ok
+      let pending = capabilityPath(gitBin, fx.repo, issued.token)
+      var record = parseFile(pending)
+      case mutation
+      of "duplicate-name":
+        record["publicationMembers"][1]["name"] = %"app"
+      of "duplicate-worktree":
+        record["publicationMembers"][1]["worktree"] =
+          record["publicationMembers"][0]["worktree"]
+      of "missing-current":
+        record["publicationMembers"][0]["worktree"] =
+          %(fx.scratch / "another-worktree")
+      of "missing-member":
+        record["publicationMembers"].elems.setLen(1)
+      of "wrong-format":
+        record["publicationMembers"][1]["objectFormat"] = %"unknown"
+      of "zero-head":
+        record["publicationMembers"][1]["headOid"] = %repeat('0', fx.head.len)
+      of "wrong-branch":
+        record["publicationMembers"][1]["remoteRef"] = %"refs/heads/other"
+      of "empty-advertisement":
+        record["publicationMembers"][1]["advertisementFingerprint"] = %""
+      of "relative-workspace":
+        record["publicationWorkspace"] = %"relative-workspace"
+      else: discard
+      writeFile(pending, $record & "\n")
+      let rejected = fx.consume(issued.token)
+      check not rejected.authorized
+      check "publication plan" in rejected.diagnostic
+      check not fileExists(pending)
+      check fx.consume(issued.token).claimLost
+
   test "exactly one of two processes claims and replay always fails":
     let gitBin = findExe("git")
     if gitBin.len == 0:
@@ -742,6 +888,7 @@ suite "nested lock-push capability security":
           let exitCode = child.waitForExit()
           check exitCode != 4
           child.close()
+
           var removed = false
           for _ in 0 ..< 100:
             if not fileExists(pending):
@@ -753,6 +900,53 @@ suite "nested lock-push capability security":
           child.terminate()
           discard child.waitForExit()
           child.close()
+
+  test "POSIX signal cleanup retains all outstanding tokens after targeted discard":
+    when defined(posix):
+      let gitBin = findExe("git")
+      check gitBin.len > 0
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      for mode in ["--issue-two-and-wait",
+          "--issue-two-discard-first-and-wait"]:
+        checkpoint(mode)
+        let marker = fx.scratch / (mode & ".issued")
+        let child = startProcess(getAppFilename(),
+          args = @[mode, gitBin, fx.repo, fx.origin, fx.refs, marker],
+          options = {poStdErrToStdOut})
+        var ready = false
+        for _ in 0 ..< 500:
+          if fileExists(marker):
+            ready = true
+            break
+          sleep(10)
+        check ready
+        if ready:
+          let tokens = readFile(marker).splitLines().filterIt(it.len > 0)
+          check tokens.len == 2
+          for index, token in tokens:
+            let expectedPending = index != 0 or
+              mode != "--issue-two-discard-first-and-wait"
+            check fileExists(capabilityPath(gitBin, fx.repo, token)) ==
+              expectedPending
+          child.terminate()
+          check child.waitForExit() != 4
+          child.close()
+          for token in tokens:
+            var removed = false
+            for _ in 0 ..< 100:
+              if not fileExists(capabilityPath(gitBin, fx.repo, token)):
+                removed = true
+                break
+              sleep(10)
+            check removed
+        else:
+          child.terminate()
+          discard child.waitForExit()
+          child.close()
+    else:
+      skip("[platform N/A] pending-token signal cleanup uses POSIX signals; " &
+        "Windows has no equivalent signal-handler contract")
 
   test "adversarial cleanup validator rejects every unsafe root shape":
     when defined(posix):

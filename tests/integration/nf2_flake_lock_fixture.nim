@@ -39,11 +39,15 @@
 ## first, and that a real `git commit` through THAT hook refreshes and stages
 ## the lock.
 ##
-## The one thing that is NOT exercised end-to-end by default is `nix` itself:
-## the cases assert on `flake.lock`'s CONTENT, which is what CI, a colleague
-## and a fresh checkout consume. Where a nix-level check adds something the
-## content check cannot give (§5's "looked like it was working while doing
-## nothing"), the case runs it and announces LOUDLY when nix is unavailable.
+## `nix` is real too wherever it is involved. A case that RECORDS a pin needs
+## it, because the refresh asks nix for the moved node's `narHash` /
+## `lastModified` / `revCount` (`nf2RecordingPrerequisites` skips LOUDLY
+## without it); the fixture's origins are real `git+file://` repositories so
+## that fetch is a real one. The cases otherwise assert on `flake.lock`'s
+## CONTENT, which is what CI, a colleague and a fresh checkout consume. Where
+## a nix-level check adds something the content check cannot give (§5's
+## "looked like it was working while doing nothing"), the case runs it and
+## announces LOUDLY when nix is unavailable.
 ##
 ## ## Topology
 ##
@@ -60,7 +64,7 @@
 ## `app`'s lock entry declares `depends = "alpha,beta,epsilon"`, so its
 ## develop-set closure is {app, alpha, beta, epsilon} and `delta` is outside it.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 const
   Nf2Repos* = ["alpha", "beta", "gamma", "delta", "epsilon", "app"]
@@ -113,6 +117,22 @@ proc nf2Prerequisites*(caseName: string): bool =
     reproBinaryPath() & "; git=" &
     (if gitBin.len == 0: "MISSING" else: gitBin) & " repro=" &
     (if fileExists(repro): "present" else: "UNBUILT — run `just bootstrap`")
+  false
+
+proc nf2RecordingPrerequisites*(caseName: string): bool =
+  ## `nf2Prerequisites`, plus `nix` on PATH — for a case whose subject is a pin
+  ## being RECORDED. Moving a pin writes the new revision's `narHash` /
+  ## `lastModified` / `revCount`, which the refresh asks nix for; without nix
+  ## it withholds the input instead, so a recording case would fail for a
+  ## reason that is not its subject. Announced LOUDLY, never a silent pass.
+  if not nf2Prerequisites(caseName):
+    return false
+  if findExe("nix").len > 0:
+    return true
+  echo "SKIPPED (loudly): " & caseName & " records a flake.lock pin, and " &
+    "recording one needs `nix` on PATH to compute the moved node's narHash " &
+    "(without it the refresh withholds the input). nix=MISSING. NOT CHECKED " &
+    "by this run: everything this case asserts about a recorded pin."
   false
 
 proc gitIn*(fx: Nf2Fixture; repo: string; args: string): string =
@@ -169,8 +189,10 @@ proc lockedNode*(name, url, rev, narHash: string; indent: string;
     originalRev = ""): string =
   ## One `flake.lock` node in nix's own on-disk shape. `lastModified`,
   ## `narHash` and `revCount` are present because a real lock carries them —
-  ## they are exactly the fields a revision move has to DROP, so a fixture
-  ## without them could not witness that.
+  ## they are exactly the fields a revision move has to RECOMPUTE (from what
+  ## nix reports for the new revision), so a fixture without them could not
+  ## witness that. The values are fixed literals rather than nix's for the
+  ## seed revisions: nothing asks nix about a node that does not move.
   ##
   ## `originalRev` writes the OTHER half of a node: `original` mirrors the
   ## flake-ref as it is written in `flake.nix`, so a non-empty value here is
@@ -258,6 +280,43 @@ proc nf2FlakeLockText*(fx: Nf2Fixture; alphaRev, betaRev, gammaRev: string;
   "  \"version\": 7\n" &
   "}\n"
 
+type
+  Nf2DerivedFields* = object
+    ## A revision's `narHash` / `lastModified` / `revCount` as nix reports
+    ## them, obtained INDEPENDENTLY of the refresh under test.
+    ok*: bool
+    narHash*: string
+    lastModified*: int
+    revCount*: int
+    diagnostic*: string
+
+proc nixPrefetchedFields*(fx: Nf2Fixture; repo, rev: string): Nf2DerivedFields =
+  ## `nix flake prefetch --json git+<origin>?ref=main&rev=<rev>` — the flake-ref
+  ## code path, not the `builtins.fetchTree`-over-attributes path the refresh
+  ## takes — so a case comparing the two compares two computations, not one
+  ## computation with itself. Requires nix on PATH (callers gate on
+  ## `nf2RecordingPrerequisites`).
+  let nixBin = findExe("nix")
+  if nixBin.len == 0:
+    result.diagnostic = "nix is not on PATH"
+    return
+  let outFile = fx.scratch / ("prefetch-" & repo & "-" & rev & ".json")
+  let res = run(q(nixBin) &
+    " --extra-experimental-features 'nix-command flakes' flake prefetch " &
+    "--json " & q("git+" & originUrl(fx, repo) & "?ref=main&rev=" & rev) &
+    " >" & q(outFile))
+  if res.code != 0 or not fileExists(outFile):
+    result.diagnostic = "nix flake prefetch failed: " & res.output
+    return
+  let doc = parseJson(readFile(outFile))
+  result.narHash = doc{"hash"}.getStr()
+  result.lastModified = doc{"locked"}{"lastModified"}.getInt()
+  result.revCount = doc{"locked"}{"revCount"}.getInt()
+  result.ok = result.narHash.len > 0
+  if not result.ok:
+    result.diagnostic = "nix flake prefetch printed no hash: " &
+      readFile(outFile)
+
 proc preCommitHookPath*(fx: Nf2Fixture): string =
   fx.app / ".git" / "hooks" / "pre-commit"
 
@@ -311,7 +370,9 @@ proc setupNf2Fixture*(label: string;
   ## has always got.
   result.gitBin = findExe("git")
   result.repro = absolutePath(reproBinaryPath())
-  result.scratch = createTempDir("nf2-" & label & "-", "")
+  # Git renders checkout paths physically; Darwin's /tmp aliases /private/tmp.
+  # Build the fixture in that frame so exact remedy assertions match Git.
+  result.scratch = expandFilename(createTempDir("nf2-" & label & "-", ""))
   result.ws = result.scratch / "ws"
   result.app = result.ws / "app"
   createDir(result.ws)
@@ -349,8 +410,8 @@ proc setupNf2Fixture*(label: string;
     "deps = [" & deps.join(", ") & "]\n")
 
   createDir(result.ws / ".repro")
-  writeFile(result.ws / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.ws / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\n" &
     "project = \"nf2\"\n" &
     "branch = \"main\"\n")

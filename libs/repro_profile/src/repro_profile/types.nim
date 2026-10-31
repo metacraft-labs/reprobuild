@@ -65,6 +65,24 @@ type
     toolIdentityRefs*: seq[string]
     requiresElevation*: bool
     cacheable*: bool
+    substituteOnly*: bool
+      ## The edge is never built on this host: its outputs come from the
+      ## binary cache or the apply fails. For a host that cannot build
+      ## what it runs (a 32-bit ARM appliance), so a cache miss is a
+      ## refusal naming the edge instead of a compile the host cannot
+      ## finish. Requires ``expectedOutputDigest``: an edge whose bytes
+      ## only a publisher's signature vouches for is one every trusted
+      ## publisher could rewrite.
+    expectedOutputDigest*: string
+      ## ``blake3:<64 hex>`` of the edge's output archive (the raw
+      ## ``rbcarc`` the publisher packed, which is what the cache serves
+      ## and what the local outputs pack back to). When set, a
+      ## substitute is accepted only if the fetched archive hashes to it,
+      ## and outputs already present that hash to it are a hit without
+      ## any fetch. The profile that carries it is signed (the deploy
+      ## manifest), so the profile pins the bytes and the cache
+      ## publisher is transport, not authority. Empty: no pin (the
+      ## pre-existing behaviour for edges the host can build itself).
     rebootRequired*: bool
       ## Mirror of ``BuildActionDef.rebootRequired``: the edge's effect
       ## needs a restart before it takes hold. An edge that actually RAN
@@ -72,12 +90,53 @@ type
       ## what makes the apply's reboot notice reachable from a profile
       ## rather than only from the Windows resource drivers.
 
+  AddOnIntent* = object
+    ## What a profile's `addOn:` section declares (ReproOS-Add-On-Mode
+    ## §4.4). The text form's `addOn { managedEtcPrefixes = [...] }` stanza
+    ## is its rendering; the apply refuses an `/etc` path outside the
+    ## prefixes with `EAddOnOutOfScope`.
+    declared*: bool
+    managedEtcPrefixes*: seq[string]
+    confirmTimeoutSec*: int
+      ## `confirmTimeout: <seconds>` (§7.5): how long the add-on switch
+      ## waits for every unit's `healthCheck`; 0 when not declared.
+
   ProfileIntent* = object
     name*: string
     activities*: seq[ActivityIntent]
     configOverrides*: seq[ConfigOverride]
     hosts*: Table[string, seq[string]]
+    hostApplies*: Table[string, seq[string]]
+      ## The concerns Reprobuild applies on a host, for every host whose
+      ## `hosts:` entry declares `applies: [...]` (block form). A host
+      ## absent from this table declares nothing: Reprobuild applies every
+      ## concern there. Values are concern names (`repro_profile/concerns`),
+      ## validated by the macro; an empty seq is a host where Reprobuild
+      ## applies nothing (Gradual-Nix-To-Reprobuild-Migration.md
+      ## §Concern-scoped apply).
+    hostSystems*: Table[string, HostSystemDecl]
+      ## The hosts whose `hosts:` entry has a `system:` key
+      ## (`repro_profile/host_system`): host -> what the entry declares
+      ## about the host's system scope -- managed elsewhere (with the
+      ## pointer to what manages it), or managed here in add-on mode (with
+      ## the system activities it selects). A host absent from this table
+      ## has its whole system managed here, the default (Gradual-Nix-To-
+      ## Reprobuild-Migration.md §Hosts, feature 2; ReproOS add-on mode).
     resources*: seq[ResourceIntent]
+    addOn*: AddOnIntent
+      ## The profile-wide `addOn:` section of ReproOS add-on mode
+      ## (ReproOS-Add-On-Mode §4.4): the `/etc` prefixes the profile's
+      ## resources may own on an add-on host. `declared` is false for a
+      ## profile without the section.
+    stowScopes*: seq[StowScope]
+      ## GM11: the `stow/` packages an activity claims (a `stow:` block in
+      ## `activity <name>:`), one record per claim. A package no record
+      ## names is materialized on every host, as before; a package some
+      ## record names is materialized only on a host where one of its
+      ## records' activity is selected and its guard holds
+      ## (`repro_profile/stow_scopes`; Home-Profile-Intent-Layer.md
+      ## §Stow-Style Dotfile Support). Empty for a profile without a
+      ## `stow:` block, which encodes exactly as before.
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G. Action-edge items emitted
       ## from inside the profile's ``resources:`` block by typed-tool
@@ -89,14 +148,65 @@ type
       ## common case — profiles that don't declare action edges leave
       ## the apply driver's build-graph path inactive.
     adapterPreference*: OrderedTable[string, seq[string]]
-      ## M2.5: per-OS adapter preference parsed from the macro form
+      ## The profile's selection policy (GM4b), parsed from the macro form
       ## `adapterPreference:` block. Keys are canonical OS tags
       ## (`"windows"`, `"linux"`, `"darwin"`); values are the ordered
-      ## adapter chain (each entry drawn from the closed set
-      ## `{"builtin", "scoop", "nix", "path"}`). Empty table when the
-      ## block is absent. `macos` aliases canonicalize to `"darwin"`.
+      ## realization kinds (each drawn from the closed set
+      ## `{"tarball", "builtin", "scoop", "nix", "path"}`; `builtin` is the
+      ## former spelling of `tarball`). Empty table when the block is
+      ## absent. `macos` aliases canonicalize to `"darwin"`.
       ## Mirrors the text-form `Profile.adapterPreference` field so
       ## both parsers produce the same AST shape for the same input.
+    dataFiles*: seq[string]
+      ## GM4: the plan-time data files the profile's `data:` section
+      ## declares, as paths relative to the profile directory (forward
+      ## slashes, validated by the macro). REFERENCES ONLY: the profile
+      ## binary never reads them, so editing a data file does not
+      ## invalidate the profile compile. The planner reads and expands them
+      ## (`repro_profile_compile/data_expansion`); an expanded intent has
+      ## this list emptied and its rows merged into `activities`
+      ## (Gradual-Nix-To-Reprobuild-Migration.md §Declarative data files
+      ## read at plan time).
+    catalogImports*: seq[string]
+      ## The provisioning-contribution catalogs the profile's `catalogs:`
+      ## section imports: each entry names a catalog's Nim module relative
+      ## to the profile directory (forward slashes, validated by the macro
+      ## with `catalog_refs.catalogImportPathProblem`). The profile binary
+      ## never reads them; `repro home apply` imports them into the recipe
+      ## it extracts the profile's package references from, as a recipe
+      ## imports them (Provisioning-Contributions.md §"Profile Package
+      ## References").
+
+  HostSystemMode* = enum
+    ## The values a host entry's `system:` key can take. An entry without a
+    ## `system:` key is `hsmFull` with no activities (`repro_profile/
+    ## host_system`); the spelled form exists to select system activities
+    ## on a fully managed host.
+    hsmManagedElsewhere = "managedElsewhere"
+      ## Something other than this configuration manages the host's system
+      ## scope; `repro infra` refuses the host.
+    hsmAddOn = "addOn"
+      ## The host's system belongs to its distribution; Reprobuild manages a
+      ## declared set of services, files and accounts on top of it (ReproOS
+      ## add-on mode).
+    hsmFull = "full"
+      ## This configuration manages the whole system (ReproOS, or a NixOS /
+      ## nix-darwin switch); spelled only to select system activities
+      ## (`system: {mode: full, activities: [...]}`), or bare `system: full`,
+      ## which means the same as no key.
+
+  HostSystemDecl* = object
+    ## What one `hosts:` entry's `system:` key declares.
+    mode*: HostSystemMode
+    managedBy*: string
+      ## `hsmManagedElsewhere` only: the `managedElsewhere("...")` pointer,
+      ## "" when the entry names none. Always "" for `hsmAddOn` and `hsmFull`.
+    activities*: seq[string]
+      ## `hsmAddOn` and `hsmFull`: the system-profile activities the block
+      ## form's `activities: [...]` selects, in declaration order, on top of
+      ## the system profile's `default` activity (which is always enabled).
+      ## Empty for the short forms `system: addOn` / `system: full`, which
+      ## select `default` alone. Always empty for `hsmManagedElsewhere`.
 
   ActivityElementKind* = enum
     aekPackageRef
@@ -148,6 +258,14 @@ type
     pkg*: string
     key*: string
     value*: ConfigValue
+    guard*: PredicateExpr
+      ## The runtime predicate under which this override applies; an empty
+      ## `guard.expr` means "on every host". Set by a `when <pred>:` around
+      ## the entry in `config:` (or by `guarded(...)` in a helper) and
+      ## evaluated by the planner against the target host, exactly like an
+      ## activity body's `aekWhenGuard`. Carried as predicate TEXT, so an
+      ## export describes every platform's overrides whatever platform
+      ## compiled the profile.
 
   FieldValueKind* = enum
     fvkString
@@ -241,10 +359,41 @@ type
     address*: string      ## optional named address; empty if unset
     fields*: Table[string, FieldValue]
     dependsOn*: seq[ResourceAddress]
+    guard*: PredicateExpr
+      ## The runtime predicate under which this resource is declared; an
+      ## empty `guard.expr` means "on every host". Set by a `when <pred>:`
+      ## around the constructor in `resources:` (or by `guarded(...)` in a
+      ## helper template) and evaluated by the planner against the target
+      ## host. Two resources may share an address when their guards select
+      ## different hosts; the planner rejects a duplicate only among the
+      ## resources a host actually gets.
+    activity*: string
+      ## The activity this resource belongs to (GM9, activity-scoped
+      ## resources); "" means profile-wide. Set for every resource declared
+      ## in a `resources:` block inside `activity <name>:` (and for a data
+      ## file's `[[resource]]` row with an `activity` key). The planner
+      ## plans such a resource only on a host whose selection enables the
+      ## activity (`default` plus the host's `hosts:` entry), and only where
+      ## its `guard` also holds. It must name an activity the profile
+      ## declares; an unknown name is refused, never treated as
+      ## profile-wide.
 
   PredicateExpr* = object
     expr*: string         ## canonical-stringified predicate; apply-
                           ## time parser handles evaluation
+
+  StowScope* = object
+    ## GM11: one claim of a `stow/` package by an activity -- an entry of a
+    ## `stow:` block inside `activity <name>:` (`repro_profile/stow_scopes`).
+    package*: string
+      ## The package: the name of an immediate subdirectory of the
+      ## profile's `stow/` tree (one path segment).
+    activity*: string
+      ## The activity whose `stow:` block names the package.
+    guard*: PredicateExpr
+      ## The runtime predicate of the `when <pred>:` the entry sits under
+      ## inside the block; an empty `guard.expr` means none. The claim holds
+      ## on a host that selects `activity` and where the guard holds.
 
   # -------------------------------------------------------------------
   # M9.R.20: SystemIntent — user-editable ``system "<hostname>":`` form.

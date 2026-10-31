@@ -12,6 +12,10 @@
 ##
 ## Digest matches the ``TMUX_NCURSES_SHA256_X86_64`` pin its consumer
 ## harvested independently.
+##
+## ``NcursesVersion`` is MSYS2's ``pkgver-pkgrel``; the record's ``version``
+## is ncurses' own, 6.6, since a ``-<pkgrel>`` suffix would read as a
+## pre-release in a ``uses:`` range.
 
 import repro_project_dsl
 
@@ -24,6 +28,7 @@ package `msys2-ncurses`:
       sha256 = "15748b99784cdafc4916c21f81a55d46b93f59b7c92840acc14ea7717df1c42f",
       archiveType = "tar.zst",
       executablePath = "usr/bin/infocmp.exe",
+      version = "6.6",
       packageId = "msys2-ncurses@" & NcursesVersion,
       cpu = "x86_64",
       os = "windows",

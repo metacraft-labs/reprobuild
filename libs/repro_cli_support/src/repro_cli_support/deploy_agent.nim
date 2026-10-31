@@ -13,7 +13,8 @@
 ##     format),
 ##   * applies the highest valid sequence for ``--target`` via the M4
 ##     ``runInfraApply`` path (build-action outputs substituted from the
-##     binary cache when ``REPRO_BINARY_CACHE_URL`` is set).
+##     binary cache when ``caches.conf`` names one with its trusted keys;
+##     see Binary-Caches.md §"Apply-time substitution and publishing").
 ##
 ## Exit codes: 0 = applied OR already-converged OR waiting (nothing to do
 ## yet); 1 = apply failed / source error (retryable — the timer retries);
@@ -41,12 +42,19 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[os, strutils]
+import std/[json, os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
+import repro_deploy_agent/secrets
+import repro_peer_cache/auth as peerAuth
+import repro_home_intent/host_identity
 import repro_profile
 import ./infra
+import repro_addon/addon_apply
+import repro_addon/agent_switch
+import repro_elevation
+import repro_profile_compile
 
 type
   DeployAgentFlags = object
@@ -57,6 +65,9 @@ type
     cacheRoot: string
     fetchTimeoutMs: int
     hostIdentity: string
+    hostGiven: bool
+      ## `--host` was passed at all: an empty `--host=` is refused by the
+      ## resolver, not read as "no flag".
     secretsKey: string
     secretsDir: string
 
@@ -77,7 +88,9 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
     of "--allowed-signers": result.allowedSigners = need(i, a, args)
     of "--state-dir": result.stateDir = need(i, a, args)
     of "--cache-root": result.cacheRoot = need(i, a, args)
-    of "--host": result.hostIdentity = need(i, a, args)
+    of "--host":
+      result.hostIdentity = need(i, a, args)
+      result.hostGiven = true
     of "--secrets-key": result.secretsKey = need(i, a, args)
     of "--secrets-dir": result.secretsDir = need(i, a, args)
     of "--fetch-timeout-ms":
@@ -94,6 +107,7 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
         result.cacheRoot = a["--cache-root=".len .. ^1]
       elif a.startsWith("--host="):
         result.hostIdentity = a["--host=".len .. ^1]
+        result.hostGiven = true
       elif a.startsWith("--secrets-key="):
         result.secretsKey = a["--secrets-key=".len .. ^1]
       elif a.startsWith("--secrets-dir="):
@@ -104,8 +118,105 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
         raise newException(ValueError, "unknown flag: " & a)
     inc i
 
+proc runDeployAgentKeygen(args: seq[string]): int =
+  ## ``repro deploy-agent keygen --secrets-key <FILE>`` — generate the
+  ## sealed-secrets recipient key ON THIS HOST (or read the one already
+  ## there) and print its public half, for the producer to seal to
+  ## (Deploy-Agent.md §Recipient key generation). The private key never
+  ## leaves the host.
+  ##
+  ## stdout carries exactly one line, the 130-char hex public key, so the
+  ## command composes (`... keygen --secrets-key K > recipient-pubkey.txt`);
+  ## what happened goes to stderr. Exit 0 on success, 1 when the key cannot
+  ## be created or the existing one is unusable, 2 on a usage error.
+  var keyPath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--secrets-key":
+      inc i
+      if i >= args.len:
+        stderr.writeLine("repro deploy-agent keygen: --secrets-key requires a value")
+        return 2
+      keyPath = args[i]
+    elif a.startsWith("--secrets-key="):
+      keyPath = a["--secrets-key=".len .. ^1]
+    else:
+      stderr.writeLine("repro deploy-agent keygen: unknown argument: " & a)
+      return 2
+    inc i
+  if keyPath.len == 0:
+    stderr.writeLine("repro deploy-agent keygen: --secrets-key <FILE> is required")
+    return 2
+  let key =
+    try:
+      ensureRecipientKeyFile(keyPath)
+    except CatchableError as e:
+      stderr.writeLine("repro deploy-agent keygen: " & e.msg)
+      return 1
+  if key.created:
+    stderr.writeLine("repro deploy-agent keygen: generated a new recipient key at " &
+      keyPath)
+  else:
+    stderr.writeLine("repro deploy-agent keygen: kept the existing recipient key at " &
+      keyPath)
+  echo peerAuth.publicKeyHex(key.publicKey)
+  0
+
+proc runDeployAgentCompileProfile*(args: seq[string]): int =
+  ## ``repro deploy-agent compile-profile --staged <module.nim>
+  ## --canonical-out <file> --actions-out <file> [--state-dir D]``: compile a
+  ## staged manifest profile (its bundle beside it, as
+  ## ``stageProfileSources`` writes it) to the canonical resource text and
+  ## the build actions, through the same Phase-F3 path ``repro infra apply``
+  ## uses, and write both; apply nothing. The unprivileged fetch unit of a
+  ## ReproOS add-on host runs this as its profile compiler, so the compiler
+  ## never runs in the root apply unit (ReproOS add-on §9.1).
+  var staged, canonicalOut, actionsOut, stateDir = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if i + 1 >= args.len:
+      stderr.writeLine("repro deploy-agent compile-profile: " & a &
+        " needs a value")
+      return 2
+    case a
+    of "--staged": staged = args[i + 1]
+    of "--canonical-out": canonicalOut = args[i + 1]
+    of "--actions-out": actionsOut = args[i + 1]
+    of "--state-dir": stateDir = args[i + 1]
+    else:
+      stderr.writeLine("repro deploy-agent compile-profile: unknown option " & a)
+      return 2
+    i += 2
+  if staged.len == 0 or canonicalOut.len == 0 or actionsOut.len == 0:
+    stderr.writeLine("usage: repro deploy-agent compile-profile --staged " &
+      "<module.nim> --canonical-out <file> --actions-out <file> [--state-dir D]")
+    return 2
+  if stateDir.len == 0: stateDir = staged.parentDir / ".compile-state"
+  var bundlePaths: seq[string]
+  for f in walkDirRec(staged.parentDir):
+    if f != staged: bundlePaths.add(f)
+  var text = ""
+  var actions: seq[ProfileBuildAction]
+  let host = try: selectHost("", false).name except CatchableError: ""
+  if not resolveSystemProfileText(staged, readFile(staged), stateDir,
+      "repro deploy-agent compile-profile", text,
+      planCommand = "repro infra plan", outBuildActions = addr actions,
+      target = defaultSystemPlanTarget(host), declaredInputs = bundlePaths):
+    return 1
+  writeFile(canonicalOut, text)
+  writeFile(actionsOut, $(%actions))
+  0
+
 proc runDeployAgentCommand*(args: seq[string]): int =
-  ## ``repro deploy-agent`` entrypoint (one tick).
+  ## ``repro deploy-agent`` entrypoint (one tick), or ``repro deploy-agent
+  ## keygen`` (see `runDeployAgentKeygen`), or ``compile-profile``
+  ## (`runDeployAgentCompileProfile`).
+  if args.len > 0 and args[0] == "keygen":
+    return runDeployAgentKeygen(args[1 .. ^1])
+  if args.len > 0 and args[0] == "compile-profile":
+    return runDeployAgentCompileProfile(args[1 .. ^1])
   var flags: DeployAgentFlags
   try:
     flags = parseFlags(args)
@@ -137,6 +248,30 @@ proc runDeployAgentCommand*(args: seq[string]): int =
     stderr.writeLine("repro deploy-agent: --secrets-dir given without " &
       "--secrets-key; the directory alone cannot open a sealed section")
     return 2
+
+  # The host identity every generation this tick commits records (and an
+  # input to its generation id). It comes from the ONE resolver `repro
+  # home`, `repro infra` and `repro system` use (`selectHost`:
+  # `$REPRO_HOST`, else `--host`, else the lower-cased OS hostname), so one
+  # machine has one name in every scope (Home-Profile-Intent-Layer.md §Host
+  # Identity; CLI/infra/README.md §Host identity; Deploy-Agent.md §CLI
+  # surface). The agent used to record the invented
+  # `reprobuild-deploy-agent` when no `--host` was given (reprobuild-pm
+  # issue
+  # 2026-10-18-deploy-agent-invents-a-host-identity-instead-of-resolving-one).
+  # An unresolvable identity is refused, never invented; like an unreadable
+  # trust-anchor file it wedges the loop until an operator acts, so it is
+  # recorded as well as printed, with the same non-retryable exit 2.
+  let host =
+    try:
+      selectHost(flags.hostIdentity, flags.hostGiven).name
+    except EHostIdentity as e:
+      stderr.writeLine("repro deploy-agent: " & e.msg)
+      var rec = tickStatusForRaise(flags.target, e.msg)
+      rec.exitCode = 2
+      rec.errorCode = "host_unresolved"
+      recordTick(flags.stateDir, flags.target, rec)
+      return 2
 
   let anchors =
     try:
@@ -174,32 +309,78 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # `repro_cli_support` already depends on `repro_deploy_agent` — importing
   # upward from the hook would close a cycle.
   #
-  # The compiler needs a FILE, so the text is staged under the state dir. It is
-  # written on every tick and deliberately not cached on content: the compile
-  # step downstream keys its own cache on the profile's sources, so a repeat
-  # tick with an unchanged profile still short-circuits there.
+  # The compiler needs FILES, so the text and the manifest's profile bundle
+  # (RDMF v3 `profileFiles`, the files the profile `staticRead`s) are staged
+  # under the state dir by `stageProfileSources`, which rebuilds the tree on
+  # every tick. Deliberately not cached on content: the compile step
+  # downstream keys its own cache on the profile's sources, so a repeat tick
+  # with an unchanged profile still short-circuits there.
   let capturedStateDir = flags.stateDir
-  let resolver: ProfileResolver = proc(profileText: string; outText: var string;
+  # The agent reads no host registry: a signed manifest names its target,
+  # and its producer decides what that target applies. The profile is
+  # planned for this host -- its runtime predicates evaluated here, the
+  # `default` system activity selected -- as `repro infra apply` plans a host
+  # the registry does not declare.
+  let capturedTarget = defaultSystemPlanTarget(host)
+  let resolver: ProfileResolver = proc(profileText: string;
+                                       profileFiles: seq[ProfileFile];
+                                       outText: var string;
                                        outBuildActions: var seq[ProfileBuildAction]):
                                     bool {.gcsafe.} =
     {.cast(gcsafe).}:
       let scratch = capturedStateDir / "deploy-agent"
-      createDir(scratch)
-      # Must be `.nim` and a valid Nim module name — the compiler rejects a
-      # hyphenated stem outright.
-      let profilePath = scratch / "manifest_profile.nim"
-      writeFile(profilePath, profileText)
+      let profilePath = stageProfileSources(scratch, profileText, profileFiles)
+      # The bundle is declared as compile input as well as observed: see
+      # `ProfileCompileOptions.declaredInputs`.
+      var bundlePaths: seq[string]
+      for f in profileFiles:
+        bundlePaths.add(scratch / f.path)
       result = resolveSystemProfileText(profilePath, profileText,
         capturedStateDir, "repro deploy-agent", outText,
         planCommand = "repro infra plan",
-        outBuildActions = addr outBuildActions)
+        outBuildActions = addr outBuildActions, target = capturedTarget,
+        declaredInputs = bundlePaths)
 
-  let deps = AgentDeps(
-    apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
-      hostIdentity =
-        (if flags.hostIdentity.len > 0: flags.hostIdentity
-         else: "reprobuild-deploy-agent"),
-      profileResolver = resolver))
+  # On a ReproOS add-on host every agent apply goes through the add-on
+  # switch (spec §9, §9.1): it is ledgered, retained as an add-on generation
+  # recording the manifest's deployment and sequence (§7.4), reachable by
+  # `repro system rollback` (§7.5), and an operator rollback pauses the
+  # agent (§9.3). The legacy `--secrets-dir` delivery above is unchanged:
+  # the tick still opens the sealed section into it before the apply. A
+  # host whose agent applied outside the switch before this build is first
+  # taken over by one switch of the profile it last applied (§9
+  # "Migration"), which adopts every object without writing or restarting.
+  let addonState = hostAddonStateDir()
+  var deps: AgentDeps
+  if isAddonHost(addonState) and
+      absolutePath(addonState) != absolutePath(flags.stateDir):
+    if needsLegacyMigration(addonState, flags.stateDir):
+      let legacyGen = legacyAgentGeneration(flags.stateDir)
+      try:
+        let r = migrateLegacyAgentState(addonState, flags.stateDir,
+          flags.target, host)
+        echo "repro deploy-agent: migration: add-on generation " &
+          r.generationId & " took over agent generation " & legacyGen &
+          " (applied " & $r.infra.appliedCount & ", no-op " &
+          $r.infra.noOpCount & ")"
+      except CatchableError as e:
+        let msg = "migrating agent generation " & legacyGen & " into the " &
+          "add-on switch failed; nothing was applied: " & e.msg
+        stderr.writeLine("repro deploy-agent: " & msg)
+        var rec = tickStatusForRaise(flags.target, msg)
+        rec.exitCode = 1
+        rec.errorCode = "addon_migration_failed"
+        recordTick(flags.stateDir, flags.target, rec)
+        return 1
+    let ctx = FixtureContext(filePrefix: flags.stateDir)
+    deps = AgentDeps(
+      apply: addonAgentApplyHook(addonState, host, flags.stateDir, resolver,
+        mkBuildActionDispatcher(flags.cacheRoot, ctx)))
+  else:
+    deps = AgentDeps(
+      apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
+        hostIdentity = host,
+        profileResolver = resolver))
 
   # `runAgentTickRecorded`, not `runAgentTick`: it runs the same tick, resolves
   # the same exit code, and additionally leaves the durable record — including
@@ -214,6 +395,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   let outcome = tick.outcome
   echo "repro deploy-agent"
   echo "  target       : " & outcome.target
+  echo "  host         : " & host
   echo "  outcome      : " & $outcome.kind
   if outcome.sequence > 0'u64:
     echo "  sequence     : " & $outcome.sequence

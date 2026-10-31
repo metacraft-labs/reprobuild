@@ -1,63 +1,48 @@
-## M69 — end-to-end gate for `repro home apply` against the built-in
-## catalog with `--prefer-adapter=builtin`.
+## M69 → GM4b — end-to-end gate for `repro home apply` resolving a home
+## profile's packages to their archive realizations.
 ##
-## A 4-package home.nim is plan-resolved against the M65 catalog
-## registry. Each package routes through the M65 `chainResolvePackage`
-## call with the host platform; every resolution MUST land on the
-## `cakBuiltin` adapter (the catalog has slices for the requested
-## (cpu, os) tuple). The catalog-lookup resolver fail-closed contract
-## is asserted alongside.
+## A 4-package home.nim is planned, and each reference is resolved — with
+## the profile resolver the apply pipeline uses (`resolveProfilePackage`,
+## GM4b) — for an x86_64-windows target under the `[tarball]` selection
+## policy (the GM4b spelling of the old `--prefer-adapter=builtin`). Every
+## resolution MUST select the package's `tarball` realization (each has a
+## Windows archive), with nothing falling through to another kind, and the
+## version a pin names reaches the selection.
 ##
-## A second pass over the same fixture asserts cache-hit semantics:
-## the catalog_lookup's `resolvedVersion` is stable across calls
-## (the slice is the same; the M64 realizer would no-op against the
-## CAS prefix from the first apply).
+## A second pass over the same fixture asserts determinism: the selected
+## (version, url, lock identity) triple is identical across calls, which is
+## what lets the realizers no-op against an existing prefix.
 ##
-## The actual realize step (downloading ~256 MB JDK, hundreds of MB
-## for the four bundles) is NOT exercised here — that would gate the
-## e2e suite on a stable network and ~1 GB of disk per run. The
-## realize loop itself is covered by `t_builtin_adapter.nim` against
-## a self-served HTTP fixture. This gate exercises the CONTRACT a
-## downstream apply relies on: every package in the fixture profile
-## resolves to a `cakBuiltin` slice, no `cakScoop` fallback fires,
-## and the resolver carries the version pin through to the slice
-## selection.
+## The actual realize step (hundreds of MB of downloads) is NOT exercised
+## here; the realizers are covered by `t_builtin_adapter*.nim` and
+## `t_realize_honors_requested_version.nim` against `file://` fixtures.
+## No mocks.
 
 import std/[os, sets, unittest]
 
 import repro_home_intent
 import repro_home_apply/plan
-import repro_home_apply/catalog_lookup
 import repro_home_apply/package_catalog
-import repro_dsl_stdlib/packages_schema
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/e2e-m69-builtin-catalog"
+let TmpDir = "build/test-tmp/e2e-m69-builtin-catalog" / testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):
     removeDir(TmpDir)
   createDir(TmpDir)
 
-proc resolveAllChain(packageIds: openArray[(string, string)]):
-    seq[CatalogResolution] =
-  ## Run `chainResolvePackage` once per (packageId, requestedVersion)
-  ## pair against the registered catalog chain. The platform's default
-  ## chain on Windows is `[cakBuiltin, cakScoop, cakPath]`; on
-  ## Linux/macOS the order is different but the cakBuiltin branch
-  ## fires first when a built-in slice exists for the (cpu, os) tuple.
-  ## All four fixture packages have Windows slices; this test verifies
-  ## the Windows arm of the contract regardless of the runner's actual
-  ## OS by pinning the host facts (the catalog is portable data; the
-  ## resolver-level contract is a pure-data operation on the catalog
-  ## for a stated target host).
-  var prodCat = openProductionCatalog()
-  let preferBuiltin = @[cakBuiltin]
+proc resolveAllTarball(packageIds: openArray[(string, string)]):
+    seq[ProfilePackageResolution] =
+  ## Resolve each (packageId, requestedVersion) for x86_64-windows under the
+  ## `[tarball]` policy. The target is stated, not the runner's: selection is
+  ## a pure function of the definitions and the target.
+  let target = realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
   for (pkgId, requested) in packageIds:
-    result.add chainResolvePackage(prodCat, pkgId,
-      chain = preferBuiltin, version = requested,
-      hostCpu = pcX86_64, hostOs = poWindows)
+    result.add resolveProfilePackage(pkgId, target, @[rkTarball],
+      requestedVersion = requested)
 
-suite "M69 e2e: repro home apply against the builtin catalog":
+suite "M69/GM4b e2e: home profile packages resolve to their archives":
 
   test "4-package home.nim parses and plans correctly":
     resetTmp()
@@ -81,8 +66,8 @@ profile "rt":
       ids.incl p.packageId
     check ids == toHashSet(["cmake", "just", "nim", "ninja"])
 
-  test "all 4 packages resolve via cakBuiltin (--prefer-adapter=builtin)":
-    let resolutions = resolveAllChain([
+  test "all 4 packages resolve to their tarball realization":
+    let resolutions = resolveAllTarball([
       ("cmake", ""),
       ("just", ""),
       ("nim", ""),
@@ -90,43 +75,35 @@ profile "rt":
     ])
     check resolutions.len == 4
     for r in resolutions:
-      check r.adapter == cakBuiltin
-      check r.builtinVersion.len > 0
-      check r.urlUsed.len > 0
-      check r.digestAlgorithm in ["sha256", "sha512"]
-      check r.digestValue.len > 0
-      # Every cakBuiltin resolution MUST carry a non-empty bin_relpath
-      # so the M69 launcher loop has something to materialize.
-      check r.binRelpath.len > 0
-      # The chain trace records exactly one step (the cakBuiltin
-      # entry that resolved); on the prefer-builtin chain there is
-      # no preceding adapter to skip.
-      check r.chainTrace.len == 1
-      check r.chainTrace[0].adapter == cakBuiltin
+      checkpoint r.packageId
+      check r.selection.kind == rkTarball
+      check r.selection.version.len > 0
+      check r.selection.tarball.url.len > 0
+      check r.selection.tarball.os == "windows"
+      check r.selection.tarball.sha256.len == 64
+      check r.selection.lockIdentity.len > 0
+      check r.selection.tarball.executablePath.len > 0
+      # Exactly one policy step, the one that selected.
+      check r.selection.trace.len == 1
+      check r.selection.trace[0].kind == rkTarball
+      check r.selection.trace[0].selected
 
-  test "catalog-lookup carries the same versions the chain picks":
-    for pkgId in ["cmake", "just", "nim", "ninja"]:
-      var prodCat = openProductionCatalog()
-      let chainRes = chainResolvePackage(prodCat, pkgId,
-        chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poWindows)
-      let lookupRes = lookupCatalogSlice(pkgId)
-      check chainRes.builtinVersion == lookupRes.resolvedVersion
+  test "a version pin reaches the selection":
+    let pinned = resolveAllTarball([("just", "1.51.0")])
+    check pinned[0].selection.version == "1.51.0"
+    let bare = resolveAllTarball([("just", "")])
+    check bare[0].selection.version == pinned[0].selection.version
 
-  test "second pass resolves to the same (version, url, digest) triple":
-    # The catalog literal is pure — re-resolving a bare reference
-    # must produce a bit-identical CatalogResolution. The M64
-    # realizer's `realizeBuiltinPackage` cache-hits when the CAS
-    # prefix for this resolution already exists; we exercise that
-    # determinism here so the apply's second-pass no-op semantics
-    # are tested without running the realizer.
-    let pass1 = resolveAllChain([("cmake", ""), ("just", ""),
-                                  ("nim", ""), ("ninja", "")])
-    let pass2 = resolveAllChain([("cmake", ""), ("just", ""),
-                                  ("nim", ""), ("ninja", "")])
+  test "second pass resolves to the same (version, url, lock) triple":
+    # Selection is pure — re-resolving a bare reference must produce the
+    # identical record, so a realizer cache-hits the prefix the first apply
+    # realized.
+    let pass1 = resolveAllTarball([("cmake", ""), ("just", ""),
+                                   ("nim", ""), ("ninja", "")])
+    let pass2 = resolveAllTarball([("cmake", ""), ("just", ""),
+                                   ("nim", ""), ("ninja", "")])
     check pass1.len == pass2.len
     for i in 0 ..< pass1.len:
-      check pass1[i].builtinVersion == pass2[i].builtinVersion
-      check pass1[i].urlUsed == pass2[i].urlUsed
-      check pass1[i].digestValue == pass2[i].digestValue
-      check pass1[i].binRelpath == pass2[i].binRelpath
+      check pass1[i].selection.version == pass2[i].selection.version
+      check pass1[i].selection.tarball.url == pass2[i].selection.tarball.url
+      check pass1[i].selection.lockIdentity == pass2[i].selection.lockIdentity

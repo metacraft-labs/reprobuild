@@ -1,14 +1,17 @@
 ## TC-4 — CI fast-track: CI SKIPS target sets covered by a VALID certificate
 ## for a platform, and RUNS everything else.
 ##
-## ``repro ci plan --platform=P --json`` resolves the project's certificate
-## policy (required targets/platforms + ci_trust) and the (commit, lock) binding
-## the certs must match, reads the certs ATTACHED to HEAD (the TC-2 git-notes
-## carrier), and emits the per-platform SKIP/RUN plan a CI job consumes. The
-## decision REUSES the TC-5 signature verifier + the TC-1 coverage union, so the
-## CI trust boundary is identical to the push gate's: only a registered-signed,
-## unrevoked, commit+lock+platform-matching cert can move a target into SKIP,
-## and only when the project explicitly set ``ci_trust = "skip"``.
+## ``repro ci plan --platform=P --json`` reads the certificate policy the
+## BASE records in its ``repro.lock`` (required names/platforms + ci_trust;
+## TC-9c, and since TC-9d nothing else) and the CONTENT the certs
+## must name (TC-8c: the checked-out tracked files), reads the certs noted on
+## that content's tree (the TC-2 git-notes carrier) and those in the local
+## certificate store, and emits the per-platform SKIP/RUN plan
+## (``reprobuild.ci-plan.v2``) a CI job consumes. The decision REUSES the push
+## gate's evaluator, so the CI trust boundary is identical to the push gate's:
+## only a registered-signed, unrevoked, content+lock+platform-matching cert can
+## move a target into SKIP, and only when the policy explicitly sets
+## ``ci_trust = "skip"``.
 ##
 ## Assertions (each falsifiable — see the inline FALSIFY notes):
 ##   1. Platform A with a VALID signed cert covering target ``t-unit`` attached
@@ -41,6 +44,9 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 include tc5_cert_signing_helpers
 
@@ -91,24 +97,22 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"TC4 Tester\"")
 
-proc projectToml(libAUrl, certificatesTable: string): string =
+proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
-  certificatesTable &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 # Platform A is the HOST tag (so a real issued cert matches it); platform B is a
@@ -125,28 +129,50 @@ type
     libAPath: string
     libASha: string
 
-proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
+proc writeProjectManifest(fx: Fixture) =
+  ## The project manifest. It carries no certificate policy: since TC-9d the
+  ## policy is the ``[certificate_policy]`` snapshot in lib-a's own
+  ## ``repro.lock`` (``declarePolicy``).
   let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(fx.libAOrigin), certificatesTable))
+    projectToml(fileUrl(fx.libAOrigin)))
 
-proc policyTable(targets: seq[string]; ciTrust: string): string =
-  ## ``[certificates]`` table: gate_mode advisory (CI plan does not depend on
-  ## the gate mode), required targets, both platforms A and B required, and the
-  ## explicit ci_trust under test.
-  var t = "[certificates]\n"
-  t.add("gate_mode = \"advisory\"\n")
-  t.add("required_targets = [")
-  for i, x in targets:
-    if i > 0: t.add(", ")
-    t.add("\"" & x & "\"")
-  t.add("]\n")
-  t.add("required_platforms = [\"" & platformA & "\", \"" & platformB & "\"]\n")
-  t.add("ci_trust = \"" & ciTrust & "\"\n\n")
-  t
+proc commitBaseAndCandidate(fx: Fixture; gitBin, snapshot: string) =
+  ## Commit ``snapshot`` in lib-a's ``repro.lock`` and publish it as the base
+  ## (``origin/main``, which the job evaluates against), then commit a change
+  ## on top and publish it on its own branch, the way a pull request's head
+  ## is: ``repro ci plan`` reads ``ci_trust`` from the BASE, and a base that
+  ## is the candidate itself is no base (TC-9c).
+  writeFile(fx.libAPath / "repro.lock", replaceCertificatePolicySection(
+    serializeLockedDependencies(LockedDependencies(
+      schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+  discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) & " add repro.lock")
+  discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+    " commit -q --no-verify -m policy")
+  discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+    " push -q --no-verify origin main")
+  writeFile(fx.libAPath / "change.txt", "the change under review\n")
+  discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) & " add change.txt")
+  discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+    " commit -q --no-verify -m change")
+  discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+    " push -q --no-verify origin HEAD:refs/heads/pr")
+
+proc declarePolicy(fx: Fixture; gitBin: string; targets: seq[string];
+                   ciTrust: string) =
+  ## The policy each block runs under: gate_mode advisory (CI plan does not
+  ## depend on the gate mode), the required targets on both platforms A and
+  ## B, and the explicit ci_trust under test: one rule for every branch
+  ## (``everyBranchPolicy``), as the production renderer records it.
+  let snapshot = everyBranchSnapshot(pmAdvisory, targets,
+    [platformA, platformB],
+    ciTrust = (if ciTrust == "skip": pctSkip else: pctAdvisory),
+    name = "lib-a")
+  commitBaseAndCandidate(fx, gitBin, snapshot)
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-tc4-ci-", "")
+  discard isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -251,7 +277,8 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
       block skipMode:
         let fx = setupFixture(gitBin)
         defer: removeDir(fx.scratch)
-        writeProjectManifest(fx, policyTable(@["t-unit", "t-int"], "skip"))
+        writeProjectManifest(fx)
+        declarePolicy(fx, gitBin, @["t-unit", "t-int"], "skip")
         seedLock(fx)
 
         # Register key A; issue a VALID signed cert covering ONLY t-unit.
@@ -263,7 +290,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
         let certA = issueRealCert(fx, keyA.priv, keyIdA, @["t-unit"])
         check certA.isSigned
         check certA.platform == platformA
-        let attA = attachCertificate(gitBin, fx.libAPath, fx.libASha, certA)
+        let attA = attachCertificate(gitBin, fx.libAPath, certA)
         check attA.ok
 
         # ---- 1 + 3. Platform A: t-unit SKIP (covered), t-int RUN (uncovered).
@@ -285,7 +312,8 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
       block forgedCert:
         let fx = setupFixture(gitBin)
         defer: removeDir(fx.scratch)
-        writeProjectManifest(fx, policyTable(@["t-unit"], "skip"))
+        writeProjectManifest(fx)
+        declarePolicy(fx, gitBin, @["t-unit"], "skip")
         seedLock(fx)
 
         # Issue a cert with a REAL signature by key F — but DO NOT register F.
@@ -301,7 +329,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
             status: rksActive)])
         let forged = issueRealCert(fx, keyF.priv, keyIdF, @["t-unit"])
         check forged.isSigned
-        let attF = attachCertificate(gitBin, fx.libAPath, fx.libASha, forged)
+        let attF = attachCertificate(gitBin, fx.libAPath, forged)
         check attF.ok
 
         let planF = planJson(fx, platformA)
@@ -315,7 +343,8 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
       block advisoryMode:
         let fx = setupFixture(gitBin)
         defer: removeDir(fx.scratch)
-        writeProjectManifest(fx, policyTable(@["t-unit"], "advisory"))
+        writeProjectManifest(fx)
+        declarePolicy(fx, gitBin, @["t-unit"], "advisory")
         seedLock(fx)
 
         const keyIdA = "tc4-adv-key"
@@ -324,7 +353,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
           @[RegisteredKey(keyId: keyIdA, publicKey: keyA.pub,
             status: rksActive)])
         let certA = issueRealCert(fx, keyA.priv, keyIdA, @["t-unit"])
-        let attA = attachCertificate(gitBin, fx.libAPath, fx.libASha, certA)
+        let attA = attachCertificate(gitBin, fx.libAPath, certA)
         check attA.ok
 
         let planAdv = planJson(fx, platformA)
@@ -337,3 +366,37 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
         # The valid cert is surfaced as an advisory signal (not a skip).
         check blockAdv.hasKey("advisory_note")
         check "ci_trust=advisory" in blockAdv["advisory_note"].getStr()
+
+      # ============ TC-9c: a hand-written branch rule ============
+      # The same fast-track under a policy written as a branch rule (`main`
+      # only) rather than the every-branch rule the blocks above
+      # use: the base's rule for the target branch decides, and its
+      # platform set is what each platform owes.
+      block policyDeclared:
+        let fx = setupFixture(gitBin)
+        defer: removeDir(fx.scratch)
+        writeProjectManifest(fx)
+        let snapshot = renderCertificatePolicySnapshot(BranchCertificatePolicy(
+          name: "ci-fast-track", package: "certpolicy", ciTrust: pctSkip,
+          rules: @[PolicyRule(branches: @["main"], gateMode: pmAdvisory,
+            commitGate: pmAdvisory, requires: @[PolicyRequirement(
+              certificate: "t-unit", platforms: @[platformA, platformB])])]))
+        commitBaseAndCandidate(fx, gitBin, snapshot)
+        seedLock(fx)
+        const keyIdP = "tc9c-policy-key"
+        let keyP = genEd25519Key(fx.scratch / "keys", "key-policy", keyIdP)
+        writeRegistry(fx.workspaceRoot,
+          @[RegisteredKey(keyId: keyIdP, publicKey: keyP.pub,
+            status: rksActive)])
+        let certP = issueRealCert(fx, keyP.priv, keyIdP, @["t-unit"])
+        check attachCertificate(gitBin, fx.libAPath, certP).ok
+
+        let planP = planJson(fx, platformA)
+        check planP["ci_trust"].getStr() == "skip"
+        check planP["policy"]["source"].getStr() == "base"
+        check planP["required_targets"].to(seq[string]) == @["t-unit"]
+        let blockP = platformBlock(planP, platformA)
+        check targets(blockP, "skip") == @["t-unit"]
+        check targets(blockP, "run").len == 0
+        let planPB = planJson(fx, platformB)
+        check targets(platformBlock(planPB, platformB), "run") == @["t-unit"]

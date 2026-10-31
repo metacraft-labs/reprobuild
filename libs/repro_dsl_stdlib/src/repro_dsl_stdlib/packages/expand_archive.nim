@@ -187,16 +187,28 @@ proc buildZipArgvWindows*(archive, destination: string): seq[string] =
   ## case a module the host loads writes any. ``-NoProfile`` keeps operator
   ## profiles out of the execution boundary, and ``-NonInteractive`` makes
   ## anything that would prompt fail instead of waiting.
+  # Explicit CP437 preserves unflagged ZIP names; flagged UTF-8 still wins.
+  # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.open
+  #
+  # Both assemblies are required: ``ZipFile``/``ZipFileExtensions`` live in
+  # System.IO.Compression.FileSystem, but ``ZipArchiveMode`` (referenced
+  # below) lives in System.IO.Compression itself. Loading only the first
+  # leaves the second type unresolved -- "Unable to find type
+  # [System.IO.Compression.ZipArchiveMode]" -- on a Windows PowerShell 5.1
+  # session that has not already loaded it some other way.
   let command =
     "$ProgressPreference = 'SilentlyContinue'; " &
     "$ErrorActionPreference = 'Stop'; " &
     "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+    "Add-Type -AssemblyName System.IO.Compression; " &
     "$root = [System.IO.Directory]::CreateDirectory(" &
       powershellSingleQuotedLiteral(destination) & ").FullName; " &
     "$root = $root.TrimEnd([char[]]'\\/') + " &
       "[System.IO.Path]::DirectorySeparatorChar; " &
-    "$zip = [System.IO.Compression.ZipFile]::OpenRead(" &
-      powershellSingleQuotedLiteral(archive) & "); " &
+    "$zip = [System.IO.Compression.ZipFile]::Open(" &
+      powershellSingleQuotedLiteral(archive) &
+      ", [System.IO.Compression.ZipArchiveMode]::Read, " &
+      "[System.Text.Encoding]::GetEncoding(437)); " &
     "try { " &
       "foreach ($entry in $zip.Entries) { " &
         "$target = [System.IO.Path]::GetFullPath(" &
@@ -351,7 +363,7 @@ proc resolveExpandArchiveArgv*(archive, destination: string;
   of eafSevenZip:
     # The spec explicitly lists ``7z`` as an accepted ``format = ...``
     # value but does NOT enumerate an argv shape (the underlying
-    # 7-Zip provisioning is the ``sevenzip.nim`` MSI on Windows; on
+    # 7-Zip provisioning is the ``pkg_7zip.nim`` MSI on Windows; on
     # Linux/macOS the closest equivalent is ``7z`` from ``p7zip``).
     # Refuse politely until a recipe lands that actually needs it.
     raise newException(ValueError,

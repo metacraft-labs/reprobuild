@@ -30,9 +30,12 @@
 ## `libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim`
 ## and, end to end, by `tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim`.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
+from repro_core/c_compiler_probe import cCompilerProbeSource, cCompilerProbeArgv
+when defined(macosx):
+  import repro_core/c_compiler
 
 proc writeUnrunnableCompiler(dir: string): string =
   ## A file named like a compiler that is not a program at all: the portable
@@ -54,7 +57,30 @@ template withEnv(names: openArray[string]; body: untyped) =
       if entry.present: putEnv(entry.name, entry.value)
       else: delEnv(entry.name)
 
+# A default third argument permits old calls but changes a Nim proc value's
+# type. Compile the original public arity assignment and call through it.
+static:
+  doAssert compiles(block:
+    let diagnostic: proc(probe: CCompilerProbe; origin: string): string =
+      cCompilerUnusableMessage
+    discard diagnostic(CCompilerProbe(compiler: "chosen", detail: "bad"),
+      "original callable API"))
+
 suite "probing the recipe-compile C compiler":
+
+  test "the original two-argument diagnostic proc remains callable":
+    let diagnostic: proc(probe: CCompilerProbe; origin: string): string =
+      cCompilerUnusableMessage
+    let probe = CCompilerProbe(compiler: "chosen", detail: "bad")
+    check diagnostic(probe, "original callable API") ==
+      "the C compiler selected for compiling the recipe cannot " &
+      "compile a trivial C file that includes <stddef.h>" &
+      (when defined(macosx): " and <Security/SecRandom.h>" else: "") &
+      "\n  compiler: chosen\n  selected from: original callable API" &
+      (when defined(macosx): "\n  SDKROOT: " & getEnv("SDKROOT", "<unset>") &
+        "\n  REPRO_BOOTSTRAP_SDKROOT: " &
+        getEnv("REPRO_BOOTSTRAP_SDKROOT", "<unset>") else: "") &
+      "\n  failure: bad\n  remedy: " & cCompilerOverrideRemedy()
 
   test "an unrunnable compiler is unusable, and the probe says why":
     let dir = createTempDir("repro-cc-probe-test-", "")
@@ -99,6 +125,47 @@ suite "probing the recipe-compile C compiler":
       for _ in walkDir(cacheDir):
         inc markers
     check markers == 0
+
+suite "shared C capability uses the real selected compiler":
+  # These are real compiler invocations, not compiler stubs. -nostdinc removes
+  # actual header search; the wrong-width mutation changes the actual C typedef.
+  # They distinguish capability checking from merely executing a file or checking
+  # its version. The same shared payload/argv is used by Windows profile compiles.
+  test "standard headers and native pointer width compile successfully":
+    let cc = findExe(when defined(windows): "gcc" else: "cc")
+    doAssert cc.len > 0, "enter the declared compiler environment"
+    let verdict = probeCCompiler(absolutePath(cc))
+    checkpoint(verdict.detail)
+    check verdict.usable
+
+  test "removing header search rejects the real compiler capability":
+    let cc = findExe(when defined(windows): "gcc" else: "cc")
+    doAssert cc.len > 0, "enter the declared compiler environment"
+    let verdict = probeCCompiler(absolutePath(cc), extraArgs = @["-nostdinc"])
+    checkpoint(verdict.detail)
+    check not verdict.usable
+    check "stddef.h" in verdict.detail
+
+  test "the real compiler rejects a changed host pointer-width assertion":
+    let cc = findExe(when defined(windows): "gcc" else: "cc")
+    doAssert cc.len > 0, "enter the declared compiler environment"
+    let dir = createTempDir("repro-real-pointer-probe-", "")
+    defer: removeDir(dir)
+    let source = dir / "probe.c"
+    let output = dir / "probe.o"
+    writeFile(source, cCompilerProbeSource)
+    var argv = cCompilerProbeArgv(absolutePath(cc), source, output)
+    # Deliberately wrong on every supported host; retain all original headers.
+    for arg in argv.mitems:
+      if arg.startsWith("-DREPRO_PROBE_POINTER_BYTES="):
+        arg = "-DREPRO_PROBE_POINTER_BYTES=" & $(sizeof(pointer) + 1)
+    var quoted: seq[string]
+    for arg in argv: quoted.add quoteShell(arg)
+    let rejected = execCmdEx(quoted.join(" "))
+    checkpoint(rejected.output)
+    check rejected.exitCode != 0
+    check "repro_probe_pointer_width" in rejected.output
+    check not fileExists(output)
 
 suite "selecting the recipe-compile C compiler":
 
@@ -161,3 +228,127 @@ suite "selecting the recipe-compile C compiler":
           raised = true
           check "there is no gcc.exe on PATH" in err.msg
         check raised
+
+when defined(macosx):
+  suite "Darwin recipe compilers reach platform frameworks":
+    test "implicit selection prefers real clang over an earlier nixpkgs gcc cc":
+      # Real compiler aliases recreate the consumer's PATH ordering without
+      # replacing compiler behavior: GCC must actually fail on the framework
+      # header, and the selected compiler must actually compile it.
+      let gcc = getEnv("REPRO_TEST_DARWIN_GCC", findExe("gcc"))
+      let clang = findExe("clang")
+      doAssert gcc.len > 0 and cCompilerFamily(gcc) == "gcc",
+        "this regression requires a real GCC (run in the Nix dev shell)"
+      doAssert clang.len > 0 and cCompilerFamily(clang) == "clang"
+      let dir = createTempDir("repro-darwin-compiler-", "")
+      defer: removeDir(dir)
+      createDir(dir / "gcc-first")
+      createDir(dir / "clang-second")
+      createSymlink(gcc, dir / "gcc-first" / "cc")
+      createSymlink(clang, dir / "clang-second" / "clang")
+      let source = dir / "framework.c"
+      writeFile(source, "#include <Security/SecRandom.h>\nint repro_framework(void) { return 0; }\n")
+      let rejected = execCmdEx(quoteShell(gcc) & " -c " & quoteShell(source) &
+        " -o " & quoteShell(dir / "gcc.o"))
+      check rejected.exitCode != 0
+      check "Security/SecRandom.h" in rejected.output
+      withEnv([bootstrapCCompilerEnv, "CC", "PATH"]):
+        delEnv(bootstrapCCompilerEnv)
+        delEnv("CC")
+        putEnv("PATH", dir / "gcc-first" & $PathSep & dir / "clang-second" &
+          $PathSep & getEnv("PATH"))
+        let chosen = recipeCCompilerPath()
+        check cCompilerFamily(chosen) == "clang"
+        let compiled = execCmdEx(quoteShell(chosen) & " -c " & quoteShell(source) &
+          " -o " & quoteShell(dir / "clang.o"))
+        check compiled.exitCode == 0
+        check fileExists(dir / "clang.o")
+        putEnv(bootstrapCCompilerEnv, gcc)
+        check recipeCCompilerPath() == gcc
+        delEnv(bootstrapCCompilerEnv)
+        putEnv("CC", gcc)
+        check recipeCCompilerPath() == gcc
+        delEnv("CC")
+        putEnv("PATH", dir / "gcc-first")
+        check recipeCCompilerPath() == gcc
+
+    test "framework-incompatible GCC is refused with compiler SDK and remedy":
+      let gcc = getEnv("REPRO_TEST_DARWIN_GCC", findExe("gcc"))
+      doAssert gcc.len > 0 and cCompilerFamily(gcc) == "gcc"
+      let probe = probeCCompiler(gcc)
+      check not probe.usable
+      check "Security/SecRandom.h" in probe.detail
+      let diagnostic = cCompilerUnusableMessage(probe, "explicit compiler")
+      check gcc in diagnostic
+      check "SDKROOT" in diagnostic
+      check getEnv("SDKROOT") in diagnostic
+      check bootstrapCCompilerEnv in diagnostic
+
+    test "a cached clang success is invalidated when wrapper header flags change":
+      let clang = findExe("clang")
+      doAssert clang.len > 0 and cCompilerFamily(clang) == "clang"
+      let dir = createTempDir("repro-darwin-probe-cache-", "")
+      defer: removeDir(dir)
+      withEnv(["NIX_CFLAGS_COMPILE"]):
+        check probeCCompiler(clang, dir).usable
+        # This real wrapper flag makes C headers unavailable. A cached success
+        # from the previous environment must not conceal the compiler failure.
+        putEnv("NIX_CFLAGS_COMPILE", getEnv("NIX_CFLAGS_COMPILE") & " -nostdinc")
+        let invalid = probeCCompiler(clang, dir)
+        check not invalid.usable
+        check "stddef.h" in invalid.detail
+
+    test "disk probe markers preserve case-sensitive compiler flags":
+      let clang = findExe("clang")
+      doAssert clang.len > 0 and cCompilerFamily(clang) == "clang"
+      let dir = createTempDir("repro-darwin-probe-case-", "")
+      defer: removeDir(dir)
+      let includeDir = dir / "headers"
+      createDir(includeDir)
+      let cacheDir = dir / "cache"
+      withEnv(["NIX_CFLAGS_COMPILE"]):
+        let original = getEnv("NIX_CFLAGS_COMPILE")
+        putEnv("NIX_CFLAGS_COMPILE", original & " -I" & includeDir)
+        check probeCCompiler(clang, cacheDir).usable
+        var markers = 0
+        for kind, path in walkDir(cacheDir):
+          if kind == pcFile and path.endsWith(".ok"):
+            inc markers
+        check markers == 1
+        # -I is a valid include-directory flag; -i is an invalid clang option.
+        # The memo keys differ, so an incorrectly lowercased disk-marker name
+        # is the only way the second call can inherit the first call's success.
+        putEnv("NIX_CFLAGS_COMPILE", original & " -i" & includeDir)
+        let invalid = probeCCompiler(clang, cacheDir)
+        check not invalid.usable
+        check "unknown argument" in invalid.detail
+        check "-i" & includeDir in invalid.detail
+
+    test "an unwrapped Nix clang that relies on ambient SDKROOT is refused while its wrapper succeeds":
+      let wrappedClang = findExe("clang")
+      doAssert wrappedClang.len > 0 and fileExists(wrappedClang) and
+        cCompilerFamily(wrappedClang) == "clang"
+      let origCcPath = wrappedClang.parentDir.parentDir / "nix-support" / "orig-cc"
+      doAssert fileExists(origCcPath)
+      let unwrappedClang = readFile(origCcPath).strip() / "bin" / "clang"
+      doAssert fileExists(unwrappedClang) and
+        cCompilerFamily(unwrappedClang) == "clang"
+      doAssert getEnv("SDKROOT").len > 0
+      check probeCCompiler(wrappedClang).usable
+      let probe = probeCCompiler(unwrappedClang)
+      check not probe.usable
+      check "stdlib.h" in probe.detail
+      var raised = false
+      try:
+        requireUsableCCompiler(unwrappedClang,
+          bootstrapCCompilerEnv & " (set in the environment)")
+      except CCompilerUnusableError as err:
+        raised = true
+        check unwrappedClang in err.msg
+        check bootstrapCCompilerEnv & " (set in the environment)" in err.msg
+        check "stdlib.h" in err.msg
+        check "clang-wrapper" in err.msg
+      check raised
+      check probeCCompiler(unwrappedClang,
+        extraArgs = @["-isysroot", getEnv("SDKROOT")]).usable
+

@@ -57,10 +57,23 @@ import std/[os, osproc, sequtils, strutils, unittest]
 
 import ../src/msys2_source
 from repro_core/paths import extendedPath
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
-const N48Root = "build/test-tmp/test-n48-msys2"
+let N48Root = "build/test-tmp/test-n48-msys2/" & $getCurrentProcessId()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
   ## ``createTempDir`` — see the vacuity note above.
+  ##
+  ## Per PROCESS, though: the runner executes every case of this binary in
+  ## its own process, concurrently with the others. One shared root let each
+  ## case's ``n48Reset`` delete the payload or archive another case's ``tar``
+  ## was still reading ("File removed before we read it"). A decimal pid adds
+  ## no backslash, so the vacuity guarantee above is unchanged.
+
+# Removed when THIS process exits. Absolute, because a case may change the
+# working directory before then. Not an ``addExitProc`` closure: under ORC the
+# ``N48Root`` global it read is destroyed before exit procs run. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(absolutePath(N48Root))
 
 const N48RaisingFirstChars = {'a', 'b', 'f', 'n', 'r', 't', 'v'}
 

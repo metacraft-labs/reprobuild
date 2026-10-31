@@ -125,9 +125,9 @@ suite "MO-13: evidence-publish verb + --lock on test sharding + gate integrity":
         # ``loadLockingRouting``.
         # NOTE: the pinned toml-serialization requires INLINE-table arrays
         # (no ``[[locking.route]]`` double-bracket form).
-        writeFile(ws / ".repro-workspace.toml",
-          "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-          "[manifest]\n" &
+        writeFile(ws / "repro-workspace.toml",
+          "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+          "[records]\n" &
           "url = \"file:///dev/null\"\n\n" &
           "[locking]\n" &
           "route = [{ visibility = \"personal\", " &

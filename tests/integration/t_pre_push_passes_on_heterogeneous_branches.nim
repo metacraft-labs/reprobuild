@@ -83,8 +83,7 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"lib-a\"\n" &
-    "default_revision = \"dev\"\n" &
-    "trunk = \"dev\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-c-origin\"\nfetch = \"" & libCUrl & "\"\n\n" &
@@ -95,33 +94,33 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "latest"
+mainline = "latest"
 """
 
 const libCFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
 remote = "lib-c-origin"
-revision = "live"
+mainline = "live"
 """
 
 type
@@ -274,3 +273,42 @@ suite "RA-3 — pre-push gate: no branch-name enforcement":
       # No failure carries the retired ``branch-mismatch`` property.
       for failure in report["failures"]:
         check failure["property"].getStr() != "branch-mismatch"
+
+  test "pre push derives absent workspace branch from root mainline":
+    # No mocks: the same real published siblings as the heterogeneous case,
+    # but state carries only project membership, and only the root's
+    # settings declare a workspace branch.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "root-default")
+    defer: removeDir(fx.scratch)
+    cloneAll(gitBin, fx)
+    writeFile(fx.workspaceRoot / "repro-workspace.toml",
+      "schema = \"reprobuild.workspace.settings.v1\"\n" &
+      "[workspace]\nmainline = \"root-dev\"\n")
+    writeWorkspaceProjects(fx.workspaceRoot, @["lib-a"])
+    let lockRes = invokeWorkspaceLock(fx)
+    checkpoint(lockRes.output)
+    require lockRes.code == 0
+    let refsFile = fx.scratch / "pushed-refs.txt"
+    writeRefsFile(refsFile, "refs/heads/live", fx.libC.sha)
+    let checked = invokeCheckPrePush(fx, fx.workspaceRoot / "lib-c", refsFile)
+    checkpoint(checked.output)
+    require checked.code == 0
+    check readReport(fx)["activeBranch"].getStr() == "root-dev"
+
+    # A project cannot override the root's declaration: `[project] trunk` is
+    # retired and refused naming its replacement. Recorded feature state in
+    # turn wins over the declaration.
+    let project = fx.workspaceRoot / "projects" / "lib-a.toml"
+    let original = readFile(project)
+    writeFile(project, original.replace("[project]\n",
+      "[project]\ntrunk = \"legacy-trunk\"\n"))
+    let legacy = invokeCheckPrePush(fx, fx.workspaceRoot / "lib-c", refsFile)
+    checkpoint(legacy.output)
+    check legacy.code != 0
+    check "`trunk` is not a `[project]` key" in legacy.output
+    writeFile(project, original)
+    seedMetadataBranch(fx, "recorded-feature")
+    require invokeCheckPrePush(fx, fx.workspaceRoot / "lib-c", refsFile).code == 0
+    check readReport(fx)["activeBranch"].getStr() == "recorded-feature"

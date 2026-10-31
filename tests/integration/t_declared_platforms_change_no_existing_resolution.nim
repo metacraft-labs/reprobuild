@@ -32,13 +32,27 @@
 ##      is the assertion that would trip if the default were changed from
 ##      "undeclared" to "inferred from the arms that exist", which would gate
 ##      resolution on a guess.
-##   4. ``innounp`` on a linux host still fails with the OLD
-##      ``EAdapterChainExhausted`` — an undeclared package's failure mode is
-##      unchanged, including its message.
-##   5. ``atk`` (nix-only, not in the built-in registry) still fails with
-##      ``EAdapterChainExhausted`` naming the built-in registry miss. A
-##      nix-only entry is the case most at risk from an inferred default,
-##      since it declares no platform anywhere.
+##   4. an UNDECLARED Windows-only entry on a linux target fails as a missing
+##      realization (``EMissingRealization``), never as a platform gate — an
+##      undeclared package's failure mode is the generic one.
+##   5. ``atk`` (nix-only) is not gated either: it resolves through its
+##      ``nixPackage`` on linux, and with an archive-only policy fails as a
+##      missing realization naming the absent tarball kind.
+##
+## GM4b note on (1)/(2) and the specimens of (4)/(5): resolution is now
+## ``realization_selection`` over the canonical definitions; the former
+## ``<tool>Catalog`` records are ``tarball`` realizations of their packages.
+## The literals of (1) and the URLs/digests of (2) are unchanged. Two things
+## measurably moved, both by GM4b's documented catalog merge (same URL in
+## both representations -> the in-package statement is the single record):
+## gh's Windows executable is spelled ``bin/gh.exe`` (was ``bin\gh.exe``),
+## and gh's Linux record realizes ``bin/gh`` with ``stripComponents = 1``
+## instead of the catalog's unflattened ``gh_2.93.0_linux_amd64/bin/gh``.
+## ``python3`` gained a resolvable Linux realization (its in-package
+## python-build-standalone archive, which the old catalog-only path never
+## consulted), so the undeclared Windows-only specimen of (4) is now ``php``;
+## and ``atk``'s ``nixPackage`` now selects (the old chain's nix step was a
+## placeholder that always skipped).
 ##
 ## Falsifiable: change the resolver to gate on an inference over whichever
 ## provisioning arms exist, instead of on an explicit declaration, and
@@ -64,36 +78,32 @@
 ## the blindness recorded above. The measurement stands; a future PMC-5 lint
 ## should be written against a source that can see the harvested catalogs.)
 ##
-## Hermetic: synthetic host targets throughout; the Scoop probe is pointed at
-## a nonexistent root; no network, no PATH dependence (the chains under test
-## exclude ``cakPath``).
+## Hermetic: synthetic targets throughout (``realizationTargetFor``); no
+## host inventory is supplied, so no PATH or Scoop dependence; no network.
 
-import std/[options, os, strutils, unittest]
+import std/[options, strutils, unittest]
 
 import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
-# ``atk`` is not part of the built-in catalog registry, so its recipe module
-# is imported directly to put the package in the registry for assertion (3).
+# ``atk`` is not part of the engine's package registry, so its recipe module
+# is imported directly to put the package in the registry for (3) and (5).
 import repro_dsl_stdlib/packages/atk
 import repro_home_apply/package_catalog
+
+let windows = realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
+let linux = realizationTargetFor(pcX86_64, poLinux, mlX86_64_v1)
+
+proc archiveOn(name: string; target: RealizationTarget): ArchiveRealization =
+  let r = resolveProfilePackage(name, target, @[rkTarball])
+  check r.selection.kind == rkTarball
+  archiveRealizationOf(name, r.selection.tarball)
 
 suite "PMC-1 — declaring platforms: changes no existing resolution":
 
   test "t_declared_platforms_change_no_existing_resolution":
-    let sandbox = getTempDir() / "pmc1-no-such-scoop-root"
-    putEnv("SCOOP", sandbox)
-    putEnv("REPRO_TEST_SCOOP_OVERRIDE", sandbox / "no-such-scoop.exe")
-    defer:
-      delEnv("SCOOP")
-      delEnv("REPRO_TEST_SCOOP_OVERRIDE")
-
-    var cat = openProductionCatalog()
 
     # ---- (1) Windows-only entry: innounp --------------------------------
     block windowsOnlyEntry:
-      let r = chainResolvePackage(cat, "innounp", chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poWindows)
-      check r.adapter == cakBuiltin
+      let r = archiveOn("innounp", windows)
       check r.resolvedVersion == "2.67.9"
       check r.builtinVersion == "2.67.9"
       check r.urlUsed == "https://raw.githubusercontent.com/jrathlev/" &
@@ -107,11 +117,9 @@ suite "PMC-1 — declaring platforms: changes no existing resolution":
       check r.executableName == "innounp.exe"
       check r.extractPath == ""
 
-    # ---- (2) multi-arm entry: gh, on both hosts -------------------------
+    # ---- (2) multi-arm entry: gh, on both targets -----------------------
     block multiArmEntryWindows:
-      let r = chainResolvePackage(cat, "gh", chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poWindows)
-      check r.adapter == cakBuiltin
+      let r = archiveOn("gh", windows)
       check r.resolvedVersion == "2.93.0"
       check r.urlUsed == "https://github.com/cli/cli/releases/download/" &
         "v2.93.0/gh_2.93.0_windows_amd64.zip"
@@ -120,90 +128,81 @@ suite "PMC-1 — declaring platforms: changes no existing resolution":
         "77aa01ed7317295ad550de0ad04f3f276b1ef0e9272e3d002ac28dd99853d211"
       check r.archiveFormat == afZip
       check r.installMethod == imExtract
-      check r.binRelpath == @["bin\\gh.exe"]
+      check r.binRelpath == @["bin/gh.exe"]
       check r.executableName == "gh.exe"
 
     block multiArmEntryLinux:
-      let r = chainResolvePackage(cat, "gh", chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poLinux)
-      check r.adapter == cakBuiltin
-      check r.resolvedVersion == "2.93.0"
-      check r.urlUsed == "https://github.com/cli/cli/releases/download/" &
+      let resolution = resolveProfilePackage("gh", linux, @[rkTarball])
+      let record = resolution.selection.tarball
+      check record.url == "https://github.com/cli/cli/releases/download/" &
         "v2.93.0/gh_2.93.0_linux_amd64.tar.gz"
-      check r.digestAlgorithm == "sha256"
-      check r.digestValue ==
+      check record.sha256 ==
         "02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0"
-      # The per-platform overrides still fire.
-      check r.archiveFormat == afTarGz
-      check r.installMethod == imExtract
-      check r.binRelpath == @["gh_2.93.0_linux_amd64/bin/gh"]
-      check r.executableName == "gh"
+      check record.detail.version == "2.93.0"
+      # The per-platform shape still fires: a tar.gz with one directory
+      # stripped, realized by the `uses:` provisioning edge.
+      check record.archiveType == "tar.gz"
+      check record.stripComponents == 1
+      check record.executablePath == "bin/gh"
+      check resolution.archiveRoute == arExtract
 
     # ---- (3) none of the slice declares availability --------------------
     block noneDeclared:
-      # PMC-5 note: ``innounp`` USED to be this block's Windows-only
-      # specimen. PMC-5 declares it (it genuinely cannot exist off Windows),
-      # so it moved to the `declaredWindowsOnlyEntry` block below. ``python3``
-      # replaces it here: its catalog is Windows-only too, but only because
-      # just the Windows slice was harvested, so it stays deliberately
-      # UNDECLARED and is the right specimen for "the gate must not fire".
-      for name in ["python3", "gh", "atk", "jdk", "cmake"]:
+      # ``python3`` and ``php`` carry Windows-only harvested archives and stay
+      # deliberately UNDECLARED: the right specimens for "the gate must not
+      # fire".
+      for name in ["python3", "php", "gh", "atk", "jdk", "cmake"]:
         let availability = packageAvailability(name)
         check not availability.declared
-        # And an undeclared package is available on every host, including
-        # ones no arm covers — the gate must not fire for it.
+        # And an undeclared package is available on every target, including
+        # ones no realization covers — the gate must not fire for it.
         check availability.isAvailableOn(pcX86_64, poLinux)
         check availability.isAvailableOn(pcAArch64, poMacos)
 
-    # ---- (4) an UNDECLARED windows-only catalog on linux: unchanged -----
-    # The property this block pins is that a package nobody declared keeps its
-    # pre-PMC-1 failure exactly. The specimen changed from ``innounp`` to
-    # ``python3`` when PMC-5 declared innounp; the property did not.
+    # ---- (4) an UNDECLARED windows-only entry on linux: the generic miss -
     block undeclaredWindowsOnlyEntryOnLinux:
       var raised = false
       try:
-        discard chainResolvePackage(cat, "python3",
-          chain = @[cakBuiltin, cakNix], hostCpu = pcX86_64, hostOs = poLinux)
-      except EPackageUnavailableOnPlatform as err:
+        discard resolveProfilePackage("php", linux, @[rkTarball, rkNix])
+      except EPlatformUnavailable as err:
         checkpoint "undeclared package gained a platform gate: " & err.msg
         check false
-      except EAdapterChainExhausted as err:
+      except EMissingRealization as err:
         raised = true
-        check err.packageId == "python3"
-        check err.msg.contains("adapter chain exhausted")
+        check err.packageName == "php"
+        check err.definitionKnown
+        check err.msg.contains("no realization of package 'php'")
+        check err.msg.contains("x86_64-linux")
       check raised
 
-    # ---- (4b) PMC-5: a DECLARED windows-only entry now fails with a reason
-    # The counterpart, and the reason the specimen above had to move. This is
-    # the behaviour change PMC-5 exists to make, asserted here rather than
-    # left as an unexplained edit to the block above.
+    # ---- (4b) PMC-5: a DECLARED windows-only entry fails with a reason ---
     block declaredWindowsOnlyEntry:
       var raised = false
       try:
-        discard chainResolvePackage(cat, "innounp",
-          chain = @[cakBuiltin, cakNix], hostCpu = pcX86_64, hostOs = poLinux)
-      except EPackageUnavailableOnPlatform as err:
+        discard resolveProfilePackage("innounp", linux, @[rkTarball, rkNix])
+      except EPlatformUnavailable as err:
         raised = true
-        check err.packageId == "innounp"
+        check err.packageName == "innounp"
         # Named, not merely refused -- PMC-1's whole point.
         check err.msg.contains("windows")
-      except EAdapterChainExhausted:
-        checkpoint "innounp is declared but still exhausted the chain; the " &
-          "PMC-5 declaration is not reaching the gate"
+      except EMissingRealization:
+        checkpoint "innounp is declared but reached the policy; the " &
+          "declaration is not reaching the gate"
         check false
       check raised
 
-    # ---- (5) nix-only entry: the OLD failure, unchanged -----------------
+    # ---- (5) nix-only entry: not gated ----------------------------------
     block nixOnlyEntry:
+      let viaNix = resolveProfilePackage("atk", linux, @[rkNix, rkTarball])
+      check viaNix.selection.kind == rkNix
       var raised = false
       try:
-        discard chainResolvePackage(cat, "atk",
-          chain = @[cakNix, cakBuiltin], hostCpu = pcX86_64, hostOs = poLinux)
-      except EPackageUnavailableOnPlatform as err:
+        discard resolveProfilePackage("atk", linux, @[rkTarball])
+      except EPlatformUnavailable as err:
         checkpoint "nix-only package gained a platform gate: " & err.msg
         check false
-      except EAdapterChainExhausted as err:
+      except EMissingRealization as err:
         raised = true
-        check err.packageId == "atk"
-        check err.msg.contains("no built-in catalog registered for 'atk'")
+        check err.packageName == "atk"
+        check err.msg.contains("no tarball realization declared")
       check raised

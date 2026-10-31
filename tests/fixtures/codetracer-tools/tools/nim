@@ -1,0 +1,23 @@
+#!/bin/sh
+# Forwards to the next `nim` on PATH after this directory: the dev-shell Nim
+# the test runs under, never CodeTracer's bundled one. Under fork pressure the
+# bundled Nim has reported `[SuccessX]` and left no binary on disk (macOS);
+# the dev-shell Nim does not. Resolved at run time rather than written into
+# this file, so the directory is the same bytes on every host and is shared
+# by every case.
+set -euf
+self_dir=$(dirname "$0")
+after_self=0
+IFS=:
+for dir in $PATH; do
+  if [ -z "$dir" ]; then
+    continue
+  fi
+  if [ "$dir" -ef "$self_dir" ]; then
+    after_self=1
+  elif [ "$after_self" = 1 ] && [ -f "$dir/nim" ] && [ -x "$dir/nim" ]; then
+    exec "$dir/nim" "$@"
+  fi
+done
+echo "nim fixture: no nim on PATH after $self_dir" >&2
+exit 127

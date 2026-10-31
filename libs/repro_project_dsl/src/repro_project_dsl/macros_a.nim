@@ -164,8 +164,12 @@ proc placementLiteral(node: NimNode; fallback: CliArgPlacement):
     fallback
 
 proc lineFile(node: NimNode): tuple[file: string; line: int] =
+  ## The source site the DSL RECORDS for `node`. Nim's line information is
+  ## always absolute; a recipe-relative provider compile names the recipe's
+  ## own files relative to it instead (`recipeSourceName`), so the provider
+  ## binary describes the copy of the recipe it runs beside.
   let info = node.lineInfoObj()
-  (info.filename, info.line)
+  (recipeSourceName(info.filename), info.line)
 
 proc calleeName(node: NimNode): string =
   if node.kind in {nnkCall, nnkCommand} and node.len > 0:
@@ -558,6 +562,8 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
                    parentParams: openArray[CliParamDef];
                    parentOutputFlags: openArray[string];
                    parentTypedOutputs: openArray[TypedOutputDef];
+                   parentRemoveBeforeRun: openArray[string];
+                   parentOptionalOutputs: openArray[string];
                    parentPolicy: BuildActionDependencyPolicy;
                    parentNonDeterminism: NonDeterminismDecl;
                    wholeBody: NimNode;
@@ -594,6 +600,8 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
   result.params = @parentParams
   result.outputFlags = @parentOutputFlags
   result.typedOutputs = @parentTypedOutputs
+  result.removeBeforeRunFlags = @parentRemoveBeforeRun
+  result.optionalOutputFlags = @parentOptionalOutputs
 
   for stmt in body:
     let head = calleeName(stmt).normalize
@@ -678,6 +686,64 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
                 "declared in this cli interface)", stmt)
           if result.outputFlags.find(flagName) < 0:
             result.outputFlags.add(flagName)
+    of "removebeforerun":
+      # ``removeBeforeRun <flag>...`` — outputs the engine removes before
+      # the edge runs, for a tool that refuses to write over an existing
+      # output (create-dmg's ``hdiutil convert``). Only an OUTPUT parameter
+      # may be named: that is what keeps the removal to paths the edge
+      # declares as its own, and it is checked here, where the author can
+      # still see the declaration.
+      if stmt.len < 2:
+        error("removeBeforeRun requires at least one output flag name", stmt)
+      var operands: seq[NimNode] = @[]
+      for i in 1 ..< stmt.len:
+        collectOutputsOperands(stmt[i], operands)
+      for operand in operands:
+        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("removeBeforeRun expects a flag name identifier, got: " &
+            operand.repr, operand)
+        let flagName = identText(operand)
+        var found = false
+        for param in result.params:
+          if param.name == flagName:
+            found = true
+            if param.role != carOutput:
+              error("removeBeforeRun: '" & flagName & "' is not an output " &
+                "(declare it with `role = output`); only an edge's own " &
+                "outputs may be removed before it runs", operand)
+            break
+        if not found:
+          error("removeBeforeRun: '" & flagName & "' is not a flag or " &
+            "positional visible in this cli scope", operand)
+        if result.removeBeforeRunFlags.find(flagName) < 0:
+          result.removeBeforeRunFlags.add(flagName)
+    of "optionaloutputs":
+      # Only the tool can declare an optional candidate. Require an output
+      # parameter so arbitrary input paths cannot be removed or claimed.
+      if stmt.len < 2:
+        error("optionalOutputs requires at least one output flag name", stmt)
+      var operands: seq[NimNode] = @[]
+      for i in 1 ..< stmt.len:
+        collectOutputsOperands(stmt[i], operands)
+      for operand in operands:
+        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("optionalOutputs expects a flag name identifier, got: " &
+            operand.repr, operand)
+        let flagName = identText(operand)
+        var found = false
+        for param in result.params:
+          if param.name == flagName:
+            found = true
+            if param.role != carOutput:
+              error("optionalOutputs: '" & flagName & "' is not an output " &
+                "(declare it with `role = output`); only an edge's own " &
+                "outputs may be optional", operand)
+            break
+        if not found:
+          error("optionalOutputs: '" & flagName & "' is not a flag or " &
+            "positional visible in this cli scope", operand)
+        if result.optionalOutputFlags.find(flagName) < 0:
+          result.optionalOutputFlags.add(flagName)
     of "subtools":
       if not isRoot:
         error("subTools is a property of the TOOL: declare it once, " &
@@ -691,7 +757,9 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
       let childBody = stmt[stmt.len - 1]
       discard parseCliScope(packageName, executableName, childBody,
         childPath, false, result.params, result.outputFlags,
-        result.typedOutputs, result.dependencyPolicy,
+        result.typedOutputs, result.removeBeforeRunFlags,
+        result.optionalOutputFlags,
+        result.dependencyPolicy,
         (result.nonDeterminism, result.nonDeterminismJustification),
         wholeBody, commands)
     else:
@@ -786,7 +854,7 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       # directly under ``cli:`` and seeds the cumulative output set that
       # each subcommand inherits, all in one source-order pass.
       let rootCmd = parseCliScope(packageName, result.exportName, cliBody,
-        @[], true, @[], @[], @[], defaultDependencyPolicy(),
+        @[], true, @[], @[], @[], @[], @[], defaultDependencyPolicy(),
         # M6: every tool starts UNBLESSED. A tool is blessed only where its
         # own spec says so, in writing, with a reason.
         (ndpUnblessed, ""), cliBody,
@@ -1070,23 +1138,22 @@ proc selectorFromConstraint(value: string): string =
   else:
     parts[0]
 
-proc selectorModuleName(selector: string): string =
-  var previousWasWord = false
-  for ch in selector:
-    if ch.isAlphaNumeric():
-      if ch.isUpperAscii() and previousWasWord and
-          result.len > 0 and result[^1] != '_':
-        result.add('_')
-      result.add(ch.toLowerAscii())
-      previousWasWord = true
-    else:
-      if result.len > 0 and result[^1] != '_':
-        result.add('_')
-      previousWasWord = false
-  while result.len > 0 and result[^1] == '_':
-    result.setLen(result.len - 1)
-  if result.len == 0:
-    result = "package"
+proc packageNameText(name: NimNode): string =
+  ## The canonical package name a ``package`` declaration names. It is a
+  ## selector string, like a ``uses:`` selector, so besides the identifier
+  ## form (``package just:``) it may be written as a string literal
+  ## (``package "7zip":``) — the only spelling of a name that is not a Nim
+  ## identifier, such as one starting with a digit. A Nim keyword may also
+  ## be written backtick-quoted (`` package `nil`: ``). Every Nim identifier
+  ## the macro emits is derived from it through ``selectorModuleName``, which
+  ## escapes a digit-led or keyword name (``pkg_7zip``, ``pkg_nil``).
+  case name.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    if name.strVal.strip().len == 0:
+      error("a package name must not be empty", name)
+    result = name.strVal
+  else:
+    result = identText(name)
 
 proc packageMarkerName(packageName: string): string =
   "reprobuildPackageMarker_" & selectorModuleName(packageName)
@@ -1484,6 +1551,253 @@ proc unsafeRelativePath(value: string): bool =
     if part == "..":
       return true
 
+const TarballInstallMethods* = ["extract", "installer-silent",
+    "msys2-pacman", "source-bootstrap", "installer-msi",
+    "installer-nsis-bundle", "installer-nsis", "installer-inno-setup",
+    "app-bundle", "pkg-install"]
+  ## GM4b: the closed set a ``tarball installMethod = "..."`` accepts. It is
+  ## the token set of ``packages_schema.InstallMethod``, which this module
+  ## cannot import (the stdlib depends on the DSL, not the reverse);
+  ## ``t_tarball_archive_detail_fields`` asserts the two stay equal.
+
+proc parseTarballArchiveDetail(node: NimNode;
+                               detail: var TarballArchiveDetail): bool =
+  ## GM4b: one named argument of a ``tarball`` statement that belongs to the
+  ## archive-realization detail (``TarballArchiveDetail``). Returns true when
+  ## ``node`` was such an argument. Strings are kept as EXPRESSION SOURCE,
+  ## like every other tarball field; repeatable arguments (one per value,
+  ## like ``mirror`` and ``prune``) append.
+  if node.kind != nnkExprEqExpr:
+    return false
+  let name = identText(node[0]).normalize
+  let value = node[1]
+  case name
+  of "version": detail.version = exprCode(value)
+  of "sha512": detail.sha512 = exprCode(value)
+  of "sha1": detail.sha1 = exprCode(value)
+  of "installmethod":
+    let text = litText(value)
+    if text.len > 0 and text notin TarballInstallMethods:
+      error("tarball installMethod must be one of " &
+        TarballInstallMethods.join("|") & "; got '" & text & "'", node)
+    detail.installMethod = exprCode(value)
+  of "extractpath": detail.extractPath = exprCode(value)
+  of "extraexecutable":
+    let text = litText(value)
+    if text.len > 0 and text.unsafeRelativePath:
+      error("tarball extraExecutable must be relative to the realized " &
+        "prefix", node)
+    detail.extraExecutables.add(exprCode(value))
+  of "installerarg": detail.installerArgs.add(exprCode(value))
+  of "pacmanpackage": detail.pacmanPackages.add(exprCode(value))
+  of "bootstraparg": detail.bootstrapArgv.add(exprCode(value))
+  of "env":
+    let text = litText(value)
+    if text.len > 0 and (text.find('=') <= 0):
+      error("tarball env must be \"NAME=value\"; got '" & text & "'", node)
+    detail.env.add(exprCode(value))
+  of "nested7z": detail.nested7z = boolLiteral(value, false)
+  of "msiadmininstall": detail.msiAdminInstall = boolLiteral(value, false)
+  of "preinstall": detail.preInstall.add(exprCode(value))
+  of "preinstallunrecognized":
+    detail.preInstallUnrecognized.add(exprCode(value))
+  of "launcheremit": detail.launcherEmit.add(exprCode(value))
+  of "cpulevel": detail.cpuLevel = exprCode(value)
+  of "cpufeatures": detail.cpuFeatures = exprCode(value)
+  of "appbundle": detail.appBundle = exprCode(value)
+  of "bundleid": detail.bundleId = exprCode(value)
+  of "teamid": detail.teamId = exprCode(value)
+  of "installerapp": detail.installerApp = exprCode(value)
+  else:
+    return false
+  true
+
+const
+  MacosAppInstallMethods = ["app-bundle", "pkg-install", "installer-silent"]
+    ## GM4c: the install methods a record that names an ``appBundle`` may
+    ## declare. ``app-bundle`` and ``installer-silent`` (an installer
+    ## application, with ``installerApp``) are realized by the home archive
+    ## realizer; ``pkg-install`` is a vendor shape declared for completeness
+    ## and refused at realization (Store-And-Installation-Layout.md § macOS
+    ## Application Bundles, "Installer applications" and "Shapes this does
+    ## not cover").
+  AppBundleArchiveTypes = ["dmg", "pkg", "zip", "tar.gz", "tar.xz",
+    "tar.bz2"]
+    ## GM4c: the archive types an ``app-bundle`` realization unpacks.
+  InstallerAppArchiveTypes = ["dmg", "zip", "tar.gz", "tar.xz", "tar.bz2"]
+    ## The archive types an installer application is copied out of. Not
+    ## ``pkg``: a flat installer package that must run is ``pkg-install``.
+
+proc validMacosTeamId(text: string): bool =
+  ## Apple team identifiers are ten upper-case letters and digits.
+  if text.len != 10:
+    return false
+  for ch in text:
+    if ch notin {'A'..'Z', '0'..'9'}:
+      return false
+  true
+
+proc validateMacosAppRecord(node: NimNode) =
+  ## GM4c: authoring-time rules for the macOS application fields. A record
+  ## that names an ``appBundle`` must say which bundle it delivers and who
+  ## signs it, because realization refuses anything it cannot verify against
+  ## those declarations. Only LITERAL values are inspected; an expression is
+  ## validated where it is evaluated (the realizer re-checks every rule).
+  ##
+  ## A macOS ``installer-silent`` record (an installer application,
+  ## Store-And-Installation-Layout.md § Installer applications) also names
+  ## the installer (``installerApp``) and its unattended arguments, and its
+  ## ``appBundle`` / ``executablePath`` are paths in the INSTALLED prefix.
+  var methodNode, appBundleNode, bundleIdNode, teamIdNode, versionNode,
+    archiveNode, exeNode, sha256Node, installerAppNode: NimNode = nil
+  var installerArgCount = 0
+  var extraExecutableNodes: seq[NimNode] = @[]
+  for i in 1 ..< node.len:
+    let arg = node[i]
+    if arg.kind != nnkExprEqExpr:
+      continue
+    case identText(arg[0]).normalize
+    of "extraexecutable": extraExecutableNodes.add arg[1]
+    of "installmethod": methodNode = arg[1]
+    of "appbundle": appBundleNode = arg[1]
+    of "bundleid": bundleIdNode = arg[1]
+    of "teamid": teamIdNode = arg[1]
+    of "version": versionNode = arg[1]
+    of "archivetype": archiveNode = arg[1]
+    of "executablepath": exeNode = arg[1]
+    of "sha256": sha256Node = arg[1]
+    of "installerapp": installerAppNode = arg[1]
+    of "installerarg": inc installerArgCount
+    else: discard
+  let methodText = litText(methodNode)
+  let anyAppField = not appBundleNode.isNil or not bundleIdNode.isNil or
+    not teamIdNode.isNil
+  # An installer-silent record is an installer APPLICATION when it names one
+  # or any application field; one without either is a Windows installer.
+  let installerApp = methodText == "installer-silent" and
+    (not installerAppNode.isNil or anyAppField)
+  let wantsApp = methodText == "app-bundle" or
+    methodText == "pkg-install" or installerApp
+  if not installerAppNode.isNil and methodText != "installer-silent":
+    error("tarball installerApp names the installer application of a " &
+      "macOS installer-silent record; declare installMethod = " &
+      "\"installer-silent\"" &
+      (if methodText.len > 0: ", not '" & methodText & "'" else: ""), node)
+  if not wantsApp and not anyAppField:
+    return
+  if anyAppField and methodNode.isNil:
+    error("tarball appBundle / bundleId / teamId describe a macOS " &
+      "application; declare installMethod = \"app-bundle\" (or the " &
+      "vendor shape it has)", node)
+  if anyAppField and methodText.len > 0 and
+      methodText notin MacosAppInstallMethods:
+    error("tarball appBundle / bundleId / teamId describe a macOS " &
+      "application; installMethod must be one of " &
+      MacosAppInstallMethods.join("|") & ", got '" & methodText & "'", node)
+  if installerApp and installerAppNode.isNil:
+    error("a macOS installer-silent tarball is an installer application: " &
+      "it needs installerApp = \"<Installer>.app\", the installer's path " &
+      "inside the archive", node)
+  if appBundleNode.isNil or bundleIdNode.isNil or teamIdNode.isNil:
+    error("a macOS application tarball needs appBundle = \"<Name>.app\", " &
+      "bundleId = \"<CFBundleIdentifier>\" and teamId = \"<signing team>\"; " &
+      "realization verifies the bundle against all three", node)
+  if wantsApp and versionNode.isNil:
+    error("a macOS application tarball needs version = \"<" &
+      "CFBundleShortVersionString>\"", node)
+  if wantsApp and sha256Node.isNil:
+    # The archive is attached or expanded before any signature is checked,
+    # so its bytes must be pinned by a strong digest first.
+    error("a macOS application tarball needs sha256 = \"<digest>\"; " &
+      "sha512 / sha1 alone are not accepted for an application archive",
+      node)
+  if installerApp and installerArgCount == 0:
+    # Nothing is appended to the declared arguments, so an installer run
+    # without any would install interactively, or to its default location.
+    error("a macOS installer application tarball needs its unattended " &
+      "arguments as installerArg = \"...\" (install4j: \"-q\", \"-dir\", " &
+      "\"${install_dir}/<Product>\")", node)
+  let teamText = litText(teamIdNode)
+  if teamIdNode.isStrLit and not validMacosTeamId(teamText):
+    error("tarball teamId must be a 10-character Apple team identifier " &
+      "(upper-case letters and digits); got '" & teamText & "'", node)
+  let bundleText = litText(appBundleNode)
+  if appBundleNode.isStrLit:
+    if bundleText.unsafeRelativePath or not bundleText.endsWith(".app"):
+      error("tarball appBundle must be a relative path inside the archive " &
+        "that names a .app bundle; got '" & bundleText & "'", node)
+  if methodText == "app-bundle":
+    let archiveText = litText(archiveNode)
+    if archiveNode.isNil or (archiveNode.isStrLit and
+        archiveText.toLowerAscii() notin AppBundleArchiveTypes):
+      error("an app-bundle tarball's archiveType must be one of " &
+        AppBundleArchiveTypes.join("|") & "; got '" & archiveText & "'",
+        node)
+    let exeText = litText(exeNode)
+    if appBundleNode.isStrLit and exeNode.isStrLit:
+      let leaf = bundleText.replace('\\', '/').split('/')[^1]
+      if not exeText.startsWith(leaf & "/"):
+        error("an app-bundle tarball's executablePath is relative to the " &
+          "realized prefix, which holds the bundle at its root: it must " &
+          "start with '" & leaf & "/'; got '" & exeText & "'", node)
+    if appBundleNode.isStrLit:
+      # The commands an application exports (Store-And-Installation-
+      # Layout.md § macOS Application Bundles, "Command line") are paths
+      # inside its bundle, relative to the prefix like executablePath.
+      let leaf = bundleText.replace('\\', '/').split('/')[^1]
+      for extraNode in extraExecutableNodes:
+        if not extraNode.isStrLit:
+          continue
+        let extraText = litText(extraNode)
+        var inside = extraText.startsWith(leaf & "/")
+        for part in extraText.replace('\\', '/').split('/'):
+          if part.len == 0 or part == "." or part == "..":
+            inside = false
+        if not inside:
+          error("an app-bundle tarball's extraExecutable names a command " &
+            "inside the bundle, relative to the realized prefix: it must " &
+            "start with '" & leaf & "/' and contain no '.' or '..' " &
+            "component; got '" & extraText & "'", node)
+  if installerApp:
+    let archiveText = litText(archiveNode)
+    if archiveNode.isNil or (archiveNode.isStrLit and
+        archiveText.toLowerAscii() notin InstallerAppArchiveTypes):
+      error("an installer application tarball's archiveType must be one " &
+        "of " & InstallerAppArchiveTypes.join("|") & " (a flat installer " &
+        "package that must run is installMethod pkg-install); got '" &
+        archiveText & "'", node)
+    let installerText = litText(installerAppNode)
+    if installerAppNode.isStrLit and (installerText.unsafeRelativePath or
+        not installerText.endsWith(".app")):
+      error("tarball installerApp must be a relative path inside the " &
+        "archive that names a .app bundle; got '" & installerText & "'",
+        node)
+    if appBundleNode.isStrLit:
+      # The first component is the placed item: the bundle itself, or the
+      # folder holding it -- never a bundle with another bundle inside. One
+      # or two components: the folder identity pins only the bundles
+      # directly in the placed folder, so the product must be one of them.
+      let parts = bundleText.replace('\\', '/').split('/')
+      if parts.len > 2:
+        error("an installer application's appBundle is the product bundle " &
+          "in the installed prefix, as '<Name>.app' or '<Folder>/<Name>.app' " &
+          "(one or two components); got '" & bundleText & "'", node)
+      for part in parts:
+        if part.len == 0 or part == "." or part.startsWith("."):
+          error("an installer application's appBundle has an empty, '.' or " &
+            "hidden component; got '" & bundleText & "'", node)
+      if parts.len > 1 and parts[0].endsWith(".app"):
+        error("an installer application's appBundle is the product bundle " &
+          "in the installed prefix; its first component is the placed item " &
+          "(the bundle, or the folder holding it), which must not itself " &
+          "be a .app bundle; got '" & bundleText & "'", node)
+    let exeText = litText(exeNode)
+    if appBundleNode.isStrLit and exeNode.isStrLit and
+        not exeText.startsWith(bundleText & "/"):
+      error("an installer application's executablePath is relative to the " &
+        "installed prefix and lies inside the product bundle: it must " &
+        "start with '" & bundleText & "/'; got '" & exeText & "'", node)
+
 proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   let loc = lineFile(node)
   if calleeName(node).normalize != "tarball":
@@ -1508,6 +1822,8 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     packageIdNode, lockIdentityNode: NimNode = nil
     stripComponentsNode: NimNode = nil
   for i in 1 ..< node.len:
+    if parseTarballArchiveDetail(node[i], result.detail):
+      continue
     let urlValue = namedValue(node[i], "url")
     if not urlValue.isNil:
       urlNode = urlValue
@@ -1585,13 +1901,21 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   # diagnostic below.
   if urlNode.isNil:
     error("tarball requires url = \"...\"", node)
-  if sha256Node.isNil:
-    error("tarball requires sha256 = \"...\"", node)
+  # GM4b: an upstream that publishes no SHA-256 (Maven and the .NET SDK
+  # publish SHA-512, Free Pascal only SHA-1) is pinned by the digest it does
+  # publish. One of the three is still required.
+  let hasAlternativeDigest =
+    result.detail.sha512.len > 0 or result.detail.sha1.len > 0
+  if sha256Node.isNil and not hasAlternativeDigest:
+    error("tarball requires sha256 = \"...\" (or sha512 / sha1 when " &
+      "upstream publishes no SHA-256)", node)
   if executablePathNode.isNil:
     error("tarball requires executablePath = \"bin/name\"", node)
+  validateMacosAppRecord(node)
   if urlNode.isStrLit and urlNode.strVal.len == 0:
     error("tarball requires url = \"...\"", node)
-  if sha256Node.isStrLit and sha256Node.strVal.len == 0:
+  if not sha256Node.isNil and sha256Node.isStrLit and
+      sha256Node.strVal.len == 0:
     error("tarball requires sha256 = \"...\"", node)
   if executablePathNode.isStrLit and executablePathNode.strVal.len == 0:
     error("tarball requires executablePath = \"bin/name\"", node)
@@ -1609,8 +1933,13 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   if result.stripComponents < 0:
     error("tarball stripComponents must not be negative", node)
   let cpuText = litText(cpuNode)
-  if cpuText.len > 0 and cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
-    error("tarball cpu must be one of any|x86_64|aarch64; got '" &
+  # `armv7` is the cache's family for every supported 32-bit ARM target
+  # (`packages_schema.parsePlatformCpuToken`); a `tarball` arm keyed by it is
+  # how a TARGET-platform component (`packages/rust_std.nim`) is catalogued
+  # for the Add-On Mode appliances (ReproOS-Add-On-Mode A15).
+  if cpuText.len > 0 and
+      cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64", "armv7"]:
+    error("tarball cpu must be one of any|x86_64|aarch64|armv7; got '" &
       cpuText & "'", node)
   let osText = litText(osNode)
   if osText.len > 0 and
@@ -1622,7 +1951,15 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   if packageIdNode.isNil:
     result.packageId = result.url
   if lockIdentityNode.isNil:
-    result.lockIdentity = "(\"sha256:\" & (" & result.sha256 & "))"
+    # The derived identity names the digest that pins the archive, in the
+    # precedence realization verifies it (sha256, then sha512, then sha1).
+    result.lockIdentity =
+      if not sha256Node.isNil:
+        "(\"sha256:\" & (" & result.sha256 & "))"
+      elif result.detail.sha512.len > 0:
+        "(\"sha512:\" & (" & result.detail.sha512 & "))"
+      else:
+        "(\"sha1:\" & (" & result.detail.sha1 & "))"
 
 proc parseScoopProvisioning(node: NimNode): ScoopProvisioningDef =
   let loc = lineFile(node)
@@ -1738,6 +2075,14 @@ proc collectProvisioning(node: NimNode;
       tarballOutput.add(parseTarballProvisioning(node))
     elif calleeName(node).normalize == "scoopapp":
       scoopOutput.add(parseScoopProvisioning(node))
+    elif calleeName(node).normalize in ["brewcask", "brewformula"]:
+      # Homebrew records are bridge records for consumers that still install
+      # through Homebrew; Reprobuild never realizes them, so a package's own
+      # realizations cannot include one (Provisioning-Contributions.md
+      # §"Homebrew bridge records").
+      error(calleeName(node) & " is a contribution-only Homebrew bridge " &
+        "record: declare it in a provisioningFor block of a Homebrew " &
+        "contribution catalog, not in a package's provisioning:", node)
     else:
       error("unsupported provisioning form: " & node.repr, node)
   else:
@@ -2269,7 +2614,7 @@ proc parsePackageDef(name: NimNode; body: NimNode;
   ## ``platforms <expr>`` form; the legacy shapes still parse their own tokens,
   ## and a package with no ``platforms`` declaration ignores it entirely.
   let loc = lineFile(name)
-  result.packageName = identText(name)
+  result.packageName = packageNameText(name)
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   # The doc comment immediately preceding a statement documents THAT
@@ -2364,7 +2709,8 @@ proc parsePackageDef(name: NimNode; body: NimNode;
       let psLoc = stmt.lineInfoObj
       result.packageSources.add(PackageSourceDecl(
         packageName: sourcedPackage, source: provenance,
-        sourceFile: psLoc.filename, sourceLine: psLoc.line))
+        sourceFile: recipeSourceName(psLoc.filename),
+        sourceLine: psLoc.line))
     elif calleeName(stmt).normalize == "uses":
       # Entries arrive in `resolvedUses`, routed below: stage 1 lowered this
       # block into an expression and the compiler evaluated its `when`s.
@@ -2644,6 +2990,67 @@ proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
       ", depKind: " & escForCode(useDef.depKind) & ")")
   result.add("]")
 
+proc codeListLiteral(codes: openArray[string]): string =
+  ## ``@[<code>, <code>]`` from expression-source strings, spliced verbatim.
+  result = "@["
+  for i, code in codes:
+    if i > 0:
+      result.add(", ")
+    result.add(code)
+  result.add("]")
+
+proc tarballArchiveDetailLiteral*(detail: TarballArchiveDetail): string =
+  ## GM4b: the ``TarballArchiveDetail(...)`` literal for a macro-time detail
+  ## whose fields hold expression SOURCE. The single emitter both the
+  ## in-package and the ``provisioningFor`` routes use.
+  "TarballArchiveDetail(version: " & codeOrEmpty(detail.version) &
+    ", sha512: " & codeOrEmpty(detail.sha512) &
+    ", sha1: " & codeOrEmpty(detail.sha1) &
+    ", installMethod: " & codeOrEmpty(detail.installMethod) &
+    ", extractPath: " & codeOrEmpty(detail.extractPath) &
+    ", extraExecutables: " & codeListLiteral(detail.extraExecutables) &
+    ", installerArgs: " & codeListLiteral(detail.installerArgs) &
+    ", pacmanPackages: " & codeListLiteral(detail.pacmanPackages) &
+    ", bootstrapArgv: " & codeListLiteral(detail.bootstrapArgv) &
+    ", env: " & codeListLiteral(detail.env) &
+    ", nested7z: " & $detail.nested7z &
+    ", msiAdminInstall: " & $detail.msiAdminInstall &
+    ", preInstall: " & codeListLiteral(detail.preInstall) &
+    ", preInstallUnrecognized: " &
+      codeListLiteral(detail.preInstallUnrecognized) &
+    ", launcherEmit: " & codeListLiteral(detail.launcherEmit) &
+    ", cpuLevel: " & codeOrEmpty(detail.cpuLevel) &
+    ", cpuFeatures: " & codeOrEmpty(detail.cpuFeatures) &
+    ", appBundle: " & codeOrEmpty(detail.appBundle) &
+    ", bundleId: " & codeOrEmpty(detail.bundleId) &
+    ", teamId: " & codeOrEmpty(detail.teamId) &
+    ", installerApp: " & codeOrEmpty(detail.installerApp) & ")"
+
+proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
+  ## The ``TarballProvisioningDef(...)`` literal for a macro-time record.
+  ## ONE emitter for both routes a tarball realization takes — an in-package
+  ## ``provisioning:`` block (``packageLiteral``) and a ``provisioningFor``
+  ## contribution (``provisioningContributionLiteral``): they are the same
+  ## declaration, and two emitters had to be kept in step by hand.
+  result = "TarballProvisioningDef(url: " & codeOrEmpty(provisioning.url) &
+    ", mirrors: " & codeListLiteral(provisioning.mirrors) &
+    ", prunePaths: " & codeListLiteral(provisioning.prunePaths) &
+    ", sha256: " & codeOrEmpty(provisioning.sha256) &
+    ", detail: " & tarballArchiveDetailLiteral(provisioning.detail) &
+    ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
+    ", nonRedistributable: " & $provisioning.nonRedistributable &
+    ", launcher: " & codeOrEmpty(provisioning.launcher) &
+    ", closureManifest: " & codeOrEmpty(provisioning.closureManifest) &
+    ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
+    ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
+    ", stripComponents: " & $provisioning.stripComponents &
+    ", packageId: " & codeOrEmpty(provisioning.packageId) &
+    ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+    ", cpu: " & codeOrEmpty(provisioning.cpu) &
+    ", os: " & codeOrEmpty(provisioning.os) &
+    ", sourceFile: " & escForCode(provisioning.sourceFile) &
+    ", sourceLine: " & $provisioning.sourceLine & ")"
+
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
     ", lockFile: " & escForCode(pkg.lockFile) &
@@ -2684,35 +3091,11 @@ proc packageLiteral(pkg: PackageDef): string =
   for provisioningIndex, provisioning in pkg.tarballProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
-    # Every string field below already holds emittable SOURCE (see
-    # ``parseTarballProvisioning``), so it is spliced verbatim. Wrapping it in
-    # ``escForCode`` here is what turned `sha256 = PinnedSha` into the literal
-    # string "PinnedSha".
-    result.add("TarballProvisioningDef(url: " & codeOrEmpty(provisioning.url) &
-      ", mirrors: @[")
-    for mirrorIndex, mirror in provisioning.mirrors:
-      if mirrorIndex > 0:
-        result.add(", ")
-      result.add(mirror)
-    result.add("], prunePaths: @[")
-    for pruneIndex, prunePath in provisioning.prunePaths:
-      if pruneIndex > 0:
-        result.add(", ")
-      result.add(prunePath)
-    result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
-      ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
-      ", nonRedistributable: " & $provisioning.nonRedistributable &
-      ", launcher: " & codeOrEmpty(provisioning.launcher) &
-      ", closureManifest: " & codeOrEmpty(provisioning.closureManifest) &
-    ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
-      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
-      ", stripComponents: " & $provisioning.stripComponents &
-      ", packageId: " & codeOrEmpty(provisioning.packageId) &
-      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
-      ", cpu: " & codeOrEmpty(provisioning.cpu) &
-      ", os: " & codeOrEmpty(provisioning.os) &
-      ", sourceFile: " & escForCode(provisioning.sourceFile) &
-      ", sourceLine: " & $provisioning.sourceLine & ")")
+    # Every string field already holds emittable SOURCE (see
+    # ``parseTarballProvisioning``), so ``tarballProvisioningLiteral`` splices
+    # it verbatim. Wrapping it in ``escForCode`` is what once turned
+    # `sha256 = PinnedSha` into the literal string "PinnedSha".
+    result.add(tarballProvisioningLiteral(provisioning))
   result.add("], scoopProvisioning: @[")
   for provisioningIndex, provisioning in pkg.scoopProvisioning:
     if provisioningIndex > 0:
@@ -2805,6 +3188,9 @@ proc packageLiteral(pkg: PackageDef): string =
         ", nonDeterminismJustification: " &
           escForCode(cmd.nonDeterminismJustification) &
         ", subTools: @[" & escapedCodeList(cmd.subTools) &
+        "], removeBeforeRunFlags: @[" &
+          escapedCodeList(cmd.removeBeforeRunFlags) &
+        "], optionalOutputFlags: @[" & escapedCodeList(cmd.optionalOutputFlags) &
         "], outputFlags: @[")
       for ofIndex, flagName in cmd.outputFlags:
         if ofIndex > 0:
@@ -3299,6 +3685,12 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     if cmd.subTools.len > 0:
       result.add("  appendRegisteredActionSubToolRefs(" & actionRef &
         ".id, [" & escapedCodeList(cmd.subTools) & "])\n")
+    if cmd.removeBeforeRunFlags.len > 0:
+      result.add("  appendRegisteredActionRemoveBeforeRun(" & actionRef &
+        ".id, call, [" & escapedCodeList(cmd.removeBeforeRunFlags) & "])\n")
+    if cmd.optionalOutputFlags.len > 0:
+      result.add("  markRegisteredActionOptionalOutputs(" & actionRef &
+        ", call, [" & escapedCodeList(cmd.optionalOutputFlags) & "])\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
     # ``emitTypedOutputBindings`` helper handles both the typed-handle
@@ -3480,7 +3872,7 @@ proc workspaceProducerLocation(selector, consumerSourceFile: string):
   # WORKSPACE-ROOT sibling convention so a DEEP out-of-tree consumer (e.g. an
   # ``infra/tests/rp5c2/recipe.nim`` several dirs below the workspace root) can
   # still bind a producer checked out as a top-level workspace sibling
-  # (``<workspace>/vm-harness``) — the RP5c2 shape. It is purely additive: a
+  # (``<workspace>/gosti``) — the RP5c2 shape. It is purely additive: a
   # direct sibling is still found at the first level, so no existing discovery
   # changes; only the previously-unresolvable deeper case now resolves. The
   # nearest ancestor that owns a ``<selector>`` project wins, so a same-named
@@ -3528,7 +3920,7 @@ proc parseResourceModuleDecl*(reproSource, projectRoot: string):
   ## in the Nim VM at CONSUMER macro-expansion and never imports the producer.
   ##
   ## Grammar (indentation-delimited, matching the marker macro):
-  ##   resourceModule "src/vm_harness/repro/resources.nim":
+  ##   resourceModule "src/gosti/repro/resources.nim":
   ##     path "src"
   ##     path "vendor/foo"
   ##
@@ -3627,9 +4019,9 @@ proc workspaceProducerDeclaresResourceType(selector,
   ## grain ``workspaceProducerModule`` above already uses. It is deliberately
   ## conservative: any line whose first token is ``resourceType`` counts.
   ##
-  ## TI2 (separate-module producer — the RP5c2 vm-harness shape): a producer that
+  ## TI2 (separate-module producer — the RP5c2 gosti shape): a producer that
   ## keeps its ``resourceType`` blocks in a SEPARATE module (e.g.
-  ## ``src/vm_harness/repro/resources.nim``) and NAMES it via a
+  ## ``src/gosti/repro/resources.nim``) and NAMES it via a
   ## ``resourceModule "<path>"`` surface entry in ``repro.nim`` is ALSO detected
   ## here — its ``repro.nim`` has no inline ``resourceType`` line, so without
   ## this branch it would fall to SC-9's wholesale module import (dragging the
@@ -3838,7 +4230,7 @@ proc dslScratchRootFor*(workspaceRoot, consumerSourceFile: string): string =
   ## ancestor whose child the producer actually is — and NOT from counting
   ## directories up from the consumer's source file. Those two agree only when
   ## the consumer's ``uses:`` sits in its project's root module. ReproOS's does
-  ## not: its ``uses: "vm-harness"`` is in ``reproos/repro/workflows.nim`` and
+  ## not: its ``uses: "gosti"`` is in ``reproos/repro/workflows.nim`` and
   ## the producer resolves two levels up, at the workspace root.
   ##
   ## The fallback is the consumer's own project directory, used only when no
@@ -3880,6 +4272,14 @@ proc dirLooksWritable(dir: string): bool =
   ## internal to ``cmd.exe``. That matters because a macro shelling out at
   ## compile time runs inside a Nim compile action whose ``PATH`` is only
   ## ``<nim>/bin:<gcc-wrapper>/bin`` — see ``compile_time_shell.nim``.
+  ##
+  ## ``false`` does NOT by itself mean "not writable". The probe's answer is
+  ## read from ``staticExec`` output, and a compile that does not execute
+  ## ``staticExec`` (``nim check``) returns "" here for every directory. A
+  ## caller that turns ``false`` into a refusal must first ask
+  ## `staticExecRuns` whether the probe ran at all, as `requireDslScratchDir`
+  ## does; this proc does not, so the happy path pays for one subprocess, not
+  ## two.
   if dir.len == 0:
     return false
   when defined(windows):
@@ -3901,6 +4301,34 @@ proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
     return
   let existing = deepestExistingDir(dir)
   if existing.len == 0 or not dirLooksWritable(existing):
+    if existing.len > 0 and not staticExecRuns():
+      # The probe did not run, so it established nothing about permissions.
+      # Under `nim check` that is every directory on every host, and calling
+      # it "not writable" sent the reader to a directory they can write, with
+      # a remedy (another scratch root) that fails the same way.
+      #
+      # Nor can the macro go on without the probe: the directory is missing,
+      # so no accessor is cached in it, and producing one means running the
+      # generator, which goes through `staticExec` as well.
+      error(
+        "reprobuild: the build scratch directory does not exist, and this " &
+        "compile cannot\n" &
+        "  produce what it would hold.\n" &
+        "  path:      " & dir & "\n" &
+        "  cause:     " & staticExecSuppressedCause() & ".\n" &
+        "             The writability probe on " & existing & "\n" &
+        "             did not run, so nothing was concluded about " &
+        "permissions. The resource\n" &
+        "             accessors this directory caches are generated through " &
+        "`staticExec` too,\n" &
+        "             so the compile cannot proceed without them.\n" &
+        "  remedy:    compile the recipe once with `nim c` (or build it with " &
+        "`repro build`);\n" &
+        "             that creates this directory and caches the accessors, " &
+        "and `nim check`\n" &
+        "             reuses them afterwards. " & DslScratchRootEnv &
+        " does not help: no scratch\n" &
+        "             root passes a probe that cannot run.")
     error(
       "reprobuild: the build scratch directory cannot be created.\n" &
       "  path:      " & dir & "\n" &
@@ -3919,9 +4347,10 @@ proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
 
 proc unresolvedMovedPackageDiagnostic(pkg: PackageDef;
     consumerSourceFile: string): string =
-  ## The compile error for a ``uses:`` of a package that moved out of the
-  ## bundled stdlib into `reprobuild-packages` and that nothing resolves, or
-  ## "" when every such use resolves. It follows `usesImportCode`'s order: an
+  ## The compile error for a ``uses:``, ``nativeBuildDeps:`` or
+  ## ``runtimeDeps:`` entry naming a package that moved out of the bundled
+  ## stdlib into `reprobuild-packages` and that nothing resolves, or "" when
+  ## every such entry resolves. It follows `usesImportCode`'s order: an
   ## explicit ``usesImportPath`` or a workspace project of that name takes the
   ## selector first, and only then is a missing catalog an error. See
   ## `MovedToReprobuildPackages` for why this is not left unresolved.
@@ -3929,134 +4358,178 @@ proc unresolvedMovedPackageDiagnostic(pkg: PackageDef;
     if normalizedImportBase(base).len > 0:
       return ""
   var reported: seq[string] = @[]
-  for useDef in pkg.toolUses:
-    let selector = useDef.packageSelector
-    if selector notin MovedToReprobuildPackages or selector in reported:
-      continue
-    if workspaceProducerModule(selector, consumerSourceFile).len > 0:
-      continue
-    let diagnostic = movedPackageUnresolvedDiagnostic(selector,
-      useDef.rawConstraint,
-      if useDef.sourceFile.len > 0: useDef.sourceFile else: consumerSourceFile,
-      useDef.sourceLine)
-    if diagnostic.len > 0:
-      reported.add(selector)
-      if result.len > 0:
-        result.add("\n\n")
-      result.add(diagnostic)
+  # All three lists: `usesImportCode` consults the catalog for each of them,
+  # so a moved package unresolved in any of them loses its provisioning the
+  # same way.
+  for (listName, uses) in [("uses", pkg.toolUses),
+      ("nativeBuildDeps", pkg.nativeBuildDeps),
+      ("runtimeDeps", pkg.runtimeDeps)]:
+    for useDef in uses:
+      let selector = useDef.packageSelector
+      if selector notin MovedToReprobuildPackages or selector in reported:
+        continue
+      if workspaceProducerModule(selector, consumerSourceFile).len > 0:
+        continue
+      let diagnostic = movedPackageUnresolvedDiagnostic(selector,
+        useDef.rawConstraint,
+        if useDef.sourceFile.len > 0: useDef.sourceFile
+        else: consumerSourceFile,
+        useDef.sourceLine, listName, lookupSourceFile = consumerSourceFile)
+      if diagnostic.len > 0:
+        reported.add(selector)
+        if result.len > 0:
+          result.add("\n\n")
+        result.add(diagnostic)
+
+const BundledStdlibSelectors* = [
+  "attic-client",
+  "autoconf",
+  "automake",
+  "bash",
+  "bpftrace",
+  "bpftool",
+  "bun",
+  "cachix",
+  "capnp",
+  "cargo",
+  "cargo-nextest",
+  "circom",
+  "clang",
+  "clippy",
+  "ctags",
+  "create-dmg",
+  "curl",
+  "dpkg",
+  # macOS splits debug info out of the Mach-O image in a SECOND pass that the
+  # compiler driver shells out to by bare name, so an edge compiling with
+  # ``-g`` on darwin runs ``dsymutil`` after the link and has to be able to
+  # name it. It is not in the clang-wrapper's ``bin``; see
+  # ``repro_dsl_stdlib/packages/dsymutil.nim`` for why it is a selector of its
+  # own rather than a widening of ``clang``.
+  "dsymutil",
+  "electron",
+  "emcc",
+  "esbuild",
+  "flake8",
+  "forc",
+  "foundry",
+  "gcc",
+  "gh",
+  "git",
+  "go",
+  "installer",
+  "just",
+  "llvm-config",
+  "make",
+  "maturin",
+  "mdbook",
+  # M9.P stop-gap: ``meson`` + ``ninja`` added so ``uses: "meson"``
+  # / ``uses: "ninja"`` lines on from-source recipes (e.g. the
+  # ``recipes/packages/source/dbus-broker`` family) auto-import
+  # the hand-authored ``package meson:`` / ``package ninja:``
+  # provisioning blocks. Without this entry the runner's
+  # ``isBundledStdlibSelector`` rejects the selector and the
+  # provisioning shape never reaches the tool-identity resolver.
+  "meson",
+  "nim",
+  "nimble",
+  "ninja",
+  "nix",
+  "nsis",
+  "node",
+  "npm",
+  "npx",
+  "openssl",
+  "pcre-config",
+  "pkg-config",
+  "pkgconf",
+  "playwright",
+  "pnpm",
+  "pyproject-hooks",
+  "pytest",
+  "python3",
+  # M7 (Windows reprobuild migration): python-build-standalone
+  # tarball provisioning (libs/python3xx.lib + include/ — the
+  # PyO3 build script's link target). Distinct from ``python3``
+  # which on Windows resolves to the official embeddable zip.
+  "python-dev",
+  "rg",
+  "ruby",
+  "rust-analyzer",
+  "rustc",
+  "rustfmt",
+  "rustup",
+  # M9.R.14b.1: ``runquotad`` is the RunQuota daemon binary the
+  # build engine spawns transitively for from-source recipe
+  # graphs. The root ``repro.nim``'s ``uses: "runquotad"`` line
+  # needs the auto-import here so the stdlib package definition at
+  # ``repro_dsl_stdlib/packages/runquotad.nim`` reaches the
+  # project-interface extractor; without it the from-source
+  # resolver hard-fails with "no stdlib provisioning channel
+  # declared on the tool use" on every Linux smoke.
+  "runquotad",
+  "sh",
+  # `shellcheck`, `shfmt` and `prek` moved to reprobuild-packages, like
+  # `sqlite3`; see `reprobuildPackagesInterfaceModule`.
+  "solc",
+  "stylus",
+  "swc",
+  "tmux",
+  "tree-sitter",
+  "tsx",
+  "tup",
+  "typescript",
+  "uv",
+  "vim",
+  "wasm-opt",
+  "wasm-pack",
+  "webpack-cli",
+  "wget",
+  # Cloudflare Pages/Workers CLI — an isonim static site's deploy step
+  # (`wrangler pages deploy dist/`) declares `uses: "wrangler"`; the
+  # auto-import reaches `repro_dsl_stdlib/packages/wrangler.nim`.
+  "wrangler",
+  "xdotool",
+  "xvfb-run",
+  "yarn",
+  "zstd",
+  # The CLI tool and the development channel are two selectors, exactly as
+  # ``python3`` / ``python-dev`` are. ``zstd`` realizes nixpkgs' DEFAULT
+  # output (``bin`` -- ``bin/zstd`` and nothing else); ``zstd-dev`` realizes
+  # every output, so ``zstd.h`` (``dev``) and ``libzstd`` (``out``) reach the
+  # consumer's include and library channels. A recipe that compiles against
+  # the header names ``zstd-dev``; one that runs the binary names ``zstd``.
+  # See ``repro_dsl_stdlib/packages/zstd_dev.nim`` for why the dev package
+  # declares a HEADER as its ``executablePath``.
+  "zstd-dev",
+  # ReproOS-Add-On-Mode A15: the Rust standard library of a TARGET
+  # platform. Its arms are keyed by the target the build compiles for,
+  # not by the host; see ``repro_dsl_stdlib/packages/rust_std.nim``.
+  "rust-std"
+  ]
+  ## The stdlib package selectors a recipe's ``uses:`` reaches by name alone:
+  ## ``usesImportCode`` auto-imports ``repro_dsl_stdlib/packages/<module>``
+  ## for each. GM4b lifted the list out of ``usesImportCode`` so the engine's
+  ## package registry (``repro_dsl_stdlib/package_registry``) links the SAME
+  ## set for home-profile resolution: every package a recipe resolves by name
+  ## is a package a profile resolves by name
+  ## (Provisioning-Contributions.md §"Profile Package References").
+  ##
+  ## M29 (Provisioning catalog cleanup): autoconf, automake, bun, maturin,
+  ## npm, pnpm, pyproject-hooks added so every catalog entry under
+  ## repro_dsl_stdlib/packages/ is discoverable via a plain ``uses:`` line in
+  ## reprobuild.nim.
+
+proc isBundledStdlibSelector*(selector: string): bool =
+  selector in BundledStdlibSelectors
+
+proc bundledStdlibModuleName*(selector: string): string =
+  ## The ``repro_dsl_stdlib/packages/<module>`` basename ``usesImportCode``
+  ## imports for a bundled selector. Exported so the engine's package registry
+  ## generates its imports from the same mapping.
+  selectorModuleName(selector)
 
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
-  proc isBundledStdlibSelector(selector: string): bool =
-    # M29 (Provisioning catalog cleanup): autoconf, automake, bun,
-    # maturin, npm, pnpm, pyproject-hooks added so every catalog
-    # entry under repro_dsl_stdlib/packages/ is discoverable via a
-    # plain ``uses:`` line in reprobuild.nim.
-    selector in [
-      "attic-client",
-      "autoconf",
-      "automake",
-      "bash",
-      "bpftrace",
-      "bpftool",
-      "bun",
-      "cachix",
-      "capnp",
-      "cargo",
-      "cargo-nextest",
-      "circom",
-      "clang",
-      "clippy",
-      "ctags",
-      "create-dmg",
-      "curl",
-      "dpkg",
-      "electron",
-      "emcc",
-      "esbuild",
-      "flake8",
-      "forc",
-      "foundry",
-      "gcc",
-      "gh",
-      "git",
-      "go",
-      "installer",
-      "just",
-      "llvm-config",
-      "make",
-      "maturin",
-      "mdbook",
-      # M9.P stop-gap: ``meson`` + ``ninja`` added so ``uses: "meson"``
-      # / ``uses: "ninja"`` lines on from-source recipes (e.g. the
-      # ``recipes/packages/source/dbus-broker`` family) auto-import
-      # the hand-authored ``package meson:`` / ``package ninja:``
-      # provisioning blocks. Without this entry the runner's
-      # ``isBundledStdlibSelector`` rejects the selector and the
-      # provisioning shape never reaches the tool-identity resolver.
-      "meson",
-      "nim",
-      "nimble",
-      "ninja",
-      "nix",
-      "nsis",
-      "node",
-      "npm",
-      "npx",
-      "openssl",
-      "pcre-config",
-      "pkg-config",
-      "pkgconf",
-      "playwright",
-      "pnpm",
-      "pyproject-hooks",
-      "pytest",
-      "python3",
-      # M7 (Windows reprobuild migration): python-build-standalone
-      # tarball provisioning (libs/python3xx.lib + include/ — the
-      # PyO3 build script's link target). Distinct from ``python3``
-      # which on Windows resolves to the official embeddable zip.
-      "python-dev",
-      "rg",
-      "ruby",
-      "rust-analyzer",
-      "rustc",
-      "rustfmt",
-      "rustup",
-      # M9.R.14b.1: ``runquotad`` is the RunQuota daemon binary the
-      # build engine spawns transitively for from-source recipe
-      # graphs. The root ``repro.nim``'s ``uses: "runquotad"`` line
-      # needs the auto-import here so the stdlib package definition at
-      # ``repro_dsl_stdlib/packages/runquotad.nim`` reaches the
-      # project-interface extractor; without it the from-source
-      # resolver hard-fails with "no stdlib provisioning channel
-      # declared on the tool use" on every Linux smoke.
-      "runquotad",
-      "sh",
-      # `shellcheck`, `shfmt` and `prek` moved to reprobuild-packages, like
-      # `sqlite3`; see `reprobuildPackagesInterfaceModule`.
-      "solc",
-      "stylus",
-      "swc",
-      "tmux",
-      "tree-sitter",
-      "tsx",
-      "tup",
-      "typescript",
-      "uv",
-      "vim",
-      "wasm-opt",
-      "wasm-pack",
-      "webpack-cli",
-      "wget",
-      # Cloudflare Pages/Workers CLI — an isonim static site's deploy step
-      # (`wrangler pages deploy dist/`) declares `uses: "wrangler"`; the
-      # auto-import reaches `repro_dsl_stdlib/packages/wrangler.nim`.
-      "wrangler",
-      "xdotool",
-      "xvfb-run",
-      "yarn",
-      "zstd"
-    ]
   var modules: seq[string] = @[]
   for useDef in pkg.toolUses:
     if isBundledStdlibSelector(useDef.packageSelector):
@@ -4183,6 +4656,36 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # ``.nim`` extension (Nim's ``import "<path>"`` form). Re-attach it
       # so the per-sibling shim below can ``include`` the real file.
       producerModules.add((moduleAlias, selector, producerModule & ".nim"))
+  # A package named in ``nativeBuildDeps:`` / ``runtimeDeps:`` resolves from
+  # the `reprobuild-packages` catalog too (Provisioning-Contributions.md,
+  # "Catalog Lookup And Provisioning": wherever a recipe names it). Like the
+  # stdlib's dependency-only imports above, it needs module initialization
+  # (to register its provisioning) but not its typed command surface, so it
+  # is imported for its selector-specific marker alone; a selector `uses:`
+  # already imported in full is not imported again. The order follows the
+  # `uses:` branch: an explicit ``usesImportPath`` or a workspace project of
+  # that name keeps the selector, and only then is the catalog consulted.
+  var dependencyOnlyAliases: seq[string] = @[]
+  if not hasExplicitImports:
+    for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+      let selector = useDef.packageSelector
+      if isBundledStdlibSelector(selector):
+        continue
+      if workspaceProducerModule(selector, consumerSourceFile).len > 0:
+        continue
+      let catalogModule =
+        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+      if catalogModule.len == 0:
+        continue
+      let catalogAlias = selectorModuleName(selector) & "_packages_module"
+      var catalogSeen = false
+      for (existingAlias, _, _) in producerModules:
+        if existingAlias == catalogAlias:
+          catalogSeen = true
+          break
+      if not catalogSeen:
+        producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
+        dependencyOnlyAliases.add(catalogAlias)
   # Multi-Sibling interface-extraction object-collision fix.
   #
   # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per
@@ -4262,6 +4765,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       let importedModule =
         if shimCurrent: shimDir / shimStem
         else: siblingReproPath.changeFileExt("")
+      if moduleAlias in dependencyOnlyAliases:
+        # A catalog package named only in a dependency list: see the
+        # dependency-only branch above, and the stdlib's dependency imports
+        # for why the ``as <alias>`` binding is load-bearing.
+        let markerName = packageMarkerName(selector)
+        result.add("from \"" & importedModule.replace('\\', '/') & "\" as " &
+          moduleAlias & "_dep import " & markerName & "\n")
+        result.add(markerName & "()\n")
+        continue
       result.add("import \"" & importedModule.replace('\\', '/') & "\" as " &
         moduleAlias & " except package\n")
       result.add("when compiles(" & moduleAlias &
@@ -4306,7 +4818,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # ``resourceType`` AND an ``executable``/``library`` is routed here and the
   # ``continue`` above SKIPS the SC-9 wholesale-module import, so its exec/lib
   # typed wrappers do NOT cross alongside its resource contract. Acceptable for
-  # the resource-only gate (and vm-harness, whose providers are resource-shaped);
+  # the resource-only gate (and gosti, whose providers are resource-shaped);
   # unifying the exec/lib SC-9 path onto the same cached-artifact read is a TI2
   # follow-up (emit BOTH the accessor splice AND the module import for such a
   # sibling).
@@ -4568,8 +5080,25 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
             error("resource accessor generation failed for '" & selector &
               "': expected an IFP frame, got:\n" & genOut.strip())
         if genOut.len == 0:
+          # Empty output has two causes and they need different remedies: the
+          # generator never ran (a compile that does not execute `staticExec`,
+          # i.e. `nim check`), or it ran and printed nothing. Only the second
+          # is a generator failure.
+          if not staticExecRuns():
+            error("resource accessor generation for '" & selector &
+              "' did not run.\n" &
+              "  cause:     " & staticExecSuppressedCause() & ".\n" &
+              "             The generator is compiled and run through " &
+              "`staticExec`, and no current accessor\n" &
+              "             for this producer is cached in " & accDir & "\n" &
+              "             (none was generated yet, or the producer changed " &
+              "since).\n" &
+              "  remedy:    compile the recipe once with `nim c` (or build " &
+              "it with `repro build`);\n" &
+              "             that caches the accessors, and `nim check` " &
+              "reuses them afterwards.")
           error("resource accessor generation failed for '" & selector &
-            "': generator produced no output")
+            "': the generator ran and produced no output")
 
         # TI3 Level-2 reuse-in-place: the producer's source changed (stamp miss)
         # but if the InterfaceFingerprint matches the ``.ifp`` sidecar the edit

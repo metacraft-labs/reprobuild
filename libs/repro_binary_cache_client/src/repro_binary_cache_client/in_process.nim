@@ -22,8 +22,12 @@
 ## a thin wrapper that builds a ``PublishInProcessRequest`` from CLI
 ## flags and forwards.
 
-import std/[algorithm, httpclient, httpcore, net, os,
+import std/[algorithm, httpclient, httpcore, net, os, sets, tempfiles,
             sequtils, strutils, tempfiles, times]
+when defined(posix):
+  # rename(2) directly: Nim's moveDir falls back to copy-and-remove when the
+  # rename fails, which is exactly the partial state extractPrefixInto refuses.
+  proc cRename(oldPath, newPath: cstring): cint {.importc: "rename", header: "<stdio.h>".}
 
 when defined(ssl):
   import wrappers/openssl
@@ -39,7 +43,9 @@ import ./cache_key
 import ./compress
 import ./decompress
 
+import repro_core/link_target
 import repro_core/paths
+import repro_core/target_object_check
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types as bcsTypes
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/manifest_codec as serverCodec
@@ -53,6 +59,11 @@ type
     outcomes*: seq[SubstituteOutcome]
     ok*: bool
     reason*: string
+    trustRejected*: bool
+      ## At least one endpoint refused the root (or a member) on TRUST. OR-ed
+      ## across every endpoint tried, so a trust refusal on a higher-priority
+      ## cache followed by a plain miss on a lower one is still reported as a
+      ## trust refusal; `reason` alone keeps only the last endpoint's text.
 
   PublishInProcessRequest* = object
     ## M9.L.4-refactor Step A. Self-contained request carrying every
@@ -88,6 +99,10 @@ type
 
   PublishInProcessResult* = object
     ## Outcome of a single ``publishInProcess`` call.
+    ##   * ``rawArchiveDigestHex`` — BLAKE3 hex of the raw (uncompressed)
+    ##     prefix archive, set as soon as the archive is written (so it is
+    ##     present on a failed upload too); what a profile pins as
+    ##     ``expectedOutputDigest = "blake3:<hex>"``.
     ##   * ``ok``  — true iff the server responded 2xx.
     ##   * ``statusCode`` — HTTP status from ``/publish``; ``0`` when
     ##     the call short-circuited before issuing the request
@@ -105,6 +120,7 @@ type
     error*: string
     bytesUploaded*: int
     responseBody*: string
+    rawArchiveDigestHex*: string
 
 const
   ArchiveMagic = "RBCA"
@@ -119,7 +135,7 @@ const
   ArchiveCopyBufferBytes = 256 * 1024
 
 type
-  ArchiveEntryKind = enum
+  ArchiveEntryKind* = enum
     aekFile = 0
     aekDirectory = 1
     aekSymlink = 2
@@ -235,7 +251,7 @@ proc archiveEntryPayloadSize(plan: PrefixArchivePlan;
   case entry.kind
   of aekFile: getFileSize(extendedPath(path))
   of aekDirectory: 0
-  of aekSymlink: int64(expandSymlink(extendedPath(path)).len)
+  of aekSymlink: int64(readSymlinkTarget(extendedPath(path)).len)
 
 proc planPrefixArchive(prefix: string): PrefixArchivePlan =
   result.root = absolutePath(prefix)
@@ -269,7 +285,11 @@ proc writeArchiveBytes(writer: var ArchiveFileWriter;
                        data: pointer; dataLen: int) =
   if dataLen == 0:
     return
-  if writer.output.writeBuffer(data, dataLen) != dataLen:
+  # A nil `output` is the hash-only writer: the archive is streamed through
+  # the hasher and written nowhere, which is how a consumer checks present
+  # outputs against a pinned digest without a 40 MB temporary file.
+  if writer.output != nil and
+      writer.output.writeBuffer(data, dataLen) != dataLen:
     raise newException(IOError, "short write while creating rbcarc")
   writer.hasher.update(data, dataLen)
   writer.bytesWritten += int64(dataLen)
@@ -334,12 +354,76 @@ proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
     of aekDirectory:
       discard
     of aekSymlink:
-      writer.writeArchiveString(expandSymlink(extendedPath(path)))
+      writer.writeArchiveString(readSymlinkTarget(extendedPath(path)))
   if writer.bytesWritten != plan.size:
     raise newException(IOError,
       "rbcarc size changed while archiving: expected " & $plan.size &
       ", wrote " & $writer.bytesWritten)
   result = writer.hasher.finalize()
+
+proc prefixArchiveDigestHex*(prefix: string): string =
+  ## BLAKE3 hex of the raw archive `publishInProcess` would write for
+  ## `prefix` — by the SAME planner and writer, so a consumer that hashes
+  ## its present outputs with this gets the digest the publisher printed
+  ## (`expectedOutputDigest`), and not a near-identical archive from a
+  ## second implementation. Streamed through the hasher; nothing is written.
+  writeArchiveFile(planPrefixArchive(prefix), nil).toHex()
+
+proc prefixSubsetArchiveDigestHex*(root: string;
+                                   members: openArray[string]): string =
+  ## The digest `prefixArchiveDigestHex` would give for a prefix holding
+  ## only `members` (root-relative paths, each a file or a directory) of
+  ## `root` — what the publisher's staging of an edge's declared outputs
+  ## produces, computed in place over `root` without copying anything.
+  ## The staged tree holds the members' regular files and the directories
+  ## that lead to them, and nothing else, so: an entry outside every member
+  ## is dropped, a directory with no kept file beneath it is dropped (the
+  ## stage never creates it), and a symbolic link is refused as the
+  ## publisher refuses to stage one.
+  var want: seq[string] = @[]
+  for m in members:
+    let n = m.replace('\\', '/').strip(chars = {'/'})
+    if n.len > 0: want.add(n)
+  proc covered(path: string): bool =
+    for w in want:
+      if path == w or path.startsWith(w & "/"): return true
+    false
+  var plan: PrefixArchivePlan
+  plan.root = absolutePath(root)
+  plan.rootIsDirectory = true
+  var kept: seq[ArchiveEntry] = @[]
+  var fileDirs = initHashSet[string]()
+  for entry in walkPrefix(plan.root):
+    case entry.kind
+    of aekSymlink:
+      if covered(entry.path):
+        raise newException(IOError,
+          "output tree holds a symbolic link, which a publisher refuses to " &
+          "stage: " & entry.path)
+    of aekFile:
+      if covered(entry.path):
+        kept.add(entry)
+        var d = entry.path
+        while true:
+          let i = d.rfind('/')
+          if i < 0: break
+          d = d[0 ..< i]
+          fileDirs.incl(d)
+    of aekDirectory:
+      # Every directory is a candidate: a member may be a FILE below a
+      # directory that is not itself a member (`bin/x`), and the stage
+      # creates that directory on the way to the file.
+      kept.add(entry)
+  var entries: seq[ArchiveEntry] = @[]
+  for e in kept:
+    if e.kind == aekDirectory and e.path notin fileDirs: continue
+    entries.add(e)
+  plan.entries = entries
+  for entry in plan.entries:
+    plan.size += 4'i64 + int64(entry.path.len) + 1 + 4 + 8 +
+      archiveEntryPayloadSize(plan, entry)
+  plan.size += 12
+  writeArchiveFile(plan, nil).toHex()
 
 proc packPrefix*(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree. Same
@@ -360,7 +444,7 @@ proc packPrefix*(prefix: string): seq[byte] =
       case entry.kind
       of aekFile: readFile(absPath)
       of aekDirectory: ""
-      of aekSymlink: expandSymlink(absPath)
+      of aekSymlink: readSymlinkTarget(absPath)
     writeU32LE(result, uint32(pathBytes.len))
     for ch in pathBytes:
       result.add(byte(ch))
@@ -413,22 +497,24 @@ proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
     result = result or (uint64(buf[pos]) shl uint64(shift))
     inc pos
 
-proc extractPrefixRaw(archive: openArray[byte]; outDir: string)
+type
+  ExtractedEntry* = tuple[path: string, kind: ArchiveEntryKind]
+    ## One archive entry as extracted: its POSIX-style relative path and
+    ## kind. ``extractPrefix`` returns the list so a consumer can tell an
+    ## explicit directory entry from a directory that merely exists because
+    ## a file beneath it was created.
 
-proc extractPrefix*(archive: openArray[byte]; outDir: string) =
-  ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
-  ## v2 preserves regular files, directory entries, and symbolic links;
-  ## v1 remains accepted so already-published cache entries keep working.
-  ## Raises ``IOError`` on a malformed / truncated archive.
-  ##
-  ## A zstd-compressed archive is decompressed first. The CAS stores each
-  ## payload exactly as its producer signed it, so a blob read back carries
-  ## no manifest to say which codec produced it -- but ``rbcarc`` begins with
-  ## ``RBCA`` and a zstd frame with its own magic, so the two never collide.
-  ## Sniffing here rather than at each call site means every consumer of a
-  ## substituted prefix -- the tool store, the provider-compile cache, the
-  ## build-action apply path, the CLI -- handles compressed entries without
-  ## knowing they exist.
+proc extractPrefixRaw(archive: openArray[byte]; outDir: string): seq[ExtractedEntry]
+
+proc rawArchiveBytes*(archive: openArray[byte]): seq[byte] =
+  ## The raw ``rbcarc`` bytes of a payload as its producer wrote them:
+  ## ``archive`` itself, or its zstd frame decompressed. The CAS stores
+  ## each payload exactly as its producer signed it, so a blob read back
+  ## carries no manifest to say which codec produced it -- but ``rbcarc``
+  ## begins with ``RBCA`` and a zstd frame with its own magic, so the two
+  ## never collide. This is also the byte string whose BLAKE3 a profile
+  ## pins as ``expectedOutputDigest`` and ``repro cache publish`` prints:
+  ## one hash of one representation, whatever the transport did.
   if isZstdFrame(archive):
     var plain: seq[byte] = @[]
     let decomp =
@@ -449,11 +535,67 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
       decomp.finish(sink)
     except DecompressError as e:
       raise newException(IOError, "rbcarc zstd decode failed: " & e.msg)
-    extractPrefixRaw(plain, outDir)
-    return
-  extractPrefixRaw(archive, outDir)
+    return plain
+  @archive
 
-proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
+proc extractPrefix*(archive: openArray[byte]; outDir: string): seq[ExtractedEntry] {.discardable.} =
+  ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
+  ## v2 preserves regular files, directory entries, and symbolic links;
+  ## v1 remains accepted so already-published cache entries keep working.
+  ## Raises ``IOError`` on a malformed / truncated archive.
+  ##
+  ## A zstd-compressed archive is decompressed first. The CAS stores each
+  ## payload exactly as its producer signed it, so a blob read back carries
+  ## no manifest to say which codec produced it -- but ``rbcarc`` begins with
+  ## ``RBCA`` and a zstd frame with its own magic, so the two never collide.
+  ## Sniffing here rather than at each call site means every consumer of a
+  ## substituted prefix -- the tool store, the provider-compile cache, the
+  ## build-action apply path, the CLI -- handles compressed entries without
+  ## knowing they exist.
+  extractPrefixRaw(rawArchiveBytes(archive), outDir)
+
+const ExtractMutation {.strdefine: "reproAddonMutation".} = ""
+  ## Only a falsifying test build of the static ReproOS add-on binary sets
+  ## this (``-d:reproAddonMutation=agent-extract-follows-links``); see
+  ## ``repro_addon/mutations``. Empty in every product build.
+
+proc refuseWriteThroughSymlink*(outDir, rel: string) =
+  ## Raise unless writing the entry ``rel`` under ``outDir`` stays inside
+  ## ``outDir``.
+  ##
+  ## Rejecting absolute paths and ``..`` components (done by the caller) only
+  ## constrains the entry's *text*. ``rbcarc-v2`` also carries symbolic links,
+  ## and every primitive used below (``createDir``, ``writeFile``,
+  ## ``createSymlink`` into a parent) follows a link already on the path. An
+  ## archive holding ``d -> /etc`` and then ``d/cron.d/job`` would therefore
+  ## write ``/etc/cron.d/job``; one holding ``f -> /etc/passwd`` and then a
+  ## file ``f`` would overwrite ``/etc/passwd``. Prefixes are materialised by
+  ## privileged applies, so either is a write anywhere as root.
+  ##
+  ## The rule: no component of the entry's path that already exists may be a
+  ## symbolic link, the entry itself included. Links the archive creates are
+  ## still extracted -- real prefixes carry ``libfoo.so -> libfoo.so.1`` --
+  ## but nothing is ever written *through* one. The extraction directory is
+  ## private to the extracting process, so nothing else can add a link
+  ## between this check and the write.
+  ##
+  ## Exported so every consumer that copies substituted bytes onward (the
+  ## build-action apply path writes them into an action's working
+  ## directory) applies the same rule to its own destination.
+  when ExtractMutation == "agent-extract-follows-links":
+    # Falsifying build of the ReproOS add-on gate
+    # `e2e_addon_hostile_archive_cannot_escape_staging`: the check is gone.
+    return
+  var cur = outDir
+  for part in rel.split('/'):
+    cur = cur / part
+    if symlinkExists(cur):
+      raise newException(IOError,
+        "rbcarc rejected entry written through a symbolic link: " & rel &
+        " (" & cur & " is a link)")
+
+proc extractPrefixRaw(archive: openArray[byte]; outDir: string): seq[ExtractedEntry] =
+  result = @[]
   if archive.len < 4 + 4 + 4:
     raise newException(IOError, "rbcarc too short: " & $archive.len)
   for i in 0 ..< 4:
@@ -491,10 +633,12 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
         ArchiveEntryKind(rawKind)
     let mode = readU32LE(archive, pos)
     let size = readU64LE(archive, pos)
-    if pos + int(size) > archive.len:
+    if size > uint64(archive.len - pos):
       raise newException(IOError,
         "rbcarc truncated reading file body for " & rel)
     let absOut = outDir / rel
+    refuseWriteThroughSymlink(outDir, normalizedRel)
+    result.add((path: normalizedRel, kind: entryKind))
     # Same MAX_PATH argument as the walk on the publish side: a tree deep
     # enough to archive is deep enough to fail to restore.
     createDir(extendedPath(parentDir(absOut)))
@@ -523,6 +667,61 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
       for i in countdown(directoryModes.high, 0):
         setFilePermissions(
           directoryModes[i][0], modeFilePermissions(directoryModes[i][1]))
+
+proc extractPrefixInto*(archive: openArray[byte]; outDir: string) =
+  ## Extract into ``outDir`` all or nothing. The archive is extracted into a
+  ## fresh staging directory beside ``outDir`` first and renamed into place
+  ## only when every entry was accepted, so a refused or malformed archive
+  ## (including one ``refuseWriteThroughSymlink`` rejects) leaves no partial
+  ## tree behind. ``outDir`` must be absent or an empty directory, and not a
+  ## symbolic link: extracting over existing content would mix the cache's
+  ## bytes with whatever was there, and a link would make the rename land
+  ## wherever it points. Raises ``IOError`` on every refusal and failure.
+  ##
+  ## The staging directory has a random name and is created with mkdir
+  ## semantics that fail when the name exists (``createTempDir``), so nothing
+  ## planted beside ``outDir`` can be mistaken for it. This proc never removes
+  ## a path it did not create: an earlier version staged under the predictable
+  ## ``.<name>.repro-extract-<pid>`` and began by removing it, and ``removeDir``
+  ## follows a symbolic link, so a link planted at that name made a privileged
+  ## caller empty the directory it pointed at.
+  if symlinkExists(outDir):
+    raise newException(IOError,
+      "substitute output path is a symbolic link: " & outDir)
+  if dirExists(outDir):
+    for _ in walkDir(outDir):
+      raise newException(IOError,
+        "substitute output directory is not empty: " & outDir)
+  elif fileExists(outDir):
+    raise newException(IOError,
+      "substitute output path exists and is not a directory: " & outDir)
+  let outAbs = absolutePath(outDir)
+  let parent = parentDir(outAbs)
+  createDir(parent)
+  let tmp =
+    try:
+      createTempDir(".repro-extract-", "", parent)
+    except CatchableError as e:
+      raise newException(IOError,
+        "cannot create a staging directory beside " & outDir & ": " & e.msg)
+  try:
+    extractPrefix(archive, tmp)
+    when defined(posix):
+      # rename(2) replaces an empty directory atomically and never follows
+      # a link at the destination; Nim's moveDir would fall back to copying
+      # when the rename fails, which is exactly the partial state refused here.
+      if cRename(tmp.cstring, outAbs.cstring) != 0:
+        raise newException(IOError,
+          "cannot move the extracted prefix into place at " & outDir & ": " &
+          osErrorMsg(osLastError()))
+    else:
+      if dirExists(outAbs):
+        removeDir(outAbs)
+      moveDir(tmp, outAbs)
+  except CatchableError as e:
+    try: removeDir(tmp) except CatchableError: discard
+    if e of IOError: raise
+    raise newException(IOError, e.msg)
 
 # ---------------------------------------------------------------------------
 # Multipart body builder.
@@ -581,6 +780,8 @@ proc substituteInProcess*(rootEntryKeyHex: string;
         outcomes.add(outcome)
         if not outcome.ok:
           allOk = false
+          if outcome.trustRejected:
+            result.trustRejected = true
           break
       if allOk:
         result.ok = true
@@ -590,7 +791,15 @@ proc substituteInProcess*(rootEntryKeyHex: string;
         return
       else:
         result.outcomes = outcomes
-        result.reason = "one or more substitutes failed on " & endpoint.baseUrl
+        # Name the substitute that failed and why: "failed" alone leaves an
+        # operator nothing to act on.
+        result.reason = "one or more substitutes failed on " & endpoint.baseUrl &
+          (if outcomes.len > 0 and outcomes[^1].reason.len > 0:
+             ": " & outcomes[^1].reason else: "")
+    except ClosureWalkTrustError as e:
+      result.trustRejected = true
+      result.reason = "endpoint " & endpoint.baseUrl & ": " & e.msg
+      continue
     except CatchableError as e:
       result.reason = "endpoint " & endpoint.baseUrl & ": " & e.msg
       continue
@@ -648,6 +857,27 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     result.error = "publish: prefix path does not exist: " & req.prefixDir
     return
 
+  # The object check at the publication boundary: a prefix published under
+  # another platform's identity must hold that platform's objects
+  # (CLI/build.md §"Cross Targets: `--target`"). This is the route by which
+  # cross-built bytes reach a cache (Binary-Caches.md §"Publishing for a host
+  # that cannot build"), so host bytes are refused here whoever publishes.
+  let p = req.identity.platform
+  let mismatches =
+    try:
+      targetObjectMismatchesForPublication(req.prefixDir, p.cpu, p.os, p.abi,
+        p.libcVariant, decodeTargetObjectExemptions(
+          getEnv(TargetObjectExemptionsEnvVar)))
+    except UnknownTargetCpu, ValueError:
+      @[getCurrentExceptionMsg()]
+  if mismatches.len > 0:
+    result.error = "publish: " & $mismatches.len & " object(s) under " &
+      req.prefixDir & " are not for the platform it is published under (" &
+      p.cpu & "/" & p.os & "/" & p.abi & "/" & p.libcVariant &
+      "), so nothing is published (the object check):\n  " &
+      mismatches.join("\n  ")
+    return
+
   let archivePlan =
     try:
       planPrefixArchive(req.prefixDir)
@@ -691,6 +921,10 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     rawDigest = writeArchiveFile(archivePlan, archiveFile)
     close(archiveFile)
     archiveOpen = false
+    # The digest a profile pins as `expectedOutputDigest`: of the RAW
+    # archive, before compression, which is also what a consumer hashes
+    # after it has decompressed the payload (`rawArchiveBytes`).
+    result.rawArchiveDigestHex = rawDigest.toHex()
   except CatchableError as e:
     result.error = "publish: cannot create prefix archive: " & e.msg
     return

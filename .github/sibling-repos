@@ -74,28 +74,42 @@ nim-termctl=dev
 # the --path as `../reprobuild-test-adapters/src`. Mainline branch is `dev`
 # (the `main` branch was retired in the org branch-rename sweep).
 # Keep this revision aligned with flake.lock and repro.lock.
-reprobuild-test-adapters=72962c60f12426ba00b621fda5ab76b0f89ba912
+reprobuild-test-adapters=b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24
+
+# The `test_certificates` Nim package (test-certificates-tools): the local
+# store, note framing and two-note merge of the test-certificate standard,
+# linked by repro_cli_support. config.nims puts `../test-certificates-tools/src`
+# on the --path when TEST_CERTIFICATES_TOOLS_SRC is unset. Pinned at an
+# `agents` commit until the v0.1.0 tag carries it. Keep this revision aligned
+# with flake.nix's `test-certificates-tools-src` URL, flake.lock, package.nix
+# and repro.lock.
+test-certificates-tools=9864082065c8acb1db315e65a6a4157a3ab77117
 reprobuild-ct-test-runner=dev
 
 # The reprobuild-packages catalog. A `uses:` name the stdlib does not bundle is
 # looked up in a `reprobuild-packages` checkout beside the consuming project
 # (or an ancestor), or beside this checkout -- which is where this entry puts
-# it. `sqlite3` moved there, and the move is now a compile ERROR when no
-# catalog defines it, so without this checkout every recipe this suite compiles
-# that uses sqlite3 stops: runquota's repro.nim
+# it. `sqlite3` moved there, then `shellcheck`, `shfmt` and `prek`, and each
+# move is a compile ERROR when no catalog defines the package, so without this
+# checkout every recipe this suite compiles that uses one of them stops: runquota's repro.nim
 # (t_b0_runquota_repro_nim_compiles), CodeTracer's (the e2e codetracer-subset
 # fixture and the `ct` build), and t_uses_resolves_sqlite3_from_real_
 # reprobuild_packages, which exists to prove the real catalog -- not the
 # fixture under tests/reprobuild-packages -- defines what consumers rely on.
+# The CodeTracer fixture also uses `shellcheck`, and
+# t_import_of_a_moved_stdlib_module_names_the_new_home compiles `uses:` of all
+# three lint tools against the real catalog, so the pin must be a revision
+# that defines them (they arrived in eed38ec). t_e2e_home_profile_reaches_
+# catalog_apps resolves a home profile's `ghostty` and `iterm2` from the real
+# catalog and asserts their records, which arrived in 9f981af.
 #
 # Pinned to an exact revision, like io-mon above, so the catalog content the
-# suite asserts against does not move under a commit. It is not in repro.lock:
-# the lock records `uses:` dependencies, and the catalog is not one -- nothing
-# records catalog coordinates in a lock yet (Provisioning-Contributions.md,
-# "Catalog Lookup And Provisioning"). Nor is it a flake input: no Nix-sandboxed
+# suite asserts against does not move under a commit. Keep this source pin
+# aligned with the catalog dependency recorded in repro.lock. It is not a
+# flake input: no Nix-sandboxed
 # build here compiles a recipe, and $REPROBUILD_PACKAGES_ROOT in the dev shell
 # would replace the fixture catalog the lookup test walks to.
-reprobuild-packages=9d9176bff5c5aee175efcaa5d667c9ed7b9b8043
+reprobuild-packages=0b10d26cd8d8cb37b45d5da40a886ebb078bd8ec
 
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
@@ -150,7 +164,40 @@ reprobuild-packages=9d9176bff5c5aee175efcaa5d667c9ed7b9b8043
 # Moved to e750199 (2026-09-30), io-mon's `agents` tip, which contains both
 # 53994c0 (dev + agents reconciliation) and 31b05a5 (io-mon#41). Matches
 # `io-mon-src` in flake.nix, flake.lock and `ioMonSrc` in nix/pkgs/by-name.
-io-mon=e75019940be4722fcaf11f1b239de37adae54f41
+# Current clones match flake.nix/flake.lock for shipped-tools capture.
+# package.nix standalone defaults separately match its historical release src.
+# Moved to 9576b79 (2026-10-15), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 6453936 is an ancestor.
+# Moved to 3ccdd4b (2026-10-15), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 9576b79 is an ancestor.
+# Moved to 414a3de (2026-10-15), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 3ccdd4b is an ancestor.
+# Moved to 527368e (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 414a3de is an ancestor.
+# Moved to 2801e94 (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 527368e is an ancestor.
+# Moved to a4378d9 (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 2801e94 is an ancestor.
+# Moved to f33311e (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; a4378d9 is an ancestor.
+# Moved to 3f8788c (2026-10-17), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; f33311e is an ancestor.
+# Moved to 71b4d7c (2026-10-21), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 091fa26 is an ancestor.
+# Moved to 8a9a71c (2026-10-21), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 71b4d7c is an ancestor.
+# Moved to 4d468bc (2026-10-21), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 8a9a71c is an ancestor.
+# Moved to 06ee30a (2026-10-22), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 4d468bc is an ancestor.
+# Moved to 6fc4ba9 (2026-10-22), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 06ee30a is an ancestor.
+# Raw renameat2 capture; matches io-mon-src in flake.nix and flake.lock.
+# Moved to e0fe6b44 (2026-10-30), io-mon's `agents` tip (32-bit ARM raw-syscall
+# capture + preallocated shm segments), matching `io-mon-src` in flake.nix.
+# Moved to 7a3e4c89 (2026-10-30): Thumb-capable images fail closed on ARM.
+# Moved to e05beda0 (2026-10-30): patch-status global static again (re-review blocker).
+io-mon=e05beda08343b04b3d53f008ebcd0fe7bd27d8b1
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -177,10 +224,26 @@ io-mon=e75019940be4722fcaf11f1b239de37adae54f41
 # `nim-stackable-hooks-src` in flake.nix: a slow Windows child is no longer
 # resumed mid-injection (it is waited for, and past a hard deadline the spawn
 # fails cleanly). 5125869 is an ancestor of 72f5782.
-nim-stackable-hooks=72f578249e9d8bbca8e3705c8a41ed5085c05bf9
-runquota=dev
-nim-shm-queue=5a8e43b52fa202859658692c9f8432967f3971ea
-nim-shm-gset=c646982b354cb5b1fa8734f94b951a660419d75c
+# Match the shared SIP resolver used by the engine and monitor shim.
+# Moved 3af63afc -> ff7eb18 (2026-10-16) with `nim-stackable-hooks-src`.
+# Moved 6082ee94 -> 059c549 (2026-10-22) with `nim-stackable-hooks-src`, for
+# the io-mon pin's Windows borrow-timeout policy API.
+# Moved 059c549 -> 3af8a4e (2026-10-30) with `nim-stackable-hooks-src`: the armhf
+# raw-syscall substrate.
+# Moved 3af8a4e -> 7533478 (2026-10-30) with `nim-stackable-hooks-src`.
+nim-stackable-hooks=75334780682e70b1adb58bf813d869e7f5df63f5
+# Must match `runquota-src` in flake.lock, for the reason the
+# nim-stackable-hooks note above gives: `release.yml` overrides that input to
+# THIS clone. The release also builds the `runquotad` and `runquota` every
+# archive ships from the pinned revision
+# (scripts/release/stage_release_runquota.sh), which it exports from this
+# clone, so the clone has to contain it. It was `dev` until 2026-10-20, 14
+# commits behind the pin.
+# Private auto-start requires the explicit endpoint policy in this revision;
+# keep release archives and CI overrides on the same API as the Nix pin.
+runquota=9818dc0c90be8ba7993424a7bbfbb6e009ffa965
+nim-shm-queue=84fd76b174d4868e703ba3d599668ee340e0b6ea
+nim-shm-gset=6333cc915689559b00f81371734783c2e894ca45
 
 # nim-shm-lease: runquota's published stats table imports its anchor on
 # WINDOWS now, not only on Linux/macOS, and the Windows release leg builds
@@ -189,7 +252,10 @@ nim-shm-gset=c646982b354cb5b1fa8734f94b951a660419d75c
 # that leg sets). Without it that build stops at `cannot open file:
 # shm_lease/anchor`. Pinned to the revision runquota's own `flake.lock` pins
 # (`nodes.nim-shm-lease.locked.rev`); move it when runquota moves that pin.
-nim-shm-lease=e3254b7ba1c501de6e64dbb41c96306be5ca6058
+# stage_release_runquota.sh exports the same revision from this clone.
+# Moved e3254b7 -> 22e3100 (2026-10-20) with the runquota pin above, whose
+# flake.lock names it; e3254b7 is an ancestor.
+nim-shm-lease=22e3100cdb4fbc374689ddac55b4b32c90654140
 # `main` retired in the org branch-rename sweep; mainline is now `dev`.
 repo-workspaces=dev
 
@@ -216,5 +282,27 @@ repo-workspaces=dev
 # as data rather than as one workflow's inline step.
 metacraft-github-actions=dev
 
+# The Test Certificates specification (private; mainline `latest`). Its
+# `vectors/content/` suite is the oracle for
+# tests/integration/t_content_id_vectors_match_the_conformance_suite.nim, which
+# reads the vectors with `git archive` at the revision recorded in
+# tests/integration/content_id/test-certificates-spec-content-vectors.pin --
+# from the object store, not the working tree -- and fails (never skips) when
+# the sibling or that revision is missing.
+#
+# Pinned to THAT SAME 40-hex revision rather than to `latest`, because
+# clone-siblings clones every entry shallow (`--depth 1` at the resolved
+# revision): a `=latest` entry would fetch only the branch tip, and the pinned
+# vectors would be absent the moment `latest` moved past them. A SHA entry
+# fetches exactly the pinned commit. scripts/check_workflows.sh refuses a
+# sibling pin that differs from the .pin file, so move both together.
+test-certificates-spec=9ebbcb3c9e539f294dbe125dea87c445b270523e
 
-
+# gosti (the VM lifecycle library; repository `gosti`, checked out in the
+# workspace as `gosti` or, before the rename, `vm-harness`). The add-on mode
+# VM gates (tests/e2e/addon/) drive QEMU and Incus guests through it, and
+# their crash gate needs the QMP hard reset it gained at this revision.
+# Pinned to the SAME 40-hex revision as tests/e2e/addon/gosti.pin, which
+# scripts/run_addon_gate.sh resolves and every gate record carries; move
+# both together.
+gosti=ad271155260b1a9938bcf293418bd3d789dd85d5

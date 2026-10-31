@@ -6,6 +6,7 @@
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
+from shared_clones import LeafPoolRemoteName
 
 proc q(value: string): string = quoteShell(value)
 
@@ -80,8 +81,7 @@ proc setupFixture(): RemotesFixture =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin-prefix\"\nfetch = \"" & fileUrl(originsDir) & "\"\n\n" &
     "[[remote]]\nname = \"lib-a-upstream-prefix\"\nfetch = \"" & fileUrl(upstreamsDir) & "\"\n\n" &
     "includes = [\n" &
@@ -90,8 +90,8 @@ proc setupFixture(): RemotesFixture =
   writeFile(workspaceRoot / "projects" / "myproject.toml", projectToml)
 
   let repoToml =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-    "[repo]\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+    "[repo]\nmainline = \"main\"\n" &
     "name = \"lib-a\"\n" &
     "path = \"libs/lib-a\"\n" &
     "remote = \"origin\"\n" &
@@ -120,7 +120,12 @@ suite "Workspace multiple remotes alignment":
     let remotesOutput = requireGit(q(f.gitBin) & " -C " & q(repoAbs) & " remote").strip().splitLines()
     check "origin" in remotesOutput
     check "upstream" in remotesOutput
-    check remotesOutput.len == 2
+    # Exactly the manifest's two remotes, plus the shared-clone pool remote
+    # every leaf carries for its pool (shared_clones §3.4), which workspace
+    # init adds alongside them.
+    checkpoint("remotes: " & $remotesOutput)
+    check remotesOutput.len == 3
+    check LeafPoolRemoteName in remotesOutput
 
     # Check URLs match
     let originUrl = requireGit(q(f.gitBin) & " -C " & q(repoAbs) & " remote get-url origin").strip()

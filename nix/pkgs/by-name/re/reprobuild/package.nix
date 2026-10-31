@@ -44,14 +44,41 @@
   openssl,
   zstd,
   clingo,
+  # Runtime package from the same RunQuota revision as runquotaSrc. Required
+  # explicitly for standalone callPackage consumers: an absent default must
+  # not silently select an older ambient daemon without parent-death support.
+  runquotaTools,
 
   # The Nim toolchain: the metacraft-labs/nim fork (Nim 2.3.1 devel), built from
   # source. See ./nim-fork.nix for why the stock nixpkgs `nim` cannot be used.
   nimFork ? callPackage ./nim-fork.nix { },
 
+  # The flake supplies its pinned bundle. A nixpkgs-style build uses the same
+  # shared derivation from the pinned source, without depending on flake APIs.
+  macosTools ? if stdenv.isDarwin then callPackage "${macosToolsSrc}/package.nix" { } else null,
+  # This fixed evaluation-time fetch permits importing the shared recipe
+  # without import-from-derivation; the payload is the same pinned source.
+  macosToolsSrc ? builtins.fetchTarball {
+    url = "https://github.com/metacraft-labs/stackable-hooks-macos-tools/archive/1ad378d58776ec9b6cc73e1c27b8e53c15676f03.tar.gz";
+    sha256 = "sha256-l4rPNg0DzGmaNpBpCFGTM6qFAg2Og0HCA5X/yny0/R0=";
+  },
+
   # ── Sources ────────────────────────────────────────────────────────────────
-  # Every entry mirrors a `flake.lock` pin. Bump a rev and its hash together:
-  # set the hash to `lib.fakeHash`, build, and copy the `got:` line.
+  # Every entry mirrors a pin of the `flake.lock` of the commit `src` (below)
+  # names -- NOT of the tree this file sits in, whose lock moves on every
+  # sibling pin refresh -- and the flake check `nixpkgs-package-src-sync`
+  # fails when one does not (rev, and the hash where the lock records a
+  # `narHash`). The defaults change only when `src` moves; move `version`
+  # and every entry with it. The hash is that lock's `narHash`, or
+  # `nix flake prefetch --json github:<owner>/<repo>/<rev>`'s `hash`
+  # (`fetchFromGitHub` and the flake's github fetcher produce the same store
+  # path for the same revision).
+  #
+  # An entry for a source input added AFTER the `src` commit (its lock has no
+  # such node yet) mirrors this tree's `flake.lock` instead, and the check
+  # holds it to that until the next release snapshot moves `src` past it.
+  # The metacraft-labs/nixpkgs fork must map such an input in its `pins.json`
+  # when it syncs the first release that carries it (nix/README.md).
   #
   # `src` and `version` are deliberately NOT arguments: `callPackage` fills an
   # argument from the package set whenever the set HAS that name, default or no
@@ -78,14 +105,14 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "41ab1b987aba67e8bcc34a5945ac33e17b6418ed";
-    hash = "sha256-Lv0i9MBGkwPFfEaOxB7y9ixwt7dOvJIKj3W4R/BpyOY=";
+    rev = "3af8a4e937dcf68666d1e47e4191cad496c6d793";
+    hash = "sha256-w2b3D6BdOA5NZthVhIcsAuti1Pz1UxiEDnCwjwkJdM4=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
-    hash = "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=";
+    rev = "31be9a10007c007af429951616c13bc275587c76";
+    hash = "sha256-xEqzwMISwpA/JwzhSKK+TRU67Dj/F7Z8rSwOoYj/Cv4=";
   },
   # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
   # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
@@ -97,56 +124,61 @@
   # both come from this input, so they at least agreed with each other; what
   # they disagreed with was every capture file and every other build.
   #
-  # Nothing checks this correspondence yet, so until something does: move this
-  # rev and hash whenever `io-mon-src` in flake.nix moves. The hash is the same
-  # value the lock records as `narHash` — `fetchFromGitHub` and the flake's
-  # github fetcher produce the same store path for the same revision, which is
-  # how to confirm a bump is right rather than merely well-formed.
+  # `nixpkgs-package-src-sync` now checks this correspondence against the
+  # `src` commit's lock (see the Sources header above).
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "e75019940be4722fcaf11f1b239de37adae54f41";
-    hash = "sha256-ZhlF06zxG00Ieaakuh0TCw1SUZv7Y9L7nwIL9k0TlZo=";
+    rev = "e0fe6b4461f0555a7b44d57f42d1dbc6e07d1255";
+    hash = "sha256-OgJJqJG6WS5bjimeCj5labICT2PoxuS9ABOFzq40twI=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-gset";
-    rev = "c646982b354cb5b1fa8734f94b951a660419d75c";
-    hash = "sha256-nO7XSWxBWrLgL8d9q1zhTcGMMjGokZKjYtX9byb9/Vk=";
+    rev = "6333cc915689559b00f81371734783c2e894ca45";
+    hash = "sha256-DHLmzNF3ECzivASL9sfAddPRp1P8CkBhbouD9Y6kXWk=";
   },
   shmQueueSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-queue";
-    rev = "5a8e43b52fa202859658692c9f8432967f3971ea";
-    hash = "sha256-QPYS3OJPza6M2l1FMKa+jt3+mIBHCHWGkLOb9jAKMHs=";
+    rev = "84fd76b174d4868e703ba3d599668ee340e0b6ea";
+    hash = "sha256-ph1AMDJSXCDuvC4JH6NxSU7yXEFYz4UjJ1zW+Tj19EA=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
-    rev = "033f00a1d9df8d7e2cb0368010746acc272a9dce";
-    hash = "sha256-L5N0v9haMBtmCjkt3aw4V6dBPPJqqHY17YZL2Muedsk=";
+    rev = "008950fa91fdd68a44f77f9c454eff5b7bf139fa";
+    hash = "sha256-zoUpXtJicwLQjvG/CiGlFkC6BucIOsV7OKpOFflXTuA=";
   },
   ctTestRunnerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild-ct-test-runner";
-    rev = "397fc59ed3e3d8f774523a6723782c535aaabe58";
-    hash = "sha256-Ndf8zh1QB1AeNb+2w0vmMP5UVzakJxj2z4Sv50FfSIQ=";
+    rev = "69167f4226e0faca4fb64cb0e913c7b49eddf853";
+    hash = "sha256-n2acAPw0rBma3KsdKagKpoMKOa2baq5F7xMLVaofIFQ=";
   },
   testAdaptersSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild-test-adapters";
-    rev = "360cd50767e548556a0a7510d879f28c87eb3e34";
-    hash = "sha256-mj1z79GUGcOOVzADqIo9toLwM0k5xIHaLstKl4a9u64=";
+    rev = "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24";
+    hash = "sha256-bDuj7DYj2nZtvG0em05EMy6/hK/RWIE917GHHZPq62Y=";
+  },
+  # The `test_certificates` package (test-certificates-tools): the store,
+  # note-framing and note-merge rules of the test-certificate standard, which
+  # the engine links instead of re-implementing. Source only, pure stdlib.
+  testCertificatesToolsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "test-certificates-tools";
+    rev = "9864082065c8acb1db315e65a6a4157a3ab77117";
+    hash = "sha256-zxOEf1NeCOiKN1KMxwFsr2leww43cfJJB0Oo2g2JZSA=";
   },
   # Source only. reprobuild compiles `runquota_client`/`_codec`/`_core`/`_ipc`/
-  # `_process`/`_protocol` out of this tree; it does not build or ship
-  # runquota's own binaries, so none of runquota's build-time dependencies
-  # (nim-shm-lease and friends) are needed here.
+  # `_process`/`_protocol` out of this tree. The separate runquotaTools package
+  # owns compilation of its binaries and their build-time dependencies.
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "3590066e9c9dc82ca758ff2d7918f3b6f8304f35";
-    hash = "sha256-KD47AShW5Y8trE9vY4WrPtk/ot6qagq3p4vhPw/mQBU=";
+    rev = "9818dc0c90be8ba7993424a7bbfbb6e009ffa965";
+    hash = "sha256-A9b+rJTlp/pz6MgmZot/WDfvozmOYzBpPFOhRbxUUAM=";
   },
 }:
 let
@@ -198,13 +230,19 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.1.3";
+  version = "0.2.19";
 
+  # The default source: a published commit whose `reprobuild.nimble` carries
+  # `version` above and whose `flake.lock` pins the `*Src` defaults above
+  # (`nixpkgs-package-src-sync` checks both, fetching this commit by its
+  # hash). Move all three together (reprobuild's flake overrides it with its
+  # own tree; the metacraft-labs/nixpkgs fork overrides it with the release
+  # tag, see nix/README.md).
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "f314140067a25fe53acc199481fb115aa1c6be7b";
-    hash = "sha256-CLNxSZCVI1Qj8ggpKzgh4ytUeT0Q47XKMbFjsDZsh5E=";
+    rev = "f7903db3c1799562d9de1f5ca99ee31f8519efd8";
+    hash = "sha256-D6rOfOyGnaQCehpBi7bzPEUUVqDuvQ7Ud+w7RW2s10Q=";
   };
 
   strictDeps = true;
@@ -249,6 +287,7 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   env = {
+    STACKABLE_HOOKS_BUILT_TOOLS_DIR = if stdenv.isDarwin then "${macosTools}" else "";
     BLAKE3_PREFIX = "${blake3Prefix}";
     NIMCRYPTO_SRC = "${nimcryptoSrc}";
     BEARSSL_SRC = "${bearsslSrc}";
@@ -268,6 +307,7 @@ stdenv.mkDerivation (finalAttrs: {
     CODETRACER_PINNED_SRC = "${codetracerSrc}/src";
     REPRO_CT_TEST_RUNNER_SRC = "${ctTestRunnerSrc}";
     REPRO_TEST_ADAPTERS_SRC = "${testAdaptersSrc}/src";
+    TEST_CERTIFICATES_TOOLS_SRC = "${testCertificatesToolsSrc}/src";
     REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
     RUNQUOTA_SRC = "${runquotaSrc}";
     SQLITE_PREFIX = "${sqlite.out}";
@@ -379,11 +419,11 @@ stdenv.mkDerivation (finalAttrs: {
     # wrappers because arbitrary user build actions inherit the wrapper
     # environment.
     #
-    # THE NAME LIST IS A CONTRACT. `runtime_contract.ReprobuildWrapperVariables`
-    # re-derives it and `t_packaging_wrapper_vars_match_flake.nim` fails if the
-    # two disagree, because a `--set-default` the native packaging layer does
-    # not know about produces a working Nix build and a `.deb` whose binary dies
-    # on the user's machine.
+    # THE NAME LIST IS A CONTRACT. The native packaging layer shares
+    # `ReprobuildWrapperVariables`; `ReprobuildNixRuntimeToolVariables` adds the
+    # two RunQuota executables supplied only by the Nix runtime closure.
+    # `t_packaging_wrapper_vars_match_flake.nim` checks both, so common source
+    # defaults cannot drift and native wrappers never name unbundled tools.
     for b in "$out"/bin/*; do
       test -x "$b" || continue
       wrapProgram "$b" \
@@ -400,9 +440,12 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
+        --set-default TEST_CERTIFICATES_TOOLS_SRC ${testCertificatesToolsSrc}/src \
         --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
         --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
         --set-default RUNQUOTA_SRC ${runquotaSrc} \
+        --set-default RUNQUOTAD_BIN ${runquotaTools}/bin/runquotad \
+        --set-default RUNQUOTA_BIN ${runquotaTools}/bin/runquota \
         --set-default SQLITE_PREFIX ${sqlite.out} \
         --set-default XXHASH_PREFIX ${xxhash} \
         --set-default CLINGO_PREFIX ${clingo} \
@@ -479,18 +522,36 @@ stdenv.mkDerivation (finalAttrs: {
       runtimeLibraryPath
       nimFork
       ;
+    # The source arguments as given, read back by the flake check
+    # `nixpkgs-package-src-sync` to compare the defaults with `flake.lock`.
+    sources = {
+      inherit
+        nimcryptoSrc
+        bearsslSrc
+        stackableHooksSrc
+        ctTraceFormatSrc
+        ioMonSrc
+        shmGsetSrc
+        shmQueueSrc
+        codetracerSrc
+        ctTestRunnerSrc
+        testAdaptersSrc
+        testCertificatesToolsSrc
+        runquotaSrc
+        ;
+    };
   };
 
   meta = {
     description = "Reprobuild build system";
     homepage = "https://github.com/metacraft-labs/reprobuild";
-    license = lib.licenses.mit;
+    license = lib.licenses.asl20;
     mainProgram = "repro";
     maintainers = [ ];
+    # nixpkgs 26.11 dropped x86_64-darwin (see flake.nix `systems`).
     platforms = [
       "x86_64-linux"
       "aarch64-linux"
-      "x86_64-darwin"
       "aarch64-darwin"
     ];
   };

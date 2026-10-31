@@ -47,6 +47,17 @@
 ##   writes, creates, deletes, renames, executes, and load-library
 ##   observations".
 ##
+## The evidence-level contract is checked on every platform. Publication
+## and reuse also require a complete capture: io-mon `docs/usage.md`
+## ("macOS limitation (normative)") requires captures without
+## a complete tree-lifetime guard to report loss, so Failure-Semantics.md
+## §Monitoring Failures forbids their publication and requires a rebuild.
+## Where `NoTreeLifetimeGuard` holds, every monitored run must retain the
+## enumeration evidence and fail closed with the platform marker,
+## `monitor-loss`, no hot record and a successful re-launch. Linux keeps
+## the published membership and warm-reuse assertions. The converter case
+## uses a complete tool report without a monitor and publishes everywhere.
+##
 ## THE THREE PRODUCERS UNDER TEST:
 ##
 ##   1. `repro-pathset-v1` (`libs/repro_depfile`) had kinds
@@ -73,10 +84,12 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import repro_test_support
+import repro_test_support/descendant_guard_expectations
 
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
-const TmpDir = "build/test-tmp/t_enumerated_directory_evidence_producers"
+let TmpDir = "build/test-tmp/t_enumerated_directory_evidence_producers" /
+  testCaseScratchSlug()
 const RepoRootMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -248,6 +261,35 @@ proc directoryCounts(inputs: seq[FileFingerprint]):
       if input.metadata.membershipTrackedDirectory():
         inc result.tracked
 
+proc checkEnumerationEvidence(f: Fixture; act: BuildAction; r: ActionResult) =
+  ## Ask the real capture what the key would contain, even on hosts where
+  ## incomplete monitoring correctly prevents publication of that key.
+  let inputs = act.cacheInputPaths(r.evidence)
+  let enumerated = act.cacheEnumeratedDirectories(r.evidence)
+  checkpoint(act.id & " evidence inputs=" & $inputs &
+    " enumerated=" & $enumerated)
+  check f.listDir in inputs
+  check f.listDir in enumerated
+
+proc checkFailsClosed(f: Fixture; act: BuildAction; r: ActionResult) =
+  ## The platform limitation must explain the missing record; an unrelated
+  ## failure or an empty capture must not satisfy this branch.
+  var markers = 0
+  for diagnostic in r.evidence.diagnostics:
+    const lead = "monitor loss: "
+    if diagnostic.startsWith(lead) and
+        diagnostic[lead.len .. ^1].isTreeLifetimeLimitation:
+      inc markers
+  checkpoint(act.id & " diagnostics=" & $r.evidence.diagnostics &
+    " publish skipped=" & r.cachePublishSkipReason)
+  check markers == 1
+  check "monitor-loss" in r.cachePublishSkipReason
+  var cache = openActionCache(f.cacheRoot / "action-cache")
+  check not cache.readHotRecord(act.weakFingerprint).found
+  check r.status == asSucceeded
+  check r.cacheDecision notin ReuseDecisions
+  check r.launched
+
 proc runUnderMonitor(repoRoot, depfile: string; argv: seq[string]) =
   ## Drive the real io-monitor over a real process, writing a real iomon.
   let tools = monitorTools(repoRoot)
@@ -386,32 +428,42 @@ suite "the builtin record site carries enumerated directories":
     let config = testConfig(f.cacheRoot)
 
     let first = runBuild(g, config)
+    f.checkEnumerationEvidence(act, first.byId(act.id))
+    if NoTreeLifetimeGuard:
+      f.checkFailsClosed(act, first.byId(act.id))
     checkpoint("first: status=" & $first.byId(act.id).status &
       " stderr=" & first.byId(act.id).stderr)
     check first.byId(act.id).status == asSucceeded
     check first.byId(act.id).launched
 
-    # Denominator: the record must carry the directory, and carry it as
-    # MEMBERSHIP-tracked, not as a bare existence probe.
-    let inputs = f.recordedInputsFor(act)
-    let counts = directoryCounts(inputs)
-    checkpoint("recorded inputs=" & $inputs.len &
-      " directories=" & $counts.dirs &
-      " membership-tracked=" & $counts.tracked)
-    check inputs.len > 0
-    check counts.dirs > 0
-    check counts.tracked > 0
+    if not NoTreeLifetimeGuard:
+      # The published record must carry MEMBERSHIP, not just existence.
+      let inputs = f.recordedInputsFor(act)
+      let counts = directoryCounts(inputs)
+      checkpoint("recorded inputs=" & $inputs.len &
+        " directories=" & $counts.dirs &
+        " membership-tracked=" & $counts.tracked)
+      check inputs.len > 0
+      check counts.dirs > 0
+      check counts.tracked > 0
 
     let warm = runBuild(g, config)
+    if NoTreeLifetimeGuard:
+      f.checkEnumerationEvidence(act, warm.byId(act.id))
+      f.checkFailsClosed(act, warm.byId(act.id))
     checkpoint("warm: decision=" & $warm.byId(act.id).cacheDecision &
       " launched=" & $warm.byId(act.id).launched)
-    check warm.byId(act.id).cacheDecision in ReuseDecisions
-    check not warm.byId(act.id).launched
+    if not NoTreeLifetimeGuard:
+      check warm.byId(act.id).cacheDecision in ReuseDecisions
+      check not warm.byId(act.id).launched
 
     writeFile(f.listDir / "newcomer.txt", "appeared\n")
 
     let after = runBuild(g, config)
     let r = after.byId(act.id)
+    f.checkEnumerationEvidence(act, r)
+    if NoTreeLifetimeGuard:
+      f.checkFailsClosed(act, r)
     checkpoint("after adding a file: decision=" & $r.cacheDecision &
       " launched=" & $r.launched & " reason=" & r.reason)
     check r.cacheDecision notin ReuseDecisions
@@ -460,26 +512,39 @@ suite "the elevated-broker record site carries enumerated directories":
     config.brokerSpawn = monitoringBrokerSpawn(repoRoot, f.rmdfPath)
 
     let first = runBuild(g, config)
+    f.checkEnumerationEvidence(act, first.byId(act.id))
+    if NoTreeLifetimeGuard:
+      f.checkFailsClosed(act, first.byId(act.id))
     checkpoint("first: status=" & $first.byId(act.id).status &
       " stderr=" & first.byId(act.id).stderr)
     check first.byId(act.id).status == asSucceeded
     check f.runCount() == 1
 
-    let counts = directoryCounts(f.recordedInputsFor(act))
-    checkpoint("directories=" & $counts.dirs &
-      " membership-tracked=" & $counts.tracked)
-    check counts.tracked > 0
+    if not NoTreeLifetimeGuard:
+      let counts = directoryCounts(f.recordedInputsFor(act))
+      checkpoint("directories=" & $counts.dirs &
+        " membership-tracked=" & $counts.tracked)
+      check counts.tracked > 0
 
     let warm = runBuild(g, config)
+    if NoTreeLifetimeGuard:
+      f.checkEnumerationEvidence(act, warm.byId(act.id))
+      f.checkFailsClosed(act, warm.byId(act.id))
     checkpoint("warm: decision=" & $warm.byId(act.id).cacheDecision)
-    check warm.byId(act.id).cacheDecision in ReuseDecisions
-    check f.runCount() == 1
+    if NoTreeLifetimeGuard:
+      check f.runCount() == 2
+    else:
+      check warm.byId(act.id).cacheDecision in ReuseDecisions
+      check f.runCount() == 1
 
     writeFile(f.listDir / "newcomer.txt", "appeared\n")
 
     let after = runBuild(g, config)
     let r = after.byId(act.id)
+    f.checkEnumerationEvidence(act, r)
+    if NoTreeLifetimeGuard:
+      f.checkFailsClosed(act, r)
     checkpoint("after adding a file: decision=" & $r.cacheDecision &
       " launched=" & $r.launched & " reason=" & r.reason)
     check r.cacheDecision notin ReuseDecisions
-    check f.runCount() == 2
+    check f.runCount() == (if NoTreeLifetimeGuard: 3 else: 2)

@@ -383,12 +383,19 @@ suite "deploy agent keeps a durable HISTORY of every tick":
     check deployAgentExitCode(aoAmbiguous) == 2
     # NOT 1: retrying on the timer will not fix a wrong recipient key.
     check deployAgentExitCode(aoSecretsFailed) == 2
+    # NOT 1 either: no retry changes the host's distribution.
+    check deployAgentExitCode(aoUnsupportedBase) == 2
+    # A frozen mirror and a quarantined deployment: no retry fixes either.
+    check deployAgentExitCode(aoStale) == 2
+    check deployAgentExitCode(aoRolledBack) == 2
+    # An operator's own pause is not a failure.
+    check deployAgentExitCode(aoPaused) == 0
 
     var seen = 0
     for kind in AgentOutcomeKind:
       check deployAgentExitCode(kind) in [0, 1, 2]
       inc seen
-    check seen == 8
+    check seen == 12
 
 suite "deploy agent maps every tick onto a Windows event":
 
@@ -400,7 +407,7 @@ suite "deploy agent maps every tick onto a Windows event":
       ids.add(id)
     check tickEventId(TickRaisedOutcome) notin ids
     ids.add(tickEventId(TickRaisedOutcome))
-    check ids.len == 9
+    check ids.len == 13
 
     # 1..1000 is not decoration: the source is registered against
     # EventCreate.exe's stock message table, which covers exactly that

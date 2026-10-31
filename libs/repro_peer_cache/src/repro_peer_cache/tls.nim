@@ -37,11 +37,15 @@
 ## single heap-allocated `TlsConn` ref object so the buffers outlive
 ## each individual handshake step.
 ##
-## The EC private key bytes (`ourPrivateKeyBuf`) live on the heap-
-## allocated `TlsConn` and never move; the BearSSL `EcPrivateKey`
-## stored in `ecKey` points at `ourPrivateKeyBuf[0]` for the duration
-## of the session. Same pattern for `ourCertDer` (the DER-encoded
-## leaf cert) which `X509Certificate.data` points into.
+## The EC private key never lives in the GC heap (Distributed-Execution
+## M7, threat model G16): the BearSSL `EcPrivateKey` stored in `ecKey`
+## points into a `secret_key.SecretKey` page the `TlsConn` keeps alive
+## (`keyRef`) — the caller's own key for a leaf credential, or a private
+## copy made from a legacy `CertAndKey`. Such a page is wiped in a forked
+## child, so a daemon's build worker does not inherit the daemon's key
+## through the connections it held at fork time. Same lifetime pattern for
+## `ourCertDer` (the DER-encoded leaf cert) which `X509Certificate.data`
+## points into.
 ##
 ## ## Async handshake driver
 ##
@@ -73,6 +77,7 @@ import bearssl/abi/bearssl_ssl as bsslSslAbi
 import bearssl/abi/bearssl_x509 as bsslX509Abi
 import ./auth
 import ./pki
+import ./secret_key
 import ./types
 
 var tlsDebug* = false
@@ -126,7 +131,8 @@ type
     # storage. Both are referenced by the engine across the session.
     ourCertDer: seq[byte]
     ourCertChain: seq[X509Certificate]
-    ourPrivateKeyBuf: array[P256PrivLen, byte]
+    keyRef: SecretKey
+      ## The private scalar `ecKey.x` points into (see "Buffer lifetime").
     ecKey: EcPrivateKey
 
     # Peer identity captured from the validated cert chain.
@@ -136,6 +142,27 @@ type
 
     # Per-call IO scratch.
     handshakeStarted: bool
+
+    # Distributed-Execution M7: single-reader / single-writer discipline.
+    # Several coroutines drive one connection (a reader loop waiting for the
+    # next frame, senders pushing requests), and each can find the engine
+    # wanting records sent or received. Two of them flushing the same
+    # pending record duplicated it on the wire, and two reads into the
+    # engine's buffer interleaved — either breaks the session. Records are
+    # now copied and acknowledged synchronously and written by ONE writer in
+    # order; only one coroutine reads the socket at a time.
+    outQueue: seq[string]
+    writerActive: bool
+    writeFailed: bool
+    recvBusy: bool
+    # One `sendBytes` at a time: a frame larger than the engine's send
+    # buffer is written across several awaits, and a second sender (a
+    # keep-alive answer, a refusal, a reply to a concurrent request)
+    # writing in between would interleave its bytes into the middle of
+    # the first frame (Distributed-Execution M7: the worker answers a
+    # ReachGoal while it fetches blobs over the same connection).
+    sendBusy: bool
+    sendWaiters: seq[Future[void]]
 
 # ---------------------------------------------------------------------------
 # Small helpers.
@@ -147,6 +174,8 @@ proc nowMs(): int64 =
   ## Monotonic milliseconds since module init. Only differences matter
   ## — we use this for deadlines.
   int64((getMonoTime() - tlsEpoch).inMilliseconds)
+
+const NoDeadlineValue = high(int64) div 4
 
 proc sha256Bytes(buf: openArray[byte]): array[32, byte] =
   var ctx: bsslHashAbi.Sha256Context
@@ -213,18 +242,29 @@ proc buildAnchorList(conn: TlsConn; anchors: TrustAnchorSet) =
 # Engine initialisation.
 # ---------------------------------------------------------------------------
 
-proc setupOurCertAndKey(conn: TlsConn; ourCert: CertAndKey) =
-  ## Copies the leaf cert + private scalar into TlsConn-owned storage and
-  ## wires up the BearSSL ABI types that the engine will hold pointers to.
-  conn.ourCertDer = ourCert.certDer
+proc setupOurCertAndSecret(conn: TlsConn; certDer: seq[byte];
+                           key: SecretKey) =
+  ## Copies the leaf cert into TlsConn-owned storage and points the BearSSL
+  ## private key at `key`'s protected page, which the connection keeps
+  ## alive for the session.
+  if certDer.len == 0:
+    raise newException(TlsHandshakeError, "no certificate to present")
+  conn.ourCertDer = certDer
   conn.ourCertChain = @[X509Certificate()]
   conn.ourCertChain[0].data = addr conn.ourCertDer[0]
   conn.ourCertChain[0].dataLen = uint(conn.ourCertDer.len)
-  for i in 0 ..< P256PrivLen:
-    conn.ourPrivateKeyBuf[i] = ourCert.keypair.privateKey[i]
+  conn.keyRef = key
   conn.ecKey.curve = cint(bsslEcAbi.EC_secp256r1)
-  conn.ecKey.x = addr conn.ourPrivateKeyBuf[0]
+  conn.ecKey.x = keyAddress(key)
   conn.ecKey.xlen = uint(P256PrivLen)
+
+proc setupOurCertAndKey(conn: TlsConn; ourCert: CertAndKey) =
+  ## The legacy shape (Peer-Cache-BearSSL M3/M4): the private scalar comes
+  ## with the certificate. It is copied into a connection-owned protected
+  ## page, never into the GC heap.
+  var kp = ourCert.keypair
+  let key = newSecretKey(kp)
+  setupOurCertAndSecret(conn, ourCert.certDer, key)
 
 proc newTlsConn(sock: AsyncSocket; role: TlsRole): TlsConn =
   result = TlsConn(
@@ -343,79 +383,128 @@ proc engineRef(conn: TlsConn): ptr SslEngineContext =
 # Raw socket IO (string <-> byte buffers).
 # ---------------------------------------------------------------------------
 
-proc rawSocketSend(sock: AsyncSocket; src: ptr byte; len: int):
-    Future[void] {.async.} =
-  if len <= 0:
-    return
-  var s = newString(len)
-  for i in 0 ..< len:
-    s[i] = char(cast[ptr UncheckedArray[byte]](src)[i])
-  await sock.send(s)
+proc writerLoop(conn: TlsConn) {.async.} =
+  ## The connection's only writer: drains `outQueue` in order.
+  try:
+    while conn.outQueue.len > 0:
+      let chunk = conn.outQueue[0]
+      conn.outQueue.delete(0)
+      await conn.socket.send(chunk)
+  except CatchableError:
+    conn.writeFailed = true
+    conn.outQueue.setLen(0)
+  conn.writerActive = false
 
-proc rawSocketRecvInto(sock: AsyncSocket; dst: ptr byte; cap: int):
-    Future[int] {.async.} =
-  if cap <= 0:
-    return 0
-  let chunk = await sock.recv(cap)
+proc takePendingRecord(conn: TlsConn): bool =
+  ## Copies the engine's pending outgoing record bytes into the write queue
+  ## and acknowledges them at once — no `await` between the copy and the
+  ## ack, so no other coroutine can see (and send) the same bytes. Returns
+  ## whether anything was taken.
+  let eng = conn.engineRef()
+  var sendLen: uint = 0
+  let sendBuf = sslEngineSendrecBuf(eng[], sendLen)
+  if sendLen == 0'u or sendBuf.isNil:
+    return false
+  var chunk = newString(int(sendLen))
+  copyMem(addr chunk[0], sendBuf, int(sendLen))
+  sslEngineSendrecAck(eng[], csize_t(sendLen))
+  conn.outQueue.add(chunk)
+  if not conn.writerActive:
+    conn.writerActive = true
+    asyncCheck writerLoop(conn)
+  true
+
+proc drainWrites(conn: TlsConn; deadlineMs: int64): Future[bool] {.async.} =
+  ## Waits until every queued record has been written (or the write failed).
+  while conn.writerActive or conn.outQueue.len > 0:
+    if conn.writeFailed:
+      return false
+    if nowMs() > deadlineMs:
+      return false
+    await sleepAsync(1)
+  not conn.writeFailed
+
+proc readIntoEngine(conn: TlsConn; deadlineMs: int64): Future[bool] {.async.} =
+  ## Reads one chunk from the socket into the engine's receive buffer. The
+  ## destination is looked up AFTER the read completes, so a buffer pointer
+  ## is never held across an `await`. Returns false on close/error/deadline.
+  let eng = conn.engineRef()
+  var capLen: uint = 0
+  if sslEngineRecvrecBuf(eng[], capLen).isNil or capLen == 0'u:
+    await sleepAsync(0)
+    return true
+  conn.recvBusy = true
+  defer: conn.recvBusy = false
+  let recvFut = conn.socket.recv(int(capLen))
+  var chunk = ""
+  try:
+    if deadlineMs >= NoDeadlineValue:
+      # An idle connection between frames: wait as long as the peer keeps
+      # the socket open.
+      chunk = await recvFut
+    else:
+      let waitMs = max(0, int(deadlineMs - nowMs()))
+      if waitMs <= 0 or not (await withTimeout(recvFut, waitMs)):
+        return false
+      chunk = recvFut.read()
+  except CatchableError:
+    return false
   if chunk.len == 0:
-    return 0
-  let n = min(chunk.len, cap)
-  for i in 0 ..< n:
-    cast[ptr UncheckedArray[byte]](dst)[i] = byte(ord(chunk[i]))
-  return n
+    return false
+  var offset = 0
+  while offset < chunk.len:
+    var room: uint = 0
+    let dst = sslEngineRecvrecBuf(eng[], room)
+    if dst.isNil or room == 0'u:
+      return false
+    let n = min(int(room), chunk.len - offset)
+    copyMem(dst, unsafeAddr chunk[offset], n)
+    sslEngineRecvrecAck(eng[], csize_t(n))
+    offset += n
+  true
 
 # ---------------------------------------------------------------------------
 # Handshake / record-layer pump.
 # ---------------------------------------------------------------------------
 
+const NoDeadline = NoDeadlineValue
+  ## `pumpUntilState` deadline meaning "none" (see `recv`'s `idleTimeoutMs`).
+
 proc pumpUntilState(conn: TlsConn; wanted: cuint; deadlineMs: int64):
     Future[bool] {.async.} =
   ## Drives the BearSSL state machine until one of the bits in `wanted`
   ## is set (or `SSL_CLOSED` flips on, in which case we bail). Returns
-  ## true on success, false on close / deadline / IO error.
+  ## true on success, false on close / deadline / IO error. Outgoing
+  ## records go through the connection's single writer; only one coroutine
+  ## reads the socket at a time (see the `TlsConn` fields).
   let eng = conn.engineRef()
   while true:
+    if conn.writeFailed:
+      return false
     let state = sslEngineCurrentState(eng[])
     if (state and SSL_CLOSED) != 0'u:
       return false
     if (state and wanted) != 0'u:
       return true
     if (state and SSL_SENDREC) != 0'u:
-      var sendLen: uint = 0
-      let sendBuf = sslEngineSendrecBuf(eng[], sendLen)
-      if sendLen == 0'u or sendBuf.isNil:
-        # State bit set but no buffer — wait for the engine to advance.
-        await sleepAsync(0)
+      if conn.takePendingRecord():
         continue
-      try:
-        await rawSocketSend(conn.socket, sendBuf, int(sendLen))
-      except CatchableError:
-        return false
-      sslEngineSendrecAck(eng[], csize_t(sendLen))
+      await sleepAsync(0)
       continue
     if (state and SSL_RECVREC) != 0'u:
-      var recvLen: uint = 0
-      let recvBuf = sslEngineRecvrecBuf(eng[], recvLen)
-      if recvLen == 0'u or recvBuf.isNil:
-        await sleepAsync(0)
+      if conn.recvBusy:
+        # Another coroutine is already reading for this connection; let it
+        # deliver, then look at the state again.
+        await sleepAsync(1)
+        if deadlineMs < NoDeadline and nowMs() > deadlineMs:
+          return false
         continue
-      let recvFut = rawSocketRecvInto(conn.socket, recvBuf, int(recvLen))
-      let waitMs = max(0, int(deadlineMs - nowMs()))
-      let ok =
-        if waitMs <= 0: false
-        else: await withTimeout(recvFut, waitMs)
-      if not ok:
+      if not await conn.readIntoEngine(deadlineMs):
         return false
-      let got =
-        try: recvFut.read()
-        except CatchableError: 0
-      if got <= 0:
-        return false
-      sslEngineRecvrecAck(eng[], csize_t(got))
       continue
     # No I/O state bit set — yield to dispatcher and re-check.
     await sleepAsync(0)
-    if nowMs() > deadlineMs:
+    if deadlineMs < NoDeadline and nowMs() > deadlineMs:
       return false
 
 # ---------------------------------------------------------------------------
@@ -465,17 +554,14 @@ proc dumpEngine(conn: TlsConn; tag: string) =
                    " xcErr=" & $xcErr & " xcNumCerts=" & $xcNumCerts &
                    " ver=" & toHex(int(ver)) & extra)
 
-proc wrapServerSocket*(sock: AsyncSocket;
-                      ourCert: CertAndKey;
-                      anchors: TrustAnchorSet;
-                      timeoutMs: int = TlsHandshakeTimeoutMs):
-                      Future[Option[TlsConn]] {.async.} =
-  ## Wraps an accepted TCP socket with a BearSSL TLS 1.2 mutual-auth
-  ## server context. Returns `none` on any handshake failure.
+proc wrapServer(sock: AsyncSocket; certDer: seq[byte]; key: SecretKey;
+                legacy: CertAndKey; anchors: TrustAnchorSet;
+                timeoutMs: int): Future[Option[TlsConn]] {.async.} =
   var conn: TlsConn
   try:
     conn = newTlsConn(sock, trServer)
-    setupOurCertAndKey(conn, ourCert)
+    if key.isNil: setupOurCertAndKey(conn, legacy)
+    else: setupOurCertAndSecret(conn, certDer, key)
     buildAnchorList(conn, anchors)
     initServerEngine(conn)
   except CatchableError as err:
@@ -493,18 +579,33 @@ proc wrapServerSocket*(sock: AsyncSocket;
   capturePeerIdentity(conn)
   return some(conn)
 
-proc wrapClientSocket*(sock: AsyncSocket;
-                      targetHost: string;
+proc wrapServerSocket*(sock: AsyncSocket;
                       ourCert: CertAndKey;
                       anchors: TrustAnchorSet;
                       timeoutMs: int = TlsHandshakeTimeoutMs):
-                      Future[Option[TlsConn]] {.async.} =
-  ## Mirror for the dial side. `targetHost` becomes the TLS SNI; an
-  ## empty string falls back to the placeholder `peer.local`.
+                      Future[Option[TlsConn]] =
+  ## Wraps an accepted TCP socket with a BearSSL TLS 1.2 mutual-auth
+  ## server context. Returns `none` on any handshake failure.
+  wrapServer(sock, @[], nil, ourCert, anchors, timeoutMs)
+
+proc wrapServerSocket*(sock: AsyncSocket;
+                      certDer: seq[byte];
+                      key: SecretKey;
+                      anchors: TrustAnchorSet;
+                      timeoutMs: int = TlsHandshakeTimeoutMs):
+                      Future[Option[TlsConn]] =
+  ## Distributed-Execution M7: the same, presenting `certDer` with the
+  ## private key held in `key` (never copied out of its protected page).
+  wrapServer(sock, certDer, key, CertAndKey(), anchors, timeoutMs)
+
+proc wrapClient(sock: AsyncSocket; targetHost: string; certDer: seq[byte];
+                key: SecretKey; legacy: CertAndKey; anchors: TrustAnchorSet;
+                timeoutMs: int): Future[Option[TlsConn]] {.async.} =
   var conn: TlsConn
   try:
     conn = newTlsConn(sock, trClient)
-    setupOurCertAndKey(conn, ourCert)
+    if key.isNil: setupOurCertAndKey(conn, legacy)
+    else: setupOurCertAndSecret(conn, certDer, key)
     buildAnchorList(conn, anchors)
     initClientEngine(conn, targetHost)
   except CatchableError as err:
@@ -522,13 +623,35 @@ proc wrapClientSocket*(sock: AsyncSocket;
   capturePeerIdentity(conn)
   return some(conn)
 
+proc wrapClientSocket*(sock: AsyncSocket;
+                      targetHost: string;
+                      ourCert: CertAndKey;
+                      anchors: TrustAnchorSet;
+                      timeoutMs: int = TlsHandshakeTimeoutMs):
+                      Future[Option[TlsConn]] =
+  ## Mirror for the dial side. `targetHost` becomes the TLS SNI; an
+  ## empty string falls back to the placeholder `peer.local`.
+  wrapClient(sock, targetHost, @[], nil, ourCert, anchors, timeoutMs)
+
+proc wrapClientSocket*(sock: AsyncSocket;
+                      targetHost: string;
+                      certDer: seq[byte];
+                      key: SecretKey;
+                      anchors: TrustAnchorSet;
+                      timeoutMs: int = TlsHandshakeTimeoutMs):
+                      Future[Option[TlsConn]] =
+  ## Distributed-Execution M7: the dial side presenting `certDer` with the
+  ## private key held in `key`.
+  wrapClient(sock, targetHost, certDer, key, CertAndKey(), anchors,
+    timeoutMs)
+
 # ---------------------------------------------------------------------------
 # Steady-state IO.
 # ---------------------------------------------------------------------------
 
 proc flushSendrec(conn: TlsConn; deadlineMs: int64): Future[bool] {.async.} =
-  ## Drains any pending SEND records the engine has queued. Called after
-  ## a write so the bytes actually hit the wire.
+  ## Drains any pending SEND records the engine has queued and waits until
+  ## they are on the wire. Called after a write.
   let eng = conn.engineRef()
   sslEngineFlush(eng[], 0.cint)
   while true:
@@ -536,23 +659,14 @@ proc flushSendrec(conn: TlsConn; deadlineMs: int64): Future[bool] {.async.} =
     if (state and SSL_CLOSED) != 0'u:
       return false
     if (state and SSL_SENDREC) == 0'u:
-      return true
-    var sendLen: uint = 0
-    let sendBuf = sslEngineSendrecBuf(eng[], sendLen)
-    if sendLen == 0'u or sendBuf.isNil:
+      break
+    if not conn.takePendingRecord():
       await sleepAsync(0)
-      continue
-    try:
-      await rawSocketSend(conn.socket, sendBuf, int(sendLen))
-    except CatchableError:
-      return false
-    sslEngineSendrecAck(eng[], csize_t(sendLen))
     if nowMs() > deadlineMs:
       return false
+  return await conn.drainWrites(deadlineMs)
 
-proc sendBytes*(conn: TlsConn; data: seq[byte]) {.async.} =
-  ## Pushes `data.len` bytes through the tunnel. Yields between chunks
-  ## if BearSSL's send-app buffer fills up.
+proc sendBytesLocked(conn: TlsConn; data: seq[byte]) {.async.} =
   if conn.closed:
     raise newException(TlsHandshakeError, "send on closed TlsConn")
   let eng = conn.engineRef()
@@ -590,6 +704,33 @@ proc sendBytes*(conn: TlsConn; data: seq[byte]) {.async.} =
   if not finalFlush:
     raise newException(TlsHandshakeError, "send final flush failed")
 
+proc acquireSend(conn: TlsConn) {.async.} =
+  while conn.sendBusy:
+    let waiter = newFuture[void]("tls.acquireSend")
+    conn.sendWaiters.add(waiter)
+    await waiter
+  conn.sendBusy = true
+
+proc releaseSend(conn: TlsConn) =
+  conn.sendBusy = false
+  if conn.sendWaiters.len > 0:
+    let waiter = conn.sendWaiters[0]
+    conn.sendWaiters.delete(0)
+    if not waiter.finished:
+      waiter.complete()
+
+proc sendBytes*(conn: TlsConn; data: seq[byte]) {.async.} =
+  ## Pushes `data.len` bytes through the tunnel. Yields between chunks
+  ## if BearSSL's send-app buffer fills up. Concurrent callers are
+  ## serialized: each call's bytes are contiguous on the wire.
+  if conn.closed:
+    raise newException(TlsHandshakeError, "send on closed TlsConn")
+  await conn.acquireSend()
+  try:
+    await conn.sendBytesLocked(data)
+  finally:
+    conn.releaseSend()
+
 proc send*(conn: TlsConn; data: string) {.async.} =
   var asBytes = newSeq[byte](data.len)
   for i in 0 ..< data.len:
@@ -599,16 +740,24 @@ proc send*(conn: TlsConn; data: string) {.async.} =
 proc send*(conn: TlsConn; data: seq[byte]) {.async.} =
   await sendBytes(conn, data)
 
-proc recv*(conn: TlsConn; size: int): Future[string] {.async.} =
+proc recv*(conn: TlsConn; size: int;
+           idleTimeoutMs = 60_000): Future[string] {.async.} =
   ## Reads up to `size` bytes from the tunnel. Returns the empty string
-  ## when the tunnel is closed by the peer.
+  ## when the tunnel is closed by the peer — or when nothing arrives within
+  ## `idleTimeoutMs`. `idleTimeoutMs <= 0` waits without a deadline: what a
+  ## frame reader waiting for the NEXT frame's header wants, because a
+  ## connection that is idle between frames is healthy (Distributed-Execution
+  ## M7: a daemon build worker's connection sits idle while the engine runs a
+  ## long synchronous step, and treating that as a close dropped it).
   if size <= 0:
     return ""
   if conn.closed:
     return ""
   result = newStringOfCap(size)
   let eng = conn.engineRef()
-  let deadline = nowMs() + int64(60_000)
+  let deadline =
+    if idleTimeoutMs <= 0: NoDeadline
+    else: nowMs() + int64(idleTimeoutMs)
   while result.len < size:
     let ok = await pumpUntilState(conn,
                                   cuint(SSL_RECVAPP) or cuint(SSL_CLOSED),
@@ -643,6 +792,14 @@ proc close*(conn: TlsConn) {.async.} =
     return
   conn.closed = true
   try: conn.socket.close() except CatchableError: discard
+  # The engine no longer needs the key; let its page go with the last
+  # holder.
+  conn.ecKey.x = nil
+  conn.keyRef = nil
+  for waiter in conn.sendWaiters:
+    if not waiter.finished:
+      waiter.complete()
+  conn.sendWaiters.setLen(0)
 
 # ---------------------------------------------------------------------------
 # Metadata accessors.

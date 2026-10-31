@@ -16,10 +16,10 @@
 ## project file, and serializes the SOLVER output (``UnifiedSolution``),
 ## not workspace VCS state.
 ##
-## ## On-disk format (``reprobuild.solved-graph-lock.v2``)
+## ## On-disk format (``reprobuild.solved-graph-lock.v3``)
 ##
 ## ```toml
-## schema = "reprobuild.solved-graph-lock.v2"
+## schema = "reprobuild.solved-graph-lock.v3"
 ##
 ## [lock]
 ## platform = "amd64-linux"
@@ -27,17 +27,37 @@
 ## inputs_digest = "fnv1a64:0123abcd..."
 ## variants = [{ name = "compiler", value = "clang" }]
 ## packages = [{ name = "nim", version = "2.2.0", source = "nim", selection = "selected" }]
-## deps = []
+## deps = [{ name = "app", self = "true", coord_kind = "vcs", url = "...", ref = "main", revision = "<sha>", integrity = "git-sha1:<sha>", ... }, { name = "lib", coord_kind = "vcs", ... }]
 ## ```
 ##
-## **There is exactly one on-disk schema, and every writer in this module
-## emits it.** ``serializeSolvedGraphLock`` and ``serializeLockedDependencies``
-## both produce ``…v2`` documents that ``parseSolvedGraphLock`` and
+## **There is exactly one schema every writer emits, and it is v3.**
+## ``serializeSolvedGraphLock`` and ``serializeLockedDependencies`` both
+## produce ``…v3`` documents that ``parseSolvedGraphLock`` and
 ## ``parseLockedDependencies`` accept; a document this module writes is a
 ## document this module reads back. The regression that pins the invariant is
-## ``tests/t_lock_writer_output_reads_back.nim``. The historical ``…v1``
-## tag is rejected on read (regenerate with ``repro lock refresh``); nothing
-## writes it.
+## ``tests/t_lock_writer_output_reads_back.nim``.
+##
+## **A ``deps`` record pins an IDENTITY, never a materialization**
+## (Workspace-Manifests.md §"The locked-dependency model", §"Mode-agnostic"):
+## name, coordinates, integrity, solved version and metadata. It carries NO
+## filesystem ``path``. Where a dependency is checked out is a fact about the
+## machine reading the lock, so it is derived there, from the dependency's
+## NAME (``repro_cli_support``'s ``lockedDepCheckoutPath``: the develop
+## overrides, then the workspace membership, then a checkout present beneath
+## the lock's directory, then the one-level sibling ``../<name>``). The one entry that needs a marker — the
+## lock's OWN repository — carries ``self = "true"``, which is metadata about
+## the record, not a location.
+##
+## ``…v2`` is still READ, so every lock committed before v3 keeps working, and
+## its ``path`` key is NOT authoritative: ``"."`` (or an empty value on a VCS
+## entry) identifies the self entry, exactly as v2 consumers recognized it,
+## and every other recorded path is discarded and derived locally as for v3.
+## A recorded path is the one field of a v2 record that goes stale while the
+## dependency is unchanged — issue
+## ``2026-10-14-committed-lock-records-a-filesystem-path-per-dependency`` —
+## so believing it is what the v3 reader exists to stop. The historical
+## ``…v1`` tag is rejected on read (regenerate with ``repro lock refresh``);
+## nothing writes v1 or v2.
 ##
 ## The ``variants`` / ``packages`` arrays are **inline-table arrays**
 ## (``field = [{...}, {...}]``), not nested ``[[array.of.tables]]`` — the
@@ -60,17 +80,33 @@
 ## SHA-lock layer and MO-2's evidence model). MO-1 records the source
 ## identity the unified solver actually keys on (the package-definition
 ## name); deeper provenance layers above it.
+##
+## ## Locked provisioning realizations (ReproOS-Campaign-Completion M7 D2)
+##
+## A v2 document may also carry ``provisioning = [{ record = "…", … }]`` —
+## the locked provisioning realizations of ``repro_lock/provisioning``,
+## re-exported here. The key is written only when there is at least one
+## record, so a lock without them is byte-identical to what this module
+## wrote before they existed; the reader is strict about it (see that
+## module). They are not part of ``lockIdentityOf``: see
+## ``LockedDependencies.provisioning``.
 
 import std/[algorithm, strutils, tables]
 
 import repro_solver
 import repro_multihash
 import repro_lock/identity
+import repro_lock/toml_subset
+import repro_lock/provisioning
+import repro_lock/catalog_imports
+import repro_lock/certificate_policy
 
 export UnifiedSolution
 export SelectionStatus
 export repro_multihash
 export identity
+export provisioning
+export catalog_imports
 
 const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
   ## The historical MO-1 schema string, retained ONLY so a stale lock can be
@@ -82,19 +118,34 @@ const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
   ## ``solutionToLock`` / ``solvedPartOf`` stamped on a freshly built
   ## ``SolvedGraphLock``, and ``serializeSolvedGraphLock`` wrote it to disk —
   ## producing documents ``parseSolvedGraphLock`` refused to read. Both now
-  ## stamp ``SolvedGraphLockSchemaV2``, which is the only schema in play.
+  ## stamp ``SolvedGraphLockSchemaV3``, the schema every writer emits.
 
 const SolvedGraphLockSchemaV2* = "reprobuild.solved-graph-lock.v2"
-  ## Workspace-Manifest-Optional MO-8 — the self-describing committed lock and
-  ## the ONLY committed-lock schema the reader accepts. It preserves the
-  ## solved-graph payload (``variants`` / ``packages`` / ``optimal`` /
-  ## ``platform`` / ``inputs_digest``) as a sub-part AND adds the unified
-  ## ``deps`` set — each locked dependency with checkout COORDINATES (a sum
-  ## over VCS / repro-store / registry) and a self-describing INTEGRITY
-  ## multihash. This is what makes a lock-file-only workspace fully
-  ## self-describing (populated from the lock's content, not from live
-  ## ``git HEAD``). The reader is LOUD on any schema other than v2 (including
-  ## the old ``…v1``).
+  ## Workspace-Manifest-Optional MO-8 — the self-describing committed lock. It
+  ## preserves the solved-graph payload (``variants`` / ``packages`` /
+  ## ``optimal`` / ``platform`` / ``inputs_digest``) as a sub-part AND adds the
+  ## unified ``deps`` set — each locked dependency with checkout COORDINATES
+  ## (a sum over VCS / repro-store / registry) and a self-describing INTEGRITY
+  ## multihash.
+  ##
+  ## READ-ONLY now. A v2 ``deps`` record also carried a workspace-relative
+  ## ``path``; v3 drops it (see ``SolvedGraphLockSchemaV3``), and the reader
+  ## takes from a v2 path only whether the entry is the lock's own repository
+  ## (``"."``) — every other recorded path is ignored.
+
+const SolvedGraphLockSchemaV3* = "reprobuild.solved-graph-lock.v3"
+  ## The committed-lock schema every writer emits. Identical to v2 except that
+  ## a ``deps`` record carries no ``path``: a lock pins identity, never a
+  ## materialization (Workspace-Manifests.md §"The locked-dependency model").
+  ## The lock's own repository is marked ``self = "true"`` instead of
+  ## ``path = "."``. The reader accepts v3 and v2 and is LOUD on any other
+  ## schema (including the old ``…v1``).
+
+const SelfLockedDepPath* = "."
+  ## The in-memory ``LockedDep.path`` of the lock's OWN repository: the
+  ## directory holding the lock, relative to itself. It is what
+  ## ``isSelfLockedDep`` tests and what ``serializeLockedDependencies`` turns
+  ## into ``self = "true"`` on disk.
 
 type
   LockedVariant* = object
@@ -218,8 +269,24 @@ type
     ## packages are both just dependencies with coordinates + integrity; the
     ## "workspace repos vs solved graph" split is not a real boundary.
     name*: string             ## identity.
-    path*: string             ## workspace-relative path (``.`` = the root
-                              ## repo) for a VCS workspace dep; empty otherwise.
+    path*: string
+      ## Where THIS machine has the dependency checked out, relative to the
+      ## directory the lock is read against (``committedLockPathBase`` in
+      ## ``repro_cli_support``) — a LOCAL MATERIALIZATION, never part of the
+      ## lock. It is NEVER SERIALIZED and never read from a lock document:
+      ## ``parseLockedDependencies`` sets ``SelfLockedDepPath`` (``.``) on the
+      ## lock's own repository, the one-level sibling default
+      ## (``defaultLockedDepCheckoutPath``) on every other VCS entry, and ""
+      ## on a non-VCS one; ``repro_cli_support``'s ``localizeLockedDeps``
+      ## then replaces the default with what this machine actually declares
+      ## (develop overrides, workspace membership, a nested checkout). A
+      ## writer that builds a ``LockedDep`` from a checkout sets it to where
+      ## it observed the checkout, for its own use; the serializer drops it.
+      ##
+      ## So no code may compare a ``path`` against another lock's or treat it
+      ## as recorded: two locks that name one dependency agree or disagree on
+      ## its IDENTITY (name, coordinates, integrity), not on where some writer
+      ## once found it. Use ``isSelfLockedDep`` for the self test.
     coordinates*: Coordinates
     integrity*: string        ## self-describing multihash (``<alg>:<digest>``).
     version*: string          ## solved version/option assignment where
@@ -246,6 +313,60 @@ type
     variants*: seq[LockedVariant]
     packages*: seq[LockedPackage]
     deps*: seq[LockedDep]
+    provisioning: seq[LockedRealization]
+      ## M7 deliverable 2 — the locked provisioning realizations
+      ## (``repro_lock/provisioning``), serialised under the ``provisioning``
+      ## key and ONLY when non-empty, so every lock written before them
+      ## re-serialises byte-identically.
+      ##
+      ## Deliberately NOT exported. A record is handed out for USE only by
+      ## ``lockedRealizationFor``, which takes the CURRENT interface and
+      ## contribution fingerprints and refuses a stale record. The one other
+      ## reader is ``lockedProvisioningClaims``, which hands the raw records
+      ## to the provisioning RESOLVER
+      ## (``repro_interface_artifacts/contribution_selection``) so it can
+      ## learn which contributor each record pins; that resolver re-checks
+      ## every record through ``requireCurrentRealization`` (the same gate)
+      ## plus the catalog coordinate and realization before selecting from
+      ## it. Set it with ``withProvisioningRealizations``.
+      ##
+      ## Deliberately NOT projected into ``lockIdentityOf`` either. The spec
+      ## (Provisioning-Contributions.md, Locks And Snapshots) requires that
+      ## refreshing only a contribution leave downstream typechecking cached
+      ## while invalidating the realization and build edges that selected
+      ## it. The §6.2 lock identity governs EVERY action under the lock, so
+      ## folding the record in would invalidate typechecking too.
+      ##
+      ## The realization and build edges that select a locked realization
+      ## ARE keyed on its contribution fingerprint (M7 deliverables 3/4): a
+      ## resolver-selected ``ProvisioningPin`` carries it, and
+      ## ``repro_tool_profiles`` folds it into the acquisition plan's lock
+      ## identity, which keys the realized prefix, the tool profile
+      ## fingerprint and the typed-tool action fingerprint. So a
+      ## contribution-only refresh moves those keys while this identity --
+      ## and with it downstream typechecking -- stays put. A record whose
+      ## contribution no longer matches the catalogs is REFUSED by the
+      ## resolver, never re-used.
+    catalogImports: seq[LockedCatalogImport]
+      ## ReproOS M6 deliverable 1 -- the catalog import pins
+      ## (``repro_lock/catalog_imports``), serialised under the
+      ## ``catalog_imports`` key and ONLY when non-empty, so every lock
+      ## written before them re-serialises byte-identically. Not projected
+      ## into ``lockIdentityOf``, for the reason ``provisioning`` is not: they
+      ## govern which catalog revisions a provisioning selection is verified
+      ## against, never typechecking. Set with ``withCatalogImportPins``.
+    certificatePolicySection*: string
+      ## Test-Certificates TC-9b: the ``[certificate_policy]`` snapshot,
+      ## VERBATIM as the lock carries it (``""`` when it carries none).
+      ##
+      ## Kept as text, not parsed here, on purpose. Only the writers that
+      ## evaluate the provider (``repro lock refresh`` and the certifying
+      ## run's lock-update node) may change it; every other writer -- the
+      ## commit-time re-pin above all -- must carry it through byte for byte,
+      ## hand edits included. The strict reader in
+      ## ``repro_lock/certificate_policy`` is what the gates judge it with, so
+      ## a malformed snapshot does not make the lock unreadable to a build; it
+      ## makes the GATES refuse.
 
 const
   LockedArchiveBinary* = "binary"
@@ -293,7 +414,7 @@ proc solutionToLock*(sol: UnifiedSolution; platform: string;
   ## deterministic regardless of the (unordered) ``Table`` iteration
   ## order — two solves of the same graph produce byte-identical locks.
   result = SolvedGraphLock(
-    schema: SolvedGraphLockSchemaV2,
+    schema: SolvedGraphLockSchemaV3,
     platform: platform,
     optimal: sol.optimal,
     inputsDigest: inputsDigestOf(inputsText),
@@ -444,40 +565,6 @@ proc sameSolution*(a, b: UnifiedSolution): bool =
   true
 
 # ---------------------------------------------------------------------------
-# TOML escaping (basic-string subset)
-# ---------------------------------------------------------------------------
-
-proc tomlEscape(s: string): string =
-  result = newStringOfCap(s.len + 2)
-  for ch in s:
-    case ch
-    of '\\': result.add("\\\\")
-    of '"': result.add("\\\"")
-    of '\n': result.add("\\n")
-    of '\r': result.add("\\r")
-    of '\t': result.add("\\t")
-    else: result.add(ch)
-
-proc tomlUnescape(raw: string): string =
-  result = newStringOfCap(raw.len)
-  var i = 0
-  while i < raw.len:
-    let ch = raw[i]
-    if ch == '\\' and i + 1 < raw.len:
-      let nxt = raw[i + 1]
-      case nxt
-      of '\\': result.add('\\')
-      of '"': result.add('"')
-      of 'n': result.add('\n')
-      of 'r': result.add('\r')
-      of 't': result.add('\t')
-      else: result.add(nxt)
-      i += 2
-    else:
-      result.add(ch)
-      inc i
-
-# ---------------------------------------------------------------------------
 # Serialize
 # ---------------------------------------------------------------------------
 
@@ -490,50 +577,6 @@ proc tomlUnescape(raw: string): string =
 # Parse
 # ---------------------------------------------------------------------------
 
-proc parseScalarString(rhs: string): string =
-  let s = rhs.strip()
-  if s.len >= 2 and s[0] == '"' and s[^1] == '"':
-    tomlUnescape(s[1 ..< s.high])
-  else:
-    s
-
-iterator inlineTables(rhs: string): Table[string, string] =
-  ## Yield each ``{ k = "v", ... }`` inline table from an inline-table
-  ## array right-hand side as a key→value map. Tolerant of whitespace;
-  ## the writer always emits the canonical comma-space form.
-  var s = rhs.strip()
-  if s.len >= 2 and s[0] == '[' and s[^1] == ']':
-    s = s[1 ..< s.high]
-  var i = 0
-  while i < s.len:
-    while i < s.len and s[i] != '{': inc i
-    if i >= s.len: break
-    inc i  # past '{'
-    var fields = initTable[string, string]()
-    # Parse ``key = "value"`` pairs until the closing '}'.
-    while i < s.len and s[i] != '}':
-      while i < s.len and s[i] in {' ', '\t', ','}: inc i
-      if i >= s.len or s[i] == '}': break
-      # key
-      var keyBuf = ""
-      while i < s.len and s[i] notin {'=', ' ', '\t'}:
-        keyBuf.add(s[i]); inc i
-      while i < s.len and s[i] in {' ', '\t', '='}: inc i
-      # value (quoted string only — the writer never emits bare values
-      # inside the inline tables).
-      if i < s.len and s[i] == '"':
-        inc i
-        var valBuf = ""
-        while i < s.len and s[i] != '"':
-          if s[i] == '\\' and i + 1 < s.len:
-            valBuf.add(s[i]); valBuf.add(s[i + 1]); i += 2
-          else:
-            valBuf.add(s[i]); inc i
-        inc i  # past closing quote
-        if keyBuf.len > 0:
-          fields[keyBuf] = tomlUnescape(valBuf)
-    if i < s.len and s[i] == '}': inc i  # past '}'
-    yield fields
 
 proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## Parse a committed solved-graph lock. Round-trips
@@ -541,10 +584,12 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## ``serializeLockedDependencies`` writes, ignoring the ``deps`` array —
   ## ``parseLockedDependencies`` is the reader that keeps it). Raises
   ## ``SolvedGraphLockParseError`` on a missing/mismatched schema. Unknown keys
-  ## are ignored (forward-compatible within the v2 schema).
+  ## are ignored (forward-compatible within the v2 and v3 schemas).
   result = SolvedGraphLock(schema: "", variants: @[], packages: @[])
   var sawSchema = false
-  for rawLine in content.splitLines():
+  # The policy snapshot's keys (``schema``, ``name``, ...) are not lock keys,
+  # so only the lines outside it are read.
+  for rawLine in splitCertificatePolicySection(content).lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
@@ -595,22 +640,24 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
           # `t_lock_from_a_v3_host_resolves_on_a_v2_host` exists to forbid.
           target: fields.getOrDefault("target", "")))
     else: discard
-  if not sawSchema or result.schema != SolvedGraphLockSchemaV2:
+  if not sawSchema or result.schema notin
+      [SolvedGraphLockSchemaV3, SolvedGraphLockSchemaV2]:
     # A ``…v1`` tag is named specifically: it is not a typo but a lock
     # committed by an older Reprobuild (or, before the writer was brought to
     # v2, printed by ``repro build --print-solved-graph``), and "regenerate"
     # is the whole of the fix. Anything else is a genuinely unknown schema.
     let detail =
       if result.schema == SolvedGraphLockSchemaV1:
-        "the superseded MO-1 schema; " & SolvedGraphLockSchemaV2 & " is current"
+        "the superseded MO-1 schema; " & SolvedGraphLockSchemaV3 & " is current"
       else:
-        "expected " & SolvedGraphLockSchemaV2
+        "expected " & SolvedGraphLockSchemaV3 & " (or the still-readable " &
+          SolvedGraphLockSchemaV2 & ")"
     raise newException(SolvedGraphLockParseError,
       "unsupported lock schema '" & result.schema & "' (" & detail &
       "); regenerate with `repro lock refresh`")
 
 # ---------------------------------------------------------------------------
-# MO-8 — the unified LockedDependencies model: v2 serialize / parse
+# MO-8 — the unified LockedDependencies model: v3 serialize, v3/v2 parse
 # ---------------------------------------------------------------------------
 
 proc joinNames(names: seq[string]): string =
@@ -649,7 +696,7 @@ proc solvedPartOf*(ld: LockedDependencies): SolvedGraphLock =
   ## Project the solved-graph sub-part out of a ``LockedDependencies`` (so the
   ## existing solution<->lock helpers keep working unchanged).
   SolvedGraphLock(
-    schema: SolvedGraphLockSchemaV2, platform: ld.platform,
+    schema: SolvedGraphLockSchemaV3, platform: ld.platform,
     optimal: ld.optimal, inputsDigest: ld.inputsDigest,
     variants: ld.variants, packages: ld.packages)
 
@@ -663,9 +710,69 @@ proc canonicalSolvedGraph*(ld: LockedDependencies): CanonicalSolvedGraph =
   canonicalSolvedGraph(solvedPartOf(ld))
 
 proc lockIdentityOf*(ld: LockedDependencies): LockIdentity =
-  ## §6.2's key for a committed `…lock.v2` document. The lock-file NAME is
+  ## §6.2's key for a committed `…lock.v3` (or v2) document. The lock-file NAME is
   ## not a parameter and cannot become one.
   lockIdentityOf(canonicalSolvedGraph(ld))
+
+proc withProvisioningRealizations*(ld: LockedDependencies;
+                                   records: seq[LockedRealization]):
+    LockedDependencies =
+  ## ``ld`` with its locked provisioning realizations replaced by
+  ## ``records``. Every record must have been sealed by
+  ## ``sealLockedRealization`` (or read back by the strict reader);
+  ## ``serializeLockedDependencies`` refuses one that was not.
+  result = ld
+  result.provisioning = records
+
+proc lockedProvisioningClaims*(ld: LockedDependencies):
+    seq[LockedRealization] =
+  ## The lock's provisioning records as CLAIMS, for the provisioning
+  ## resolver only (``repro_interface_artifacts/contribution_selection
+  ## .resolveProvisioningSelections``). A claim says which contributor the
+  ## lock pins; it is not a selection. The resolver checks every claim
+  ## against the composed catalogs -- through ``requireCurrentRealization``
+  ## (interface and contribution fingerprints), the catalog coordinate and
+  ## the declared realization -- and refuses rather than select from one
+  ## that does not match. Anything else that wants a record uses
+  ## ``lockedRealizationFor``.
+  ld.provisioning
+
+proc provisioningRealizationCount*(ld: LockedDependencies): int =
+  ## How many provisioning realizations the lock records. A count, not the
+  ## records: see ``lockedRealizationFor``.
+  ld.provisioning.len
+
+proc withCatalogImportPins*(ld: LockedDependencies;
+                            pins: seq[LockedCatalogImport]):
+    LockedDependencies =
+  ## ``ld`` with its catalog import pins replaced by ``pins`` (M6 D1;
+  ## ``repro_lock/catalog_imports``). Validated when serialised.
+  result = ld
+  result.catalogImports = pins
+
+proc lockedCatalogImportPins*(ld: LockedDependencies):
+    seq[LockedCatalogImport] =
+  ## The lock's catalog import pins, as read (strictly) or as set.
+  ld.catalogImports
+
+proc catalogImportPinCount*(ld: LockedDependencies): int =
+  ## How many catalog import pins the lock records.
+  ld.catalogImports.len
+
+proc lockedRealizationFor*(ld: LockedDependencies;
+                           packageName, hostPlatform, targetPlatform: string;
+                           currentInterfaceFingerprint,
+                           currentContributionFingerprint: string):
+    LockedRealization =
+  ## The locked provisioning realization of ``packageName`` on this
+  ## host/target pair, returned ONLY if it still matches the current
+  ## canonical interface fingerprint and the current contribution
+  ## fingerprint. Raises ``StaleLockedRealizationError`` (saying which one
+  ## moved) otherwise, and ``LockedRealizationError`` when the lock records
+  ## none. See ``repro_lock/provisioning.requireCurrentRealization``.
+  requireCurrentRealization(ld.provisioning, packageName, hostPlatform,
+    targetPlatform, currentInterfaceFingerprint,
+    currentContributionFingerprint)
 
 # ---------------------------------------------------------------------------
 # MO-11 — non-VCS coordinates + integrity for solved packages, and the lift of
@@ -797,6 +904,39 @@ proc lockedDepsFromPackages*(packages: seq[LockedPackage];
         version: p.version, visibility: "public", participation: "",
         depends: @[], tags: @[]))
 
+proc defaultLockedDepCheckoutPath*(name: string): string =
+  ## The checkout location a non-self dependency is given when nothing local
+  ## says otherwise: the one-level sibling ``../<name>`` (CLI/develop.md
+  ## §"Checkout Placement"), relative to the directory holding the lock.
+  ## "" for an empty name, which names nothing that could be placed.
+  if name.len == 0: "" else: "../" & name
+
+proc isSelfLockedDep*(d: LockedDep): bool =
+  ## Is ``d`` the lock's OWN repository — the consumer the lock describes,
+  ## not a dependency of it? The one spelling of that test: on disk the entry
+  ## carries ``self = "true"`` (v3) or ``path = "."`` (v2), and both read
+  ## into ``path == SelfLockedDepPath`` (see ``LockedDep.path``).
+  d.path == SelfLockedDepPath
+
+proc validateV3Deps(deps: openArray[LockedDep]) =
+  ## Names are the serialized identity, and only one VCS record can describe
+  ## the repository holding the lock.
+  var names = initTable[string, bool]()
+  var hasSelf = false
+  for dep in deps:
+    if dep.name in names:
+      raise newException(SolvedGraphLockParseError,
+        "duplicate locked dependency name '" & dep.name & "'")
+    names[dep.name] = true
+    if isSelfLockedDep(dep):
+      if dep.coordinates.kind != ckVcs:
+        raise newException(SolvedGraphLockParseError,
+          "self dependency '" & dep.name & "' must have VCS coordinates")
+      if hasSelf:
+        raise newException(SolvedGraphLockParseError,
+          "a committed lock may carry only one self dependency")
+      hasSelf = true
+
 proc coordKindString(k: CoordKind): string =
   case k
   of ckVcs: "vcs"
@@ -807,8 +947,15 @@ proc coordKindString(k: CoordKind): string =
 proc serializeDepInline(d: LockedDep): string =
   ## One ``{ ... }`` inline table for a ``LockedDep``. Key order is FIXED so
   ## two writes of the same model are byte-identical.
+  ##
+  ## ``d.path`` is deliberately NOT written: it is where the writing machine
+  ## has the dependency checked out, and a lock pins identity only (see
+  ## ``SolvedGraphLockSchemaV3``). The self entry is marked instead, with a
+  ## quoted value because every value in these inline tables is a quoted
+  ## string (``toml_subset.inlineTables`` reads nothing else).
   result = "{ name = \"" & tomlEscape(d.name) & "\""
-  result.add(", path = \"" & tomlEscape(d.path) & "\"")
+  if isSelfLockedDep(d):
+    result.add(", self = \"true\"")
   result.add(", coord_kind = \"" & coordKindString(d.coordinates.kind) & "\"")
   case d.coordinates.kind
   of ckVcs:
@@ -842,13 +989,24 @@ proc serializeDepInline(d: LockedDep): string =
   result.add(" }")
 
 proc serializeLockedDependencies*(ld: LockedDependencies): string =
-  ## Render the unified model to canonical ``reprobuild.solved-graph-lock.v2``
+  ## Render the unified model to canonical ``reprobuild.solved-graph-lock.v3``
   ## TOML. The solved-graph payload is preserved verbatim as a sub-part;
-  ## the ``deps`` set (sorted by name then path) carries each dependency's
-  ## coordinates + self-describing integrity. Deterministic: a write -> read
-  ## -> write round-trip is byte-identical.
+  ## the ``deps`` set (sorted by unique name) carries each dependency's
+  ## coordinates + self-describing integrity, and no checkout path.
+  ## Deterministic: a write -> read -> write
+  ## round-trip is byte-identical.
+  validateV3Deps(ld.deps)
+  # A self record can describe a project that has never been published. An
+  # external VCS dependency, however, must be fetchable from the committed
+  # coordinates; serializing an empty URL would publish an unusable pin.
+  for dep in ld.deps:
+    if dep.coordinates.kind == ckVcs and not isSelfLockedDep(dep) and
+        dep.coordinates.url.strip().len == 0:
+      raise newException(SolvedGraphLockParseError,
+        "refusing to write VCS dependency '" & dep.name &
+        "' with an empty fetch url")
   result = newStringOfCap(1024)
-  result.add("schema = \"" & tomlEscape(SolvedGraphLockSchemaV2) & "\"\n\n")
+  result.add("schema = \"" & tomlEscape(SolvedGraphLockSchemaV3) & "\"\n\n")
   result.add("[lock]\n")
   result.add("platform = \"" & tomlEscape(ld.platform) & "\"\n")
   result.add("optimal = " & (if ld.optimal: "true" else: "false") & "\n")
@@ -879,13 +1037,33 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
   # deps — the MO-8 unified set (coordinates + integrity per dependency).
   var sorted = ld.deps
   sorted.sort(proc(a, b: LockedDep): int =
-    result = cmp(a.name, b.name)
-    if result == 0: result = cmp(a.path, b.path))
+    cmp(a.name, b.name))
   result.add("deps = [")
   for i, d in sorted:
     if i > 0: result.add(", ")
     result.add(serializeDepInline(d))
   result.add("]\n")
+  # provisioning — M7 D2's locked realizations. Emitted ONLY when there is
+  # one, so a lock without them is byte-identical to what this writer
+  # produced before they existed. Raises ``LockedRealizationError`` on a
+  # record that was not sealed by the lock writer, is malformed, or shares
+  # a (package, host, target) key with another.
+  if ld.provisioning.len > 0:
+    result.add(ProvisioningLockKey & " = " &
+      serializeProvisioningRealizations(ld.provisioning) & "\n")
+  # catalog_imports -- M6 D1's import pins. Emitted ONLY when there is one,
+  # for the same reason. Raises ``LockedCatalogImportError`` on a malformed
+  # pin, or on two pins for one repo or one remote.
+  if ld.catalogImports.len > 0:
+    result.add(CatalogImportsLockKey & " = " &
+      serializeCatalogImports(ld.catalogImports) & "\n")
+  # TC-9b: the certificate-policy snapshot, last and verbatim. Absent from
+  # every lock that enacts no policy, so those re-serialize byte-identically.
+  if ld.certificatePolicySection.len > 0:
+    result.add("\n")
+    result.add(ld.certificatePolicySection)
+    if not ld.certificatePolicySection.endsWith("\n"):
+      result.add("\n")
 
 proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## Render a ``SolvedGraphLock`` to a canonical committed-lock document.
@@ -911,22 +1089,94 @@ proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## (``tests/t_lock_writer_output_reads_back.nim``).
   serializeLockedDependencies(lockedDepsFromSolved(lock))
 
+const ProvisioningRepairAdvice =
+  "the lock writer never produces this, and `repro lock refresh` carries " &
+  "the provisioning array forward rather than regenerating it (it refuses " &
+  "to replace a lock whose array it cannot read); restore the " &
+  "`provisioning` line from version control, or remove it deliberately"
+  ## The repair a malformed ``provisioning`` array calls for. NOT "regenerate
+  ## with ``repro lock refresh``": a refresh re-solves the package graph and
+  ## cannot re-derive a locked provisioning selection, so it carries the
+  ## array forward (``withProvisioningCarriedForward``) and refuses one it
+  ## cannot read rather than dropping it.
+
+const CatalogImportsRepairAdvice* =
+  "catalog import pins are written only by `repro lock refresh " &
+  "--provisioning`, and a plain refresh carries them forward rather than " &
+  "re-resolving them; restore the `catalog_imports` line from version " &
+  "control, or re-pin deliberately with `repro lock refresh --provisioning`"
+  ## The repair a malformed ``catalog_imports`` array calls for (M6 D1).
+
 proc parseLockedDependencies*(content: string): LockedDependencies =
-  ## Parse a committed lock into the unified model. Accepts ONLY the v2
-  ## schema; a v1-tagged (or any other) lock is rejected LOUDLY by
+  ## Parse a committed lock into the unified model. Accepts the v3 and v2
+  ## schemas; a v1-tagged (or any other) lock is rejected LOUDLY by
   ## ``parseSolvedGraphLock`` (raises ``SolvedGraphLockParseError`` —
   ## regenerate with ``repro lock refresh``). The solved-graph keys reuse
-  ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the v2 addition.
+  ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the MO-8
+  ## addition.
+  ##
+  ## No checkout location is read from the document. Each dep's in-memory
+  ## ``path`` is set as ``LockedDep.path`` describes — ``.`` for the self
+  ## entry, ``defaultLockedDepCheckoutPath`` for any other VCS entry, "" for
+  ## a non-VCS one — and a v2 record's ``path`` value is consulted only to
+  ## recognize the self entry. A caller that knows which directory the lock
+  ## belongs to refines the default with ``repro_cli_support``'s
+  ## ``localizeLockedDeps``.
   let solved = parseSolvedGraphLock(content)  # validates schema + solved part
   result = lockedDepsFromSolved(solved)
-  # Pull the v2 ``deps`` array (empty when the lock carries no deps).
-  for rawLine in content.splitLines():
+  let split = splitCertificatePolicySection(content)
+  result.certificatePolicySection = split.policySection
+  # Pull the ``deps`` array (empty when the lock carries no deps), and
+  # M7 D2's ``provisioning`` array (absent from every lock written before it),
+  # and M6 D1's ``catalog_imports`` array (likewise) -- all from the lock
+  # part; the certificate-policy section after it is carried verbatim.
+  var sawProvisioning = false
+  var sawCatalogImports = false
+  for rawLine in split.lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#") or line.startsWith("["):
       continue
     let eq = line.find('=')
-    if eq <= 0: continue
-    if line[0 ..< eq].strip() != "deps": continue
+    if eq <= 0:
+      # A ``provisioning`` line cut before its ``=`` is a truncated record
+      # array, not a line to skip: skipping it would read a lock that
+      # selected a contributor as one that selected none.
+      if line.startsWith(ProvisioningLockKey):
+        raise newException(SolvedGraphLockParseError,
+          "lock has a truncated `" & ProvisioningLockKey & "` line; " &
+          ProvisioningRepairAdvice)
+      if line.startsWith(CatalogImportsLockKey):
+        raise newException(SolvedGraphLockParseError,
+          "lock has a truncated `" & CatalogImportsLockKey & "` line; " &
+          CatalogImportsRepairAdvice)
+      continue
+    let key = line[0 ..< eq].strip()
+    if key == CatalogImportsLockKey:
+      if sawCatalogImports:
+        raise newException(SolvedGraphLockParseError,
+          "lock carries the `" & CatalogImportsLockKey & "` key twice; " &
+          CatalogImportsRepairAdvice)
+      sawCatalogImports = true
+      try:
+        result.catalogImports = parseCatalogImports(line[eq + 1 .. ^1])
+      except LockedCatalogImportError as err:
+        raise newException(SolvedGraphLockParseError,
+          "lock " & err.msg & "; " & CatalogImportsRepairAdvice)
+      continue
+    if key == ProvisioningLockKey:
+      if sawProvisioning:
+        raise newException(SolvedGraphLockParseError,
+          "lock carries the `" & ProvisioningLockKey & "` key twice; " &
+          ProvisioningRepairAdvice)
+      sawProvisioning = true
+      try:
+        result.provisioning = parseProvisioningRealizations(
+          line[eq + 1 .. ^1])
+      except LockedRealizationError as err:
+        raise newException(SolvedGraphLockParseError,
+          "lock " & err.msg & "; " & ProvisioningRepairAdvice)
+      continue
+    if key != "deps": continue
     let rhs = line[eq + 1 .. ^1].strip()
     for f in inlineTables(rhs):
       let kindRaw = f.getOrDefault("coord_kind", "vcs")
@@ -948,9 +1198,25 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
           url: f.getOrDefault("url", ""),
           gitRef: f.getOrDefault("ref", ""),
           revision: f.getOrDefault("revision", ""))
+      let name = f.getOrDefault("name", "")
+      # The self entry: v3 marks it; v2 spelled it as the path `.` — or left
+      # the path empty, which v2 consumers read as the root too — and only a
+      # VCS entry can be a repository's own record. No other v2 path value
+      # means anything here (see the module's on-disk format notes).
+      let isSelf =
+        if solved.schema == SolvedGraphLockSchemaV2:
+          let recorded = f.getOrDefault("path", "")
+          coords.kind == ckVcs and
+            (recorded.len == 0 or recorded == SelfLockedDepPath)
+        else:
+          f.getOrDefault("self", "") == "true"
+      let localPath =
+        if isSelf: SelfLockedDepPath
+        elif coords.kind == ckVcs: defaultLockedDepCheckoutPath(name)
+        else: ""
       result.deps.add(LockedDep(
-        name: f.getOrDefault("name", ""),
-        path: f.getOrDefault("path", ""),
+        name: name,
+        path: localPath,
         coordinates: coords,
         integrity: f.getOrDefault("integrity", ""),
         version: f.getOrDefault("version", ""),
@@ -963,3 +1229,324 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
           sha256: f.getOrDefault("archive_sha256", ""),
           archiveType: f.getOrDefault("archive_type", ""),
           build: f.getOrDefault("archive_build", ""))))
+  if solved.schema == SolvedGraphLockSchemaV3:
+    validateV3Deps(result.deps)
+
+proc decodedKeyText(keyPart: string): string =
+  ## ``keyPart`` with TOML's ``\uXXXX`` / ``\UXXXXXXXX`` escapes -- and TOML
+  ## 1.1's ``\xHH`` -- of ASCII code points decoded, so
+  ## ``"provisioning"`` and ``"\x70rovisioning"`` read as the key they
+  ## spell. Everything else is kept byte for byte.
+  var i = 0
+  while i < keyPart.len:
+    if keyPart[i] == '\\' and i + 1 < keyPart.len and
+        keyPart[i + 1] in {'u', 'U', 'x'}:
+      let digits =
+        case keyPart[i + 1]
+        of 'u': 4
+        of 'U': 8
+        else: 2
+      if i + 2 + digits <= keyPart.len:
+        try:
+          let code = parseHexInt(keyPart[i + 2 ..< i + 2 + digits])
+          if code >= 0 and code < 128:
+            result.add(char(code))
+            i += 2 + digits
+            continue
+        except ValueError:
+          discard
+    result.add(keyPart[i])
+    inc i
+
+proc lockLineKeyText*(line: string): string =
+  ## The KEY text of a (stripped, non-comment) lock line, as the key-spelling
+  ## guards inspect it, with TOML escapes of ASCII code points decoded
+  ## (``decodedKeyText``).
+  ##
+  ## A table header, or a line without ``=``, is key text as a whole.
+  ## Otherwise the key text is EVERY key the line spells, one per line of
+  ## the result: the text before the first ``=``, and, inside an inline
+  ## table, the text from each ``{`` or ``,`` to the next ``=`` -- so
+  ## ``x = { catalog_imports = [...] }`` and ``catalog = { imports = [...] }``
+  ## are seen for what TOML makes of them (``x.catalog_imports``,
+  ## ``catalog.imports``) and not as the keys ``x`` and ``catalog``. Quoted
+  ## strings are scanned as units, so an ``=``, ``,`` or ``#`` inside a
+  ## quoted key neither splits nor ends it, and a quoted VALUE is never key
+  ## text (a dependency named after a lock key is not a match). A ``#``
+  ## outside a string ends the line. A key still open at the end of the
+  ## line (an unterminated quote, say) is key text too.
+  if line.startsWith("[") or line.find('=') < 0:
+    return decodedKeyText(line)
+  var keys = ""
+  var current = ""
+  var inKey = true
+  var i = 0
+  while i < line.len:
+    let ch = line[i]
+    if ch == '"' or ch == '\'':
+      var j = i + 1
+      while j < line.len and line[j] != ch:
+        if ch == '"' and line[j] == '\\' and j + 1 < line.len:
+          j += 2
+        else:
+          inc j
+      if inKey:
+        current.add(line[i ..< min(j + 1, line.len)])
+      i = j + 1
+      continue
+    case ch
+    of '#':
+      break
+    of '=':
+      if inKey:
+        keys.add(current & "\n")
+        current = ""
+        inKey = false
+    of '{', ',':
+      inKey = true
+      current = ""
+    of '}', ']':
+      inKey = false
+      current = ""
+    else:
+      if inKey:
+        current.add(ch)
+    inc i
+  if inKey and current.strip().len > 0:
+    keys.add(current & "\n")
+  decodedKeyText(keys)
+
+proc readsProvisioningLine*(line: string): bool =
+  ## The ONE form ``parseLockedDependencies`` reads records from:
+  ## a (stripped) non-header line whose key, before its first ``=``, is
+  ## exactly ``provisioning``.
+  if line.startsWith("[") or line.startsWith("#"):
+    return false
+  let eq = line.find('=')
+  eq > 0 and line[0 ..< eq].strip() == ProvisioningLockKey
+
+proc namesProvisioningKey*(line: string): bool =
+  ## Whether the KEY part of a (stripped, non-comment) line -- the whole of a
+  ## header line, else the text before its first ``=`` -- names
+  ## ``provisioning`` in any spelling: bare, quoted, escaped (``\u``, ``\U``
+  ## and TOML 1.1's ``\x``), dotted, as a table or array-of-tables header,
+  ## or behind bytes TOML does not treat as
+  ## whitespace (a BOM, a no-break space) -- and in ANY ASCII letter case.
+  ## TOML keys are case-sensitive, so ``Provisioning = [...]`` is another
+  ## key that every reader skips; but a lock that spells it so meant to pin,
+  ## and skipping it would build unpinned. (The lock's own keys are a fixed
+  ## lower-case set; package names are values, never keys.) Values are not
+  ## inspected, so a dependency that merely mentions the word is not a
+  ## match -- and neither is a member of another key's inline table
+  ## (``x = { provisioning = 1 }``), which M7's own end-to-end case pins as
+  ## "not the provisioning key".
+  let eq = line.find('=')
+  let keyPart =
+    if line.startsWith("[") or eq < 0: line
+    else: line[0 ..< eq]
+  ProvisioningLockKey in decodedKeyText(keyPart).toLowerAscii()
+
+proc lockDeclaresProvisioning*(text: string): bool =
+  ## True when ``text`` has a line that names the ``provisioning`` key in ANY
+  ## spelling (see ``namesProvisioningKey``), including the writer's own.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if namesProvisioningKey(line):
+      return true
+  false
+
+proc lockHasUnreadProvisioningSpelling*(text: string): bool =
+  ## True when ``text`` names the ``provisioning`` key on some line OTHER
+  ## than the one form the strict reader reads (``readsProvisioningLine``).
+  ## The strict reader silently skips every other spelling -- quoted,
+  ## escaped, dotted, table headers -- (measured), so records written that
+  ## way would be dropped: alone they read as "no record", and beside a
+  ## read line (say, one holding only another platform's records) the
+  ## host's records vanish while the lock still parses. Either way the CLI
+  ## build path refuses instead of building unpinned, and a refresh refuses
+  ## to replace the lock (``withProvisioningCarriedForward``) rather than
+  ## drop them.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if readsProvisioningLine(line):
+      continue
+    if namesProvisioningKey(line):
+      return true
+  false
+
+proc readsCatalogImportsLine*(line: string): bool =
+  ## The ONE form ``parseLockedDependencies`` reads catalog import pins from
+  ## (M6 D1): a stripped non-header line whose key, before its first ``=``,
+  ## is exactly ``catalog_imports``.
+  if line.startsWith("[") or line.startsWith("#"):
+    return false
+  let eq = line.find('=')
+  eq > 0 and line[0 ..< eq].strip() == CatalogImportsLockKey
+
+proc namesCatalogImportsKey*(line: string): bool =
+  ## Whether the KEY text of a (stripped, non-comment) line
+  ## (``lockLineKeyText``: every key the line spells, inline-table keys
+  ## included, escapes decoded) names ``catalog_imports`` in any spelling --
+  ## the ``namesProvisioningKey`` rule, widened further for a two-word key:
+  ## everything but ASCII letters and digits is ignored, in any letter case,
+  ## so ``Catalog-Imports``, ``catalogImports``, ``catalog.imports``,
+  ## ``"catalog imports"``, ``[catalog.imports]`` and
+  ## ``catalog = { imports = [...] }`` match too, as does a key with a
+  ## zero-width or full-width separator, raw or escaped (an escape of a
+  ## non-ASCII code point, which ``decodedKeyText`` keeps as text, is
+  ## dropped here like any other separator). A lock that spells the key in a
+  ## way the reader skips meant to pin, and a false refusal is the safe side
+  ## -- which is also why this guard, unlike ``namesProvisioningKey``, looks
+  ## inside inline tables: no lock has ever carried a member of that name.
+  let text = lockLineKeyText(line)
+  var folded = ""
+  var i = 0
+  while i < text.len:
+    let ch = text[i]
+    if ch == '\\' and i + 1 < text.len and text[i + 1] in {'u', 'U', 'x'}:
+      let digits =
+        case text[i + 1]
+        of 'u': 4
+        of 'U': 8
+        else: 2
+      var n = 0
+      while n < digits and i + 2 + n < text.len and
+          text[i + 2 + n] in HexDigits:
+        inc n
+      if n == digits:
+        i += 2 + digits
+        continue
+    let lower = toLowerAscii(ch)
+    if lower in {'a'..'z', '0'..'9'}:
+      folded.add(lower)
+    inc i
+  "catalogimports" in folded
+
+proc lockDeclaresCatalogImports*(text: string): bool =
+  ## True when ``text`` has a line that names ``catalog_imports`` in ANY
+  ## spelling, including the writer's own.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if namesCatalogImportsKey(line):
+      return true
+  false
+
+proc lockHasUnreadCatalogImportsSpelling*(text: string): bool =
+  ## True when ``text`` names ``catalog_imports`` on some line OTHER than the
+  ## one form the strict reader reads.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if readsCatalogImportsLine(line):
+      continue
+    if namesCatalogImportsKey(line):
+      return true
+  false
+
+proc documentCarriesCatalogImports(content: string): bool =
+  ## Whether a committed lock document carries the writer's
+  ## ``catalog_imports`` line. A line cut before its ``=`` is not looked for
+  ## here: it names the key in a form the reader does not read, which
+  ## ``lockHasUnreadCatalogImportsSpelling`` refuses first.
+  for rawLine in content.splitLines():
+    if readsCatalogImportsLine(rawLine.strip()):
+      return true
+  false
+
+proc documentCarriesProvisioning(content: string): bool =
+  ## Whether a committed lock document spells a ``provisioning`` key at all
+  ## -- including one cut before its ``=`` -- by the line rules
+  ## ``parseLockedDependencies`` applies.
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#") or line.startsWith("["):
+      continue
+    let eq = line.find('=')
+    if eq <= 0:
+      if line.startsWith(ProvisioningLockKey): return true
+    elif line[0 ..< eq].strip() == ProvisioningLockKey:
+      return true
+  false
+
+proc withProvisioningCarriedForward*(fresh: LockedDependencies;
+                                     incumbentDocument: string):
+    LockedDependencies =
+  ## ``fresh`` -- a lock just produced by a SOLVE, which knows nothing about
+  ## provisioning -- carrying the locked provisioning realizations of the
+  ## incumbent committed lock document UNCHANGED. The two doors that write
+  ## the committed lock (``repro lock refresh`` and ``repro lock solve
+  ## --write``, ``repro_lock_gen``) call this, so a refresh never silently
+  ## turns a pinned contributor into "no lock, choose again".
+  ##
+  ## Carrying a record forward unchanged is safe: a record is handed back
+  ## only by ``lockedRealizationFor`` against the CURRENT interface and
+  ## contribution fingerprints, so a record the new solve made stale refuses
+  ## on read instead of being used. Re-selecting a contributor is M7
+  ## deliverables 3 and 5, not a side effect of re-solving versions.
+  ##
+  ## An incumbent without a ``provisioning`` key contributes nothing (and
+  ## may be any document at all, as before). An incumbent WITH one must
+  ## parse; otherwise this raises ``SolvedGraphLockParseError`` and the
+  ## caller must not replace the committed lock.
+  result = fresh
+  if lockHasUnreadProvisioningSpelling(incumbentDocument):
+    # Records under a key spelling the strict reader skips (quoted, escaped,
+    # dotted, a table header, another letter case) are invisible to it:
+    # rewriting the lock would drop them without a word, and the next build
+    # would run unpinned.
+    var spelled = ""
+    for rawLine in incumbentDocument.splitLines():
+      let line = rawLine.strip()
+      if line.len > 0 and not line.startsWith("#") and
+          not readsProvisioningLine(line) and namesProvisioningKey(line):
+        spelled = line
+        break
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it names `" &
+      ProvisioningLockKey & "` in a form the lock reader does not read " &
+      "(only the writer's `" & ProvisioningLockKey & " = [...]` line is " &
+      "read): " & (if spelled.len > 80: spelled[0 ..< 80] & "..." else: spelled).escape() &
+      "; a refresh carries locked provisioning realizations forward -- it " &
+      "never drops one silently. Restore the writer's line from version " &
+      "control, or remove the line deliberately.")
+  if lockHasUnreadCatalogImportsSpelling(incumbentDocument):
+    # M6 D1: the same rule for catalog import pins. Dropping them would make
+    # the next build refuse for want of a pin -- safe -- but a refresh that
+    # silently un-pins a catalog is still a refresh that re-selected.
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it names `" &
+      CatalogImportsLockKey & "` in a form the lock reader does not read " &
+      "(only the writer's `" & CatalogImportsLockKey & " = [...]` line is " &
+      "read); a refresh carries catalog import pins forward -- it never " &
+      "drops one silently. " & CatalogImportsRepairAdvice & ".")
+  let carriesProvisioning = documentCarriesProvisioning(incumbentDocument)
+  let carriesCatalogImports = documentCarriesCatalogImports(incumbentDocument)
+  if not carriesProvisioning and not carriesCatalogImports:
+    return
+  var incumbent: LockedDependencies
+  try:
+    incumbent = parseLockedDependencies(incumbentDocument)
+  except CatchableError as err:
+    if carriesProvisioning:
+      raise newException(SolvedGraphLockParseError,
+        "refusing to replace the committed lock: it carries a `" &
+        ProvisioningLockKey & "` array that cannot be read, and a refresh " &
+        "carries locked provisioning realizations forward -- it never drops " &
+        "one silently (" & err.msg & ")")
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it carries a `" &
+      CatalogImportsLockKey & "` array that cannot be read, and a refresh " &
+      "carries catalog import pins forward -- it never drops one silently (" &
+      err.msg & ")")
+  result.provisioning = incumbent.provisioning
+  # M6 D1: catalog import pins are carried forward unchanged too. A plain
+  # refresh never re-resolves a moving reference; only ``repro lock refresh
+  # --provisioning`` re-pins.
+  result.catalogImports = incumbent.catalogImports

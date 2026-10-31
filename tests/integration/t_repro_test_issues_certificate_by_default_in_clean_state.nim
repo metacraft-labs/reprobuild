@@ -23,6 +23,7 @@
 ##
 ## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -84,19 +85,18 @@ proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -108,9 +108,11 @@ type
     libASeed: string
     libASha: string
     daemonKey: string   ## ed25519 private key the daemon signs issuance with
+    certStore: string   ## the scratch local certificate store (user root)
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASeed = result.scratch / "seed-lib-a"
@@ -183,8 +185,10 @@ proc runReproTest(fx: Fixture; fixtureJson: string;
   runShell(shellCommand(args, daemonKeyEnv(fx.daemonKey, tc1KeyId)),
     fx.workspaceRoot)
 
-proc certPath(fx: Fixture): string =
-  defaultCertificatePath(fx.workspaceRoot, fx.libASha, currentPlatformTag())
+proc storedCerts(fx: Fixture; gitBin, sha: string): seq[string] =
+  ## TC-8c: the certificates the local store holds for ``sha``'s content.
+  storedCertificateFiles(fx.certStore,
+    treeContentId(gitBin, fx.workspaceRoot / "lib-a", sha))
 
 suite "TC-1 — repro test issues a certificate by default in a clean state":
 
@@ -206,19 +210,24 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
         checkpoint("repro test output: " & res.output)
       check res.code == 0
 
-      let cp = certPath(fx)
-      check fileExists(cp)
-      let cert = readCertificateFile(cp)
+      let issuedFiles = storedCerts(fx, gitBin, fx.libASha)
+      check issuedFiles.len == 1
+      let cert = readCertificateFile(issuedFiles[0])
       check cert.schema == testCertificateSchemaV1
-      # TC-7: the state lives in [certificate.vcs], and ``clean`` /
-      # ``untracked`` are MEASURED and reported separately. Issuance only
-      # happens from a clean tree, so both are the honest values for one.
-      check cert.vcs.commit == fx.libASha        # bound to HEAD (clean tree)
+      # TC-8b: [certificate.vcs] names the tested CONTENT — the content id
+      # of the tracked files, which for this unmodified working tree is
+      # HEAD's tree — and HEAD only as the informational
+      # ``base``. ``untracked`` is MEASURED.
+      let libATree = requireGit(q(gitBin) & " -C " &
+        q(fx.workspaceRoot / "lib-a") & " rev-parse " & fx.libASha &
+        "^{tree}").strip()
+      check cert.vcs.content == "git-tree-sha1:" & libATree
+      check cert.vcs.base == fx.libASha
       check cert.vcs.repo.len > 0
-      check cert.vcs.clean
       check (not cert.vcs.untracked)
       check cert.vcs.paths.len == 0              # whole-repository claim
-      check (not cert.vcs.worktree.present)      # clean-tree form
+      for gone in ["commit = ", "clean = ", "worktree"]:
+        check gone notin serializeCertificateToToml(cert)
       check cert.framework == reprobuildFrameworkId
       check cert.platform == currentPlatformTag()
       check cert.result == tcrPassed
@@ -228,7 +237,7 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
       check cert.commands.len >= 1
       check cert.commands[0].argv.len > 0
       check cert.commands[0].argv[0] == "sh"
-      # TC-7: the lock digest is GONE from the record — the commit binds it.
+      # TC-7: the lock digest is GONE from the record — the content binds it.
       check "lock = " notin serializeCertificateToToml(cert)
       # TC-5: the certificate is now daemon-SIGNED (ed25519) by the registered
       # key, and the signature verifies against the workspace registry.
@@ -240,9 +249,12 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
         registeredKeyStorePath(fx.workspaceRoot))
       check verifyCertificateSignature(cert, regStore) == svValid
 
-      # Verifier: the cert covers (framework, commit, platform, [t-unit]).
+      # Verifier: the cert covers (framework, content, platform, [t-unit]) at
+      # the commit it was issued for — its tree is computed by the verifier.
+      let atHead = commitUnderEvaluation(fx.workspaceRoot / "lib-a",
+        fx.libASha)
       let req = CoverageRequirement(
-        framework: reprobuildFrameworkId, commit: fx.libASha,
+        framework: reprobuildFrameworkId, state: atHead,
         platform: currentPlatformTag(), requiredTargets: @["t-unit"])
       let cov = verifyCoverage(@[cert], req)
       check cov.covered
@@ -252,32 +264,94 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
 
       # A requirement for a target NOT covered must NOT verify.
       let reqMiss = CoverageRequirement(
-        framework: reprobuildFrameworkId, commit: fx.libASha,
+        framework: reprobuildFrameworkId, state: atHead,
         platform: currentPlatformTag(),
         requiredTargets: @["t-unit", "t-integration"])
       let covMiss = verifyCoverage(@[cert], reqMiss)
       check (not covMiss.covered)
       check "t-integration" in covMiss.missingTargets
 
-      # A cert for a DIFFERENT commit must be ignored by the verifier.
+      # A cert for DIFFERENT content must be ignored by the verifier.
       var otherCert = cert
-      otherCert.vcs.commit = "deadbeef" & cert.vcs.commit[8 .. ^1]
+      otherCert.vcs.content = "git-tree-sha1:deadbeef" & libATree[8 .. ^1]
       let covIgnore = verifyCoverage(@[otherCert], req)
       check (not covIgnore.covered)
       check covIgnore.matchingCerts == 0
 
       # --- sub-case 2: --no-certify suppresses issuance --------------------
-      removeFile(cp)
+      removeDir(fx.certStore)
       let resNo = runReproTest(fx, fixtureJson, @["--no-certify"])
       check resNo.code == 0
-      check (not fileExists(cp))   # no certificate written
+      check (not dirExists(fx.certStore / "v1"))   # no certificate written
 
       # --- sub-case 3: a FAILING target → no certificate -------------------
       let fixtureFail = fx.scratch / "fixture-fail.json"
       writeTestFixtureJson(fixtureFail, "t-unit", "exit 1")
-      check (not fileExists(cp))
+      check (not dirExists(fx.certStore / "v1"))
       let resFail = runReproTest(fx, fixtureFail, @["--certify"])
       # The run itself fails (a failing target), and NO certificate is issued.
       check resFail.code != 0
-      check (not fileExists(cp))
+      check (not dirExists(fx.certStore / "v1"))
       check resFail.output.contains("no certificate")
+
+  test "an unpushed clean current HEAD is certified before push":
+    # Agents-Push-Gate.md §4.1: the receiving-side gateway (TC-6) refuses a
+    # push that carries no covering certificate, so the certificate has to
+    # exist BEFORE the push. Issuance therefore must not require the current
+    # repository's own HEAD to be published; that publication is the very push
+    # being gated. Restoring the old requirement leaves the store empty.
+    let gitBin = findExe("git")
+    if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
+      skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
+    else:
+      let fx = setupFixture(gitBin, "unpushed")
+      defer: removeDir(fx.scratch)
+      let libA = fx.workspaceRoot / "lib-a"
+      writeFile(libA / "feature.txt", "new\n")
+      discard requireGit(q(gitBin) & " -C " & q(libA) & " add feature.txt")
+      discard requireGit(q(gitBin) & " -C " & q(libA) & " commit -m feature")
+      let newSha = requireGit(q(gitBin) & " -C " & q(libA) &
+        " rev-parse HEAD").strip()
+      # Lock AFTER the commit, as the managed post-commit hook would, so the
+      # attested commit has a lock record for the record-store lock check.
+      seedLock(fx)
+
+      let fixtureJson = fx.scratch / "fixture-pass.json"
+      writeTestFixtureJson(fixtureJson, "pre-commit", "exit 0")
+      let res = runReproTest(fx, fixtureJson, @["--certify"])
+      if res.code != 0:
+        checkpoint("repro test output: " & res.output)
+      check res.code == 0
+      let issuedFiles = storedCerts(fx, gitBin, newSha)
+      if issuedFiles.len != 1:
+        checkpoint("no certificate for the clean unpushed HEAD:\n" &
+          res.output)
+      check issuedFiles.len == 1
+      if issuedFiles.len == 1:
+        let cert = readCertificateFile(issuedFiles[0])
+        check cert.vcs.base == newSha
+        check cert.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
+          " -C " & q(libA) & " rev-parse " & newSha & "^{tree}").strip()
+        check "pre-commit" in cert.targets
+        check cert.isSigned
+      # Certifying published nothing: the origin still lacks the commit.
+      let originHas = runCmd(q(gitBin) & " --git-dir=" & q(fx.libAOrigin) &
+        " cat-file -e " & newSha & "^{commit}")
+      check originHas.code != 0
+
+      # TC-8d: an untracked file beside the unpushed HEAD no longer refuses.
+      # It is outside the content, so the content is still HEAD's tree, and
+      # the record says ``untracked = true`` (this path captures no read set,
+      # so the default untracked-inputs mode issues and says so).
+      removeDir(fx.certStore)
+      writeFile(libA / "scratch.txt", "uncommitted\n")
+      let resDirty = runReproTest(fx, fixtureJson, @["--certify"])
+      checkpoint(resDirty.output)
+      check resDirty.code == 0
+      let withScratch = storedCerts(fx, gitBin, newSha)
+      check withScratch.len == 1
+      if withScratch.len == 1:
+        let cert = readCertificateFile(withScratch[0])
+        check cert.vcs.untracked
+        check cert.vcs.base == newSha
+      check resDirty.output.contains("no read set was captured")

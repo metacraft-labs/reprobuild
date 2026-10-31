@@ -13,8 +13,10 @@
 ## variant gymnastics.
 
 import std/[algorithm, json, options, strutils, tables]
+from std/os import paramCount, paramStr
 
 import ./types
+import ./host_system
 
 # ---------------------------------------------------------------------
 # Encode.
@@ -107,10 +109,17 @@ proc encodeActivity(a: ActivityIntent): string =
   result = "{\"name\":" & encodeStr(a.name) &
     ",\"body\":" & encodeActivityElementSeq(a.body) & "}"
 
+proc encodeGuard(g: PredicateExpr): string =
+  ## A guard is `null` when the element applies on every host, else the
+  ## predicate text. Always emitted, so a consumer never mistakes an
+  ## absent key for "unconditional".
+  if g.expr.len == 0: "null" else: encodeStr(g.expr)
+
 proc encodeConfigOverride(c: ConfigOverride): string =
   result = "{\"pkg\":" & encodeStr(c.pkg) &
     ",\"key\":" & encodeStr(c.key) &
-    ",\"value\":" & encodeConfigValue(c.value) & "}"
+    ",\"value\":" & encodeConfigValue(c.value) &
+    ",\"guard\":" & encodeGuard(c.guard) & "}"
 
 proc encodeResource(r: ResourceIntent): string =
   result = "{\"kind\":" & encodeStr(r.kind) &
@@ -131,7 +140,35 @@ proc encodeResource(r: ResourceIntent): string =
     if i > 0:
       result.add ","
     result.add encodeAddress(dep)
-  result.add "]}"
+  # `activity` (GM9) is always emitted, `null` for a profile-wide resource,
+  # for the reason `guard` is: a consumer must never read an absent key as
+  # "every host".
+  result.add "],\"guard\":" & encodeGuard(r.guard) &
+    ",\"activity\":" &
+    (if r.activity.len == 0: "null" else: encodeStr(r.activity)) & "}"
+
+proc encodeStringArray(items: seq[string]): string
+
+proc encodeHostSystems(t: Table[string, HostSystemDecl]): string =
+  ## `{"<host>": {"mode": "managedElsewhere" | "addOn" | "full", "managedBy":
+  ## "<pointer>" | null, "activities": [...]}, ...}`, hosts sorted so the
+  ## bytes are stable. Every key is always present (`managedBy` null and
+  ## `activities` empty where the mode has none), so a consumer never reads
+  ## an absent key as a value.
+  var keys: seq[string] = @[]
+  for k in t.keys:
+    keys.add k
+  keys.sort(cmp[string])
+  result = "{"
+  for i, k in keys:
+    if i > 0:
+      result.add ","
+    result.add encodeStr(k)
+    let d = t[k]
+    result.add ":{\"mode\":" & encodeStr($d.mode) & ",\"managedBy\":"
+    result.add(if d.managedBy.len > 0: encodeStr(d.managedBy) else: "null")
+    result.add ",\"activities\":" & encodeStringArray(d.activities) & "}"
+  result.add "}"
 
 proc encodeHosts(h: Table[string, seq[string]]): string =
   var keys: seq[string] = @[]
@@ -205,6 +242,9 @@ proc encodeBuildAction(b: ProfileBuildAction): string =
     (if b.cacheable: "true" else: "false")
   result.add ",\"rebootRequired\":" &
     (if b.rebootRequired: "true" else: "false")
+  result.add ",\"substituteOnly\":" &
+    (if b.substituteOnly: "true" else: "false")
+  result.add ",\"expectedOutputDigest\":" & encodeStr(b.expectedOutputDigest)
   result.add "}"
 
 proc emitProfileIntentJson*(p: ProfileIntent): string =
@@ -248,11 +288,102 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   result.add "]"
   result.add ",\"adapterPreference\":" &
     encodeAdapterPreference(p.adapterPreference)
+  # GM4: the plan-time data-file references, only when the profile
+  # declares any. An expanded intent (what `repro home export` prints) has
+  # none: its rows are already merged into `activities`, so a consumer can
+  # never expand them twice, and the key set of a profile without a
+  # `data:` section is unchanged.
+  if p.dataFiles.len > 0:
+    result.add ",\"dataFiles\":" & encodeStringArray(p.dataFiles)
+  # The contribution catalogs the profile imports, only when it declares
+  # any, so the key set of a profile without a `catalogs:` section is
+  # unchanged.
+  if p.catalogImports.len > 0:
+    result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
+  # ReproOS add-on mode: the profile-wide `addOn:` section, only when the
+  # profile declares it, so the key set of a profile without one is
+  # unchanged.
+  if p.addOn.declared:
+    result.add ",\"addOn\":{\"managedEtcPrefixes\":" &
+      encodeStringArray(p.addOn.managedEtcPrefixes)
+    # Only when declared, so the envelope of a profile without it is
+    # unchanged.
+    if p.addOn.confirmTimeoutSec > 0:
+      result.add ",\"confirmTimeout\":" & $p.addOn.confirmTimeoutSec
+    result.add "}"
+  # The concerns Reprobuild applies per host (`applies:` in a block-form
+  # `hosts:` entry), only when some host declares them, so the key set of a
+  # profile without a declaration is unchanged
+  # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+  if p.hostApplies.len > 0:
+    result.add ",\"hostApplies\":" & encodeHosts(p.hostApplies)
+  # GM10 + add-on mode: the hosts whose `hosts:` entry has a `system:` key,
+  # only when some host has one, so the key set of a profile without the
+  # attribute is unchanged. Each value is an object carrying `mode`,
+  # `managedBy` and `activities` (`encodeHostSystems`).
+  if p.hostSystems.len > 0:
+    result.add ",\"hostSystems\":" & encodeHostSystems(p.hostSystems)
+  # GM11: the activities' stow claims, only when some activity has a
+  # `stow:` block, so the key set of a profile without one is unchanged.
+  # In declaration order; `guard` always emitted (null: none), as for
+  # resources.
+  if p.stowScopes.len > 0:
+    result.add ",\"stowScopes\":["
+    for i, s in p.stowScopes:
+      if i > 0:
+        result.add ","
+      result.add "{\"package\":" & encodeStr(s.package) &
+        ",\"activity\":" & encodeStr(s.activity) &
+        ",\"guard\":" & encodeGuard(s.guard) & "}"
+    result.add "]"
   result.add "}"
 
 # ---------------------------------------------------------------------
 # Decode (for tests + future tooling).
 # ---------------------------------------------------------------------
+
+proc decodeHostSystemsJson*(node: JsonNode): Table[string, HostSystemDecl] =
+  ## The `hostSystems` object `encodeHostSystems` writes (also the export's
+  ## `intent.hostSystems`), strictly: every entry must carry `mode`
+  ## (`managedElsewhere` / `addOn`), `managedBy` (string or null) and
+  ## `activities` (array of strings), and must be a value the `profile`
+  ## macro could have produced (`hostSystemDeclProblem`). Anything else
+  ## raises `ValueError` naming the host -- a malformed entry is never read
+  ## as "managed here".
+  if node.kind != JObject:
+    raise newException(ValueError, "hostSystems must be an object " &
+      "(host -> {mode, managedBy, activities})")
+  for host, v in node:
+    let shapeError = "hostSystems." & host & " must be an object with " &
+      "`mode` (\"managedElsewhere\", \"addOn\" or \"full\"), `managedBy` (a string " &
+      "or null) and `activities` (an array of strings)"
+    if v.kind != JObject or not v.hasKey("mode") or
+        v["mode"].kind != JString or not v.hasKey("managedBy") or
+        v["managedBy"].kind notin {JString, JNull} or
+        not v.hasKey("activities") or v["activities"].kind != JArray:
+      raise newException(ValueError, shapeError)
+    var decl: HostSystemDecl
+    case v["mode"].getStr()
+    of $hsmManagedElsewhere: decl.mode = hsmManagedElsewhere
+    of $hsmAddOn: decl.mode = hsmAddOn
+    of $hsmFull: decl.mode = hsmFull
+    else:
+      raise newException(ValueError, "hostSystems." & host &
+        ": unknown mode `" & v["mode"].getStr() & "`")
+    if v["managedBy"].kind == JString:
+      decl.managedBy = v["managedBy"].getStr()
+      if decl.managedBy.len == 0:
+        raise newException(ValueError, "hostSystems." & host &
+          ": `managedBy` is an empty string; an entry that names no " &
+          "manager says null")
+    for it in v["activities"]:
+      if it.kind != JString:
+        raise newException(ValueError, shapeError)
+      decl.activities.add it.getStr()
+    let problem = hostSystemDeclProblem(decl)
+    if problem.len > 0:
+      raise newException(ValueError, "hostSystems." & host & ": " & problem)
+    result[host] = decl
 
 proc parseFieldValue(n: JsonNode): FieldValue =
   let kind = n["kind"].getStr()
@@ -280,6 +411,11 @@ proc parseConfigValue(n: JsonNode): ConfigValue =
   else:
     raise newException(ValueError,
       "unknown ConfigValue kind: '" & kind & "'")
+
+proc parseGuard(n: JsonNode): PredicateExpr =
+  ## `null` / absent (an intent written before guards existed) -> no guard.
+  if n.isNil or n.kind == JNull: PredicateExpr(expr: "")
+  else: PredicateExpr(expr: n.getStr())
 
 proc parseAddress(n: JsonNode): ResourceAddress =
   ResourceAddress(kind: n["kind"].getStr(), name: n["name"].getStr())
@@ -323,7 +459,8 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     result.configOverrides.add ConfigOverride(
       pkg: c["pkg"].getStr(),
       key: c["key"].getStr(),
-      value: parseConfigValue(c["value"]))
+      value: parseConfigValue(c["value"]),
+      guard: parseGuard(c.getOrDefault("guard")))
   for k, v in root["hosts"]:
     var acts: seq[string] = @[]
     for it in v:
@@ -331,7 +468,16 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     result.hosts[k] = acts
   for r in root["resources"]:
     var ri = ResourceIntent(kind: r["kind"].getStr(),
-      address: r["address"].getStr())
+      address: r["address"].getStr(),
+      guard: parseGuard(r.getOrDefault("guard")))
+    # GM9: `null` / absent (an intent written before activity-scoped
+    # resources) -> profile-wide. Anything but a string or null is refused.
+    let activity = r.getOrDefault("activity")
+    if not activity.isNil and activity.kind != JNull:
+      if activity.kind != JString:
+        raise newException(ValueError, "resource `" & ri.address &
+          "`: `activity` must be a string or null, got " & $activity.kind)
+      ri.activity = activity.getStr()
     for fk, fv in r["fields"]:
       ri.fields[fk] = parseFieldValue(fv)
     for dep in r["dependsOn"]:
@@ -352,7 +498,14 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         # decodes with ``false``, which is the pre-existing behaviour
         # exactly -- no envelope had a reboot to report.
         rebootRequired: (if b.hasKey("rebootRequired"):
-                           b["rebootRequired"].getBool() else: false))
+                           b["rebootRequired"].getBool() else: false),
+        # Optional for the same reason: an envelope written before the
+        # substitute-only edge existed has neither, and decodes as an
+        # ordinary buildable edge, which is what it was.
+        substituteOnly: (if b.hasKey("substituteOnly"):
+                           b["substituteOnly"].getBool() else: false),
+        expectedOutputDigest: (if b.hasKey("expectedOutputDigest"):
+                                 b["expectedOutputDigest"].getStr() else: ""))
       for it in b["argv"]:
         ba.argv.add it.getStr()
       for it in b["deps"]:
@@ -373,6 +526,64 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
       for it in chainNode:
         chain.add it.getStr()
       result.adapterPreference[osKey] = chain
+  # GM4: optional; absent when the profile declares no data files.
+  if root.hasKey("dataFiles"):
+    for it in root["dataFiles"]:
+      result.dataFiles.add it.getStr()
+  # Optional; absent when the profile imports no contribution catalog.
+  if root.hasKey("catalogImports"):
+    for it in root["catalogImports"]:
+      result.catalogImports.add it.getStr()
+  # Optional; absent when the profile has no `addOn:` section. A malformed
+  # section is refused, never dropped (dropping it would lift the managed
+  # prefixes and let every /etc path through).
+  if root.hasKey("addOn"):
+    let a = root["addOn"]
+    if a.kind != JObject or not a.hasKey("managedEtcPrefixes") or
+        a["managedEtcPrefixes"].kind != JArray:
+      raise newException(ValueError,
+        "addOn must be an object with a `managedEtcPrefixes` array")
+    result.addOn.declared = true
+    for it in a["managedEtcPrefixes"]:
+      if it.kind != JString:
+        raise newException(ValueError,
+          "addOn.managedEtcPrefixes must be an array of strings")
+      result.addOn.managedEtcPrefixes.add it.getStr()
+    if a.hasKey("confirmTimeout"):
+      if a["confirmTimeout"].kind != JInt or a["confirmTimeout"].getInt() <= 0:
+        raise newException(ValueError,
+          "addOn.confirmTimeout must be a positive number of seconds")
+      result.addOn.confirmTimeoutSec = a["confirmTimeout"].getInt()
+  # Optional; absent when no host declares the concerns Reprobuild applies.
+  if root.hasKey("hostApplies"):
+    for k, v in root["hostApplies"]:
+      var concerns: seq[string] = @[]
+      for it in v:
+        concerns.add it.getStr()
+      result.hostApplies[k] = concerns
+  # GM10 + add-on mode: optional; absent when no host entry has a `system:`
+  # key. A malformed entry is refused, never read as "managed here".
+  if root.hasKey("hostSystems"):
+    result.hostSystems = decodeHostSystemsJson(root["hostSystems"])
+  # GM11: optional; absent when no activity claims a stow package. A
+  # malformed claim is refused, never dropped (dropping it would put the
+  # package on every host).
+  if root.hasKey("stowScopes"):
+    let ss = root["stowScopes"]
+    if ss.kind != JArray:
+      raise newException(ValueError,
+        "stowScopes must be an array of {package, activity, guard}")
+    for i in 0 ..< ss.len:
+      let c = ss[i]
+      if c.kind != JObject or
+          not c.hasKey("package") or c["package"].kind != JString or
+          not c.hasKey("activity") or c["activity"].kind != JString or
+          not c.hasKey("guard") or c["guard"].kind notin {JString, JNull}:
+        raise newException(ValueError, "stowScopes[" & $i &
+          "] must be an object with `package` and `activity` (strings) " &
+          "and `guard` (a string or null)")
+      result.stowScopes.add StowScope(package: c["package"].getStr(),
+        activity: c["activity"].getStr(), guard: parseGuard(c["guard"]))
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.
@@ -755,20 +966,89 @@ proc parseSystemActivityJson*(s: string): SystemActivitySpec =
   result.homeContributions = parseStrList(root["homeContributions"])
 
 # ---------------------------------------------------------------------
+# Platform probe record.
+#
+# `repro home export` evaluates a home profile for platforms other than the
+# one compiling it by running `nim check --os:<os> --cpu:<cpu>` with
+# `-d:reproProfilePlatformProbe`: the `profile` macro then evaluates the
+# intent in Nim's compile-time VM and prints it between these markers (see
+# `macros.nim` and `repro_profile_compile/platforms.nim`). One definition of
+# the markers, here, read by both sides.
+# ---------------------------------------------------------------------
+
+const
+  ProfilePlatformProbeDefine* = "reproProfilePlatformProbe"
+    ## The `-d:` symbol that turns a profile check into a platform probe.
+  ProfilePlatformProbeBegin* = "@@repro-profile-platform-probe-begin@@"
+  ProfilePlatformProbeEnd* = "@@repro-profile-platform-probe-end@@"
+
+proc platformProbeRecord*(intentJson: string): string =
+  ## The line a platform probe prints: the intent JSON between the markers.
+  ProfilePlatformProbeBegin & intentJson & ProfilePlatformProbeEnd
+
+proc parsePlatformProbeRecord*(output: string; intentJson: var string): bool =
+  ## Extract the intent JSON a probe printed from the checker's combined
+  ## output. False when the output carries no complete record (the check
+  ## failed before or while evaluating the profile).
+  let a = output.find(ProfilePlatformProbeBegin)
+  if a < 0:
+    return false
+  let start = a + ProfilePlatformProbeBegin.len
+  let b = output.find(ProfilePlatformProbeEnd, start)
+  if b < 0:
+    return false
+  intentJson = output[start ..< b]
+  true
+
+# ---------------------------------------------------------------------
 # Entry-point helper.
 # ---------------------------------------------------------------------
 
+const ReproIntentOutFlag* = "--repro-intent-out"
+  ## THE INTENT-OUTPUT CONTRACT of a compiled profile binary. Invoked with
+  ## exactly `--repro-intent-out <path>`, the binary writes the intent
+  ## document it would otherwise print on stdout to `<path>`, and changes
+  ## nothing else: stdout and stderr stay free for the profile's own
+  ## diagnostics.
+  ##
+  ## WHY IT EXISTS. The profile compile's RUN edge (`__repro_profile_run`,
+  ## reprobuild-pm `spec/Profile-Compilation-Model.md` §2) launches the
+  ## binary directly -- no `repro` helper, no shell -- and the build engine
+  ## caches and restores DECLARED OUTPUT FILES, not a process's stdout. A
+  ## helper that captured stdout would put a `repro` process back into the
+  ## run edge's process tree, and on Windows that process draws entropy at
+  ## start-up (its OpenSSL DLLs seed a stack-protector canary), which the
+  ## unblessed run edge cannot carry. So the binary writes the declared
+  ## output itself.
+  ##
+  ## Invoked any other way -- in particular with no arguments -- the binary
+  ## prints the document on stdout exactly as Phase A defined, which is how
+  ## `repro_profile_compile.compileProfileBinary` and the tests run it.
+
+proc writeIntentDocument*(document: string) =
+  ## Deliver a compiled profile's intent document: to the file named by the
+  ## intent-output contract (`ReproIntentOutFlag`) when the binary was
+  ## invoked with exactly that flag and a path, else to stdout. The file
+  ## holds the same bytes `echo` would print (the document and a newline).
+  ## A failure to write raises, so the binary exits non-zero and the run
+  ## edge fails instead of publishing a missing or partial document.
+  if paramCount() == 2 and paramStr(1) == ReproIntentOutFlag:
+    writeFile(paramStr(2), document & "\n")
+  else:
+    echo document
+
 template emitProfileIntent*(p: ProfileIntent): typed =
-  ## Convenience: emit the JSON form to stdout and quit. Phase A's
+  ## Convenience: emit the JSON form and quit -- to stdout, or to the file
+  ## the intent-output contract names (`writeIntentDocument`). Phase A's
   ## `profile name: body` macro autogenerates a trailing invocation of
   ## this template so the user does not need a `when isMainModule:`
   ## block.
-  echo emitProfileIntentJson(p)
+  writeIntentDocument(emitProfileIntentJson(p))
   quit(0)
 
 template emitSystemIntent*(p: SystemIntent): typed =
-  ## Convenience: emit the JSON form to stdout and quit. The
-  ## ``system "<hostname>":`` macro autogenerates a trailing
-  ## invocation when called as a main module.
-  echo emitSystemIntentJson(p)
+  ## Convenience: emit the JSON form and quit, to the same destination as
+  ## `emitProfileIntent`. The ``system "<hostname>":`` macro autogenerates a
+  ## trailing invocation when called as a main module.
+  writeIntentDocument(emitSystemIntentJson(p))
   quit(0)

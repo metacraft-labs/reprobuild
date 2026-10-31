@@ -9,6 +9,11 @@
 ##
 ##   nim r scripts/generate_test_edges.nim
 ##
+## IT TAKES NO ARGUMENTS, and refuses any it is given (exit 2) rather than
+## discarding them and printing a success line — see ``argumentRefusal``. In
+## particular the ``--write-*`` / ``--check-*`` suite-artifact flags belong to
+## ``scripts/reprobuild_suite_inventory.py``, not here.
+##
 ## The output (``repro_tests.nim``) is checked into git so the diff is
 ## review-visible.
 ##
@@ -46,8 +51,9 @@
 ## confirmed that ``for`` loops survive inside ``build:``; this generator
 ## now emits a data table and iteration happens at the call site.
 
-import std/[algorithm, os, strutils, sets]
+import std/[algorithm, os, strutils, sets, tables]
 import repro_binary_reachability
+import ct_test_nim_unittest/grouping
 
 const
   GeneratedFile = "repro_tests.nim"
@@ -289,7 +295,8 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
   #     every member of the 22-member group does". Both halves are false once
   #     the scan follows LIBRARY imports and not only path imports:
   #     `repro_dsl_stdlib/packages/*` modules declare top-level `package`
-  #     blocks and arrive directly and through `catalog_registry`, so 5 of
+  #     blocks and arrive directly and through `catalog_registry` (now
+  #     `package_registry`), so 5 of
   #     the 13 taken reach one and 21 of the 22 rejected do. The groups
   #     differ in density (5/13 vs 21/22), not in kind. What licenses taking
   #     the 13 is the measurement — every member run standalone first, the
@@ -377,6 +384,7 @@ type
     identName: string     # Nim identifier for the let-binding
     needsProviderMode: bool
     needsSsl: bool        # M6: carries --define:ssl (HTTPS transport gate)
+    needsMissingJsonEvidenceTest: bool
     needsSoftwareRootTestTrust: bool
       ## Carries ``--define:reproAttestSoftwareRootTestTrust``. See
       ## ``needsSoftwareRootTestTrustDefine`` below.
@@ -410,6 +418,17 @@ type
     selfInterposes: bool
       ## Bootstrap-And-Self-Build B4: per-test target-OS guard for the
       ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
+    group: string
+      ## Test-Binary-Grouping M2: the group binary stem this source's cases
+      ## are compiled into, or "" when it keeps its own binary. Decided by
+      ## ``ct_test_nim_unittest/grouping.planGroups``; see ``assignGroups``.
+    singleReason: string
+      ## Why the source keeps its own binary; "" when it is grouped.
+
+proc needsMissingJsonEvidenceTestDefine(path: string): bool =
+  ## Put the private report-reader seam on the compile edge so it is active
+  ## before any import, and consolidation sees this as a flagged test.
+  path == "tests/unit/t_missing_json_evidence.nim"
 
 proc needsSslDefine(path: string): bool =
   ## Windows-Runner-Binary-Cache-Deploy M6/M7: the HTTPS gates exercise the
@@ -491,17 +510,76 @@ proc isProviderModePath(path: string): bool =
   for exact in [
     "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
+    "tests/integration/t_hcr_native_library_prerequisite.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
     "tests/unit/t_constructor_fetch_tool_refs.nim",
+    "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",
     "tests/unit/t_from_source_go_recognition.nim",
     "tests/unit/t_from_source_npm_recognition.nim",
     "tests/unit/t_install_mirror_optional_version.nim",
     "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
     "tests/unit/t_library_stage_alias.nim",
+    "tests/unit/t_vendor_manifest_evaluation_inputs.nim",
     # Measures the macro's module-init startup pass over a ``build:``
     # body, which the macro emits only under this define.
     "tests/unit/t_provider_startup_body_containment.nim",
+    # Shared-Development-Services L1: drives ``buildPackageFragment`` and
+    # ``buildPackageDevEnv`` directly, and asserts on ``servicePlaceholder``
+    # -- all three exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_service_lowers_typed_edges_into_the_graph_fragment.nim",
+    # Shared-Development-Services L2: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` body declares parameterised activities, and
+    # asserts on ``servicePlaceholder`` -- the dev-env ``activity`` surface
+    # itself (``proc activity(name: string)`` included) exists only under
+    # this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_activity_params_reach_the_services_they_declare.nim",
+    # Shared-Development-Services L5: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` activity reads configurables an
+    # ``environment`` binds, and asserts on the argv of the service the
+    # provider lowered -- ``buildPackageDevEnv`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l5_environment_reaches_the_service_argv.nim",
+    # Shared-Development-Services L8: both drive ``buildPackageDevEnv``
+    # over a fixture whose ``devEnv:`` activity declares contribution
+    # points, and read the services the provider lowered --
+    # ``buildPackageDevEnv``, ``ProviderGraphRequest`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_contribution_operation_is_a_second_axis.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services D-SS11: drives ``buildPackageDevEnv``
+    # over a fixture whose consumer packages resolve a shared service
+    # through ``<package>.<service>.shared(...)``, and reads the
+    # resolutions the provider lowered -- ``buildPackageDevEnv``,
+    # ``ProviderGraphRequest`` and the generated ``devEnv<Pkg>Package``
+    # exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss11_resolutions_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services, reprobuild issue #498: drives
+    # ``buildPackageDevEnv`` over a fixture whose two activities
+    # contribute across each other, and reads the argv the provider
+    # lowered -- ``buildPackageDevEnv``, ``ProviderGraphRequest`` and
+    # the generated ``devEnv<Pkg>Package`` exist only under this
+    # define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss498_cross_activity_contribution_is_order_independent.nim",
+    # Shared-Development-Services F1: drives ``buildPackageDevEnv`` and
+    # reads ``DevEnvResult.actions``, the channel that only exists on
+    # the provider's own return.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssf1_dev_env_actions_reach_the_caller.nim",
+    # Shared-Development-Services J-2: drives ``buildPackageDevEnv``
+    # over a two-owner / two-resolver fixture and reads the resolutions
+    # the provider lowered.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssj2_two_resolvers_do_not_collide.nim",
   ]:
     if p == exact:
       return true
@@ -667,11 +745,15 @@ proc legacySingleFileScan(repoRoot, rel: string): bool =
 const SelfInterposingTestStems = [
   "t_stackable_hooks_extracted_process_tree",
   "t_m9r40_1_probe_clean_env",
-  "test_monitor_finish_is_pooled"
+  "test_monitor_finish_is_pooled",
+  "t_e2e_hcr_linux_replay_of_patched_recording"
 ]
   ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
   ## be observed by the engine's io-monitor: two interposers on the same libc
-  ## entry points re-enter each other and livelock. Their execute edges get a
+  ## entry points re-enter each other and livelock. The recorder-backed HCR
+  ## gate also refuses the monitor's modified executable mappings and mutable
+  ## mapped shards. Its execute edge must additionally be non-cacheable because
+  ## the depfile does not observe its runtime input closure. These edges get a
   ## GENERATED DEPFILE (``fs.unmonitorableActionDepfile`` feeding
   ## ``makeDepfilePolicy``) as their dependency evidence instead of monitoring.
   ## See the long note at the execute-edge call site in ``repro.nim`` for the
@@ -880,11 +962,253 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       needsProviderMode: isProviderModePath(rel),
       needsSsl: needsSslDefine(rel),
       needsSoftwareRootTestTrust: needsSoftwareRootTestTrustDefine(rel),
+      needsMissingJsonEvidenceTest: needsMissingJsonEvidenceTestDefine(rel),
       requiresReproBinary: detectReproBinaryUsage(reach, repoRoot, rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
       targetOs: targetOs,
       selfInterposes: selfInterposes))
+
+proc definesFor(edge: TestEdge): seq[string] =
+  ## The ``-d:`` list a source compiles with, in the order the table records.
+  if edge.needsProviderMode: result.add("reproProviderMode")
+  if edge.needsSsl: result.add("ssl")
+  if edge.needsMissingJsonEvidenceTest:
+    result.add("reproMissingJsonEvidenceTest")
+  if edge.needsSoftwareRootTestTrust:
+    result.add("reproAttestSoftwareRootTestTrust")
+  if edge.source in ["tests/unit/t_source_fetch_tool_metadata.nim",
+                     "tests/unit/t_install_mirror_tool_metadata.nim"]:
+    result.add("reproInterfaceMode")
+
+# ---------------------------------------------------------------------------
+# Test-Binary-Grouping M2: which sources share a binary.
+#
+# The PLAN (membership, chunking, naming) is ``planGroups`` in
+# ``ct_test_nim_unittest/grouping``, a pure function. What lives here is the
+# part that needs the tree: each source's compile-option key, and the reasons a
+# source must keep its own binary that only reading files can establish. The
+# result is stamped into ``repro_tests.nim`` (``group`` / ``singleReason``) so
+# the recipe, the suite inventory and the binary pruner all read one answer.
+# ---------------------------------------------------------------------------
+
+const
+  RecipeSpecialCasedSources = [
+    # ``repro.nim`` gives these an execute edge that a group's could not
+    # carry: the M4 bundle verifier consumes the bundle binaries; the per-case
+    # fixture gate EXECUTES its subjects' own binaries by path; the opt-in
+    # layer source has a second, named ``.live`` execute edge.
+    # ``repro.nim`` asserts at graph-construction time that each of these is
+    # single, so this list cannot drift from it silently.
+    ("tests/integration/t_m4_pure_unit_consolidation.nim",
+     "its execute edge consumes every pure-unit bundle binary"),
+    ("tests/integration/" &
+       "t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim",
+     "it executes its subjects' own binaries by path"),
+    ("tests/integration/t_pcr_composite_matches_tpm.nim",
+     "it has a second, opt-in-layer execute edge"),
+    # Added on fix/bootstrap-guard-ignores-build-output (164fa306cf), whose
+    # recipe puts this source's own compile edge in the `test` collection;
+    # listed here ahead of that branch so a merge of the two needs no
+    # judgement.
+    ("tests/integration/t_hcr_native_library_prerequisite.nim",
+     "its own compile edge is a member of the test collection"),
+  ]
+
+  PerCaseFixtureGateSubjectsMirror = [
+    "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
+    "libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim",
+    "libs/repro_cas_store/tests/t_cas_materialize_link.nim",
+    "libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim",
+    "libs/repro_cas_store/tests/t_link_capability_facts.nim",
+    "libs/repro_cas_store/tests/t_link_capability_probe.nim",
+    "libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim",
+    "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
+    "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
+    "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
+    "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
+    "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
+    "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
+    "tests/integration/t_leaked_instance_is_reaped.nim",
+    "tests/integration/t_measurement_manifest_cross_check.nim",
+    "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
+    "tests/integration/t_snp_evidence_reaches_the_verdict.nim",
+    "tests/integration/t_snp_expectation_reaches_the_manifest.nim",
+    "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
+    "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
+    "tests/integration/t_teardown_runs_on_failure_path.nim",
+    "tests/integration/t_verify_e2e_mock.nim",
+  ]
+    ## ``PerCaseFixtureGateSubjects`` in ``repro.nim``. Mirrored rather than
+    ## imported because the recipe cannot be imported by a script; the
+    ## recipe's assertion is what keeps the two equal.
+
+  SlowStartupSources = [
+    # M1 measured 68 ms and 56 ms of module initialisation (recipe modules
+    # whose ``package`` declarations register with the DSL at start-up);
+    # every case of a group holding them paid ~120 ms. Spec, "Per-case
+    # start-up overhead".
+    "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
+    "tests/unit/t_m9r5b_recipe_options_sweep.nim",
+    # M2 measurement (module initialisation, median of 3 to 7 runs of an
+    # unknown --run name, 923 grouped sources, 2026-10-26): every source over
+    # the ~20 ms the spec sets. A group binary pays its members' module
+    # initialisation on every case it runs; ``test_from_source_cmake_convention``
+    # alone made each of its group's ~390 cases start 0.4 s slower.
+    "libs/repro_standard_provider/tests/test_from_source_cmake_convention.nim", # 211 ms
+    "libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim", # 119 ms
+    "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim", # 71 ms
+    "libs/repro_standard_provider/tests/test_from_source_meson_convention.nim", # 29 ms
+    "libs/repro_local_store/tests/t_prefix_owning_path.nim", # 23 ms
+  ]
+
+  ReferenceScanRoots = ["tests", "libs", "tools", "scripts", "apps", "recipes",
+    ".github"]
+  ReferenceScanRootFiles = ["repro.nim", "Justfile", "config.nims"]
+  ReferenceScanExts = [".nim", ".nims", ".py", ".sh", ".ps1", ".yml",
+    ".yaml", ".toml", ".txt"]
+
+proc directoryConfigReason(repoRoot, source: string): string =
+  ## Nim reads ``nim.cfg`` and ``config.nims`` from every parent directory of
+  ## the main module. A group module lives under ``build/test-groups``, so a
+  ## configuration file in a test directory (or between it and the root)
+  ## would stop applying to that directory's sources when they are grouped.
+  var dir = source.parentDir
+  while dir.len > 0 and dir != ".":
+    for name in ["nim.cfg", "config.nims"]:
+      if fileExists(repoRoot / dir / name):
+        return "directory config " & dir & "/" & name & " applies only " &
+          "when the main module is under " & dir
+    dir = dir.parentDir
+
+proc scanReferencedStems(repoRoot: string; stems: HashSet[string]):
+    Table[string, string] =
+  ## stem -> the first file (sorted) that names ``test-bin/<stem>`` or the
+  ## execute-edge id ``test_execute.<stem>``. Something runs or selects that
+  ## binary by name, so it must keep existing under that name.
+  result = initTable[string, string]()
+  var files: seq[string]
+  for root in ReferenceScanRoots:
+    let abs = repoRoot / root
+    if not dirExists(abs): continue
+    for path in walkDirRec(abs, relative = true):
+      let rel = (root / path).toForward()
+      if rel.startsWith("tests/fixtures/") and "/.repro/" in rel: continue
+      if "/build/" in rel or "/.nimcache/" in rel: continue
+      if rel.splitFile.ext in ReferenceScanExts:
+        files.add rel
+  for f in ReferenceScanRootFiles:
+    if fileExists(repoRoot / f): files.add f
+  files.sort()
+  for rel in files:
+    var text = ""
+    try: text = readFile(repoRoot / rel)
+    except IOError, OSError: continue
+    for marker in ["test-bin/", "test_execute."]:
+      var at = text.find(marker)
+      while at >= 0:
+        var e = at + marker.len
+        while e < text.len and (text[e].isAlphaNumeric or text[e] == '_'):
+          inc e
+        let stem = text[at + marker.len ..< e]
+        if stem in stems and stem notin result:
+          result[stem] = rel
+        at = text.find(marker, e)
+    # A test stem as a whole string literal in OTHER Nim / shell code:
+    # ``const TargetTest = "t_x"`` followed by
+    # ``".#reprobuild.test_execute." & TargetTest``, a stem list a runner
+    # classifies against, a selector built at run time. Python is left out:
+    # the inventory's tests name stems as DATA about sources, never as
+    # binaries to run, and would keep ~50 sources single for nothing.
+    let ext = rel.splitFile.ext
+    # ``repro.nim`` is excluded: every test it names is either handled per
+    # source above (and asserted there) or only gains typed inputs, which a
+    # group's execute edge takes the union of.
+    if rel != "repro.nim" and
+        (ext in [".nim", ".nims", ".sh", ".yml", ".yaml"] or rel == "Justfile"):
+      let own = rel.splitFile.name
+      var at = text.find('"')
+      while at >= 0:
+        let close = text.find('"', at + 1)
+        if close < 0: break
+        let literal = text[at + 1 ..< close]
+        if literal != own and literal in stems and literal notin result:
+          result[literal] = rel
+        at = text.find('"', close + 1)
+
+proc assignGroups(repoRoot: string; edges: var seq[TestEdge]) =
+  ## Fill ``group`` / ``singleReason`` on every edge. See the block comment
+  ## above; the rule list is the eligibility section of the M2 plan.
+  var stems = initHashSet[string]()
+  for e in edges: stems.incl e.source.splitFile.name
+  let referenced = scanReferencedStems(repoRoot, stems)
+  var specialReason = initTable[string, string]()
+  for (src, why) in RecipeSpecialCasedSources: specialReason[src] = why
+  for src in PerCaseFixtureGateSubjectsMirror:
+    specialReason[src] = "the per-case fixture gate executes its binary by path"
+  var candidates: seq[GroupCandidate]
+  for e in edges:
+    let stem = e.source.splitFile.name
+    let abs = repoRoot / e.source
+    let text = try: readFile(abs) except IOError, OSError: ""
+    var reason = ""
+    if e.source.startsWith(BundleRoot & "/"):
+      reason = "pure-unit bundle (Suite-Modernization M4) is already shared"
+    elif e.selfInterposes:
+      reason = "selfInterposes: its execute edge takes a generated depfile"
+    elif e.source in specialReason:
+      reason = "special-cased by repro.nim: " & specialReason[e.source]
+    elif e.source in SlowStartupSources:
+      reason = "slow module initialisation would be paid by every case of " &
+        "its group"
+    elif "nix_daemon" in e.source:
+      reason = "repro.nim skips it on Windows"
+    else:
+      for cfg in [abs & ".cfg", abs.changeFileExt("nims")]:
+        if fileExists(cfg):
+          reason = "per-file config " & relativePath(cfg, repoRoot).toForward
+          break
+    if reason.len == 0:
+      reason = directoryConfigReason(repoRoot, e.source)
+    if reason.len == 0:
+      let marker = selfSpawnMarker(text)
+      if marker.len > 0: reason = "self-spawn marker " & marker
+    if reason.len == 0:
+      let effect = moduleLevelSideEffect(text)
+      if effect.len > 0: reason = "module-level " & effect
+    if reason.len == 0:
+      let work = moduleLevelWork(text)
+      if work.len > 0:
+        let shown = if work.len > 60: work[0 ..< 60] & "..." else: work
+        reason = "module-level statement runs at every start-up: " & shown
+    if reason.len == 0:
+      let work = suiteScopeWork(text)
+      if work.len > 0:
+        let shown = if work.len > 60: work[0 ..< 60] & "..." else: work
+        reason = "suite-scope statement runs at every start-up: " & shown
+    if reason.len == 0:
+      let pragma = globalLinkPragma(text)
+      if pragma.len > 0: reason = "program-wide pragma {." & pragma
+    if reason.len == 0 and stem in referenced:
+      reason = "its binary is named by " & referenced[stem]
+    candidates.add GroupCandidate(
+      source: e.source,
+      optionKey: compileOptionKey(e.source, definesFor(e), e.extraPassC,
+        e.extraPassL, $e.targetOs),
+      singleReason: reason,
+      compiledC: compilePragmaTargets(text, e.source),
+      caseNames: staticCaseNames(text))
+  let plan = planGroups(candidates, DefaultMaxGroupMembers)
+  var bySource = initTable[string, GroupAssignment]()
+  for row in plan: bySource[row.source] = row
+  for e in edges.mitems:
+    let row = bySource[e.source]
+    e.group = row.group
+    e.singleReason = row.singleReason
+    if e.group in stems:
+      stderr.writeLine("generate_test_edges: group stem '" & e.group &
+        "' collides with a test source stem")
+      quit(1)
 
 proc acceptPythonTest(rel: string): bool =
   ## Bootstrap-And-Self-Build B4: discover Python tests participating in
@@ -943,6 +1267,19 @@ proc seqLiteral(values: seq[string]): string =
       result.add(", ")
     result.add('"' & v & '"')
   result.add("]")
+
+proc nimLiteral(s: string): string =
+  ## A Nim string literal for ``s``: only ``\`` and ``"`` (and control
+  ## characters) are escaped, so UTF-8 in a case name stays readable in the
+  ## checked-in table and round-trips through the Python parser.
+  result = "\""
+  for ch in s:
+    case ch
+    of '\\': result.add "\\\\"
+    of '"': result.add "\\\""
+    of '\0' .. '\x1F': result.add "\\x" & toHex(ord(ch), 2)
+    else: result.add ch
+  result.add "\""
 
 proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result = ""
@@ -1027,6 +1364,16 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result.add("      ## of from the monitor, and is denied the monitor shim\n")
   result.add("      ## env seed. See the note at the execute-edge call site\n")
   result.add("      ## in ``repro.nim``.\n")
+  result.add("    group*: string\n")
+  result.add("      ## Test-Binary-Grouping M2: the stem of the group binary\n")
+  result.add("      ## (``build/test-bin/<group>``) this source's cases are\n")
+  result.add("      ## compiled into, or \"\" when the source keeps its own\n")
+  result.add("      ## binary at ``binary``. ``binary`` stays the source's\n")
+  result.add("      ## own path either way: it is where the single-file\n")
+  result.add("      ## fallback compile puts it when the group fails to\n")
+  result.add("      ## compile. Decided by ``ct_test_nim_unittest/grouping``.\n")
+  result.add("    singleReason*: string\n")
+  result.add("      ## Why the source keeps its own binary; \"\" when grouped.\n")
   result.add("\n")
   result.add("const reprobuildTestSpecs*: seq[TestSpec] = @[\n")
   for i, edge in edges:
@@ -1034,15 +1381,7 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     result.add("  TestSpec(\n")
     result.add("    source: \"" & edge.source & "\",\n")
     result.add("    binary: \"" & edge.binary & "\",\n")
-    var definesList: seq[string] = @[]
-    if edge.needsProviderMode: definesList.add("reproProviderMode")
-    if edge.needsSsl: definesList.add("ssl")
-    if edge.needsSoftwareRootTestTrust:
-      definesList.add("reproAttestSoftwareRootTestTrust")
-    if edge.source in ["tests/unit/t_source_fetch_tool_metadata.nim",
-                       "tests/unit/t_install_mirror_tool_metadata.nim"]:
-      definesList.add("reproInterfaceMode")
-    let definesLit = seqLiteral(definesList)
+    let definesLit = seqLiteral(definesFor(edge))
     let reqLit = if edge.requiresReproBinary: "true" else: "false"
     let targetOsLit = case edge.targetOs
       of soAny: "soAny"
@@ -1053,7 +1392,10 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     result.add("    extraPassL: " & seqLiteral(edge.extraPassL) & ",\n")
     result.add("    targetOs: " & targetOsLit & ",\n")
     result.add("    selfInterposes: " & (if edge.selfInterposes: "true"
-                                         else: "false") & ")" & sep & "\n")
+                                         else: "false") & ",\n")
+    result.add("    group: " & nimLiteral(edge.group) & ",\n")
+    result.add("    singleReason: " & nimLiteral(edge.singleReason) & ")" & sep &
+      "\n")
   result.add("]\n")
   result.add("\n")
   result.add("## Bootstrap-And-Self-Build B4: Python tests discovered\n")
@@ -1155,7 +1497,61 @@ proc renderShapeParity(): string =
     result.add(path & "\t" &
       (if walkAcceptsSource(path): "ACCEPT" else: "REJECT") & "\n")
 
-proc main() =
+const SuiteInventoryScript = "scripts/reprobuild_suite_inventory.py"
+  ## The tool the ``--write-*`` / ``--check-*`` suite-artifact flags belong
+  ## to. Named in the refusal below because the recognised argument set HERE
+  ## is empty, so "unrecognised argument" on its own tells the caller nothing
+  ## they can act on.
+
+proc argumentRefusal*(args: openArray[string]): string =
+  ## "" when there is nothing to refuse; otherwise the full stderr text.
+  ##
+  ## THIS SCRIPT TAKES NO ARGUMENTS. It regenerates two checked-in artifacts
+  ## from the source tree and has nothing to configure. Until this existed,
+  ## every argument was accepted, discarded, and followed by the generator's
+  ## two "is up to date" lines and exit 0 — so a command that did nothing was
+  ## indistinguishable, in a log or a milestone drawer, from one that did the
+  ## work. An agent recorded having regenerated the suite artifacts with
+  ## ``nim r scripts/generate_test_edges.nim --write-static-case-counts``,
+  ## which regenerates neither; the claim was false and was caught only
+  ## because a reviewer re-derived it. See ``reprobuild-pm/issues/
+  ## 2026-10-09-generate-test-edges-accepts-any-flag-and-reports-success.md``.
+  ##
+  ## ``--write-static-case-counts`` and ``--write-inventory-sources`` are the
+  ## arguments most likely to arrive here, and they are REAL flags of a
+  ## DIFFERENT tool, so the message says where they live rather than only
+  ## that they are not understood here.
+  ##
+  ## A ``string`` rather than a ``quit`` so the whole message is testable
+  ## without spawning a process:
+  ## ``tests/integration/
+  ## t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim``
+  ## calls it directly. ``main`` consults it before any work and exits 2.
+  if args.len == 0:
+    return ""
+  var named: seq[string] = @[]
+  for arg in args:
+    named.add("'" & arg & "'")
+  result = "generate_test_edges: refusing to run: unrecognised argument " &
+    named.join(", ") & "\n"
+  result.add("generate_test_edges: this script takes no arguments. It " &
+    "regenerates " & GeneratedFile & " and " & ShapeParityFile &
+    " from the source tree; there is nothing to select or configure.\n")
+  result.add("generate_test_edges: the --write-* / --check-* suite-artifact " &
+    "flags belong to " & SuiteInventoryScript & ", not to this script. For " &
+    "example:\n")
+  result.add("  python3 " & SuiteInventoryScript &
+    " --write-static-case-counts --write-inventory-sources\n")
+
+proc main(args: openArray[string]) =
+  # The refusal comes FIRST, before `writeBundleSources` and `discoverTests`,
+  # so a refused run writes no file. A generator that rewrote its checked-in
+  # artifacts and then complained would already have done the thing it was
+  # refusing to do.
+  let refusal = argumentRefusal(args)
+  if refusal.len > 0:
+    stderr.write(refusal)
+    quit(2)  # usage error
   let repoRoot = getCurrentDir()
   # Bundle sources must exist before discovery: each one is enrolled as an
   # ordinary TestSpec by path, and ``detectReproBinaryUsage`` reads it.
@@ -1163,7 +1559,8 @@ proc main() =
   if bundlesWritten > 0:
     stderr.writeLine("generate_test_edges: wrote " & $bundlesWritten &
       " bundle source(s) under " & BundleRoot)
-  let edges = discoverTests(repoRoot)
+  var edges = discoverTests(repoRoot)
+  assignGroups(repoRoot, edges)
   let pythonTests = discoverPythonTests(repoRoot)
 
   proc writeIfChanged(rel, content, what: string) =
@@ -1190,4 +1587,9 @@ proc main() =
     $shapeParityCorpus().len & " path shapes")
 
 when isMainModule:
-  main()
+  # `commandLineParams()` is called HERE and never at module scope. This
+  # module is imported by
+  # `tests/integration/t_test_edge_migration_covers_all_test_files.nim`, and
+  # that test binary receives its own arguments; reading argv at module scope
+  # would make the generator's refusal fire on the importer's flags.
+  main(commandLineParams())

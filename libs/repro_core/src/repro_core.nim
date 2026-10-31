@@ -36,7 +36,7 @@ export jsts_dep_scanner
 export convention_attribution
 export injected_libraries
 
-const ReprobuildVersion* {.strdefine.} = "0.2.6"
+const ReprobuildVersion* {.strdefine.} = "0.2.19"
   ## The release version this image reports through ``repro --version``.
   ##
   ## M5 SELF-HOST: a ``{.strdefine.}`` rather than a bare literal so ONE
@@ -50,3 +50,43 @@ const ReprobuildVersion* {.strdefine.} = "0.2.6"
 
 proc versionString*(): string =
   ReprobuildVersion
+
+when defined(reproGeneratedSourceRevision):
+  # The graph route. The ``reprobuild.apps.source-revision`` edge in
+  # ``repro.nim`` writes this module (``scripts/source_revision.sh
+  # --nim-module``) and the engine edge puts its directory on ``--path``.
+  # Importing it, rather than passing the value as ``-d:``, is what makes the
+  # revision a monitored INPUT of the compile: the content of the file keys
+  # the engine edge, so a new commit rebuilds the engine and an unchanged one
+  # leaves it a cache hit. (``staticRead`` cannot take its place: it resolves
+  # a relative path against this module's directory, not the build's cwd.)
+  import reprobuild_source_revision
+  const generatedSourceRevision = reprobuildGeneratedSourceRevision
+else:
+  const generatedSourceRevision = ""
+
+const ReprobuildSourceRevision* {.strdefine.} = generatedSourceRevision
+  ## The source revision (a git commit id, with a ``-dirty`` suffix when the
+  ## tree carried uncommitted changes to tracked files) this image was built
+  ## from, or ``""`` when the build did not say.
+  ##
+  ## ``ReprobuildVersion`` does not identify a build: two images reporting the
+  ## same version can be hundreds of commits apart. Tools that record what
+  ## produced an artifact (``repro home export``'s provenance) therefore carry
+  ## the revision as well. It is injected at build time, never discovered at
+  ## run time, and ``scripts/source_revision.sh`` is the one derivation of it
+  ## (``$REPROBUILD_SOURCE_REVISION`` when set, else ``git rev-parse HEAD`` of
+  ## the tree, else unknown). Two routes carry the answer in:
+  ##
+  ## * ``scripts/build_apps.sh`` (``just build``, the Nix package) passes
+  ##   ``-d:ReprobuildSourceRevision=…``, which wins over the default below;
+  ## * the ``repro.nim`` engine edge defines ``reproGeneratedSourceRevision``
+  ##   and compiles in the module its probe edge generated (above).
+  ##
+  ## The Nix package and the release workflow set the variable (the former's
+  ## sandbox has no ``.git``); on the graph route the probe reads it when the
+  ## probe ACTION runs, not when the recipe is evaluated.
+
+proc sourceRevisionString*(): string =
+  ## ``ReprobuildSourceRevision``; ``""`` means unknown.
+  ReprobuildSourceRevision

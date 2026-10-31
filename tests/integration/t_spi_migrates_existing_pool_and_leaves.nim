@@ -35,6 +35,7 @@
 ## ``repro``.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import shared_clones
@@ -110,19 +111,18 @@ proc projectToml(name, libUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"" & name & "\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib.toml\",\n]\n"
 
 const libFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib"
 path = "lib"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
 const GlobalConfig = """
@@ -234,7 +234,7 @@ suite "SPI-4: migration of existing pools and leaves":
       for leaf in leaves:
         check cfg(leaf, "remote.repro-pool.url") == poolFileUrl(pool)
         check cfg(leaf, "remote.repro-pool.promisor") == "true"
-        check cfg(leaf, "remote.repro-pool.uploadpack") == LeafPoolUploadPack
+        check cfg(leaf, "remote.repro-pool.uploadpack") == leafPoolUploadPackCommand()
         check cfg(leaf, "fetch.hideRefs") == LeafHiddenFetchRefs
         check cfg(leaf, "extensions.partialClone") == ""
         check gitIn(leaf, "rev-parse", "-q", "--verify",

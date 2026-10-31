@@ -14,7 +14,7 @@
 ##    on encode, so identical inputs must produce byte-identical
 ##    output and reversed input order must produce the same wire.
 
-import std/[tables, unittest]
+import std/[sets, strutils, tables, unittest]
 
 import repro_profile
 import repro_profile_intent
@@ -121,8 +121,22 @@ suite "RBPI envelope: corruption detection":
     check raised
 
   test "unsupported version raises ERbpiCorrupt(field: schemaVersion)":
+    # DERIVED FROM `RbpiSchemaVersion`, which is already exported, so this
+    # needs no accessor: one `+ 1` at the single call site is cheaper than
+    # a second name, and the derivation is visible where it is read.
+    #
+    # It used to poke a literal 7, written when the schema version was 1.
+    # The reader's check is an EQUALITY, so 7 stayed unsupported through
+    # the bumps to 2 and to 3 and the case kept passing -- but it was
+    # measuring "version 7 is refused", not "the version one past this
+    # build's is refused", and those come apart the moment the schema
+    # reaches 7. Nothing would have reddened; the case would simply have
+    # started asserting that the CURRENT version is rejected, which is the
+    # opposite property.
     var env = wrapEnvelope(smallBody())
-    env[4] = 0x07'u8  # version becomes 7
+    let unknown = RbpiSchemaVersion + 1'u16
+    env[4] = byte(unknown and 0xff'u16)
+    env[5] = byte((unknown shr 8) and 0xff'u16)
     var raised = false
     try:
       discard readEnvelope(env)
@@ -348,6 +362,171 @@ suite "ProfileIntent CBOR body round-trip":
     check q.hosts["zeta"] == @["develop"]
     check q.hosts["middle"].len == 0
 
+  test "hostApplies round-trips, and is absent from the wire when empty":
+    # GM7 (envelope schema 7): the per-host concern declaration. A profile
+    # without one encodes exactly as a schema-6 profile did -- no key -- so
+    # its action-cache identity is unchanged apart from the version.
+    var p: ProfileIntent
+    p.name = "ha"
+    p.hosts["m1"] = @["desktop"]
+    p.hosts["home-pc"] = @["desktop"]
+    let plain = encodeProfileIntentToBytes(p)
+    var plainText = ""
+    for b in plain: plainText.add char(b)
+    check "hostApplies" notin plainText
+    p.hostApplies["m1"] = @["applications", "environment"]
+    p.hostApplies["home-pc"] = @[]
+    let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
+    check q.hostApplies.len == 2
+    check q.hostApplies["m1"] == @["applications", "environment"]
+    check q.hostApplies["home-pc"].len == 0
+    check decodeProfileIntentFromBytes(plain).hostApplies.len == 0
+
+  test "hostSystems round-trips (RBPI and JSON), absent when empty":
+    # GM10 + add-on mode (envelope schema 11): how each declared host's
+    # system scope is managed -- elsewhere, with the optional pointer, or in
+    # add-on mode, with the optional system activities. A profile without one
+    # encodes exactly as before -- no key, in either encoding.
+    var p: ProfileIntent
+    p.name = "sme"
+    p.hosts["infra-host"] = @["default"]
+    p.hosts["distro-host"] = @["default"]
+    p.hosts["home-pc"] = @["default"]
+    p.hosts["rpi"] = @["default"]
+    p.hosts["validator"] = @["default"]
+    p.hosts["pc"] = @["default"]
+    let plain = encodeProfileIntentToBytes(p)
+    var plainText = ""
+    for b in plain: plainText.add char(b)
+    check "hostSystems" notin plainText
+    check "hostSystems" notin emitProfileIntentJson(p)
+    check decodeProfileIntentFromBytes(plain).hostSystems.len == 0
+    p.hostSystems["infra-host"] = HostSystemDecl(mode: hsmManagedElsewhere,
+      managedBy: "example-org/infra")
+    p.hostSystems["distro-host"] = HostSystemDecl(mode: hsmManagedElsewhere)
+    p.hostSystems["rpi"] = HostSystemDecl(mode: hsmAddOn)
+    p.hostSystems["validator"] = HostSystemDecl(mode: hsmAddOn,
+      activities: @["ethereum_validator", "host_baseline"])
+    p.hostSystems["pc"] = HostSystemDecl(mode: hsmFull, activities: @["web"])
+    let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
+    check q.hostSystems == p.hostSystems
+    check not q.hostSystems.hasKey("home-pc")
+    let js = emitProfileIntentJson(p)
+    check js.contains("\"hostSystems\":{\"distro-host\":" &
+      "{\"mode\":\"managedElsewhere\",\"managedBy\":null,\"activities\":[]}," &
+      "\"infra-host\":{\"mode\":\"managedElsewhere\",\"managedBy\":" &
+      "\"example-org/infra\",\"activities\":[]},\"pc\":{\"mode\":\"full\"," &
+      "\"managedBy\":null,\"activities\":[\"web\"]},\"rpi\":{\"mode\":\"addOn\"," &
+      "\"managedBy\":null,\"activities\":[]},\"validator\":{\"mode\":" &
+      "\"addOn\",\"managedBy\":null,\"activities\":[\"ethereum_validator\"," &
+      "\"host_baseline\"]}}")
+    let r = parseProfileIntentJson(js)
+    check r.hostSystems == p.hostSystems
+    # The lookup every reader uses.
+    let m = systemManagementFor(r, "infra-host")
+    check m.declared and m.managedElsewhere and m.mode == mmManagedElsewhere and
+      m.managedBy == "example-org/infra"
+    let n = systemManagementFor(r, "distro-host")
+    check n.managedElsewhere and n.managedBy == ""
+    let h = systemManagementFor(r, "home-pc")
+    check h.declared and not h.managedElsewhere and h.mode == mmFull
+    check enabledSystemActivities(h) == toHashSet(["default"])
+    let a = systemManagementFor(r, "rpi")
+    check a.isAddOn and a.systemActivities.len == 0
+    check enabledSystemActivities(a) == toHashSet(["default"])
+    let v = systemManagementFor(r, "validator")
+    check v.isAddOn and v.systemActivities == @["ethereum_validator",
+      "host_baseline"]
+    check enabledSystemActivities(v) == toHashSet(["default",
+      "ethereum_validator", "host_baseline"])
+    let pc = systemManagementFor(r, "pc")
+    check pc.mode == mmFull and pc.spelled and not pc.isAddOn
+    check enabledSystemActivities(pc) == toHashSet(["default", "web"])
+    check not h.spelled
+    check not systemManagementFor(r, "nowhere").declared
+    check systemManagementFor(r, "nowhere").mode == mmFull
+    # A malformed JSON entry is refused, never read as "managed here".
+    for bad in ["{\"hostSystems\":{\"x\":\"repo\"}}",
+                "{\"hostSystems\":{\"x\":{}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\"}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"here\",\"managedBy\":null,\"activities\":[]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\",\"managedBy\":\"r\",\"activities\":[]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"managedElsewhere\",\"managedBy\":null,\"activities\":[\"a\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"addOn\",\"managedBy\":null,\"activities\":[\"default\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"full\",\"managedBy\":\"r\",\"activities\":[\"web\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"full\",\"managedBy\":null,\"activities\":[\"default\"]}}}",
+                "{\"hostSystems\":{\"x\":{\"mode\":\"managedElsewhere\",\"managedBy\":1,\"activities\":[]}}}",
+                "{\"hostSystems\":[]}"]:
+      let doc = js[0 ..< js.len - 1] & "," & bad[1 ..< bad.len - 1] & "}"
+      expect ValueError:
+        discard parseProfileIntentJson(doc)
+    # The RBPI reader refuses the same impossible declarations as corrupt
+    # (the encoder writes whatever it is handed, so it can produce them).
+    for impossible in [HostSystemDecl(mode: hsmAddOn, managedBy: "r"),
+                       HostSystemDecl(mode: hsmFull, managedBy: "r"),
+                       HostSystemDecl(mode: hsmAddOn, activities: @["default"]),
+                       HostSystemDecl(mode: hsmManagedElsewhere,
+                         activities: @["a"])]:
+      var bad = p
+      bad.hostSystems["rpi"] = impossible
+      expect ERbpiCorrupt:
+        discard decodeProfileIntentFromBytes(encodeProfileIntentToBytes(bad))
+
+  test "stowScopes round-trip (RBPI and JSON), absent when empty":
+    # GM11 (envelope schema 10): the stow packages activities claim, in
+    # declaration order, with an optional guard. A profile without a claim
+    # encodes exactly as a schema-9 profile did -- no key, in either
+    # encoding.
+    var p: ProfileIntent
+    p.name = "stow"
+    p.activities = @[ActivityIntent(name: "default"),
+                     ActivityIntent(name: "desktop_core")]
+    let plain = encodeProfileIntentToBytes(p)
+    var plainText = ""
+    for b in plain: plainText.add char(b)
+    check "stowScopes" notin plainText
+    check "stowScopes" notin emitProfileIntentJson(p)
+    check decodeProfileIntentFromBytes(plain).stowScopes.len == 0
+    p.stowScopes = @[
+      StowScope(package: "kitty", activity: "desktop_core"),
+      StowScope(package: "rdp", activity: "desktop_core"),
+      StowScope(package: "rdp", activity: "default",
+        guard: PredicateExpr(expr: "windows"))]
+    let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
+    check q.stowScopes == p.stowScopes
+    let js = emitProfileIntentJson(p)
+    check js.contains("\"stowScopes\":[{\"package\":\"kitty\",\"activity\":" &
+      "\"desktop_core\",\"guard\":null},{\"package\":\"rdp\",\"activity\":" &
+      "\"desktop_core\",\"guard\":null},{\"package\":\"rdp\",\"activity\":" &
+      "\"default\",\"guard\":\"windows\"}]")
+    check parseProfileIntentJson(js).stowScopes == p.stowScopes
+    check stowScopesProblem(q.stowScopes, ["default", "desktop_core"]) == ""
+    # The shared validator refuses what the macro never builds.
+    check "does not declare" in stowScopesProblem(q.stowScopes, ["default"])
+    check "twice" in stowScopesProblem(
+      [StowScope(package: "a", activity: "x"),
+       StowScope(package: "a", activity: "x")], ["x"])
+    check "path" in stowScopesProblem(
+      [StowScope(package: "a/b", activity: "x")], ["x"])
+    check "empty" in stowPackageNameProblem("")
+    check stowPackageNameProblem("..") != ""
+    check stowPackageNameProblem(" kitty") != ""
+    check stowPackageNameProblem("kit\ty") != ""
+    check stowPackageNameProblem("kitty") == ""
+    # A malformed JSON claim is refused, never dropped (a dropped claim
+    # would put its package on every host).
+    for bad in ["{\"stowScopes\":{}}",
+                "{\"stowScopes\":[\"kitty\"]}",
+                "{\"stowScopes\":[{\"package\":\"kitty\"}]}",
+                "{\"stowScopes\":[{\"package\":\"kitty\",\"activity\":1," &
+                  "\"guard\":null}]}",
+                "{\"stowScopes\":[{\"package\":\"kitty\",\"activity\":" &
+                  "\"x\"}]}"]:
+      let doc = js[0 ..< js.find(",\"stowScopes\"")] & "," &
+        bad[1 ..< bad.len - 1] & "}"
+      expect ValueError:
+        discard parseProfileIntentJson(doc)
+
   test "full fixture round-trips structurally":
     let p = fixtureFull()
     let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
@@ -464,3 +643,21 @@ suite "encodeRbpi / decodeRbpi convenience":
       check e.field == "custom"
       check e.detail == "diagnostic message"
     check raised
+
+  test "GM4: data-file references round-trip and are absent when empty":
+    var p = ProfileIntent(name: "gm4")
+    p.activities.add ActivityIntent(name: "default",
+      body: @[ActivityElement(kind: aekPackageRef, pkgName: "jq")])
+    let without = encodeRbpi(p)
+    check decodeRbpi(without).dataFiles.len == 0
+    p.dataFiles = @["data/apps.toml", "data/cli.toml"]
+    let with = encodeRbpi(p)
+    check decodeRbpi(with).dataFiles == @["data/apps.toml", "data/cli.toml"]
+    # The key is optional on the wire: present only with references.
+    check without != with
+    # The JSON form carries them too, and omits the key when empty.
+    check emitProfileIntentJson(p).contains("\"dataFiles\":[\"data/apps.toml\"")
+    check parseProfileIntentJson(emitProfileIntentJson(p)).dataFiles ==
+      p.dataFiles
+    p.dataFiles = @[]
+    check not emitProfileIntentJson(p).contains("dataFiles")

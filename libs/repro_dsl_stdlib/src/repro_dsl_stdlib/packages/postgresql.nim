@@ -12,8 +12,10 @@
 ## which the server resolves relative to itself, so stripComponents=1
 ## flattens the wrapper and keeps that tree intact.
 ##
-## The version is EDB's compound ``<pgversion>-<build>`` tag rather than a
-## plain PostgreSQL version.
+## ``PostgresqlVersion`` is EDB's compound ``<pgversion>-<build>`` tag rather
+## than a plain PostgreSQL version; the record's ``version`` is PostgreSQL's
+## own, 16.14, since a ``-<build>`` suffix would read as a pre-release and
+## fall below 16.14 in a ``uses:`` range.
 ##
 ## **What the prunes drop.** EDB's zip is an installer payload, not a server
 ## distribution: of its 820 MB, 671 MB is pgAdmin 4 — an Electron desktop
@@ -45,6 +47,7 @@ package postgresql:
       prune = "StackBuilder",
       prune = "doc",
       executablePath = "bin/postgres.exe",
+      version = "16.14",
       packageId = "postgresql@" & PostgresqlVersion,
       cpu = "x86_64",
       os = "windows",

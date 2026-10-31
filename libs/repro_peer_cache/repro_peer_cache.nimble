@@ -1,6 +1,6 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Reprobuild peer cache wire protocol, in-memory peer registry, and TCP server/client (Peer-Cache M0)"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 requires "nim >= 2.2.0"

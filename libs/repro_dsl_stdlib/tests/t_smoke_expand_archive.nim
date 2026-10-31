@@ -161,8 +161,10 @@ suite "Phase F — argv assemblers (pure)":
           "'C:\\agent''s runner').FullName; " &
         "$root = $root.TrimEnd([char[]]'\\/') + " &
           "[System.IO.Path]::DirectorySeparatorChar; " &
-        "$zip = [System.IO.Compression.ZipFile]::OpenRead(" &
-          "'C:\\runner''s cache\\runner.zip'); " &
+        "$zip = [System.IO.Compression.ZipFile]::Open(" &
+          "'C:\\runner''s cache\\runner.zip', " &
+          "[System.IO.Compression.ZipArchiveMode]::Read, " &
+          "[System.Text.Encoding]::GetEncoding(437)); " &
         "try { foreach ($entry in $zip.Entries) { " &
           "$target = [System.IO.Path]::GetFullPath(" &
             "[System.IO.Path]::Combine($root, $entry.FullName)); " &

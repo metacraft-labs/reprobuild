@@ -1,27 +1,31 @@
-## Peer-cache TCP server — Peer-Cache M0.
+## Peer-cache TCP server — Peer-Cache M0, hardened as a Boundary receiver in
+## Distributed-Execution M7.
 ##
-## `asyncnet` + `asyncdispatch` based server. On accept, reads framed
-## peer-cache messages from the connection. Handles:
+## `asyncnet` + `asyncdispatch` based server. On accept, the remote address
+## is checked against the configured CIDR allowlist (defence in depth only:
+## network adjacency is never authorization), the TLS handshake runs under
+## `tmTls`, and then every frame passes the receiver gate (`boundary.nim`)
+## before it is decoded: size from the header, protocol order, the caller's
+## roles on THIS message, and its rate. See `serveConnection` below.
 ##
-##   `mkHello`     — reply with `mkHelloOk` + initial `mkAdvertise`
-##                   snapshot built from the registry's self-advertised
-##                   set,
-##   `mkAdvertise` — applied to the registry,
-##   `mkPing`      — replied with `mkPong`,
-##   `mkGoodbye`   — closes the connection,
-##   `mkFetchRequest` — M0 stub: responds with an empty
-##                       `mkFetchResponse{ truncated: true }`. M1 wires
-##                       this to the local store.
-##
-## At accept time, the remote network address is checked against the
-## configured CIDR allowlist; non-matching peers are dropped without
-## sending any frames.
+## Messages served: identity proof, Hello (bound to the verified identity
+## under `tmTls`), advertisements and refresh requests, keep-alives,
+## content-plane fetches (`mkFetchRequest`), memoization-plane queries
+## (`mkGetSelectorsRequest` / `mkGetActionRecordRequest`), and — on a node
+## holding the worker role — `mkReachGoalRequest` through `workerHandler`.
 
 import std/[asyncdispatch, asyncnet, nativesockets, net, options, sets,
-            strutils, tables]
+            strutils, tables, times]
+when defined(posix):
+  from std/posix import nil
+
+import blake3
 
 import ./auth
+import ./boundary
 import ./codec
+import ./evidence_record
+import ./identity
 import ./metrics
 import ./multicast
 import ./pki
@@ -30,6 +34,8 @@ import ./tls
 import ./types
 
 export metrics
+export boundary
+export identity
 
 type
   CidrV4* = object
@@ -53,6 +59,16 @@ type
       ## Peer-Cache M1: optional test seam. When non-nil, the proc is
       ## called on the `mkFetchResponse` payload bytes just before
       ## encoding. Production code leaves this `nil`.
+    memoSelectorReader*: MemoSelectorReader
+      ## Distributed-Execution M0: answers `mkGetSelectorsRequest` from the
+      ## local two-phase memo store. `nil` answers every request with an
+      ## empty selector list (a memo miss), which is what a peer that only
+      ## serves content blobs honestly knows.
+    memoEntryReader*: MemoEntryReader
+      ## Distributed-Execution M0: answers `mkGetActionRecordRequest`.
+      ## `nil` answers `found = false`.
+    memoRequestsServed*: int
+      ## Instrumentation: memo requests (selector + record) answered.
     listener: AsyncSocket
     running: bool
     activeConnections: seq[AsyncSocket]
@@ -83,6 +99,11 @@ type
       ## emits a first-time off-CIDR warning. Tracks the "warning is
       ## logged exactly once per peer ID per session" assertion in
       ## the M2 CIDR-allowlist test independent of `stderr` capture.
+    diagnosticLog*: proc(line: string) {.gcsafe, closure.}
+      ## Where the server's operator diagnostics go (today the first-time
+      ## off-CIDR multicast warning). nil = stderr. A node hosted by
+      ## `repro-daemon` routes them to the daemon log, because the daemon's
+      ## stdout and stderr go to /dev/null.
     capTier2*: bool
       ## Peer-Cache-Scale M2: this server's tier-2 capability. Echoed
       ## back to peers in `mkHelloOk` so clients can record us as a
@@ -118,8 +139,136 @@ type
       ## sites at fetch / advertise / signature paths are no-ops when
       ## nil. Provided by `newPeerCacheServer` or set after the fact
       ## by the daemon's `--metrics-addr` wiring.
+    gate*: ReceiverGate
+      ## Distributed-Execution M7: the FLOW-2/FLOW-4 receiver gate every
+      ## frame passes (`boundary.nim`). Never nil after construction.
+    requireShortLivedLeaves*: bool
+      ## Distributed-Execution M7 (CRED-1): refuse legacy long-lived
+      ## identities; only host-CA leaves of at most an hour are accepted.
+      ## Set by every node the CLI and the daemon start.
+    leafProvider*: LeafProvider
+      ## Distributed-Execution M7: the current short-lived leaf, presented
+      ## on every TLS accept and in `mkIdentityProof`. When nil, `ourCert`
+      ## is presented (the Peer-Cache-BearSSL M3/M4 shape).
+    workerHandler*: WorkerHandler
+      ## Distributed-Execution M7: the worker role's receiver for
+      ## `mkReachGoalRequest`, called only after the gate admitted the
+      ## frame. Nil on a node without the worker role (the gate then
+      ## refuses `ReachGoal` itself: `AuthorizationPolicy.servesWorker`).
+    reporter*: DetectionReporter
+      ## Where the server's own detections go (a hydration reply that does
+      ## not hash to its digest). Nil = counted only.
+    clock*: proc(): int64 {.gcsafe, closure.}
+      ## Unix milliseconds. Nil = the system clock. A test seam, so a test
+      ## can show a connection end when its caller's leaf expires without
+      ## waiting an hour (threat model G15).
+    discoveredEndpoints*: seq[Endpoint]
+      ## Endpoints announced over opt-in multicast on a TLS node. Never
+      ## dialled here (an announcement is unauthenticated bytes): the
+      ## node's client dials them through the TLS handshake and the
+      ## outbound gate (threat model G29). Bounded.
+    inboundAuthenticated*: CountTable[(PeerId, LeafRole)]
+      ## Instrumentation: inbound connections whose identity proof verified,
+      ## per authenticated host and leaf role. A node can show from its own side that a
+      ## host never opened a connection to it (FLOW-1, threat model D4: a
+      ## worker — its daemon or any build it hosts — never dials a
+      ## requester or orchestrator).
 
   PeerCacheServerError* = object of CatchableError
+
+  HydrationChannel* = ref object
+    ## Distributed-Execution M7 (FLOW-1, threat model D4): the worker side
+    ## of a `ReachGoal`'s connection. The worker fetches the graph
+    ## descriptor, the snapshot manifest and its blobs BACK over the
+    ## connection its caller opened — it never dials the caller. The caller
+    ## answers only for the digests it published for that goal
+    ## (`client.HydrationSet`), and every answer is BLAKE3-verified here.
+    send: proc(kind: MessageKind; payload: seq[byte]): Future[void]
+      {.gcsafe, closure.}
+    pending: Table[BlobDigest, Future[Option[seq[byte]]]]
+    closed*: bool
+    caller*: CallerIdentity
+    mismatches*: int
+    server: PeerCacheServer
+
+  WorkerHandler* = proc(caller: CallerIdentity; frame: Frame;
+                        hydration: HydrationChannel):
+    Future[tuple[kind: MessageKind; payload: seq[byte]]] {.gcsafe, closure.}
+    ## Distributed-Execution M7: answers an admitted worker-vocabulary
+    ## frame. The caller identity is the one the RECEIVER verified;
+    ## `hydration` reaches back to the caller over its own connection.
+
+const
+  MaxCapturedRefusalBytes = 64 * 1024
+    ## How much of a refused frame's payload is read for the audit record
+    ## when the frame is over its size budget (EVID-1; threat model G19).
+  MaxDiscoveredEndpoints = 256
+  DefaultHydrationTimeoutMs* = 60_000
+
+proc nowMs*(server: PeerCacheServer): int64 =
+  if server.clock.isNil: int64(epochTime() * 1000.0)
+  else: server.clock()
+
+proc pendingCount*(ch: HydrationChannel): int =
+  if ch.isNil: 0 else: ch.pending.len
+
+proc fetch*(ch: HydrationChannel; digest: BlobDigest;
+            timeoutMs = DefaultHydrationTimeoutMs): Future[Option[seq[byte]]]
+            {.async.} =
+  ## Asks the caller for `digest` over its own connection; `none` when the
+  ## caller does not answer, refuses, or answers bytes that do not hash to
+  ## `digest`.
+  if ch.isNil or ch.closed:
+    return none(seq[byte])
+  var fut: Future[Option[seq[byte]]]
+  if ch.pending.hasKey(digest):
+    fut = ch.pending[digest]
+  else:
+    fut = newFuture[Option[seq[byte]]]("peer_cache.hydration")
+    ch.pending[digest] = fut
+    try:
+      await ch.send(mkFetchRequest, encodeFetchRequest(FetchRequest(
+        digest: digest)))
+    except CatchableError:
+      ch.pending.del(digest)
+      return none(seq[byte])
+  if not await withTimeout(fut, timeoutMs):
+    if ch.pending.hasKey(digest) and ch.pending[digest] == fut:
+      ch.pending.del(digest)
+    return none(seq[byte])
+  return fut.read()
+
+proc complete(ch: HydrationChannel; resp: FetchResponse) =
+  if not ch.pending.hasKey(resp.digest):
+    return
+  let fut = ch.pending[resp.digest]
+  ch.pending.del(resp.digest)
+  var value = none(seq[byte])
+  if not resp.truncated:
+    let observed = blake3.digest(resp.payload)
+    if observed == bytes(resp.digest):
+      value = some(resp.payload)
+    else:
+      inc ch.mismatches
+      if not ch.server.isNil and not ch.server.reporter.isNil:
+        try:
+          ch.server.reporter(newEvidenceRecord(ecDetection,
+            "peer-cache-content", "blob-digest-mismatch",
+            [("peer", $ch.caller.hostId), ("digest", $resp.digest),
+             ("observedDigest", $blobDigestFromBytes(observed)),
+             ("size", $resp.payload.len), ("reason", "hydration reply")],
+            payload = resp.payload))
+        except CatchableError:
+          discard
+  if not fut.finished:
+    fut.complete(value)
+
+proc closeChannel(ch: HydrationChannel) =
+  ch.closed = true
+  for _, fut in ch.pending.pairs:
+    if not fut.finished:
+      fut.complete(none(seq[byte]))
+  ch.pending.clear()
 
 # ---------------------------------------------------------------------------
 # CIDR parsing + matching.
@@ -223,9 +372,15 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
                          trustMode: TrustMode = tmCidr;
                          ourCert: CertAndKey = CertAndKey();
                          trustAnchorSet: TrustAnchorSet = TrustAnchorSet();
-                         metrics: PeerCacheMetrics = nil):
+                         metrics: PeerCacheMetrics = nil;
+                         memoSelectorReader: MemoSelectorReader = nil;
+                         memoEntryReader: MemoEntryReader = nil;
+                         gate: ReceiverGate = nil):
                          PeerCacheServer =
   result = PeerCacheServer(
+    gate: (if gate.isNil: newReceiverGate() else: gate),
+    memoSelectorReader: memoSelectorReader,
+    memoEntryReader: memoEntryReader,
     selfPeerId: selfPeerId,
     listenAddr: listenAddr,
     listenPort: listenPort,
@@ -300,180 +455,45 @@ proc sendFrame(sock: AsyncSocket; messageKind: MessageKind;
 # `wrapServerSocket` from `tls.nim`. Real TLS owns the auth surface.
 
 # ---------------------------------------------------------------------------
-# Connection handler.
+# Distributed-Execution M0: memoization request handling, shared by the
+# plain-TCP and TLS connection handlers so the two transports cannot drift.
 # ---------------------------------------------------------------------------
 
-proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
-                      remoteAddress: string) {.async.} =
-  ## Peer-Cache M0 `tmCidr` connection handler. The `tmTls` path runs
-  ## through `handleConnectionTls` (below) instead.
-  var registeredPeerId: PeerId
-  var hasRegisteredPeer = false
-  try:
-    while server.running:
-      let frameBytes = await readFrameBytes(client)
-      if frameBytes.len == 0:
-        break
-      let frame = decodeFrame(frameBytes)
-      case frame.messageKind
-      of mkHello:
-        let hello = decodeHello(frame.payload)
-        # Register the peer with the network address `accept` saw
-        # plus the listen port from the Hello. The announced
-        # endpoint becomes the peer's known fetch address.
-        let endpoint = initEndpoint(remoteAddress, Port(hello.listenPort))
-        server.registry.addPeer(hello.peerId, endpoint)
-        # Peer-Cache-Scale M2: record the remote's `cap_tier2`.
-        server.registry.setPeerTier2(hello.peerId, hello.capTier2)
-        registeredPeerId = hello.peerId
-        hasRegisteredPeer = true
-        # Reply with HelloOk.
-        let helloOk = HelloOk(
-          peerId: server.selfPeerId,
-          protocolVersion: PeerCacheProtocolVersion,
-          maxBlobBytes: server.maxBlobBytes,
-          capTier2: server.capTier2)
-        await sendFrame(client, mkHelloOk, encodeHelloOk(helloOk))
-        # Send the initial advertise snapshot.
-        let snapshot = server.registry.snapshotFor(hello.peerId)
-        await sendFrame(client, mkAdvertise, encodeAdvertise(snapshot))
-        if not server.metrics.isNil:
-          inc server.metrics.advertisementsSentTotal
-      of mkAdvertise:
-        if not hasRegisteredPeer:
-          # Advertise before Hello — protocol violation.
-          raise newException(PeerCacheServerError,
-            "Advertise received before Hello on peer-cache connection")
-        let ad = decodeAdvertise(frame.payload)
-        server.registry.applyAdvertise(registeredPeerId, ad)
-        if not server.metrics.isNil:
-          inc server.metrics.advertisementsReceivedTotal
-      of mkAdvertiseV2:
-        # Peer-Cache-Scale M1: v2 cuckoo-filter advertisement.
-        if not hasRegisteredPeer:
-          raise newException(PeerCacheServerError,
-            "AdvertiseV2 received before Hello on peer-cache connection")
-        let ad = decodeAdvertiseV2(frame.payload)
-        # Peer-Cache-BearSSL M3: signed-advertisement enforcement when
-        # `tmTls`. Tampered frames bump `signatureRejectedCount` once
-        # per peer per session and get dropped without affecting the
-        # registry.
-        if server.trustMode == tmTls:
-          var verified = false
-          if ad.signature.len == 64 and
-             server.peerKeyByPeerId.hasKey(registeredPeerId):
-            var sig: SignatureBytes
-            for i in 0 ..< 64:
-              sig[i] = ad.signature[i]
-            let msg = canonicaliseAdvertiseForSigning(registeredPeerId, ad)
-            verified = verifySignature(
-              server.peerKeyByPeerId[registeredPeerId], msg, sig)
-          if not verified:
-            if registeredPeerId notin server.signatureRejectedPeers:
-              server.signatureRejectedPeers.incl(registeredPeerId)
-              inc server.signatureRejectedCount
-            if not server.metrics.isNil:
-              inc server.metrics.signatureRejectionsTotal
-            continue
-        server.registry.applyAdvertiseV2(registeredPeerId, ad)
-        if not server.metrics.isNil:
-          inc server.metrics.advertisementsReceivedTotal
-      of mkPing:
-        await sendFrame(client, mkPong, encodePong(Pong()))
-      of mkPong:
-        if hasRegisteredPeer:
-          server.registry.updateLastSeen(registeredPeerId)
-      of mkGoodbye:
-        break
-      of mkFetchRequest:
-        # M1: consult the injected `LocalStoreReader`. Reply truncated
-        # when there is no reader (M0 fallback), the blob is absent, or
-        # the blob exceeds `maxBlobBytes`. On hit, run the optional
-        # `responseInterceptor` (test seam for the corrupted-payload
-        # verification path) before encoding the response payload.
-        let req = decodeFetchRequest(frame.payload)
-        if not server.metrics.isNil:
-          inc server.metrics.fetchRequestsTotal
-        var resp: FetchResponse
-        if server.localStoreReader.isNil:
-          resp = FetchResponse(
-            digest: req.digest, truncated: true, payload: @[])
-          if not server.metrics.isNil:
-            inc server.metrics.fetchMissesTotal
-        else:
-          let lookup = server.localStoreReader(req.digest)
-          if lookup.isNone:
-            resp = FetchResponse(
-              digest: req.digest, truncated: true, payload: @[])
-            if not server.metrics.isNil:
-              inc server.metrics.fetchMissesTotal
-          else:
-            let bytes = lookup.get()
-            if uint64(bytes.len) > server.maxBlobBytes:
-              resp = FetchResponse(
-                digest: req.digest, truncated: true, payload: @[])
-              if not server.metrics.isNil:
-                inc server.metrics.fetchMissesTotal
-            else:
-              var payload = bytes
-              if not server.responseInterceptor.isNil:
-                payload = server.responseInterceptor(payload)
-              resp = FetchResponse(
-                digest: req.digest, truncated: false, payload: payload)
-              if not server.metrics.isNil:
-                inc server.metrics.fetchHitsLocal
-        await sendFrame(client, mkFetchResponse, encodeFetchResponse(resp))
-      of mkFetchResponse:
-        # Server-side receipt of a fetch response is unusual (the
-        # server is the one serving fetches), but the protocol is
-        # bidirectional — drop silently in M0.
-        discard
-      of mkHelloOk:
-        # Server doesn't expect HelloOk from a client.
-        discard
-      of mkWant:
-        # M1: a `wkSnapshotRequest` asks for a fresh advertise
-        # snapshot — used by the receiver after detecting a
-        # sequence-number gap (see registry.needsSnapshot). We reply
-        # with the current `mkAdvertise` snapshot from the registry.
-        # `wkBlobs` (point fetch list) remains a no-op until M2 wires
-        # batched fetches; senders that want a single blob today use
-        # `mkFetchRequest` instead.
-        if not hasRegisteredPeer:
-          raise newException(PeerCacheServerError,
-            "Want received before Hello on peer-cache connection")
-        let want = decodeWant(frame.payload)
-        case want.kind
-        of wkSnapshotRequest:
-          let snapshot = server.registry.snapshotFor(registeredPeerId)
-          await sendFrame(
-            client, mkAdvertise, encodeAdvertise(snapshot))
-          if not server.metrics.isNil:
-            inc server.metrics.advertisementsSentTotal
-        of wkBlobs:
-          discard
-      of mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
-         mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
-        # Peer-Cache-Scale M0: SWIM frames are handled by the SWIM
-        # engine's own transport, not by the M0 TCP server. Drop them
-        # silently if they arrive on a TCP connection — production
-        # code routes SWIM traffic out-of-band.
-        discard
-  except CatchableError:
-    # Connection-level errors close the socket; the registry retains
-    # the peer entry so a reconnection re-uses it.
-    discard
-  finally:
-    try: client.close() except CatchableError: discard
-
-# ---------------------------------------------------------------------------
-# Peer-Cache-BearSSL M3: TLS-side frame I/O + connection handler.
-#
-# Mirrors `readFrameBytes` / `sendFrame` / `handleConnection` but talks
-# to a `TlsConn` instead of a raw `AsyncSocket`. The application-layer
-# semantics are identical — the only difference is the transport, so
-# this file has a parallel TLS path rather than a polymorphic seam.
-# ---------------------------------------------------------------------------
+proc memoReply*(server: PeerCacheServer; frame: Frame):
+    tuple[kind: MessageKind; payload: seq[byte]] =
+  ## Builds the reply for a memo request frame. Raises
+  ## `PeerCacheServerError` for a frame that is not a memo request; codec
+  ## errors propagate (the caller closes the connection, as for any
+  ## malformed frame).
+  case frame.messageKind
+  of mkGetSelectorsRequest:
+    let req = decodeGetSelectorsRequest(frame.payload)
+    var selectors: seq[MemoSelector] = @[]
+    if not server.memoSelectorReader.isNil:
+      selectors = server.memoSelectorReader(req.weakFingerprint)
+      if selectors.len > MaxSelectorsPerResponse:
+        selectors.setLen(MaxSelectorsPerResponse)
+    inc server.memoRequestsServed
+    (mkGetSelectorsResponse, encodeGetSelectorsResponse(
+      GetSelectorsResponse(weakFingerprint: req.weakFingerprint,
+                           selectors: selectors)))
+  of mkGetActionRecordRequest:
+    let req = decodeGetActionRecordRequest(frame.payload)
+    var resp = GetActionRecordResponse(
+      weakFingerprint: req.weakFingerprint,
+      strongFingerprint: req.strongFingerprint,
+      found: false, entry: @[])
+    if not server.memoEntryReader.isNil:
+      let entry = server.memoEntryReader(req.weakFingerprint,
+                                         req.strongFingerprint)
+      if entry.isSome and uint64(entry.get().len) <= server.maxBlobBytes:
+        resp.found = true
+        resp.entry = entry.get()
+    inc server.memoRequestsServed
+    (mkGetActionRecordResponse, encodeGetActionRecordResponse(resp))
+  else:
+    raise newException(PeerCacheServerError,
+      "not a memo request frame: " & $frame.messageKind)
 
 proc readFrameBytesTls(conn: TlsConn): Future[seq[byte]] {.async.} =
   ## Reads one full peer-cache frame (header + payload) from the TLS
@@ -510,172 +530,412 @@ proc sendFrameTls(conn: TlsConn; messageKind: MessageKind;
   let bytes = encodeFrame(messageKind, payload)
   await tls.send(conn, bytes)
 
-proc handleConnectionTls(server: PeerCacheServer; conn: TlsConn;
-                         remoteAddress: string) {.async.} =
-  var registeredPeerId: PeerId
-  var hasRegisteredPeer = false
-  let authedKey = remotePublicKey(conn)
+# ---------------------------------------------------------------------------
+# Connection handling — Distributed-Execution M7.
+#
+# ONE loop serves both transports (plain TCP under `tmCidr`, BearSSL TLS under
+# `tmTls`), so the Boundary rules cannot drift between them. For every frame:
+#
+#   1. the 8-byte header is read and `ReceiverGate.admit` decides from it
+#      alone — size first, so an oversized frame is refused without its body
+#      ever being allocated (`boundary.nim` documents the order);
+#   2. a refused frame is audited by the gate, the sender is told
+#      (`mkRefused`) and the connection is closed when the stream cannot be
+#      resynchronised;
+#   3. an admitted frame's payload is read, decoded strictly, audited with
+#      its payload (`recordAdmitted`) and only then acted on.
+#
+# The caller's identity is established by the RECEIVER: from the TLS leaf it
+# verified (`mkIdentityProof`, `identity.nim`) — never from the peer id a
+# Hello claims. Under `tmTls` a Hello naming any other peer id is refused
+# and the connection closed; under `tmCidr` the caller is anonymous and the
+# gate's anonymous set applies.
+# ---------------------------------------------------------------------------
+
+type
+  FrameIo = object
+    ## The transport a connection rides, as three closures.
+    recvExact: proc(n: int): Future[seq[byte]] {.gcsafe, closure.}
+    send: proc(kind: MessageKind; payload: seq[byte]): Future[void]
+      {.gcsafe, closure.}
+    close: proc() {.gcsafe, closure.}
+
+proc plainRecvExact(sock: AsyncSocket; n: int): Future[seq[byte]] {.async.} =
+  if n == 0:
+    return @[]
+  var got = ""
+  while got.len < n:
+    let chunk = await sock.recv(n - got.len)
+    if chunk.len == 0:
+      return @[]
+    got.add(chunk)
+  result = newSeq[byte](n)
+  for i in 0 ..< n:
+    result[i] = byte(ord(got[i]))
+
+proc tlsRecvExact(conn: TlsConn; n: int;
+                  idle = false): Future[seq[byte]] {.async.} =
+  ## `idle`: this read waits for the next frame, so no deadline applies
+  ## until its first byte (an idle connection is not a closed one).
+  if n == 0:
+    return @[]
+  var got = ""
+  while got.len < n:
+    let chunk = await tls.recv(conn, n - got.len,
+      idleTimeoutMs = (if idle and got.len == 0: 0 else: 60_000))
+    if chunk.len == 0:
+      return @[]
+    got.add(chunk)
+  result = newSeq[byte](n)
+  for i in 0 ..< n:
+    result[i] = byte(ord(got[i]))
+
+proc plainIo(sock: AsyncSocket): FrameIo =
+  FrameIo(
+    recvExact: proc(n: int): Future[seq[byte]] {.gcsafe, closure.} =
+      plainRecvExact(sock, n),
+    send: proc(kind: MessageKind; payload: seq[byte]): Future[void]
+        {.gcsafe, closure.} =
+      sendFrame(sock, kind, payload),
+    close: proc() {.gcsafe, closure.} =
+      try: sock.close() except CatchableError: discard)
+
+proc tlsIo(conn: TlsConn): FrameIo =
+  FrameIo(
+    recvExact: proc(n: int): Future[seq[byte]] {.gcsafe, closure.} =
+      tlsRecvExact(conn, n, idle = n == 8),
+    send: proc(kind: MessageKind; payload: seq[byte]): Future[void]
+        {.gcsafe, closure.} =
+      sendFrameTls(conn, kind, payload),
+    close: proc() {.gcsafe, closure.} =
+      asyncCheck tls.close(conn))
+
+proc headerFields(header: seq[byte]): tuple[version, tag: uint16;
+                                           payloadLen: uint32] =
+  result.version = uint16(header[0]) or (uint16(header[1]) shl 8)
+  result.tag = uint16(header[2]) or (uint16(header[3]) shl 8)
+  for i in 0 ..< 4:
+    result.payloadLen = result.payloadLen or
+      (uint32(header[4 + i]) shl uint32(i * 8))
+
+proc sendRefusal(io: FrameIo; tag: uint16; decision: GateDecision)
+    {.async.} =
   try:
-    while server.running:
-      let frameBytes = await readFrameBytesTls(conn)
-      if frameBytes.len == 0:
-        break
-      let frame = decodeFrame(frameBytes)
-      case frame.messageKind
-      of mkHello:
-        let hello = decodeHello(frame.payload)
-        let endpoint = initEndpoint(remoteAddress, Port(hello.listenPort))
-        server.registry.addPeer(hello.peerId, endpoint)
-        server.registry.setPeerTier2(hello.peerId, hello.capTier2)
-        if authedKey.isSome:
-          server.peerKeyByPeerId[hello.peerId] = authedKey.get()
-        registeredPeerId = hello.peerId
-        hasRegisteredPeer = true
-        let helloOk = HelloOk(
-          peerId: server.selfPeerId,
-          protocolVersion: PeerCacheProtocolVersion,
-          maxBlobBytes: server.maxBlobBytes,
-          capTier2: server.capTier2)
-        await sendFrameTls(conn, mkHelloOk, encodeHelloOk(helloOk))
-        let snapshot = server.registry.snapshotFor(hello.peerId)
-        await sendFrameTls(conn, mkAdvertise, encodeAdvertise(snapshot))
-        if not server.metrics.isNil:
-          inc server.metrics.advertisementsSentTotal
-      of mkAdvertise:
-        if not hasRegisteredPeer:
-          raise newException(PeerCacheServerError,
-            "Advertise received before Hello on TLS peer-cache connection")
-        let ad = decodeAdvertise(frame.payload)
-        server.registry.applyAdvertise(registeredPeerId, ad)
-        if not server.metrics.isNil:
-          inc server.metrics.advertisementsReceivedTotal
-      of mkAdvertiseV2:
-        if not hasRegisteredPeer:
-          raise newException(PeerCacheServerError,
-            "AdvertiseV2 received before Hello on TLS peer-cache connection")
-        let ad = decodeAdvertiseV2(frame.payload)
-        # Signed-advertisement enforcement via the TLS-validated pubkey.
-        var verified = false
-        if ad.signature.len == 64 and
-           server.peerKeyByPeerId.hasKey(registeredPeerId):
-          var sig: SignatureBytes
-          for i in 0 ..< 64:
-            sig[i] = ad.signature[i]
-          let msg = canonicaliseAdvertiseForSigning(registeredPeerId, ad)
-          verified = verifySignature(
-            server.peerKeyByPeerId[registeredPeerId], msg, sig)
-        elif ad.signature.len == 0:
-          # tmTls allows unsigned advertisements when the peer skipped
-          # signing — accept them like the M2 path. The M1 tamper test
-          # covers the signed path explicitly.
-          verified = true
-        if not verified:
-          if registeredPeerId notin server.signatureRejectedPeers:
-            server.signatureRejectedPeers.incl(registeredPeerId)
-            inc server.signatureRejectedCount
-          if not server.metrics.isNil:
-            inc server.metrics.signatureRejectionsTotal
-          continue
-        server.registry.applyAdvertiseV2(registeredPeerId, ad)
-        if not server.metrics.isNil:
-          inc server.metrics.advertisementsReceivedTotal
-      of mkPing:
-        await sendFrameTls(conn, mkPong, encodePong(Pong()))
-      of mkPong:
-        if hasRegisteredPeer:
-          server.registry.updateLastSeen(registeredPeerId)
-      of mkGoodbye:
-        break
-      of mkFetchRequest:
-        let req = decodeFetchRequest(frame.payload)
-        if not server.metrics.isNil:
-          inc server.metrics.fetchRequestsTotal
-        var resp: FetchResponse
-        if server.localStoreReader.isNil:
-          resp = FetchResponse(
-            digest: req.digest, truncated: true, payload: @[])
-          if not server.metrics.isNil:
-            inc server.metrics.fetchMissesTotal
-        else:
-          let lookup = server.localStoreReader(req.digest)
-          if lookup.isNone:
-            resp = FetchResponse(
-              digest: req.digest, truncated: true, payload: @[])
-            if not server.metrics.isNil:
-              inc server.metrics.fetchMissesTotal
-          else:
-            let bytes = lookup.get()
-            if uint64(bytes.len) > server.maxBlobBytes:
-              resp = FetchResponse(
-                digest: req.digest, truncated: true, payload: @[])
-              if not server.metrics.isNil:
-                inc server.metrics.fetchMissesTotal
-            else:
-              var payload = bytes
-              if not server.responseInterceptor.isNil:
-                payload = server.responseInterceptor(payload)
-              resp = FetchResponse(
-                digest: req.digest, truncated: false, payload: payload)
-              if not server.metrics.isNil:
-                inc server.metrics.fetchHitsLocal
-        await sendFrameTls(conn, mkFetchResponse, encodeFetchResponse(resp))
-      of mkFetchResponse, mkHelloOk:
-        discard
-      of mkWant:
-        if not hasRegisteredPeer:
-          raise newException(PeerCacheServerError,
-            "Want received before Hello on TLS peer-cache connection")
-        let want = decodeWant(frame.payload)
-        case want.kind
-        of wkSnapshotRequest:
-          let snapshot = server.registry.snapshotFor(registeredPeerId)
-          await sendFrameTls(conn, mkAdvertise, encodeAdvertise(snapshot))
-          if not server.metrics.isNil:
-            inc server.metrics.advertisementsSentTotal
-        of wkBlobs:
-          discard
-      of mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
-         mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
-        discard
+    await io.send(mkRefused, encodeRefused(RefusedNotice(refusedTag: tag,
+      refusalClass: uint8(ord(decision.refusal)), reason: decision.reason)))
   except CatchableError:
     discard
+
+proc ownProof(server: PeerCacheServer): seq[byte] =
+  if server.leafProvider.isNil:
+    return @[]
+  try: server.leafProvider().cert.certDer
+  except CatchableError: @[]
+
+proc fetchReply(server: PeerCacheServer; req: FetchRequest): FetchResponse =
+  ## The content-plane answer (unchanged semantics from Peer-Cache M1).
+  if not server.metrics.isNil:
+    inc server.metrics.fetchRequestsTotal
+  result = FetchResponse(digest: req.digest, truncated: true, payload: @[])
+  if server.localStoreReader.isNil:
+    if not server.metrics.isNil:
+      inc server.metrics.fetchMissesTotal
+    return
+  let lookup = server.localStoreReader(req.digest)
+  if lookup.isNone or uint64(lookup.get().len) > server.maxBlobBytes:
+    if not server.metrics.isNil:
+      inc server.metrics.fetchMissesTotal
+    return
+  var payload = lookup.get()
+  if not server.responseInterceptor.isNil:
+    payload = server.responseInterceptor(payload)
+  if not server.metrics.isNil:
+    inc server.metrics.fetchHitsLocal
+  result = FetchResponse(digest: req.digest, truncated: false, payload: payload)
+
+proc refuseInline(server: PeerCacheServer; io: FrameIo;
+                  caller: CallerIdentity; tag: uint16; payload: seq[byte];
+                  refusal: RefusalClass; reason: string;
+                  close = true) {.async.} =
+  ## A refusal decided AFTER the payload was read (identity proof that does
+  ## not verify, a Hello claiming another identity, schema errors). Audited
+  ## like a gate refusal, with the payload captured.
+  let decision = GateDecision(allowed: false, refusal: refusal,
+    reason: reason, closeConnection: close)
+  server.gate.record(caller, tag, uint32(payload.len), decision, payload,
+    nowMs = server.nowMs())
+  await sendRefusal(io, tag, decision)
+
+proc readRefusedPayload(io: FrameIo; decision: GateDecision;
+                        payloadLen: uint32): Future[seq[byte]] {.async.} =
+  ## The payload of a frame the gate refused from its header, for the audit
+  ## record (EVID-1: capture the payload, not only the fact; threat model
+  ## G19). A frame within its size budget is read whole (it must be
+  ## consumed anyway to stay in frame sync); an oversized one only up to
+  ## `MaxCapturedRefusalBytes` before the connection is closed.
+  let n =
+    if decision.refusal == rcSize: min(int(payloadLen), MaxCapturedRefusalBytes)
+    else: int(payloadLen)
+  if n <= 0:
+    return @[]
+  try:
+    result = await io.recvExact(n)
+  except CatchableError:
+    result = @[]
+
+proc serveConnection(server: PeerCacheServer; io: FrameIo;
+                     remoteAddress: string;
+                     authedKey: Option[PublicKeyBytes]) {.async.} =
+  var caller = CallerIdentity(address: remoteAddress)
+  if server.trustMode == tmTls and authedKey.isSome:
+    # Until an identity proof arrives, a TLS peer is its own key (the
+    # legacy shape). A node that requires short-lived leaves treats it as
+    # unauthenticated instead, so nothing but the proof itself passes.
+    if not server.requireShortLivedLeaves:
+      let legacy = legacyIdentityFromKey(authedKey.get())
+      caller.authenticated = true
+      caller.hostId = legacy.hostId
+      caller.leafRole = lrLegacy
+  let hydration = HydrationChannel(send: io.send, server: server,
+    pending: initTable[BlobDigest, Future[Option[seq[byte]]]]())
+  var goalInFlight = false
+  try:
+    while server.running:
+      let header = await io.recvExact(8)
+      if header.len != 8:
+        break
+      let (version, tag, payloadLen) = headerFields(header)
+      let decision = server.gate.decide(caller, tag, payloadLen,
+        server.nowMs(), hydrationPending = hydration.pendingCount > 0)
+      if not decision.allowed:
+        let captured = await readRefusedPayload(io, decision, payloadLen)
+        server.gate.record(caller, tag, payloadLen, decision, captured,
+          nowMs = server.nowMs())
+        await sendRefusal(io, tag, decision)
+        if decision.closeConnection or captured.len != int(payloadLen):
+          break
+        continue
+      let payload = await io.recvExact(int(payloadLen))
+      if payload.len != int(payloadLen):
+        break
+      var frameBytes = header
+      frameBytes.add(payload)
+      var frame: Frame
+      try:
+        frame = decodeFrame(frameBytes)
+      except CatchableError as err:
+        await server.refuseInline(io, caller, tag, payload, rcSchema,
+          "malformed frame: " & err.msg)
+        break
+      discard version
+      server.gate.recordAdmitted(caller, tag, payload)
+      try:
+        case frame.messageKind
+        of mkIdentityProof:
+          if server.trustMode != tmTls or authedKey.isNone:
+            await server.refuseInline(io, caller, tag, payload, rcProtocol,
+              "identity proof outside a TLS session")
+            break
+          var leafDer: seq[byte]
+          try:
+            leafDer = decodeIdentityProof(frame.payload)
+          except CatchableError as err:
+            await server.refuseInline(io, caller, tag, payload, rcSchema,
+              err.msg)
+            break
+          let verified = verifyLeaf(leafDer, server.trustAnchorSet,
+            server.nowMs() div 1000, expectedPublicKey = authedKey,
+            requireShortLived = server.requireShortLivedLeaves)
+          if not verified.ok:
+            await server.refuseInline(io, caller, tag, payload,
+              rcUnauthenticated, verified.reason)
+            break
+          caller.authenticated = true
+          caller.hostId = verified.hostId
+          server.inboundAuthenticated.inc((verified.hostId, verified.role))
+          caller.leafRole = verified.role
+          caller.leafNotAfter = verified.notAfter
+          hydration.caller = caller
+          let mine = server.ownProof()
+          if mine.len > 0:
+            await io.send(mkIdentityProof, encodeIdentityProof(mine))
+        of mkHello:
+          let hello = decodeHello(frame.payload)
+          if server.trustMode == tmTls:
+            if not caller.authenticated:
+              await server.refuseInline(io, caller, tag, payload,
+                rcUnauthenticated, "Hello before a verified identity proof")
+              break
+            if hello.peerId != caller.hostId:
+              await server.refuseInline(io, caller, tag, payload,
+                rcUnauthenticated, "Hello claims peer " & $hello.peerId &
+                " but the authenticated host is " & $caller.hostId)
+              break
+          let peerId = if caller.authenticated: caller.hostId else: hello.peerId
+          server.registry.addPeer(peerId,
+            initEndpoint(remoteAddress, Port(hello.listenPort)))
+          server.registry.setPeerTier2(peerId, hello.capTier2)
+          if authedKey.isSome:
+            server.peerKeyByPeerId[peerId] = authedKey.get()
+          caller.helloDone = true
+          if not caller.authenticated:
+            caller.hostId = hello.peerId
+          hydration.caller = caller
+          await io.send(mkHelloOk, encodeHelloOk(HelloOk(
+            peerId: server.selfPeerId,
+            protocolVersion: PeerCacheProtocolVersion,
+            maxBlobBytes: server.maxBlobBytes,
+            capTier2: server.capTier2)))
+          await io.send(mkAdvertise,
+            encodeAdvertise(server.registry.snapshotFor(peerId)))
+          if not server.metrics.isNil:
+            inc server.metrics.advertisementsSentTotal
+        of mkAdvertise:
+          server.registry.applyAdvertise(caller.hostId,
+            decodeAdvertise(frame.payload))
+          if not server.metrics.isNil:
+            inc server.metrics.advertisementsReceivedTotal
+        of mkAdvertiseV2:
+          let ad = decodeAdvertiseV2(frame.payload)
+          # Peer-Cache-BearSSL M3 semantics: under `tmTls` a signed
+          # advertisement must verify under the TLS-bound key and an unsigned
+          # one is accepted; `tmCidr` has no key to check against.
+          var verified = true
+          if server.trustMode == tmTls and ad.signature.len > 0:
+            verified = false
+            if ad.signature.len == 64 and
+                server.peerKeyByPeerId.hasKey(caller.hostId):
+              var sig: SignatureBytes
+              for i in 0 ..< 64:
+                sig[i] = ad.signature[i]
+              verified = verifySignature(server.peerKeyByPeerId[caller.hostId],
+                canonicaliseAdvertiseForSigning(caller.hostId, ad), sig)
+          if not verified:
+            if caller.hostId notin server.signatureRejectedPeers:
+              server.signatureRejectedPeers.incl(caller.hostId)
+              inc server.signatureRejectedCount
+            if not server.metrics.isNil:
+              inc server.metrics.signatureRejectionsTotal
+            continue
+          server.registry.applyAdvertiseV2(caller.hostId, ad)
+          if not server.metrics.isNil:
+            inc server.metrics.advertisementsReceivedTotal
+        of mkWant:
+          let want = decodeWant(frame.payload)
+          if want.kind == wkSnapshotRequest:
+            await io.send(mkAdvertise,
+              encodeAdvertise(server.registry.snapshotFor(caller.hostId)))
+            if not server.metrics.isNil:
+              inc server.metrics.advertisementsSentTotal
+        of mkPing:
+          await io.send(mkPong, encodePong(Pong()))
+        of mkPong:
+          if caller.helloDone:
+            server.registry.updateLastSeen(caller.hostId)
+        of mkGoodbye:
+          break
+        of mkFetchRequest:
+          let resp = server.fetchReply(decodeFetchRequest(frame.payload))
+          await io.send(mkFetchResponse, encodeFetchResponse(resp))
+        of mkFetchResponse:
+          # Admitted by the gate only as a hydration reply (a fetch this
+          # worker made over the caller's connection is outstanding).
+          hydration.complete(decodeFetchResponse(frame.payload))
+        of mkGetSelectorsRequest, mkGetActionRecordRequest:
+          let reply = server.memoReply(frame)
+          await io.send(reply.kind, reply.payload)
+        of mkReachGoalRequest:
+          if server.workerHandler.isNil:
+            await server.refuseInline(io, caller, tag, payload,
+              rcNotImplemented, "this node does not hold the worker role",
+              close = false)
+          elif goalInFlight:
+            await server.refuseInline(io, caller, tag, payload, rcProtocol,
+              "a ReachGoal is already in progress on this connection",
+              close = false)
+          else:
+            # The handler hydrates over THIS connection, so it runs beside
+            # the read loop that delivers the caller's hydration replies.
+            goalInFlight = true
+            let handler = server.workerHandler
+            let goalCaller = caller
+            let goalFrame = frame
+            proc runGoal() {.async.} =
+              try:
+                let reply = await handler(goalCaller, goalFrame, hydration)
+                await io.send(reply.kind, reply.payload)
+              except CatchableError:
+                discard
+              goalInFlight = false
+            asyncCheck runGoal()
+        of mkHelloOk, mkGetSelectorsResponse,
+           mkGetActionRecordResponse, mkRefused, mkReachGoalResponse,
+           mkAttach, mkGraphDescriptorFetch, mkExecutePips,
+           mkNotifyPipResults, mkShardDispatch,
+           mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
+           mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
+          # Unreachable: the gate refuses these at a receiver (zero size
+          # budget for replies/SWIM, not-implemented for the reserved ones).
+          discard
+      except OSError, IOError, TlsHandshakeError:
+        # The connection itself failed (peer gone mid-reply): not a
+        # property of the frame.
+        break
+      except CatchableError as err:
+        # A payload the codec or a handler could not process is a parser-
+        # level rejection (EVID-1): refused as `schema`, audited with the
+        # frame, and the connection closed.
+        await server.refuseInline(io, caller, tag, payload, rcSchema,
+          "malformed " & $frame.messageKind & ": " & err.msg)
+        break
+  except CatchableError:
+    # Connection-level errors close the socket; the registry retains
+    # the peer entry so a reconnection re-uses it.
+    discard
   finally:
-    try: await tls.close(conn) except CatchableError: discard
+    hydration.closeChannel()
+    io.close()
 
 proc acceptLoop(server: PeerCacheServer) {.async.} =
   while server.running:
     var client: AsyncSocket
     var remoteAddress: string
-    var remotePort: Port
     try:
       (remoteAddress, client) = await server.listener.acceptAddr()
-      remotePort = Port(0)  # acceptAddr returns address only
     except CatchableError:
       break
     if client.isNil:
       break
     if not inAllowlist(remoteAddress, server.allowlist):
-      # CIDR rejection — close without responding. The remote sees
-      # a clean TCP RST/FIN before any Hello reply, which is how the
-      # M0 verification test asserts the rejection path.
+      # CIDR rejection — close without responding (defence in depth beside
+      # the declared-interface bind; adjacency is never authorization).
       try: client.close() except CatchableError: discard
       continue
     server.activeConnections.add(client)
-    # Peer-Cache-BearSSL M3: when `tmTls` is active, wrap the accepted
-    # socket with a BearSSL TLS 1.2 mutual-auth context. The handshake
-    # completes (or fails) before `handleConnection` observes any
-    # Hello/Advertise. On failure the connection is closed and the
-    # tls-handshake-rejected counter is bumped.
     if server.trustMode == tmTls:
-      let connOpt = await wrapServerSocket(client, server.ourCert,
-                                          server.trustAnchorSet)
+      var connOpt: Option[TlsConn]
+      if server.leafProvider.isNil:
+        connOpt = await wrapServerSocket(client, server.ourCert,
+                                         server.trustAnchorSet)
+      else:
+        let leaf =
+          try: server.leafProvider()
+          except CatchableError: LeafCredential()
+        if leaf.key.isNil or not leaf.key.available:
+          connOpt = none(TlsConn)
+        else:
+          connOpt = await wrapServerSocket(client, leaf.cert.certDer,
+            leaf.key, server.trustAnchorSet)
       if connOpt.isNone:
         inc server.tlsHandshakeRejectedCount
         try: client.close() except CatchableError: discard
         continue
-      asyncCheck handleConnectionTls(server, connOpt.get(), remoteAddress)
+      let conn = connOpt.get()
+      asyncCheck serveConnection(server, tlsIo(conn), remoteAddress,
+        remotePublicKey(conn))
     else:
-      asyncCheck handleConnection(server, client, remoteAddress)
+      asyncCheck serveConnection(server, plainIo(client), remoteAddress,
+        none(PublicKeyBytes))
 
 proc start*(server: PeerCacheServer) =
   ## Opens the listening socket and spawns the accept loop.
@@ -684,6 +944,10 @@ proc start*(server: PeerCacheServer) =
   ## suite + loopback helper rely on this).
   if server.running:
     return
+  if server.trustMode == tmCidr and not server.listenAddr.startsWith("127."):
+    # The harness mode (see `TrustMode`) never listens beyond loopback.
+    raise newException(ValueError, "a CIDR-trust peer-cache server listens " &
+      "only on a loopback address, not '" & server.listenAddr & "'")
   server.listener = newAsyncSocket()
   server.listener.setSockOpt(OptReuseAddr, true)
   server.listener.bindAddr(server.listenPort, server.listenAddr)
@@ -715,6 +979,29 @@ proc stop*(server: PeerCacheServer) =
 proc actualPort*(server: PeerCacheServer): Port =
   server.listenPort
 
+proc abandonAfterFork*(server: PeerCacheServer) =
+  ## Distributed-Execution M0: called in a FORKED CHILD of the process that
+  ## owns this server (a `repro-daemon` build worker). Releases the child's
+  ## copies of the listening and multicast descriptors WITHOUT going through
+  ## the async dispatcher: the dispatcher the child inherited is the
+  ## parent's (on Linux the epoll instance is literally shared), so
+  ## unregistering through it would disturb the parent, which keeps serving.
+  ## The server object is unusable afterwards.
+  server.running = false
+  server.started = false
+  server.multicastRunning = false
+  when defined(posix):
+    if not server.listener.isNil:
+      discard posix.close(cint(server.listener.getFd()))
+    if not server.multicastSocket.isNil:
+      discard posix.close(cint(server.multicastSocket.getFd()))
+    for conn in server.activeConnections:
+      if not conn.isNil:
+        discard posix.close(cint(conn.getFd()))
+  server.listener = nil
+  server.multicastSocket = nil
+  server.activeConnections.setLen(0)
+
 proc sampleMetrics*(server: PeerCacheServer) =
   ## Peer-Cache-Scale M4: mirrors registry size + counter snapshots
   ## into the shared `PeerCacheMetrics`. The HTTP scrape handler reads
@@ -737,15 +1024,46 @@ proc sampleMetrics*(server: PeerCacheServer) =
 # Peer-Cache M2: UDP multicast receiver.
 # ---------------------------------------------------------------------------
 
+proc readGatedFrame(server: PeerCacheServer; sock: AsyncSocket;
+                    peer: CallerIdentity; ctx: OutboundContext):
+                    Future[Option[Frame]] {.async.} =
+  ## One frame from a socket this server dialled, through the outbound gate
+  ## (size from the header before the body is read; audited).
+  let header = await sock.recv(8)
+  if header.len != 8:
+    return none(Frame)
+  var hdr = newSeq[byte](8)
+  for i in 0 ..< 8: hdr[i] = byte(ord(header[i]))
+  let (_, tag, payloadLen) = headerFields(hdr)
+  let decision = server.gate.decideOutbound(peer, tag, payloadLen, ctx,
+    server.nowMs())
+  if not decision.allowed:
+    server.gate.record(peer, tag, payloadLen, decision, outbound = true,
+      nowMs = server.nowMs())
+    return none(Frame)
+  var frameBytes = hdr
+  if payloadLen > 0'u32:
+    let body = await sock.recv(int(payloadLen))
+    if body.len != int(payloadLen):
+      return none(Frame)
+    for ch in body: frameBytes.add(byte(ord(ch)))
+  let frame = decodeFrame(frameBytes)
+  server.gate.recordAdmitted(peer, tag, frame.payload, outbound = true)
+  return some(frame)
+
 proc dialAnnouncedPeer(server: PeerCacheServer;
                        hello: Hello;
                        remoteAddress: string) {.async.} =
-  ## After an inbound multicast announcement passes the CIDR check,
-  ## open a TCP connection to the announced endpoint and complete the
-  ## standard `mkHello` / `mkHelloOk` handshake. The accepted side
-  ## (in this server) is a passive listener; here we explicitly act
-  ## as the *dialer*, since the originator's announcement told us
-  ## where to find them.
+  ## After an inbound multicast announcement passes the CIDR check:
+  ##
+  ## * on a TLS node (every node the CLI and the daemon start) the
+  ##   announced endpoint is only RECORDED (`discoveredEndpoints`). An
+  ##   announcement is unauthenticated bytes; the node's client dials the
+  ##   endpoint through the TLS handshake, the identity proof and the
+  ##   outbound gate like any other peer (threat model G29 — the plaintext
+  ##   dial with an unbounded read used to run here);
+  ## * in the CIDR harness mode (loopback only) the Peer-Cache M2 handshake
+  ##   runs here, with every frame through the outbound gate.
   ##
   ## Errors are swallowed — a stale announcement (peer went away
   ## between sending and our dial) is not a protocol violation, just
@@ -754,15 +1072,21 @@ proc dialAnnouncedPeer(server: PeerCacheServer;
     # Self-announce on loopback — `IP_MULTICAST_LOOP` delivers our
     # own packets back. Drop without warning.
     return
+  let endpoint = initEndpoint(remoteAddress, Port(hello.listenPort))
+  if server.trustMode == tmTls:
+    if endpoint notin server.discoveredEndpoints and
+        server.discoveredEndpoints.len < MaxDiscoveredEndpoints:
+      server.discoveredEndpoints.add(endpoint)
+    return
   if server.registry.hasPeer(hello.peerId):
     # Already discovered via a previous announcement; nothing more
     # to do. The TCP connection from the prior round still feeds the
     # registry advertisements.
     return
   var sock = newAsyncSocket()
+  let peer = CallerIdentity(address: remoteAddress)
   try:
     await sock.connect(remoteAddress, Port(hello.listenPort))
-    # Send our own Hello.
     let ourHello = Hello(
       peerId: server.selfPeerId,
       listenPort: uint16(server.listenPort),
@@ -773,33 +1097,12 @@ proc dialAnnouncedPeer(server: PeerCacheServer;
     for i, b in helloFrame:
       helloStr[i] = char(b)
     await sock.send(helloStr)
-    # Read HelloOk (8-byte header then payload).
-    let header = await sock.recv(8)
-    if header.len != 8:
+    let okFrame = await server.readGatedFrame(sock, peer,
+      OutboundContext(helloPending: true))
+    if okFrame.isNone or okFrame.get().messageKind != mkHelloOk:
       try: sock.close() except CatchableError: discard
       return
-    var hdrBytes = newSeq[byte](8)
-    for i in 0 ..< 8:
-      hdrBytes[i] = byte(ord(header[i]))
-    var payloadLen: uint32 = 0
-    for i in 0 ..< 4:
-      payloadLen = payloadLen or (uint32(hdrBytes[4 + i]) shl uint32(i * 8))
-    var frameBytes = hdrBytes
-    if payloadLen > 0'u32:
-      let payload = await sock.recv(int(payloadLen))
-      if payload.len != int(payloadLen):
-        try: sock.close() except CatchableError: discard
-        return
-      let prefix = frameBytes.len
-      frameBytes.setLen(prefix + payload.len)
-      for i in 0 ..< payload.len:
-        frameBytes[prefix + i] = byte(ord(payload[i]))
-    let okFrame = decodeFrame(frameBytes)
-    if okFrame.messageKind != mkHelloOk:
-      try: sock.close() except CatchableError: discard
-      return
-    let helloOk = decodeHelloOk(okFrame.payload)
-    let endpoint = initEndpoint(remoteAddress, Port(hello.listenPort))
+    let helloOk = decodeHelloOk(okFrame.get().payload)
     server.registry.addPeer(helloOk.peerId, endpoint)
     # Peer-Cache-Scale M2: record the dialed peer's tier-2 capability
     # from both the announced Hello and the returned HelloOk.
@@ -808,31 +1111,12 @@ proc dialAnnouncedPeer(server: PeerCacheServer;
     # Drain one more frame (the initial advertise snapshot) so the
     # registry's blob set is primed. Best-effort.
     try:
-      let advHeader = await sock.recv(8)
-      if advHeader.len == 8:
-        var ahBytes = newSeq[byte](8)
-        for i in 0 ..< 8:
-          ahBytes[i] = byte(ord(advHeader[i]))
-        var advLen: uint32 = 0
-        for i in 0 ..< 4:
-          advLen = advLen or (uint32(ahBytes[4 + i]) shl uint32(i * 8))
-        var advBytes = ahBytes
-        if advLen > 0'u32:
-          let advPayload = await sock.recv(int(advLen))
-          for i in 0 ..< advPayload.len:
-            advBytes.add(byte(ord(advPayload[i])))
-        let advFrame = decodeFrame(advBytes)
-        if advFrame.messageKind == mkAdvertise:
-          server.registry.applyAdvertise(helloOk.peerId,
-            decodeAdvertise(advFrame.payload))
+      let adv = await server.readGatedFrame(sock, peer, OutboundContext())
+      if adv.isSome and adv.get().messageKind == mkAdvertise:
+        server.registry.applyAdvertise(helloOk.peerId,
+          decodeAdvertise(adv.get().payload))
     except CatchableError:
       discard
-    # Close the dialer side. Future fetches go through the regular
-    # `PeerCacheClient.requestFetch` path which opens its own
-    # connection from the seed-list / multicast-derived endpoints —
-    # by the time we add the peer to the registry the client side
-    # can dial them on the next round. M3 may merge the dialer +
-    # long-lived connection holders.
     try: sock.close() except CatchableError: discard
   except CatchableError:
     try: sock.close() except CatchableError: discard
@@ -866,11 +1150,14 @@ proc multicastReceiveLoop(server: PeerCacheServer;
       if helloOk and hello.peerId notin server.multicastWarnedPeers:
         server.multicastWarnedPeers.incl(hello.peerId)
         inc server.warningEmitCount
+        let line = "peer-cache: dropping multicast announcement from " &
+          triple.address & " (peer " & $hello.peerId &
+          ") — outside configured CIDR allowlist"
         try:
-          stderr.writeLine(
-            "peer-cache: dropping multicast announcement from " &
-            triple.address & " (peer " & $hello.peerId &
-            ") — outside configured CIDR allowlist")
+          if server.diagnosticLog.isNil:
+            stderr.writeLine(line)
+          else:
+            server.diagnosticLog(line)
         except CatchableError:
           discard
       continue

@@ -202,7 +202,7 @@ suite "NLF-GEN-5 one path: identical content and identical fingerprints":
     withScenario:
       let d = runFourDoors(server, scratch, lsDefault)
       let ld = parseLockedDependencies(d.solve.lockDocument)
-      check ld.schema == SolvedGraphLockSchemaV2
+      check ld.schema == SolvedGraphLockSchemaV3
       check ld.packages.len > 0
       check serializeLockedDependencies(ld) == d.solve.lockDocument
 

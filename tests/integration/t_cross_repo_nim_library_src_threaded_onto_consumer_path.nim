@@ -53,7 +53,12 @@
 ##      (no hardcoded ``../greetlib/src``).
 ##   3. Editing the sibling's ``src/greetlib.nim`` (develop) / refreshing the
 ##      pin (lock-pinned) rebuilds the consumer with the NEW stamp — the reused
-##      SC-4 fold (§4.2a.5) invalidates on the sibling's source.
+##      SC-4 invalidation (§4.2a.5). Since the scoped rule of 2026-10-12
+##      (§4.3) the monitored ``nim c`` misses on the observed read of the
+##      edited ``greetlib.nim`` (develop) and on the new revision-keyed
+##      ``--path:`` directory the refreshed pin fetches into (lock-pinned), not
+##      on a folded producer identity — so this is the end-to-end check that
+##      the narrower key still never serves a stale consumer.
 ##
 ## Falsifiability (§SC-11): the consumer's ``repro.nim`` carries NO
 ## ``--path:../greetlib/src``, so without the SC-11 ``nimPathDirs`` channel the
@@ -116,7 +121,8 @@ package greetlib:
 """
 
 proc producerModule(stamp: string): string =
-  "proc greeting*(): string = \"" & stamp & "\"\n"
+  "proc greeting*(): string = \"" & stamp & "\"\n" &
+    "proc resolveSipReplacement*(): string = greeting()\n"
 
 # ---- The CONSUMER's importable Nim module. It ``import greetlib`` with NO
 # path qualifier — resolution depends ENTIRELY on the SC-11 ``--path:`` thread.
@@ -290,6 +296,20 @@ proc writeConsumer(root, reproText: string) =
   writeFile(root / "repro.nim", reproText)
   writeFile(root / "src" / "app.nim", consumerAppSource)
 
+proc writeLock(root, url, revision: string; path = ""; integrity = "") =
+  var ld = LockedDependencies(
+    schema: "reprobuild.solved-graph-lock.v2",
+    platform: currentPlatformId(), optimal: true,
+    inputsDigest: inputsDigestOf("sc11-fixture"))
+  ld.deps.add(LockedDep(
+    name: "greetlib", path: path,
+    coordinates: Coordinates(kind: ckVcs, url: url, gitRef: "main",
+      revision: revision),
+    integrity: (if integrity.len > 0: integrity
+      else: gitObjectMultihash("sha1", revision)),
+    visibility: "public"))
+  writeFile(root / "repro.lock", serializeLockedDependencies(ld))
+
 proc buildCommand(reproAbs, consumerRoot, cacheRoot: string): string =
   q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
     " --tool-provisioning=path --daemon=off --log=quiet" &
@@ -381,6 +401,19 @@ created_at = "2026-07-04T00:00:00Z"
           checkpoint("develop app-out.txt(after edit)=" & got2)
           check got2 == greetStampEdited
 
+        # Reject the producer before its standard-module poison can reach a
+        # compile. A fresh source input forces this check through launch even
+        # when the preceding valid consumer build is cached.
+        createDir(siblingRoot / "src/std")
+        writeFile(siblingRoot / "src/std/objectdollar.nim",
+          "{.error: \"producer replaced std/objectdollar\".}\n")
+        writeFile(consumerRoot / "src/app.nim", consumerAppSource &
+          "\n# producer collision validation\n")
+        let refused = run(cmd, repoRoot)
+        checkpoint(refused.output)
+        check refused.code != 0
+        check refused.output.contains("reserved standard-library module namespace std")
+
       # ==================================================================
       # LOCK-PINNED MODE — no override → fetched tree's src/ (§4.2a.6, §5.2)
       # ==================================================================
@@ -401,19 +434,20 @@ created_at = "2026-07-04T00:00:00Z"
         let consumerRoot = lpRoot / "consumer"
         createDir(consumerRoot)
         writeConsumer(consumerRoot, consumerReproWithGreetlib)
+        # A configured snapshot exports the older API, while the consumer
+        # lock selects the newer API. Configuration must still execute.
+        let staleSource = consumerRoot / "stale-nix-source"
+        createDir(staleSource)
+        writeFile(staleSource / "greetlib.nim",
+          "proc greeting*(): string = \"stale revision\"\n")
+        writeFile(consumerRoot / "config.nims",
+          "switch(\"path\", " & staleSource.escape & ")\n" &
+          "switch(\"define\", \"consumerConfigExecuted\")\n")
+        writeFile(consumerRoot / "src/app.nim",
+          "when not defined(consumerConfigExecuted):\n" &
+          "  {.error: \"consumer config was bypassed\".}\n" &
+          consumerAppSource.replace("greeting()", "resolveSipReplacement()"))
 
-        proc writeLock(root, url, revision: string) =
-          var ld = LockedDependencies(
-            schema: "reprobuild.solved-graph-lock.v2",
-            platform: currentPlatformId(), optimal: true,
-            inputsDigest: inputsDigestOf("sc11-fixture"))
-          ld.deps.add(LockedDep(
-            name: "greetlib", path: "",
-            coordinates: Coordinates(kind: ckVcs, url: url, gitRef: "main",
-              revision: revision),
-            integrity: gitObjectMultihash("sha1", revision),
-            visibility: "public"))
-          writeFile(root / "repro.lock", serializeLockedDependencies(ld))
         writeLock(consumerRoot, remote, rev)
 
         check not fileExists(consumerRoot / ".repro" / "develop-overrides.toml")
@@ -437,6 +471,20 @@ created_at = "2026-07-04T00:00:00Z"
           "greetlib" / rev / "repro.nim"
         check fileExists(fetched)
         check not dirExists(parentDir(consumerRoot) / "greetlib")
+        # A cache containing the pin is insufficient if its checkout moved.
+        let fetchedRoot = parentDir(fetched)
+        let movedCache = run(q(gitBin) & " -C " & q(fetchedRoot) &
+          " -c user.name=SC11 -c user.email=sc11@example.invalid" &
+          " commit --quiet --allow-empty -m 'move cached HEAD'")
+        require movedCache.code == 0
+        let refusedCache = run(cmd, repoRoot)
+        checkpoint(refusedCache.output)
+        check refusedCache.code != 0
+        check refusedCache.output.contains("source revision mismatch")
+        check refusedCache.output.contains(fetchedRoot)
+        let restoreCache = run(q(gitBin) & " -C " & q(fetchedRoot) &
+          " checkout --quiet --detach " & q(rev))
+        require restoreCache.code == 0
         check fileExists(marker)
         if fileExists(marker):
           let got = readFile(marker).strip()
@@ -465,6 +513,16 @@ created_at = "2026-07-04T00:00:00Z"
           let got2 = readFile(marker).strip()
           checkpoint("lock-pinned app-out.txt(after refreshed pin)=" & got2)
           check got2 == greetStampEdited
+
+        createDir(remote / "src/std")
+        writeFile(remote / "src/std/objectdollar.nim",
+          "{.error: \"producer replaced std/objectdollar\".}\n")
+        gitCommitAll(remote, gitBin, "sc11 producer reserved namespace")
+        writeLock(consumerRoot, remote, gitHead(remote, gitBin))
+        let refused = run(cmd, repoRoot)
+        checkpoint(refused.output)
+        check refused.code != 0
+        check refused.output.contains("reserved standard-library module namespace std")
 
       # ==================================================================
       # FALSIFIABILITY — a CONTROL consumer that names NO ``uses: "greetlib"``
@@ -565,3 +623,90 @@ created_at = "2026-07-04T00:00:00Z"
       check not fileExists(producerTestMarker)
       # No producer-pool lease denial leaked into the consumer build.
       check not output.contains("greetlib.pty-serial")
+
+  test "lock-pinned sibling source agrees with consumer pin before compilation":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    require fileExists(reproBinary)
+    let scratch = absolutePath(getTempDir() / ("sc11-source-revision-" &
+      $getCurrentProcessId()))
+    removeDir(scratch)
+    createDir(scratch)
+    defer: removeDir(scratch)
+    let sibling = scratch / "greetlib"
+    let consumer = scratch / "consumer"
+    writeProducerSrc(sibling, "older revision")
+    writeFile(sibling / "src/greetlib.nim",
+      "proc greeting*(): string = \"older revision\"\n")
+    gitInit(sibling, gitBin)
+    # Separate Git directories use the same .git file shape as worktrees.
+    # Verification must inspect Git's root, rather than require a .git dir.
+    moveDir(sibling / ".git", scratch / "greetlib-git-data")
+    writeFile(sibling / ".git", "gitdir: ../greetlib-git-data\n")
+    let older = gitHead(sibling, gitBin)
+    writeProducerSrc(sibling, greetStamp)
+    # A commit cannot contain a self-record naming itself. Matching source
+    # must remain usable even when its committed self-record names its parent.
+    writeLock(sibling, sibling, older, path = ".")
+    gitCommitAll(sibling, gitBin, "new library with lagging self-record")
+    let selected = gitHead(sibling, gitBin)
+    writeConsumer(consumer, consumerReproWithGreetlib)
+    writeLock(consumer, sibling, selected)
+    let cacheRoot = scratch / "action-cache"
+    createDir(cacheRoot)
+    let cmd = buildCommand(absolutePath(reproBinary), consumer, cacheRoot)
+    let matching = run(cmd, ReprobuildRepoRoot)
+    checkpoint(matching.output)
+    require matching.code == 0
+    check readFile(consumer / "build/app-out.txt").strip() == greetStamp
+
+    writeLock(consumer, sibling, selected,
+      integrity = "git-sha1:0000000000000000000000000000000000000000")
+    let invalidIntegrity = run(cmd, ReprobuildRepoRoot)
+    checkpoint(invalidIntegrity.output)
+    check invalidIntegrity.code != 0
+    check invalidIntegrity.output.contains("integrity check FAILED")
+    writeLock(consumer, sibling, selected)
+
+    # An ancestor repository can have exactly the expected HEAD. It still
+    # cannot stand in for a producer that has no repository of its own.
+    removeFile(sibling / ".git")
+    writeFile(scratch / ".git", "gitdir: greetlib-git-data\n")
+    let ancestor = run(cmd, ReprobuildRepoRoot)
+    checkpoint(ancestor.output)
+    check ancestor.code != 0
+    check ancestor.output.contains("producer repository root")
+    removeFile(scratch / ".git")
+    writeFile(sibling / ".git", "gitdir: ../greetlib-git-data\n")
+
+    let checkout = run(q(gitBin) & " -C " & q(sibling) &
+      " checkout --quiet --detach " & q(older))
+    require checkout.code == 0
+    let mismatched = run(cmd, ReprobuildRepoRoot)
+    checkpoint(mismatched.output)
+    check mismatched.code != 0
+    check mismatched.output.contains("source revision mismatch")
+    check mismatched.output.contains("greetlib")
+    check mismatched.output.contains(sibling)
+    check mismatched.output.contains(consumer / "repro.lock")
+    check mismatched.output.contains(selected)
+    check mismatched.output.contains(older)
+    check mismatched.output.contains("repro lock update")
+    # Refusal happens before the consumer compile overwrites its output.
+    check readFile(consumer / "build/app-out.txt").strip() == greetStamp
+
+    createDir(consumer / ".repro")
+    writeFile(consumer / ".repro/develop-overrides.toml", """
+schema = "reprobuild.workspace.develop-overrides.v1"
+[[override]]
+package = "greetlib"
+local_path = "../greetlib"
+state = "editable"
+created_at = "2026-10-19T00:00:00Z"
+provenance = "repro develop --only=greetlib"
+""")
+    let editable = run(cmd, ReprobuildRepoRoot)
+    checkpoint(editable.output)
+    check editable.code == 0
+    check not editable.output.contains("source revision mismatch")
+    check readFile(consumer / "build/app-out.txt").strip() == "older revision"

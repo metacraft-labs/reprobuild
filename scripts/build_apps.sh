@@ -48,9 +48,20 @@ source scripts/lib/preloaded_shim_loader.sh
 #      ``--out`` target on every invocation, so "not older than this run" is a
 #      true statement about a build that did the work — and an artifact left
 #      over from a previous run fails it.
-#   2. An entrypoint that fails to compile or link has its stale binary
-#      REMOVED, so "does the file exist?" stops answering yes for a binary
-#      nobody built.
+#   2. An entrypoint that fails to compile or link — or whose output fails
+#      the check in point 1 — has its previous binary SET ASIDE under the same
+#      name plus ``.stale`` (``build/bin/repro`` -> ``build/bin/repro.stale``).
+#      The canonical name is gone, so "does the file exist?" stops answering
+#      yes for a binary nobody built. The old build is NOT deleted, because
+#      the failure is often not the tree's: a sibling checkout that is a few
+#      commits stale breaks the compile with nothing in this repo changed, and
+#      that must not cost the developer the tool that worked a minute earlier.
+#      It stays runnable, explicitly, under the ``.stale`` name. Only a build
+#      from before this run is set aside; a file the failing step wrote itself
+#      is removed. A newer set-aside replaces an older one, and a successful
+#      build removes it, so a green run leaves no ``.stale`` for
+#      ``cp build/bin/*`` packaging to ship. The DSL runtime library follows
+#      the same rule.
 #   3. The loop runs to the end and reports every failure together, instead of
 #      hiding failures 2..N behind the first one.
 #   4. The last line of output is an explicit verdict, so a log read through a
@@ -132,9 +143,92 @@ resolve_built_binary() {
   return 1
 }
 
-discard_stale_binary() {
-  local name="$1"
-  rm -f "build/bin/${name}" "build/bin/${name}.exe"
+# Move each given artifact that exists off its canonical name to
+# ``<path>.stale`` (point 2 of the rationale above), replacing an older
+# ``.stale``. A path with nothing at it leaves any existing ``.stale`` alone:
+# that one is still the most recent build there was. Prints a phrase saying
+# where the previous build went, for the caller's failure message.
+#
+# Only a PREVIOUS build is set aside. A file strictly newer than the run
+# marker was written by the step that just failed — a link cut short by a full
+# disk, or the empty output verify_fresh_artifact refused — and moving it would
+# replace the last good ``.stale`` with a broken one. Such a file is deleted
+# instead. ``-nt`` (strictly newer) errs toward keeping: on a filesystem with
+# whole-second timestamps a previous build stamped in the marker's tick is
+# still treated as a previous build.
+#
+# If the rename itself fails the artifact is deleted instead, and the phrase
+# says so: losing the old build is the lesser harm next to leaving it at the
+# canonical name, where it would answer for a build that did not happen.
+set_aside_previous_build() {
+  local path
+  local kept=()
+  local discarded=()
+  local removed=()
+  local stuck=()
+  local earlier=()
+  for path in "$@"; do
+    if [ -e "${path}" ] || [ -L "${path}" ]; then
+      if [ "${path}" -nt "${build_run_marker}" ]; then
+        rm -f "${path}" || true
+        if [ -e "${path}" ] || [ -L "${path}" ]; then
+          stuck+=("${path}")
+        else
+          discarded+=("${path}")
+        fi
+        if [ -e "${path}.stale" ]; then
+          earlier+=("${path}.stale")
+        fi
+      elif mv -f "${path}" "${path}.stale"; then
+        kept+=("${path}.stale")
+      else
+        rm -f "${path}" || true
+        if [ -e "${path}" ] || [ -L "${path}" ]; then
+          stuck+=("${path}")
+        else
+          removed+=("${path}")
+        fi
+      fi
+    elif [ -e "${path}.stale" ]; then
+      earlier+=("${path}.stale")
+    fi
+  done
+  local notes=()
+  if [ "${#kept[@]}" -gt 0 ]; then
+    notes+=("kept the previous build as ${kept[*]}")
+  fi
+  if [ "${#discarded[@]}" -gt 0 ]; then
+    notes+=("removed ${discarded[*]}, which the failed step itself wrote")
+  fi
+  if [ "${#removed[@]}" -gt 0 ]; then
+    notes+=("could not set the previous build aside, so removed ${removed[*]}")
+  fi
+  if [ "${#stuck[@]}" -gt 0 ]; then
+    notes+=("could neither set aside nor remove ${stuck[*]}; it is NOT this run's build")
+  fi
+  if [ "${#kept[@]}" -eq 0 ] && [ "${#removed[@]}" -eq 0 ] &&
+     [ "${#stuck[@]}" -eq 0 ]; then
+    if [ "${#earlier[@]}" -gt 0 ]; then
+      notes+=("no previous build was present (an earlier one is still kept as ${earlier[*]})")
+    else
+      notes+=("no previous build was present")
+    fi
+  fi
+  local note separator=""
+  for note in "${notes[@]}"; do
+    printf '%s%s' "${separator}" "${note}"
+    separator="; "
+  done
+}
+
+# The counterpart for a step that succeeded: its ``.stale`` copies describe a
+# build that has now been superseded, and leaving them would let a packaging
+# glob over build/bin ship one.
+clear_set_aside_build() {
+  local path
+  for path in "$@"; do
+    rm -f "${path}.stale"
+  done
 }
 
 # Peer-Cache-BearSSL: resolve nim-bearssl the same way every other sibling
@@ -150,7 +244,34 @@ discard_stale_binary() {
 bearssl_src="$(resolve_bearssl_src)"
 export BEARSSL_SRC="${bearssl_src}"
 
-nim_mode_flags=()
+# Nix supplies the per-build worker request; Nim's zero default otherwise
+# expands to the host-online CPU count, independently of a caller's quota.
+# Keep zero/automatic behavior when the request is absent outside Nix.
+nim_mode_flags=(--parallelBuild:"${NIX_BUILD_CORES:-0}")
+
+# The source revision the images are built from, embedded as
+# `ReprobuildSourceRevision` (libs/repro_core/src/repro_core.nim) so a binary
+# can say which commit it is -- the version string alone does not identify a
+# build. scripts/source_revision.sh is the one derivation, shared with the
+# `reprobuild.apps.reprobuild` edge in repro.nim: an explicit
+# $REPROBUILD_SOURCE_REVISION wins (the Nix package sets it from the flake,
+# whose sandbox has no .git); otherwise git is asked about THIS tree, `-dirty`
+# when tracked files differ from HEAD. When neither answers, the define is
+# omitted and the binary reports the revision unknown. A revision the script
+# refuses (characters outside [A-Za-z0-9._+-]) stops the build here.
+source_revision="$(bash scripts/source_revision.sh --tree .)"
+if [ -n "${source_revision}" ]; then
+  nim_mode_flags+=("-d:ReprobuildSourceRevision=${source_revision}")
+fi
+
+# MS-2 falsifying-mutation harnesses (`when defined(reproMutations)` in the
+# libraries) are compiled in only on request: a gate's red run builds with
+# REPROBUILD_MUTATIONS=1 and arms one mutation through its own variable; a
+# build without it carries none of them.
+if [ -n "${REPROBUILD_MUTATIONS:-}" ]; then
+  nim_mode_flags+=("-d:reproMutations")
+fi
+
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
     ;;
@@ -599,6 +720,9 @@ while read -r name path extra_flags; do
       runtime_passl=(${repro_runtime_passl[@]+"${repro_runtime_passl[@]}"})
       ;;
   esac
+  # Both spellings, because Nim appends ``.exe`` on Windows (see
+  # resolve_built_binary); the one that does not exist is skipped.
+  artifacts=("build/bin/${name}" "build/bin/${name}.exe")
   entrypoint_status=0
   (
     unset_clingo_searchpath
@@ -613,19 +737,28 @@ while read -r name path extra_flags; do
       "${path}"
   ) || entrypoint_status=$?
   if [ "${entrypoint_status}" -ne 0 ]; then
-    # Delete whatever was there before. ``nim c`` leaves the previous binary
-    # untouched when it fails, and that leftover is the thing that lets a
-    # broken build keep answering yes to "is build/bin/<name> there?".
-    discard_stale_binary "${name}"
-    record_failure "${name}: 'nim c ${path}' exited ${entrypoint_status} (compile or link failure); removed the stale build/bin/${name}"
+    # Move whatever was there before off its canonical name. ``nim c``
+    # leaves the previous binary untouched when it fails, and that leftover
+    # is the thing that lets a broken build keep answering yes to "is
+    # build/bin/<name> there?". It is set aside as ``.stale`` rather than
+    # deleted, so a failure from outside the tree does not destroy the
+    # developer's last working tool.
+    set_aside_note="$(set_aside_previous_build "${artifacts[@]}")"
+    record_failure "${name}: 'nim c ${path}' exited ${entrypoint_status} (compile or link failure); ${set_aside_note}"
     # Keep going. The next entrypoint's failure is worth knowing about in the
     # same run, and every entrypoint that is NOT rebuilt from here on has to be
     # accounted for by the sweep below rather than left silently stale.
     continue
   fi
   if built_binary="$(resolve_built_binary "${name}")"; then
-    verify_fresh_artifact "${built_binary}" "${name}" ||
-      discard_stale_binary "${name}"
+    if verify_fresh_artifact "${built_binary}" "${name}"; then
+      clear_set_aside_build "${artifacts[@]}"
+    else
+      # verify_fresh_artifact has already recorded the failure; this line only
+      # says where the artifact it refused went. Deliberately not a second
+      # ``FAILED:`` line, so each entrypoint is counted once.
+      echo "build_apps: ${name}: $(set_aside_previous_build "${artifacts[@]}")" >&2
+    fi
   else
     record_failure "${name}: 'nim c ${path}' exited 0 but produced no build/bin/${name}"
   fi
@@ -656,6 +789,26 @@ fi
 verify_fresh_artifact \
   "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon staging" ||
   abort_if_failed
+
+# The sandbox launcher (apps/reprobuild-sandbox-launcher/launcher.c) is plain
+# C with its own build script, not a Nim entrypoint, so it is built here
+# explicitly. It ships beside `repro` because the `linux.addOnTool` driver
+# resolves it from the engine's own directory (`addOnToolLauncherPath` in
+# repro_elevation/posix_system_driver.nim) and refuses to write a wrapper
+# when it is absent; the Nix package installs every build/bin/* file, so this
+# one step puts it beside `repro` in `just build`'s tree, in the package and in
+# the release bundle. The
+# cross build for another Linux CPU (scripts/cross/build_linux_cross.sh)
+# builds it with the target's compiler. Linux only: the launcher's namespace
+# setup is Linux-specific and the Windows stub is exercised by its own tests.
+if [ "${REPRO_HOST_PLATFORM}" = linux ]; then
+  bash apps/reprobuild-sandbox-launcher/build.sh \
+    --out build/bin/reprobuild-sandbox-launcher ||
+    record_failure "reprobuild-sandbox-launcher: apps/reprobuild-sandbox-launcher/build.sh failed"
+  verify_fresh_artifact \
+    "build/bin/reprobuild-sandbox-launcher" "reprobuild-sandbox-launcher" ||
+    abort_if_failed
+fi
 
 # Build the shared DSL runtime DLL — the Tier 1 artifact described in
 # reprobuild-specs/Provider-Compile-Tiering.md. Per-project provider
@@ -690,17 +843,21 @@ dsl_runtime_status=0
     --out:"build/lib/librepro_project_dsl_runtime.new.${dll_ext}" \
     libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim
 ) || dsl_runtime_status=$?
+dsl_runtime_lib="build/lib/librepro_project_dsl_runtime.${dll_ext}"
 if [ "${dsl_runtime_status}" -ne 0 ]; then
   # Same reasoning as the entrypoints: a provider that links against a DSL
   # runtime left over from an earlier build is a wrong artifact, not a
-  # partial one.
-  rm -f "build/lib/librepro_project_dsl_runtime.${dll_ext}"
-  record_failure "librepro_project_dsl_runtime: 'nim c --app:lib' exited ${dsl_runtime_status}; removed the stale build/lib/librepro_project_dsl_runtime.${dll_ext}"
+  # partial one — so it leaves the canonical name, and is kept as ``.stale``
+  # for the same reason the binaries are.
+  record_failure "librepro_project_dsl_runtime: 'nim c --app:lib' exited ${dsl_runtime_status}; $(set_aside_previous_build "${dsl_runtime_lib}")"
   abort_if_failed
 fi
-verify_fresh_artifact \
+if ! verify_fresh_artifact \
   "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" \
-  "librepro_project_dsl_runtime" || abort_if_failed
+  "librepro_project_dsl_runtime"; then
+  echo "build_apps: librepro_project_dsl_runtime: $(set_aside_previous_build "${dsl_runtime_lib}")" >&2
+  abort_if_failed
+fi
 if [ -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" ]; then
   mv -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" "build/lib/librepro_project_dsl_runtime.${dll_ext}.old" || true
 fi
@@ -708,6 +865,7 @@ mv -f "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" "build/lib/librepr
 verify_fresh_artifact \
   "build/lib/librepro_project_dsl_runtime.${dll_ext}" \
   "librepro_project_dsl_runtime publish" || abort_if_failed
+clear_set_aside_build "${dsl_runtime_lib}"
 
 # Windows runtime-DLL staging: the blocks below copy each dlopen'd library next
 # to the built binaries so LoadLibrary resolves it from the .exe's own
@@ -926,6 +1084,73 @@ case "${REPRO_HOST_PLATFORM}" in
     ;;
 esac
 
+# Windows self-containment, TLS library half: stage libssl-3-x64.dll and
+# libcrypto-3-x64.dll next to the engine.
+#
+# The `--define:ssl` entry points (the engine, repro-binary-cache,
+# repro-harvest-apt) load OpenSSL through Nim's `std/openssl`, which binds it
+# with `{.dynlib: "(libssl-3-x64|...).dll".}` -- a LoadLibrary by name at
+# module init, not an import the linker records. So exactly as with clingo.dll
+# and sqlite3_64.dll, a build/bin without them works only where the CALLER's
+# PATH happens to hold an OpenSSL, and an engine run from a clean environment
+# (a dev shell's minimal PATH, a service, the integration tests) dies at
+# start-up with
+#
+#   could not load: libssl-3-x64.dll
+#
+# Measured on the Windows workstation at agents b668bea7f: every engine this
+# script built failed that way under `repro exec`'s minimal PATH until the
+# two DLLs were copied in by hand.
+#
+# Source resolution policy (mirrors the blocks above -- no hardcoded store
+# path), in the order that keeps the staged DLLs the build's OWN OpenSSL:
+#   1. `$REPRO_WINDOWS_OPENSSL_DIR/bin` (what ensure-openssl.ps1 exports, and
+#      what windows/stage-release-dlls.ps1 stages a release from);
+#   2. the install whose `lib` dir is on `$LIBRARY_PATH` -- env.ps1 exports
+#      ensure-openssl.ps1's `lib` there for the link, and its runtime DLLs sit
+#      in the sibling `bin`;
+#   3. the directory of `openssl.exe` on PATH;
+#   4. the DLLs themselves on PATH.
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
+    openssl_bin_dir=""
+    openssl_candidates=()
+    if [ -n "${REPRO_WINDOWS_OPENSSL_DIR:-}" ]; then
+      openssl_candidates+=("${REPRO_WINDOWS_OPENSSL_DIR}/bin")
+    fi
+    if [ -n "${LIBRARY_PATH:-}" ]; then
+      IFS=';' read -r -a library_path_entries <<<"${LIBRARY_PATH}"
+      for entry in "${library_path_entries[@]}"; do
+        [ -n "${entry}" ] && openssl_candidates+=("$(dirname "${entry}")/bin")
+      done
+    fi
+    openssl_exe="$(command -v openssl.exe 2>/dev/null || true)"
+    if [ -n "${openssl_exe}" ]; then
+      openssl_candidates+=("$(dirname "${openssl_exe}")")
+    fi
+    libssl_on_path="$(command -v libssl-3-x64.dll 2>/dev/null || true)"
+    if [ -n "${libssl_on_path}" ]; then
+      openssl_candidates+=("$(dirname "${libssl_on_path}")")
+    fi
+    for cand in ${openssl_candidates[@]+"${openssl_candidates[@]}"}; do
+      if [ -f "${cand}/libssl-3-x64.dll" ] && [ -f "${cand}/libcrypto-3-x64.dll" ]; then
+        openssl_bin_dir="${cand}"
+        break
+      fi
+    done
+    if [ -n "${openssl_bin_dir}" ]; then
+      for dll in libssl-3-x64.dll libcrypto-3-x64.dll; do
+        if [ ! "${openssl_bin_dir}/${dll}" -ef "build/bin/${dll}" ]; then
+          cp -f "${openssl_bin_dir}/${dll}" "build/bin/${dll}"
+        fi
+      done
+      echo "Staged libssl-3-x64.dll and libcrypto-3-x64.dll from ${openssl_bin_dir} -> build/bin/"
+    else
+      windows_dll_staging_problem "libssl-3-x64.dll / libcrypto-3-x64.dll not found (REPRO_WINDOWS_OPENSSL_DIR, LIBRARY_PATH's OpenSSL, openssl.exe on PATH, PATH); cannot stage them next to the engine -- it will fail 'could not load: libssl-3-x64.dll' in a clean environment until OpenSSL is provisioned (windows/ensure-openssl.ps1)"
+    fi
+    ;;
+esac
+
 # Windows self-containment, HTTPS half: stage cacert.pem next to repro.exe.
 #
 # Nim's ``net.newContext(CVerifyPeer)`` delegates to
@@ -1009,6 +1234,11 @@ while read -r name _path _extra_flags; do
 done < apps/entrypoints.txt
 verify_fresh_artifact \
   "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon (final sweep)" || true
+if [ "${REPRO_HOST_PLATFORM}" = linux ]; then
+  verify_fresh_artifact \
+    "build/bin/reprobuild-sandbox-launcher" \
+    "reprobuild-sandbox-launcher (final sweep)" || true
+fi
 verify_fresh_artifact \
   "build/lib/librepro_project_dsl_runtime.${dll_ext}" \
   "librepro_project_dsl_runtime (final sweep)" || true

@@ -51,6 +51,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <ucontext.h>
+#include <sys/uio.h>
 
 /* ---------------------------------------------------------------------------
  * Raw syscalls the parked path needs, beyond the three-argument helper
@@ -66,6 +67,7 @@
 #define REPRO_HCR_LX_NR_TGKILL 234
 #define REPRO_HCR_LX_NR_OPENAT 257
 #define REPRO_HCR_LX_NR_CLOCK_GETTIME 228
+#define REPRO_HCR_LX_NR_PROCESS_VM_READV 310
 
 #define REPRO_HCR_LX_AT_FDCWD (-100)
 #define REPRO_HCR_LX_O_RDONLY 0
@@ -102,6 +104,34 @@ static long repro_hcr_lx_syscall4(long number, long a0, long a1, long a2,
                    : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10)
                    : "rcx", "r11", "memory");
   return result;
+}
+
+/* A VMA can disappear after /proc/self/maps was captured. Let the kernel
+ * copy the bytes so that race returns EFAULT instead of faulting our handler.
+ * No libc, allocator, errno slot or interposed wrapper is reached here. */
+/* Defined by the including provider after this header. */
+static long repro_hcr_lx_syscall6(long number, long a0, long a1, long a2,
+                                long a3, long a4, long a5);
+
+static volatile int32_t repro_hcr_lx_stack_read_error = 0;
+
+static long repro_hcr_lx_read_stack(void *destination, uint64_t source,
+                                   size_t length) {
+  struct iovec local, remote;
+  long got;
+  local.iov_base = destination;
+  local.iov_len = length;
+  remote.iov_base = (void *)(uintptr_t)source;
+  remote.iov_len = length;
+  got = repro_hcr_lx_syscall6(REPRO_HCR_LX_NR_PROCESS_VM_READV,
+      repro_hcr_lx_syscall0(REPRO_HCR_LX_NR_GETPID),
+      (long)(uintptr_t)&local, 1, (long)(uintptr_t)&remote, 1, 0);
+  /* EFAULT marks current inaccessible memory. EPERM/ENOSYS instead mean
+   * the observation mechanism is unavailable and must refuse quiescence. */
+  if (got < 0 && got != -14 /* EFAULT */) {
+    __atomic_store_n(&repro_hcr_lx_stack_read_error, 1, __ATOMIC_RELEASE);
+  }
+  return got;
 }
 
 static long repro_hcr_lx_raw_gettid(void) {
@@ -182,6 +212,7 @@ enum {
    * never deliver the signal to. See
    * `repro_hcr_lx_census_unresponsive_signal_masks`.
    */
+  REPRO_HCR_LX_QUIESCE_STACK_UNAVAILABLE = 9,
   REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED = 8
 };
 
@@ -203,6 +234,8 @@ static const char *repro_hcr_lx_quiesce_status_name(int code) {
       return "quiescence-signal-delivery-failed";
     case REPRO_HCR_LX_QUIESCE_MAPS_UNAVAILABLE:
       return "quiescence-maps-snapshot-unavailable";
+    case REPRO_HCR_LX_QUIESCE_STACK_UNAVAILABLE:
+      return "quiescence-stack-read-unavailable";
     case REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED:
       return "quiescence-signal-blocked";
     default:
@@ -214,6 +247,7 @@ static const char *repro_hcr_lx_quiesce_status_name(int code) {
 
 typedef struct repro_hcr_lx_parked_thread {
   volatile int32_t tid;
+  volatile int32_t entered;     /* handler ran during this attempt */
   volatile int32_t parked;      /* 1 once the handler is about to futex-wait */
   volatile int32_t resumed;     /* 1 once the handler has left the wait */
   volatile int32_t adjusted;    /* 1 when the patcher rewrote the resume PC */
@@ -372,7 +406,8 @@ static repro_hcr_lx_parked_thread *repro_hcr_lx_quiesce_slot_for(int32_t tid) {
  *
  * Bounds discipline: the chain must be strictly ascending, 8-aligned, start at
  * or above the interrupted SP, and stay inside 8 MiB of it. A wild `rbp` in a
- * frame-pointer-less frame therefore terminates the walk instead of faulting.
+ * frame-pointer-less frame terminates the walk. Every frame record is copied
+ * through the kernel too: a span bound alone cannot establish readability.
  */
 static uint32_t repro_hcr_lx_quiesce_walk_frames(uint64_t frame_pointer,
                                                  uint64_t stack_pointer,
@@ -398,9 +433,15 @@ static uint32_t repro_hcr_lx_quiesce_walk_frames(uint64_t frame_pointer,
     if (fp < previous || fp - stack_pointer > span) {
       break;
     }
-    memcpy(&next_fp, (const void *)(uintptr_t)fp, sizeof(next_fp));
-    memcpy(&return_address, (const void *)(uintptr_t)(fp + 8),
-           sizeof(return_address));
+    {
+      uint64_t record[2];
+      if (repro_hcr_lx_read_stack(record, fp, sizeof(record)) !=
+          (long)sizeof(record)) {
+        break; /* A fault or short record is incomplete, never a chain end. */
+      }
+      next_fp = record[0];
+      return_address = record[1];
+    }
     if (return_address == 0) {
       /* Also an end, not a give-up: no caller to return to. */
       *out_complete = 1;
@@ -473,12 +514,17 @@ static int repro_hcr_lx_trampoline_mismatch = 0;
  *     ones. A probe that can only return success is trap 4 wearing a syscall:
  *     it passed every check and had stopped asking the question.
  *
- * What works is to stop probing and to KNOW. `/proc/self/maps` is read ONCE per
+ * A snapshot alone is not a sound accessibility check: stack lifetime and
+ * protection can change between capture and handler entry. Every speculative
+ * read below therefore uses process_vm_readv, whose kernel copy can fail
+ * safely at the current boundary. Never probe and then dereference.
+ *
+ * `/proc/self/maps` is read ONCE per
  * quiescence, in `begin`, BEFORE the first `tgkill` — so it is on the side of
  * the allocation boundary where a read is allowed — and parsed into a static
  * table of readable ranges. The handler then bounds its scan by the range that
- * contains the interrupted stack pointer, which is both sound and exact: it
- * cannot leave the thread's own stack mapping.
+ * contains the interrupted stack pointer. It provides an upper bound, while
+ * the kernel copy enforces the current readable boundary.
  */
 
 typedef struct repro_hcr_lx_readable_range {
@@ -620,6 +666,7 @@ static uint32_t repro_hcr_lx_collect_nested_frames(
   }
   readable_end = repro_hcr_lx_readable_end_of(cursor);
   if (readable_end == 0) {
+    __atomic_store_n(&repro_hcr_lx_stack_read_error, 1, __ATOMIC_RELEASE);
     return 0;
   }
   limit = cursor + REPRO_HCR_LX_NESTED_SCAN_BYTES;
@@ -627,23 +674,39 @@ static uint32_t repro_hcr_lx_collect_nested_frames(
     limit = readable_end;
   }
   while (cursor + 8 <= limit && produced < capacity) {
-    uint64_t word;
-    memcpy(&word, (const void *)(uintptr_t)cursor, sizeof(word));
-    if (word == repro_hcr_lx_sigreturn_trampoline) {
-      const ucontext_t *outer = (const ucontext_t *)(uintptr_t)(cursor + 8);
-      uint64_t rip_slot =
-          (uint64_t)(uintptr_t)&outer->uc_mcontext.gregs[REG_RIP];
-      /* The slot is read here and WRITTEN later by the patcher, so it has to
-       * be inside the same readable range, not merely inside the scan bound. */
-      if (rip_slot + 8 <= readable_end) {
+    uint64_t words[32];
+    /* Each copy stays within a 256-byte aligned block, hence one base page.
+     * Batching avoids one syscall per word in the parked critical path. */
+    size_t bytes = sizeof(words) - (size_t)(cursor & (sizeof(words) - 1));
+    long got;
+    size_t j;
+    if (bytes > limit - cursor) bytes = (size_t)(limit - cursor);
+    got = repro_hcr_lx_read_stack(words, cursor, bytes);
+    if (got <= 0) {
+      /* No readable prefix at the interrupted SP means no stack evidence.
+       * After a prefix, EFAULT is the current mapping end, just as a current
+       * non-readable VMA would have bounded the original maps snapshot. */
+      if (cursor == ((scan_from + 7u) & ~(uint64_t)7u)) {
+        __atomic_store_n(&repro_hcr_lx_stack_read_error, 1, __ATOMIC_RELEASE);
+      }
+      break;
+    }
+    for (j = 0; j + 8 <= (size_t)got && produced < capacity; j += 8) {
+      if (words[j / 8] == repro_hcr_lx_sigreturn_trampoline) {
+        uint64_t rip_slot = cursor + j + 8 +
+            offsetof(ucontext_t, uc_mcontext.gregs[REG_RIP]);
         uint64_t rip;
-        memcpy(&rip, (const void *)(uintptr_t)rip_slot, sizeof(rip));
-        out_pc[produced] = rip;
-        out_slot[produced] = rip_slot;
-        produced += 1;
+        if (rip_slot <= readable_end && readable_end - rip_slot >= 8 &&
+            repro_hcr_lx_read_stack(&rip, rip_slot, sizeof(rip)) ==
+                (long)sizeof(rip)) {
+          out_pc[produced] = rip;
+          out_slot[produced] = rip_slot;
+          produced += 1;
+        }
       }
     }
-    cursor += 8;
+    cursor += (uint64_t)got;
+    if ((size_t)got != bytes) break;
   }
   return produced;
 }
@@ -655,6 +718,18 @@ static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
   repro_hcr_lx_parked_thread *slot;
   (void)signo;
   (void)info;
+
+  slot = repro_hcr_lx_quiesce_slot_for(tid);
+  if (slot == NULL) {
+    /* A thread created after enumeration is not represented in parked_count. */
+    __atomic_fetch_add(&repro_hcr_lx_quiesce.stray_signals, 1,
+                       __ATOMIC_ACQ_REL);
+    return;
+  }
+  /* Publish before stack inspection. Linux self-blocks the signal throughout
+   * this handler, including late arrivals after the deadline. Retain evidence
+   * through sigreturn so the census can distinguish delivery from blocking. */
+  __atomic_store_n(&slot->entered, 1, __ATOMIC_RELEASE);
 
   if (!repro_hcr_lx_trampoline_verified &&
       !repro_hcr_lx_trampoline_mismatch) {
@@ -676,18 +751,6 @@ static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
     } else {
       repro_hcr_lx_trampoline_mismatch = 1;
     }
-  }
-
-  slot = repro_hcr_lx_quiesce_slot_for(tid);
-  if (slot == NULL) {
-    /* A thread created after the enumeration that produced the slot table. The
-     * begin loop re-enumerates until two consecutive rounds agree precisely so
-     * this is transient; counting it is what makes it visible rather than
-     * silent. Returning immediately is correct: this thread is not accounted
-     * for in `parked_count`, so the patcher will not think it is parked. */
-    __atomic_fetch_add(&repro_hcr_lx_quiesce.stray_signals, 1,
-                       __ATOMIC_ACQ_REL);
-    return;
   }
 
   repro_hcr_lx_quiesce_handler_stage = 1;
@@ -911,9 +974,13 @@ static int repro_hcr_lx_tid_sets_agree(const int32_t *a, int32_t a_count,
  * synchronous faults). Both clear on their own, both would have parked, and a
  * pre-flight refusal turned each into a failed patch.
  *
- * After the deadline the distinction is free. A thread that has had the signal
- * pending for the whole deadline and STILL has it masked is the structural
- * case; a transiently-masked thread took the signal and parked long before.
+ * A deadline alone cannot distinguish these cases: a handler can arrive late
+ * and still be self-blocked during the census. Each slot therefore retains
+ * handler-entry evidence for this attempt, checked after reading its mask.
+ * Entered threads remain timeouts, even if their masks still contain the
+ * quiescence signal. Requiring the signal to remain thread-pending also covers
+ * delivery before the handler's first store: the kernel consumes pending at
+ * delivery. Only blocked, pending signals without entry retain that diagnosis.
  * And the failure direction is safe: a mislabelled refusal is still a refusal,
  * whereas a pre-flight false positive was a refusal that should never have
  * happened. NOTHING THAT USED TO SUCCEED CAN FAIL BECAUSE OF THIS CODE — it
@@ -986,17 +1053,19 @@ static void repro_hcr_lx_status_path_for(int32_t tid) {
   }
 }
 
-/* `SigBlk:` and `Name:` out of one `/proc/self/task/<tid>/status`. Returns 1
- * only when the mask line was found; `out_name` is best-effort and is left as
+/* `SigBlk:`, `SigPnd:` and `Name:` out of one task status snapshot. Returns 1
+ * only when both mask lines were found; `out_name` is best-effort and is left as
  * an empty string when the process has no readable `Name:`. */
 static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
-                                           char *out_name) {
+                                           uint64_t *out_pending, char *out_name) {
   long fd;
   size_t held = 0;
   int found_mask = 0;
+  int found_pending = 0;
   size_t i;
   out_name[0] = '\0';
   *out_mask = 0;
+  *out_pending = 0;
   repro_hcr_lx_status_path_for(tid);
   fd = repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_OPENAT, REPRO_HCR_LX_AT_FDCWD,
                              (long)(uintptr_t)repro_hcr_lx_status_path,
@@ -1032,7 +1101,8 @@ static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
     }
     j = start;
     if (held - start >= 7 &&
-        memcmp(repro_hcr_lx_status_buffer + start, "SigBlk:", 7) == 0) {
+        (memcmp(repro_hcr_lx_status_buffer + start, "SigBlk:", 7) == 0 ||
+         memcmp(repro_hcr_lx_status_buffer + start, "SigPnd:", 7) == 0)) {
       uint64_t mask = 0;
       int digits = 0;
       j = start + 7;
@@ -1050,8 +1120,13 @@ static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
         j += 1;
       }
       if (digits > 0) {
-        *out_mask = mask;
-        found_mask = 1;
+        if (memcmp(repro_hcr_lx_status_buffer + start, "SigBlk:", 7) == 0) {
+          *out_mask = mask;
+          found_mask = 1;
+        } else {
+          *out_pending = mask;
+          found_pending = 1;
+        }
       }
     } else if (held - start >= 5 &&
                memcmp(repro_hcr_lx_status_buffer + start, "Name:", 5) == 0) {
@@ -1068,13 +1143,13 @@ static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
     }
     i += 1;
   }
-  return found_mask;
+  return found_mask && found_pending;
 }
 
 /*
  * Censuses the tids already recorded in `unresponsive_tids` — the threads that
  * did not park before the deadline. Returns the number that still block
- * `signo`, which is the number that could never have parked at all.
+ * `signo` with it pending, without having entered this attempt's handler.
  */
 static int32_t repro_hcr_lx_census_unresponsive_signal_masks(int signo) {
   int32_t i;
@@ -1090,14 +1165,22 @@ static int32_t repro_hcr_lx_census_unresponsive_signal_masks(int signo) {
               i < REPRO_HCR_LX_MAX_QUIESCE_THREADS;
        ++i) {
     uint64_t mask = 0;
+    uint64_t pending = 0;
     char name[REPRO_HCR_LX_COMM_MAX];
     if (!repro_hcr_lx_read_thread_status(
-            repro_hcr_lx_quiesce.unresponsive_tids[i], &mask, name)) {
+            repro_hcr_lx_quiesce.unresponsive_tids[i], &mask, &pending, name)) {
       repro_hcr_lx_quiesce.sigmask_read_failed += 1;
       continue;
     }
     repro_hcr_lx_quiesce.sigmask_read_ok += 1;
-    if ((mask & signal_bit) == 0) {
+    /* Read entry evidence AFTER /proc: a handler can start during that read. */
+    repro_hcr_lx_parked_thread *slot = repro_hcr_lx_quiesce_slot_for(
+        repro_hcr_lx_quiesce.unresponsive_tids[i]);
+    /* tgkill leaves a genuinely blocked signal pending. Delivery consumes it
+     * before the kernel enters userspace, closing the window before entered's
+     * first store. SigPnd is thread-directed, matching our tgkill handshake. */
+    if ((mask & pending & signal_bit) == 0 ||
+        (slot != NULL && __atomic_load_n(&slot->entered, __ATOMIC_ACQUIRE))) {
       continue;
     }
     if (repro_hcr_lx_quiesce.blocked_count < REPRO_HCR_LX_MAX_BLOCKED_THREADS) {
@@ -1152,6 +1235,8 @@ static int32_t repro_hcr_lx_quiesce_scratch_b[REPRO_HCR_LX_MAX_QUIESCE_THREADS];
  * patch. There is no cleanup path to get wrong because there is nothing to
  * clean up.
  */
+static int repro_hcr_lx_quiesce_release(void);
+
 static int repro_hcr_lx_quiesce_begin(uint64_t timeout_ns) {
   int32_t *current = repro_hcr_lx_quiesce_scratch_a;
   int32_t *previous = repro_hcr_lx_quiesce_scratch_b;
@@ -1284,6 +1369,8 @@ static int repro_hcr_lx_quiesce_begin(uint64_t timeout_ns) {
   repro_hcr_lx_quiesce.last_begin_ns = started;
   deadline = started + timeout_ns;
 
+  __atomic_store_n(&repro_hcr_lx_stack_read_error, 0, __ATOMIC_RELEASE);
+
   /* Step 3: signal. From here to the release, no allocation. */
   repro_hcr_lx_quiesce.signal_failed_count = 0;
   repro_hcr_lx_quiesce.signal_failed_tid = -1;
@@ -1395,6 +1482,11 @@ static int repro_hcr_lx_quiesce_begin(uint64_t timeout_ns) {
       repro_hcr_lx_quiesce.last_park_ns =
           repro_hcr_lx_monotonic_ns() - started;
       repro_hcr_lx_quiesce.held = 1;
+      if (__atomic_load_n(&repro_hcr_lx_stack_read_error, __ATOMIC_ACQUIRE)) {
+        (void)repro_hcr_lx_quiesce_release();
+        repro_hcr_lx_quiesce.last_status = REPRO_HCR_LX_QUIESCE_STACK_UNAVAILABLE;
+        return REPRO_HCR_LX_QUIESCE_STACK_UNAVAILABLE;
+      }
       repro_hcr_lx_quiesce.last_status = REPRO_HCR_LX_QUIESCE_OK;
       return REPRO_HCR_LX_QUIESCE_OK;
     }
@@ -1448,10 +1540,10 @@ static int repro_hcr_lx_quiesce_begin(uint64_t timeout_ns) {
       }
       repro_hcr_lx_quiesce.held = 0;
       /*
-       * Everyone who parked is out of the futex and out of the handler, so
-       * reading `/proc` is allowed again — and the answer is now meaningful,
-       * because a thread that had the signal pending for the whole deadline
-       * and STILL masks it is structurally unreachable rather than slow. See
+       * Release has been published, but late handlers may still be running.
+       * The census excludes handlers that entered this attempt, whose masks
+       * contain the kernel's temporary self-block rather than evidence that
+       * delivery was impossible. See
        * the census's own comment for why this cannot run before the wait.
        */
       if (repro_hcr_lx_quiesce_sigmask_census_enabled &&

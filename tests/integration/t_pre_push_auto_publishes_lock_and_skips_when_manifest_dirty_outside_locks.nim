@@ -49,6 +49,13 @@
 ## ``putLock`` / ``putEvidence``, with the enclosing repository left without a
 ## commit, without anything staged, and with a clean tracked tree.
 ##
+## The fifth case pins the one carve-out the dirty guard (and the
+## verified-recovery check after the publish commit) makes: an UNTRACKED file
+## under ``.repro/build/`` is disposable derived output, not dirt. Tracked or
+## staged changes there, and anything under the retired ``.repro/workspace/``,
+## still refuse. A real post-commit hook writing such a file on every commit
+## stands in for the field mechanism.
+##
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
@@ -57,6 +64,7 @@ import evidence
 import git_tool
 import repro_cli_support
 import repro_lock_store
+import repro_test_support/reasoned_skip
 
 proc q(value: string): string = quoteShell(value)
 
@@ -556,3 +564,143 @@ suite "RA-7 — lock publication (commit + push) and dirty-outside-locks guard":
       let tracked = run(q(gitBin) & " -C " & q(workspace) & " ls-files")
       check tracked.code == 0
       check "manifests-team" notin tracked.output
+
+  test "t_lock_publish_tolerates_only_untracked_disposable_build_output":
+    ## The dirty-outside-``locks/`` guard exists so a publish commit never
+    ## sweeps up unrelated work and never runs against an inconsistent tree.
+    ## An UNTRACKED file under ``.repro/build/`` can cause neither: that tree
+    ## is disposable derived output (Retired-Names.md moved every
+    ## ``<verb>-report.json`` there because "a report is derived output"),
+    ## and publication stages only explicit canonical ``locks/`` paths, so
+    ## such a file is unreachable from the index and from the commit.
+    ##
+    ## Counting it as dirt is what made a hook's trace a permanent wedge: the
+    ## publish commit fires the store's post-commit hook, the hook files its
+    ## report under ``.repro/build/reports/``, and the next publish refused
+    ## over it — as did the verified-recovery check of the SAME publish,
+    ## which runs after that commit.
+    ##
+    ## The carve-out is narrow on purpose, and each edge is pinned here:
+    ##   (a) untracked report + log under ``.repro/build/reports/`` →
+    ##       published AND pushed, and the files stay untracked and unpushed;
+    ##   (b) a TRACKED file under ``.repro/build/`` modified → still refused;
+    ##   (c) a STAGED new file under ``.repro/build/`` → still refused;
+    ##   (d) an untracked file under the RETIRED ``.repro/workspace/`` →
+    ##       still refused, and the refusal names it.
+    ##
+    ## Falsifiable: against the guard without the carve-out (a) answers
+    ## ``lpoRefusedDirty`` naming the report. Hermetic: local ``git init`` /
+    ## ``git init --bare`` only; no network, no mocks.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repos, a real bare " &
+        "upstream and a real post-commit hook")
+    else:
+      let scratch = createTempDir("repro-ra7-disposable-build-", "")
+      defer: removeDir(scratch)
+      let identity = ensureGitToolResolvable(tpmPathOnly, gitBin.parentDir)
+      let (bare, work) = seedManifestRepo(gitBin, scratch)
+      let reports = work / ".repro" / "build" / "reports"
+
+      # ---- (a) untracked derived output → published ----------------------
+      createDir(reports)
+      writeFile(reports / "post-commit-report.json",
+        "{\"outcome\": \"skipped-no-workspace\"}\n")
+      writeFile(reports / "post-commit-lock.log", "trace\n")
+      # And a post-commit hook that files a trace there on EVERY commit — the
+      # field mechanism itself, as a real git hook rather than a stub of the
+      # engine: the publish's own commit fires it, so the verified-recovery
+      # check that runs after that commit sees a file the commit just made.
+      # The record this asserts on is a new one, so the check is falsifiable
+      # against a recovery guard without the carve-out.
+      let hookPath = work / ".git" / "hooks" / "post-commit"
+      writeFile(hookPath, "#!/bin/sh\n" &
+        "mkdir -p .repro/build/reports\n" &
+        "date >> .repro/build/reports/hook-trace.log\n")
+      setFilePermissions(hookPath, {fpUserRead, fpUserWrite, fpUserExec})
+      let base = commitCount(gitBin, bare, "refs/heads/latest")
+      let shaA = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      writeLock(work, "demo", "demo", shaA, validLock("demo", "demo", shaA))
+      let pubA = publishWorkspaceLock(identity, work)
+      checkpoint("untracked .repro/build publish diagnostic: " & pubA.diagnostic)
+      check pubA.outcome == lpoPublished
+      check commitCount(gitBin, bare, "refs/heads/latest") == base + 1
+      let treeA = run(q(gitBin) & " -C " & q(bare) &
+        " ls-tree -r --name-only refs/heads/latest")
+      check treeA.code == 0
+      check ("locks/demo/demo/" & shaA & ".toml") in treeA.output
+      # The derived output was neither swept into the commit nor touched.
+      check ".repro/" notin treeA.output
+      check fileExists(reports / "post-commit-report.json")
+      check fileExists(reports / "post-commit-lock.log")
+      let untrackedA = run(q(gitBin) & " -C " & q(work) &
+        " status --porcelain --untracked-files=all")
+      check untrackedA.code == 0
+      check "?? .repro/build/reports/post-commit-report.json" in
+        untrackedA.output
+      # The hook really ran inside the publish (so the recovery check really
+      # saw its output).
+      check fileExists(reports / "hook-trace.log")
+      check "locks/" notin untrackedA.output
+
+      # ---- (b) a TRACKED file under .repro/build/ modified → refused -----
+      let trackedRel = ".repro/build/tracked.txt"
+      writeFile(work / ".repro" / "build" / "tracked.txt", "committed\n")
+      discard requireGit(q(gitBin) & " -C " & q(work) & " add " &
+        q(trackedRel))
+      discard requireGit(q(gitBin) & " -C " & q(work) &
+        " commit -m \"track a build file\"")
+      discard requireGit(q(gitBin) & " -C " & q(work) & " push origin latest")
+      writeFile(work / ".repro" / "build" / "tracked.txt", "edited\n")
+      let afterB = commitCount(gitBin, bare, "refs/heads/latest")
+      let shaB = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      writeLock(work, "demo", "demo", shaB, validLock("demo", "demo", shaB))
+      let pubB = publishWorkspaceLock(identity, work)
+      checkpoint("tracked .repro/build publish diagnostic: " & pubB.diagnostic)
+      check pubB.outcome == lpoRefusedDirty
+      check trackedRel in pubB.diagnostic
+      # Only the tracked edit is named: the untracked report is not dirt.
+      check "post-commit-report.json" notin pubB.diagnostic
+      check commitCount(gitBin, bare, "refs/heads/latest") == afterB
+      check readFile(work / ".repro" / "build" / "tracked.txt") == "edited\n"
+      discard requireGit(q(gitBin) & " -C " & q(work) & " checkout -- " &
+        q(trackedRel))
+
+      # ---- (c) a STAGED new file under .repro/build/ → refused -----------
+      let stagedRel = ".repro/build/staged.txt"
+      writeFile(work / ".repro" / "build" / "staged.txt", "staged\n")
+      discard requireGit(q(gitBin) & " -C " & q(work) & " add " &
+        q(stagedRel))
+      let pubC = publishWorkspaceLock(identity, work)
+      checkpoint("staged .repro/build publish diagnostic: " & pubC.diagnostic)
+      check pubC.outcome == lpoRefusedDirty
+      check stagedRel in pubC.diagnostic
+      check commitCount(gitBin, bare, "refs/heads/latest") == afterB
+      # The operator's own staging is left exactly as it was found.
+      let stagedC = run(q(gitBin) & " -C " & q(work) &
+        " diff --cached --name-only")
+      check stagedC.code == 0
+      check stagedC.output.strip() == stagedRel
+      discard requireGit(q(gitBin) & " -C " & q(work) & " rm -q --cached " &
+        q(stagedRel))
+      removeFile(work / ".repro" / "build" / "staged.txt")
+
+      # ---- (d) the RETIRED .repro/workspace/ path → refused --------------
+      let retiredRel = ".repro/workspace/post-commit-report.json"
+      createDir(work / ".repro" / "workspace")
+      writeFile(work / ".repro" / "workspace" / "post-commit-report.json",
+        "{}\n")
+      let pubD = publishWorkspaceLock(identity, work)
+      checkpoint("retired-path publish diagnostic: " & pubD.diagnostic)
+      check pubD.outcome == lpoRefusedDirty
+      check retiredRel in pubD.diagnostic
+      check commitCount(gitBin, bare, "refs/heads/latest") == afterB
+
+      # With the retired file gone, the same pending record publishes —
+      # beside the untracked report that has been there all along.
+      removeDir(work / ".repro" / "workspace")
+      let pubE = publishWorkspaceLock(identity, work)
+      checkpoint("after-cleanup publish diagnostic: " & pubE.diagnostic)
+      check pubE.outcome == lpoPublished
+      check commitCount(gitBin, bare, "refs/heads/latest") == afterB + 1
+      check fileExists(reports / "post-commit-report.json")

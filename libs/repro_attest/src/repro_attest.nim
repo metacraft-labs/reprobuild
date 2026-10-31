@@ -19,6 +19,11 @@
 ##     wrote.
 ##   * ``repro_attest/manifest`` — the ``reproos.attested-image.v1``
 ##     document: typed record, canonical renderer, strict parser.
+##   * ``repro_attest/image_layout`` — the ``reproos.image-layout.v1``
+##     record: the disk layout an image was actually BUILT with, bound to
+##     the digest of the partition table that built it, so a profile's
+##     belief about the shape of its root filesystem can be checked
+##     against the image instead of against itself.
 ##   * ``repro_attest/tpm2`` — the TPM 2.0 structure codec: the
 ##     big-endian TLV a measured-boot machine signs, plus recomputation
 ##     of a quote's PCR composite digest.
@@ -54,10 +59,16 @@
 ##     key source the agent mints key agreements with, and the opener
 ##     that recovers what was released to one. Not re-exported, for the
 ##     same reason ``hpke`` is not — it is built on it.
+##   * ``repro_attest/tpm2_device`` — the command transactions: the
+##     request and response framing a TPM speaks, the password
+##     authorization a machine's own attestation key is created under,
+##     and the five commands this surface needs, over a character
+##     device or a socket.
 ##   * ``repro_attest/tpm2_backend`` — the measured-boot backend: the
 ##     ``reproos.tpm2-evidence.v1`` composite that carries a quote, its
-##     signature and the TCG event log as one blob, and the driver that
-##     assembles it.
+##     signature and the TCG event log as one blob, and the two sources
+##     it assembles one from — a machine's own TPM, or artifacts a TPM
+##     already produced.
 ##   * ``repro_attest/tsm_report`` — the kernel's unified
 ##     attestation-report directory: the write-then-read pass a
 ##     confidential guest makes over it, and the counter discipline that
@@ -108,11 +119,13 @@ import ./repro_attest/tdx_launch
 import ./repro_attest/tpm2
 import ./repro_attest/event_log
 import ./repro_attest/manifest
+import ./repro_attest/image_layout
 import ./repro_attest/binding
 import ./repro_attest/report
 import ./repro_attest/driver
 import ./repro_attest/provision
 import ./repro_attest/mock_backend
+import ./repro_attest/tpm2_device
 import ./repro_attest/tpm2_backend
 import ./repro_attest/tsm_report
 import ./repro_attest/snp_backend
@@ -125,6 +138,8 @@ import ./repro_attest/commitment
 import ./repro_attest/inference_statement
 
 export measurement, snp_launch, tdx_launch, tpm2, event_log, manifest,
-       binding, report, driver, provision, mock_backend, tpm2_backend,
+       image_layout,
+       binding, report, driver, provision, mock_backend, tpm2_device,
+       tpm2_backend,
        tsm_report, snp_backend, tdx_backend, sealing, cloud_launch,
        merkle, edge_attestation, commitment, inference_statement

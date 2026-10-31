@@ -9,31 +9,41 @@
 ## accepted by a uid-0 peer on that very connection.
 ##
 ## What each case pins:
-##   * ownership: a socket a user can create is refused; the real root-owned
-##     nix daemon socket passes;
+##   * ownership: a socket a user can create is refused; a root-controlled
+##     socket passes; the stock macOS Nix daemon's writable ancestry is refused;
 ##   * grading: a loss is attributed only when the dialled path is the trusted
 ##     endpoint AND its peer uid is 0. Another endpoint behind the same pid 1,
 ##     or the trusted path with a non-root peer, stays a loss;
 ##   * revalidation: trust built from a path that no longer holds is dropped
 ##     before it can forgive anything.
 ##
-## MOCKS: none. The positive cases use this host's real
-## `/nix/var/nix/daemon-socket/socket` (root-owned on any multi-user Nix
-## install). Where it does not exist, those cases skip and say so. The
-## monitor records are hand-built in the exact shape io-mon writes (see
+## MOCKS: none. Grading uses this host's real Nix daemon socket on Linux,
+## or its real Nix GC socket on macOS: the stock macOS daemon's symlink
+## traverses group-writable `/private/var/run`, whereas the GC socket has
+## root-controlled ancestry. Only absence decides a fixture skip; failed
+## ownership is a test failure. This suite tests endpoint attribution, not
+## either service's protocol. Monitor records are hand-built in the exact shape io-mon writes (see
 ## io-mon `recordIpcConnect` and `unmonitoredSubtreeLossDetails`): the grading
 ## under test is the engine's, and io-mon's own suite covers the shim.
 
 import std/[net, os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
-import repro_local_store
 import io_mon/[capabilities, types]
 
-const NixDaemonSocket = "/nix/var/nix/daemon-socket/socket"
+const
+  NixDaemonSocket = "/nix/var/nix/daemon-socket/socket"
+  GradingSocket = when defined(macosx): "/nix/var/nix/gc-socket/socket"
+                  else: NixDaemonSocket
 
-proc nixSocketPresent(): bool =
-  endpointRootOwned(NixDaemonSocket).ok
+proc socketPresent(path: string): bool =
+  # Socket presence is independent of the production ownership verdict.
+  try:
+    discard getFileInfo(path, followSymlink = false)
+    result = true
+  except OSError:
+    result = false
 
 proc ipcLoss(path: string; peerUid: int): MonitorRecord =
   ## The event-loss record io-mon writes for an out-of-tree IPC peer, with the
@@ -55,10 +65,10 @@ proc grade(records: seq[MonitorRecord];
     evidence, seen, attribution)
   result.diagnostics = evidence.diagnostics
 
-proc trustedNix(): TrustedEndpoint =
-  TrustedEndpoint(endpoint: NixDaemonSocket,
-    canonical: endpointRootOwned(NixDaemonSocket).canonical,
-    name: "nix-daemon", contribution: tdcContentAlreadyKeyed)
+proc trustedSocket(): TrustedEndpoint =
+  TrustedEndpoint(endpoint: GradingSocket,
+    canonical: endpointRootOwned(GradingSocket).canonical,
+    name: "nix-endpoint", contribution: tdcContentAlreadyKeyed)
 
 suite "endpoint-keyed daemon trust":
   test "a socket an unprivileged user can create is not root-owned":
@@ -73,46 +83,65 @@ suite "endpoint-keyed daemon trust":
     check not owned.ok
     check owned.detail.len > 0
 
-  test "the real root-owned nix daemon socket passes the ownership check":
-    # Existence, not a successful check, decides the skip; otherwise a broken
-    # check would read as "absent". (`fileExists` is false for a socket.)
-    var present = true
-    try:
-      discard getFileInfo(NixDaemonSocket, followSymlink = false)
-    except OSError:
-      present = false
-    if not present:
+  test "the real Nix daemon socket follows the ownership policy":
+    if not socketPresent(NixDaemonSocket):
       skip("no multi-user Nix daemon socket on this host")
     else:
       let owned = endpointRootOwned(NixDaemonSocket)
+      var stockMacWritableAncestor = false
+      when defined(macosx):
+        # Inspect the installation independently of the ownership function:
+        # a failed production check must never decide its own expectation.
+        stockMacWritableAncestor =
+          expandFilename(NixDaemonSocket) == "/private/var/run/nix-daemon.socket" and
+          fpGroupWrite in getFilePermissions("/private/var/run")
+      if stockMacWritableAncestor:
+        check not owned.ok
+        check owned.detail == "/private/var/run is writable by group or others"
+        let stale = TrustedEndpoint(endpoint: NixDaemonSocket,
+          canonical: expandFilename(NixDaemonSocket),
+          name: "nix-daemon", contribution: tdcContentAlreadyKeyed)
+        check revalidatedTrustedEndpoints(@[stale]).len == 0
+        check grade(@[ipcLoss(NixDaemonSocket, 0)], @[stale]).status ==
+          mesUnknownScopeLoss
+      else:
+        checkpoint(owned.detail)
+        check owned.ok
+        check owned.canonical.len > 0
+
+  test "the real grading socket has root-controlled ancestry":
+    if not socketPresent(GradingSocket):
+      skip("no multi-user Nix grading socket on this host")
+    else:
+      let owned = endpointRootOwned(GradingSocket)
       checkpoint(owned.detail)
       check owned.ok
       check owned.canonical.len > 0
 
   test "a loss on the trusted endpoint with a root peer is attributed":
-    if not nixSocketPresent():
-      skip("no root-owned Nix daemon socket on this host")
+    if not socketPresent(GradingSocket):
+      skip("no multi-user Nix grading socket on this host")
     else:
-      let graded = grade(@[ipcLoss(NixDaemonSocket, 0)], @[trustedNix()])
+      let graded = grade(@[ipcLoss(GradingSocket, 0)], @[trustedSocket()])
       check graded.status == mesComplete
       var named = false
       for d in graded.diagnostics:
-        if "by endpoint " & NixDaemonSocket in d: named = true
+        if "by endpoint " & GradingSocket in d: named = true
       check named
 
   test "another endpoint behind the same activator pid stays a loss":
-    if not nixSocketPresent():
-      skip("no root-owned Nix daemon socket on this host")
+    if not socketPresent(GradingSocket):
+      skip("no multi-user Nix grading socket on this host")
     else:
-      let graded = grade(@[ipcLoss(NixDaemonSocket, 0),
-        ipcLoss("/run/some-other-service.sock", 0)], @[trustedNix()])
+      let graded = grade(@[ipcLoss(GradingSocket, 0),
+        ipcLoss("/run/some-other-service.sock", 0)], @[trustedSocket()])
       check graded.status == mesUnknownScopeLoss
 
   test "the trusted path with a non-root peer stays a loss":
-    if not nixSocketPresent():
-      skip("no root-owned Nix daemon socket on this host")
+    if not socketPresent(GradingSocket):
+      skip("no multi-user Nix grading socket on this host")
     else:
-      let graded = grade(@[ipcLoss(NixDaemonSocket, 1000)], @[trustedNix()])
+      let graded = grade(@[ipcLoss(GradingSocket, 1000)], @[trustedSocket()])
       check graded.status == mesUnknownScopeLoss
 
   test "trust whose path no longer holds is dropped at grading time":

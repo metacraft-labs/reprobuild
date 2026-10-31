@@ -1,0 +1,27 @@
+# Known differences of the GM6 equivalence fixture on darwin: what every Home
+# Manager configuration adds on its own (measured by evaluation on home-pc,
+# 2026-10-15; the darwin build runs on m1).
+
+[[allow]]
+category = "files"
+status = "only-in-nix"
+id = "~/.cache/.keep"
+reason = "Home Manager creates the XDG cache directory with a .keep file in every configuration"
+
+[[allow]]
+category = "files"
+status = "only-in-nix"
+id = "~/.local/state/.keep"
+reason = "Home Manager creates the XDG state directory with a .keep file in every configuration"
+
+[[allow]]
+category = "files"
+status = "only-in-nix"
+id = "~/Library/Fonts/.home-manager-fonts-version"
+reason = "Home Manager records the version of the fonts it links on darwin"
+
+[[allow]]
+category = "environment"
+status = "only-in-nix"
+id = "var:TERMINFO_DIRS"
+reason = "Home Manager points terminfo at the Nix profile on darwin"

@@ -24,9 +24,12 @@ when not defined(windows):
 import git_tool
 import repro_cli_support
 import repro_cli_support/push_hook_protocol
+import repro_lock
+import repro_lock/certificate_policy
 import repro_lock_store
 import repro_test_support
 import repro_workspace_manifests
+import ./every_branch_policy
 
 const
   ExternalStoreModeEnv = "REPROBUILD_TEST_POLICY_STORE_MODE"
@@ -140,27 +143,27 @@ proc setup(gitBin: string): Fixture =
   let manifests = result.workspace / ".repro" / "manifests"
   createDir(manifests / "projects")
   createDir(manifests / "repos")
-  writeFile(result.workspace / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.workspace / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
   writeFile(manifests / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n" &
     "[[remote]]\nname = \"app-origin\"\nfetch = \"" &
       result.appOrigin.replace('\\', '/') & "\"\n\n" &
     "[[remote]]\nname = \"dep-origin\"\nfetch = \"" &
       result.depOrigin.replace('\\', '/') & "\"\n\n" &
     "includes = [\"repos/app.toml\", \"repos/dep.toml\"]\n")
   writeFile(manifests / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"app-origin\"\nrevision = \"main\"\n" &
+    "remote = \"app-origin\"\nmainline = \"main\"\n" &
     "depends = [\"dep\"]\n")
   writeFile(manifests / "repos" / "dep.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"dep\"\npath = \"dep\"\n" &
-    "remote = \"dep-origin\"\nrevision = \"main\"\n")
+    "remote = \"dep-origin\"\nmainline = \"main\"\n")
   let ensured = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
     "--vcs", "--workspace-root=" & result.workspace, result.workspace]))
   if ensured.code != 0:
@@ -212,13 +215,20 @@ proc writeDevelopOverride(workspace, package, path: string) =
       path.replace('\\', '/') & "\"\nstate = \"editable\"\n" &
     "created_at = \"2026-07-22T00:00:00Z\"\n")
 
-proc requiredCertificateProject(body: string): string =
-  let remote = body.find("[[remote]]")
-  if remote < 0: return body
-  body[0 ..< remote] &
-    "[certificates]\ngate_mode = \"required\"\n" &
-    "required_targets = [\"t-unit\"]\nrequired_platforms = [\"" &
-    hostOS & "/" & hostCPU & "\"]\n\n" & body[remote .. ^1]
+proc requiredCertificateLock(depRevision, depUrl: string): string =
+  ## A committed ``repro.lock`` that pins the develop-set sibling ``dep`` at
+  ## its checkout (as the committed-lock gate requires) and records a
+  ## certificate policy requiring t-unit on this host for every branch
+  ## (TC-9d: the policy is the pushed content's own; one rule for every
+  ## branch, ``everyBranchSnapshot``).
+  replaceCertificatePolicySection(serializeLockedDependencies(
+    LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[
+      LockedDep(name: "dep", path: "../dep",
+        coordinates: Coordinates(kind: ckVcs, url: depUrl, gitRef: "main",
+          revision: depRevision),
+        integrity: "git-sha1:" & depRevision, visibility: "public")])),
+    everyBranchSnapshot(pmRequired, ["t-unit"],
+    [hostOS & "/" & hostCPU], name = "app"))
 
 proc writeFailingStore(path, log: string) =
   when defined(windows):
@@ -320,7 +330,7 @@ proc manifestProject(name: string; remotes: seq[(string, string)];
     string =
   result = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"" & name &
-    "\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n"
+    "\"\n\n"
   for remote in remotes:
     result.add("[[remote]]\nname = \"" & remote[0] & "\"\nfetch = \"" &
       remote[1].replace('\\', '/') & "\"\n\n")
@@ -331,9 +341,9 @@ proc manifestProject(name: string; remotes: seq[(string, string)];
   result.add("]\n")
 
 proc manifestRepo(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" &
     name & "\"\npath = \"" & name & "\"\nremote = \"" & remote &
-    "\"\nrevision = \"main\"\n"
+    "\"\nmainline = \"main\"\n"
 
 proc seedManifestLayer(gitBin, layer, bare: string;
     files: openArray[(string, string)]) =
@@ -525,13 +535,17 @@ suite "pre-push protocol v2 policy regressions":
         "backend = \"external-cli\", program = \"" &
         policyStore.replace('\\', '/') &
         "\", repos = [\"app\", \"dep\"] }")
-      let projectFile = fx.workspace / ".repro" / "manifests" /
-        "projects" / "app.toml"
-      let ordinaryProject = readFile(projectFile)
-      writeFile(projectFile, requiredCertificateProject(ordinaryProject))
+      # The outgoing commit gains a policy requiring an uncovered t-unit; the
+      # policy commit is made with --no-verify so only pre-push judges it.
+      writeFile(fx.app / "repro.lock", requiredCertificateLock(require(
+        q(gitBin) & " -C " & q(fx.dep) & " rev-parse HEAD").strip(), fx.depOrigin))
+      discard require(q(gitBin) & " -C " & q(fx.app) & " add repro.lock")
+      discard require(q(gitBin) & " -C " & q(fx.app) &
+        " commit -q --no-verify -m certificate-policy")
       if fileExists(policyStoreLog): removeFile(policyStoreLog)
       let certFailure = run(q(gitBin) & " -C " & q(fx.app) &
         " push origin main")
+      checkpoint("certificate-policy push: " & certFailure.output)
       check certFailure.code != 0
       check "certificate" in certFailure.output
       check hasFailure(fx.report(), "certificate-coverage")
@@ -539,7 +553,9 @@ suite "pre-push protocol v2 policy regressions":
       if fileExists(policyStoreLog):
         check not readFile(policyStoreLog).splitLines().anyIt(
           it.startsWith("put "))
-      writeFile(projectFile, ordinaryProject)
+      # Drop the policy commit: the ordinary outgoing commit pushes again.
+      discard require(q(gitBin) & " -C " & q(fx.app) & " reset -q --hard " &
+        q(appUnpublished))
 
       let finalPush = run("env " & LegacyHookSentinelEnv & "=1 " & q(gitBin) &
         " -C " & q(fx.app) & " push origin main")
@@ -589,7 +605,8 @@ suite "pre-push protocol v2 policy regressions":
       if routedPathSelected.isSome:
         check routedPathSelected.get().key.sha == bogus
       check lockedShaFromStore(selectedStore, "app", "app", "app") == bogus
-      let resolvedForIntegrity = resolveProject(projectFile)
+      let resolvedForIntegrity = resolveProject(fx.workspace / ".repro" /
+        "manifests" / "projects" / "app.toml")
       var resolvedApp: ResolvedRepo
       for repo in resolvedForIntegrity.repos:
         if repo.name == "app": resolvedApp = repo
@@ -706,8 +723,12 @@ suite "pre-push protocol v2 policy regressions":
       let secretSha = bareHead(gitBin, secretOrigin)
 
       createDir(workspace / ".repro")
-      let publicLayer = workspace / ".repro" / "manifests-public"
-      let privateLayer = workspace / ".repro" / "manifests-private"
+      # Both layers are checkouts inside the workspace directory but outside
+      # `.repro/` (Workspace-Settings-Files.md §4 forbids a layer there): the
+      # public one shared in `repro-workspace.toml`, the private one one
+      # person's in `repro-workspace.local.toml`. The root is the base layer.
+      let publicLayer = workspace / "manifests-public"
+      let privateLayer = workspace / "manifests-private"
       let publicBare = scratch / "manifests-public.git"
       let privateBare = scratch / "manifests-private.git"
       seedManifestLayer(gitBin, publicLayer, publicBare, [
@@ -722,11 +743,15 @@ suite "pre-push protocol v2 policy regressions":
           ("secret-origin", secretOrigin)], @["repos/secret.toml"])),
         ("repos/secret.toml", manifestRepo("secret", "secret-origin")),
       ])
-      writeFile(workspace / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"app\"\nbranch = \"main\"\n\n" &
+      writeFile(workspace / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+        "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
+      writeFile(workspace / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
         "[[manifest]]\nlocal_path = \"" &
-          publicLayer.replace('\\', '/') & "\"\nvisibility = \"public\"\n\n" &
+          publicLayer.replace('\\', '/') & "\"\nvisibility = \"public\"\n")
+      writeFile(workspace / "repro-workspace.local.toml",
+        "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
         "[[manifest]]\nlocal_path = \"" &
           privateLayer.replace('\\', '/') & "\"\nvisibility = \"private\"\n")
       for repo in [(appOrigin, workspace / "app"),

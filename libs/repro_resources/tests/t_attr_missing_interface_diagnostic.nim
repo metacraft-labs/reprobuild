@@ -23,11 +23,11 @@ suite "t_attr_missing_interface_diagnostic":
     # lifted interface.
     var raised = false
     try:
-      discard unmarshalAttrs("vm_harness.unlifted", "\x01\x00\x00\x00\x00\x00")
+      discard unmarshalAttrs("gosti.unlifted", "\x01\x00\x00\x00\x00\x00")
     except KeyError as err:
       raised = true
       # Names the resource typeId that could not be re-hydrated.
-      check err.msg.contains("vm_harness.unlifted")
+      check err.msg.contains("gosti.unlifted")
       # Points at the MISSING INTERFACE DEPENDENCY (the M1b framing) …
       check err.msg.contains("missing the interface dependency")
       check err.msg.contains("lifted")

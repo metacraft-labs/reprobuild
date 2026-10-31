@@ -767,17 +767,274 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             name: string;
                             content: string;
                             enabled: bool = true;
+                            aptClosureLock: string = "";
+                            restartIfChanged: bool = true;
+                            collision: string = "";
+                            dropInName: string = "";
+                            stopOnRemoval: bool = true;
+                            reloadIfChanged: bool = false;
+                            exclusive: bool = false;
+                            healthCheck: string = "";
+                            credentials: seq[string] = @[];
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
+  ## A system unit under `/etc/systemd/system/`.
+  ##
+  ## The add-on switch's service transitions (ReproOS Add-On Mode spec
+  ## §7.3): a unit that leaves the profile is stopped before its file goes
+  ## unless `stopOnRemoval = false`; `reloadIfChanged = true` reloads the
+  ## running instance (`ExecReload=`) instead of restarting it when only a
+  ## resource it `dependsOn` changed; `exclusive = true` makes the switch
+  ## stop the old instance and confirm it exited before the new one starts,
+  ## refusing the apply (`EAddOnExclusiveOverlap`) when it cannot -- for a
+  ## service two instances of which cause harm (a validator client). A unit
+  ## whose content carries `X-Repro-Exclusive=true` in `[Unit]` is
+  ## exclusive too.
+  ##
+  ## `healthCheck` is what must hold once the switch has started the unit
+  ## for the generation to be committed (ReproOS Add-On Mode spec §7.5):
+  ## `"active"` (the unit reaches active), `"tcp:127.0.0.1:<port>"`,
+  ## `"http://127.0.0.1:<port>/<path>"` (2xx) or `"exec:/repro/store/…"`
+  ## (exits 0); probes are loopback only. A check that has not passed
+  ## within the profile's `confirmTimeout` makes the switch revert to the
+  ## previous generation. Outside add-on mode the field is ignored.
+  ##
+  ## `credentials` names the secrets the unit reads (ReproOS Add-On Mode
+  ## spec §10.3): each must be declared with `secretFile(service = <the
+  ## unit's name without .service>, name = ...)`, and renders as
+  ## `LoadCredential=<name>:/run/repro/secrets/<service>/<name>`, so the
+  ## service reads it from `$CREDENTIALS_DIRECTORY`.
+  ##
+  ## `collision` is add-on mode's opt-in when a distribution package
+  ## already provides a unit of this name (ReproOS Add-On Mode spec §4.3):
+  ## `"dropIn"` writes `content` as a drop-in of the package's unit
+  ## (`/etc/systemd/system/<name>.d/50-repro-<dropInName>.conf`,
+  ## `dropInName` defaulting to `addon`), `"replace"` lets this unit
+  ## shadow the package's. Without it such a unit is refused
+  ## (`EAddOnUnitShadows`). Outside add-on mode the field is ignored.
+  ##
+  ## A unit that is active when the apply reaches it is RESTARTED when its
+  ## file, its closure, or a resource it `dependsOn` (its configuration
+  ## file, a credential) changed in that apply, so the change takes effect
+  ## then and not at some unrelated later restart. `restartIfChanged =
+  ## false` holds the restart and the apply log reports it as pending.
+  ## ReproOS Add-On Mode spec §7.3.
+  ##
+  ## `aptClosureLock` attaches a `package(apt, ...)` closure: the text of a
+  ## `repro-apt-closure-lock v1` (`repro-harvest-apt --emit-lock`, usually
+  ## read with `staticRead`). The apply realises the closure into
+  ## `/repro/store/prefixes/` and the installed unit gains
+  ## `BindReadOnlyPaths=<closure>/usr:/usr` (plus
+  ## `InaccessiblePaths=-/etc/ld.so.preload`) in its `[Service]` section,
+  ## so `ExecStart=/usr/bin/<daemon>` runs the closure's binary natively
+  ## and `AmbientCapabilities=`, `DynamicUser=`, `LoadCredential=` and
+  ## `DeviceAllow=` keep their meaning. ReproOS Add-On Mode spec §8.3.
   block:
     var fields = initTable[string, FieldValue]()
     fields["name"] = strField(name)
     fields["content"] = strField(content)
     fields["enabled"] = boolField(enabled)
+    if aptClosureLock.len > 0:
+      fields["aptClosureLock"] = strField(aptClosureLock)
+    fields["restartIfChanged"] = boolField(restartIfChanged)
+    if collision.len > 0:
+      fields["collision"] = strField(collision)
+    if dropInName.len > 0:
+      fields["dropInName"] = strField(dropInName)
+    if not stopOnRemoval:
+      fields["stopOnRemoval"] = boolField(false)
+    if reloadIfChanged:
+      fields["reloadIfChanged"] = boolField(true)
+    if exclusive:
+      fields["exclusive"] = boolField(true)
+    if healthCheck.len > 0:
+      fields["healthCheck"] = strField(healthCheck)
+    if credentials.len > 0:
+      fields["credentials"] = listField(credentials)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,
       dependsOn)
+
+template secretFile*(targetResources: var seq[ResourceIntent];
+                     service: string;
+                     name: string;
+                     address: string = "";
+                     dependsOn: seq[string] = @[]) =
+  ## A secret a service needs (ReproOS Add-On Mode spec §8.3, §10.3): the
+  ## sealed entry `<service>/<name>` of the host's sealed envelope is
+  ## materialised as `/run/repro/secrets/<service>/<name>` (a tmpfs,
+  ## created `0400` inside a `0700` directory) at every apply and at boot.
+  ## The secret never appears in the profile: it arrives only in the deploy
+  ## agent's sealed section, or through `repro system addon secret put` on
+  ## the host. A unit reads it by naming `name` in its `credentials`.
+  ##
+  ## Address default: `secrets.secretFile:<service>/<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["service"] = strField(service)
+    fields["name"] = strField(name)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("secrets.secretFile", service & "/" & name)
+    pushResource(targetResources, "secrets.secretFile", addr0, fields,
+      dependsOn)
+
+template systemdSystemDropIn*(targetResources: var seq[ResourceIntent];
+                              unit: string;
+                              content: string;
+                              name: string = "addon";
+                              restartIfChanged: bool = true;
+                              address: string = "";
+                              dependsOn: seq[string] = @[]) =
+  ## A drop-in for a unit the profile does NOT own -- a distribution unit
+  ## such as `cron.service` -- written to
+  ## `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` (ReproOS Add-On
+  ## Mode spec §4.1, the `dropIn` class). An active `unit` is restarted
+  ## when the drop-in changes (§7.3) unless `restartIfChanged = false`.
+  ## For a unit the profile itself writes, use `systemdSystemUnit`'s
+  ## `collision = "dropIn"` instead.
+  ##
+  ## Address default: `systemd.systemDropIn:<unit>:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["unit"] = strField(unit)
+    fields["name"] = strField(name)
+    fields["content"] = strField(content)
+    fields["restartIfChanged"] = boolField(restartIfChanged)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("systemd.systemDropIn", unit, name)
+    pushResource(targetResources, "systemd.systemDropIn", addr0, fields,
+      dependsOn)
+
+template linuxSysusersEntry*(targetResources: var seq[ResourceIntent];
+                             name: string;
+                             kind: string = "user";
+                             id: string = "";
+                             description: string = "";
+                             home: string = "";
+                             shell: string = "";
+                             address: string = "";
+                             dependsOn: seq[string] = @[]) =
+  ## A system account (`kind = "user"`) or group (`kind = "group"`) for a
+  ## service, declared as one sysusers.d(5) entry in
+  ## `/etc/sysusers.d/repro-<name>.conf` and created with
+  ## `systemd-sysusers <file>` (ReproOS Add-On Mode spec §4.1, the
+  ## `sysusers` class). `id` pins the UID / GID; `description`, `home` and
+  ## `shell` are the user's GECOS, home and shell (systemd's defaults when
+  ## empty). An existing account of the same name with a different id or
+  ## shell is a collision the apply refuses. The account is never deleted
+  ## when the entry leaves the profile. `passwdUser` / `passwdGroup` stay
+  ## for accounts that need `useradd` semantics.
+  ##
+  ## Address default: `linux.sysusersEntry:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["kind"] = strField(kind)
+    if id.len > 0:
+      fields["id"] = strField(id)
+    if description.len > 0:
+      fields["description"] = strField(description)
+    if home.len > 0:
+      fields["home"] = strField(home)
+    if shell.len > 0:
+      fields["shell"] = strField(shell)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.sysusersEntry", name)
+    pushResource(targetResources, "linux.sysusersEntry", addr0, fields,
+      dependsOn)
+
+template systemdUnitState*(targetResources: var seq[ResourceIntent];
+                           name: string;
+                           enabled: bool = true;
+                           state: string = "Running";
+                           address: string = "";
+                           dependsOn: seq[string] = @[]) =
+  ## Require a unit the profile relies on but does NOT own — a
+  ## distribution unit such as `avahi-daemon.service` — to be enabled and
+  ## active (or disabled and stopped). The apply converges only
+  ## `systemctl enable|disable` and `start|stop`; the unit file and its
+  ## conffiles stay the distribution's, and a unit that is not installed
+  ## or is masked is refused rather than created. Removing the resource
+  ## forgets the requirement and changes nothing on the host. ReproOS
+  ## Add-On Mode spec §4.1, the `unitState` class.
+  ##
+  ## Address default: `systemd.unitState:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["enabled"] = boolField(enabled)
+    fields["state"] = strField(state)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("systemd.unitState", name)
+    pushResource(targetResources, "systemd.unitState", addr0, fields,
+      dependsOn)
+
+# `AddOnToolDir` is where `addOnTool` wrappers land, and `addOnToolPath()`
+# puts it on PATH. `AddOnToolPathScript` is the body of `AddOnToolPathFile`:
+# it prepends the wrapper directory once (login shells source
+# `/etc/profile.d/*.sh`; it is POSIX sh, as Debian's `/etc/profile` is).
+#
+# The file is the profile's own, never generation 0's
+# `/etc/profile.d/repro-addon.sh` (the add-on bootstrap's hook that appends
+# the store `repro`): two writers of one path would each rewrite the
+# other's content on every apply, and the boot-time verification would
+# report the file against whichever digest the ledger holds for the other
+# (ReproOS Add-On Mode spec §4.1, §13 decision 18).
+const
+  AddOnToolDir* = "/etc/repro/bin"
+  AddOnToolPathFile* = "/etc/profile.d/repro-addon-tools.sh"
+  AddOnToolPathScript* =
+    "# Written by reprobuild (addOnToolPath): operator commands from the\n" &
+    "# add-on's package(apt) closures live under " & AddOnToolDir & ".\n" &
+    "case \":$PATH:\" in\n" &
+    "  *\":" & AddOnToolDir & ":\"*) ;;\n" &
+    "  *) PATH=\"" & AddOnToolDir & ":$PATH\" ;;\n" &
+    "esac\n" &
+    "export PATH\n"
+
+template addOnTool*(targetResources: var seq[ResourceIntent];
+                    command: string;
+                    aptClosureLock: string;
+                    program: string = "";
+                    address: string = "";
+                    dependsOn: seq[string] = @[]) =
+  ## Put `command` from a `package(apt, ...)` closure on an operator's
+  ## PATH without writing into `/usr`. The apply realises the closure
+  ## (`aptClosureLock`, a `repro-apt-closure-lock v1`, as for
+  ## `systemdSystemUnit`) and writes `/etc/repro/bin/<command>`, a wrapper
+  ## that runs `program` (default `/usr/bin/<command>`) through
+  ## `reprobuild-sandbox-launcher` with the closure's `/usr` bound
+  ## read-only over `/usr` in an unprivileged user namespace, plus the
+  ## launcher manifest beside it. Declare `addOnToolPath()` once in the
+  ## profile for the `PATH` hook. ReproOS Add-On Mode spec §4.1.
+  ##
+  ## Address default: `linux.addOnTool:<command>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["command"] = strField(command)
+    fields["aptClosureLock"] = strField(aptClosureLock)
+    if program.len > 0:
+      fields["program"] = strField(program)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.addOnTool", command)
+    pushResource(targetResources, "linux.addOnTool", addr0, fields,
+      dependsOn)
+
+template addOnToolPath*(targetResources: var seq[ResourceIntent];
+                        address: string = "";
+                        dependsOn: seq[string] = @[]) =
+  ## The `fs.systemFile` `AddOnToolPathFile`
+  ## (`/etc/profile.d/repro-addon-tools.sh`) that puts `/etc/repro/bin`
+  ## (the `addOnTool` wrappers) on PATH for login shells.
+  ## One per profile: it is an ordinary file resource with a fixed
+  ## content, so two declarations would be the same address twice.
+  ## ReproOS Add-On Mode spec §4.1.
+  # Positional on purpose: a template substitutes its parameters wherever
+  # the identifier appears, including a named argument's NAME, so
+  # `address = address` would expand to `"" = ""`.
+  fsSystemFile(targetResources, AddOnToolPathFile,
+    AddOnToolPathScript, "", "", "", "0644", "", address, dependsOn)
 
 template launchdSystemDaemon*(targetResources: var seq[ResourceIntent];
                               label: string;
@@ -800,6 +1057,7 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
                        sha256: string = "";
                        sourceLocal: string = "";
                        mode: string = "0644";
+                       collision: string = "";
                        address: string = "";
                        dependsOn: seq[string] = @[]) =
   ## A managed system-scope file. The file's content is supplied by
@@ -858,6 +1116,11 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
       fields["sha256"] = strField(sha256)
     if sourceLocal.len > 0:
       fields["sourceLocal"] = strField(sourceLocal)
+    # Add-on mode's opt-in when a package owns `path` (ReproOS Add-On Mode
+    # spec §4.3): `"divert"` moves the package's copy to `<path>.distrib`
+    # through a local dpkg diversion first. Ignored outside add-on mode.
+    if collision.len > 0:
+      fields["collision"] = strField(collision)
     let addr0 = if address.len > 0: address
                 else: autoAddress("fs.systemFile", path)
     pushResource(targetResources, "fs.systemFile", addr0, fields,
@@ -1309,13 +1572,9 @@ template linuxNixosSystemModule*(targetResources: var seq[ResourceIntent];
   ## re-reads on each invocation" model: the file is the source of
   ## truth; the realization step is downstream.
   ##
-  ## TEXT-FORMAT CONSTRAINT: the M69 system-profile text round-tripper
-  ## quotes each field with simple `"..."` literals and the parser's
-  ## `unquote` strips ONE surrounding pair without escapes; the
-  ## `content` value therefore MUST NOT contain a double-quote
-  ## character. Use Nix's `''...''` URL-string form (which the Nix
-  ## parser treats verbatim, no `"` needed) or pre-bind quoted
-  ## strings to `let` variables in an upstream module.
+  ## `content` may hold any text, double quotes included: the system
+  ## profile text form encodes a `"` as `""` (`repro_infra`
+  ## `quoteSystemValue`) and decodes it on parse.
   ##
   ## Address default: `linux.nixosSystemModule:<name>`.
   block:

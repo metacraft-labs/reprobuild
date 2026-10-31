@@ -3,14 +3,14 @@
 > **Migration note (2026-06).** The lifecycle logic in
 > `run-wsl-m69-posix.ps1` and `provision-and-run-m69-posix.sh` is now
 > wrapped by the Nim
-> [`vm-harness`](https://github.com/metacraft-labs/vm-harness) library's
+> [`gosti`](https://github.com/metacraft-labs/gosti) library's
 > `WslBackend` adapter (M1 of the *Multi-OS VM Automation Campaign*; see
 > `metacraft/reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`).
 > The PowerShell + bash scripts in this directory are Tier-2 reprobuild
 > orchestration and **continue to be the canonical entry point** for the
 > M69 POSIX WSL gates — no behavioural change. New consumers (the
-> `vm-harness` CLI, the AH Rust port, the unified driver harness) drive
-> the same scripts through `vm_harness.backends.wsl.runViaReproScript`
+> `gosti` CLI, the AH Rust port, the unified driver harness) drive
+> the same scripts through `gosti.backends.wsl.runViaReproScript`
 > rather than invoking them directly, but the direct invocation paths
 > below remain supported and tested.
 

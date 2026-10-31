@@ -124,6 +124,94 @@ function Download-String {
   return [string]$content
 }
 
+function New-VerifiedDownloadHttpHandler {
+  # Each download owns its handler. Keep construction separate so transport
+  # tests can supply authenticated fixture trust while exercising real HTTP I/O.
+  # The default uses the platform trust store without validation overrides.
+  return (New-Object System.Net.Http.HttpClientHandler)
+}
+
+function Download-VerifiedFileFromMirrors {
+  param(
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string[]]$Urls,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+    [ValidateRange(1, 600)][int]$TimeoutSeconds = 60
+  )
+
+  # Every source supplies the same pinned bytes. Keep the destination untouched
+  # until verification succeeds, and discard failed transfers before trying the
+  # next source. One attempt per source avoids spending all retries on an outage.
+  $failures = @()
+  # .NET Framework follows HTTPS-to-HTTP redirects by default. Resolve them
+  # ourselves so the Windows PowerShell 5.1 path enforces the same HTTPS rule.
+  # https://learn.microsoft.com/dotnet/api/system.net.http.httpclienthandler.allowautoredirect
+  Add-Type -AssemblyName System.Net.Http
+  $handler = New-VerifiedDownloadHttpHandler
+  $handler.AllowAutoRedirect = $false
+  $client = New-Object System.Net.Http.HttpClient($handler)
+  # One cancellation deadline per source owns every redirect and the final
+  # buffered body. A client timeout alone would restart on each GetAsync.
+  $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+  try {
+    foreach ($url in $Urls) {
+      $partial = "$OutFile.$([Guid]::NewGuid().ToString('N')).partial"
+      $deadline = New-Object Threading.CancellationTokenSource
+      $deadline.CancelAfter([TimeSpan]::FromSeconds($TimeoutSeconds))
+      try {
+        $current = [Uri]::new($url, [UriKind]::Absolute)
+        $redirects = 0
+        while ($true) {
+          # ResponseContentRead includes the entire body in this cancellable
+          # operation. The pinned OpenSSL archive is small enough to buffer.
+          $response = $client.GetAsync($current, [Net.Http.HttpCompletionOption]::ResponseContentRead,
+                                      $deadline.Token).GetAwaiter().GetResult()
+          try {
+            if ([int]$response.StatusCode -in @(301, 302, 303, 307, 308)) {
+              $location = $response.Headers.Location
+              if ($null -eq $location -or [string]::IsNullOrWhiteSpace($location.OriginalString)) {
+                throw "Redirect from '$current' has a missing or invalid Location."
+              }
+              $next = [Uri]::new($current, $location.OriginalString)
+              if ($next.Scheme -ne 'https') {
+                throw "Redirect from '$current' must preserve HTTPS; refused '$next'."
+              }
+              $redirects++
+              if ($redirects -gt 5) { throw "Redirect limit exceeded for '$url'." }
+              $current = $next
+              continue
+            }
+            [void]$response.EnsureSuccessStatusCode()
+            $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            break
+          } finally {
+            $response.Dispose()
+          }
+        }
+        $partialPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($partial)
+        [IO.File]::WriteAllBytes($partialPath, $bytes)
+        Assert-FileSha256 -Path $partial -Expected $ExpectedSha256
+        Move-Item -LiteralPath $partial -Destination $OutFile -Force
+        return
+      } catch {
+        $reason = if ($deadline.IsCancellationRequested) {
+          "Source deadline exceeded after $TimeoutSeconds seconds."
+        } else { $_.Exception.Message }
+        $failures += "${url}: $reason"
+        Write-Warning "Verified download from '$url' failed. $reason"
+      } finally {
+        $deadline.Dispose()
+        if (Test-Path -LiteralPath $partial) {
+          Remove-Item -LiteralPath $partial -Force
+        }
+      }
+    }
+    throw "No mirror supplied the pinned archive: $($failures -join '; ')"
+  } finally {
+    $client.Dispose()
+  }
+}
+
 function Ensure-CleanDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -156,7 +244,10 @@ function Expand-ZipArchive {
   $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   New-Item -ItemType Directory -Force -Path $target | Out-Null
-  [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $target)
+  # ZIP unflagged names use CP437; the encoding overload preserves flagged UTF-8.
+  # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.extracttodirectory
+  [System.IO.Compression.ZipFile]::ExtractToDirectory(
+    $archive, $target, [System.Text.Encoding]::GetEncoding(437))
 }
 
 function Test-BootstrapStepEnabled {
@@ -312,6 +403,63 @@ function Get-BashExe {
     throw "bash is required for Tup source bootstrap but was not found on PATH. Install Git Bash/MSYS2 and retry."
   }
   return $bashCommand.Source
+}
+
+# `bash` that can run this repository's POSIX scripts on the HOST.
+#
+# Windows makes "the bash on PATH" a real trap: `C:\Windows\System32\bash.exe`
+# (the WSL launcher, also surfaced via the WindowsApps alias) is on PATH by
+# DEFAULT and shadows Git Bash. On a host with no WSL distro installed it does
+# not fail as "bash is missing" -- it prints a WSL advertisement, exits
+# non-zero, and the caller dies with a message about distributions that has
+# nothing to do with reprobuild. Git ships the bash we want, so it is resolved
+# from git's own installation. `env.ps1` uses these to put that bash on PATH;
+# `scripts/release/package_windows_release.ps1` uses them to run the release
+# source staging with it.
+function Get-CommandSourceOrEmpty {
+  param([string]$Name)
+  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+  if ($null -eq $cmd) { return "" }
+  if ($cmd.CommandType -eq "Alias") { return $cmd.Definition }
+  return $cmd.Source
+}
+
+function Test-UsableBash {
+  param([string]$Path)
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+  if (-not (Test-Path -LiteralPath $Path)) { return $false }
+  # The WSL launcher lives in System32 / WindowsApps and is never the bash we
+  # want here, even when a distro IS installed: the build must run against the
+  # host filesystem with the host toolchain on PATH, not inside a Linux VM.
+  $dir = Split-Path -Parent $Path
+  if ($dir -match '\\(System32|SysWOW64|WindowsApps)$') { return $false }
+  return $true
+}
+
+function Resolve-GitBashDir {
+  # `git.exe` lives in `<root>\cmd` (or `<root>\bin`); bash sits in
+  # `<root>\bin\bash.exe` for every supported layout (Git for Windows,
+  # scoop, winget).
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if ($null -eq $git) { return "" }
+  $gitExe = if ($git.CommandType -eq "Alias") { $git.Definition } else { $git.Source }
+  if ([string]::IsNullOrWhiteSpace($gitExe)) { return "" }
+  $root = Split-Path -Parent (Split-Path -Parent $gitExe)
+  foreach ($candidate in @((Join-Path $root "bin"), (Join-Path $root "usr\bin"))) {
+    if (Test-Path -LiteralPath (Join-Path $candidate "bash.exe")) {
+      return $candidate
+    }
+  }
+  return ""
+}
+
+function Resolve-UsableBashExe {
+  # The bash on PATH when it is usable, otherwise git's own; "" when neither.
+  $current = Get-CommandSourceOrEmpty 'bash'
+  if (Test-UsableBash $current) { return $current }
+  $gitBashDir = Resolve-GitBashDir
+  if ($gitBashDir) { return (Join-Path $gitBashDir "bash.exe") }
+  return ""
 }
 
 function ConvertTo-BashPath {

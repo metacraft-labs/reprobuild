@@ -27,9 +27,12 @@
 ##   * a DIVERGED sibling (another line of history) is refused without the
 ##     flag and written with it;
 ##   * an AHEAD sibling advances with no refusal;
-##   * `ref` is a remote-tracking branch containing the commit, preferring
-##     `agents`, then `dev`; a local-only branch is never written for a
-##     sibling or for the root; an unpublished commit records an empty `ref`;
+##   * `ref` is a remote-tracking branch containing the commit (the
+##     repo's resolved `unstable`, then `mainline`, first — covered by
+##     `t_published_ref_prefers_resolved_unstable.nim`; here lib-b declares
+##     only the mainline `main`, so the fallback order decides); a local-only
+##     branch is never written for a sibling or for the root; an unpublished
+##     commit records an empty `ref`;
 ##   * through the real `pre-commit` hook: a sibling on a local-only branch is
 ##     pinned with its published `ref`; a committed local-only `ref` over an
 ##     unmoved revision is repaired; a still-published `ref` over an unmoved
@@ -42,6 +45,7 @@
 ## its body is the managed body's dispatch line.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 import ./committed_lock_siblings_fixture
 
@@ -54,11 +58,11 @@ proc field(entry, key: string): string =
   let stop = entry.find('"', at + k.len)
   entry[at + k.len ..< stop]
 
-proc pinOf(lockBody, path: string): string =
-  field(depEntry(lockBody, path), "revision")
+proc pinOf(lockBody, name: string): string =
+  field(depEntry(lockBody, name), "revision")
 
-proc refOf(lockBody, path: string): string =
-  field(depEntry(lockBody, path), "ref")
+proc refOf(lockBody, name: string): string =
+  field(depEntry(lockBody, name), "ref")
 
 proc refresh(fx: SiblingFixture; extra = ""; allowEnv = ""):
     tuple[code: int; output: string] =
@@ -104,7 +108,7 @@ proc startPinnedAtNewest(label: string): Started =
   result.pinned = fx.advance("lib-b")
   fx.refreshAndPublishLock()
   let committed = fx.git(fx.app, "show HEAD:repro.lock")
-  doAssert pinOf(committed, "../lib-b") == result.pinned,
+  doAssert pinOf(committed, "lib-b") == result.pinned,
     "the baseline lock does not pin lib-b's newest commit:\n" & committed
   result.fx = fx
 
@@ -171,7 +175,7 @@ suite "repro lock refresh never moves a pin backward":
         let again = fx.refresh()
         checkpoint(again.output)
         check again.code == 0
-        check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.pinned
+        check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
 
   test "t_an_allowed_regression_writes_the_older_pin_and_says_so":
     if findExe("git").len == 0:
@@ -185,7 +189,7 @@ suite "repro lock refresh never moves a pin backward":
       let byFlag = fx.refresh("--allow-pin-regression=lib-b")
       checkpoint(byFlag.output)
       check byFlag.code == 0
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.seed
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.seed
       let announced = lineWith(byFlag.output, "allowed pin regression",
         "lib-b")
       check announced.len > 0
@@ -197,12 +201,12 @@ suite "repro lock refresh never moves a pin backward":
       let byEnv = fx.refresh(allowEnv = "lib-b")
       checkpoint(byEnv.output)
       check byEnv.code == 0
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.seed
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.seed
       discard fx.git(fx.app, "checkout -q -- repro.lock")
       let other = fx.refresh(allowEnv = "lib-c")
       checkpoint(other.output)
       check other.code != 0
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.pinned
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
       check "names 'lib-c', which this refresh does not move backward" in
         other.output
 
@@ -219,15 +223,15 @@ suite "repro lock refresh never moves a pin backward":
       let r = fx.refresh()
       checkpoint(r.output)
       check r.code != 0
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.pinned
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
       check lineWith(r.output, "lib-b", "behind by 2").len > 0
 
       let allowed = fx.refresh("--allow-pin-regression=lib-b")
       checkpoint(allowed.output)
       check allowed.code == 0
       let body = readFile(fx.app / "repro.lock")
-      check pinOf(body, "../lib-b") == s.seed
-      check refOf(body, "../lib-b") == "main"
+      check pinOf(body, "lib-b") == s.seed
+      check refOf(body, "lib-b") == "main"
       check "\"blocktracer\"" notin body
 
   test "t_a_diverged_sibling_needs_the_explicit_flag":
@@ -246,17 +250,17 @@ suite "repro lock refresh never moves a pin backward":
       let r = fx.refresh()
       checkpoint(r.output)
       check r.code != 0
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.pinned
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
       check lineWith(r.output, "lib-b", "diverged: 1 and 1").len > 0
 
       let allowed = fx.refresh("--allow-pin-regression=lib-b")
       checkpoint(allowed.output)
       check allowed.code == 0
       let body = readFile(fx.app / "repro.lock")
-      check pinOf(body, "../lib-b") == sideways
+      check pinOf(body, "lib-b") == sideways
       # Not reachable from any published branch: no ref rather than a
       # local one.
-      check refOf(body, "../lib-b") == ""
+      check refOf(body, "lib-b") == ""
 
   test "t_an_ahead_sibling_advances":
     if findExe("git").len == 0:
@@ -269,7 +273,7 @@ suite "repro lock refresh never moves a pin backward":
       let r = fx.refresh()
       checkpoint(r.output)
       check r.code == 0
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == next
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == next
       check "REFUSED" notin r.output
       check "allowed pin regression" notin r.output
 
@@ -290,12 +294,15 @@ suite "a committed lock's ref names a published branch":
       checkpoint(r.output)
       check r.code == 0
       var body = readFile(fx.app / "repro.lock")
-      check refOf(body, "../lib-b") == "main"
+      check refOf(body, "lib-b") == "main"
       check refOf(body, ".") == "main"
       check "\"n3g\"" notin body
       check "\"local-topic\"" notin body
 
-      # `agents` is preferred, then `dev`, over every other published branch.
+      # lib-b sits on the local-only `n3g`, so `advance` publishes nothing to
+      # `main`: the commit is on `dev` alone, then on `agents` and `dev`. No
+      # role of lib-b names either, so the fallback order decides — the only
+      # containing branch, then the first containing branch by name.
       let next = fx.advance("lib-b")
       discard fx.git(s.libB, "push -q origin HEAD:dev")
       discard fx.git(s.libB, "fetch -q origin")
@@ -303,14 +310,14 @@ suite "a committed lock's ref names a published branch":
       checkpoint(r.output)
       check r.code == 0
       body = readFile(fx.app / "repro.lock")
-      check pinOf(body, "../lib-b") == next
-      check refOf(body, "../lib-b") == "dev"
+      check pinOf(body, "lib-b") == next
+      check refOf(body, "lib-b") == "dev"
       discard fx.git(s.libB, "push -q origin HEAD:agents")
       discard fx.git(s.libB, "fetch -q origin")
       # Re-observing an UNMOVED pin keeps a ref that is still published.
       r = fx.refresh()
       check r.code == 0
-      check refOf(readFile(fx.app / "repro.lock"), "../lib-b") == "dev"
+      check refOf(readFile(fx.app / "repro.lock"), "lib-b") == "dev"
       # A moved pin takes the preferred published branch.
       let newest = fx.advance("lib-b")
       discard fx.git(s.libB, "push -q origin HEAD:agents HEAD:dev")
@@ -319,8 +326,8 @@ suite "a committed lock's ref names a published branch":
       checkpoint(r.output)
       check r.code == 0
       body = readFile(fx.app / "repro.lock")
-      check pinOf(body, "../lib-b") == newest
-      check refOf(body, "../lib-b") == "agents"
+      check pinOf(body, "lib-b") == newest
+      check refOf(body, "lib-b") == "agents"
 
   test "t_the_commit_hook_records_and_repairs_published_refs":
     if findExe("git").len == 0:
@@ -340,8 +347,8 @@ suite "a committed lock's ref names a published branch":
       checkpoint(c.output)
       check c.code == 0
       var body = fx.git(fx.app, "show HEAD:repro.lock")
-      check pinOf(body, "../lib-b") == next
-      check refOf(body, "../lib-b") == "main"
+      check pinOf(body, "lib-b") == next
+      check refOf(body, "lib-b") == "main"
       check "\"n3g\"" notin body
 
       # A committed local-only ref over an unmoved revision is repaired.
@@ -349,15 +356,15 @@ suite "a committed lock's ref names a published branch":
       writeFile(lockPath, readFile(lockPath).replace(
         "ref = \"main\", revision = \"" & next & "\"",
         "ref = \"blocktracer\", revision = \"" & next & "\""))
-      check refOf(readFile(lockPath), "../lib-b") == "blocktracer"
+      check refOf(readFile(lockPath), "lib-b") == "blocktracer"
       discard fx.git(fx.app, "add repro.lock")
       discard fx.git(fx.app, "commit -q --no-verify -m hand-edited-ref")
       c = fx.tryCommit("repair-the-ref")
       checkpoint(c.output)
       check c.code == 0
       body = fx.git(fx.app, "show HEAD:repro.lock")
-      check pinOf(body, "../lib-b") == next
-      check refOf(body, "../lib-b") == "main"
+      check pinOf(body, "lib-b") == next
+      check refOf(body, "lib-b") == "main"
 
       # A still-published ref over an unmoved revision is kept: a new
       # preferred branch containing it does not churn the lock.

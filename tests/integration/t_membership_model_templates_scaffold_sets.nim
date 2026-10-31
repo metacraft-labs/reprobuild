@@ -104,16 +104,16 @@ proc setupFixture(gitBin, slug: string; defaultTemplate = ""): Fixture =
     "[repo-set]\nname = \"shared-infrastructure\"\n\n" &
     "member_sets = [\n]\n\nmember_repos = [\n]\n")
   writeFile(root / "repos" / "service-scaffolding.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"service-scaffolding\"\npath = \"service-scaffolding\"\n" &
-    "branch = \"main\"\nurl_prefix = \"acme\"\n")
+    "mainline = \"main\"\nurl_prefix = \"acme\"\n")
   var bootstrap =
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\nurl = \"https://git.example.invalid/acme/manifests\"\n"
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\nurl = \"https://git.example.invalid/acme/manifests\"\n"
   if defaultTemplate.len > 0:
     bootstrap.add("\n[projects]\ndefault_template = \"" &
       defaultTemplate & "\"\n")
-  writeFile(root / ".repro-workspace.toml", bootstrap)
+  writeFile(root / "repro-workspace.toml", bootstrap)
   discard requireGit(q(gitBin) & " init -b main " & q(root))
   discard requireGit(q(gitBin) & " -C " & q(root) &
     " config user.email tester@example.invalid")
@@ -180,7 +180,7 @@ suite "membership model — repo-set templates":
       # if it is only answerable by reading the org config, the default is
       # effectively silent.
       check added.output.contains("applied template 'service'")
-      check added.output.contains(".repro-workspace.toml")
+      check added.output.contains("repro-workspace.toml")
       check added.output.contains("default_template")
 
   test "t_no_template_opts_out_of_the_configured_default":
@@ -269,22 +269,16 @@ suite "membership model — repo-set templates":
       check m.member_sets == @["shared-infrastructure"]
       check m.member_repos == @["service-scaffolding"]
 
-      # The scaffold does not re-seed `default_revision`. The model removes the
-      # field — revision is lock territory, and its value was org branching
-      # policy restated once per project — so a stub that kept emitting it
-      # would reintroduce, into every project authored from here on, exactly
-      # what a manifest conversion has just finished deleting.
-      #
-      # Asserted BOTH ways on purpose. The decoded field is what callers see,
-      # and the raw bytes are what the next reader of the file sees; a stub
-      # that emitted the key with an empty value would satisfy only one of
-      # them. `trunk` is checked as still present in the same breath, because
-      # the point is that one specific field went away and the file is
-      # otherwise intact.
-      check m.project.default_revision.isNone
+      # The scaffold names no branch. A project-level branch key is retired:
+      # each repo's branch is its own `mainline`, and the workspace branch is
+      # the root repository's — so a stub that emitted one would reintroduce,
+      # into every project authored from here on, a key every reader refuses.
+      # Asserted on the raw bytes, which are what the next reader of the file
+      # sees; the decoded record cannot even carry the key any more.
       let projectText = readFile(projectFile)
       check "default_revision" notin projectText
-      check "trunk = \"main\"" in projectText
+      check "trunk" notin projectText
+      check m.project.name.len > 0
 
   test "t_template_may_not_carry_a_fixed_set_name":
     # (8) A distinct schema exists precisely so this is unrepresentable. If a

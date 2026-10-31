@@ -398,6 +398,29 @@ class TheRatchetHasNoWalkableBypass(unittest.TestCase):
         )
         return result
 
+    def test_quoted_compiler_variable_names_are_not_references(self):
+        # These names are literal path/argument bytes, not reads of the
+        # compiler-valued variable. The paired real variable flow must still
+        # be detected, so blanking every compiler string cannot satisfy this.
+        for name in ("compiler_named_path_literal", "compiler_named_executor_literal"):
+            with self.subTest(name=name):
+                self.assertFalse(self.spawns(fixture(name), "t_" + name))
+        for name in ("compiler_variable_spawns", "compiler_fmt_variable_spawns",
+                     "compiler_amp_variable_spawns", "nim_fmt_fragment_spawns"):
+            with self.subTest(name=name):
+                self.assertTrue(self.spawns(fixture(name), "t_" + name))
+
+    def test_process_metadata_is_not_command_data(self):
+        for name in ("compiler_process_environment",
+                     "compiler_process_positional_environment",
+                     "compiler_exec_environment"):
+            with self.subTest(name=name):
+                self.assertFalse(self.spawns(fixture(name), "t_" + name))
+        for name in ("compiler_process_arguments", "compiler_shell_stdin",
+                     "compiler_nested_environment"):
+            with self.subTest(name=name):
+                self.assertTrue(self.spawns(fixture(name), "t_" + name))
+
     def test_nim_check_is_detected(self):
         self.assertTrue(
             self.spawns(NIM_CHECK_TEST, "t_nim_check"),
@@ -571,6 +594,40 @@ def fixture_table_rows(repro_nim_text: str) -> dict[str, list[str]]:
     return rows
 
 
+def fixture_table_checked_in_paths(repro_nim_text: str) -> dict[str, list[str]]:
+    """The ``testFixtureArtifacts`` artifacts that name NO action, per source.
+
+    A row artifact without an ``actionId`` is a CHECKED-IN fixture file: an
+    input of the test's execute edge that no edge produces. Its paths are
+    spelled ``<const> & "/rel"`` or as a literal; the constant is resolved
+    against its ``<name>* = "<value>"`` declaration in the same text.
+    """
+    start = repro_nim_text.find("testFixtureArtifacts*")
+    if start < 0:
+        return {}
+    end = repro_nim_text.find("\n  ]", start)
+    block = repro_nim_text[start : end if end > 0 else len(repro_nim_text)]
+    consts = dict(re.findall(r'(\w+)\*?\s*=\s*"([^"]*)"', repro_nim_text))
+    rows: dict[str, list[str]] = {}
+    for entry in re.finditer(
+        r"TestGraphArtifacts\(\s*source:\s*(.*?),\s*artifacts:\s*@\[(.*?)\]\)",
+        block,
+        re.S,
+    ):
+        source = "".join(re.findall(r'"([^"]*)"', entry.group(1)))
+        for artifact in re.finditer(
+            r"TestGraphArtifact\(\s*path:\s*([^)]*?)\)", entry.group(2), re.S
+        ):
+            if "actionId" in artifact.group(1):
+                continue
+            path = ""
+            for token in re.findall(r'"([^"]*)"|(\w+)', artifact.group(1)):
+                literal, name = token
+                path += literal if literal else consts.get(name, "\0" + name)
+            rows.setdefault(source, []).append(path)
+    return rows
+
+
 class GraphOwnedFixtureRebuildOnce(unittest.TestCase):
     """M3 verification: test_graph_owned_fixture_rebuild_once.
 
@@ -723,17 +780,44 @@ class GraphOwnedFixtureRebuildOnce(unittest.TestCase):
         """A typed input nothing produces is a build that cannot succeed."""
         rows = fixture_table_rows(self.repro_nim)
         self.assertTrue(rows, "testFixtureArtifacts did not parse")
+        checked_in = fixture_table_checked_in_paths(self.repro_nim)
         declared_actions = set(
             re.findall(r'actionId\s*=\s*"([^"]+)"', self.repro_nim)
         )
         for source, actions in sorted(rows.items()):
-            self.assertTrue(actions, f"{source} lists no artifacts")
+            self.assertTrue(
+                actions or checked_in.get(source),
+                f"{source} lists no artifacts",
+            )
             for action in actions:
                 self.assertIn(
                     action,
                     declared_actions,
                     f"{source} depends on action {action}, which no edge in "
                     "repro.nim declares",
+                )
+
+    def test_every_checked_in_fixture_artifact_is_in_the_tree(self):
+        """The producer-less half of the rule above.
+
+        A row artifact with no ``actionId`` names a checked-in file, and
+        nothing will ever build it: if it is absent the execute edge has an
+        input that cannot exist.
+        """
+        checked_in = fixture_table_checked_in_paths(self.repro_nim)
+        self.assertIn(
+            "tests/integration/"
+            "t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim",
+            checked_in,
+            "the SC-7 capstone's checked-in recipes did not parse",
+        )
+        for source, paths in sorted(checked_in.items()):
+            for path in paths:
+                self.assertNotIn("\0", path, f"{source}: unresolved {path!r}")
+                self.assertTrue(
+                    (REPO_ROOT / path).is_file(),
+                    f"{source} declares checked-in fixture {path}, which is "
+                    "not in the tree",
                 )
 
 

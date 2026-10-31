@@ -29,7 +29,7 @@
 ## observers then prove, at macro expansion (no repro binary / network / $HOME):
 ##
 ##   1. **the typed wrapper crossed.** ``container(address, image, cpus)`` — the
-##      producer's ``vm_harness.container`` wrapper — is declared and type-checks
+##      producer's ``gosti.container`` wrapper — is declared and type-checks
 ##      in the consumer's scope (``containerCompiles``), and the contract consts
 ##      (``containerTypeId`` / entrypoint ids) are in scope (``typeIdDeclared``).
 ##   2. **NO driver closure crossed.** The producer's driver symbol
@@ -155,7 +155,7 @@ proc cApply(inst: ResourceInstance; action: ResourceActionKind;
 let containerDriver = ResourceProviderDriver(
   identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -237,14 +237,14 @@ suite "RP5a: consumer imports resource contract without driver":
     let res = contract.publicResources[0]
 
     let accessorSrc = emitResourceContractAccessors(contract)
-    check accessorSrc.contains("\"vm_harness.container\"")
+    check accessorSrc.contains("\"gosti.container\"")
     check accessorSrc.contains("proc container*")
     check accessorSrc.contains("image: string")
     check accessorSrc.contains("cpus: int")
-    check accessorSrc.contains("vm_harness.container.observe")
-    check accessorSrc.contains("vm_harness.container.apply")
-    check res.typeId == "vm_harness.container"
-    check typedContractResourceAttrs(contract, "vm_harness.container") ==
+    check accessorSrc.contains("gosti.container.observe")
+    check accessorSrc.contains("gosti.container.apply")
+    check res.typeId == "gosti.container"
+    check typedContractResourceAttrs(contract, "gosti.container") ==
       @["image", "cpus"]
 
     # The typed surface COMPILES into a driver-free consumer.
@@ -263,7 +263,7 @@ suite "RP5a: consumer imports resource contract without driver":
     let renamed = resolveProducerTypedContract("prodres", workspace)
     check hasResourceContract(renamed)
     let renamedAttrs =
-      typedContractResourceAttrs(renamed, "vm_harness.container")
+      typedContractResourceAttrs(renamed, "gosti.container")
     check "vcpus" in renamedAttrs
     check "cpus" notin renamedAttrs
     let renamedSrc = emitResourceContractAccessors(renamed)

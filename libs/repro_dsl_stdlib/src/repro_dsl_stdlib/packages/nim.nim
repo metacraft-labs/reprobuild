@@ -1,34 +1,31 @@
-## M68 merge note (hand-edited): the auto-generated ``nimCatalog`` body
-## sits below the pre-existing ``package nim:`` DSL block. The DSL
-## block remains the source of truth for the Nim CLI surface
-## (``nim c`` / ``nim js`` flag declarations) and the Nix
-## provisioning shape on Nix-capable hosts; the ``nimCatalog`` slice
-## is consumed by the M64 ``cakBuiltin`` adapter on Windows.
-## Re-harvest emits ONLY the catalog half; re-attach the DSL block
-## by hand if you regenerate.
+## GM4b: every archive realization of ``nim`` is a ``tarball`` statement
+## in the ``provisioning:`` block below. The M68 ``nimCatalog``
+## (``VersionedProvisioning``) copy that once sat beside it named the same
+## four archives; it was merged into those statements (adding ``version``
+## and the extra executables) and removed, so a home profile and a
+## recipe's ``uses:`` select from one set of records.
 ##
 ## **Known M69 realize-time gap.** The Scoop manifest carries a
 ## ``post_install`` PowerShell hook that copies ``dist/nimble/src/nimblepkg``
 ## into ``bin/`` so ``nimble`` can locate its package definitions at
 ## runtime. The harvester silently drops the hook (per the module's
-## "post_install is deliberately discarded" rule), so cakBuiltin's
-## realized prefix will ship ``bin/nimble.exe`` but ``nimble``
+## "post_install is deliberately discarded" rule), so the realized
+## prefix will ship ``bin/nimble.exe`` but ``nimble``
 ## invocations may fail to find ``nimblepkg``. The manifest also
 ## carries an ``installer.script`` (``Add-Path -Path "$env:USERPROFILE\.nimble\bin"``)
 ## — a USERPROFILE PATH tweak, not a true installer, so M68's
-## refined harvester correctly keeps ``install_method = imExtract``.
+## refined harvester correctly keeps the plain ``extract`` install method.
 ##
-## **M9.5 merge note (hand-edited):** added a ``(pcX86_64, poLinux)``
-## platform slice manually (the Nim upstream publishes prebuilts on
+## M9.5: the Linux realization was added by hand (the Nim upstream publishes prebuilts on
 ## ``nim-lang.org/download/``, NOT on GitHub Releases — so the M7
 ## gh-releases harvester doesn't apply). URL pattern:
 ## ``nim-<ver>-linux_x64.tar.xz``; sha256 lifted from upstream's
-## ``.sha256`` sidecar. archive_format_override = afTarXz (Windows is
-## afZip); bin_relpath_override drops the .exe suffix. Upstream Nim's
+## ``.sha256`` sidecar (``tar.xz``; Windows is ``zip``, and the
+## executables there carry the .exe suffix). Upstream Nim's
 ## Linux build targets glibc 2.17+ (the prebuilt is statically linked
 ## against the c runtime where feasible).
 
-import std/[options, os, sets, strutils, tables]
+import std/[options, os, sequtils, sets, strutils, tables]
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
@@ -38,12 +35,13 @@ export packages_schema
 # probed by each consumer. Imported as the LAYOUT module, not as
 # ``packages/openssl`` — importing the package module would run its
 # ``package openssl:`` registration as a side effect of importing ``nim``,
-# putting a catalog entry into every recipe's registry that did not ask for
+# putting a tarball realization into every recipe's registry that did not ask for
 # one.
 import repro_dsl_stdlib/openssl_layout
 
 # Hand-authored builds use the same pending identity as source conventions.
 import repro_project_dsl/source_cache_identity
+import repro_dsl_stdlib/active_context
 
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
@@ -61,29 +59,38 @@ package nim:
     # bucket. The bucket version is the source of truth — `preferredVersion`
     # is used here (vs. `version`) so any later 2.2.x publication satisfies
     # the codetracer constraint without forcing a downgrade. The bin path
-    # matches `nimCatalog` below (Scoop manifest's first `bin` entry).
+    # matches the Scoop manifest's first `bin` entry.
     # `requiresExecutionProfileChecksum = false` keeps the engine from
     # demanding a recorded execution-profile when the operator hasn't yet
     # captured one for the host architecture.
     scoopApp(bucket = "main", app = "nim",
       preferredVersion = ">=1.6,<3.0", executablePath = "bin/nim.exe",
       requiresExecutionProfileChecksum = false)
-    # Direct-download provisioning consumed by --tool-provisioning=tarball.
-    # One tarball(...) entry per (cpu, os) slice the package supports.
-    # The resolver picks the first entry whose constraints match the
-    # build host; entries with cpu/os = "any" (or omitted) match every
-    # host and act as a catch-all. URLs + SHAs come straight from
-    # nim-lang.org — the same upstream that `nimCatalog` below
-    # harvests from.
-    tarball url = "https://nim-lang.org/download/nim-2.2.10_x64.zip",
-      sha256 = "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f",
+    # Direct-download realizations, selected by --tool-provisioning=tarball
+    # and by a home profile's `package "nim"` alike (GM4b). One
+    # tarball(...) entry per (cpu, os) the package supports. The selector
+    # takes the most specific entry matching the target; entries with
+    # cpu/os = "any" (or omitted) match every target and act as a
+    # catch-all. The Windows maintenance prefix is a qualified full source
+    # build; other platform archives retain their upstream supplier pins.
+    tarball url = "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip",
+      sha256 = "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "bin/nim.exe",
       packageId = "nim@2.2.10",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:nim@2.2.10:sha256:fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
+      lockIdentity = "tarball:nim@2.2.10:sha256:92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b",
+      version = "2.2.10",
+      extraExecutable = "bin\\atlas.exe",
+      extraExecutable = "bin\\nimble.exe",
+      extraExecutable = "bin\\nimgrab.exe",
+      extraExecutable = "bin\\nimgrep.exe",
+      extraExecutable = "bin\\nimpretty.exe",
+      extraExecutable = "bin\\nimsuggest.exe",
+      extraExecutable = "bin\\vccexe.exe",
+      extraExecutable = "bin\\testament.exe"
     tarball url = "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz",
       sha256 = "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211",
       archiveType = "tar.xz",
@@ -92,7 +99,20 @@ package nim:
       packageId = "nim@2.2.10",
       cpu = "x86_64",
       os = "linux",
-      lockIdentity = "tarball:nim@2.2.10:linux:sha256:0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211"
+      lockIdentity = "tarball:nim@2.2.10:linux:sha256:0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211",
+      version = "2.2.10",
+      extraExecutable = "bin/atlas",
+      extraExecutable = "bin/nimble",
+      # No ``bin/nimgrab``: upstream's linux_x64 bundle does not carry it.
+      # ``nimgrab`` is built by ``koch tools`` from ``tools/nimgrab.nim``,
+      # which is the only thing in the archive under that name, so the
+      # declaration bound an exported executable the realization cannot
+      # produce. The macOS bundles likewise omit it; Windows declarations
+      # remain unchanged. Native platform conformance is a separate check.
+      extraExecutable = "bin/nimgrep",
+      extraExecutable = "bin/nimpretty",
+      extraExecutable = "bin/nimsuggest",
+      extraExecutable = "bin/testament"
     tarball url = "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_arm64.tar.xz",
       sha256 = "9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e",
       archiveType = "tar.xz",
@@ -101,7 +121,14 @@ package nim:
       packageId = "nim@2.2.10",
       cpu = "aarch64",
       os = "macos",
-      lockIdentity = "tarball:nim@2.2.10:macos-aarch64:sha256:9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e"
+      lockIdentity = "tarball:nim@2.2.10:macos-aarch64:sha256:9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e",
+      version = "2.2.10",
+      extraExecutable = "bin/atlas",
+      extraExecutable = "bin/nimble",
+      extraExecutable = "bin/nimgrep",
+      extraExecutable = "bin/nimpretty",
+      extraExecutable = "bin/nimsuggest",
+      extraExecutable = "bin/testament"
     tarball url = "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_x64.tar.xz",
       sha256 = "35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851",
       archiveType = "tar.xz",
@@ -110,7 +137,14 @@ package nim:
       packageId = "nim@2.2.10",
       cpu = "x86_64",
       os = "macos",
-      lockIdentity = "tarball:nim@2.2.10:macos-x86_64:sha256:35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851"
+      lockIdentity = "tarball:nim@2.2.10:macos-x86_64:sha256:35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851",
+      version = "2.2.10",
+      extraExecutable = "bin/atlas",
+      extraExecutable = "bin/nimble",
+      extraExecutable = "bin/nimgrep",
+      extraExecutable = "bin/nimpretty",
+      extraExecutable = "bin/nimsuggest",
+      extraExecutable = "bin/testament"
 
   executable nim:
     cli:
@@ -250,6 +284,19 @@ package nim:
         # the host's 64-bit linker. Both have to be named.
         flag gccLinkerExe is string,
           alias = "--gcc.linkerexe:",
+          format = concat
+        # A cross target (`constructors/nim_executable`, `nim_library` under
+        # a zig `CrossTarget`): the OS beside `cpu`, and clang pointed at the
+        # zig `cc` wrapper for both compile and link
+        # (https://nim-lang.org/docs/nimc.html#crossminuscompilation).
+        flag os is string,
+          alias = "--os:",
+          format = concat
+        flag clangExe is string,
+          alias = "--clang.exe:",
+          format = concat
+        flag clangLinkerExe is string,
+          alias = "--clang.linkerexe:",
           format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
         flag parallelBuild is int,
@@ -608,8 +655,29 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         publishAs = "";
         dependencyPolicy = defaultDependencyPolicy();
         actionCachePolicy = defaultActionCachePolicy();
-        commandStatsId = ""): BuildActionDef
+        commandStatsId = "";
+        runInSourceDir = false): BuildActionDef
     {.discardable.} =
+  ## ``runInSourceDir`` runs the compile with its working directory set to
+  ## the directory of ``source`` instead of the recipe root. The recipe
+  ## keeps spelling every path relative to the recipe root; the alias
+  ## re-spells the ones nim and the engine resolve against the working
+  ## directory (the source on the argv, ``--out:``, ``--nimcache:``,
+  ## ``--path:``, extra outputs, the depfile) relative to that directory, so
+  ## the command line names the same files. Declared inputs keep the
+  ## recipe-root spelling, because the lowering materializes them against
+  ## the recipe root.
+  ##
+  ## Why it exists: nim writes scratch files into its working directory --
+  ## ``<project>_linkerArgs.txt`` on a long link line, deleted again after
+  ## the link (``extccomp.nim``). In the recipe root that bumps the
+  ## modification time of a directory other edges record as an input, and
+  ## each of them then misses on the next build with "input metadata
+  ## changed". In the source's own directory the scratch file lands where
+  ## no other edge looks. It is also the general rule for compiles here:
+  ## run them where the compiled module lives, so paths come out naturally
+  ## relative.
+  ##
   ## Test-Fixtures-In-Build-Graph M2: ``appLib`` / ``threadsOn`` were
   ## added to the convenience alias so the monitor-shim fixture edge in
   ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` and
@@ -631,6 +699,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## so a hand-authored recipe's public-interface binaries publish with
   ## no extra ceremony.
   discard imports
+  requireCrossTargetConsulted("nim.c")
   # Windows: nim appends `.exe` to an executable regardless of what `--out:`
   # says, so a recipe that writes `binary = "build/bin/foo"` produces
   # `build/bin/foo.exe`. The `output` flag is `role = output` and is what
@@ -663,19 +732,53 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
     inputs.add(reproConfigNimsFile)
 
-  result = c(pkg = pkg, source = source, output = effectiveBinary,
+  # The directory the compile runs in, spelled relative to the recipe root
+  # ("" = the recipe root itself), and the re-spelling of a
+  # recipe-root-relative path relative to it.
+  let runDir =
+    if runInSourceDir: source.parentDir.replace('\\', '/')
+    else: ""
+  if runInSourceDir and (source.isAbsolute or runDir.len == 0 or
+      runDir == "." or runDir.startsWith("..")):
+    raise newException(ValueError,
+      "nim.c(runInSourceDir = true) needs a `source` in a subdirectory of " &
+      "the recipe root, spelled relative to it; got `" & source & "`")
+  proc fromRunDir(path: string): string =
+    if runDir.len == 0 or path.len == 0 or path.isAbsolute:
+      path
+    else:
+      relativePath(path, runDir, '/')
+
+  result = c(pkg = pkg, source = fromRunDir(source),
+    output = fromRunDir(effectiveBinary),
     defines = defines,
     cpu = cpu, cc = cc, gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
-    paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
+    paths = paths.mapIt(fromRunDir(it)), passC = passC,
+    passL = effectivePassL, nimcache = fromRunDir(cacheDir),
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,
     deps = deps, after = after, extraInputs = inputs,
-    extraOutputs = extraOutputs, extraEnv = extraEnv,
-    depfile = depfile, cacheable = cacheable,
+    extraOutputs = extraOutputs.mapIt(fromRunDir(it)), extraEnv = extraEnv,
+    depfile = fromRunDir(depfile), cacheable = cacheable,
     dependencyPolicy = compileDependencyPolicy(
-      cacheDir, cacheable, dependencyPolicy),
+      fromRunDir(cacheDir), cacheable, dependencyPolicy),
     actionCachePolicy = actionCachePolicy,
     commandStatsId = commandStatsId)
+  if runInSourceDir:
+    # The engine resolves outputs, the depfile and the policy roots against
+    # the action's cwd, which is why they are re-spelled above. Declared
+    # inputs are materialized against the recipe root instead, so the source
+    # -- which the typed tool derives as an input from its argv spelling --
+    # goes back to the recipe-root spelling, in the same first position.
+    var rootInputs = @[source]
+    for item in inputs:
+      if item notin rootInputs:
+        rootInputs.add(item)
+    setRegisteredActionInputs(result.id, rootInputs)
+    setRegisteredActionCwd(result.id, acwdCustom, runDir)
+    result.inputs = rootInputs
+    result.cwdKind = acwdCustom
+    result.cwdCustomPath = runDir
   if usesSslDefine(defines):
     # The OpenSSL profile supplies the platform-specific library directories;
     # the linker arguments above intentionally contain no host paths.
@@ -697,11 +800,10 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   # SELECTED actions reference -- so a fragment build such as
   # ``repro build .#apps`` still resolves it.
   #
-  # This covers the edges ``nim.c(...)`` lowers -- 26 of this
-  # repository's 1397 nim edges. The other 1371 go through
-  # ``buildNimUnittest.build``, a typed tool from a pinned external
-  # package, and declare the same ref at their call site in
-  # ``repro.nim``.
+  # This covers edges lowered by nim.c. The in-tree shared
+  # ct_test_nim_unittest adapter records the native backend on its own
+  # unittest compile edges too; consumers need not repeat this default
+  # compiler attachment at each call site.
   #
   # An unmatched ref is inert: the resolver returns ``none`` for a name
   # no ``uses:`` entry declares, so a recipe that does not declare its C
@@ -723,33 +825,6 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     else: "gcc"
   appendRegisteredActionToolIdentityRefs(result.id, [backendCompiler])
   maybeTagPublicInterface(result, publish, publishAs)
-
-# ---------------------------------------------------------------------------
-# M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
-# Harvested from bucket: ScoopInstaller/Main
-# Versions (newest-first): 2.2.10
-# ---------------------------------------------------------------------------
-
-let nimCatalog* = @[
-  VersionedProvisioning(
-    version: "2.2.10",
-    archive_format: afZip,
-    install_method: imExtract,
-    bin_relpath: @["bin\\atlas.exe", "bin\\nim.exe", "bin\\nimble.exe", "bin\\nimgrab.exe", "bin\\nimgrep.exe", "bin\\nimpretty.exe", "bin\\nimsuggest.exe", "bin\\vccexe.exe", "bin\\testament.exe"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nim-lang.org/download/nim-2.2.10_x64.zip", sha256: "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f", sha512: "", extract_path: "nim-2.2.10"),
-      # M9.5: Linux x86_64 slice. Upstream nim-lang.org Linux prebuilt;
-      # the inner dir is ``nim-<ver>/`` (same convention as Windows);
-      # archive_format_override = afTarXz; binaries lack .exe.
-      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz", sha256: "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"]),
-      PlatformBinary(cpu: pcAArch64, os: poMacos, url: "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_arm64.tar.xz", sha256: "9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"]),
-      PlatformBinary(cpu: pcX86_64, os: poMacos, url: "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_x64.tar.xz", sha256: "35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"])
-    ],
-    installer_args: @[],
-    pacman_packages: @[],
-    bootstrap_argv: @[],
-    env: initTable[string, string]())
-]
 
 
 # NOTE: named ``nimPackage`` (not ``package``) on purpose. A recipe that does
@@ -859,4 +934,4 @@ proc nimRepropathsConfig*(pkg: NimPackage;
     closeSearch = closeSearch,
     snippet = snippet,
     actionId = "ensure_snippet_config_nims_" & currentOwningPackage())
-  result.add(snippetAction)
+  result.add(snippetAction)

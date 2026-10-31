@@ -9,7 +9,15 @@
 # the compiler proper): bootstrap a stage-0 `nim` from csources_v3, then compile
 # `compiler/nim.nim` directly. The fork compiler itself imports the CodeTracer
 # trace-writer + stew + results, so those three are vendored under `dist/`
-# exactly where `config/nim.cfg` expects them (`$nim/dist/...`).
+# exactly where the fork's `compiler/nim.cfg` expects them
+# (`$projectpath/../dist/...`). From the revision `flake.nix`'s `nim-fork-src`
+# advanced to on 2026-10-22, the fork's GLOBAL `config/nim.cfg` no longer puts
+# them on the search path, so a program compiled by the installed `nim` never
+# sees them: a project that brings its own nim-stew (CodeTracer's
+# `libs/nim-stew`) would otherwise get two copies and ambiguous symbols.
+# The `forkSrc` default moves with the release snapshot `package.nix`'s `src`
+# names, not independently with `flake.nix`; the `nixpkgs-package-src-sync`
+# check holds those source pins together.
 #
 # THIS IS A PRIVATE HELPER of `pkgs/by-name/re/reprobuild/package.nix`, not a
 # top-level nixpkgs attribute: nixpkgs' by-name resolver auto-exposes only
@@ -35,14 +43,16 @@
   # ── Source pins ────────────────────────────────────────────────────────────
   # Defaults are ordinary nixpkgs fixed-output fetches, so a nixpkgs consumer
   # needs no flake plumbing. reprobuild's flake passes its own inputs here.
-  # Keep every default in step with the corresponding `flake.lock` entry; the
+  # Keep every default in step with the corresponding entry of the
+  # `flake.lock` of package.nix's `src` commit (the flake check
+  # `nixpkgs-package-src-sync` fails otherwise); the
   # `hash` is the fetched tree's NAR hash (set it to `lib.fakeHash` and copy the
   # `got:` line from the resulting build failure when bumping a rev).
   forkSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim";
-    rev = "0b5b5ec507d2d9c731d222184c625851377a02c8";
-    hash = "sha256-0E1OGS2qRaKobiq2ZGi+nD2djgoLrqXApJzGmRGAFt0=";
+    rev = "22d525d83ff061f5912121f3519418cda806d36c";
+    hash = "sha256-RLYXg/JHHKKi4CDfefgHO0RUnkNJP4pL5msoISPadys=";
   },
   csourcesSrc ? fetchFromGitHub {
     owner = "nim-lang";
@@ -53,8 +63,8 @@
   traceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
-    hash = "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=";
+    rev = "31be9a10007c007af429951616c13bc275587c76";
+    hash = "sha256-xEqzwMISwpA/JwzhSKK+TRU67Dj/F7Z8rSwOoYj/Cv4=";
   },
   stewSrc ? fetchFromGitHub {
     owner = "status-im";
@@ -179,14 +189,14 @@ stdenv.mkDerivation {
     # source hard-requires ({.error.} without it); `--skipParentCfg` does not
     # suppress a project's own cfg, only parent-directory ones.
     echo "[nim-fork] 3/4 build nimpretty from the fork (formatter/compiler skew)"
-    ./bin/nim c -d:release \
+    ./bin/nim c --parallelBuild:"''${NIX_BUILD_CORES:-0}" -d:release \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
       -o:bin/nimpretty nimpretty/nimpretty.nim
     test -x bin/nimpretty
 
     echo "[nim-fork] 4/4 compile the fork compiler proper (koch-boot-free)"
-    ./bin/nim c -d:release -d:nimKochBootstrap \
+    ./bin/nim c --parallelBuild:"''${NIX_BUILD_CORES:-0}" -d:release -d:nimKochBootstrap \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
       --passC:-I${zstd.dev}/include \
@@ -203,7 +213,12 @@ stdenv.mkDerivation {
     runHook preInstall
     mkdir -p "$out"
     # Ship a faithful Nim installation tree: the compiler + stdlib + config +
-    # the vendored dist/ deps that config/nim.cfg references on every compile.
+    # the vendored dist/ deps. The compiled `nim` does not read dist/ at run
+    # time, and the global config/nim.cfg of the forks this file is built from
+    # since the 2026-10-22 advance does not list it; it is shipped so a
+    # program built against this installation with an explicit
+    # `$nim/dist/...` path (the fork's `testament/testament.nim.cfg` uses that
+    # form) still finds the copies the compiler was built with.
     cp -r bin lib config dist "$out/"
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # Linux: nim dlopens libpcre/libzstd by soname, so bake the store lib dirs
@@ -236,6 +251,20 @@ stdenv.mkDerivation {
     "$out/bin/nim" --version
     runHook postInstall
   '';
+
+  # The source arguments as given, read back by reprobuild's flake check
+  # `nixpkgs-package-src-sync` to compare the defaults with `flake.lock`.
+  passthru.sources = {
+    inherit
+      forkSrc
+      csourcesSrc
+      traceFormatSrc
+      stewSrc
+      resultsSrc
+      checksumsSrc
+      nimonySrc
+      ;
+  };
 
   meta = {
     description = "metacraft-labs/nim fork (Nim 2.3.1 devel) — reprobuild toolchain";

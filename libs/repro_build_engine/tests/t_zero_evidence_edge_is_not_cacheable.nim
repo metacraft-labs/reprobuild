@@ -96,6 +96,7 @@
 ## there first, which is why the narrowness arm is not optional.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_core
@@ -104,11 +105,15 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable"
+let TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
-const RootImage = "/bin/sh"
+let RootImage =
+  when defined(windows): findExe("sh").replace('\\', '/')
+  else: "/bin/sh"
   ## The DEFAULT `argv[0]` for the edges below, and therefore the path the
   ## LAUNCHER contributes
   ## through `collectEvidence`'s root-image fold — the action's own root image,
@@ -185,23 +190,44 @@ proc runCount(f: Fixture): int =
       inc n
   n
 
+proc fixturePath(path: string): string =
+  ## Every fixture path is spliced into a `sh -c` command line and, for the
+  ## depfile and path-set cases, into a `printf` FORMAT. A Windows path's
+  ## backslashes are escapes in both (`\test-tmp\t_zero...` holds a `\t`),
+  ## so on Windows the fixture uses the forward-slash spelling, which Win32
+  ## and MSYS `sh` both accept. POSIX paths are returned unchanged.
+  when defined(windows): path.replace('\\', '/')
+  else: path
+
+proc removeFixtureTree(root: string) =
+  ## The action cache nests records three directories deep under the fixture
+  ## (`cache/action-cache/hot-records/<68-char key>.rbar/<64-char>.rec`), which
+  ## takes a checkout at an ordinary depth past Windows' 260-character
+  ## `MAX_PATH`. A plain `removeDir` cannot delete those files, and Nim's
+  ## `removeFile` reports `ERROR_PATH_NOT_FOUND` as "already gone", so the
+  ## failure surfaced only as the enclosing directory "not empty" -- failing
+  ## a case whose assertions had all passed, and leaving the tree for the next
+  ## run's `makeFixture` to trip over. The engine itself reaches these files
+  ## through `extendedPath`; so does this.
+  removeDir(corepaths.extendedPath(root))
+
 proc makeFixture(name: string): Fixture =
-  let root = absolutePath(TmpDir / name)
+  let root = fixturePath(absolutePath(TmpDir / name))
   if dirExists(root):
-    removeDir(root)
-  let workRoot = root / "work"
+    removeFixtureTree(root)
+  let workRoot = fixturePath(root / "work")
   createDir(workRoot)
   result = Fixture(
     root: root,
     workRoot: workRoot,
-    cacheRoot: root / "cache",
-    rmdfPath: workRoot / "observed.iomon",
-    runLogPath: workRoot / "runs.log",
-    observedPath: workRoot / "observed.txt",
-    secondObservedPath: workRoot / "observed-2.txt",
-    makeDepfilePath: workRoot / "deps.d",
-    secondDepfilePath: workRoot / "extra-deps.d",
-    pathSetPath: workRoot / "converted.pathset")
+    cacheRoot: fixturePath(root / "cache"),
+    rmdfPath: fixturePath(workRoot / "observed.iomon"),
+    runLogPath: fixturePath(workRoot / "runs.log"),
+    observedPath: fixturePath(workRoot / "observed.txt"),
+    secondObservedPath: fixturePath(workRoot / "observed-2.txt"),
+    makeDepfilePath: fixturePath(workRoot / "deps.d"),
+    secondDepfilePath: fixturePath(workRoot / "extra-deps.d"),
+    pathSetPath: fixturePath(workRoot / "converted.pathset"))
   writeFile(result.observedPath, "generation-1\n")
   # The second prerequisite exists for the same reason the first does: a
   # missing prerequisite is a different failure than the ones under test.
@@ -235,7 +261,7 @@ proc writeRmdf(f: Fixture; records: seq[MonitorRecord]) =
   var all = profileRecords(defaultHooksMonitorProfile())
   for record in records:
     all.add(record)
-  writeFile(f.rmdfPath, cast[string](encodeCanonical(all)))
+  writeFile(f.rmdfPath, encodeCanonical(all))
 
 proc processRecord(): MonitorRecord =
   ## A record that carries no file observation. The real monitor emits
@@ -492,7 +518,7 @@ proc converterValidatedByMonitorEdge(f: Fixture; id: string;
       postBuildConverters: @[
         PostBuildDependencyConverterSpec(
           converterProcess: directProcess(
-            corepaths.normalizedPath("/bin/sh"),
+            corepaths.normalizedPath(RootImage),
             ["-c", "printf 'repro-pathset-v1\\n" & converterReports & "' > " &
               f.pathSetPath],
             corepaths.normalizedPath(f.workRoot)),
@@ -520,7 +546,7 @@ suite "an edge that observed nothing is not cacheable":
 
   test "zero observations: the edge does not publish and re-runs":
     let f = makeFixture("zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.runEdge("zero-evidence/run")
     let g = graph([act])
@@ -584,7 +610,7 @@ suite "an edge that observed nothing is not cacheable":
     # record mean something, and such an edge must keep the reuse that
     # making zero-output edges cacheable was for.
     let f = makeFixture("one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.runEdge("one-observation/run")
     let g = graph([act])
@@ -642,7 +668,7 @@ suite "an edge that observed nothing is not cacheable":
     # home for actions with no monitorable evidence — into a failure or a
     # new diagnostic. It never published, so there is nothing to skip.
     let f = makeFixture("noncacheable")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.runEdge("non-cacheable/run", cacheable = false)
     let g = graph([act])
@@ -667,7 +693,7 @@ suite "the same guard holds on the recognized-report evidence arm":
 
   test "zero observations in a produced .iomon: the edge does not publish":
     let f = makeFixture("report-zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.iomonReportEdge("report-zero-evidence/run")
     let g = graph([act])
@@ -705,7 +731,7 @@ suite "the same guard holds on the recognized-report evidence arm":
     # would also be satisfied by an engine that refused every edge of this
     # class for some unrelated reason.
     let f = makeFixture("report-one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.iomonReportEdge("report-one-observation/run")
     let g = graph([act])
@@ -744,7 +770,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
   test "recognized-format-validated-by-monitor: zero observations do not publish":
     let f = makeFixture("validated-report-zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.reportValidatedByMonitorEdge("validated-report-zero/run")
     let g = graph([act])
@@ -802,7 +828,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
     ## declared a report and produced none of its declared paths" is a
     ## different outcome again, recorded by `cirMissingDependencyReport`.
     let f = makeFixture("validated-report-one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.reportValidatedByMonitorEdge("validated-report-one/run")
     let g = graph([act])
@@ -836,7 +862,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
   test "converter-validated-by-monitor: zero observations do not publish":
     let f = makeFixture("validated-converter-zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.converterValidatedByMonitorEdge("validated-converter-zero/run")
     let g = graph([act])
@@ -867,7 +893,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
   test "converter-validated-by-monitor: one converted input publishes":
     let f = makeFixture("validated-converter-one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.converterValidatedByMonitorEdge("validated-converter-one/run",
       converterReports = "input\\t" & f.observedPath & "\\n")
@@ -1002,7 +1028,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-auto-zero")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.runEdge("keyed-auto-zero/run", rootImage = sh)
       let g = graph([act])
@@ -1048,7 +1074,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-auto-one")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       # Same store `argv[0]`; the observation is a WORKSPACE file, so it
       # survives the elision and the key is not empty.
       f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
@@ -1085,7 +1111,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-report-zero")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.reportValidatedByMonitorEdge("keyed-report-zero/run",
         rootImage = sh)
@@ -1115,7 +1141,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-report-one")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
       let act = f.reportValidatedByMonitorEdge("keyed-report-one/run",
         rootImage = sh)
@@ -1140,7 +1166,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-converter-zero")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.converterValidatedByMonitorEdge("keyed-converter-zero/run",
         rootImage = sh)
@@ -1168,7 +1194,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-converter-one")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord()])
       let act = f.converterValidatedByMonitorEdge("keyed-converter-one/run",
         converterReports = "input\\t" & f.observedPath & "\\n",
@@ -1217,7 +1243,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-out-of-scope")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.iomonReportEdge("keyed-out-of-scope/run", rootImage = sh)
       let g = graph([act])
@@ -1264,7 +1290,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-noncacheable")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.runEdge("keyed-noncacheable/run", cacheable = false,
         rootImage = sh)
@@ -1304,7 +1330,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ## above because the two can fail independently: the diagnostic STRING
     ## shipped correct and informative from the day the guard landed, while
     ## the refusal recorded no `CacheIneligibilityReason` at all for three
-    ## weeks. `traceCacheIneligibility` substitutes its defensive
+    ## weeks. `traceCacheIneligibility` then substituted a defensive
     ## `"unspecified"` placeholder for an empty reason set, so the refusal
     ## reached an operator as
     ##
@@ -1312,21 +1338,36 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ##                            reasons=unspecified
     ##
     ## and — the consequence that matters beyond the wording — was invisible
-    ## to any per-class count over `cacheIneligibilityReasons`, which is how
-    ## DA-7's item 2 is measured. A class that never enters the set cannot
-    ## appear in such a table as a row, a zero, or a regression, whatever
-    ## its true count.
+    ## to any per-class count over the reason set, which is how DA-7's item 2
+    ## is measured. A class that never enters the set cannot appear in such
+    ## a table as a row, a zero, or a regression, whatever its true count.
     ##
-    ## WHY THE TRACE RATHER THAN THE SET: `cacheIneligibilityReasons` is a
-    ## module-private field of a module-private object, so the trace event
-    ## is the only place the class is observable from outside the engine —
-    ## and it is also the place an operator actually reads it, which makes
-    ## it the right assertion target rather than a concession.
+    ## WHAT THE TYPE NOW GUARANTEES, AND WHAT IT LEAVES TO THIS CASE. The
+    ## refusal flag and the reason set used to be two fields written by
+    ## convention. They are now one `CacheRefusal` whose only writer,
+    ## `refuseCachePublication`, takes the reason as an argument, and whose
+    ## "refused" is derived from the set being non-empty — so a refusal with
+    ## NO class cannot be written, and the placeholder went with it
+    ## (`t_cache_refusal_always_names_its_reason` pins that at compile time).
+    ## What no type can check is that this guard names THIS class rather than
+    ## a neighbour's, and that is what the equality below still pins.
     ##
-    ## MUTATION-CHECKED (2026-10-03): deleting the
+    ## WHY THE TRACE RATHER THAN THE SET: the reason set is a private field
+    ## of `CacheRefusal`, held in a module-private field of a module-private
+    ## object, so the trace event is the only place the class is observable
+    ## from outside the engine — and it is also the place an operator
+    ## actually reads it, which makes it the right assertion target rather
+    ## than a concession.
+    ##
+    ## MUTATION-CHECKED (2026-10-03, against the former two-field shape):
+    ## deleting the then-separate
     ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line in
-    ## `gradeKeyedInputSet` reddens this case on the `reasons=` equality and
-    ## on the `unspecified` assertion, and reddens NOTHING else in the file.
+    ## `gradeKeyedInputSet` reddened this case on the `reasons=` equality and
+    ## on the `unspecified` assertion, and reddened NOTHING else in the file.
+    ## That mutation is no longer expressible: the class is an argument of
+    ## the refusal, so deleting it deletes the refusal too. The one that
+    ## remains — passing a different class — falls on the `reasons=`
+    ## equality by construction.
     let sh = contentAddressedShell()
     if sh.len == 0:
       skip("no executable /nix/store bash on this host; the tool-root " &
@@ -1372,7 +1413,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ## reason this file now asserts a publish decision about a combination
     ## rather than only a trace string.
     ##
-    ## `cacheIneligibilityReasons` is documented as diagnostic-only, and it
+    ## The reason set (`cacheIneligibilityReasons`) reads as diagnostic, and it
     ## is — with exactly one exception. `determinismProbeAdmits` gates on
     ##
     ##     if evidence.cacheIneligibilityReasons != {cirUnblessedEntropy}:
@@ -1401,7 +1442,8 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ## compared"), so a fixture built like its siblings would grade the gate
     ## above with the gate below and pass whatever the first one did.
     ##
-    ## MEASURED BOTH WAYS (2026-10-03), by deleting the
+    ## MEASURED BOTH WAYS (2026-10-03, against the former two-field shape,
+    ## where the reason was a separate line), by deleting the
     ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line and
     ## rebuilding. The warm run's trace and the published evidence file:
     ##
@@ -1539,7 +1581,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## the case fails on a path being present rather than on a resolution
     ## having quietly returned "".
     let f = makeFixture("da1f-builtin-root-image")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     let config = testConfig(f.cacheRoot)
     let outPath = f.workRoot / "written.txt"
 
@@ -1574,7 +1616,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     # the fold outright reddens here; deleting only its `kind == bakProcess`
     # clause reddens above.
     let f2 = makeFixture("da1f-process-root-image")
-    defer: removeDir(f2.root)
+    defer: removeFixtureTree(f2.root)
     f2.writeRmdf(@[processRecord(), readRecord(f2.observedPath)])
     var proc0 = f2.runEdge("da1f/process-with-argv")
     proc0.argv = @["sh", "-c", "echo ran >> " & f2.runLogPath]
@@ -1590,7 +1632,8 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     # than two empty answers.
     var resolvedRootImage = ""
     for path in rp.evidence.monitorReads:
-      if path.isAbsolute and path.extractFilename == "sh":
+      # `sh` on POSIX, `sh.exe` on Windows.
+      if path.isAbsolute and path.splitFile.name == "sh":
         resolvedRootImage = path
     checkpoint("resolved root image: " & resolvedRootImage)
     check resolvedRootImage.len > 0
@@ -1608,7 +1651,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## Asserting only the warm half would pass against an engine that marks
     ## every evidence set a replay.
     let f = makeFixture("da1f-replay-provenance")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.runEdge("da1f/replay-provenance")
     let g = graph([act])
@@ -1647,7 +1690,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## sources disagree about what the same observation means), so this case
     ## pins BOTH halves: the entry is still there, and it is now attributable.
     let f = makeFixture("da1f-converter-provenance")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.converterValidatedByMonitorEdge("da1f/converter-provenance",
       converterReports = "input\\t" & f.observedPath & "\\n")
@@ -1682,7 +1725,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
       let name = "da1f-depfile-" &
         (if declarationDerived: "declared" else: "observed")
       let f = makeFixture(name)
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord()])
       # The generator stamp is a COMMENT, exactly as
       # `unmonitorableActionDepfileText` writes it. The rule below it is
@@ -1744,7 +1787,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## WHICH POLARITY IS THE SAFE ONE, TRACED RATHER THAN ASSUMED. The
     ## predicate has exactly one caller — the fifth term of the zero-evidence
     ## guard in `applyMonitorEvidenceStatus` — and `true` there is the
-    ## REFUSAL: `zeroEvidenceDiagnostic`, `disableCacheHits`,
+    ## REFUSAL: `zeroEvidenceDiagnostic` plus a publish refusal naming
     ## `cirEmptyEvidence`, so the action succeeds and publishes nothing.
     ## `false` lets the record through. The shipped presence test answers
     ## `true` for an UNMARKED writer (the fail-closed answer, a lost hit); the
@@ -1784,7 +1827,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
       let name = "da1f-z1-" &
         (if observationPresent: "mixed" else: "both-declared")
       let f = makeFixture(name)
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord()])
       let act = f.twoReportsValidatedByMonitorEdge("da1f/z1/" & name,
         firstHeader =

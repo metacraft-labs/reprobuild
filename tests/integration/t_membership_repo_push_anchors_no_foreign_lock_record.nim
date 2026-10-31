@@ -152,14 +152,14 @@ suite "a membership-repo push anchors no foreign lock record":
           " commit -qm " & q("seed " & name))
         discard requireRun(git & " -C " & q(ws / name) & " push -q origin main")
         writeFile(ws / "repos" / (name & ".toml"),
-          "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+          "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
           "[repo]\nname = \"" & name & "\"\npath = \"" & name & "\"\n" &
-          "remote = \"" & name & "-origin\"\nrevision = \"main\"\n")
+          "remote = \"" & name & "-origin\"\nmainline = \"main\"\n")
 
       writeFile(ws / "projects" / "mix.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"mix\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"mix\"\n" &
+        "\n" &
         "[[remote]]\nname = \"core-origin\"\nfetch = \"file://" &
           scratch / "origin-core.git" & "\"\n\n" &
         "[[remote]]\nname = \"side-origin\"\nfetch = \"file://" &
@@ -186,8 +186,8 @@ suite "a membership-repo push anchors no foreign lock record":
       discard requireRun(git & " -C " & q(store) & " commit -qm seed")
       discard requireRun(git & " -C " & q(store) & " push -q origin main")
 
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n")
 
       # An EXPLICIT team route to that store. Without one the workspace is
@@ -195,9 +195,9 @@ suite "a membership-repo push anchors no foreign lock record":
       # per-repo participation fan-out — the path a suppressed partition write
       # re-enables — is never exercised at all. The field failure this test
       # exists for happened in a routed workspace, so the fixture is routed.
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"team\", backend = \"git-checkout\", " &

@@ -6,6 +6,7 @@
 ## warn when production code calls the ambient process APIs directly.
 
 import std/[os, osproc, strtabs]
+import ./process_exec
 
 proc uncontrolledFindExe*(exe: string, followSymlinks = true): string =
   ## Resolves ``exe`` through the ambient PATH.
@@ -18,7 +19,15 @@ proc uncontrolledExecCmdEx*(command: string;
                             workingDir = ""; input = ""):
     tuple[output: string, exitCode: int] =
   ## Runs ``command`` through an ambient shell or PATH lookup.
-  {.noRewrite.}: osproc.execCmdEx(command, options, env, workingDir, input)
+  ##
+  ## ``osproc.execCmdEx`` in every respect except the release of the child:
+  ## ``process_exec.execCmdExCloseOnce`` closes the merged stdout/stderr
+  ## descriptor once, where ``osproc.close`` closes it twice on POSIX — a
+  ## stale close that
+  ## lands on another thread's descriptor when this runs inside the build
+  ## engine's scheduler thread with its worker pool live (the tarball and
+  ## Nim-from-source provisioners call it there). See ``process_close``.
+  execCmdExCloseOnce(command, options, env, workingDir, input)
 
 proc uncontrolledExecProcess*(command: string; workingDir = "";
                               args: openArray[string] = [];

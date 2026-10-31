@@ -1,4 +1,4 @@
-import std/[os, strutils, compilesettings]
+import std/[algorithm, os, strutils, compilesettings]
 
 # The directory holding THIS file, resolved independently of whatever project
 # nim happens to be compiling.
@@ -18,6 +18,25 @@ import std/[os, strutils, compilesettings]
 # being compiled, and to this repo the rest of the time. Anything that must
 # denote a location in THIS repository has to be anchored here instead.
 let reproRepoRoot = currentSourcePath().parentDir()
+
+# Every existence probe below goes through these, never through a bare
+# `fileExists` / `dirExists`. Those resolve a relative path against the
+# compiler's WORKING DIRECTORY, while a relative `switch("path", ...)` is
+# resolved against the directory of this file -- so a probe and the switch it
+# guards agreed only for as long as nim happened to be started in the repo
+# root. Compiles do not have to be: the `apps` edges run in their module's own
+# directory (`nim.c(runInSourceDir = true)` in `repro.nim`), and from there a
+# cwd-relative probe of `../io-mon/src` looks inside `apps/` and finds
+# nothing. Anchoring a relative probe here makes it test exactly the
+# directory the switch would add, whatever the working directory. Absolute
+# paths are unaffected.
+proc repoPath(path: string): string =
+  if path.len == 0 or path.isAbsolute: path
+  else: reproRepoRoot / path
+
+proc repoFileExists(path: string): bool = fileExists(repoPath(path))
+
+proc repoDirExists(path: string): bool = dirExists(repoPath(path))
 
 switch("styleCheck", "hint")
 
@@ -171,7 +190,7 @@ let ctTestRunnerRoot = block:
     ".." / "reprobuild-ct-test-runner"
 let ctTestRunnerAdapterSrc = ctTestRunnerRoot / "libs" /
   "ct_test_runner_adapter" / "src"
-if dirExists(ctTestRunnerAdapterSrc):
+if repoDirExists(ctTestRunnerAdapterSrc):
   switch("path", ctTestRunnerAdapterSrc)
 
 # Incremental-Test-Runner: ``ct_incremental_adapter`` is hosted by CodeTracer
@@ -213,7 +232,7 @@ let ctIncrementalSrc = block:
                     ".." / "codetracer" / "src",
                     getEnv("CODETRACER_PINNED_SRC")]:
     if candidate.len > 0 and
-        fileExists(candidate / "ct_incremental_adapter.nim"):
+        repoFileExists(candidate / "ct_incremental_adapter.nim"):
       found = candidate
       break
   found
@@ -262,7 +281,7 @@ else:
   # canonical file.
   let ctIncrementalFallbackSrc = ctTestRunnerRoot / "libs" /
     "ct_incremental_adapter" / "src"
-  if dirExists(ctIncrementalFallbackSrc):
+  if repoDirExists(ctIncrementalFallbackSrc):
     switch("path", ctIncrementalFallbackSrc)
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
@@ -277,8 +296,24 @@ let reproTestAdaptersSrc = block:
     fromEnv
   else:
     ".." / "reprobuild-test-adapters" / "src"
-if dirExists(reproTestAdaptersSrc):
+if repoDirExists(reproTestAdaptersSrc):
   switch("path", reproTestAdaptersSrc)
+
+# The test-certificate standard's store, note-framing and two-note merge rules
+# live in the standalone ``test-certificates-tools`` package (Nim package
+# ``test_certificates``, stdlib-only), which the engine links instead of
+# keeping a second implementation of them. Same resolution as the TestRunner
+# contract above: ``TEST_CERTIFICATES_TOOLS_SRC`` (seeded from the pinned
+# ``test-certificates-tools-src`` flake input by the dev shell and the
+# sandboxed package build), else the sibling checkout.
+let testCertificatesToolsSrc = block:
+  let fromEnv = getEnv("TEST_CERTIFICATES_TOOLS_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "test-certificates-tools" / "src"
+if repoFileExists(testCertificatesToolsSrc / "test_certificates.nim"):
+  switch("path", testCertificatesToolsSrc)
 
 for libName in [
   # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
@@ -358,6 +393,16 @@ for libName in [
   # Windows-Runner-Binary-Cache-Deploy M5: the signed desired-state
   # manifest pull agent (reprobuild-native analog of mcl-deploy-agent).
   "repro_deploy_agent",
+  # ReproOS-Remix-Protocol-And-Registry M1: the Remix manifest codec,
+  # identities, signatures and lineage.
+  "repro_remix",
+  "repro_remix_registry",
+  # ReproOS-Agent-Harbor-Integration M0: the agent integration host,
+  # capabilities, approvals and audit log.
+  "repro_agent_protocol",
+  # ReproOS-Agent-Harbor-Integration M3: ownership, checkout and the
+  # Reprobuild backend of the agent host.
+  "repro_agent_backend",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",
@@ -372,6 +417,9 @@ for libName in [
   "repro_homebrew_adapter",
   "repro_elevation",
   "repro_infra",
+  # ReproOS add-on mode: fingerprint, preflight, bootstrap, uninstall and
+  # the add-on layer over `repro infra apply` on a distribution-owned host.
+  "repro_addon",
   "repro_interface_artifacts",
   "repro_dev_env_artifacts",
   "repro_dev_env_activation",
@@ -407,6 +455,12 @@ for libName in [
   "repro_test_support",
   "repro_workspace_manifests",
   "repro_peer_cache",
+  # Distributed-Execution M7: the receiver half of remote goals. Snapshot
+  # manifests + tree verification + materialization (M1 extends with
+  # capture and the worktree pool), and the worker that executes ONLY
+  # nodes of a hydrated graph descriptor inside a confined execution lease.
+  "repro_workspace_snapshot",
+  "repro_distributed_worker",
   # ReproOS-Generations-And-Foreign-Packages A2: binary-cache server
   # library + apps/repro-binary-cache HTTP daemon. Layer-3 substitute
   # plane per Binary-Caches.md; see THREE-LAYER-TAXONOMY.md.
@@ -536,20 +590,20 @@ for libName in [
 # Nim sibling. Prefer ``$IO_MON_SRC``, then the sibling checkout.
 let ioMonSrc = block:
   let fromEnv = getEnv("IO_MON_SRC")
-  if fromEnv.len > 0 and fileExists(fromEnv / "io_mon.nim"):
+  if fromEnv.len > 0 and repoFileExists(fromEnv / "io_mon.nim"):
     fromEnv
-  elif fromEnv.len > 0 and fileExists(fromEnv / "src" / "io_mon.nim"):
+  elif fromEnv.len > 0 and repoFileExists(fromEnv / "src" / "io_mon.nim"):
     fromEnv / "src"
   else:
     ".." / "io-mon" / "src"
-if fileExists(ioMonSrc / "io_mon.nim"):
+if repoFileExists(ioMonSrc / "io_mon.nim"):
   switch("path", ioMonSrc)
 
 proc nixDevShellSourcePath(envName, marker: string): string =
   when defined(windows):
     ""
   else:
-    if not fileExists("flake.nix"):
+    if not repoFileExists("flake.nix"):
       return ""
     let systemResult =
       gorgeEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
@@ -558,13 +612,16 @@ proc nixDevShellSourcePath(envName, marker: string): string =
     let system = systemResult.output.strip()
     if system.len == 0:
       return ""
+    # `cd` first: `.#` names the flake in the working directory, and the
+    # `flake.nix` probe above is anchored at the repo root (see `repoPath`).
     let valueResult = gorgeEx(
+      "cd " & quoteShell(reproRepoRoot) & " && " &
       "nix eval --raw '.#devShells." & system & ".default." & envName &
       "' 2>/dev/null")
     if valueResult.exitCode != 0:
       return ""
     let candidate = valueResult.output.strip()
-    if candidate.len > 0 and fileExists(candidate / marker):
+    if candidate.len > 0 and repoFileExists(candidate / marker):
       return candidate
     ""
 
@@ -602,14 +659,14 @@ proc reportUnresolvedPackagePath(envName: string;
     "  wanted a directory containing: " & marker & "\n" &
     "  $" & envName & ": " &
     (if envPath.len == 0: "unset"
-     elif dirExists(envPath): "set to " & envPath & ", which has no " & marker
+     elif repoDirExists(envPath): "set to " & envPath & ", which has no " & marker
      else: "set to " & envPath & ", which does not exist") & "\n"
   if candidates.len == 0:
     report.add "  candidate directories: none are declared for this package\n"
   else:
     for candidate in candidates:
       report.add "  candidate directory: " & candidate & " -- " &
-        (if dirExists(candidate): "exists, but has no " & marker
+        (if repoDirExists(candidate): "exists, but has no " & marker
          else: "does not exist") & "\n"
   if useDevShellFallback:
     report.add "  development-shell fallback: consulted, no match\n"
@@ -633,17 +690,17 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   ## ``optional = true`` says a checkout is EXPECTED to be able to lack this
   ## package, so its report reads as a note rather than a warning. It is for
   ## packages whose absence the tree already tolerates -- today only
-  ## ``VM_HARNESS_SRC``, which ``config.nims`` itself guards with
-  ## ``vmHarnessAvailable`` further down, and which no Nix execution surface
+  ## ``GOSTI_SRC``, which ``config.nims`` itself guards with
+  ## ``gostiAvailable`` further down, and which no Nix execution surface
   ## exports. The distinction is about how surprising the absence is, not
   ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
   ## for why nothing here refuses.
   let envPath = getEnv(envName)
-  if envPath.len > 0 and fileExists(envPath / marker):
+  if envPath.len > 0 and repoFileExists(envPath / marker):
     switch("path", envPath)
     return
   for candidate in candidates:
-    if fileExists(candidate / marker):
+    if repoFileExists(candidate / marker):
       switch("path", candidate)
       return
   if useDevShellFallback:
@@ -748,8 +805,77 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # missing nim-shm-gset, which is exactly the version skew that breaks the build.
 # These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
+proc pinnedSiblingRevision(sibling: string): string =
+  ## The revision `.github/sibling-repos` pins for `sibling` (a `name=<sha>` or
+  ## `name!=<sha>` line keyed by the sibling directory's name), or "" when the
+  ## file does not pin it. Comments and bare names resolve to "".
+  let name = sibling.parentDir().extractFilename()   # ../nim-shm-gset/src -> nim-shm-gset
+  let pinsPath = repoPath(".github" / "sibling-repos")
+  if not fileExists(pinsPath): return ""
+  for raw in readFile(pinsPath).splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line[0] == '#': continue
+    for sep in ["!=", "="]:
+      let at = line.find(sep)
+      if at > 0 and line[0 ..< at] == name:
+        return line[at + sep.len .. ^1].strip()
+  return ""
+
+proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: int] =
+  ## `gorgeEx` runs relative to the script's directory, not the process's, so
+  ## the sibling's checkout is named absolutely.
+  gorgeEx("git -C " & quoteShell(repoPath(sibling.parentDir())) & " " & args)
+
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
-  if fileExists(sibling / marker):
+  ## Sibling-first, but never silently against an explicit pin.
+  ##
+  ## A workspace checkout at `../<name>/src` is what a developer edits, so it
+  ## wins -- EXCEPT when `$<envName>` names another tree and the sibling is
+  ## BEHIND the revision this repository pins for it in `.github/sibling-repos`
+  ## (neither at that revision, nor ahead of it, nor carrying local changes).
+  ## Such a sibling is stale, not a work in progress, and letting it win
+  ## discards the pin without a trace: at b761df51f a cross build whose
+  ## `SHM_GSET_SRC` named the pinned nim-shm-gset 6333cc9 compiled the engine
+  ## against the sibling at fb981c7 instead, so the installed engine lacked the
+  ## fix the pin carried and still died with SIGBUS on a full tmpfs. The shim,
+  ## whose builder honours the variable, had it. The two images disagreed about
+  ## which nim-shm-gset they were, and nothing said so.
+  ##
+  ## So: sibling at/ahead-of/dirty-against the pin -> sibling (the developer's
+  ## intent); sibling behind the pin while an env pin is set -> the env pin,
+  ## announced; no pin known or no git -> sibling, as before.
+  ## `REPRO_SIBLING_POLICY=sibling|pin` forces either choice.
+  if repoFileExists(sibling / marker):
+    let envPath = getEnv(envName)
+    let policy = getEnv("REPRO_SIBLING_POLICY")
+    if policy != "sibling" and envPath.len > 0 and
+        repoFileExists(envPath / marker) and
+        absolutePath(envPath) != absolutePath(sibling):
+      var preferPin = policy == "pin"
+      var why = "REPRO_SIBLING_POLICY=pin"
+      if not preferPin:
+        let pin = pinnedSiblingRevision(sibling)
+        if pin.len > 0:
+          let head = siblingGit(sibling, "rev-parse HEAD")
+          let dirty = siblingGit(sibling, "status --porcelain --untracked-files=no")
+          # `nim check` (and nimsuggest) do not run `gorgeEx`: it answers
+          # ("", 0) there, which this reads as "cannot tell" and keeps the
+          # sibling, as before. Only a real compile can refuse a stale one.
+          let headRev = head.output.strip()
+          if head.exitCode == 0 and dirty.exitCode == 0 and headRev.len >= 12:
+            let atOrAhead = siblingGit(sibling,
+              "merge-base --is-ancestor " & pin & " HEAD").exitCode == 0
+            if not atOrAhead and dirty.output.strip().len == 0:
+              preferPin = true
+              why = "the sibling is at " & headRev[0 ..< 12] &
+                ", which is not at or ahead of the pinned " & pin[0 ..< 12] &
+                " in .github/sibling-repos, and carries no local changes"
+      if preferPin:
+        echo "config.nims: using $" & envName & "=" & envPath &
+          " instead of the sibling " & sibling & " (" & why &
+          "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
+        switch("path", envPath)
+        return
     switch("path", sibling)
     return
   addPackagePath(envName, [], marker, useDevShellFallback = true)
@@ -781,27 +907,27 @@ addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
 # exists, so removing the duplicate loses no resolution and restores the
 # policy.
 
-# R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
+# R2: gosti lives in the sibling ``D:/metacraft/gosti/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
-# (tests/integration/t_r2_iso_boot.nim) imports ``vm_harness`` to drive
+# (tests/integration/t_r2_iso_boot.nim) imports ``gosti`` to drive
 # the bootFromMedia/captureSerial/expectLine primitives against the
-# Hyper-V Gen-2 UEFI backend. Prefer $VM_HARNESS_SRC, then the
+# Hyper-V Gen-2 UEFI backend. Prefer $GOSTI_SRC, then the
 # sibling-repo checkout.
-addPackagePath("VM_HARNESS_SRC", [
-  ".." / "vm-harness" / "src",
-], "vm_harness.nim", optional = true)
+addPackagePath("GOSTI_SRC", [
+  ".." / "gosti" / "src",
+], "gosti.nim", optional = true)
 
-# Define ``vmHarnessAvailable`` only when the optional vm-harness sibling is
+# Define ``gostiAvailable`` only when the optional gosti sibling is
 # actually present. The R2/R9 boot integration tests guard their
-# ``import vm_harness`` on this symbol so they skip-compile when the sibling is
+# ``import gosti`` on this symbol so they skip-compile when the sibling is
 # absent, instead of hard-failing the whole test-build. A missing optional
 # sibling must skip, not be fatal (Workspace-alignment RA-23;
 # Interactive-UX-And-Progress.md Principle 2).
 block:
-  let vmhEnv = getEnv("VM_HARNESS_SRC")
-  if (vmhEnv.len > 0 and fileExists(vmhEnv / "vm_harness.nim")) or
-     fileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
-    switch("define", "vmHarnessAvailable")
+  let gostiEnv = getEnv("GOSTI_SRC")
+  if (gostiEnv.len > 0 and repoFileExists(gostiEnv / "gosti.nim")) or
+     repoFileExists(".." / "gosti" / "src" / "gosti.nim"):
+    switch("define", "gostiAvailable")
 
 # Lib subdirectories to probe under a system prefix. The order matters:
 # `lib` covers the default + Debian-multiarch case (Debian/Ubuntu install
@@ -818,16 +944,180 @@ const LibSubdirs = [
   "lib/aarch64-linux-gnu",
 ]
 
+proc archiveObjectHeader(archive: string): string =
+  ## The first member of the ar(5) archive `archive` whose data opens with an
+  ## object header (ELF, thin or universal Mach-O), or "" when none does.
+  ## NimScript mirror of `archiveMatchesHostArch` in
+  ## `repro_interface_artifacts`; keep the two in step. Members follow the
+  ## common layout (https://man.freebsd.org/cgi/man.cgi?query=ar&sektion=5):
+  ## a 60-byte header after the 8-byte magic, name in bytes 0..15, decimal
+  ## size in 48..57, data padded to an even offset. The GNU `/` and `//`
+  ## tables and the BSD `__.SYMDEF` are skipped because their data is no
+  ## object header; a BSD `#1/N` name prefixes the data with N name bytes. A
+  ## malformed header, or more than `MaxMembers`, yields "" (accepted).
+  const MaxMembers = 4096
+  proc isObjectHeader(at: int): bool =
+    if at + 4 > archive.len:
+      return false
+    let m = archive[at .. at + 3]
+    m == "\x7FELF" or m == "\xCF\xFA\xED\xFE" or m == "\xCE\xFA\xED\xFE" or
+      m == "\xCA\xFE\xBA\xBE"
+  var pos = 8
+  for _ in 0 ..< MaxMembers:
+    if pos + 60 > archive.len:
+      return ""
+    let name = archive[pos .. pos + 15]
+    var memberSize: int
+    try:
+      memberSize = parseInt(archive[pos + 48 .. pos + 57].strip())
+    except ValueError:
+      return ""
+    if memberSize < 0:
+      return ""
+    var dataPos = pos + 60
+    var dataLen = memberSize
+    if name.startsWith("#1/"):
+      var nameLen: int
+      try:
+        nameLen = parseInt(name[3 .. ^1].strip())
+      except ValueError:
+        return ""
+      dataPos += nameLen
+      dataLen -= nameLen
+    if dataLen >= 8 and isObjectHeader(dataPos):
+      return archive[dataPos ..< min(archive.len, dataPos + 512)]
+    pos = pos + 60 + memberSize + (memberSize and 1)
+  ""
+
+proc libMatchesTargetArch(libFile: string): bool =
+  ## NimScript mirror of `soMatchesHostArch` in
+  ## `libs/repro_interface_artifacts/src/repro_interface_artifacts.nim`:
+  ## whether `libFile`'s object header names something the TARGET's loader
+  ## can map. Keep the two in step; the library proc carries the full
+  ## rationale and the header-layout references, and
+  ## `libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim`
+  ## pins the behaviour.
+  ##
+  ## The `/nix/store` glob below is not an architecture selector: the CI
+  ## runners' store holds i686, x86-64 and aarch64 builds under names that
+  ## differ only in their hash, and its first sorted `*-openssl-*` was a
+  ## 32-bit OpenSSL, baked as `-L` + `-Wl,-rpath` into 64-bit binaries
+  ## (`libcrypto.so.3: wrong ELF class: ELFCLASS32`).
+  ##
+  ## In NimScript `hostCPU` and `defined(cpu64)` describe the compilation's
+  ## target (`buildCPU` is the machine running the compiler), which is the
+  ## architecture the `-L`/RPATH must match. There is no `File` API in the
+  ## VM, so the header is taken from `readFile`; it runs only on fallback
+  ## candidates, and stops at the first that matches.
+  ##
+  ## An ELF must match the target's class (`EI_CLASS`, byte 4), data encoding
+  ## (`EI_DATA`, byte 5) and `e_machine` (bytes 18-19); a thin Mach-O its
+  ## word size and `cputype`; a universal Mach-O must carry a slice for the
+  ## target `cputype`. An ELF never matches a Darwin target, a Mach-O never
+  ## a non-Darwin one. A static archive is judged by its first member that
+  ## carries an object header (`archiveObjectHeader`): a cross-build leaves
+  ## `sqlite-static-aarch64-unknown-linux-musl` in the store with only a
+  ## `libsqlite3.a`, and an unclassified archive let the glob below hand an
+  ## x86-64 link that directory (`ld: skipping incompatible … libsqlite3.a`,
+  ## `cannot find -lsqlite3`; measured 2026-10-30). Anything else
+  ## unclassified -- a linker script, a short file, an unknown target
+  ## machine -- is accepted and left to the linker, as before this filter
+  ## existed.
+  if not repoFileExists(libFile):
+    return true
+  var hdr = readFile(repoPath(libFile))
+  if hdr.len < 8:
+    return true
+  if hdr.startsWith("!<arch>\n"):
+    hdr = archiveObjectHeader(hdr)
+    if hdr.len < 8:
+      return true
+  proc b(at: int): uint32 = uint32(ord(hdr[at]))
+  proc le32(at: int): uint32 =
+    b(at) or (b(at + 1) shl 8) or (b(at + 2) shl 16) or (b(at + 3) shl 24)
+  proc be32(at: int): uint32 =
+    (b(at) shl 24) or (b(at + 1) shl 16) or (b(at + 2) shl 8) or b(at + 3)
+  let targetIs64 = defined(cpu64)
+  let targetMachine =
+    if hostCPU == "amd64": 0x3E'u32         # EM_X86_64
+    elif hostCPU == "arm64": 0xB7'u32       # EM_AARCH64
+    elif hostCPU == "i386": 0x03'u32        # EM_386
+    elif hostCPU == "arm": 0x28'u32         # EM_ARM (32-bit armhf/armel)
+    else: 0'u32
+  let targetCpuType =
+    if hostCPU == "amd64": 0x01000007'u32   # CPU_TYPE_X86_64
+    elif hostCPU == "arm64": 0x0100000C'u32 # CPU_TYPE_ARM64
+    else: 0'u32
+  let magic = hdr[0 .. 3]
+  if magic == "\x7FELF":
+    when defined(macosx):
+      return false
+    else:
+      if hdr.len < 20:
+        return true
+      if b(4) != (if targetIs64: 2'u32 else: 1'u32):
+        return false
+      let targetLittleEndian = cpuEndian == littleEndian
+      if b(5) != (if targetLittleEndian: 1'u32 else: 2'u32):
+        return false
+      if targetMachine == 0'u32:
+        return true
+      let eMachine =
+        if targetLittleEndian: b(18) or (b(19) shl 8)
+        else: (b(18) shl 8) or b(19)
+      return eMachine == targetMachine
+  let thin64 = magic == "\xCF\xFA\xED\xFE"
+  let thin32 = magic == "\xCE\xFA\xED\xFE"
+  let fat = magic == "\xCA\xFE\xBA\xBE"
+  if not (thin64 or thin32 or fat):
+    return true
+  when not defined(macosx):
+    return false
+  else:
+    if thin32:
+      return not targetIs64
+    if thin64:
+      return targetCpuType == 0'u32 or le32(4) == targetCpuType
+    # FAT_MAGIC doubles as the Java class-file magic; see the library proc.
+    let slices = int(be32(4))
+    if slices <= 0 or slices > 32 or 8 + slices * 20 > hdr.len or
+       targetCpuType == 0'u32:
+      return true
+    for i in 0 ..< slices:
+      if be32(8 + i * 20) == targetCpuType:
+        return true
+    false
+
+proc dirHoldsLibrary(libDir: string; dylibNames: openArray[string];
+                     targetArchOnly: bool): bool =
+  ## Whether `libDir` holds one of `dylibNames` -- and, when
+  ## `targetArchOnly`, none of them built for another architecture.
+  ##
+  ## The directory is judged as a whole because the names are alternatives
+  ## for ONE `-l`: a static archive (`libsqlite3.a`) cannot be classified
+  ## from its header and is accepted on its own, so judging name by name let
+  ## the archive vouch for a directory whose `libsqlite3.so` was foreign --
+  ## and the linker, which prefers the shared object, then took that. A
+  ## cross-compile to armhf on an x86-64 Nix host linked the store's x86-64
+  ## SQLite that way.
+  result = false
+  for dylibName in dylibNames:
+    let path = libDir / dylibName
+    if repoFileExists(path):
+      if targetArchOnly and not libMatchesTargetArch(path):
+        return false
+      result = true
+
 proc firstExistingPrefixLibDir(prefix: string;
-                               dylibNames: openArray[string]): string =
+                               dylibNames: openArray[string];
+                               targetArchOnly = false): string =
   ## Return the absolute libdir under `prefix` that holds one of
   ## `dylibNames`, or "" if none match. Probes `prefix/lib`,
   ## `prefix/lib64`, and the two common Debian-multiarch triples.
   for libSub in LibSubdirs:
     let candidate = prefix / libSub
-    for dylibName in dylibNames:
-      if fileExists(candidate / dylibName):
-        return candidate
+    if dirHoldsLibrary(candidate, dylibNames, targetArchOnly):
+      return candidate
   ""
 
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
@@ -835,29 +1125,63 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
   for prefix in candidates:
     if prefix.len == 0:
       continue
-    if not fileExists(prefix / header):
+    if not repoFileExists(prefix / header):
       continue
     if firstExistingPrefixLibDir(prefix, dylibNames).len > 0:
       return prefix
   ""
 
+proc nixStorePrefixes(namePattern: string): seq[string] =
+  ## The `/nix/store` directories matching the glob `namePattern`
+  ## (`*-sqlite-*`, ...), sorted bytewise.
+  ##
+  ## Expanded by the shell's own glob and `printf` builtin, with no external
+  ## tool. This used to be `find ... | sort`, but the provider-compile and
+  ## interface-extraction edges run this file with `PATH` set to the Nim and
+  ## C compilers' directories only (`providerCompileLaunchEnv`): neither tool
+  ## was found, every store lookup came back empty, and the SQLite search
+  ## fell through to the host's `/usr/lib` -- which then ended up in the
+  ## provider's RPATH ahead of the Nix glibc (reprobuild-pm issue
+  ## 2026-10-14-project-provider-rpath-puts-usr-lib-ahead-of-the-nix-glibc).
+  ## Listing the store in NimScript instead (`listDirs`) exceeds the VM's
+  ## iteration limit on a store of ~100k entries.
+  ##
+  ## The pattern is this file's own literal, never user input; a pattern
+  ## that matches nothing leaves the glob unexpanded, which `-d` rejects.
+  ## A symlink is skipped, as `find -type d` did and as `nixLibDirIn`'s
+  ## `walkDir` does. The shell's glob order follows the locale, so the
+  ## result is sorted here, as `nixLibDirIn` in `repro_interface_artifacts`
+  ## sorts its own.
+  if not dirExists("/nix/store"):
+    return @[]
+  let listing = gorgeEx("for d in /nix/store/" & namePattern &
+    "; do [ -d \"$d\" ] && [ ! -L \"$d\" ] && printf '%s\\n' \"$d\"; " &
+    "done; true")
+  if listing.exitCode != 0:
+    return @[]
+  for line in listing.output.splitLines:
+    let path = line.strip()
+    if path.len > 0:
+      result.add(path)
+  result.sort()
+
 proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): string =
-  let cmd = "find /nix/store -maxdepth 1 -type d -name '" & namePattern &
-    "' 2>/dev/null | sort"
-  let result = gorgeEx(cmd)
-  if result.exitCode != 0:
-    return ""
-  for line in result.output.splitLines:
-    let prefix = line.strip()
-    if prefix.len == 0:
-      continue
-    if fileExists(prefix / header) and
-       firstExistingPrefixLibDir(prefix, dylibNames).len > 0:
+  for prefix in nixStorePrefixes(namePattern):
+    # Same architecture filter as `nixLibDir` (and as the library's
+    # `nixPrefix`): the store holds every architecture under one name.
+    if repoFileExists(prefix / header) and
+       firstExistingPrefixLibDir(prefix, dylibNames,
+                                 targetArchOnly = true).len > 0:
       return prefix
   ""
 
 proc firstExistingLibDir(candidates: openArray[string];
-                         dylibNames: openArray[string]): string =
+                         dylibNames: openArray[string];
+                         targetArchOnly = false): string =
+  ## `targetArchOnly` is for candidates nobody chose for this build -- a
+  ## conventional prefix, a store glob -- where a directory's existence says
+  ## nothing about its architecture. An explicitly named prefix is taken as
+  ## given.
   for candidate in candidates:
     let path = candidate.strip()
     if path.len == 0:
@@ -867,25 +1191,20 @@ proc firstExistingLibDir(candidates: openArray[string];
     # standard lib subdirectories so a candidate like `/usr` resolves
     # whether the host is `/usr/lib`, `/usr/lib64`, or a Debian-multiarch
     # triple.
-    for dylibName in dylibNames:
-      if fileExists(path / dylibName):
-        return path
-    let resolved = firstExistingPrefixLibDir(path, dylibNames)
+    if dirHoldsLibrary(path, dylibNames, targetArchOnly):
+      return path
+    let resolved = firstExistingPrefixLibDir(path, dylibNames, targetArchOnly)
     if resolved.len > 0:
       return resolved
   ""
 
 proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
-  let cmd = "find /nix/store -maxdepth 1 -type d -name '" & namePattern &
-    "' 2>/dev/null | sort"
-  let result = gorgeEx(cmd)
-  if result.exitCode != 0:
-    return ""
-  for line in result.output.splitLines:
-    let prefix = line.strip()
-    if prefix.len == 0:
-      continue
-    let libDir = firstExistingLibDir([prefix], dylibNames)
+  ## The first sorted `/nix/store` prefix matching `namePattern` whose libdir
+  ## holds one of `dylibNames` built for the compilation's target. Mirrored
+  ## by `nixLibDirIn` in `repro_interface_artifacts`; the architecture filter
+  ## is what keeps "first sorted" from meaning "arbitrary architecture".
+  for prefix in nixStorePrefixes(namePattern):
+    let libDir = firstExistingLibDir([prefix], dylibNames, targetArchOnly = true)
     if libDir.len > 0:
       return libDir
   ""
@@ -914,10 +1233,17 @@ if not useSystemHashLibs:
     "blake3" / "vendor"
   let vendoredXxhashInc = reproRepoRoot / "libs" / "xxh3" / "src" /
     "xxh3" / "vendor"
-  if fileExists(vendoredBlake3Inc / "blake3.h"):
-    switch("passC", "-I" & vendoredBlake3Inc)
-  if fileExists(vendoredXxhashInc / "xxhash.h"):
-    switch("passC", "-I" & vendoredXxhashInc)
+  #
+  # Quoted: Nim splices `passC` text into the C compiler command line verbatim,
+  # so an unquoted root containing a space -- an installed release unpacked
+  # under `C:\Users\<First Last>\...`, whose `share\repro\source` carries this
+  # file -- came apart into a stray `vendor` linker input and every profile
+  # compile failed in gcc (measured 2026-10-13, Gradual-Nix-To-Reprobuild-
+  # Migration GM1w).
+  if repoFileExists(vendoredBlake3Inc / "blake3.h"):
+    switch("passC", "-I" & quoteShell(vendoredBlake3Inc))
+  if repoFileExists(vendoredXxhashInc / "xxhash.h"):
+    switch("passC", "-I" & quoteShell(vendoredXxhashInc))
 else:
   let blake3Prefix = block:
     let direct = firstExistingPrefix(
@@ -977,19 +1303,27 @@ proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
     if tok.startsWith("-L") and tok.len > 2:
       let dir = tok[2 .. ^1]
       for n in dylibNames:
-        if fileExists(dir / n):
+        if repoFileExists(dir / n):
           return dir
   ""
 
 when not defined(windows) and not defined(macosx):
   # SQLite link search path. Order: an explicit SQLITE_LIBDIR/SQLITE_PREFIX;
   # then, when a Nix toolchain is in play, the dev shell's own sqlite
-  # (NIX_LDFLAGS) or any Nix store sqlite; only on a host with no Nix at all
-  # the distribution's directories. A host directory is used for `-L` but is
-  # never baked into RPATH (see `isHostSystemLibDir`).
+  # (NIX_LDFLAGS) or a Nix store sqlite built for the target architecture
+  # (`nixLibDir` filters the glob); only on a host with no Nix at all the
+  # distribution's directories. A host directory is used for `-L` but is
+  # never baked into RPATH (see `isHostSystemLibDir`) -- by this file. Nix's
+  # ld-wrapper adds its own `-rpath` for every `-L` directory holding a
+  # library the link uses, and skips only directories outside `$NIX_STORE`;
+  # with `NIX_STORE` unset that test matches nothing. The isolated
+  # provider-compile launch therefore declares `NIX_STORE`
+  # (`providerCompileLaunchEnv`), and the store lookups above must not depend
+  # on the shell `PATH` (`nixStorePrefixes`), or a Nix host falls through to
+  # `/usr/lib` here.
   let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
   let nixInPlay = getEnv("NIX_CC").len > 0 or
-    getEnv("IN_NIX_SHELL").len > 0 or dirExists("/nix/store")
+    getEnv("IN_NIX_SHELL").len > 0 or repoDirExists("/nix/store")
   let sqliteLibDir = block:
     let explicit = firstExistingLibDir(
       [getEnv("SQLITE_LIBDIR"), getEnv("SQLITE_PREFIX")], sqliteNames)
@@ -1033,23 +1367,35 @@ when not defined(windows) and not defined(macosx):
 # carried the blake3/xxhash `-L` flags from those blocks, proving the channel).
 # We add only the search path — the graph still owns `-lssl -lcrypto` per edge —
 # so this is a no-op for non-ssl edges. Windows keeps its own graph-level path.
+#
+# Resolution order: an explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev
+# shell sets the former to its own `pkgs.openssl`); then the dev shell's own
+# `-L` link inputs (`nixLdflagsLibDir`); then the Homebrew prefixes; and only
+# then the `/nix/store` glob. The last two are filtered by target
+# architecture (`libMatchesTargetArch`): `/usr/local` on Apple Silicon is
+# commonly an x86-64 Homebrew, and on a mixed-architecture store the glob's
+# first match was a 32-bit OpenSSL. `externalHashFlags` in
+# `repro_interface_artifacts` replays this exact order for the helpers
+# Reprobuild compiles for itself; keep the two in step.
 when not defined(windows):
+  let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
   let opensslLibDir = block:
-    let direct = firstExistingLibDir(
-      [
-        getEnv("OPENSSL_LIBDIR"),
-        getEnv("OPENSSL_PREFIX"),
-        "/opt/homebrew/opt/openssl@3",
-        "/opt/homebrew/opt/openssl",
-        "/usr/local/opt/openssl@3",
-        "/usr/local/opt/openssl",
-      ],
-      ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"])
-    if direct.len > 0:
-      direct
-    else:
-      nixLibDir("*-openssl-*",
-        ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"])
+    var dir = firstExistingLibDir(
+      [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
+    if dir.len == 0:
+      dir = nixLdflagsLibDir(opensslNames)
+    if dir.len == 0:
+      dir = firstExistingLibDir(
+        [
+          "/opt/homebrew/opt/openssl@3",
+          "/opt/homebrew/opt/openssl",
+          "/usr/local/opt/openssl@3",
+          "/usr/local/opt/openssl",
+        ],
+        opensslNames, targetArchOnly = true)
+    if dir.len == 0:
+      dir = nixLibDir("*-openssl-*", opensslNames)
+    dir
 
   if opensslLibDir.len > 0:
     switch("passL", "-L" & opensslLibDir)
@@ -1102,6 +1448,14 @@ when defined(macosx):
 # "everything under the Nim installation": ``$nim/dist/nim-stew`` and
 # ``$nim/dist/nim-results`` are exactly the 10 ambiguous entries, and hoisting
 # them would silently swap the vendored copies for the fork's.
+#
+# Those two entries came from the fork's global ``config/nim.cfg``, which put
+# them on the path of every compile. The fork pinned by ``nim-fork-src`` since
+# the advance recorded in ``flake.nix`` no longer does (its ``dist/`` trees are
+# on the path only of the fork's own programs), so with that compiler neither
+# entry is on this repository's search path and the 10 specs above resolve to
+# the vendored copies alone. The ``libPath`` key stays right either way: it is
+# what keeps a compiler that still lists them from swapping the copies.
 #
 # Re-derive the ambiguity set before extending this block — the safety property
 # is a fact about the current tree, not an invariant anything enforces.

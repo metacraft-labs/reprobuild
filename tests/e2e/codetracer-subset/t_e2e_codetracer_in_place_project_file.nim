@@ -1,21 +1,28 @@
-import std/[json, os, osproc, sequtils, sets, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tempfiles,
+  unittest]
+import repro_test_support/reasoned_skip
 
 import nimcrypto/sha2 as ncSha2
+import repro_project_dsl/install_mirror_resolver
 import repro_tool_profiles
 import repro_test_support
 
+when defined(posix):
+  from std/posix import Stat, lstat, getuid, S_ISDIR, S_ISSOCK
+  import runquota_client
+
 const
   CodeTracerProjectContractCommit =
-    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
+    "008950fa91fdd68a44f77f9c454eff5b7bf139fa"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-a9ef983e.nim"
+    "tests/fixtures/codetracer-subset/repro-008950fa.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-a9ef983e.nims"
+    "tests/fixtures/codetracer-subset/config-008950fa.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ecb87da01665a172128ec45b2eab00e8e97a709ccdd52f7291797207b84ee85e"
+    "0428fc213dee954c3b1569f4f185322f9f7ac72bc21993bfa75b3859669f6ac4"
   PinnedCodeTracerConfigPayloadSha256 =
-    "fadd0d2371f3456043db00f902d59d1c9e186b0bf97e8a52f48e10b87dd3485d"
+    "469f008a005d9d0d6b274fca8f8422b9f96bc78156567e269b35b0f3ce625a80"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by
@@ -60,131 +67,6 @@ const
       module: "nimcrypto.nim"
     )
   ]
-
-const GccProxySource = r"""
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-static const char *default_real_gcc = "@REAL_GCC_PATH@";
-
-static void read_for_monitor(const char *path) {
-  int fd = open(path, O_RDONLY);
-  if (fd < 0) return;
-  char buffer[4096];
-  while (read(fd, buffer, sizeof(buffer)) > 0) {}
-  close(fd);
-}
-
-int main(int argc, char **argv) {
-  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
-    puts("gcc proxy 1.0.0");
-    return 0;
-  }
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-include") == 0 && i + 1 < argc) {
-      read_for_monitor(argv[i + 1]);
-      i++;
-    } else if (argv[i][0] != '-' && strstr(argv[i], ".c") != NULL) {
-      read_for_monitor(argv[i]);
-    }
-  }
-  char **next_argv = calloc((size_t)argc + 1, sizeof(char *));
-  if (next_argv == NULL) return 126;
-  next_argv[0] = (char *)default_real_gcc;
-  for (int i = 1; i < argc; i++) next_argv[i] = argv[i];
-
-#if defined(__APPLE__)
-  /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose
-     SDK bin lacks gcc and falls back to PATH — re-finding this proxy
-     and looping until kern.maxprocperuid is exhausted. Strip the SDK
-     pointers and proxy directory while retaining monitor injection. */
-  unsetenv("DEVELOPER_DIR");
-  unsetenv("SDKROOT");
-  setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
-#endif
-  execv(default_real_gcc, next_argv);
-  perror("execv real gcc");
-  return 127;
-}
-"""
-
-const StylusFixtureSource = r"""
-#include <errno.h>
-#include <libgen.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-
-static int mkdir_p(const char *path) {
-  char *copy = strdup(path);
-  if (copy == NULL) return 126;
-  for (char *p = copy + 1; *p != '\0'; p++) {
-    if (*p == '/') {
-      *p = '\0';
-      if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
-        free(copy);
-        return 1;
-      }
-      *p = '/';
-    }
-  }
-  if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
-    free(copy);
-    return 1;
-  }
-  free(copy);
-  return 0;
-}
-
-static int ensure_parent(const char *path) {
-  char *copy = strdup(path);
-  if (copy == NULL) return 126;
-  char *dir = dirname(copy);
-  int code = mkdir_p(dir);
-  free(copy);
-  return code;
-}
-
-int main(int argc, char **argv) {
-  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
-    puts("stylus 1.0.0");
-    return 0;
-  }
-  const char *output = "";
-  const char *source = "";
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
-    else if (argv[i][0] == '-') return 64;
-    else source = argv[i];
-  }
-  if (output[0] == '\0' || source[0] == '\0') return 65;
-  if (ensure_parent(output) != 0) return 1;
-  FILE *in = fopen(source, "r");
-  if (in == NULL) return 2;
-  FILE *out = fopen(output, "w");
-  if (out == NULL) {
-    fclose(in);
-    return 3;
-  }
-  fprintf(out, "/* %s */\n", source);
-  char buffer[4096];
-  size_t n = 0;
-  while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
-    if (fwrite(buffer, 1, n, out) != n) {
-      fclose(in);
-      fclose(out);
-      return 4;
-    }
-  }
-  fclose(in);
-  fclose(out);
-  return 0;
-}
-"""
 
 const CodeTracerCommonDevToolExecutables: seq[string] = @[
   "attic-client",
@@ -258,6 +140,19 @@ else:
     CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables &
       CodeTracerMacDevToolExecutables
 
+# Tool `uses:` entries no PATH fixture provides, because the native edges that
+# reference them resolve them themselves: `zstd-dev` is a header/library
+# channel, not an executable (CodeTracer 01d8b6e54), and `dsymutil` is the
+# macOS debug-info pass (CodeTracer 3be367fc1). The C1 pinned contract also
+# declares `image_diff` for the parity gate's FLIP producer C ABI; no selected
+# source-slice action references it. These count toward the declared tool total
+# but are not in `CodeTracerDevToolExecutables`, whose members must each
+# resolve to an executable fixture.
+when defined(macosx):
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev", "dsymutil", "image_diff"]
+else:
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev", "image_diff"]
+
 const CodeTracerSourcePackages = [
   "isonim",
   "nim-everywhere",
@@ -306,9 +201,6 @@ proc installLiveReloadTransport*(url, bundleUrl: cstring): LiveReloadTransport =
 proc disconnect*(transport: LiveReloadTransport) =
   discard
 """
-
-proc q(value: string): string =
-  quoteShell(value)
 
 proc shellCommand(args: openArray[string];
                   env: openArray[(string, string)] = []):
@@ -538,7 +430,7 @@ proc sha256Hex(data: string): string =
 
 proc pinnedCodeTracerPayload(path, expectedSha256: string): string =
   ## The retained fixture carries its own AGPL/provenance header. The payload
-  ## after that header remains byte-identical to the pinned public source.
+  ## after that header is the pinned public source, byte for byte.
   let lines = readFile(path).splitLines(keepEol = true)
   if lines.len <= PinnedCodeTracerFixtureHeaderLines or
       not lines[0].contains("SPDX-License-Identifier: AGPL-3.0-or-later") or
@@ -554,7 +446,7 @@ proc pinnedCodeTracerPayload(path, expectedSha256: string): string =
       CodeTracerProjectContractCommit & ": " & path)
 
 proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
-  ## Use a Reprobuild-owned snapshot of CodeTracer's reviewed ``dev`` graph so
+  ## Use a Reprobuild-owned snapshot of CodeTracer's reviewed published graph so
   ## an adjacent checkout's branch or uncommitted state cannot silently change
   ## the integration oracle. The real sibling still supplies every source file
   ## copied and built by the cases below.
@@ -563,7 +455,7 @@ proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
   if not fileExists(projectFixture) or not fileExists(configFixture):
     raise newException(ValueError,
       "pinned CodeTracer project contract fixtures are missing")
-  let projectPayload = pinnedCodeTracerPayload(projectFixture,
+  let fixturePayload = pinnedCodeTracerPayload(projectFixture,
     PinnedCodeTracerProjectPayloadSha256)
   let configPayload = pinnedCodeTracerPayload(configFixture,
     PinnedCodeTracerConfigPayloadSha256)
@@ -575,7 +467,8 @@ proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
       raise newException(ValueError,
         "canonical CodeTracer project contract files are missing at " &
         codeTracerRoot)
-    if readFile(liveProject) != projectPayload or
+    # A live checkout must match the single reviewed source byte for byte.
+    if readFile(liveProject) != fixturePayload or
         readFile(liveConfig) != configPayload:
       raise newException(ValueError,
         "live CodeTracer project contract differs from pinned commit " &
@@ -607,12 +500,6 @@ proc compilePublicReproTestBin(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-proc writeExecutable(path, content: string) =
-  createDir(path.splitPath.head)
-  writeFile(path, content)
-  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
-    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
-
 when defined(macosx) or defined(linux):
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
     discard tempRoot
@@ -623,28 +510,84 @@ when defined(macosx) or defined(linux):
     result.shim = requireBinary(monitorShimPath(repoRoot),
       "reprobuild.test_fixtures.monitor_shim")
 
-proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
-    socket: string] =
-  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = runquotaSocketEndpoint(
-    "repro-m29-rq-" & $getCurrentProcessId())
-  if fileExists(socketPath):
-    removeFile(socketPath)
-  let daemon = startProcess(daemonBin, args = [
-    "--socket", socketPath,
-    "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184",
-    # Test daemon: keep it out of the host-wide observation store, which
-    # it would otherwise open (and write) before it binds its socket.
-    "--no-write-stats"
-  ], options = {poUsePath})
-  putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
-    if pathExists(socketPath):
-      return (process: daemon, socket: socketPath)
-    sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+type PrivateRunQuotaFixture = object
+  process: owned(Process)
+  socket: string
+  hadScope, hadSocket: bool
+  previousScope, previousSocket: string
+
+proc stopRunQuotaDaemon(daemon: var PrivateRunQuotaFixture) =
+  ## Only this invocation's daemon and endpoint are ours. Restore the caller's
+  ## policy even when shutdown or startup fails; no host daemon is touched.
+  try:
+    if daemon.process != nil:
+      try:
+        if daemon.process.running(): daemon.process.terminate()
+        discard daemon.process.waitForExit()
+      finally:
+        daemon.process.close()
+  finally:
+    try:
+      if daemon.socket.len > 0 and pathExists(daemon.socket):
+        removeFile(daemon.socket)
+      if daemon.socket.len > 0 and dirExists(daemon.socket.parentDir):
+        removeDir(daemon.socket.parentDir)
+    finally:
+      if daemon.hadScope: putEnv("RUNQUOTA_ENDPOINT_SCOPE", daemon.previousScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      if daemon.hadSocket: putEnv("RUNQUOTA_SOCKET", daemon.previousSocket)
+      else: delEnv("RUNQUOTA_SOCKET")
+
+proc ensureRunQuotaDaemon(repoRoot: string): PrivateRunQuotaFixture =
+  ## A real invocation-private daemon must use the same policy as its clients,
+  ## even on hosts with an NSS RunQuota service identity. Environment selection
+  ## remains in force for every child launched by this case, then is restored.
+  result.hadScope = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+  result.previousScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+  result.hadSocket = existsEnv("RUNQUOTA_SOCKET")
+  result.previousSocket = getEnv("RUNQUOTA_SOCKET")
+  try:
+    let daemonBin = requireRunQuotaDaemonBin(repoRoot)
+    result.socket = runquotaSocketEndpoint(
+      "repro-m29-rq-" & $getCurrentProcessId())
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+    putEnv("RUNQUOTA_SOCKET", result.socket)
+    if pathExists(result.socket): removeFile(result.socket)
+    result.process = startProcess(daemonBin, args = [
+      "--socket", result.socket,
+      "--cpu-milli", "16000",
+      "--memory-bytes", "17179869184",
+      # No test traffic in the host-wide observation store.
+      "--no-write-stats"
+    ], options = {poUsePath})
+    var readinessProblem = "socket did not appear"
+    for _ in 0 ..< 200:
+      if pathExists(result.socket):
+        when defined(posix):
+          var directory, socket: Stat
+          doAssert lstat(result.socket.parentDir.cstring, directory) == 0
+          doAssert lstat(result.socket.cstring, socket) == 0
+          doAssert S_ISDIR(directory.st_mode) and S_ISSOCK(socket.st_mode)
+          doAssert directory.st_uid == getuid() and socket.st_uid == getuid()
+          doAssert (directory.st_mode and 0o7777) == 0o700
+          doAssert (socket.st_mode and 0o7777) == 0o600
+          try:
+            # Existence alone is not readiness: complete the real protocol's
+            # Hello handshake under the same private policy as child clients.
+            var client = runquota_client.connectDefault()
+            client.close()
+            return
+          except CatchableError as err:
+            readinessProblem = err.msg
+        else:
+          return
+      if result.process.peekExitCode() != -1:
+        raise newException(OSError, "runquotad exited before readiness")
+      sleep(25)
+    raise newException(OSError, "runquotad was not ready: " & readinessProblem)
+  except:
+    stopRunQuotaDaemon(result)
+    raise
 
 proc copyTree(sourceRoot, destRoot: string) =
   for sourcePath in walkDirRec(sourceRoot):
@@ -1066,6 +1009,14 @@ proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
     projectRoot)
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
+  # The contracted ``config.nims`` ``include``s
+  # ``src/frontend/test_support/force_import_isolation.nims`` unconditionally
+  # (and force-imports ``state_isolation.nim`` beside it into test-shaped
+  # programs), so every subset needs that directory whether or not it copies
+  # the rest of ``src/frontend`` -- the native subset does not, and without
+  # it every compile stops while evaluating ``config.nims``.
+  copyTree(codeTracerRoot / "src" / "frontend" / "test_support",
+    projectRoot / "src" / "frontend" / "test_support")
   addCodeTracerFixtureTransitivePaths(projectRoot)
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
@@ -1187,63 +1138,78 @@ proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
   finishCodeTracerProject(codeTracerRoot, projectRoot)
 
-proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
-  let binDir = tempRoot / "codetracer-tool-bin"
-  createDir(binDir)
-  let sourcePath = binDir / "gcc-proxy.c"
-  let gccPath = binDir / "gcc"
-  let clangPath = binDir / "clang"
-  # Apple's signed /usr/bin/gcc tool shim strips DYLD interposition across
-  # exec, which makes an otherwise successful compile report an unmonitored
-  # subtree and prevents a sound action-cache publish. The dev-shell clang is
-  # unsigned, injectable, and already carries the pinned SDK/toolchain paths.
-  let realGcc = findExe(
+# The PATH tools every case runs under, as STABLE directories shared by all
+# cases: the checked-in scripts under ``tests/fixtures/codetracer-tools`` and
+# the compiled ``gcc``/``clang`` proxy and ``stylus`` stand-in that edges
+# ``reprobuild.test_fixtures.codetracer_tool_*`` build into
+# ``build/test-fixtures/codetracer-tools`` (``testFixtureArtifacts``).
+#
+# Each case used to compile and write its own copies into
+# ``<tempRoot>/codetracer-tool-bin``. Interface extraction records the PATH it
+# observes and the compilers it runs from it, so a per-case directory made every
+# case re-extract the same CodeTracer recipe and its packages — a correct miss,
+# most of each case's time. Nothing here writes to these directories;
+# a case that needs a different tool gets a different DIRECTORY ahead of the
+# shared ones, never a different file in them.
+proc codeTracerToolDir(relative: string): string =
+  result = graphArtifactPath("tests/fixtures/codetracer-tools/" & relative)
+  check dirExists(result)
+
+proc codeTracerToolBinary(relative, edge: string): string =
+  # Read-only outputs of the fixture edges, never written by a case.
+  requireBinary(graphArtifactPath("build/test-fixtures/codetracer-tools/" &
+    relative), edge)
+
+proc codeTracerPathDirs(includeClang = false): seq[string] =
+  # The real compiler the proxy forwards to is the next one on PATH after its
+  # own directory: the test's own ``gcc`` (``clang`` on macOS — Apple's
+  # signed /usr/bin/gcc shim strips DYLD interposition across exec, which
+  # makes a successful compile report an unmonitored subtree; the dev-shell
+  # clang is unsigned and injectable). The ``nim`` script likewise forwards
+  # to the test's own Nim (see its header for why not CodeTracer's bundled
+  # one). Both must exist, as they had to when they were baked in per case.
+  let realCompiler = findExe(
     when defined(macosx): "clang"
     else: "gcc")
-  check realGcc.len > 0
-  writeFile(sourcePath, GccProxySource.replace("@REAL_GCC_PATH@", realGcc))
-  discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+  check realCompiler.len > 0
+  # Where the PATH search cannot find it, because the edge's PATH is hermetic.
+  # CodeTracer's native edges declare their backend compiler (CodeTracer
+  # 23d5af70f), so their PATH is only the directories their declared tools
+  # resolved into, and the proxy's is the only compiler directory among them.
+  # The proxy then execs the compiler this names (see `gcc-proxy.c`). It is the
+  # same compiler the PATH search finds on the inherited-PATH edges.
+  putEnv("REPROBUILD_CODETRACER_REAL_COMPILER", realCompiler)
+  check findExe("nim").len > 0
+  let gcc = codeTracerToolBinary("bin/gcc",
+    "reprobuild.test_fixtures.codetracer_tool_gcc")
+  discard codeTracerToolBinary("bin/stylus",
+    "reprobuild.test_fixtures.codetracer_tool_stylus")
+  # ``clang`` is either the proxy (native cases) or a version-answering
+  # stand-in, and it must come BEFORE the proxy's directory: on macOS the
+  # proxy looks for the real ``clang`` after its own directory.
   if includeClang:
-    discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
-  let stylusSourcePath = binDir / "stylus-fixture.c"
-  let stylusPath = binDir / "stylus"
-  writeFile(stylusSourcePath, StylusFixtureSource)
-  discard requireSuccess(shellCommand(["cc", stylusSourcePath, "-o", stylusPath]))
-  writeExecutable(binDir / "node",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "case \"${1:-}\" in\n" &
-    "  --version|-v) echo 'v20.0.0'; exit 0 ;;\n" &
-    "  node_modules/stylus/bin/stylus|*/node_modules/stylus/bin/stylus)\n" &
-    "    shift; exec " & q(stylusPath) & " \"$@\" ;;\n" &
-    "  tests/ipc_registry_test.js|*/tests/ipc_registry_test.js)\n" &
-    "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
-    "  *) exit 0 ;;\n" &
-    "esac\n")
-  # Pin `nim` to the nix-shell Nim (2.2.4) rather than CodeTracer's bundled
-  # Nim 2.2.8. Under fork/resource pressure (parallel compiles spawning gcc
-  # children), the bundled Nim's interaction with the host clang-wrapper has
-  # been observed to report `[SuccessX]` while leaving no binary on disk — a
-  # SuccessX-but-no-output failure mode that surfaces in
-  # compileExtractRunner. The nix-shell Nim does not exhibit this on the
-  # affected macOS hosts, so forwarding through a shim keeps every subtest
-  # on a known-good toolchain.
-  let nimBinary = findExe("nim")
-  check nimBinary.len > 0
-  writeExecutable(binDir / "nim",
-    "#!/bin/sh\n" &
-    "exec " & q(nimBinary) & " \"$@\"\n")
+    result.add(codeTracerToolBinary("clang-bin/clang",
+      "reprobuild.test_fixtures.codetracer_tool_clang").parentDir)
+  else:
+    result.add(codeTracerToolDir("clang-stub"))
+  result.add(gcc.parentDir)
+  result.add(codeTracerToolDir("tools"))
+  when defined(linux):
+    result.add(codeTracerToolDir("tools-linux"))
+  elif defined(macosx):
+    result.add(codeTracerToolDir("tools-macos"))
+  # Every dev tool CodeTracer's project declares resolves to a fixture,
+  # except the shells and nix, which come from the host as before.
+  let dirs = result
   for tool in CodeTracerDevToolExecutables:
-    if tool notin ["bash", "nim", "node", "gcc", "nix", "sh", "stylus"] and
-        not fileExists(binDir / tool):
-      writeExecutable(binDir / tool,
-        "#!/bin/sh\n" &
-        "set -eu\n" &
-        "case \"${1:-}\" in\n" &
-        "  --version|-v) echo '" & tool & " fixture 1.0.0'; exit 0 ;;\n" &
-        "  *) exit 0 ;;\n" &
-        "esac\n")
-  binDir & $PathSep & getEnv("PATH")
+    if tool notin ["bash", "nix", "sh"]:
+      let provided = dirs.anyIt(fileExists(it / tool))
+      if not provided:
+        checkpoint("no fixture directory provides " & tool)
+      check provided
+
+proc codeTracerPathValue(includeClang = false): string =
+  (codeTracerPathDirs(includeClang) & @[getEnv("PATH")]).join($PathSep)
 
 proc codeTracerNimPath(codeTracerRoot: string): string =
   let localNim = codeTracerRoot / "non-nix-build" / "deps" / "nim" /
@@ -1265,25 +1231,23 @@ proc codeTracerNimPath(codeTracerRoot: string): string =
     return canonicalHostNim
   hostNim
 
-proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
+proc codeTracerNativePathValue(codeTracerRoot: string): string =
   let nimPath = codeTracerNimPath(codeTracerRoot)
-  nimPath.splitPath.head & $PathSep & codeTracerPathValue(tempRoot,
-    includeClang = true)
+  nimPath.splitPath.head & $PathSep & codeTracerPathValue(includeClang = true)
 
-proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
-  let basePath = codeTracerPathValue(tempRoot, includeClang = true)
-  let binDir = tempRoot / "codetracer-tool-bin"
+proc codeTracerHybridNimPathValue(codeTracerRoot: string): string =
+  # JavaScript targets compile with the test's Nim, native ones with
+  # CodeTracer's (``hybrid-nim/nim``). CodeTracer's Nim directory is
+  # APPENDED, so it shadows no other tool; the script takes the last ``nim``
+  # on PATH for native targets.
   let localNim = codeTracerNimPath(codeTracerRoot)
-  let hostNim = findExe("nim")
-  check hostNim.len > 0
-  writeExecutable(binDir / "nim",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "if [ \"${1:-}\" = \"js\" ]; then\n" &
-    "  exec " & q(hostNim) & " \"$@\"\n" &
-    "fi\n" &
-    "exec " & q(localNim) & " \"$@\"\n")
-  basePath
+  check findExe("nim").len > 0
+  # The native edges' PATH is hermetic, so the appended directory never
+  # reaches them; `hybrid-nim/nim` falls back to this.
+  putEnv("REPROBUILD_CODETRACER_NATIVE_NIM", localNim)
+  (@[codeTracerToolDir("hybrid-nim")] &
+    codeTracerPathDirs(includeClang = true) &
+    @[getEnv("PATH"), localNim.parentDir]).join($PathSep)
 
 proc nixStorePaths(output: string): seq[string] =
   for line in output.splitLines:
@@ -1292,8 +1256,10 @@ proc nixStorePaths(output: string): seq[string] =
       result.add(item)
 
 proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
+  # Resolve these package references against the reviewed flake's nixpkgs,
+  # independently of the operator's moving global registry.
   var packages = @[
-    "nix", "build", "--no-link", "--print-out-paths",
+    "nix", "build", "--no-link", "--print-out-paths", "--inputs-from", repoRoot,
     "nixpkgs#openssl.out",
     "nixpkgs#sqlite.out",
     "nixpkgs#pcre.out",
@@ -1444,7 +1410,8 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
       action{"status"}.getStr() & " launched=" &
       $action{"launched"}.getBool() & " cacheDecision=" &
       action{"cacheDecision"}.getStr() & " reason=" &
-      action{"reason"}.getStr())
+      action{"reason"}.getStr() & " cacheMissReason=" &
+      action{"cacheMissReason"}.getStr())
     if action{"status"}.getStr() != status or
         action{"launched"}.getBool() != launched:
       checkpoint("action " & id & " diagnostics=" &
@@ -1478,7 +1445,12 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
       $action{"launched"}.getBool() & " cacheDecision=" &
       action{"cacheDecision"}.getStr())
     if action{"status"}.getStr() notin ["asCacheHit", "asUpToDate"]:
-      checkpoint("cache rejection reason=" & action{"reason"}.getStr() &
+      # `reason` is how the action SETTLED (`builtin`, `exit=0`), not why
+      # the lookup missed; `cacheMissReason` is the lookup's own verdict and
+      # the one that names the input or output it rejected on.
+      checkpoint("cache rejection cacheMissReason=" &
+        action{"cacheMissReason"}.getStr() & " reason=" &
+        action{"reason"}.getStr() &
         " diagnostics=" & $action{"evidence"}{"diagnostics"})
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
@@ -1524,7 +1496,8 @@ proc assertOutputActionCacheEffective(report: JsonNode; output: string) =
     checkpoint("cache-effective output " & output & " action=" &
       action{"id"}.getStr() & " status=" & action{"status"}.getStr() &
       " launched=" & $action{"launched"}.getBool() & " cacheDecision=" &
-      action{"cacheDecision"}.getStr())
+      action{"cacheDecision"}.getStr() & " cacheMissReason=" &
+      action{"cacheMissReason"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
@@ -1602,7 +1575,7 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(buildDebug(projectRoot, "subwindow.js.map"))
   check fileExists(buildDebug(projectRoot, "src/subwindow.js"))
   for stylesheet in [
-    "default_white_theme.css",
+    "default_white_theme_electron.css",
     "default_dark_theme_electron.css",
     "default_dark_theme_extension.css",
     "default_dark_theme.css",
@@ -1649,12 +1622,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -1674,7 +1642,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#c-sudoku-object-with-generated-header"
       let selected = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -1731,12 +1699,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -1751,7 +1714,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-public-ui-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -1851,12 +1814,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -1871,7 +1829,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-src-subwindow-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -1959,12 +1917,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -1979,7 +1932,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-src-index-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -2084,12 +2037,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2104,7 +2052,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerNativePathValue(codeTracerRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerNimPath(codeTracerRoot)
@@ -2184,12 +2132,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2204,7 +2147,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerNativePathValue(codeTracerRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerNimPath(codeTracerRoot)
@@ -2230,10 +2173,14 @@ when defined(macosx) or defined(linux):
       # product ships — the binary plus the startup assets `ct` reads out
       # of `<prefix>/config/` — and a set name does not rename its member.
       #
-      # This case's subset copies `src/ct` but not `src/config`, so
-      # `ctStartupAssets` is empty here and the aggregate degenerates to
-      # one member; that is why the closure is a single action. It does
-      # NOT make the aggregate a second name for that action.
+      # This case's subset copies `src/ct` but not `src/config` wholesale.
+      # The compile-closure walker (`completeCodeTracerCompileClosure`)
+      # still stages `src/config/default_config.yaml`, because the staged
+      # `src/common/config_test.nim` `staticRead`s it, so `ctStartupAssets`
+      # holds exactly that one copy (`default_layout.json` is referenced by
+      # nothing staged) and the closure is two actions: the compile and
+      # `config-default-config-yaml`. Neither makes the aggregate a second
+      # name for the compile.
       #
       # That is a MEASURED claim, not a reading of the code. Drive the
       # same pair through the UNPATCHED engine with the aggregate carrying
@@ -2243,7 +2190,7 @@ when defined(macosx) or defined(linux):
       # `target()` name. The id an edge is keyed and reported under must
       # not flip because two data files happened to be present.
       check first.contains("selectedTarget: ct")
-      check first.contains("scheduler: actions=1")
+      check first.contains("scheduler: actions=2")
       check first.contains(
         "action: ct-binary status=asSucceeded launched=true")
       check not first.contains("action: ct status=")
@@ -2269,8 +2216,10 @@ when defined(macosx) or defined(linux):
       check fileOutput.contains("executable")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 1
+      check firstReport{"actions"}.len == 2
       assertAction(firstReport, "ct-binary", "asSucceeded", true)
+      assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
+        true)
       # The aggregate's name is not an action id.
       check reportAction(firstReport, "ct").kind == JNull
       let nativeAction = reportAction(firstReport, "ct-binary")
@@ -2317,12 +2266,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2337,7 +2281,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerHybridNimPathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerHybridNimPathValue(codeTracerRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip().len > 0
       var nativeEnv: seq[(string, string)] = @[]
@@ -2353,8 +2297,13 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check first.contains("defaultTarget: codetracer")
       check first.contains("selectedTarget: codetracer")
-      check first.contains("scheduler: actions=24")
-      check first.contains("action: ct status=asSucceeded launched=true")
+      # 25 = the 23 non-ct actions, ``ct-binary`` (the compile that the ``ct``
+      # aggregate names; ``ct`` itself is a selector, not an action id) and,
+      # since CodeTracer f8781d4b (CTC-3i), ``ct-test``, which now ships in
+      # ``codetracerActions`` beside ``ct``.
+      check first.contains("scheduler: actions=25")
+      check first.contains("action: ct-binary status=asSucceeded launched=true")
+      check first.contains("action: ct-test status=asSucceeded launched=true")
       check first.contains(
         "action: db-backend-record status=asSucceeded launched=true")
       check first.contains(
@@ -2372,7 +2321,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "bin/db-backend-record"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 24
+      check firstReport{"actions"}.len == 25
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -2385,7 +2334,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2400,18 +2349,19 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
         true)
       assertAction(firstReport, "db-backend-record", "asSucceeded", true)
-      assertAction(firstReport, "ct", "asSucceeded", true)
+      assertAction(firstReport, "ct-binary", "asSucceeded", true)
+      assertAction(firstReport, "ct-test", "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
       check reportAction(firstReport,
         "c-sudoku-object-with-generated-header").kind == JNull
-      check reportAction(firstReport, "ct"){"dependencyPolicyKind"}.getStr() ==
+      check reportAction(firstReport, "ct-binary"){"dependencyPolicyKind"}.getStr() ==
         "dgAutomaticMonitor"
-      check hasMonitorEvidence(reportAction(firstReport, "ct"))
-      check monitorEvidenceContains(reportAction(firstReport, "ct"),
+      check hasMonitorEvidence(reportAction(firstReport, "ct-binary"))
+      check monitorEvidenceContains(reportAction(firstReport, "ct-binary"),
         "src/ct/codetracerconf.nim")
-      check declaredEvidenceContains(reportAction(firstReport, "ct"),
+      check declaredEvidenceContains(reportAction(firstReport, "ct-binary"),
         "src/ct/codetracer.nim")
 
       let aggregateIdentity =
@@ -2426,7 +2376,7 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check secondReport{"actions"}.len == 24
+      check secondReport{"actions"}.len == 25
       assertActionCacheEffective(secondReport, "frontend-ui-js")
       assertActionCacheEffective(secondReport, "frontend-public-ui-js")
       assertActionCacheEffective(secondReport, "frontend-index-js")
@@ -2438,7 +2388,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2450,7 +2400,8 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "config-default-layout-json")
       assertActionCacheEffective(secondReport, "config-default-config-yaml")
       assertActionCacheEffective(secondReport, "db-backend-record")
-      assertActionCacheEffective(secondReport, "ct")
+      assertActionCacheEffective(secondReport, "ct-binary")
+      assertActionCacheEffective(secondReport, "ct-test")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -2473,7 +2424,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(changedReport, "frontend-subwindow-html")
       assertActionCacheEffective(changedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2488,7 +2439,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(changedReport, "config-default-layout-json")
       assertActionCacheEffective(changedReport, "config-default-config-yaml")
       assertActionCacheEffective(changedReport, "db-backend-record")
-      assertAction(changedReport, "ct", "asSucceeded", true)
+      assertAction(changedReport, "ct-binary", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
       check reportAction(changedReport, "generate-config-header").kind == JNull
@@ -2506,12 +2457,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2526,7 +2472,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-server-index-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -2597,12 +2543,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2613,7 +2554,7 @@ when defined(macosx) or defined(linux):
       check not readFile(projectRoot / "repro.nim").
         contains("writeProject")
 
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-public-resources"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue)
       check first.contains("selectedTarget: frontend-public-resources")
@@ -2732,12 +2673,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
       let projectRoot = tempRoot / "codetracer"
@@ -2745,7 +2681,7 @@ when defined(macosx) or defined(linux):
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
       check readFile(projectRoot / "repro.nim") == projectText
 
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let first = build(reproBin, projectRoot & "#frontend-public-resources",
         repoRoot, pathValue)
       check first.contains("selectedTarget: frontend-public-resources")
@@ -2771,12 +2707,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2791,12 +2722,34 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
+      # The pinned recipe's `frontend` aggregate (CodeTracer 008950fa) is the
+      # 14 `frontendActions` plus the `frontend-styles` target's 6:
+      #   frontend-ui-js, frontend-public-ui-js, frontend-index-js,
+      #   frontend-src-index-js, frontend-server-index-js,
+      #   frontend-subwindow-js, frontend-src-subwindow-js,
+      #   frontend-index-html, frontend-subwindow-html, frontend-helpers-js,
+      #   frontend-src-helpers-js, nim-js-reload-reconnect-test,
+      #   reload-bootstrap-host-js, frontend-public-resources;
+      #   stylus-{default_white_theme_electron, default_dark_theme_electron,
+      #   default_dark_theme_extension, loader, subwindow} and the
+      #   `default_dark_theme.css` copy.
+      # The webpack pair (`frontend-webpack-dist`, `frontend-public-dist`)
+      # is registered only when `webpack.config.js` exists, and this subset
+      # does not copy it. The provenance of each action is listed at
+      # `M52ScheduledActions` below. Nothing has joined or left the
+      # aggregate since this count was written (4dde5bb82).
       check first.contains("scheduler: actions=20")
+      check first.contains(
+        "action: frontend-helpers-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: nim-js-reload-reconnect-test status=asSucceeded launched=true")
+      check first.contains(
+        "action: reload-bootstrap-host-js status=asSucceeded launched=true")
       check first.contains(
         "action: frontend-ui-js status=asSucceeded launched=true")
       check first.contains(
@@ -2840,7 +2793,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2870,7 +2823,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2903,7 +2856,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(htmlChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(htmlChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2946,7 +2899,7 @@ when defined(macosx) or defined(linux):
       assertAction(helperChangedReport, "frontend-src-helpers-js",
         "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2976,12 +2929,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       # Test-Fixtures-In-Build-Graph M1: assert the graph-built ``repro``
       # instead of recompiling ``apps/repro/repro.nim`` into tempRoot.
@@ -3001,12 +2949,109 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      # `clang` is the compiler proxy here, not the version-answering stub,
+      # because this graph links a native binary: `ct-test` (see the action
+      # list below) is a `nim.c` compile, and on macOS Nim links with
+      # `clang`. With the stub first on PATH that link "succeeded" without
+      # writing anything and `dsymutil` then failed on the missing binary.
+      # The JS cases keep the stub: they compile nothing native.
+      let pathValue = codeTracerPathValue(includeClang = true)
       let first = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=28")
+      # THE ACTION COUNT FOLLOWS THE PINNED RECIPE, so it is derived from
+      # `PinnedCodeTracerProjectFile` (CodeTracer 008950fa) rather than from
+      # the last value that passed. `repro build <projectRoot>` names a
+      # target, so the recipe's `defaultBuildAction` is NOT consulted, and
+      # the unselected lowering (`lowerProviderSnapshot` with no selector)
+      # schedules every emitted edge except members of the `test`, `bench`
+      # and `lint` collections. For this source subset that is the 31
+      # actions of `M52ScheduledActions`, each named with the CodeTracer
+      # change that added it:
+      #
+      #   generate_nim_paths_codeTracer, ensure_ignore_nim_paths_codeTracer,
+      #     ensure_snippet_config_nims_codeTracer
+      #                                 `nim.nimRepropathsConfig()`, 3db8cf5bb
+      #   generate-config-header, nim-js-ipc-registry-test,
+      #     c-sudoku-object-tup, c-sudoku-object-with-generated-header
+      #                                 646826284 (the first project slice)
+      #   build-c-dir                   2af65269c
+      #   nim-js-reload-reconnect-test, reload-bootstrap-host-js,
+      #     frontend-helpers-js         4d9e44d98
+      #   frontend-ui-js, frontend-public-ui-js        851abfc9a
+      #   frontend-index-js, frontend-src-index-js     c0959cb4c
+      #   frontend-server-index-js                     5101931a4
+      #   frontend-subwindow-js, frontend-src-subwindow-js  14d39fd84
+      #   frontend-index-html, frontend-subwindow-html,
+      #     frontend-src-helpers-js                    736819434
+      #   stylus-{default_white_theme_electron, default_dark_theme_electron,
+      #     default_dark_theme_extension, loader, subwindow} and the
+      #     `default_dark_theme.css` copy             f6a5d4203 (the white
+      #     theme's entry point renamed by b7e1d85d7, same count)
+      #   frontend-public-resources                    a74df24c7
+      #   config-default-layout-json, config-default-config-yaml
+      #                                 116983166, registered only when
+      #                                 `src/config/` exists
+      #   ct-test                       84df173fd (2026-08-11)
+      #
+      # Not counted: the twelve `codetracer.gate.*` shell gates (the original
+      # ten from 996f9b122 and the two real-tree sibling-pin guards),
+      # which are members of the `test`/`lint` collections, and every action
+      # whose inputs this subset does not copy (the `fileExists` branches for
+      # webpack, cargo, `db-backend-record`, `ct`, the app bundles and the
+      # docs book).
+      #
+      # The 28 this case asserted from 4dde5bb82 (2026-07-12) is the same
+      # list without three entries. `ct-test` did not exist yet. The two
+      # `config-default-*` copies were not registered, because this copier
+      # did not yet stage `src/config/` (it does since 28ac9d04ce, for the
+      # frontend's `staticRead`s). `auxiliaryActionIds`, which keeps
+      # `ct-test` out of the recipe's `codetracer` aggregate in a source
+      # subset, does not apply here: the aggregate is the DEFAULT target,
+      # and this build names its target.
+      const M52ScheduledActions = [
+        "generate_nim_paths_codeTracer",
+        "ensure_ignore_nim_paths_codeTracer",
+        "ensure_snippet_config_nims_codeTracer",
+        "generate-config-header",
+        "build-c-dir",
+        "nim-js-ipc-registry-test",
+        "nim-js-reload-reconnect-test",
+        "reload-bootstrap-host-js",
+        "frontend-ui-js",
+        "frontend-public-ui-js",
+        "frontend-index-js",
+        "frontend-src-index-js",
+        "frontend-server-index-js",
+        "frontend-subwindow-js",
+        "frontend-src-subwindow-js",
+        "frontend-index-html",
+        "frontend-subwindow-html",
+        "frontend-helpers-js",
+        "frontend-src-helpers-js",
+        "stylus-default_dark_theme_extension",
+        "stylus-default_white_theme_electron",
+        "stylus-default_dark_theme_electron",
+        "stylus-loader",
+        "stylus-subwindow",
+        "fs-copyFile-src-2fbuild-debug-repro-2ffrontend-2fstyles-2f" &
+          "default_dark_theme.css",
+        "frontend-public-resources",
+        "config-default-layout-json",
+        "config-default-config-yaml",
+        "ct-test",
+        "c-sudoku-object-tup",
+        "c-sudoku-object-with-generated-header"
+      ]
+      checkpoint(first.splitLines().filterIt(
+        it.startsWith("scheduler:") or it.startsWith("action:")).join("\n"))
+      check first.contains("scheduler: actions=" & $M52ScheduledActions.len)
+      for id in M52ScheduledActions:
+        check first.contains("action: " & id &
+          " status=asSucceeded launched=true")
+      check not first.contains("action: gate-")
+      check not first.contains("action: codetracer.gate.")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: build-c-dir status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
@@ -3039,7 +3084,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "subwindow.html"))
       check fileExists(buildDebug(projectRoot, "src/helpers.js"))
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3052,16 +3097,65 @@ when defined(macosx) or defined(linux):
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
+      # THE PATH-ONLY TOOL IDENTITY HOLDS THE TOOLS THE SELECTED ACTIONS
+      # REFERENCE, not every `uses:` entry (External-Package-Catalog-
+      # Adapters.md §"Which Tools A Build Realizes"; `scopedToolArtifact`,
+      # 636d688f2). Among the 31 actions above, the `nim.js` compiles and
+      # `ct-test`'s `nim.c` run `nim`, the five `stylus-*` edges run `node`,
+      # and the two C objects run `gcc`. Every other action is a built-in
+      # and runs no tool. No action's `toolIdentityRefs` or tool sub-tools
+      # name another declared tool, so exactly three profiles are realized.
+      # No selected action references the other declared tools, so they stay
+      # declared and unrealized. The declared set, the denominator of
+      # `selected tool identities:`, has three parts:
+      #   * the recipe's `uses:` tools for this platform, which is
+      #     `CodeTracerDevToolExecutables` plus `CodeTracerNonFixtureToolUses`;
+      #   * its seven source packages, which are `CodeTracerSourcePackages`
+      #     plus `isonim-tui` and `codetracer-trace-format-nim`;
+      #   * the commands of the generated install-mirror script, which every
+      #     package declares as native tools (`registerInstallMirrorTools`,
+      #     from `typedInstallMirrorShellTools`): `sh rm mkdir cp touch sed
+      #     chmod`, and 14 more on Linux. `sh` is counted again, because its
+      #     dependency kind differs from the `uses:` entry.
+      # Measured on macOS before CodeTracer 01d8b6e54: 46 + 6 + 7 = 59.
+      #
+      # It used to assert one profile per declared tool and source package
+      # (written 2026-07-12, before the scoping). That fails with
+      # `identity.profiles.len was 3`, and the 3 is the intended answer.
+      const M52RealizedTools = ["gcc", "nim", "node"]
+      # `isonim-tui` joined the pinned recipe's `uses:` after
+      # `CodeTracerSourcePackages` was written.
+      # `codetracer-trace-format-nim` joined it at CodeTracer 01d8b6e54.
+      let declaredSourcePackages = @CodeTracerSourcePackages &
+        @["isonim-tui", "codetracer-trace-format-nim"]
+      let declaredToolUses = CodeTracerDevToolExecutables.len +
+        CodeTracerNonFixtureToolUses.len +
+        declaredSourcePackages.len +
+        typedInstallMirrorShellTools("codeTracer").len
+      for line in first.splitLines:
+        if line.startsWith("selected tool identities: "):
+          checkpoint(line)
+      check first.contains("selected tool identities: " &
+        $M52RealizedTools.len & "/" & $declaredToolUses)
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == CodeTracerDevToolExecutables.len +
-        CodeTracerSourcePackages.len
-      for executableName in CodeTracerDevToolExecutables:
-        check identity.profiles.anyIt(it.executableName == executableName)
-      for packageName in CodeTracerSourcePackages:
-        check identity.profiles.anyIt(it.packageSelector == packageName)
+      checkpoint("realized tool identities: " &
+        identity.profiles.mapIt(it.packageSelector & "|" &
+          it.executableName).join(", "))
+      check identity.profiles.len == M52RealizedTools.len
+      check identity.profiles.mapIt(it.executableName).sorted() ==
+        @M52RealizedTools
       for profile in identity.profiles:
         check profile.installMethod == "path"
         check profile.cachePortability == cpLocalOnly
+      # Declared, referenced by no selected action, therefore not realized.
+      for executableName in CodeTracerDevToolExecutables:
+        if executableName notin M52RealizedTools:
+          check not identity.profiles.anyIt(
+            it.executableName == executableName)
+      for packageName in declaredSourcePackages:
+        check not identity.profiles.anyIt(it.packageSelector == packageName)
+      for toolName in typedInstallMirrorShellTools("codeTracer"):
+        check not identity.profiles.anyIt(it.executableName == toolName)
       check not identity.profiles.anyIt(it.executableName == "nim-js")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
@@ -3080,7 +3174,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3134,7 +3228,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3165,7 +3259,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(cChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(cChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3198,7 +3292,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(headerDeletedReport, "frontend-subwindow-html")
       assertActionCacheEffective(headerDeletedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",

@@ -1,4 +1,5 @@
 import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_core/cli_images
 import repro_daemon_core/runtime
@@ -343,7 +344,9 @@ suite "Local daemons/control-plane M10 development self-restart":
       check dirExists(fieldValue(started, "staged-generation-dir"))
       check not fileExists(fieldValue(started, "staged-generation-dir") /
         addFileExt("repro-full", ExeExt))
-      check fieldValue(started, "protocol-generation") == "1.1"
+      # `$UserDaemonProtocolMajor & "." & $UserDaemonProtocolMinor`. Minor went
+      # 1 -> 2 with the §4.2 `udkLeaseReapProviders` frames (additive).
+      check fieldValue(started, "protocol-generation") == "1.2"
       check fieldValue(started, "reconnect-limitations").contains(
         "watch sessions can be reattached")
 

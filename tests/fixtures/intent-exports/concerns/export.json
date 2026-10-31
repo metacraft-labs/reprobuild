@@ -1,0 +1,296 @@
+{
+  "format": "repro.home.export",
+  "schemaVersion": 5,
+  "selection": {
+    "host": "m1",
+    "hostDeclared": true,
+    "activities": [
+      "default",
+      "desktop"
+    ],
+    "unknownActivities": []
+  },
+  "intent": {
+    "name": "gm7Concerns",
+    "activities": [
+      {
+        "name": "default",
+        "body": [
+          {
+            "kind": "packageRef",
+            "name": "bash",
+            "version": ""
+          },
+          {
+            "kind": "whenGuard",
+            "predicate": "linux",
+            "body": [
+              {
+                "kind": "packageRef",
+                "name": "patchelf",
+                "version": ""
+              }
+            ]
+          },
+          {
+            "kind": "whenGuard",
+            "predicate": "macos",
+            "body": [
+              {
+                "kind": "packageRef",
+                "name": "gm7app",
+                "version": ""
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "desktop",
+        "body": [
+          {
+            "kind": "packageRef",
+            "name": "busybox",
+            "version": ""
+          }
+        ]
+      }
+    ],
+    "configOverrides": [
+      {
+        "pkg": "git",
+        "key": "credentialHelper",
+        "value": {
+          "kind": "string",
+          "value": "store"
+        },
+        "guard": null
+      }
+    ],
+    "hosts": {
+      "home-pc": [
+        "desktop"
+      ],
+      "m1": [
+        "desktop"
+      ],
+      "server": []
+    },
+    "resources": [
+      {
+        "kind": "fs.userFile",
+        "address": "fs.userFile:~/.config/gm7/app.conf",
+        "fields": {
+          "content": {
+            "kind": "string",
+            "value": "gm7 = 1\n"
+          },
+          "executable": {
+            "kind": "bool",
+            "value": false
+          },
+          "hostFile": {
+            "kind": "string",
+            "value": "~/.config/gm7/app.conf"
+          },
+          "mode": {
+            "kind": "string",
+            "value": "0644"
+          }
+        },
+        "dependsOn": [],
+        "guard": null,
+        "activity": null
+      },
+      {
+        "kind": "env.userVariable",
+        "address": "env.userVariable:GM7_EDITOR",
+        "fields": {
+          "name": {
+            "kind": "string",
+            "value": "GM7_EDITOR"
+          },
+          "value": {
+            "kind": "string",
+            "value": "nvim"
+          },
+          "valueKind": {
+            "kind": "string",
+            "value": "string"
+          }
+        },
+        "dependsOn": [],
+        "guard": null,
+        "activity": null
+      },
+      {
+        "kind": "fs.managedBlock",
+        "address": "fs.managedBlock:~/.bashrc:gm7",
+        "fields": {
+          "blockId": {
+            "kind": "string",
+            "value": "gm7"
+          },
+          "content": {
+            "kind": "string",
+            "value": "export GM7=1"
+          },
+          "hostFile": {
+            "kind": "string",
+            "value": "~/.bashrc"
+          }
+        },
+        "dependsOn": [],
+        "guard": null,
+        "activity": null
+      }
+    ],
+    "buildActions": [],
+    "adapterPreference": {},
+    "hostApplies": {
+      "m1": [
+        "applications",
+        "environment"
+      ],
+      "server": [
+        "packages"
+      ]
+    }
+  },
+  "concerns": {
+    "names": [
+      "packages",
+      "applications",
+      "files",
+      "environment",
+      "services",
+      "settings"
+    ],
+    "resourceKinds": {
+      "fs.managedBlock": "environment",
+      "windows.registryValue": "settings",
+      "env.userVariable": "environment",
+      "env.userPath": "environment",
+      "windows.startup": "services",
+      "shell.integration": "environment",
+      "linux.gsettings": "settings",
+      "systemd.userUnit": "services",
+      "macos.userDefault": "settings",
+      "launchd.userAgent": "services",
+      "fs.userFile": "files",
+      "vscode.extension": "settings",
+      "linux.dconfKey": "settings",
+      "linux.kdeConfigKey": "settings",
+      "pkg.homebrewFormula": "applications",
+      "pkg.homebrewCask": "applications",
+      "macos.appBundle": "applications"
+    },
+    "configOverrides": "files",
+    "profileBin": {
+      "x86_64-linux": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      },
+      "aarch64-linux": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      },
+      "x86_64-darwin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      },
+      "aarch64-darwin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      },
+      "x86_64-windows": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      },
+      "aarch64-windows": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      }
+    },
+    "packages": {
+      "x86_64-linux": {
+        "applications": [],
+        "unresolved": [
+          "busybox",
+          "gm7app",
+          "patchelf"
+        ]
+      },
+      "aarch64-linux": {
+        "applications": [],
+        "unresolved": [
+          "busybox",
+          "gm7app",
+          "patchelf"
+        ]
+      },
+      "x86_64-darwin": {
+        "applications": [
+          "gm7app"
+        ],
+        "unresolved": [
+          "busybox",
+          "patchelf"
+        ]
+      },
+      "aarch64-darwin": {
+        "applications": [
+          "gm7app"
+        ],
+        "unresolved": [
+          "busybox",
+          "patchelf"
+        ]
+      },
+      "x86_64-windows": {
+        "applications": [],
+        "unresolved": [
+          "busybox",
+          "gm7app",
+          "patchelf"
+        ]
+      },
+      "aarch64-windows": {
+        "applications": [],
+        "unresolved": [
+          "busybox",
+          "gm7app",
+          "patchelf"
+        ]
+      }
+    }
+  },
+  "platforms": {
+    "x86_64-linux": "same",
+    "aarch64-linux": "same",
+    "x86_64-darwin": "same",
+    "aarch64-darwin": "same",
+    "x86_64-windows": "same",
+    "aarch64-windows": "same"
+  },
+  "provenance": {
+    "repro": {
+      "version": "0.2.18",
+      "sourceRevision": "01e2eaf5f4f69afbe438c7b5fe1111364c2089c7-dirty"
+    },
+    "hostSource": "env",
+    "profile": {
+      "root": "home.nim",
+      "digest": null,
+      "inputs": []
+    },
+    "dataFiles": [],
+    "compile": {
+      "target": "x86_64-linux",
+      "os": "linux",
+      "cpu": "amd64",
+      "defines": [],
+      "probe": {}
+    }
+  }
+}

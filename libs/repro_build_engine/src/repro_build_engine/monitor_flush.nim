@@ -119,7 +119,9 @@
 ## both questions, which is the concrete reason the "point io-mon at /dev/null
 ## and re-encode here" variant was rejected on more than its CPU cost.
 
-import std/[os, strutils]
+import std/[monotimes, os, strutils, times]
+
+from repro_core/paths import extendedPath
 
 import ./worker_pool
 
@@ -164,6 +166,7 @@ type
     tempPath: cstring
     destPath: cstring
     failSubstring: cstring
+    releasePath: cstring
     delayMs: int
 
 static:
@@ -208,27 +211,33 @@ proc publishOneFlush(node: FlushNode): string {.gcsafe.} =
   ## rename has nothing to publish — rather than a mock: everything downstream
   ## sees exactly what a genuine ENOSPC would produce.
   let actionId = $enginePoolJobKey(addr node.base)
+  # Both paths sit under the engine's cache root, which a CMake TryCompile
+  # nests deep enough to pass Windows' ``MAX_PATH``; every file-system call
+  # below therefore goes through ``extendedPath``. The messages keep the
+  # ordinary spelling.
   let tempPath = $node.tempPath
   let destPath = $node.destPath
+  let tempFsPath = extendedPath(tempPath)
+  let destFsPath = extendedPath(destPath)
   let failSubstring = $node.failSubstring
   if failSubstring.len > 0 and actionId.contains(failSubstring):
     try:
-      removeFile(tempPath)
+      removeFile(tempFsPath)
     except CatchableError:
       discard
     return "injected monitor depfile flush failure " &
       "(REPROBUILD_MONITOR_FLUSH_FAIL) for " & actionId
-  if not fileExists(tempPath):
+  if not fileExists(tempFsPath):
     return "monitor depfile flush: io-mon wrote no depfile at " & tempPath
   try:
     # ``moveFile`` is ``rename`` on POSIX and ``MoveFileEx`` with
     # ``MOVEFILE_REPLACE_EXISTING`` on Windows; both replace the destination
     # atomically WITHIN a filesystem, which is what ``monitorFlushTempPath``
     # guarantees.
-    moveFile(tempPath, destPath)
+    moveFile(tempFsPath, destFsPath)
   except CatchableError as err:
     try:
-      removeFile(tempPath)
+      removeFile(tempFsPath)
     except CatchableError:
       discard
     return "monitor depfile flush failed for " & actionId & ": " & err.msg
@@ -238,10 +247,32 @@ proc runFlushJob(job: EnginePoolJob): cstring {.nimcall, gcsafe.} =
   ## The pool task. ``job`` is the ``base`` field of a ``FlushNodeObj``, which
   ## the ``static`` assertion above pins at offset 0.
   let node = cast[FlushNode](job)
-  if node.delayMs > 0:
-    # The seam ``the scheduler starts the next edges before the file lands``
-    # measures through. Without it the publication is a single ``rename``
-    # and lands so fast that the case could pass on a machine where nothing
+  let releasePath = $node.releasePath
+  if releasePath.len > 0:
+    # The RELEASE seam: withhold this publication until ``releasePath``
+    # exists, so a test can make "the next edge observed the depfile's
+    # absence" a matter of ORDER rather than of timing. The next edge's own
+    # command observes and then creates the file, so only a scheduler that
+    # starts that edge before this publication lands can ever release it.
+    #
+    # The hold ALSO ends the moment anyone waits on this tenant — and that is
+    # what keeps the opposite engine from deadlocking without making it a
+    # race: a scheduler that waits for this publication before starting the
+    # next edge is, by definition, a waiter, so the publication lands at once
+    # and the next edge then observes it. ``runBuild``'s own end-of-build
+    # wait is a waiter too, so a hold is never left behind by a build whose
+    # next edge never ran. Both ends are decided by order. ``delayMs`` is
+    # only a hang breaker for a caller that neither releases nor waits.
+    let deadline = getMonoTime() + initDuration(milliseconds = node.delayMs)
+    while not fileExists(extendedPath(releasePath)) and
+        not enginePoolTenantHasWaiter(monitorFlushTenant) and
+        getMonoTime() < deadline:
+      sleep(5)
+  elif node.delayMs > 0:
+    # The DELAY seam: keep a publication in flight for ``delayMs``. Without
+    # it the publication is a single ``rename`` and lands so fast that a case
+    # about publications in flight (HM-5's recycled-slot, torn-reader and
+    # cacheable-ordering cases) could pass on a machine where nothing
     # overlapped at all, which would make it a test of scheduling luck.
     sleep(node.delayMs)
   let err = publishOneFlush(node)
@@ -254,6 +285,7 @@ proc releaseFlushJob(job: EnginePoolJob) {.nimcall, gcsafe.} =
   sharedFree(node.tempPath)
   sharedFree(node.destPath)
   sharedFree(node.failSubstring)
+  sharedFree(node.releasePath)
   deallocShared(node)
 
 proc enqueueMonitorFlush*(job: MonitorFlushJob) =
@@ -261,7 +293,7 @@ proc enqueueMonitorFlush*(job: MonitorFlushJob) =
   ## this is the call the scheduler makes BEFORE it collects evidence,
   ## publishes a cache entry, or launches the next edges.
   ##
-  ## The two test seams are read HERE, per job, rather than once when the
+  ## The three test seams are read HERE, per job, rather than once when the
   ## pool starts: a test process that runs several builds must not be stuck
   ## with whatever the first one happened to set.
   let delayMs =
@@ -273,6 +305,8 @@ proc enqueueMonitorFlush*(job: MonitorFlushJob) =
   node.tempPath = sharedDup(job.tempPath)
   node.destPath = sharedDup(job.destPath)
   node.failSubstring = sharedDup(getEnv("REPROBUILD_MONITOR_FLUSH_FAIL", ""))
+  node.releasePath = sharedDup(
+    getEnv("REPROBUILD_MONITOR_FLUSH_RELEASE_PATH", ""))
   node.delayMs = delayMs
   submitEnginePoolJob(monitorFlushTenant, job.actionId, addr node.base,
     runFlushJob, releaseFlushJob)

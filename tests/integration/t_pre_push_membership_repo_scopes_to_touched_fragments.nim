@@ -74,13 +74,13 @@ proc seedOrigin(gitBin, originPath, seedPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(seedPath) & " push origin main")
 
 proc fragmentToml(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\nname = \"" & name & "\"\npath = \"" & name & "\"\n" &
-  "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+  "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
 
 proc projectToml(libAUrl, libBUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\nname = \"ws\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+  "[project]\nname = \"ws\"\n\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n"

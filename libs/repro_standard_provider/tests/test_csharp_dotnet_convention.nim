@@ -16,19 +16,18 @@
 ##     - an F# project (``*.fsproj``) is present at the root
 ##   * ``emitFragment`` against the hello-binary fixture (skipped when
 ##     dotnet is missing):
-##     - the convention emits a single ``csharp-dotnet-build`` action.
-##     - the action's argv carries ``dotnet build -c Release
-##       --no-restore --nologo --verbosity quiet``.
-##     - the action's output is
-##       ``bin/Release/<TargetFramework>/<AssemblyName>.exe`` under
-##       the project root (the fixture's csproj pins ``net8.0`` +
-##       ``OutputType=Exe`` + ``AssemblyName=hello``).
-##   * Output-path resolution: ``<TargetFramework>`` (singular or
-##     first entry of plural) + ``<AssemblyName>`` (or csproj basename
-##     fall-back) + ``<OutputType>`` (extension selector) compose the
-##     predicted binary path.
+##     - the convention emits a ``csharp-dotnet-outputs`` discovery
+##       action and a single ``csharp-dotnet-build`` action.
+##     - the build action's argv carries ``dotnet build -c Release
+##       --no-restore --nologo --verbosity quiet --disable-build-servers``.
+##     - the build action declares no outputs of its own: it loads the
+##       discovery fragment, which is one of its inputs.
+##   * Where MSBuild puts the assembly (default layout, ``OutputPath``,
+##     ``AssemblyName``, ``RuntimeIdentifier``, ``UseAppHost=false``) is
+##     checked by real SDK builds in ``test_delegated_build_outputs.nim``.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 
 import repro_core
@@ -288,117 +287,26 @@ suite "csharp-dotnet convention M42":
       check sawNologoFlag
       check sawVerbosityQuiet
 
-      # Output is bin/Release/<TargetFramework>/<AssemblyName>.exe
-      # under the fixture root. The fixture pins TargetFramework=net8.0
-      # + OutputType=Exe + AssemblyName defaults from "hello.csproj"
-      # so the binary lands at ``bin/Release/net8.0/hello.exe``.
-      var sawExeOutput = false
-      for outPath in buildAct.outputs:
-        let unified = outPath.replace('\\', '/')
-        if unified.endsWith("/bin/Release/net8.0/hello.exe"):
-          sawExeOutput = true
-      check sawExeOutput
-
-  test "output-path resolution: TargetFramework + AssemblyName + OutputType compose the binary filename":
-    # Scratch project with custom TargetFramework + AssemblyName +
-    # OutputType to exercise the csproj XML parser without needing the
-    # dotnet toolchain on PATH. ``recognize`` will fail when dotnet
-    # isn't installed, but emit-fragment's output-path branch is
-    # independent of that gate; since ``emitFragment`` calls
-    # ``dotnetExecutable()`` and raises when dotnet is missing, this
-    # test SKIPs when the toolchain is unavailable.
-    if not dotnetToolchainReady():
-      skip("dotnet not on PATH")
-    else:
-      let scratch = getTempDir() / "test_csharp_dotnet_convention_custom_coords"
-      if dirExists(scratch):
-        removeDir(scratch)
-      createDir(scratch)
-      writeFile(scratch / "Program.cs",
-        "using System;\n" &
-        "Console.WriteLine(\"x\");\n")
-      # Use ``<TargetFrameworks>`` (plural, semicolon-separated) to
-      # exercise the first-entry pickoff; pin a custom AssemblyName
-      # and ``OutputType=Exe`` so the predicted path is
-      # ``bin/Release/net9.0/customAsm.exe``.
-      writeFile(scratch / "custom.csproj",
-        "<Project Sdk=\"Microsoft.NET.Sdk\">\n" &
-        "  <PropertyGroup>\n" &
-        "    <OutputType>Exe</OutputType>\n" &
-        "    <TargetFrameworks>net9.0;net8.0</TargetFrameworks>\n" &
-        "    <AssemblyName>customAsm</AssemblyName>\n" &
-        "    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>\n" &
-        "  </PropertyGroup>\n" &
-        "</Project>\n")
-      writeFile(scratch / "packages.lock.json", "{\n  \"version\": 1\n}\n")
-      writeFile(scratch / "reprobuild.nim",
-        "import repro_project_dsl\n" &
-        "package fakeDotnetCustomCoords:\n" &
-        "  uses:\n" &
-        "    \"dotnet >=8\"\n" &
-        "\n" &
-        "  executable custom:\n" &
-        "    discard\n")
-      defer:
-        removeDir(scratch)
-      let conv = dotnet_convention.csharpDotnetConvention()
-      let request = dummyRequest(scratch)
-      require conv.recognize(scratch, request)
-      let fragment = conv.emitFragment(scratch, request)
-      var sawCustomBinary = false
+      check "--disable-build-servers" in argv
+      check ("DOTNET_CLI_TELEMETRY_OPTOUT", "1") in buildAct.env
+      # The build edge's outputs are discovered, not predicted
+      # (Build-Engine-And-Scheduler.md §"Outputs a delegated build
+      # decides"): it declares none itself, loads the fragment its
+      # discovery edge writes, and is keyed on it. Real builds of the
+      # default layout and of the overrides are in
+      # test_delegated_build_outputs.nim.
+      check buildAct.outputs.len == 0
+      check buildAct.dynamicDepsFile.replace('\\', '/').endsWith(
+        "/.repro/build/csharp-dotnet-outputs.dyndep")
+      check buildAct.dynamicDepsFile in buildAct.inputs
+      check "csharp-dotnet-outputs" in buildAct.deps
+      var sawDiscovery = false
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
-        for outPath in action.outputs:
-          let unified = outPath.replace('\\', '/')
-          if unified.endsWith("/bin/Release/net9.0/customAsm.exe"):
-            sawCustomBinary = true
-      check sawCustomBinary
-
-  test "output-path resolution: OutputType=Library yields .dll":
-    # Library output: ``OutputType=Library`` (or omitted) ⇒ ``.dll``.
-    # AssemblyName defaults to the csproj basename when omitted.
-    if not dotnetToolchainReady():
-      skip("dotnet not on PATH")
-    else:
-      let scratch = getTempDir() / "test_csharp_dotnet_convention_library_output"
-      if dirExists(scratch):
-        removeDir(scratch)
-      createDir(scratch)
-      writeFile(scratch / "Lib.cs",
-        "namespace MyLib;\npublic static class L { " &
-          "public static int Add(int a, int b) => a + b; }\n")
-      writeFile(scratch / "mylib.csproj",
-        "<Project Sdk=\"Microsoft.NET.Sdk\">\n" &
-        "  <PropertyGroup>\n" &
-        "    <OutputType>Library</OutputType>\n" &
-        "    <TargetFramework>net8.0</TargetFramework>\n" &
-        "    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>\n" &
-        "  </PropertyGroup>\n" &
-        "</Project>\n")
-      writeFile(scratch / "packages.lock.json", "{\n  \"version\": 1\n}\n")
-      writeFile(scratch / "reprobuild.nim",
-        "import repro_project_dsl\n" &
-        "package fakeDotnetLibrary:\n" &
-        "  uses:\n" &
-        "    \"dotnet >=8\"\n" &
-        "\n" &
-        "  library mylib:\n" &
-        "    discard\n")
-      defer:
-        removeDir(scratch)
-      let conv = dotnet_convention.csharpDotnetConvention()
-      let request = dummyRequest(scratch)
-      require conv.recognize(scratch, request)
-      let fragment = conv.emitFragment(scratch, request)
-      var sawDllOutput = false
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        for outPath in action.outputs:
-          let unified = outPath.replace('\\', '/')
-          if unified.endsWith("/bin/Release/net8.0/mylib.dll"):
-            sawDllOutput = true
-      check sawDllOutput
+        if action.id == "csharp-dotnet-outputs":
+          sawDiscovery = true
+          check action.outputs == @[buildAct.dynamicDepsFile]
+          check "--delegated-outputs" in inlineArgvOf(action)
+      check sawDiscovery

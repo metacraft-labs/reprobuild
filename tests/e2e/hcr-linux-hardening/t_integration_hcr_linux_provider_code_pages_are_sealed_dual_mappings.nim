@@ -70,6 +70,7 @@
 ## motivated asserting the kernel's answer rather than the return code.
 
 import std/[json, os, osproc, streams, strtabs, strutils, unittest]
+from repro_test_support import testScratchSlug
 
 when defined(linux) and defined(amd64):
   import repro_hcr_agent
@@ -211,7 +212,8 @@ int main(int argc, char **argv) {
   suite Gate:
     test "the dual mapping allocates executable pages where the anonymous path cannot":
       let repoRoot = getCurrentDir()
-      let workDir = repoRoot / "build" / "hcr-linux-memfd"
+      # Per case: both cases build into this directory, concurrently.
+      let workDir = repoRoot / "build" / "hcr-linux-memfd" / testScratchSlug()
       createDir(workDir)
       let probe = buildProbe(repoRoot, workDir)
 
@@ -262,7 +264,7 @@ int main(int argc, char **argv) {
 
     test "a real patch body executes from a sealed memfd with no writable alias":
       let repoRoot = getCurrentDir()
-      let workDir = repoRoot / "build" / "hcr-linux-memfd"
+      let workDir = repoRoot / "build" / "hcr-linux-memfd" / testScratchSlug()
       createDir(workDir)
       let repro = repoRoot / "build" / "bin" / "repro".addFileExt(ExeExt)
       if not fileExists(repro):

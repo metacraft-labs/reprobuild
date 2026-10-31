@@ -14,5 +14,7 @@ import repro_deploy_agent/tick_status
 import repro_deploy_agent/tick_history
 import repro_deploy_agent/tick_event_log
 import repro_deploy_agent/tick_record
+import repro_deploy_agent/profile_stage
 
-export manifest, agent, tick_status, tick_history, tick_event_log, tick_record
+export manifest, agent, tick_status, tick_history, tick_event_log, tick_record,
+       profile_stage

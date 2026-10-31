@@ -47,10 +47,13 @@ package `tar`:
     # pinning LINUX tarballs for GNU tar, gzip and coreutils --
     # three new downloads to vet, which is a decision for whoever
     # owns the provisioning catalogue rather than a typo here.
+    # ``version`` is GNU tar's, not Git's: ``usr/bin/tar.exe --version``
+    # here reports 1.35.
     tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/tar.exe",
+      version = "1.35",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",

@@ -123,12 +123,14 @@ when defined(posix) and isNixSupported:
       let oldFail = getEnv("REPRO_TEST_NIM_FAIL")
       let oldFake = getEnv("REPRO_TEST_FAKE_PROVIDER")
       let oldRuntimeRpath = getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH")
+      let oldTmpDir = getEnv("TMPDIR")
       defer:
         putEnv("REPRO_NIM_COMPILER", oldCompiler)
         putEnv("REPRO_PROVIDER_NIMCACHE_MODE", oldMode)
         putEnv("REPRO_TEST_NIM_FAIL", oldFail)
         putEnv("REPRO_TEST_FAKE_PROVIDER", oldFake)
         putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
+        if oldTmpDir.len > 0: putEnv("TMPDIR", oldTmpDir) else: delEnv("TMPDIR")
         setFilePermissions(modulePath, {fpUserRead, fpUserWrite})
         setFilePermissions(projectRoot,
           {fpUserRead, fpUserWrite, fpUserExec})
@@ -253,6 +255,12 @@ when defined(posix) and isNixSupported:
       putEnv("REPRO_TEST_NIM_FAIL", "")
       putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
       putEnv("REPRO_PROVIDER_NIMCACHE_MODE", "shared")
+      # The shared interface nimcache lives under the temporary directory
+      # (`interfaceExtractionNimcacheRoot`), outside any scratch or
+      # action-cache root. A private one keeps the object counts below about
+      # this fixture alone.
+      createDir(tempRoot / "tmp")
+      putEnv("TMPDIR", tempRoot / "tmp")
 
       let first = extractInterfaceFromModule(modulePath,
         outputRoot / "first.rbsz", outputRoot / "first.nim", sourceRoot,
@@ -266,7 +274,7 @@ when defined(posix) and isNixSupported:
       # exactly one object here and it is subject to the same reuse claim as
       # everything else in the directory.
       var objectTimes = initTable[string, Time]()
-      for path in walkDirRec(scratchRoot / "nimcache-interface"):
+      for path in walkDirRec(interfaceExtractionNimcacheRoot()):
         if path.endsWith(".o"):
           objectTimes[path] = getLastModificationTime(path)
       require objectTimes.len >= 4
@@ -280,7 +288,7 @@ when defined(posix) and isNixSupported:
         if not fileExists(path) or getLastModificationTime(path) != modified:
           inc rebuilt
       var objectsAfter = 0
-      for path in walkDirRec(scratchRoot / "nimcache-interface"):
+      for path in walkDirRec(interfaceExtractionNimcacheRoot()):
         if path.endsWith(".o"):
           inc objectsAfter
       checkpoint "shared objects: " & $objectTimes.len & ", rebuilt: " &
@@ -300,9 +308,15 @@ when defined(posix) and isNixSupported:
       # COUNT catches it.
       check objectsAfter == objectTimes.len
       let compilerCwds = readFile(cwdLog).splitLines().filterIt(it.len > 0)
-      require compilerCwds.len == 1
-      check compilerCwds[0].parentDir == scratchRoot / "m7-temp"
-      check not dirExists(compilerCwds[0])
+      # Two compiler processes per extraction: the `nim dump` that reads the
+      # recipe's configuration search paths, and the compile. BOTH run in the
+      # extraction's one private directory, never in the caller's.
+      checkpoint "compiler cwds: " & $compilerCwds
+      check compilerCwds.len == 2
+      for compilerCwd in compilerCwds:
+        check compilerCwd.parentDir == scratchRoot / "m7-temp"
+        check compilerCwd.extractFilename.startsWith("repro-interface-extract-")
+        check not dirExists(compilerCwd)
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
       check transientChildren(scratchRoot / "m7-temp",
@@ -331,3 +345,67 @@ when defined(posix) and isNixSupported:
             root / ($value & ".nim"), getCurrentDir(), root / "scratch",
             useExtractionCache = false, consumerRoot = root)
           check fileExists(artifactPath)
+
+    test "SDK dependencies outrank configuration and extra paths without losing recipe imports":
+      # Real module trees and the real compiler: either competing module emits
+      # a compile error if selected. Successful extraction/link must therefore
+      # use the actual SDK closure, not a simulated resolver or compiler.
+      let root = createTempDir("repro-sdk-path-priority-", "")
+      let project = root / "consumer"
+      let configured = project / "configured imports"
+      let extra = project / "extra imports"
+      createDir(configured / "stew")
+      createDir(extra)
+      createDir(root / "scratch")
+      createDir(root / "tmp")
+      let oldTmp = getEnv("TMPDIR")
+      let oldCache = getEnv("XDG_CACHE_HOME")
+      putEnv("TMPDIR", root / "tmp")
+      putEnv("XDG_CACHE_HOME", root / "cache")
+      defer:
+        if oldTmp.len > 0: putEnv("TMPDIR", oldTmp) else: delEnv("TMPDIR")
+        if oldCache.len > 0: putEnv("XDG_CACHE_HOME", oldCache)
+        else: delEnv("XDG_CACHE_HOME")
+        removeDir(root)
+      writeFile(configured / "stew/ptrops.nim",
+        "{.error: \"consumer stew must not replace the SDK dependency\".}\n")
+      writeFile(extra / "repro_core.nim",
+        "{.error: \"extra path must not replace the SDK library\".}\n")
+      writeFile(configured / "config_only.nim", "const configValue* = 37\n")
+      writeFile(extra / "extra_only.nim", "const extraValue* = 19\n")
+      writeFile(project / "config.nims", "switch(\"path\", " &
+        configured.escape & ")\nswitch(\"define\", \"recipeConfigurationOnly\")\n")
+      let modulePath = project / "repro.nim"
+      writeFile(modulePath, """
+import repro_project_dsl
+import config_only, extra_only
+static:
+  doAssert configValue == 37 and extraValue == 19
+when defined(reproInterfaceMode):
+  static: doAssert not defined(recipeConfigurationOnly)
+when defined(reproProviderMode):
+  static: doAssert defined(recipeConfigurationOnly)
+package namespaceFixture:
+  build:
+    discard
+""")
+      let artifact = root / "interface.rbsz"
+      var extracted = false
+      try:
+        discard extractInterfaceFromModule(modulePath, artifact,
+          root / "interface.nim", getCurrentDir(), root / "scratch",
+          extraPaths = @[extra], useExtractionCache = false,
+          consumerRoot = project)
+        extracted = true
+      except OSError as err:
+        checkpoint(err.msg)
+      check extracted
+      check fileExists(artifact)
+      let binary = root / "provider"
+      let command = providerCompileCommand(modulePath, binary, getCurrentDir(),
+        root / "scratch", extraFlags = @["--path:" & extra])
+      let compiled = repro_interface_artifacts.runCommand(command,
+        cwd = root / "scratch", raiseOnFailure = false)
+      checkpoint(compiled.output)
+      check compiled.exitCode == 0
+      check fileExists(binary)

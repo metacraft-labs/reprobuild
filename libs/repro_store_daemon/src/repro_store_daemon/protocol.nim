@@ -149,7 +149,7 @@ proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
     buf.writeString(value)
 
 proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
-  let count = int(buf.readU32Le(pos))
+  let count = readElementCount(buf, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = buf.readString(pos)
@@ -370,13 +370,32 @@ proc currentUid*(): int64 =
     0'i64
 
 proc defaultDevEndpoint*(): string =
+  ## The dev store daemon's endpoint. ``REPROSTORED_ENDPOINT`` is taken
+  ## verbatim, and so is a socket under ``XDG_RUNTIME_DIR`` (the session
+  ## manager's short ``/run/user/<uid>``); an over-long explicit choice is
+  ## reported by ``bindIpcListener``, naming the limit, rather than moved.
+  ##
+  ## Only the ``getTempDir()`` fallback is bounded. ``$TMPDIR`` has no length
+  ## limit -- the suite's ``~/.cache/reprobuild-test-tmp/<slot>``, a
+  ## ``nix-shell`` session directory -- and the socket must fit what
+  ## ``std/net`` binds (107 bytes on Linux, 91 on macOS;
+  ## ``repro_core/paths.unixSocketPathMaxLen``) with room beside it for
+  ## ``bindIpcListener``'s staging name (``ipcEndpointFits``). Where it would
+  ## not, the socket goes straight into ``/tmp``, the location this default
+  ## already has whenever ``TMPDIR=/tmp``, as
+  ## ``repro_core/paths.runquotaEndpointPath`` does for its own sockets. The
+  ## status file (``statusFileForEndpoint``) stays in ``devRuntimeDir``: it
+  ## is a regular file, with no address limit.
   let override = getEnv("REPROSTORED_ENDPOINT")
   if override.len > 0:
     return override
   when defined(windows):
     "\\\\.\\pipe\\reprostored-dev-current-user"
   else:
-    devRuntimeDir() / ("reprostore-" & $currentUid() & ".sock")
+    let leaf = "reprostore-" & $currentUid() & ".sock"
+    result = devRuntimeDir() / leaf
+    if getEnv("XDG_RUNTIME_DIR").len == 0 and not ipcEndpointFits(result):
+      result = "/tmp" / leaf
 
 proc statusFileForEndpoint*(endpoint: string): string =
   let leaf = endpoint.extractFilename

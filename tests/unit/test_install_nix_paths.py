@@ -4,12 +4,14 @@ WHY THIS FILE EXISTS
 
 For Nix users the package repository is the `metacraft-labs/nixpkgs` fork,
 whose standing branches are named after the upstream channel each one tracks
-(metacraft-specs `infrastructure/package-distribution.md` §6.4, §13). On
-NixOS the installer must not install anything: it detects the system's
-channel, picks the fork branch of the same name, and PRINTS the configuration
-change. It never edits `/etc/nixos`, and it never registers an apt/dnf
+plus the suffix `-metacraft` (metacraft-specs
+`infrastructure/package-distribution.md` §6.4, §13). On NixOS the installer
+must not install anything: it detects the system's channel, picks the fork
+branch `<channel>-metacraft`, and PRINTS the configuration change. It never edits `/etc/nixos`, and it never registers an apt/dnf
 repository just because such a tool happens to be on PATH. Elsewhere,
-`--method nix` installs into the user's Nix profile from the fork.
+`--method nix` installs into the user's Nix profile from the fork, and moves
+an entry that follows one of the old bare channel names (which the fork stops
+updating after its transition window) onto that channel's `-metacraft` branch.
 
 Every case drives the REAL installer script and asserts on its exit status,
 its stdout (the snippet a user copies) and on which external commands it ran.
@@ -40,6 +42,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts" / "install" / "repro-install.sh"
 FORK = "github:metacraft-labs/nixpkgs"
+# The fork's branches: the -metacraft names, and the old bare names that it
+# keeps publishing during the transition window.
+NEW_BRANCHES = ("nixos-unstable-metacraft nixpkgs-unstable-metacraft "
+                "nixos-26.05-metacraft nixpkgs-26.05-darwin-metacraft")
+OLD_BRANCHES = "nixos-unstable nixpkgs-unstable nixos-26.05 nixpkgs-26.05-darwin"
 
 RECORDER = """#!/bin/sh
 printf '%s %s\\n' "$(basename "$0")" "$*" >> "$STUB_LOG"
@@ -77,8 +84,7 @@ class InstallerNixPathsTest(unittest.TestCase):
             "{\n  inputs.nixpkgs.url = \"%s\";\n}\n" % nixpkgs_url
         )
 
-    def run_installer(self, *args, branches="nixos-unstable nixpkgs-unstable "
-                      "nixos-26.05 nixpkgs-26.05-darwin", marker=None, env=None):
+    def run_installer(self, *args, branches=NEW_BRANCHES, marker=None, env=None):
         full_env = {
             "PATH": f"{self.bin}:/usr/bin:/bin:{os.environ.get('PATH', '')}",
             "HOME": str(self.tmp),
@@ -107,7 +113,7 @@ class InstallerNixPathsTest(unittest.TestCase):
         self.flake("github:NixOS/nixpkgs/nixos-26.05")
         proc = self.run_installer()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(f'inputs.metacraft.url = "{FORK}/nixos-26.05";', proc.stdout)
+        self.assertIn(f'inputs.metacraft.url = "{FORK}/nixos-26.05-metacraft";', proc.stdout)
         self.assertIn(".legacyPackages.${pkgs.stdenv.hostPlatform.system}.reprobuild",
                       proc.stdout)
         self.assertIn("sudo nixos-rebuild switch", proc.stdout)
@@ -120,7 +126,7 @@ class InstallerNixPathsTest(unittest.TestCase):
         self.flake("github:NixOS/nixpkgs/nixos-unstable")
         proc = self.run_installer()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(f'"{FORK}/nixos-unstable"', proc.stdout)
+        self.assertIn(f'"{FORK}/nixos-unstable-metacraft"', proc.stdout)
         self.assertNotIn("nixos-26.05", proc.stdout)
 
     def test_channel_config_gets_a_nix_channel_snippet_for_its_release(self):
@@ -129,7 +135,7 @@ class InstallerNixPathsTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(
             "sudo nix-channel --add https://github.com/metacraft-labs/nixpkgs/"
-            "archive/nixos-26.05.tar.gz metacraft",
+            "archive/nixos-26.05-metacraft.tar.gz metacraft",
             proc.stdout,
         )
         self.assertIn("(import <metacraft> { }).reprobuild", proc.stdout)
@@ -140,8 +146,24 @@ class InstallerNixPathsTest(unittest.TestCase):
         self.os('ID=nixos\nVERSION_ID="25.11"\n')
         proc = self.run_installer()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("archive/nixos-unstable.tar.gz", proc.stdout)
-        self.assertIn("has no branch nixos-25.11", proc.stderr)
+        self.assertIn("archive/nixos-unstable-metacraft.tar.gz", proc.stdout)
+        self.assertIn("has no branch nixos-25.11-metacraft", proc.stderr)
+
+    def test_the_old_bare_channel_names_are_never_chosen(self):
+        # During the transition window the fork has both names; the old one
+        # stops receiving updates afterwards, so it is never printed.
+        self.os('ID=nixos\nVERSION_ID="26.05"\n')
+        proc = self.run_installer(branches=f"{OLD_BRANCHES} {NEW_BRANCHES}")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("archive/nixos-26.05-metacraft.tar.gz", proc.stdout)
+        self.assertNotIn("archive/nixos-26.05.tar.gz", proc.stdout)
+
+    def test_a_fork_with_only_the_old_names_falls_back_to_unstable_metacraft(self):
+        self.os('ID=nixos\nVERSION_ID="26.05"\n')
+        proc = self.run_installer(branches=OLD_BRANCHES)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("archive/nixos-unstable-metacraft.tar.gz", proc.stdout)
+        self.assertIn("has no branch nixos-26.05-metacraft", proc.stderr)
 
     def test_the_nixos_marker_alone_is_enough(self):
         # ID=nixos is missing (a customised os-release); /etc/NIXOS is not.
@@ -151,7 +173,7 @@ class InstallerNixPathsTest(unittest.TestCase):
         proc = self.run_installer(marker=marker)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("method=nixos", proc.stderr)
-        self.assertIn("archive/nixos-26.05.tar.gz", proc.stdout)
+        self.assertIn("archive/nixos-26.05-metacraft.tar.gz", proc.stdout)
 
     def test_nixos_never_registers_a_system_repository(self):
         # apt-get and dnf are on PATH (as in a dev shell); ID_LIKE even says
@@ -159,7 +181,7 @@ class InstallerNixPathsTest(unittest.TestCase):
         self.os('ID=nixos\nID_LIKE=debian\nVERSION_ID="26.05"\n')
         proc = self.run_installer()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("archive/nixos-26.05.tar.gz", proc.stdout)
+        self.assertIn("archive/nixos-26.05-metacraft.tar.gz", proc.stdout)
         self.assertEqual(self.calls(), [])
         self.assertFalse(any(p.name.endswith(".sources") for p in self.tmp.rglob("*")))
 
@@ -174,9 +196,9 @@ class InstallerNixPathsTest(unittest.TestCase):
     def test_an_explicit_branch_overrides_detection(self):
         self.os('ID=nixos\nVERSION_ID="26.05"\n')
         self.flake("github:NixOS/nixpkgs/nixos-26.05")
-        proc = self.run_installer(env={"REPRO_NIX_BRANCH": "nixos-unstable"})
+        proc = self.run_installer(env={"REPRO_NIX_BRANCH": "nixos-unstable-metacraft"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(f'"{FORK}/nixos-unstable"', proc.stdout)
+        self.assertIn(f'"{FORK}/nixos-unstable-metacraft"', proc.stdout)
 
     # -- Nix elsewhere ----------------------------------------------------
 
@@ -186,7 +208,7 @@ class InstallerNixPathsTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         installs = [c for c in self.calls() if " profile install " in f" {c} "]
         self.assertEqual(len(installs), 1, self.calls())
-        self.assertTrue(installs[0].endswith(f"{FORK}/nixpkgs-unstable#reprobuild"),
+        self.assertTrue(installs[0].endswith(f"{FORK}/nixpkgs-unstable-metacraft#reprobuild"),
                         installs[0])
         self.assertFalse(any(c.startswith(("apt-get", "dnf", "sudo")) for c in self.calls()))
 
@@ -195,12 +217,36 @@ class InstallerNixPathsTest(unittest.TestCase):
         proc = self.run_installer(
             "--method", "nix",
             env={"STUB_NIX_PROFILE_LIST":
-                 f"Name: reprobuild\nOriginal flake URL: {FORK}/nixpkgs-unstable"},
+                 f"Name: reprobuild\n"
+                 f"Original flake URL: {FORK}/nixpkgs-unstable-metacraft\n"
+                 f"Locked flake URL: {FORK}/0123456789abcdef0123456789abcdef01234567"},
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue(any(c.endswith("profile upgrade reprobuild") for c in self.calls()),
                         self.calls())
+        self.assertFalse(any(" profile remove " in f" {c} " for c in self.calls()))
         self.assertFalse(any(" profile install " in f" {c} " for c in self.calls()))
+
+    def test_method_nix_moves_an_install_from_an_old_bare_name(self):
+        # Installed by an earlier installer from the bare `nixos-26.05`
+        # (older `nix profile list` format, one line per entry): reinstall
+        # from `nixos-26.05-metacraft`, which keeps receiving releases.
+        self.os('ID=debian\nVERSION_ID="12"\n')
+        attr = "legacyPackages.x86_64-linux.reprobuild"
+        proc = self.run_installer(
+            "--method", "nix",
+            env={"STUB_NIX_PROFILE_LIST":
+                 f"0 {FORK}/nixos-26.05#{attr} "
+                 f"{FORK}/0123456789abcdef0123456789abcdef01234567#{attr} "
+                 "/nix/store/00000000000000000000000000000000-reprobuild-0.2.5"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        profile = [c for c in self.calls() if " profile " in f" {c} " and " list" not in c]
+        self.assertEqual(len(profile), 2, self.calls())
+        self.assertTrue(profile[0].endswith("profile remove reprobuild"), profile)
+        self.assertTrue(profile[1].endswith(f"profile install {FORK}/nixos-26.05-metacraft#reprobuild"),
+                        profile)
+        self.assertIn("stops receiving updates", proc.stderr)
 
     def test_method_nix_uninstall_removes_the_profile_entry(self):
         self.os('ID=debian\nVERSION_ID="12"\n')

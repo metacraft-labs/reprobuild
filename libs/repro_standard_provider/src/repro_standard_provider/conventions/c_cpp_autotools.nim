@@ -1122,26 +1122,24 @@ proc emitModeBInstallAction(projectRoot, makeExe: string;
                             jobs: int;
                             makeActionId: string): BuildActionDef =
   ## Mode-B ``make DESTDIR=<stage> install`` action (spec line 131).
-  ## Lifts the install tree into ``<stage>``; the declared outputs are
-  ## the four canonical install sub-trees (spec lines 136-137) so they
-  ## become the package's artifacts.
+  ## Lifts the install tree into ``<stage>``. The tree itself is the
+  ## declared artifact, including partial and empty installations.
   let buildDir = modeBBuildDir(projectRoot)
   let stageDir = modeBStageDir(projectRoot)
   createDir(extendedPath(stageDir))
   # Pass DESTDIR as a make command-line override (always wins over a
   # Makefile-level assignment) so the install tree is redirected into
   # the staging root rather than the real ``/``.
-  let argv = @[makeExe, "-C", buildDir, "-j" & $jobs,
+  let installArgv = @[makeExe, "-C", buildDir, "-j" & $jobs,
     "DESTDIR=" & stageDir, "install"]
+  # Empty and partial installs are valid; the action owns the staged tree,
+  # including its existence when make has nothing to install.
+  let argv = @["sh", "-c", "mkdir -p " & quoteShell(stageDir) &
+    " && " & installArgv.quoteShellCommand()]
   # Artifacts lifted from ``<stage>/{bin,lib,include,share}`` (spec
   # lines 136-137). With ``--prefix=/`` these land directly under
   # ``<stage>/{bin,lib,include,share}``.
-  let outputs = @[
-    stageDir / "bin",
-    stageDir / "lib",
-    stageDir / "include",
-    stageDir / "share",
-  ]
+  let outputs = @[stageDir]
   buildAction(
     id = "ccpp-autotools-modeb-install",
     call = inlineExecCall(argv, projectRoot),

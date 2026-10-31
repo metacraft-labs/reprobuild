@@ -11,8 +11,10 @@
 ##     payload byte representation
 
 import std/[os, strutils, tables, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_home_resources
+from repro_home_generations import digestHex
 
 suite "M68 smoke: home resource lifecycle":
 
@@ -1311,7 +1313,7 @@ vscodevim.vim@1.27.0
     check action.kind == rakCreate
     check action.resourceKind == rkVscodeExtension
 
-  test "lifecycle: first-apply with no prior generation is NOT drift":
+  test "lifecycle: first apply converges a set contribution":
     # Regression for the M83 step-3 Hyper-V harness failure: a
     # `vscode.extension` resource on a fresh VM (no prior generation
     # manifest, so no recorded binding) where the desired ID is not
@@ -1319,9 +1321,8 @@ vscodevim.vim@1.27.0
     # `present=true` with the empty-intersection canonical (digest =
     # `af1349b9f5f9…`, the empty-text BLAKE3); the desired digest is
     # over the canonical `vscodevim.vim\n`. The two differ, but with
-    # `hasRecorded=false` the diff is NOT drift — drift requires a
-    # prior record of management. The lifecycle must collapse this
-    # to `rakUpdate` so the apply executor converges instead of
+    # `hasRecorded=false` the diff is NOT drift for set contributions.
+    # The lifecycle must collapse this to `rakUpdate` so apply converges instead of
     # raising `EDrift`.
     let desired = Resource(kind: rkVscodeExtension, address: "ve:first-apply",
       lifecyclePolicy: lpDefault,
@@ -1345,26 +1346,93 @@ vscodevim.vim@1.27.0
     check action.driftExpectedHex == ""
     check action.driftObservedHex == ""
 
-  test "lifecycle: first-apply with observed != desired is update, not drift":
-    # Same pattern for `fs.managedBlock`: the host file already has
-    # content under our managed-block sentinels (e.g. a previous
-    # untracked installer wrote it) and no prior generation manifest
-    # records a binding for this address. Lifecycle must converge,
-    # not drift-block.
-    var desired = Resource(kind: rkFsManagedBlock,
-      address: "fs:first-apply",
-      hostFilePath: "/tmp/host", managedBlockId: "block",
-      managedBlockContent: "PATH=/desired")
-    var state: ResourceState
-    state.address = desired.address
-    state.desired = desired
-    state.hasDesired = true
+  test "lifecycle: user PATH contribution converges without weakening recorded drift":
+    let desired = Resource(kind: rkEnvUserPath, address: "path:initial",
+      pathEntries: @["/desired/bin"])
+    var state = ResourceState(address: desired.address, hasDesired: true,
+      desired: desired)
+    state.observed.present = true
+    state.observed.digest = digestOfBytes(@[byte('x')])
+    check decideAction(state).kind == rakUpdate
+    state.hasRecorded = true
+    state.recorded.postWriteDigest = digestOfBytes(@[byte('y')])
+    check decideAction(state).kind == rakDriftBlocked
+
+  test "lifecycle: first apply blocks an unrecorded differing whole object":
+    let resources = @[
+      Resource(kind: rkFsManagedBlock, address: "block:unowned",
+        hostFilePath: "/tmp/host", managedBlockId: "block",
+        managedBlockContent: "desired"),
+      Resource(kind: rkFsUserFile, address: "file:unowned",
+        userFileHostPath: "/tmp/host", userFileContent: "desired"),
+      Resource(kind: rkEnvUserVariable, address: "env:unowned",
+        envVarName: "TEST"),
+      Resource(kind: rkMacosUserDefault, address: "default:unowned",
+        defaultsDomain: "test", defaultsKey: "key",
+        defaultsValueLiteral: "true"),
+      Resource(kind: rkLaunchdUserAgent, address: "agent:unowned",
+        launchdLabel: "test", launchdPlistContent: "desired")]
+    for desired in resources:
+      var state = ResourceState(address: desired.address,
+        desired: desired, hasDesired: true)
+      state.observed.present = true
+      state.observed.digest = digestOfBytes(@[byte('o'), byte('l'), byte('d')])
+      let action = decideAction(state)
+      check action.kind == rakDriftBlocked
+      check action.driftExpectedHex == ""
+      check action.driftObservedHex == digestHex(state.observed.digest)
+      expect EDrift:
+        raiseIfDriftBlocked(action)
+      let reconciled = decideAction(state,
+        DecisionOptions(reconcile: rpReconcileDrift))
+      check reconciled.kind == rakUpdate
+      check reconciled.driftObservedHex == action.driftObservedHex
+      # Matching unmanaged content remains a no-op; recorded ownership
+      # permits an ordinary desired-content update.
+      state.observed.digest = digestOfResource(desired)
+      check decideAction(state).kind == rakNoOp
+      state.observed.digest = digestOfBytes(@[byte('o')])
+      state.hasRecorded = true
+      state.recorded.postWriteDigest = state.observed.digest
+      check decideAction(state).kind == rakUpdate
+
+  test "lifecycle: an unrecorded-object drift says no generation records it":
+    # The plan summary and the EDrift message name the case (there is no
+    # recorded digest to quote) and both remedies.
+    let desired = Resource(kind: rkFsUserFile, address: "file:first-apply",
+      userFileHostPath: "/tmp/host-file", userFileContent: "desired\n",
+      userFileMode: "0644")
+    var state = ResourceState(address: desired.address, desired: desired,
+      hasDesired: true)
     state.observed.present = true
     state.observed.digest = digestOfBytes(@[byte('o'), byte('l'), byte('d')])
-    state.hasRecorded = false  # First apply.
     let action = decideAction(state)
-    check action.kind == rakUpdate
-    check action.kind != rakDriftBlocked
+    check action.kind == rakDriftBlocked
+    check "no generation records" in action.summary
+    try:
+      raiseIfDriftBlocked(action)
+      check false
+    except EDrift as e:
+      check "no generation records it" in e.msg
+      check "--reconcile-drift" in e.msg
+      check ("repro home adopt " & desired.address) in e.msg
+    check "[drift reconciled]" in decideAction(state,
+      DecisionOptions(reconcile: rpReconcileDrift)).summary
+
+  test "lifecycle: every built-in kind declares its first-apply ownership":
+    # The per-kind table `decideAction` consults on a first apply. Pinned
+    # whole, so a kind added later must be classified on purpose.
+    for kind in ResourceKind:
+      checkpoint($kind)
+      let want =
+        case kind
+        of rkEnvUserPath, rkVscodeExtension, rkLinuxGsettings,
+           rkHomebrewFormula, rkHomebrewCask:
+          roSetContribution
+        else:
+          roWholeObject
+      check lookupResourceType($kind).ownership == want
+      check builtinResourceOwnership(kind) == want
 
   test "realWorldIdentity is the singleton vscode:extensions":
     let r = Resource(kind: rkVscodeExtension, address: "ve",
@@ -2119,3 +2187,216 @@ suite "Recipe-Val side-finding: POSIX env.userVariable arm":
         delEnv("REPRO_HOME_POSIX_PATH_RC")
         try: removeFile(rc) except OSError: discard
         try: removeDir(dir) except OSError: discard
+
+# ---------------------------------------------------------------------------
+# Test home fence.
+#
+# reprobuild-pm issue 2026-10-20-home-apply-tests-wrote-path-blocks-into-the-
+# real-users-bashrc.md: home-apply tests wrote `env.userPath` blocks into the
+# invoking user's real `~/.bashrc` and passed. The fence makes such a write
+# raise instead. These cases pin its rule on real files under a temp root; no
+# driver is mocked.
+# ---------------------------------------------------------------------------
+
+template withFenceEnv(protectedRoots, allowRoots: string; body: untyped) =
+  let priorFence = getEnv(TestHomeFenceEnvVar)
+  let priorAllow = getEnv(TestHomeFenceAllowEnvVar)
+  if protectedRoots.len > 0: putEnv(TestHomeFenceEnvVar, protectedRoots)
+  else: delEnv(TestHomeFenceEnvVar)
+  if allowRoots.len > 0: putEnv(TestHomeFenceAllowEnvVar, allowRoots)
+  else: delEnv(TestHomeFenceAllowEnvVar)
+  try:
+    body
+  finally:
+    if priorFence.len > 0: putEnv(TestHomeFenceEnvVar, priorFence)
+    else: delEnv(TestHomeFenceEnvVar)
+    if priorAllow.len > 0: putEnv(TestHomeFenceAllowEnvVar, priorAllow)
+    else: delEnv(TestHomeFenceAllowEnvVar)
+
+suite "Test home fence: drivers refuse writes into a fenced home":
+  test "the fence is off unless REPRO_TEST_HOME_FENCE is set":
+    let root = createTempDir("repro-fence-off-", "")
+    defer:
+      try: removeDir(root) except OSError: discard
+    let rc = root / ".bashrc"
+    withFenceEnv("", ""):
+      check not testHomeFenceActive()
+      check testHomeFenceViolation(rc) == ""
+      discard applyManagedBlockResource(rc, "fence-off", "x\n")
+      check readFile(rc).contains("repro-managed:fence-off")
+
+  test "managed-block and user-file writes inside the fenced home raise and change nothing":
+    let root = createTempDir("repro-fence-on-", "")
+    defer:
+      try: removeDir(root) except OSError: discard
+    # The protected home lives under the process temp dir. The temp dir
+    # CONTAINS the protected home, so it is no carve-out for it.
+    let home = root / "home"
+    createDir(home)
+    let rc = home / ".bashrc"
+    const Initial = "# the user's own rc\n"
+    writeFile(rc, Initial)
+    withFenceEnv(home, ""):
+      check testHomeFenceActive()
+      check testHomeFenceViolation(rc).len > 0
+      expect TestHomeFenceError:
+        discard applyManagedBlockResource(rc,
+          "repro-home-userpath:home.package.leak.bin",
+          "export PATH='/leak'${PATH:+:$PATH}\n")
+      check readFile(rc) == Initial
+      check not fileExists(rc & ".repro.tmp")
+      expect TestHomeFenceError:
+        destroyManagedBlockResource(rc, "anything")
+      check readFile(rc) == Initial
+      # The env.userPath driver reaches the rc file through the same
+      # managed-block writer, which is the leak the issue records. On
+      # Windows it writes `HKCU\Environment\Path` instead, and the
+      # registry half of the fence has to refuse it: the case unsets the
+      # `REPRO_REGISTRY_ROOT` seam a runner may have set (which would send
+      # the write to a fake hive and prove nothing) and checks that the
+      # real user PATH did not change (reprobuild-pm issue
+      # 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-
+      # real-user-path).
+      let priorRegistryRoot = (existsEnv(RegistryRootEnvVar),
+        getEnv(RegistryRootEnvVar))
+      delEnv(RegistryRootEnvVar)
+      try:
+        when defined(windows):
+          let realPathBefore = readUserPathRaw()
+        expect TestHomeFenceError:
+          discard applyUserPath(@["/leak/bin"], @[], rc,
+            "repro-home-userpath:home.package.leak.bin")
+        when defined(windows):
+          check readUserPathRaw() == realPathBefore
+      finally:
+        if priorRegistryRoot[0]:
+          putEnv(RegistryRootEnvVar, priorRegistryRoot[1])
+      check readFile(rc) == Initial
+      let userFile = home / ".config" / "tool" / "settings.toml"
+      expect TestHomeFenceError:
+        discard writeUserFileBytes(userFile, [byte('x')], "")
+      check not fileExists(userFile)
+      check not dirExists(home / ".config")
+      # The message names the refused path and the variable that fenced it.
+      try:
+        discard applyManagedBlockResource(rc, "msg", "x\n")
+        check false
+      except TestHomeFenceError as e:
+        check e.path == rc
+        check TestHomeFenceEnvVar in e.msg
+        check rc in e.msg
+
+  test "a carve-out strictly inside the fenced home is writable; its siblings are not":
+    let root = createTempDir("repro-fence-carve-", "")
+    defer:
+      try: removeDir(root) except OSError: discard
+    let home = root / "home"
+    let suiteScratch = home / ".cache" / "reprobuild-test-tmp"
+    createDir(suiteScratch)
+    withFenceEnv(home, suiteScratch):
+      let inside = suiteScratch / "case" / "home" / ".bashrc"
+      check testHomeFenceViolation(inside) == ""
+      discard applyManagedBlockResource(inside, "carve", "ok\n")
+      check readFile(inside).contains("repro-managed:carve")
+      let sibling = home / ".cache" / "other" / "file"
+      check testHomeFenceViolation(sibling).len > 0
+      expect TestHomeFenceError:
+        discard writeUserFileBytes(sibling, [byte('x')], "")
+      check not fileExists(sibling)
+      # A name that merely shares the home's prefix is outside it.
+      let prefixTwin = root / "home-other" / ".bashrc"
+      check testHomeFenceViolation(prefixTwin) == ""
+    # An allow root that CONTAINS the fenced home does not open it.
+    withFenceEnv(home, root):
+      check testHomeFenceViolation(home / ".bashrc").len > 0
+
+  test "the process temp dir is a carve-out only when it lies inside the fenced home":
+    let root = createTempDir("repro-fence-tmp-", "")
+    defer:
+      try: removeDir(root) except OSError: discard
+    let home = root / "home"
+    let tmpInsideHome = home / ".cache" / "suite-tmp"
+    createDir(tmpInsideHome)
+    var prior: seq[(string, string)]
+    for name in ["TMPDIR", "TMP", "TEMP"]:
+      prior.add((name, getEnv(name)))
+      putEnv(name, tmpInsideHome)
+    try:
+      withFenceEnv(home, ""):
+        check testHomeFenceViolation(tmpInsideHome / "x" / ".bashrc") == ""
+        check testHomeFenceViolation(home / ".bashrc").len > 0
+    finally:
+      for (name, value) in prior:
+        if value.len > 0: putEnv(name, value)
+        else: delEnv(name)
+
+  when not defined(windows):
+    # POSIX only: the alias is a directory symlink, which an unprivileged
+    # Windows process cannot create. The case pins canonicalisation, which
+    # is what makes `/home` vs `/var/home` or macOS `/tmp` vs `/private/tmp`
+    # aliases of one fenced home compare equal.
+    test "a fenced home reached through a symlink alias is still fenced":
+      let root = createTempDir("repro-fence-alias-", "")
+      defer:
+        try: removeDir(root) except OSError: discard
+      let realHome = root / "real-home"
+      createDir(realHome)
+      let alias = root / "alias-home"
+      createSymlink(realHome, alias)
+      withFenceEnv(alias, ""):
+        check testHomeFenceViolation(realHome / ".bashrc").len > 0
+        expect TestHomeFenceError:
+          discard applyManagedBlockResource(realHome / ".bashrc", "a", "x\n")
+        check not fileExists(realHome / ".bashrc")
+      withFenceEnv(realHome, ""):
+        check testHomeFenceViolation(alias / ".zshrc").len > 0
+
+  test "a home that is the filesystem root is not fenced":
+    # `HOME=/` (minimal containers) cannot be fenced without fencing every
+    # path on the machine, so the fence ignores it rather than failing
+    # every driver write the suite makes.
+    let fsRoot = when defined(windows): getTempDir()[0 .. 2] else: "/"
+    let root = createTempDir("repro-fence-fsroot-", "")
+    defer:
+      try: removeDir(root) except OSError: discard
+    # Probe a path outside the temp dir: the temp dir is itself a carve-out
+    # inside a fenced `/`, which would hide whether the root was dropped.
+    let outsideTemp = fsRoot / "repro-fence-probe-absent" / ".bashrc"
+    withFenceEnv(fsRoot, ""):
+      check testHomeFenceViolation(outsideTemp) == ""
+      check testHomeFenceViolation(root / ".bashrc") == ""
+    # A real home next to it in the same list is still fenced.
+    let home = root / "home"
+    createDir(home)
+    withFenceEnv(fsRoot & $PathSep & home, ""):
+      check testHomeFenceViolation(home / ".bashrc").len > 0
+
+  when defined(linux):
+    test "systemd user-unit apply and destroy refuse before touching a fenced home":
+      # The refusal must come before `systemctl --user` runs or the unit
+      # file is written or removed.
+      let root = createTempDir("repro-fence-systemd-", "")
+      defer:
+        try: removeDir(root) except OSError: discard
+      let home = root / "home"
+      let unit = home / ".config" / "systemd" / "user" / "fence-probe.service"
+      createDir(parentDir(unit))
+      writeFile(unit, "[Unit]\n")
+      withFenceEnv(home, ""):
+        expect TestHomeFenceError:
+          discard applyUserUnit(home, "fence-probe.service", "[Unit]\nX=1\n",
+            enabled = false)
+        check readFile(unit) == "[Unit]\n"
+        expect TestHomeFenceError:
+          destroyUserUnit(home, "fence-probe.service")
+        check fileExists(unit)
+
+  when defined(windows):
+    test "the extended-length spelling of a fenced path is fenced":
+      let root = createTempDir("repro-fence-extended-", "")
+      defer:
+        try: removeDir(root) except OSError: discard
+      let home = root / "home"
+      createDir(home)
+      withFenceEnv(home, ""):
+        check testHomeFenceViolation(r"\\?\" & (home / ".bashrc")).len > 0

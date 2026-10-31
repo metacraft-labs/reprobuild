@@ -130,19 +130,18 @@ proc projectTomlSingle(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 # A two-repo project used by the sync-unreadable case: lib-b is declared with
@@ -151,20 +150,19 @@ proc projectTomlTwo(libAUrl, libBUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n"
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 # ---- fixture --------------------------------------------------------------
@@ -202,13 +200,13 @@ proc baseFixture(gitBin, slug: string): Fixture =
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
 const wsRootFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "ws-root"
 path = "."
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc projectTomlWithWorkspaceRoot(libAUrl: string): string =
@@ -219,19 +217,18 @@ proc projectTomlWithWorkspaceRoot(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/ws-root.toml\",\n  \"repos/lib-a.toml\",\n]\n"
 
 const libADependsOnRootToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 depends = ["ws-root"]
 """
 
@@ -299,9 +296,9 @@ proc seedManifestGitLayer(gitBin: string; fx: var Fixture) =
   # `[manifest] publish_locks = true` in the host bootstrap config. The config
   # lives at the workspace root (not inside the manifest checkout); the gate
   # reads it from disk, so it need not be tracked by any repo.
-  writeFile(fx.workspaceRoot / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(fx.workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"" & fileUrl(fx.manifestBare) & "\"\n" &
     "branch = \"main\"\n" &
     "publish_locks = true\n")
@@ -384,7 +381,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var failure: JsonNode = nil
       for f in report["failures"]:
         if f["property"].getStr() == "dirty": failure = f
-      check failure != nil
+      check not failure.isNil
       check failure["repo"].getStr() == "lib-a"
       assertNamesOffenderAndRemedy(failure["remediation"].getStr(), "lib-a")
 
@@ -411,7 +408,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var failure: JsonNode = nil
       for f in report["failures"]:
         if f["property"].getStr() == "unpublished": failure = f
-      check failure != nil
+      check not failure.isNil
       check failure["repo"].getStr() == "lib-a"
       assertNamesOffenderAndRemedy(failure["remediation"].getStr(), "lib-a")
 
@@ -433,7 +430,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var failure: JsonNode = nil
       for f in report["failures"]:
         if f["property"].getStr() == "lock-publish-failure": failure = f
-      check failure != nil
+      check not failure.isNil
       # The offender here is the workspace lock / manifest repo; the remedy
       # is the concrete ``repro push`` command.
       check failure["remediation"].getStr().contains("repro push")
@@ -452,7 +449,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["executionStatus"].getStr() == "refused"
       assertNamesOffenderAndRemedy(entry["refusalReason"].getStr(), "lib-a")
 
@@ -475,7 +472,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["executionStatus"].getStr() == "refused"
       assertNamesOffenderAndRemedy(entry["refusalReason"].getStr(), "lib-a")
 
@@ -501,7 +498,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-b": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["executionStatus"].getStr() == "clone_failed"
       assertNamesOffenderAndRemedy(
         entry["executionDiagnostic"].getStr(), "lib-b")
@@ -551,7 +548,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["outcome"].getStr() == "confirm_refused"
       # RA-28: the per-repo refusal diagnostic must NAME the offender (lib-a,
       # whose dirty working tree would be switched and whose WIP would be
@@ -718,6 +715,14 @@ suite "RA-28 — refusals name the offender and a remedy command":
       # A committed-lock-only workspace: no manifest checkout, so
       # ``resolveWorkspaceLockedDeps`` routes it to the committed lock — the
       # plane that had no boundary at all before W5.
+      #
+      # The degenerate value is a REVISION, not a checkout path: since
+      # `reprobuild.solved-graph-lock.v3` a lock records no path, and the
+      # `path` a v2 record carries is ignored (the checkout is placed by the
+      # dependency's name), so a recorded `./.` can no longer reach anything.
+      # The revision is the lock-supplied string that still becomes a
+      # directory segment of a delete (the lock-pinned producer cache), and
+      # its refusal must name the offender and the remedy the same way.
       let scratch = createTempDir("repro-ra28-developlock-", "")
       defer: removeDir(scratch)
       let reproBin = reproBinary()
@@ -732,7 +737,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
         "variants = []\npackages = []\n" &
         "deps = [{ name = \"dep\", path = \"./.\", coord_kind = \"vcs\", " &
         "url = \"" & fileUrl(depOrigin) & "\", ref = \"main\", " &
-        "revision = \"" & depSha & "\", integrity = \"git-sha1:" & depSha &
+        "revision = \"../../victim\", integrity = \"git-sha1:" & depSha &
         "\", version = \"\", visibility = \"public\", " &
         "participation = \"\", depends = \"\", groups = \"\" }]\n")
 
@@ -746,7 +751,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       # because a lock is machine-written and "edit it" is not an
       # instruction.
       assertNamesOffenderAndRemedy(res.output, "dep")
-      check res.output.contains("'./.'")
+      check res.output.contains("'../../victim'")
       check res.output.contains("repro lock refresh")
 
   test "checkout_missing_branch_names_offender_and_remedy":
@@ -764,7 +769,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["outcome"].getStr() == "branch_missing_refused"
       # Offender: the missing branch name. Remedy: a repro command to create it.
       assertNamesOffenderAndRemedy(

@@ -57,6 +57,7 @@
 
 import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles,
   unittest]
+import repro_test_support/reasoned_skip
 
 when defined(posix):
   import std/posix
@@ -166,8 +167,7 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"lib-a\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-c-origin\"\nfetch = \"" & libCUrl & "\"\n\n" &
@@ -178,33 +178,33 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libCFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
 remote = "lib-c-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -907,9 +907,20 @@ suite "M19b — post-commit reports publication, not just the write":
       cloneAll(gitBin, fx)
       seedWorkspaceToml(fx)
 
-      # The lock store itself is a git checkout inside the workspace, and it
-      # is emphatically not a declared project repo.
-      let undeclared = lockStoreRoot(fx)
+      # A separate record store has no workspace post-commit duties and must
+      # not create a workspace report or local state when dispatched directly.
+      let store = lockStoreRoot(fx)
+      let storeResult = invokePostCommit(fx, store)
+      check storeResult.code == 0
+      check not fileExists(fx.workspaceRoot / ".repro" / "build" /
+        "reports" / "post-commit-report.json")
+      check not dirExists(store / ".repro")
+      check not dirExists(store / "locks")
+
+      # Exercise the undeclared ordinary-repository failure independently of
+      # the record store's intentional no-op. This clone is not a participant.
+      let undeclared = fx.workspaceRoot / "undeclared"
+      cloneInto(gitBin, fx.libA.origin, undeclared)
       let res = invokePostCommit(fx, undeclared)
       check res.code == 0
 

@@ -50,7 +50,8 @@ proc fakeHomeDir(): string =
   result = createTempDir("repro-m68-fs-user-file-home-", "")
 
 proc applyOnce(profileText, homeRoot: string;
-               recorded: var OrderedTable[string, RecordedBinding]):
+               recorded: var OrderedTable[string, RecordedBinding];
+               reconcile = rpFailClosed):
     seq[ResourceBinding] =
   ## Drive the apply path the smallest distance that still exercises
   ## the driver: parse the profile, compose the desired set, observe
@@ -64,8 +65,10 @@ proc applyOnce(profileText, homeRoot: string;
     try: removeDir(extendedPath(dir)) except CatchableError: discard
   let profile = loadProfile(path)
   let desired = composeDesiredResources(profile, homeRoot, HostIdentity)
-  let plan = composePlan(desired, recorded)
+  let plan = composePlan(desired, recorded,
+    DecisionOptions(reconcile: reconcile))
   for action in plan.actions:
+    raiseIfDriftBlocked(action)
     case action.kind
     of rakCreate, rakUpdate, rakReplace:
       let r = desired.resources[action.address]
@@ -93,6 +96,113 @@ proc applyOnce(profileText, homeRoot: string): seq[ResourceBinding] =
 # ---------------------------------------------------------------------------
 
 suite "M68 gate: integration_fs_user_file_apply":
+
+  test "first apply preserves occupied files and requires explicit reconciliation":
+    let homeRoot = fakeHomeDir()
+    defer: removeDir(extendedPath(homeRoot))
+    let target = homeRoot / ".gitconfig"
+    let body = """
+import repro/profile
+profile "unrecorded-file":
+  resources:
+    fs.userFile cfg:
+      hostFile = "~/.gitconfig"
+      content = "desired"
+  hosts:
+    "m68-fs-user-file-gate-host": [default]
+"""
+    writeFile(target, "existing user settings")
+    var recorded = initOrderedTable[string, RecordedBinding]()
+    expect EDrift:
+      discard applyOnce(body, homeRoot, recorded)
+    check readFile(target) == "existing user settings"
+    check recorded.len == 0
+    check not fileExists(target & ".repro.tmp")
+    let bindings = applyOnce(body, homeRoot, recorded, rpReconcileDrift)
+    check bindings.len == 1
+    check readFile(target) == "desired"
+    check recorded.len == 1
+
+  when not defined(windows):
+    test "first apply preserves a symlink and its external contents":
+      let homeRoot = fakeHomeDir()
+      defer: removeDir(extendedPath(homeRoot))
+      let target = homeRoot / ".gitconfig"
+      let source = homeRoot / "nix-managed-source"
+      writeFile(source, "existing managed settings")
+      setFilePermissions(source, {fpUserRead})
+      defer: setFilePermissions(source, {fpUserRead, fpUserWrite})
+      createSymlink(source, target)
+      let body = """
+import repro/profile
+profile "unrecorded-symlink":
+  resources:
+    fs.userFile cfg:
+      hostFile = "~/.gitconfig"
+      content = "desired"
+  hosts:
+    "m68-fs-user-file-gate-host": [default]
+"""
+      var recorded = initOrderedTable[string, RecordedBinding]()
+      expect EDrift:
+        discard applyOnce(body, homeRoot, recorded)
+      check symlinkExists(target)
+      check expandSymlink(target) == source
+      check readFile(source) == "existing managed settings"
+      check recorded.len == 0
+      discard applyOnce(body, homeRoot, recorded, rpReconcileDrift)
+      check not symlinkExists(target)
+      check readFile(target) == "desired"
+      check readFile(source) == "existing managed settings"
+
+  test "adopt claims an unrecorded file without writing before a normal update":
+    # Drive the production pipeline, including its adopt-address override
+    # and generation binding, rather than manufacturing a recorded digest.
+    let root = fakeHomeDir()
+    defer: removeDir(extendedPath(root))
+    let homeRoot = root / "home"
+    let profileDir = root / "profile"
+    createDir(homeRoot)
+    createDir(profileDir)
+    let target = homeRoot / ".gitconfig"
+    writeFile(target, "existing user settings")
+    let profilePath = profileDir / "home.nim"
+    writeFile(profilePath, """
+import repro/profile
+profile "adopt-unrecorded-file":
+  resources:
+    fs.userFile cfg:
+      hostFile = "~/.gitconfig"
+      content = "desired"
+  hosts:
+    "m68-fs-user-file-gate-host": [default]
+""")
+    var opts = ApplyOptions(profileDir: profileDir, profilePath: profilePath,
+      homeDir: homeRoot, stateDir: root / "state", storeRoot: root / "store",
+      host: HostIdentity, preLoadedProfile: loadProfile(profilePath))
+    # Scope the implicit package-PATH block to this scratch home as well.
+    let savedRc = getEnv("REPRO_HOME_POSIX_PATH_RC")
+    putEnv("REPRO_HOME_POSIX_PATH_RC", homeRoot / ".profile")
+    defer:
+      if savedRc.len > 0: putEnv("REPRO_HOME_POSIX_PATH_RC", savedRc)
+      else: delEnv("REPRO_HOME_POSIX_PATH_RC")
+    expect EDrift:
+      discard runApply(opts)
+    check readFile(target) == "existing user settings"
+    check readCurrentGenerationId(opts.stateDir).len == 0
+    let desired = composeDesiredResources(opts.preLoadedProfile, homeRoot,
+      HostIdentity)
+    require desired.resources.len == 1
+    for address in desired.resources.keys:
+      opts.adoptAddresses.add(address)
+    discard runApply(opts)
+    check readFile(target) == "existing user settings"
+    let adoptedId = readCurrentGenerationId(opts.stateDir)
+    check adoptedId.len > 0
+    opts.adoptAddresses = @[]
+    discard runApply(opts)
+    check readFile(target) == "desired"
+    check readCurrentGenerationId(opts.stateDir).len > 0
 
   test "fresh apply writes the file with declared content":
     let homeRoot = fakeHomeDir()

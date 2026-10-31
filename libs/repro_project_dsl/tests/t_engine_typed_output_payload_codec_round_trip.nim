@@ -210,10 +210,24 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     check decodeBuildActionPayload(encodeBuildActionPayload(action)).fixedOutput
     check not decodeBuildActionPayload(
       encodeBuildActionPayloadAtVersion(action, 27'u16)).fixedOutput
+    let fixedImage = encodeBuildActionPayload(action)
     action.fixedOutput = false
     check not decodeBuildActionPayload(encodeBuildActionPayload(action)).fixedOutput
-    # The sentinel is the payload's last byte.
+    # The sentinel is the one byte at which the fixed and unfixed images
+    # differ. It used to be addressed as the payload's LAST byte, which it
+    # stopped being at v29; ``corrupt[^1]`` then hit the high byte of the
+    # ``scratchDirs`` count and the case passed on whatever that raised.
     var corrupt = encodeBuildActionPayload(action)
-    corrupt[^1] = 2'u8
-    expect BuildActionPayloadError:
+    check corrupt.len == fixedImage.len
+    var sentinel = -1
+    for i in 0 ..< corrupt.len:
+      if corrupt[i] != fixedImage[i]:
+        check sentinel == -1
+        sentinel = i
+    check sentinel >= 0
+    corrupt[sentinel] = 2'u8
+    try:
       discard decodeBuildActionPayload(corrupt)
+      check false
+    except BuildActionPayloadError as err:
+      check err.msg == "invalid fixedOutput sentinel in build action payload"

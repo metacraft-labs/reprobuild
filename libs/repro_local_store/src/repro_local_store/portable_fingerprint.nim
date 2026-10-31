@@ -29,12 +29,27 @@
 ## action's static description; the strong fingerprint adds the observed
 ## inputs' content. Both are computed here over LOGICAL paths.
 ##
+## Campaign M17 chunk 2 (the published-trace record `rbpm-v2`,
+## Edge-Derived-Identities.md §3.1 and §3.3): every content, membership and
+## environment digest is BLAKE3-256 under ONE dedicated domain
+## (`PublishedDigestDomain`); an input's identity states what stands at its
+## path (`InputEntryKind`) and, for a file, its executable bit (`file:<hex>`
+## / `exec:<hex>`), and a probe's identity is the kind it found, not just
+## "present"; every input carries its ROLE, declared or observed. These are
+## THE identity functions of a published record: the two-phase peer cache
+## uses them too (`two_phase.observedIdentity`). The local action cache keeps
+## its own XXH3-64 identity, untouched.
+##
 ## Pure over strings and the filesystem: the engine adapts its own action and
 ## evidence types to these procs, which keeps this module testable alone.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, options, os, strutils]
 
+from repro_core/link_target import readSymlinkTarget
 from repro_core/paths import extendedPath
+import ./pattern_scoped_enumeration
+when defined(posix):
+  from std/posix import Stat, stat, S_ISREG
 
 import blake3
 
@@ -76,10 +91,49 @@ type
     present*: bool
     value*: string
 
+  InputRole* = enum
+    ## Campaign M17 chunk 2 (Edge-Derived-Identities.md §3.1): whether an
+    ## input is one the action DECLARED or one its execution was OBSERVED
+    ## accessing. A published record keeps the two apart, so a consumer that
+    ## misses can say which kind of input differed. `irObserved` is first so
+    ## an input built without a role is an observed one, as every input was
+    ## before the split.
+    irObserved = "observed"
+    irDeclared = "declared"
+
+  InputEntryKind* = enum
+    ## What stands at an input's path, as a published record states it
+    ## (Edge-Derived-Identities.md §2.1 / §3.1, "its kind (regular file,
+    ## directory, symlink)"). Every access identity below is ONE of these plus,
+    ## for a file, its executable bit and content digest; the record codec
+    ## (`portable_memo.nim`, `rbpm-v2`) carries them as separate fields.
+    iekAbsent = "absent"
+    iekFile = "file"
+    iekDirectory = "directory"
+    iekSymlink = "symlink"
+      ## Reserved for the shared identity function of M17 chunk 4, which
+      ## decides how a symbolic link is identified on every walk. Today a link
+      ## is FOLLOWED (as it always was on the portable walk) and identified as
+      ## what it resolves to; no identity is produced with this kind.
+    iekSpecial = "special"
+      ## A device, FIFO or socket: something whose "content" is not a fixed
+      ## byte string.
+    iekValue = "value"
+      ## An environment variable that is set (its identity is the digest of
+      ## its logicalized value); an unset one is `iekAbsent`.
+
   PortableInput* = object
     kind*: PortableInputKind
     path*: string    ## `<label>:<rel>`.
-    digest*: string  ## Content / existence / membership identity (hex).
+    digest*: string
+      ## The input's IDENTITY TEXT: what stands at the path, its executable
+      ## bit and its content / membership / value digest, in the one canonical
+      ## spelling `readIdentity`, `probeIdentity`,
+      ## `membershipHex` and `envIdentity` produce (e.g. `file:<hex>`, `exec:<hex>`,
+      ## `directory`, `absent`). The strong fingerprint is computed over it, so
+      ## a kind or executable-bit change moves the fingerprint exactly as a
+      ## content change does.
+    role*: InputRole
 
   TreeEntryKind* = enum
     tekFile
@@ -91,6 +145,9 @@ type
     rel*: string            ## `/`-separated, relative to the tree root.
     kind*: TreeEntryKind
     identity*: string       ## A file's BLAKE3 digest, a link's target text.
+    executable*: bool
+      ## A file's executable bit (`executableBit`), part of the tree digest:
+      ## a downstream read of the file is identified with it.
 
   PortableOutput* = object
     ## Cache-Scope P3.2: one output of an action, named portably. A file's
@@ -102,6 +159,10 @@ type
     path*: string    ## `<label>:<rel>`.
     digest*: string
     directory*: bool
+    executable*: bool
+      ## A file output's executable bit: a downstream action that reads the
+      ## output is identified with it (lookup without materialization takes
+      ## the read's identity from this record), so it is part of the record.
     entries*: seq[TreeEntry]
       ## For a directory: every entry beneath it, sorted by `rel`. A
       ## downstream action that reads, probes or enumerates INSIDE the
@@ -124,9 +185,26 @@ type
 
 const
   WeakDomain = "reprobuild.portable.weak.v2"
-  StrongDomain = "reprobuild.portable.strong.v1"
-  ProbePresent = "present"
-  ProbeAbsent = "absent"
+  StrongDomain = "reprobuild.portable.strong.v2"
+    ## v2 (campaign M17 chunk 2, `rbpm-v2`): each input's ROLE (declared or
+    ## observed) is framed with it, and its identity text carries its entry
+    ## kind and executable bit. A v1 strong fingerprint is never recomputed.
+  PublishedDigestDomain* = "reprobuild.published-digest.v1"
+    ## THE dedicated hash domain of every digest a published record carries
+    ## for an input or output: file content, directory membership and
+    ## environment values (Edge-Derived-Identities.md §3.3 and its rider of
+    ## 2026-10-27; §10 decision 13). Defined here once; every published digest
+    ## is BLAKE3-256 over `frame(PublishedDigestDomain) & frame(<purpose>)`
+    ## followed by the payload (`publishedDigestHasher`). A digest of the same
+    ## bytes without the domain, or under any other domain, is a different
+    ## value and never verifies. The LOCAL hash (XXH3-64, `localHash`) is
+    ## untouched: it stays the digest of local records and same-machine checks.
+  ProbeAbsent* = "absent"
+    ## The identity of a PROBE whose target does not exist. A probe whose
+    ## target exists is identified by the KIND it found (`probeIdentity`):
+    ## `file`, `directory` or `special`. (Until `rbpm-v2` every present target
+    ## was `present`, so a file replaced by a directory at a probed path went
+    ## unseen on the portable walk, while the local walk compared the kind.)
 
 proc normalizeForCompare(path: string): string =
   ## Separator-normalized, and case-folded on Windows where the filesystem is
@@ -230,11 +308,14 @@ proc ancestorProbeKey*(roots: openArray[LogicalRoot]; physical: string):
         return AncestorPrefix & root.label & ":" & rest
   ""
 
+proc probeIdentity*(path: string): string
+
 proc ancestorProbeIdentity*(roots: openArray[LogicalRoot]; key: string):
     string =
-  ## The identity of an `^<label>:<rest>` key on THIS host: "present" when
-  ## `<rest>` exists beneath any proper ancestor of root `<label>`, else
-  ## "absent"; "" when the key names no root here.
+  ## The identity of an `^<label>:<rest>` key on THIS host: the probe
+  ## identity (`probeIdentity`, the KIND found) of `<rest>` beneath the
+  ## nearest proper ancestor of root `<label>` that has it, else "absent";
+  ## "" when the key names no root here.
   if not key.startsWith(AncestorPrefix):
     return ""
   let colon = key.find(':')
@@ -249,8 +330,8 @@ proc ancestorProbeIdentity*(roots: openArray[LogicalRoot]; key: string):
           rest
         if fileExists(extendedPath(candidate)) or
             dirExists(extendedPath(candidate)):
-          return "present"
-      return "absent"
+          return probeIdentity(candidate)
+      return ProbeAbsent
   ""
 
 proc logicalizeText*(roots: openArray[LogicalRoot]; text: string): string =
@@ -287,13 +368,46 @@ proc logicalizeText*(roots: openArray[LogicalRoot]; text: string): string =
     else:
       result = result.replace(base, token)
 
+proc frame(text: string): string =
+  ## Length-prefixed so field boundaries cannot be forged by content.
+  $text.len & ":" & text
+
+type
+  PublishedDigestPurpose* = enum
+    ## What a published digest is OF. Framed after `PublishedDigestDomain`,
+    ## so a membership digest can never equal a content digest of bytes that
+    ## happen to spell the same names.
+    pdpContent = "content"
+    pdpMembership = "membership"
+    pdpEnvironment = "environment"
+
+proc publishedDigestHasher*(purpose: PublishedDigestPurpose): Blake3Hasher =
+  ## A BLAKE3-256 hasher already fed the domain prefix of `purpose`; the
+  ## caller streams the payload into it and finalizes. The one place the
+  ## prefix is spelled (see `PublishedDigestDomain`).
+  result = initHasher()
+  result.update(frame(PublishedDigestDomain) & frame($purpose))
+
+proc publishedDigestHex*(purpose: PublishedDigestPurpose;
+                         payload: openArray[byte]): string =
+  let hasher = publishedDigestHasher(purpose)
+  defer: hasher.close()
+  hasher.update(payload)
+  hasher.finalize().toHex()
+
+proc publishedDigestHex*(purpose: PublishedDigestPurpose;
+                         payload: string): string =
+  publishedDigestHex(purpose, payload.toOpenArrayByte(0, payload.high))
+
 proc fileContentHex*(path: string): string =
-  ## BLAKE3-256 of a file's bytes, streamed. "" when it cannot be read.
+  ## The published content digest of a file: BLAKE3-256 of its bytes under
+  ## `PublishedDigestDomain` (purpose `content`), streamed. "" when it cannot
+  ## be read.
   var f: File
   if not open(f, extendedPath(path), fmRead):
     return ""
   defer: close(f)
-  let hasher = initHasher()
+  let hasher = publishedDigestHasher(pdpContent)
   defer: hasher.close()
   var buf: array[65536, byte]
   while true:
@@ -305,21 +419,77 @@ proc fileContentHex*(path: string): string =
 
 proc membershipHexOfNames*(names: openArray[string]): string =
   ## Membership digest over child names already suffixed `/` for a
-  ## directory (or a link to one). Order-insensitive.
+  ## directory (or a link to one). Order-insensitive. Under
+  ## `PublishedDigestDomain`, purpose `membership`.
   var sorted = @names
   sorted.sort()
-  blake3.digest(sorted.join("\n")).toHex()
+  publishedDigestHex(pdpMembership, sorted.join("\n"))
+
+proc executableBit*(path: string): bool =
+  ## The executable bit of the file at `path`, following a symbolic link as
+  ## every portable identity does: the OWNER's execute permission
+  ## (`S_IXUSR`), the bit git records as `100755` and the one an owner's
+  ## `exec` needs. Always false on Windows, which has no such bit (a Windows
+  ## record states false for every file, and a record from a host that set
+  ## it does not verify there: a miss, never a wrong hit).
+  when defined(posix):
+    var st: Stat
+    if stat(extendedPath(path).cstring, st) != 0:
+      return false
+    (int(st.st_mode) and 0o100) != 0
+  else:
+    false
+
+proc entryKindAt*(path: string): InputEntryKind =
+  ## What stands at `path`, following a symbolic link: a dangling link is
+  ## absent, as it always was on the portable walk (how a link itself is
+  ## identified is the shared identity function's, M17 chunk 4).
+  let p = extendedPath(path)
+  if dirExists(p):
+    return iekDirectory
+  when defined(posix):
+    var st: Stat
+    if stat(p.cstring, st) != 0:
+      return iekAbsent
+    if S_ISREG(st.st_mode): iekFile else: iekSpecial
+  else:
+    if fileExists(p): iekFile else: iekAbsent
 
 const
   ReadOfAbsent* = "absent"
     ## The identity of a READ whose target does not exist.
   ReadOfDirectory* = "directory"
     ## The identity of a READ whose target is a directory.
+  ReadOfSpecial* = "special"
+    ## The identity of a READ whose target is a device, FIFO or socket.
+  ReadOfUnreadable* = "unreadable"
+    ## The identity of a READ of a regular file whose bytes cannot be read: a
+    ## file with no content digest. No published record may carry one (the
+    ## publication rule refuses a regular-file input without a digest).
+  EnvUnset* = "unset"
+    ## The identity of an observed environment variable that is not set.
+
+func fileIdentity*(digest: string; executable: bool): string =
+  ## The identity text of a READ of a regular file: its executable bit and
+  ## its published content digest, `file:<hex>` or `exec:<hex>`.
+  if digest.len == 0: ReadOfUnreadable
+  elif executable: "exec:" & digest
+  else: "file:" & digest
+
+func probeIdentityOf*(kind: InputEntryKind): string =
+  ## The identity text of a PROBE that found `kind`.
+  case kind
+  of iekAbsent: ProbeAbsent
+  of iekFile: "file"
+  of iekDirectory: "directory"
+  of iekSymlink: "symlink"
+  of iekSpecial: "special"
+  of iekValue: "value"
 
 proc readIdentity*(path: string): string =
   ## The identity of an observed READ of `path`, the same on the recording
-  ## side and the lookup side: the file's content digest, or what stands
-  ## there instead.
+  ## side and the lookup side: what stands there, and for a regular file its
+  ## executable bit and published content digest (`fileIdentity`).
   ##
   ## Reads of files that do not exist are common, not exotic: node's module
   ## resolution tries to open `package.json` at every level it walks, and
@@ -328,39 +498,155 @@ proc readIdentity*(path: string): string =
   ## answered "cannot identify" -- so a path set holding even one of them
   ## could never be evaluated, on any host, the recording one included.
   ## gemini-cli's bundle step had 125.
-  if fileExists(extendedPath(path)):
-    fileContentHex(path)
-  elif dirExists(extendedPath(path)):
-    ReadOfDirectory
-  else:
-    ReadOfAbsent
+  case entryKindAt(path)
+  of iekFile: fileIdentity(fileContentHex(path), executableBit(path))
+  of iekDirectory: ReadOfDirectory
+  of iekSpecial: ReadOfSpecial
+  else: ReadOfAbsent
+
+proc probeIdentity*(path: string): string =
+  ## The identity of an observed PROBE of `path`: the kind it finds.
+  probeIdentityOf(entryKindAt(path))
+
+func namesMatchingScope*(names: openArray[string];
+                         pattern: string): seq[string] =
+  ## The membership names (each suffixed `/` for a directory, as
+  ## `membershipHexOfNames` takes them) whose entry may match `pattern`, or
+  ## all of them for an empty pattern. One filter for the listing read from
+  ## disk and for the one a graph view predicts, so the two agree.
+  for name in names:
+    let bare =
+      if name.len > 1 and name.endsWith("/"): name[0 ..< name.len - 1]
+      else: name
+    if pattern.len == 0 or globComponentMatches(pattern, bare):
+      result.add(name)
 
 proc membershipHex*(dir: string): string =
   ## Membership digest of a directory: the sorted child names, each suffixed
   ## `/` for a directory. Names only — an enumeration observes WHICH entries
   ## exist, not their content (reads of those entries are separate inputs).
+  ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) digests only the
+  ## entries of its directory that may match its pattern.
+  let (base, pattern) = splitPatternScopedEnumeration(dir)
   var names: seq[string] = @[]
   try:
-    for kind, entry in walkDir(extendedPath(dir), relative = true):
+    for kind, entry in walkDir(extendedPath(base), relative = true):
       names.add(entry.replace('\\', '/') &
         (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
   except CatchableError:
     return ""
-  membershipHexOfNames(names)
-
-proc frame(text: string): string =
-  ## Length-prefixed so field boundaries cannot be forged by content.
-  $text.len & ":" & text
+  membershipHexOfNames(names.namesMatchingScope(pattern))
 
 proc envIdentity*(roots: openArray[LogicalRoot]; present: bool;
                   value: string): string =
   ## The identity of an observed environment variable: "unset", or the
-  ## BLAKE3 of its value with every tracked root's path logicalized — so a
-  ## value naming a path inside the project is the same on every checkout,
-  ## and one naming a host path (a PATH entry in a home directory) is not.
+  ## published digest (purpose `environment`) of its value with every tracked
+  ## root's path logicalized — so a value naming a path inside the project is
+  ## the same on every checkout, and one naming a host path (a PATH entry in a
+  ## home directory) is not.
   if not present:
-    return "unset"
-  blake3.digest(logicalizeText(roots, value)).toHex()
+    return EnvUnset
+  publishedDigestHex(pdpEnvironment, logicalizeText(roots, value))
+
+# --- identity text <-> (entry kind, executable bit, digest) -----------------
+
+type
+  IdentityParts* = object
+    ## An identity text taken apart, as the `rbpm-v2` record carries it.
+    entryKind*: InputEntryKind
+    executable*: bool
+    digest*: string
+
+func isHexDigest(text: string): bool =
+  if text.len != 64:
+    return false
+  for ch in text:
+    if ch notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
+func identityParts*(access: PortableInputKind; identity: string;
+                    parts: var IdentityParts): bool =
+  ## Splits the identity text of an input accessed as `access` into its
+  ## entry kind, executable bit and digest. False for a text no identity
+  ## function of this module produces for that access.
+  ##
+  ## The ancestor-probe identity (`ancestorProbeIdentity`) is a probe's.
+  parts = IdentityParts()
+  case access
+  of pikRead:
+    if identity == ReadOfAbsent: parts.entryKind = iekAbsent
+    elif identity == ReadOfDirectory: parts.entryKind = iekDirectory
+    elif identity == ReadOfSpecial: parts.entryKind = iekSpecial
+    elif identity == ReadOfUnreadable: parts.entryKind = iekFile
+    elif identity.startsWith("file:") and isHexDigest(identity[5 .. ^1]):
+      parts = IdentityParts(entryKind: iekFile, digest: identity[5 .. ^1])
+    elif identity.startsWith("exec:") and isHexDigest(identity[5 .. ^1]):
+      parts = IdentityParts(entryKind: iekFile, executable: true,
+        digest: identity[5 .. ^1])
+    else:
+      return false
+  of pikProbe:
+    case identity
+    of ProbeAbsent: parts.entryKind = iekAbsent
+    of "file": parts.entryKind = iekFile
+    of "directory": parts.entryKind = iekDirectory
+    of "special": parts.entryKind = iekSpecial
+    else: return false
+  of pikEnumeration:
+    if not isHexDigest(identity):
+      return false
+    parts = IdentityParts(entryKind: iekDirectory, digest: identity)
+  of pikEnvironment:
+    if identity == EnvUnset:
+      parts.entryKind = iekAbsent
+    elif isHexDigest(identity):
+      parts = IdentityParts(entryKind: iekValue, digest: identity)
+    else:
+      return false
+  true
+
+func identityFromParts*(access: PortableInputKind; parts: IdentityParts;
+                        identity: var string): bool =
+  ## Inverse of `identityParts`: the one canonical identity text, or false
+  ## for a combination no identity function produces (an executable
+  ## directory, a digest on a probe, ...).
+  if parts.executable and (access != pikRead or parts.entryKind != iekFile):
+    return false
+  case access
+  of pikRead:
+    case parts.entryKind
+    of iekAbsent, iekDirectory, iekSpecial:
+      if parts.digest.len != 0: return false
+      identity = (if parts.entryKind == iekAbsent: ReadOfAbsent
+                  elif parts.entryKind == iekDirectory: ReadOfDirectory
+                  else: ReadOfSpecial)
+    of iekFile:
+      if parts.digest.len != 0 and not isHexDigest(parts.digest):
+        return false
+      identity = fileIdentity(parts.digest, parts.executable)
+    else:
+      return false
+  of pikProbe:
+    if parts.digest.len != 0 or
+        parts.entryKind notin {iekAbsent, iekFile, iekDirectory, iekSpecial}:
+      return false
+    identity = probeIdentityOf(parts.entryKind)
+  of pikEnumeration:
+    if parts.entryKind != iekDirectory or not isHexDigest(parts.digest):
+      return false
+    identity = parts.digest
+  of pikEnvironment:
+    case parts.entryKind
+    of iekAbsent:
+      if parts.digest.len != 0: return false
+      identity = EnvUnset
+    of iekValue:
+      if not isHexDigest(parts.digest): return false
+      identity = parts.digest
+    else:
+      return false
+  true
 
 proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
                               argv: openArray[string]; cwd: string;
@@ -400,22 +686,34 @@ proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
 
 proc portableStrongFingerprint*(weakHex: string;
                                 inputs: openArray[PortableInput]): string =
-  ## Weak fingerprint plus the observed inputs' content identities, in a
-  ## canonical order (kind, then logical path) so the monitor's observation
-  ## order cannot change the identity.
+  ## Weak fingerprint plus every input's identity -- declared and observed,
+  ## each framed with its role -- in a canonical order (role, kind, then
+  ## logical path) so the monitor's observation order cannot change it.
   var sortedInputs = @inputs
   sortedInputs.sort(proc (a, b: PortableInput): int =
-    result = cmp(ord(a.kind), ord(b.kind))
+    result = cmp(ord(a.role), ord(b.role))
+    if result == 0:
+      result = cmp(ord(a.kind), ord(b.kind))
     if result == 0:
       result = cmp(a.path, b.path))
   var payload = frame(StrongDomain)
   payload.add(frame(weakHex))
   payload.add(frame($sortedInputs.len))
   for input in sortedInputs:
+    payload.add(frame($input.role))
     payload.add(frame($ord(input.kind)))
     payload.add(frame(input.path))
     payload.add(frame(input.digest))
   blake3.digest(payload).toHex()
+
+type
+  PhysicalIdentity* = proc (physical: string;
+                            kind: PortableInputKind): Option[string] {.closure.}
+    ## Supplies the identity of an observed access to a physical path in
+    ## place of the one read from disk; `none` keeps the disk's. The engine
+    ## uses it for directories above build-graph outputs, whose listing on
+    ## disk depends on which OTHER actions have run here (the graph view the
+    ## lookup side computes too).
 
 proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  argv: openArray[string]; cwd: string;
@@ -424,14 +722,28 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  reads, probes, enumerations:
                                    openArray[string];
                                  staticFields: openArray[string] = [];
-                                 observedEnv: openArray[ObservedEnv] = []):
+                                 observedEnv: openArray[ObservedEnv] = [];
+                                 identify: PhysicalIdentity = nil):
     PortableFingerprint =
   ## Everything at once. Deduplicates each observation class by logical path
   ## (the monitor reports repeats), drops untracked accesses, and marks the
   ## action not portable at the first access under no known root.
+  ## `identify`, when given, overrides the on-disk identity of a tracked
+  ## access (see `PhysicalIdentity`).
+  ##
+  ## An access of a path the action DECLARED as an input carries the role
+  ## `irDeclared`; every other access is `irObserved` (Edge-Derived-
+  ## Identities.md §3.1: declared inputs are kept apart from observed ones,
+  ## each bound by content). The set of inputs is exactly the accesses given:
+  ## the role labels them, it adds and removes none (the caller's filters --
+  ## an action's own outputs, its transient writes -- apply to declared
+  ## inputs as to every other access).
   result.portable = true
   result.weakHex = portableWeakFingerprint(roots, argv, cwd, env,
     declaredInputs, staticFields)
+  var declaredKeys: seq[string] = @[]
+  for input in declaredInputs:
+    declaredKeys.add(normalizeForCompare(input))
   var seen: seq[string] = @[]
   var rootKeys: seq[string] = @[]
   for root in roots:
@@ -440,8 +752,11 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     ## A directory that CONTAINS a root. Probing it answers "present" on
     ## every host where the root exists at all — a shell resolving a path
     ## component by component does exactly that — so the probe says nothing
-    ## about the build, only about where this host keeps it.
-    let key = normalizeForCompare(physical)
+    ## about the build, only about where this host keeps it. A
+    ## PATTERN-SCOPED listing (`patternScopedEnumerationPath`) is in its
+    ## directory: Nim's compiler globs `*.nimble` in every directory above a
+    ## module, and that scan of an ancestor says no more than a full one.
+    let key = normalizeForCompare(physical.patternScopedBase())
     for rootKey in rootKeys:
       if rootKey.len > key.len and rootKey.startsWith(key) and
           (key.endsWith("/") or rootKey[key.len] == '/'):
@@ -482,15 +797,18 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
       let key = $ord(inputKind) & "|" & render(logical)
       if key notin seen:
         seen.add(key)
+        let given =
+          if identify != nil: identify(physical, inputKind)
+          else: none(string)
+        let role =
+          if normalizeForCompare(physical) in declaredKeys: irDeclared
+          else: irObserved
         result.inputs.add(PortableInput(kind: inputKind, path: render(logical),
-          digest: identity))
+          digest: (if given.isSome: given.get() else: identity), role: role))
   for path in reads:
     consider(path, pikRead, readIdentity(path))
   for path in probes:
-    consider(path, pikProbe,
-      (if fileExists(extendedPath(path)) or dirExists(extendedPath(path)):
-         ProbePresent
-       else: ProbeAbsent))
+    consider(path, pikProbe, probeIdentity(path))
   for path in enumerations:
     consider(path, pikEnumeration, membershipHex(path))
   for variable in observedEnv:
@@ -503,7 +821,9 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     result.strongHex = portableStrongFingerprint(result.weakHex,
       result.inputs)
 
-const TreeDomain = "reprobuild.portable.tree.v1"
+const TreeDomain = "reprobuild.portable.tree.v2"
+  ## v2 (`rbpm-v2`): a file entry's identity is its published content
+  ## digest, and an executable file is tagged apart from a plain one.
 
 proc treeEntries*(dir: string): seq[TreeEntry] =
   ## Every entry beneath `dir`: a file with its BLAKE3 content digest, a
@@ -525,7 +845,7 @@ proc treeEntries*(dir: string): seq[TreeEntry] =
     case info.kind
     of pcLinkToFile, pcLinkToDir:
       let target =
-        try: expandSymlink(full).replace('\\', '/')
+        try: readSymlinkTarget(full).replace('\\', '/')
         except CatchableError: ""
       let toDir = info.kind == pcLinkToDir or dirExists(full)
       result.add(TreeEntry(rel: rel,
@@ -534,7 +854,7 @@ proc treeEntries*(dir: string): seq[TreeEntry] =
       result.add(TreeEntry(rel: rel, kind: tekDirectory))
     of pcFile:
       result.add(TreeEntry(rel: rel, kind: tekFile,
-        identity: fileContentHex(full)))
+        identity: fileContentHex(full), executable: executableBit(full)))
   result.sort(proc (a, b: TreeEntry): int = cmp(a.rel, b.rel))
 
 proc treeDigestOf*(entries: openArray[TreeEntry]): string =
@@ -545,13 +865,26 @@ proc treeDigestOf*(entries: openArray[TreeEntry]): string =
   for entry in entries:
     let tag =
       case entry.kind
-      of tekFile: "f"
+      of tekFile: (if entry.executable: "x" else: "f")
       of tekDirectory: "d"
       of tekLinkToFile: "l"
       of tekLinkToDir: "L"
     framed.add(frame(entry.rel) & frame(tag) & frame(entry.identity))
   framed.sort()
   blake3.digest(frame(TreeDomain) & framed.join("")).toHex()
+
+func readIdentityOf*(entry: TreeEntry): string =
+  ## The identity a READ of `entry` has (`readIdentity`), from a manifest.
+  case entry.kind
+  of tekFile: fileIdentity(entry.identity, entry.executable)
+  of tekDirectory, tekLinkToDir: ReadOfDirectory
+  of tekLinkToFile: ""   # what the link resolves to is not in the manifest
+
+func readIdentityOf*(output: PortableOutput): string =
+  ## The identity a READ of `output`'s path has (`readIdentity`), from its
+  ## record.
+  if output.directory: ReadOfDirectory
+  else: fileIdentity(output.digest, output.executable)
 
 proc treeContentHex*(dir: string): string =
   ## Content identity of a directory tree (see `treeDigestOf`).
@@ -591,7 +924,8 @@ proc portableOutputs*(roots: openArray[LogicalRoot];
         digest: treeDigestOf(entries), directory: true, entries: entries))
     elif fileExists(extendedPath(physical)):
       result.outputs.add(PortableOutput(path: render(logical),
-        digest: fileContentHex(physical)))
+        digest: fileContentHex(physical),
+        executable: executableBit(physical)))
     else:
       result.portable = false
       result.reason = "declared output does not exist: " & physical

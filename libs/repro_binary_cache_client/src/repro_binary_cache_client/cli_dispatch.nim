@@ -103,6 +103,7 @@ when defined(ssl):
   import wrappers/openssl
 
 import ../repro_binary_cache_client
+import repro_dsl_stdlib/packages_schema
 import ./in_process as inProcessArchive
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
@@ -158,13 +159,6 @@ type
     providerRevision: string
     depHex: seq[string]
     options: seq[(string, string)]
-
-# ---------------------------------------------------------------------------
-# Archive extraction
-# ---------------------------------------------------------------------------
-
-proc extractPrefix(archive: openArray[byte]; outDir: string) =
-  inProcessArchive.extractPrefix(archive, outDir)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -311,15 +305,19 @@ proc cmdSubstitute(args: seq[string]): int =
   var asBytes = newSeq[byte](archiveBytes.len)
   for i, ch in archiveBytes:
     asBytes[i] = byte(ch)
-  createDir(outDir)
+  # Every published prefix is an rbcarc archive (a single file is packed as
+  # a one-entry archive), so an entry that does not extract is a refusal, not
+  # a format to guess at. Writing the raw bytes out under a fixed name and
+  # reporting a hit, as this once did, turned an archive the extractor
+  # rejected as hostile into a successful substitution with partial output.
   try:
-    extractPrefix(asBytes, outDir)
-  except IOError as e:
-    # Not an archive: fall back to single-file extraction (the build
-    # script's prefix was a single file like hex0).
-    stderr.writeLine("substitute: archive parse failed (" & e.msg &
-                     "); writing CAS blob verbatim to " & outDir)
-    writeFile(outDir / "blob", archiveBytes)
+    inProcessArchive.extractPrefixInto(asBytes, outDir)
+  except CatchableError as e:
+    # IOError is the documented refusal; an OSError from the filesystem
+    # (a link at the output path, a full disk) is the same outcome to the
+    # caller: nothing was substituted.
+    stderr.writeLine("substitute: refusing entry " & hex & ": " & e.msg)
+    return 1
   echo "hit ", hex, " -> ", outDir
   return 0
 
@@ -340,7 +338,16 @@ proc parseIdentityFlags(flagArgs: seq[string]): PublishArgs =
       case p.key
       of "package-name": result.packageName = p.val
       of "package-version": result.packageVersion = p.val
-      of "platform-cpu": result.platformCpu = p.val
+      of "platform-cpu":
+        # Canonicalised to the family the cache keys by (`armhf` → `armv7`,
+        # `amd64` → `x86_64`); a token no host derives is refused, because
+        # an entry published under it could never be substituted.
+        let parsed = parsePlatformCpuToken(p.val)
+        if not parsed.ok or parsed.cpu == pcAny:
+          raise newException(ValueError,
+            "--platform-cpu '" & p.val & "' names no CPU family the " &
+            "binary cache keys by (x86_64, aarch64, armv7, x86)")
+        result.platformCpu = $parsed.cpu
       of "platform-os": result.platformOs = p.val
       of "platform-abi": result.platformAbi = p.val
       of "platform-libc": result.platformLibc = p.val
@@ -385,6 +392,13 @@ proc identityFromArgs(a: PublishArgs): CacheEntryIdentity =
     result.addOption(k, v)
   for depHex in a.depHex:
     result.addDep(depHex)
+
+proc identityFromPublishFlags*(flagArgs: seq[string]): CacheEntryIdentity =
+  ## The identity `repro cache publish` / `derive-key` build from their
+  ## identity flags, exposed so a producer that renders those flags
+  ## (`repro infra cache-keys`) can check they round-trip to the key it
+  ## printed.
+  identityFromArgs(parseIdentityFlags(flagArgs))
 
 proc cmdDeriveKey(args: seq[string]): int =
   let parsed = parseIdentityFlags(args)
@@ -448,10 +462,15 @@ proc cmdPublish(rawArgs: seq[string]): int =
     # The pre-refactor CLI used the same partitioning.
     if res.statusCode == 0 and
        (res.error.contains("identity-derived key does not match") or
-        res.error.contains("prefix path does not exist")):
+        res.error.contains("prefix path does not exist") or
+        res.error.contains("(the object check)")):
       return 2
     return 1
   echo "published ", res.responseBody.strip()
+  # What a substitute-only profile edge pins (`expectedOutputDigest`): the
+  # raw archive's digest, printed so the producer never computes it by
+  # hand and never hashes a near-identical archive from another packer.
+  echo "output-digest blake3:", res.rawArchiveDigestHex
   return 0
 
 # ---------------------------------------------------------------------------

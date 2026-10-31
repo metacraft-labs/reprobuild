@@ -61,7 +61,16 @@
 ## reach the served bytes. Neither is redundant: the tag is what makes
 ## decryption fail closed, and it is checked BEFORE any plaintext is used.
 
-import std/[os, strutils]
+import std/[os, sets, strutils]
+when defined(posix):
+  import std/posix
+  # std/posix does not export these on every target; take them from libc.
+  var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+  var oCloExec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
+
+from repro_core/codec import elementCountFits
+
+import ./agent_mutations
 
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
@@ -105,6 +114,22 @@ type
 
   SecretsError* = object of CatchableError
     ## Malformed secret list, bad key material, or a failed tag check.
+
+  RecipientKeyRevoked* = object of SecretsError
+    ## A seal was asked for a recipient key on the producer's revoked-key
+    ## list. Raised before any key material is derived.
+
+  RevokedRecipientKeys* = object
+    ## The producer half of recipient-key revocation (CRED-2): the
+    ## recipient public keys no producer may seal to any longer, whoever
+    ## asks. Every seal takes one (``sealSecrets``, ``sealSecretsInPlace``),
+    ## so a stale target configuration or a caller that still names a
+    ## revoked key gets ``RecipientKeyRevoked`` rather than an envelope a
+    ## compromised key opens. Same file format as a trust-anchor file: one
+    ## 130-hex uncompressed P-256 key per line, ``#`` comments.
+    keys: seq[peerAuth.PublicKeyBytes]
+    source*: string
+      ## Where the list came from: the file, or why a seal needs none.
 
 # ---------------------------------------------------------------------------
 # Path validation.
@@ -174,7 +199,14 @@ proc decodeSecretFiles*(buf: openArray[byte]): seq[SecretFile] =
   ## Inverse of `encodeSecretFiles`. Rejects trailing bytes: a decoder that
   ## silently ignores them would accept a payload the producer did not mean.
   var pos = 0
-  let count = int(readU32LE(buf, pos))
+  let countRaw = readU32LE(buf, pos)
+  # Each file carries at least its path length, mode and content length
+  # (three u32 fields), so a count the remaining bytes cannot hold is refused
+  # before it sizes the result.
+  if not elementCountFits(countRaw, buf.len - pos, 12):
+    raise newException(SecretsError,
+      "secret payload element count exceeds remaining bytes")
+  let count = int(countRaw)
   result = newSeqOfCap[SecretFile](count)
   for _ in 0 ..< count:
     var f = SecretFile()
@@ -269,6 +301,46 @@ proc deriveKeyAndNonce(shared: array[SharedSecretLen, byte];
     result.key[i] = stream[i]
   for i in 0 ..< GcmNonceLen:
     result.nonce[i] = stream[AesKeyLen + i]
+  # The stack copies of the key material are wiped before they are
+  # released; the returned key is the caller's to wipe.
+  zeroMem(addr stream[0], stream.len)
+  zeroMem(addr ikm[0], ikm.len)
+  zeroMem(addr hc, sizeof(hc))
+
+proc gcmTransformPtr(key: array[AesKeyLen, byte];
+                     nonce: array[GcmNonceLen, byte];
+                     aad: string;
+                     data: pointer; dataLen: int;
+                     encrypt: bool;
+                     tag: var array[GcmTagLen, byte]): bool =
+  ## Run AES-256-GCM over the ``dataLen`` bytes at ``data`` in place (a
+  ## buffer the caller owns -- a locked one, for plaintext that must not
+  ## reach swap). When `encrypt`, writes the authentication tag into `tag`
+  ## and returns true. When decrypting, checks `tag` and returns whether it
+  ## matched -- the caller MUST NOT use the data if this returns false.
+  var keyCopy = key
+  var nonceCopy = nonce
+  var aadCopy = aad
+  var bc: bsslBlock.AesCtCtrKeys
+  bsslBlock.aesCtCtrInit(bc, addr keyCopy[0], csize_t(AesKeyLen))
+  var gc: bsslAead.GcmContext
+  bsslAead.gcmInit(gc, addr bc.vtable, bsslHash.ghashCtmul32)
+  bsslAead.gcmReset(gc, addr nonceCopy[0], csize_t(GcmNonceLen))
+  if aadCopy.len > 0:
+    bsslAead.gcmAadInject(gc, addr aadCopy[0], csize_t(aadCopy.len))
+  bsslAead.gcmFlip(gc)
+  bsslAead.gcmRun(gc, (if encrypt: cint(1) else: cint(0)),
+                  (if dataLen > 0: data else: nil), csize_t(dataLen))
+  if encrypt:
+    bsslAead.gcmGetTag(gc, addr tag[0])
+    result = true
+  else:
+    result = bsslAead.gcmCheckTag(gc, addr tag[0]) == 1'u32
+  # Wipe the key, its AES schedule and the GCM state (which holds the
+  # GHASH key) before the stack frame is released.
+  zeroMem(addr keyCopy[0], AesKeyLen)
+  zeroMem(addr bc, sizeof(bc))
+  zeroMem(addr gc, sizeof(gc))
 
 proc gcmTransform(key: array[AesKeyLen, byte];
                   nonce: array[GcmNonceLen, byte];
@@ -309,11 +381,56 @@ proc gcmTransform(key: array[AesKeyLen, byte];
 # Seal / open.
 # ---------------------------------------------------------------------------
 
+proc loadRevokedRecipientKeys*(path: string): RevokedRecipientKeys =
+  ## The producer's revoked-key list at ``path``. A missing or malformed
+  ## file raises: a producer configured with a list must never seal as if
+  ## it were empty because the file went missing.
+  try:
+    let anchors = peerAuth.loadTrustAnchors(path)
+    for k in anchors.publicKeys.items: result.keys.add(k)
+  except CatchableError as e:
+    raise newException(SecretsError,
+      "cannot read the revoked recipient-key list: " & e.msg)
+  result.source = path
+
+proc revokedRecipientKeysOf*(keys: openArray[peerAuth.PublicKeyBytes];
+                             source: string): RevokedRecipientKeys =
+  ## A list built in memory (a test, or a producer that keeps it
+  ## elsewhere); ``source`` names where it came from.
+  for k in keys: result.keys.add(k)
+  result.source = source
+
+proc noRevokedRecipientKeys*(why: string): RevokedRecipientKeys =
+  ## An explicitly empty list, for a seal that has no producer
+  ## configuration to consult: a host sealing to its own current key
+  ## (``repro system addon secret put``, a rotation's re-seal), whose
+  ## revocation is the host-side rotation. ``why`` is recorded as the
+  ## source so the choice is visible, never implicit.
+  doAssert why.len > 0, "say why this seal consults no revoked-key list"
+  result.source = why
+
+proc isRevoked*(r: RevokedRecipientKeys; key: peerAuth.PublicKeyBytes): bool =
+  key in r.keys
+
+proc revokedCount*(r: RevokedRecipientKeys): int = r.keys.len
+
+proc refuseRevoked(r: RevokedRecipientKeys; key: peerAuth.PublicKeyBytes) =
+  when not agentMutated("rdmf-ignores-revoked-keys"):
+    if r.isRevoked(key):
+      var hex = ""
+      for b in key: hex.add(toHex(int(b), 2).toLowerAscii())
+      raise newException(RecipientKeyRevoked,
+        "refusing to seal to recipient key " & hex &
+        ": it is on the revoked recipient-key list (" & r.source & ")")
+
 proc sealSecrets*(recipientPubKey: peerAuth.PublicKeyBytes;
                   target: string;
-                  files: seq[SecretFile]): SealedSecrets =
+                  files: seq[SecretFile];
+                  revoked: RevokedRecipientKeys): SealedSecrets =
   ## Encrypt `files` to `recipientPubKey`. A fresh ephemeral keypair is
   ## generated per call, so the derived AES key is unique per envelope.
+  ## Refused with ``RecipientKeyRevoked`` when the key is on ``revoked``.
+  refuseRevoked(revoked, recipientPubKey)
   let ephemeral = peerAuth.generateKeypair()
   let shared = ecdhSharedX(ephemeral.privateKey, recipientPubKey)
   let derived = deriveKeyAndNonce(shared, target, ephemeral.publicKey,
@@ -352,6 +469,19 @@ proc openSecrets*(recipientPrivKey: peerAuth.PrivateKeyBytes;
 # Materialisation.
 # ---------------------------------------------------------------------------
 
+proc refuseLinkOnPath(root, rel: string) =
+  ## Raise unless no existing component of ``root/rel`` (the leaf included)
+  ## is a symbolic link. The agent writes secrets as root/SYSTEM; a link
+  ## planted on the path would redirect plaintext, or overwrite a file of
+  ## the attacker's choosing with it.
+  var cur = root
+  for part in rel.split('/'):
+    cur = cur / part
+    if symlinkExists(cur):
+      raise newException(SecretsError,
+        "refusing to write secret " & rel & " through a symbolic link (" &
+        cur & ")")
+
 proc materialiseSecrets*(files: seq[SecretFile]; destDir: string): seq[string] =
   ## Write the opened secrets under `destDir`, returning the absolute paths.
   ##
@@ -361,32 +491,355 @@ proc materialiseSecrets*(files: seq[SecretFile]; destDir: string): seq[string] =
   ## able to observe the path existing with partial content. Renaming within
   ## the same directory is atomic on both NTFS and POSIX.
   ##
+  ## **Never readable more widely than declared, never through a link.** On
+  ## POSIX the staged file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` and
+  ## its final mode already applied, so there is no window in which the
+  ## process umask leaves plaintext group- or world-readable (writing first
+  ## and narrowing the mode afterwards had exactly that window), and a link
+  ## planted at the staged name cannot redirect the write. No existing
+  ## component of the destination path may be a link either.
+  ##
   ## **Securing `destDir` is the PROFILE's job, not this proc's.** The
   ## directory carries the DACL and the files inherit it, exactly as
   ## `C:\actions-runner-tokens` already does (an `fs.systemDirectory` paired
   ## with a `windows.acl`). Setting per-file ACLs here would mean the agent
   ## and the profile both assert who may read these bytes, and the profile
-  ## would re-apply forever against whatever the agent last wrote. The POSIX
-  ## mode below is applied only where it is the whole story.
+  ## would re-apply forever against whatever the agent last wrote.
   createDir(destDir)
   result = newSeqOfCap[string](files.len)
   for f in files:
     validateSecretPath(f.path)
+    refuseLinkOnPath(destDir, f.path)
     let dest = destDir / f.path
     let parent = parentDir(dest)
     if parent.len > 0:
       createDir(parent)
+    refuseLinkOnPath(destDir, f.path)
     let staged = dest & ".staged"
     var content = newString(f.content.len)
     for i, b in f.content:
       content[i] = char(b)
-    writeFile(staged, content)
     when defined(posix):
-      var perms: set[FilePermission] = {}
-      if (f.mode and 0o400'u32) != 0: perms.incl(fpUserRead)
-      if (f.mode and 0o200'u32) != 0: perms.incl(fpUserWrite)
-      if (f.mode and 0o040'u32) != 0: perms.incl(fpGroupRead)
-      if (f.mode and 0o004'u32) != 0: perms.incl(fpOthersRead)
-      setFilePermissions(staged, perms)
+      if symlinkExists(staged):
+        raise newException(SecretsError,
+          "refusing to write secret " & f.path &
+          ": its staging name is a symbolic link")
+      if fileExists(staged):
+        removeFile(staged)      # a leftover from an interrupted earlier tick
+      let modeBits = Mode(f.mode and 0o644'u32)
+      let fd = posix.open(staged.cstring,
+        O_WRONLY or O_CREAT or O_EXCL or oNoFollow or oCloExec, modeBits)
+      if fd < 0:
+        raise newException(SecretsError,
+          "cannot create " & staged & ": " & osErrorMsg(osLastError()))
+      try:
+        # The process umask may have narrowed the open(2) mode further;
+        # fchmod sets exactly the declared bits, on the descriptor.
+        if fchmod(fd, modeBits) != 0:
+          raise newException(SecretsError,
+            "cannot set the mode of " & staged & ": " &
+            osErrorMsg(osLastError()))
+        var off = 0
+        while off < content.len:
+          let n = posix.write(fd, addr content[off], content.len - off)
+          if n < 0:
+            raise newException(SecretsError,
+              "cannot write " & staged & ": " & osErrorMsg(osLastError()))
+          off += n
+      finally:
+        discard posix.close(fd)
+    else:
+      writeFile(staged, content)
     moveFile(staged, dest)
     result.add(dest)
+
+# ---------------------------------------------------------------------------
+# The recipient key, generated on the host.
+#
+# Deploy-Agent.md §Sealed secrets (v2) / §Recipient key generation and
+# ReproOS-Add-On-Mode.md §6.2 step 3: the private half is GENERATED ON THE
+# TARGET and only its public half is printed, for the producer to seal to. The
+# key then never travels, which is why this lives in the agent rather than in
+# a producer-side tool.
+# ---------------------------------------------------------------------------
+
+type
+  RecipientKey* = object
+    publicKey*: peerAuth.PublicKeyBytes
+    created*: bool
+      ## True when this call generated the key; false when an existing key
+      ## file was read.
+
+when defined(posix):
+  import std/posix
+
+  proc posixFail(what, path: string): ref SecretsError =
+    newException(SecretsError, what & " " & path & ": " &
+      osErrorMsg(osLastError()))
+
+  proc writeAllFd(fd: cint; text: string; path: string) =
+    var off = 0
+    while off < text.len:
+      let n = posix.write(fd, unsafeAddr text[off], text.len - off)
+      if n < 0:
+        if errno == EINTR: continue
+        raise posixFail("cannot write", path)
+      off += n
+
+  const KeygenStagingInfix = ".keygen-"
+    ## The staging file beside the key is `<key>.keygen-<pid>`; the pid
+    ## says which keygen owns it, so a leftover from a crashed one can be
+    ## told from a concurrent one's.
+
+  proc sweepStaleKeygenStaging(path: string) =
+    ## Remove `<path>.keygen-<pid>` files whose owning process is gone. A
+    ## keygen killed between creating its staging file and linking it leaves
+    ## one behind (with the scalar in it, 0400 -- a secret that nothing will
+    ## ever use); a LIVE keygen's file is left alone, it is about to be
+    ## linked or unlinked by its owner.
+    let dir = parentDir(path)
+    if dir.len == 0 or not dirExists(dir):
+      return
+    let prefix = extractFilename(path) & KeygenStagingInfix
+    for kind, entry in walkDir(dir):
+      if kind notin {pcFile, pcLinkToFile}:
+        continue
+      let name = extractFilename(entry)
+      if not name.startsWith(prefix):
+        continue
+      var pid: int
+      try:
+        pid = parseInt(name[prefix.len .. ^1])
+      except ValueError:
+        continue
+      if pid <= 0:
+        continue
+      # kill(pid, 0) delivers nothing; it answers whether the pid exists.
+      # EPERM means it exists under another user: live, leave it. One with
+      # THIS pid is stale too: this process has not staged anything yet, so
+      # it can only be left over from an earlier holder of the pid.
+      if pid != int(getpid()) and
+          (posix.kill(Pid(pid), 0) == 0 or errno == EPERM):
+        continue
+      discard posix.unlink(entry.cstring)
+
+  proc createKeyFileExclusive(path, text: string): bool =
+    ## Publish `text` at `path` with mode 0400, never replacing anything.
+    ## Returns false, having written nothing at `path`, when another file got
+    ## there first -- a concurrent keygen -- so the caller reads that one.
+    ##
+    ## Written to a sibling staging file created 0400 from the start (so the
+    ## scalar is never on disk with a wider mode, whatever the umask), flushed,
+    ## and then HARD-LINKED onto `path`: `link(2)` fails with EEXIST rather
+    ## than overwrite, so a concurrent or repeated keygen cannot replace a key
+    ## a producer may already have sealed to, and a crash leaves either no key
+    ## or a complete one -- never a truncated file at the real name.
+    let tmp = path & KeygenStagingInfix & $getpid()
+    let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or O_CLOEXEC,
+                        Mode(0o400))
+    if fd < 0:
+      raise posixFail("cannot create", tmp)
+    try:
+      writeAllFd(fd, text, tmp)
+      if fsync(fd) != 0:
+        raise posixFail("cannot flush", tmp)
+    except CatchableError:
+      discard posix.close(fd)
+      discard posix.unlink(tmp.cstring)
+      raise
+    if posix.close(fd) != 0:
+      discard posix.unlink(tmp.cstring)
+      raise posixFail("cannot close", tmp)
+    let linked = posix.link(tmp.cstring, path.cstring)
+    let linkErr = osLastError()
+    discard posix.unlink(tmp.cstring)
+    if linked != 0:
+      if linkErr == OSErrorCode(EEXIST):
+        return false
+      raise newException(SecretsError, "cannot publish recipient key at " &
+        path & ": " & osErrorMsg(linkErr))
+    let dirFd = posix.open(parentDir(path).cstring, O_RDONLY or O_CLOEXEC)
+    if dirFd >= 0:
+      discard fsync(dirFd)
+      discard posix.close(dirFd)
+    true
+
+  proc createParents0700(path: string) =
+    ## Create every missing ancestor of `path`, each mode 0700 regardless of
+    ## the umask. `createDir` would make the intermediate ones 0777 & ~umask,
+    ## so a key under `a/b/recipient.key` with `a` absent got a world-
+    ## searchable `a`; and the mode is set at `mkdir(2)` time, not narrowed
+    ## afterwards, so no component is ever wider than it ends up.
+    var missing: seq[string] = @[]
+    var dir = parentDir(path)
+    while dir.len > 0 and not dirExists(dir):
+      missing.add(dir)
+      let up = parentDir(dir)
+      if up == dir:
+        break
+      dir = up
+    for i in countdown(missing.high, 0):
+      if posix.mkdir(missing[i].cstring, Mode(0o700)) != 0 and errno != EEXIST:
+        raise posixFail("cannot create directory", missing[i])
+
+  proc refuseNonRegularKeyPath(path: string) =
+    ## What `fileExists` cannot tell apart from "absent": a directory, or a
+    ## symbolic link (dangling, or to a directory) AT `path`. Creating the key
+    ## there would fail with an EEXIST that reads like a concurrent keygen, or
+    ## follow the link somewhere nobody chose; name the thing instead.
+    var st: Stat
+    if lstat(path.cstring, st) != 0:
+      return
+    if S_ISLNK(st.st_mode):
+      var target = newString(4096)
+      let n = readlink(path.cstring, cstring(target), 4095)
+      target.setLen(max(n, 0))
+      raise newException(SecretsError, "recipient key path " & path &
+        " is a symbolic link (to " & target & "); the key must be a regular " &
+        "file, so remove the link or point --secrets-key at the file itself")
+    if S_ISDIR(st.st_mode):
+      raise newException(SecretsError, "recipient key path " & path &
+        " is a directory; --secrets-key names the key FILE (for example " &
+        path / "recipient.key" & ")")
+    if not S_ISREG(st.st_mode):
+      raise newException(SecretsError, "recipient key path " & path &
+        " exists but is not a regular file")
+
+proc readRecipientKeyFile(path: string): RecipientKey =
+  ## The existing key at `path`, refused when it does not parse (rather than
+  ## regenerated: a producer may already be sealing to it, and a silent new
+  ## key would make every later manifest undecryptable with no reason given)
+  ## and, on POSIX, when group or others can read it.
+  when defined(posix):
+    var st: Stat
+    if stat(path.cstring, st) != 0:
+      raise posixFail("cannot stat", path)
+    if (st.st_mode.int and 0o077) != 0:
+      raise newException(SecretsError, "recipient key " & path &
+        " is accessible to group or others (mode " &
+        toOct(st.st_mode.int and 0o777, 3) & "); the private key must " &
+        "be readable by its owner only -- chmod 0400 it, or rotate it " &
+        "if others may have read it")
+  let priv =
+    try:
+      peerAuth.loadPrivateKeyFile(path)
+    except CatchableError as e:
+      raise newException(SecretsError, "existing recipient key " & path &
+        " is not usable (" & e.msg & "); it is left untouched -- remove " &
+        "it explicitly to generate a new one")
+  RecipientKey(publicKey: peerAuth.derivePublicKey(priv), created: false)
+
+proc ensureRecipientKeyFile*(path: string;
+                             beforePublish: proc() {.gcsafe.} = nil):
+    RecipientKey =
+  ## The deploy agent's sealed-secrets recipient key at `path`: generated
+  ## when the file does not exist, read when it does. Never replaces a key.
+  ##
+  ## The file is the `ecdsa-p256:<hex>` form `--secrets-key` loads
+  ## (`peerAuth.loadPrivateKeyFile`). On POSIX it is created mode 0400, and
+  ## every missing ancestor directory is created 0700. Securing an EXISTING
+  ## parent is the deployment's job (Add-On bootstrap creates
+  ## `/var/lib/repro/agent` 0700 root), exactly as for the secrets directory.
+  ##
+  ## Two keygens racing for the same path both return the same key: the one
+  ## whose `link(2)` finds the name taken reads the winner's file. Staging
+  ## files a crashed keygen left behind (`<path>.keygen-<pid>`, dead pid) are
+  ## removed first. A directory or a symbolic link at `path` is refused by
+  ## name. An existing key is refused when it does not parse or is readable
+  ## by group or others (`readRecipientKeyFile`).
+  ##
+  ## `beforePublish` runs after the new key is staged and before it is
+  ## linked into place. It exists for the race test, which has no other way
+  ## to put a competitor's key there at exactly that point; production
+  ## callers leave it nil.
+  if path.len == 0:
+    raise newException(SecretsError, "recipient key path is empty")
+  when defined(posix):
+    refuseNonRegularKeyPath(path)
+    sweepStaleKeygenStaging(path)
+  if fileExists(path):
+    return readRecipientKeyFile(path)
+  when defined(posix):
+    createParents0700(path)
+  else:
+    let parent = parentDir(path)
+    if parent.len > 0 and not dirExists(parent):
+      createDir(parent)
+  let kp = peerAuth.generateKeypair()
+  let text = peerAuth.privateKeyFileText(kp.privateKey)
+  when defined(posix):
+    if beforePublish != nil:
+      beforePublish()
+    if not createKeyFileExclusive(path, text):
+      # Another keygen published first; its key is the host's key now.
+      return readRecipientKeyFile(path)
+  else:
+    # Windows: the directory's DACL governs who may read the key (see
+    # `materialiseSecrets`); POSIX mode bits have no meaning here.
+    if beforePublish != nil:
+      beforePublish()
+    if fileExists(path):
+      return readRecipientKeyFile(path)
+    writeFile(path, text)
+  RecipientKey(publicKey: kp.publicKey, created: true)
+
+# ---------------------------------------------------------------------------
+# Seal / open in place, in a buffer the caller owns.
+#
+# For a caller that must keep plaintext out of memory it does not control --
+# the ReproOS add-on locks its plaintext in RAM so that no page of it can be
+# swapped (repro_addon/locked_buffer). The payload is the canonical encoding
+# `encodeSecretFiles` produces; the caller parses or builds it in place.
+# ---------------------------------------------------------------------------
+
+proc openSecretsInPlace*(recipientPrivKey: peerAuth.PrivateKeyBytes;
+                         target: string; sealed: SealedSecrets;
+                         dst: pointer; dstLen: int) =
+  ## Decrypt `sealed` into the `dstLen` bytes at `dst` (exactly the
+  ## ciphertext's length). Raises `SecretsError` -- with `dst` zeroed -- on a
+  ## failed tag check or an unusable ephemeral key: no unauthenticated byte
+  ## is left for the caller.
+  if dstLen != sealed.ciphertext.len:
+    raise newException(SecretsError, "openSecretsInPlace: buffer of " &
+      $dstLen & " bytes for a ciphertext of " & $sealed.ciphertext.len)
+  let recipientPub = peerAuth.derivePublicKey(recipientPrivKey)
+  var shared = ecdhSharedX(recipientPrivKey, sealed.ephemeralPubKey)
+  var derived = deriveKeyAndNonce(shared, target, sealed.ephemeralPubKey,
+                                  recipientPub)
+  zeroMem(addr shared[0], shared.len)
+  if dstLen > 0:
+    copyMem(dst, unsafeAddr sealed.ciphertext[0], dstLen)
+  var tag = sealed.tag
+  let opened = gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
+                               dst, dstLen, encrypt = false, tag = tag)
+  zeroMem(addr derived.key[0], AesKeyLen)
+  if not opened:
+    if dstLen > 0: zeroMem(dst, dstLen)
+    raise newException(SecretsError,
+      "sealed secrets failed authentication for target '" & target &
+      "': wrong recipient key, wrong target, or tampered ciphertext")
+
+proc sealSecretsInPlace*(recipientPubKey: peerAuth.PublicKeyBytes;
+                         target: string; payload: pointer;
+                         payloadLen: int;
+                         revoked: RevokedRecipientKeys): SealedSecrets =
+  ## Encrypt the `payloadLen` bytes of plaintext at `payload` in place to
+  ## `recipientPubKey` and return the sealed section; afterwards the buffer
+  ## holds ciphertext only. Refused (the buffer untouched) with
+  ## ``RecipientKeyRevoked`` when the key is on ``revoked``.
+  refuseRevoked(revoked, recipientPubKey)
+  let ephemeral = peerAuth.generateKeypair()
+  var shared = ecdhSharedX(ephemeral.privateKey, recipientPubKey)
+  var derived = deriveKeyAndNonce(shared, target, ephemeral.publicKey,
+                                  recipientPubKey)
+  zeroMem(addr shared[0], shared.len)
+  var tag: array[GcmTagLen, byte]
+  discard gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
+                          payload, payloadLen, encrypt = true, tag = tag)
+  zeroMem(addr derived.key[0], AesKeyLen)
+  result.ephemeralPubKey = ephemeral.publicKey
+  result.nonce = derived.nonce
+  result.tag = tag
+  result.ciphertext = newSeq[byte](payloadLen)
+  if payloadLen > 0:
+    copyMem(addr result.ciphertext[0], payload, payloadLen)

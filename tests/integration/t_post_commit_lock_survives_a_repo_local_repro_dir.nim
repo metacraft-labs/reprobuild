@@ -120,15 +120,15 @@ suite "post-commit lock refresh survives a repo-local .repro directory":
       createDir(workspaceRoot / "repos")
       writeFile(workspaceRoot / "projects" / "lib-a.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"lib-a\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"lib-a\"\n" &
+        "\n" &
         "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
           originUrl & "\"\n\n" &
         "includes = [\n  \"repos/lib-a.toml\",\n]\n")
       writeFile(workspaceRoot / "repos" / "lib-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
-        "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
+        "remote = \"lib-a-origin\"\nmainline = \"main\"\n")
       writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
       # A manifest-backed lock route must be DECLARED, not inferred, so the
@@ -248,20 +248,20 @@ suite "post-commit lock refresh survives a repo-local .repro directory":
         writeFile(workspaceRoot / "projects" / (project & ".toml"),
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
           "[project]\nname = \"" & project & "\"\n" &
-          "default_revision = \"main\"\ntrunk = \"main\"\n\n" &
+          "\n" &
           "[[remote]]\nname = \"" & repoName & "-origin\"\nfetch = \"" &
             url & "\"\n\n" &
           "includes = [\n  \"repos/" & repoName & ".toml\",\n]\n")
         writeFile(workspaceRoot / "repos" / (repoName & ".toml"),
-          "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+          "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
           "[repo]\nname = \"" & repoName & "\"\npath = \"" & repoName & "\"\n" &
-          "remote = \"" & repoName & "-origin\"\nrevision = \"main\"\n")
+          "remote = \"" & repoName & "-origin\"\nmainline = \"main\"\n")
 
       writeProject("alpha", "alpha-repo", alphaUrl)
       writeProject("beta", "beta-repo", betaUrl)
       createDir(workspaceRoot / ".repro")
-      writeFile(workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"alpha\"\n" &
         "projects = [\"alpha\", \"beta\"]\n")
 

@@ -92,9 +92,17 @@ when defined(windows):
         "; this run cannot test the observed-environment path"
     # The run must also be COMPLETE. A capture that graded incomplete would take
     # the action down a monitor-loss path and the cache decision below would be
-    # about that instead of about the environment.
+    # about that instead of about the environment. Complete is reachable on
+    # Windows because io-mon's Job Object guard PROVES the tree has exited
+    # (reprobuild-pm spec/io-mon-Windows-Tree-Lifetime-Guard.md); the
+    # blanket tree-lifetime limitation this test once had to work around is
+    # retired on Windows, so the real depfile is used as captured.
     doAssert res.completeness == mcComplete,
-      "the monitored where.exe run graded incomplete"
+      "the monitored where.exe run graded incomplete: " & $(block:
+        var losses: seq[string]
+        for r in res.records:
+          if r.kind == mrEventLoss: losses.add r.detail
+        losses)
     result = @[]
     for r in res.records:
       if r.kind == mrEnvRead:

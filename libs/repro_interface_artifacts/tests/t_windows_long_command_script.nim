@@ -60,3 +60,37 @@ suite "Windows long command script planning":
       check res.exitCode == 0
       check "start" in res.output
       check "end" in res.output
+
+when defined(windows):
+  suite "Windows command failure reports name what died":
+
+    # ReproOS campaign (reprobuild `reproos` cd65cae1, 2026-10-07): from
+    # 2026-09-18 `repro build .#apps` reported
+    # `command failed (-1073740791): ...nim.exe c ...` -- a CET shadow-stack
+    # fast fail (0xC0000409) of the launcher pwsh.exe, not of nim, which never
+    # ran. The campaign's fix named the launcher in the report. On `agents`,
+    # runCommand no longer has a launcher: it starts the command itself with
+    # CreateProcessW (0162837ed), so the reported status IS the command's,
+    # and `commandFailure` names an NTSTATUS crash as a crash
+    # (`abnormalTerminationName`). The launcher note was therefore dropped at
+    # the merge; this case keeps the campaign's evidence -- the exact status
+    # from that report -- and, unlike the dropped cases, drives a REAL failing
+    # runCommand rather than the formatting helper.
+    test "the CET fast-fail status is reported as a crash, not as a number":
+      var message = ""
+      try:
+        discard runCommand(@["cmd.exe", "/d", "/c", "exit /b -1073740791"])
+      except OSError as e:
+        message = e.msg
+      check message.startsWith("command terminated abnormally (")
+      check "0xC0000409" in message
+      check "command failed (-1073740791)" notin message
+
+    test "an ordinary failing status is not called a crash":
+      var message = ""
+      try:
+        discard runCommand(@["cmd.exe", "/d", "/c", "exit /b 1"])
+      except OSError as e:
+        message = e.msg
+      check message.startsWith("command failed (1)")
+      check "abnormally" notin message

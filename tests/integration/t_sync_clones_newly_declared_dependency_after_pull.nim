@@ -40,6 +40,7 @@
 ## missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 
@@ -112,8 +113,7 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"dev\"\n" &
-    "trunk = \"dev\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
     "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
     "[[remote]]\nname = \"c-origin\"\nfetch = \"" & cUrl & "\"\n\n" &
@@ -126,43 +126,43 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "a-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "b-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libCFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
 remote = "c-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libDFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-d"
 path = "lib-d"
 remote = "d-origin"
-branch = "main"
+mainline = "main"
 """
 
 type
@@ -322,8 +322,8 @@ suite "RA-23 — sync clones newly-declared dependencies":
 
       # Record a workspace feature branch in .repro/workspace.toml
       createDir(fx.workspaceRoot / ".repro")
-      writeFile(fx.workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\nproject = \"myproject\"\nbranch = \"feature-test\"\n")
+      writeFile(fx.workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\nproject = \"myproject\"\nbranch = \"feature-test\"\n")
 
       # Only lib-a is checked out
       cloneInto(gitBin, fx.aOrigin, fx.workspaceRoot / "lib-a")
@@ -342,3 +342,57 @@ suite "RA-23 — sync clones newly-declared dependencies":
       let bBranch = requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") &
         " branch --show-current").strip()
       check bBranch == "feature-test"
+
+  test "t_sync_wires_managed_hooks_into_a_repo_it_cloned":
+    ## A clone used to arrive UNGATED. Nothing installed the managed hooks
+    ## implicitly -- not `init`, not `sync`, not `ws enable` -- so a freshly
+    ## cloned repo had no pre-push publication check and no post-commit cache
+    ## push until an operator noticed `repro health` complaining and ran
+    ## `repro hooks ensure --vcs`. Measured on one real workspace: a sync that
+    ## materialized 21 declared repos left 105 hooks missing, and a single
+    ## later clone left 5.
+    ##
+    ## Both halves matter, so both are asserted:
+    ##   - lib-b, which THIS sync cloned, carries every managed hook.
+    ##   - lib-a, which was already checked out, is left exactly as it was.
+    ##     The pass is scoped to new clones on purpose: rewriting the hooks of
+    ##     every repo on every sync would churn the gate of a hundred repos and
+    ##     would silently undo a deliberate local hook arrangement.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case builds real origins and clones them")
+    else:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+
+      cloneInto(gitBin, fx.aOrigin, fx.workspaceRoot / "lib-a")
+      check dirExists(fx.workspaceRoot / "lib-a" / ".git")
+      check not dirExists(fx.workspaceRoot / "lib-b")
+
+      # A raw `git clone` installs no managed hook, so lib-a starts ungated.
+      # This is the control: if it were already gated, the lib-b assertions
+      # below could pass without the sync having done anything.
+      let aHooks = fx.workspaceRoot / "lib-a" / ".git" / "hooks"
+      for hookName in ["pre-commit", "pre-push", "post-commit", "post-merge",
+                       "post-checkout"]:
+        check not fileExists(aHooks / (hookName & ".repro-managed"))
+
+      let res = invokeSync(fx)
+      checkpoint("sync output: " & res.output)
+
+      # lib-b was cloned by this sync, and is gated.
+      check dirExists(fx.workspaceRoot / "lib-b" / ".git")
+      let bHooks = fx.workspaceRoot / "lib-b" / ".git" / "hooks"
+      for hookName in ["pre-commit", "pre-push", "post-commit", "post-merge",
+                       "post-checkout"]:
+        checkpoint("lib-b hook: " & hookName)
+        # The managed BODY, which is what carries the contract token, and the
+        # dispatcher that probes `repro` before handing over to it.
+        check fileExists(bHooks / (hookName & ".repro-managed"))
+        check fileExists(bHooks / hookName)
+
+      # lib-a was NOT cloned by this sync, so the pass left it alone.
+      for hookName in ["pre-commit", "pre-push", "post-commit", "post-merge",
+                       "post-checkout"]:
+        checkpoint("lib-a must stay untouched: " & hookName)
+        check not fileExists(aHooks / (hookName & ".repro-managed"))

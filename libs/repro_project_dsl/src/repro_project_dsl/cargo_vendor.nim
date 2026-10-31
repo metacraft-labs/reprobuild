@@ -123,6 +123,17 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
   let overridesDir = cargoVendorOverridesDir(projectRoot)
   let configDir = cargoConfigDir(projectRoot)
   createDir(extendedPath(cargoVendorRoot(projectRoot)))
+  # `plan` is the manifest's content, read at emission (`readVendorManifest`),
+  # and the `.cargo/config.toml` below is baked from it: one
+  # `[source."git+…"]` block per git source. So the manifest is an input of
+  # the graph evaluation, not only of this action. Unreported, a manifest
+  # edit that adds or re-pins a git source reused the cached graph and wrote
+  # the OLD config, and cargo went to the network for the new source.
+  # Reported here rather than in `readVendorManifest` because the convention
+  # reads the manifest before its fragment's input registry is reset; this
+  # call runs inside the evaluation on both the constructor and convention
+  # paths.
+  providerFileInput(manifest)
 
   proc q(value: string): string =
     value.replace("\\", "/").replace("\"", "\\\"")

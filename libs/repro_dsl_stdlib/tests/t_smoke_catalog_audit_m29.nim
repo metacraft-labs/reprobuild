@@ -8,8 +8,9 @@
 ##      ``ModuleNotFoundError`` / ``cargo: command not found`` surfaces
 ##      at a downstream M9 fixture.
 ##   2. Every catalog file declares SOME provisioning shape —
-##      ``nixPackage``, a harvested ``VersionedProvisioning`` catalog,
-##      or a ``tarball url`` arm. Entries that take the ``nixPackage
+##      ``nixPackage`` or a ``tarball url`` arm — and (GM4b) none carries a
+##      ``VersionedProvisioning`` record any more: archive realizations are
+##      ``tarball`` realizations of the package, one representation. Entries that take the ``nixPackage
 ##      "nixpkgs#"`` route additionally carry a ``nixpkgsRev`` +
 ##      ``nixpkgsNarHash`` pin, which keeps the Nix CI gate's parser
 ##      (``scripts/verify-nix-catalog-attrs.sh``) able to extract every
@@ -32,6 +33,11 @@ import std/[os, strutils, unittest]
 import repro_dsl_stdlib/nixpkgs_pin
 
 from repro_test_support import nimSourceCodeOnly, nimSourceCommentsBlanked
+# A package that moved to reprobuild-packages may leave a one-release stub
+# module here whose only content is a compile error naming the new home. It
+# is not a catalog entry, so the audit skips exactly those names.
+from repro_project_dsl/reprobuild_packages_catalog import
+  MovedPackageImportStubs
 
 const
   PackagesRel = "libs" / "repro_dsl_stdlib" / "src" / "repro_dsl_stdlib" /
@@ -125,6 +131,7 @@ iterator catalogFiles(): tuple[name, path: string] =
     if kind == pcFile and path.endsWith(".nim"):
       let name = splitFile(path).name
       if name in AuditExemptions: continue
+      if name in MovedPackageImportStubs: continue
       yield (name: name, path: path)
 
 # NEITHER READER RETURNS RAW TEXT, AND THE TWO ARE NOT INTERCHANGEABLE.
@@ -168,20 +175,17 @@ suite "M29 Part B — catalog audit":
     # Every entry must declare ONE of:
     #   * ``nixPackage`` (the M21/M29 nix-first shape — pinned to either
     #     a ``"nixpkgs#..."`` selector OR a local ``expressionFile``);
-    #   * ``VersionedProvisioning`` (the M63/M67 catalog shape harvested
-    #     from Scoop bucket manifests; the M64+ ``cakBuiltin`` adapter
-    #     consumes it on Windows hosts);
-    #   * a ``tarball url = ...`` arm (the pinned-URL + sha256 shape;
+    #   * a ``tarball url = ...`` arm (the pinned-URL + digest shape;
     #     94 entries already carry one, and PMC-1's ``chocolatey.nim``
     #     is the first to carry ONLY one, because a Windows package
     #     manager has no nixpkgs attribute and no Scoop manifest to
     #     harvest).
-    # Any of the three is valid provisioning; the audit just requires
-    # SOMETHING is there. (M67 introduced files like ``maven.nim`` /
-    # ``gradle.nim`` / ``zig.nim`` that ship ONLY the M63 catalog
-    # because Maven / Gradle / Zig have no existing Nix entry to
-    # co-host. ``ruby.nim`` carries both — see the hand-merge note in
-    # that file.)
+    # Either is valid provisioning; the audit just requires SOMETHING is
+    # there. (M67 introduced files like ``maven.nim`` / ``gradle.nim`` /
+    # ``zig.nim`` that shipped ONLY a ``VersionedProvisioning`` catalog;
+    # GM4b turned those records into ``tarball`` arms of a ``package``
+    # block, and a file that still carried one now FAILS here — the
+    # retired second representation must not come back.)
     #
     # A tarball-only entry is a shape the project already anticipates
     # elsewhere, not a hole this audit is papering over:
@@ -199,7 +203,8 @@ suite "M29 Part B — catalog audit":
       let hasVersionedProvisioning = "VersionedProvisioning(" in body or
         "initVersionedProvisioning(" in body
       let hasTarball = "tarball url" in body
-      check hasNixPackage or hasVersionedProvisioning or hasTarball
+      check not hasVersionedProvisioning
+      check hasNixPackage or hasTarball
       inc seen
     # Sanity: the catalog can't have shrunk to nothing.
     check seen >= 60

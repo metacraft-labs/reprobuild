@@ -47,8 +47,10 @@ import std/[options, os, strutils, unittest]
 
 import repro_build_engine
 import repro_binary_cache_client/engine_publisher
+from repro_test_support import testCaseScratchSlug
 
-const TmpCacheRoot = "build/test-tmp/test_engine_publisher_wiring"
+let TmpCacheRoot = "build/test-tmp/test_engine_publisher_wiring" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpCacheRoot):

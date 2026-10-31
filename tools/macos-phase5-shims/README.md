@@ -11,14 +11,14 @@
 A *Tier-2 reprobuild-specific helper* that supplies the **list of
 macOS-specific binaries** the Phase-5 gates (M7-M11) need argv-traced
 when they execute inside a disposable macOS VM, and a thin Nim helper
-module that vm-harness (the Tier-1 generic argv-tracing-shim-installer
-primitive at `metacraft-labs/vm-harness`) consumes.
+module that gosti (the Tier-1 generic argv-tracing-shim-installer
+primitive at `metacraft-labs/gosti`) consumes.
 
 The architectural split (per the M6 milestone block):
 
 | Tier | Where | Responsibility |
 |---|---|---|
-| **Tier 1** | `metacraft-labs/vm-harness` (the Nim library) | Generic argv-tracing-shim-installer primitive that knows how to wrap any named binary. Backend-agnostic. |
+| **Tier 1** | `metacraft-labs/gosti` (the Nim library) | Generic argv-tracing-shim-installer primitive that knows how to wrap any named binary. Backend-agnostic. |
 | **Tier 2** | `reprobuild/tools/macos-phase5-shims/` (this directory) | The macOS-specific binary list (`dscl`, `launchctl`, `defaults`, `systemsetup`, `scutil`, `brew`) and any per-binary post-processing the Phase-5 gates need. |
 | **Gate** | `reprobuild/tests/e2e/macos-phase5/t_e2e_*.nim` | The actual M7-M11 destructive-half scenarios that ASSERT the argv the driver shelled out is the expected one. |
 
@@ -35,13 +35,13 @@ The architectural split (per the M6 milestone block):
 
 ## Why a separate Tier-2 layer
 
-The generic argv-tracing primitive in vm-harness doesn't know which
+The generic argv-tracing primitive in gosti doesn't know which
 binaries reprobuild's macOS drivers shell out to — that knowledge
 belongs in the reprobuild repository (per the M6 milestone's
 "per-driver argv-logging shims … as Tier-2 reprobuild-specific
 helpers"). Keeping the binary list here means:
 
-  1. vm-harness stays generic (the primitive trace-installer accepts
+  1. gosti stays generic (the primitive trace-installer accepts
      any binary name).
   2. The binary list and the gates that consume the traces live in
      the same repository, so a future driver addition (e.g., M13's
@@ -55,7 +55,7 @@ The M7-M11 destructive-half blocks (sandbox-gated, run only inside a
 macOS VM with the matching `REPRO_PHASE5_MACOS_*_VM=1` env var) call
 into the Nim helper module `shim_inventory.nim` to:
 
-  1. Install the argv-tracing shims via the vm-harness Tier-1
+  1. Install the argv-tracing shims via the gosti Tier-1
      primitive for the binaries the gate needs.
   2. Run the apply/verify/destroy steps.
   3. Read the captured argv traces and ASSERT the expected commands

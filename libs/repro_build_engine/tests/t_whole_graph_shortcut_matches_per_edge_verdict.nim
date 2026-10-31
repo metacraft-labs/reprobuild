@@ -54,7 +54,8 @@ import repro_test_support
 
 const
   ChildFlag = "--whole-graph-shortcut-child"
-  TmpDir = "build/test-tmp/t_whole_graph_shortcut_matches_per_edge_verdict"
+let TmpDir = "build/test-tmp/t_whole_graph_shortcut_matches_per_edge_verdict" /
+  testCaseScratchSlug()
 
 let StableMtime = fromUnix(1_700_000_000)
   ## A whole second, so a `getFileInfo` → `setLastModificationTime`
@@ -264,7 +265,9 @@ suite "whole-graph shortcut matches the per-edge verdict":
       weakFingerprint: act.weakFingerprint,
       policy: act.actionCachePolicy,
       outputRoot: act.cwd,
-      refuseRecordWithNoInputs: act.refusesRecordWithNoInputs())
+      refuseRecordWithNoInputs: act.refusesRecordWithNoInputs(),
+      enforceOwnedOutputs: true,
+      ownedOutputs: act.outputs)
 
     let scan = cache.scanHotIndexMetadataInputsUnchanged([probe], nil,
       [resolver])

@@ -61,20 +61,25 @@ class DevShellHookScopeTests(unittest.TestCase):
     def test_non_repository_is_untouched(self):
         self.assertFalse(self.allowed())
 
-    def test_guard_encloses_the_generated_installer_and_handoff(self):
+    def test_guard_encloses_the_hook_installer_and_dispatcher_assertion(self):
         flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
-        start = flake.index("shellHook = ''", flake.index("devShells"))
-        hook = flake[start:]
+        # The default shell's hook is the one the repository guard opens.
+        hook = flake[flake.index("devShells"):]
         guard = hook.index("${./scripts/is_reprobuild_checkout.sh}; then")
-        before = hook.index("${./scripts/pre_commit_hook_handoff.sh} before")
-        installer = hook.index("+ pre-commit-check.shellHook")
-        after = hook.index("${./scripts/pre_commit_hook_handoff.sh} after")
-        end = hook.index("\n              fi", after)
-        self.assertLess(guard, before)
-        self.assertLess(before, installer)
-        self.assertLess(installer, after)
-        self.assertLess(after, end)
+        installer = hook.index("${./scripts/install-git-hooks.sh}")
+        ensure = hook.index("hooks ensure --vcs")
+        end = hook.index("\n              fi", ensure)
+        self.assertLess(guard, installer)
+        self.assertLess(installer, ensure)
+        self.assertLess(ensure, end)
 
+    def test_upstream_installer_is_not_used(self):
+        # git-hooks.nix's installer refuses to replace the committed
+        # .pre-commit-config.yaml and then installs no hook at all.
+        flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
+        shells = flake[flake.index("devShells"):]
+        self.assertNotIn("pre-commit-check.shellHook", shells)
+        self.assertNotIn("installationScript", shells)
 
 if __name__ == "__main__":
     unittest.main()

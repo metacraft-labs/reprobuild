@@ -127,6 +127,21 @@ type
     destdir*: string
     components*: Table[string, string]
 
+  CabalPackageResult* = object
+    ## Returned by ``cabal_package(...)`` -- the from-source Haskell build.
+    ## Same three roles as ``CargoPackageResult``, ``buildEdge`` likewise
+    ## being the vendor step: the ``file+noindex`` repository of the pinned
+    ## Hackage closure, and the private cabal configuration that names it.
+    buildEdge*: BuildActionDef
+      ## The vendored Hackage repository (``repro_project_dsl/hackage_vendor``).
+    compileEdge*: BuildActionDef
+      ## ``cabal build <target> --offline`` on a patched copy of the source.
+    installEdge*: BuildActionDef
+      ## Copies the built executable (``cabal list-bin``) to
+      ## ``<destdir>/usr/bin``.
+    destdir*: string
+    components*: Table[string, string]
+
   GoPackageResult* = object
     ## Returned by ``go_package(...)``. Same three roles as its siblings,
     ## and the same reading of ``buildEdge`` as ``CargoPackageResult``:
@@ -417,6 +432,19 @@ proc executable*(r: NodePackageResult; name: string): Executable =
     executableName = name,
     installPrefix = componentPath(r.components, "runtime"))
 
+proc executable*(r: CabalPackageResult; name: string): Executable =
+  ## Stage the installed executable and mirror the install tree, as the
+  ## cargo slice does, so the from-source resolver finds it under
+  ## ``<recipeRoot>/.repro/output/<name>/``.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "cabal")
+  newExecutable(
+    install = r.installEdge,
+    executableName = name,
+    installPrefix = componentPath(r.components, "runtime"))
+
 proc library*(r: CargoPackageResult; name: string): Library =
   ## For a crate that ships a cdylib or staticlib.
   ##
@@ -547,7 +575,7 @@ proc m9r15iScanQt6CmakeDirs*(qt6DepRecipeDir: string;
   ## config file (what CMake expects as ``<Component>_DIR``).
   ##
   ## Exported for unit-test introspection.
-  let cmakeRoot = qt6DepRecipeDir / ".repro" / "output" / "install" /
+  let cmakeRoot = qt6DepRecipeDir / installMirrorSubpath() /
     "usr" / "lib" / "cmake"
   if not dirExists(cmakeRoot):
     return
@@ -622,15 +650,15 @@ proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
     # in legacy mode the mirror root strips exactly that suffix off
     # the emitted recipe-dir shape.
     let depRecipeDir =
-      if mirrorRoot.endsWith("/.repro/output/install"):
-        mirrorRoot[0 ..< mirrorRoot.len - "/.repro/output/install".len]
+      if mirrorRoot.endsWith("/" & installMirrorSubpath()):
+        mirrorRoot[0 ..< mirrorRoot.len - ("/" & installMirrorSubpath()).len]
       else:
         # Non-legacy mode: the mirror root is content-hashed and does
         # not carry the legacy suffix. Scan the cmake root directly by
         # feeding a synthetic "recipe dir" whose ``+ /.repro/output/install``
         # composes to the mirror root.
         mirrorRoot & "/__pseudo_recipe_dir"
-    if mirrorRoot.endsWith("/.repro/output/install"):
+    if mirrorRoot.endsWith("/" & installMirrorSubpath()):
       m9r15iScanQt6CmakeDirs(depRecipeDir, sink)
     else:
       # For non-legacy layouts, scan the mirror root's cmake tree
@@ -722,7 +750,7 @@ proc m9r15iScanCmakeConfigDirs*(depRecipeDir: string;
   ##
   ## Legacy signature preserved for the existing unit tests; the
   ## resolver-aware collector calls the shared core directly.
-  let cmakeRoot = depRecipeDir / ".repro" / "output" / "install" /
+  let cmakeRoot = depRecipeDir / installMirrorSubpath() /
     "usr" / "lib" / "cmake"
   scanCmakeConfigDirsAt(cmakeRoot, dst)
 
@@ -977,8 +1005,7 @@ proc m9r15oCollectQt6TransitiveCmakeDeps*(projectRoot, packageName: string):
     # Only inject when the sibling install-mirror exists on disk so
     # the helper is inert in unit-test fixtures + host-orchestration
     # mode that builds the action graph without populating mirrors.
-    let mirrorUsr = siblingsRoot / dep / ".repro" / "output" /
-      "install" / "usr"
+    let mirrorUsr = siblingsRoot / dep / installMirrorSubpath() / "usr"
     if not dirExists(mirrorUsr):
       continue
     result.add(dep)
@@ -1083,16 +1110,19 @@ proc m9r33Collect2Qt6CmakeModulePathDirs*(projectRoot, packageName: string):
     let dep = m9r14fStripDepConstraint(raw)
     if not dep.startsWith("qt6-"):
       return
-    let qt6CmakeRoot = recipeRoot / dep / ".repro" / "output" /
-      "install" / "usr" / "lib" / "cmake" / "Qt6"
+    let qt6CmakeRoot = recipeRoot / dep / installMirrorSubpath() / "usr" /
+      "lib" / "cmake" / "Qt6"
     if not dirExists(qt6CmakeRoot):
       return
     sink.add(qt6CmakeRoot.replace("\\", "/"))
     let platformsDir = qt6CmakeRoot / "platforms"
     if dirExists(platformsDir):
       sink.add(platformsDir.replace("\\", "/"))
-  for raw in registeredNativeBuildDeps(packageName):
-    visit(raw, result)
+  # A `nativeBuildDeps:` entry runs on the build host: its native mirror,
+  # whatever `--target` says (CLI/build.md §"Cross Targets: `--target`").
+  withInstallMirrorTarget(""):
+    for raw in registeredNativeBuildDeps(packageName):
+      visit(raw, result)
   for raw in registeredBuildDeps(packageName):
     visit(raw, result)
 
@@ -1152,8 +1182,7 @@ proc m9r33Emit2MesaGlesv2CacheVars*(projectRoot, packageName: string):
   let recipeRoot = parentDir(projectRoot)
   if recipeRoot.len == 0:
     return
-  let mesaInstall = recipeRoot / "mesa" / ".repro" / "output" /
-    "install" / "usr"
+  let mesaInstall = recipeRoot / "mesa" / installMirrorSubpath() / "usr"
   let glesHeader = mesaInstall / "include" / "GLES2" / "gl2.h"
   let glesLib = mesaInstall / "lib64" / "libGLESv2.so"
   if not fileExists(glesHeader) or not fileExists(glesLib):
@@ -1235,7 +1264,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     else: destdir
   let srcUsr = effectiveDestRoot & "/usr"
   let escapedSrcUsr = srcUsr.replace("\\", "/").replace("\"", "\\\"")
-  let dstUsrRoot = projectRoot / ".repro" / "output" / "install"
+  # The install mirror is keyed by the target the build compiles for
+  # (`installMirrorSubpath`, ReproOS-Add-On-Mode A15): a cross build's
+  # mirror is `.repro/output/install@<triple>`, beside the native one.
+  let dstUsrRoot = projectRoot / installMirrorSubpath()
   let dstUsr = dstUsrRoot / "usr"
   createDir(dstUsrRoot)
   let escapedDstUsrRoot = dstUsrRoot.replace("\\", "/").replace("\"", "\\\"")
@@ -1252,6 +1284,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # Remove the previous mirror to avoid stale artefacts. ``rm -rf`` is
   # safe here because ``dstUsr`` is a deterministic per-recipe path that
   # we own; no user data lives under ``.repro/output/install/usr``.
+  # In hashed mode the previous build left the mirror read-only (see the
+  # enforcement step below); clear it so this rebuild can lay out a new
+  # one. Empty in legacy mode.
+  script.add(emitInstallMirrorClearPrevious(dstUsrRoot))
   script.add("rm -rf \"" & escapedDstUsr & "\"; ")
   script.add("mkdir -p \"" & escapedDstUsrRoot & "\"; ")
   script.add(m9r14e2ResetBareFhsMirrorScript(dstUsrRoot))
@@ -1493,7 +1529,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   if flagKey in stageCopyEmitted:
     return
   stageCopyEmitted.incl(flagKey)
-  let outputDir = projectRoot / ".repro" / "output" / name
+  let outputDir = projectRoot / ".repro" / "output" /
+    targetKeyedOutputName(name)
   createDir(outputDir)
   let outputPath = outputDir / name
   let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")
@@ -1642,8 +1679,26 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\"; ")
-    script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" &
+    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\" ")
+    # The static shapes a DSL name that already carries the ``lib`` prefix
+    # maps to -- ``library libCrypto:`` is ``libcrypto.a`` -- mirroring the
+    # stripped shared-object probes above. Without these a static-only
+    # build (a cross build for a static-musl target, ReproOS-Add-On-Mode
+    # A15) probed ``liblibcrypto.a`` and nothing else, and the stage copy
+    # reported "no library candidate" for a library that was there.
+    if strippedName != effectiveSourceName:
+      script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".a\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".a\" ")
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".a\" ")
+      if strippedKebabDigits.len > 0 and
+          strippedKebabDigits != strippedLowerName and
+          strippedKebabDigits != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & ".a\" ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".a\" ")
+    script.add("; do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" &
         escapedOut & "\"; exit 0; fi; done; ")
     # M9.R.14g.3 — version-suffix glob fallback for libraries that meson
     # builds with `soversion = '0.19'` and similar (wlroots, gtk-3,
@@ -1941,6 +1996,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # that here for executables.
     let snakeName = m9r14fPascalToSnake(name).replace("\"", "\\\"")
     let strippedSnake = m9r14fPascalToSnake(strippedName).replace("\"", "\\\"")
+    # Start from an empty destination. Under MSYS a copy whose source
+    # resolved to `<n>.exe` writes `<out>.exe` even when a literal `<out>`
+    # from an earlier run is present, and the listing below then sees
+    # `<out>` and leaves it -- the declared output would keep the
+    # previous build's bytes. Removing both names first makes every run
+    # write the declared output afresh.
+    script.add("rm -f \"" & escapedOut & "\" \"" & escapedOut & ".exe\"; ")
     var first = true
     for dir in candidateDirs:
       let leader = (if first: "if" else: "elif")
@@ -1965,15 +2027,42 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
           script.add("elif [ -f \"" & dir & "/" & strippedSnake & "\" ]; then ")
           script.add("cp -fL \"" & dir & "/" & strippedSnake & "\" \"" &
               escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      # A Windows build installs `<name>.exe`. It is staged under the native
+      # name AND under the declared output `<name>`: the engine fails a
+      # cacheable action that exits 0 without producing a declared output
+      # (Build-Engine-And-Scheduler.md §"A declared output is an
+      # obligation"), and this branch used to write only `<name>.exe`.
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" &
           escapedOut & ".exe\"; ")
+      script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" &
+          escapedOut & "\"; ")
       first = false
     script.add("else echo \"autotools_package stage-copy: no executable candidate for " &
         escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " &
         rootBinSrcDir & " or " & rootSbinSrcDir & " or " & libexecSrcDir &
         " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & " or " &
         libPolkit1SrcDir & "\" >&2; exit 1; fi")
+    # MSYS/Cygwin (the `sh` of a Windows build) resolves a bare `<dir>/<n>`
+    # to `<dir>/<n>.exe`: the first probe above matches an installed
+    # `<n>.exe`, and `cp` then appends the suffix to the destination too,
+    # writing `<out>.exe` and never the declared `<out>` -- so the `.exe`
+    # branch above is unreachable there (measured with MINGW64 3.6 bash and
+    # GNU cp 8.32). The engine fails a cacheable action that exits 0
+    # without a declared output (Build-Engine-And-Scheduler.md §"A declared
+    # output is an obligation"). Existence tests cannot tell the two names
+    # apart under MSYS, so the directory listing (a glob, which yields the
+    # real names) decides; the literal name is written through a temporary
+    # file, because copying `<out>.exe` onto `<out>` is a copy onto itself.
+    # On POSIX `<out>` always exists here and this is a no-op.
+    let escapedBase = name.replace("\"", "\\\"")
+    script.add("; lit=0; exe=0; for f in \"" & escapedOutDir & "\"/*; do " &
+      "case \"${f##*/}\" in \"" & escapedBase & "\") lit=1;; \"" &
+      escapedBase & ".exe\") exe=1;; esac; done; " &
+      "if [ \"$exe\" = 1 ] && [ \"$lit\" = 0 ]; then " &
+      "cp -fL \"" & escapedOut & ".exe\" \"" & escapedOut & ".repro-tmp\" && " &
+      "mv -f \"" & escapedOut & ".repro-tmp\" \"" & escapedOut & "\" && " &
+      "chmod +x \"" & escapedOut & "\"; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(
       packageName) &
@@ -1981,7 +2070,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   let stageToolRefs =
     if kind == "library": @[
       "sh", "mkdir", "cp", "ls", "sort", "head"]
-    else: @["sh", "mkdir", "cp", "chmod"]
+    else: @["sh", "mkdir", "rm", "cp", "chmod", "mv"]
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),
@@ -2025,7 +2114,8 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   if flagKey in stageCopyEmitted:
     return
   stageCopyEmitted.incl(flagKey)
-  let outputDir = projectRoot / ".repro" / "output" / aliasName
+  let outputDir = projectRoot / ".repro" / "output" /
+    targetKeyedOutputName(aliasName)
   createDir(outputDir)
   let outputPath = outputDir / aliasName
   let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")

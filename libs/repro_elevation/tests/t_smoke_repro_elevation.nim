@@ -1485,6 +1485,58 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check canonicalPasswdUserStateMaskedBy(observed, desired) !=
       canonicalPasswdUserDesired(desired)
 
+  test "a declared group that is also the primary group counts as membership":
+    # rpi2, 2026-10-30, reprobuild d7c86107b: `passwdGroup("nut")` plus
+    # `passwdUser("nut", extraGroups = @["nut"])`. The account's primary
+    # group is `nut`; `id -nG nut` prints `nut` once, the parser files it
+    # as the primary, and the declared group read as missing forever --
+    # the post-apply re-probe failed closed on every tick.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["nut"])
+    let observed = parsePasswdObservation(
+      "nut:x:999:1002::/nonexistent:/usr/sbin/nologin", "nut", "nut")
+    check observed.groups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, desired) ==
+      canonicalPasswdUserDesired(desired)
+    check not passwdUserNeedsUpdate(diffPasswdUser(desired, observed))
+    # A primary group the resource does not declare still does not count
+    # as a declared supplementary group, and one missing declared group
+    # is still drift.
+    let wantsMore = PasswdUserDesired(name: "nut", groups: @["dialout", "nut"])
+    let d = diffPasswdUser(wantsMore, observed)
+    check d.missingGroups == @["dialout"]
+    check d.extraGroups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, wantsMore) !=
+      canonicalPasswdUserDesired(wantsMore)
+
+  test "the declared set is authoritative: apply removes an undeclared group":
+    # The post-apply check is additive (macOS adds default groups nobody
+    # declared), but the apply itself is not: `usermod --groups` REPLACES
+    # the supplementary set with the declared one, so a group the account
+    # is in and the resource does not declare is dropped.
+    let desired = PasswdUserDesired(name: "nut", groups: @["nut"])
+    let observed = PasswdUserObservation(present: true, uid: "999",
+      primaryGroup: "nut", shell: "/usr/sbin/nologin",
+      groups: @["sudo"])
+    let diff = diffPasswdUser(desired, observed)
+    check diff.extraGroups == @["sudo"]
+    check passwdUserNeedsUpdate(diff)
+    check buildUsermodArgs(desired, diff) == @["--groups", "nut", "nut"]
+
+  test "useradd takes an existing same-named group as the primary only when declared":
+    # `useradd nut` with USERGROUPS_ENAB refuses when group `nut` exists
+    # ("use -g"); rpi2 tick-1 at d7c86107b.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["dialout", "nut"])
+    check buildUseraddArgs(desired, sameNameGroupExists = true) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--gid", "nut",
+        "--groups", "dialout"]
+    check buildUseraddArgs(desired) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--groups", "dialout,nut"]
+    expect EUseraddGroupCollision:
+      discard buildUseraddArgs(PasswdUserDesired(name: "nut"),
+        sameNameGroupExists = true)
+
   test "parsePasswdObservation: primary group filtered out of supplementary set":
     # Debian / Ubuntu's `useradd reprotest --groups users` (with the
     # default `USERGROUPS_ENAB=yes`) creates a per-user primary
@@ -2779,7 +2831,7 @@ kernel.x = 7
       expect ENotImplementedPlatform:
         discard observeLinuxSysctl(op)
       expect ENotImplementedPlatform:
-        discard applyLinuxSysctl(op)
+        discard applyLinuxSysctl(FixtureContext(), op)
       expect ENotImplementedPlatform:
         discard destroyLinuxSysctl(op)
 
@@ -4366,7 +4418,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
           suEnabled: false)
         var caught = false
         try:
-          discard applySystemdSystemUnit(op)
+          discard applySystemdSystemUnit(FixtureContext(), op)
         except EProtocol as e:
           caught = true
           # The diagnostic must name the distro AND point at the
@@ -4854,6 +4906,47 @@ ScheduleStartAt=2030-01-01T00:00:00Z
     check obs.schedule.kind == wstskInterval
     check obs.schedule.everyMinutes == 15
     check obs.schedule.startAt == "2030-01-01T00:00:00Z"
+
+  test "scheduledTaskMatchesDesired: multi-argument task read back through the probe converges":
+    # Regression, win-ci-bare-001 2026-10-28 12:50Z: the first registration
+    # of `\Reprobuild\CacheRoute` failed its post-apply check with
+    # "observation disagrees with desired state" while the observed and
+    # desired renderings were byte-identical. Task Scheduler stores ONE
+    # argument string, the probe returns it as `Arguments=<line>`, and the
+    # comparator used to compare that one-element list against the
+    # eight-element desired list. Driven through the real parser on purpose.
+    let probe = "TaskName=\\Reprobuild\\CacheRoute\r\n" &
+      "Executable=powershell.exe\r\n" &
+      "Arguments=-NoProfile -NonInteractive -ExecutionPolicy Bypass " &
+        "-File C:\\ProgramData\\repro\\cache-route\\cache-route.ps1 " &
+        "-StateDir C:\\ProgramData\\repro\\cache-route\r\n" &
+      "WorkingDirectory=\r\n" &
+      "RunAsUser=SYSTEM\r\n" &
+      "RunWithHighestPrivileges=True\r\n" &
+      "Enabled=True\r\n" &
+      "ScheduleKind=interval\r\n" &
+      "ScheduleEveryMinutes=5\r\n" &
+      "ScheduleStartAt=1970-01-01T00:00:00+00:00\r\n"
+    let wantArgs = @["-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+      "Bypass", "-File",
+      "C:\\ProgramData\\repro\\cache-route\\cache-route.ps1",
+      "-StateDir", "C:\\ProgramData\\repro\\cache-route"]
+    let want = ScheduledTaskScheduleSpec(kind: wstskInterval,
+      everyMinutes: 5, startAt: "")
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check canonicalScheduledTaskState(obs) ==
+      canonicalScheduledTaskDesired("\\Reprobuild\\CacheRoute",
+        "powershell.exe", wantArgs, "", "SYSTEM", true, want, true)
+    check scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", wantArgs, "", "SYSTEM", true, want, true)
+    # Still a real drift detector on the argument line.
+    var otherArgs = wantArgs
+    otherArgs[^1] = "C:\\elsewhere"
+    check not scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", otherArgs, "", "SYSTEM", true, want, true)
+    check not scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", wantArgs[0 ..< ^1], "", "SYSTEM", true, want, true)
 
   test "canonicalScheduledTaskState == canonicalScheduledTaskDesired on convergence":
     # Drift-digest equality property: the broker's digest computation

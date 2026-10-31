@@ -2,7 +2,8 @@
 ##
 ## One-shot migration command that reads a Windows-flavoured
 ## ``toolchain-versions.env`` (the ``VAR=VERSION`` pin file consumed by
-## ``D:/metacraft/env.ps1`` + the ``windows/ensure-*.ps1`` modules) and
+## the workspace's ``env.ps1`` (``$METACRAFT_ROOT/env.ps1``) + the
+## ``windows/ensure-*.ps1`` modules) and
 ## synthesizes ``package(<tool>, "<version>")`` lines into the user's
 ## ``home.nim``. Once migrated, the user can keep ``env.ps1`` only as a
 ## thin PATH-priming shim — the home profile's apply pipeline owns
@@ -41,7 +42,7 @@
 ##     opt-in; users run it once when they're ready).
 ##   - Migrating the M70-deferred-8 tools (swift/gcc/git/meson/
 ##     python3/composer/erlang/ruby) — they're emitted as TODO
-##     comments because their cakBuiltin realize paths still have
+##     comments because their archive-realizer paths still have
 ##     gaps closed by a future milestone.
 ##
 ## Tests: ``libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim``
@@ -51,7 +52,7 @@
 import std/[options, sets, strutils]
 
 import repro_home_intent
-import repro_home_apply/catalog_lookup
+import repro_home_apply/package_catalog
 
 # ---------------------------------------------------------------------------
 # VAR → tool name mapping.
@@ -123,7 +124,7 @@ const
     # dlopens libclingo at MODULE INIT, before ``main``), so it must
     # already be installed before a migrated ``home.nim`` could be
     # applied at all. ``libs/repro_dsl_stdlib/.../packages/clingo.nim``
-    # is deliberately not wired into ``catalog_registry.nim`` for that
+    # is deliberately not migrated into a home profile for that
     # reason, and ``windows/ensure-clingo.ps1`` owns the install. All
     # three keys (version + conda build string + asset digest) are one
     # pin for that provisioner, not three tools.
@@ -133,9 +134,9 @@ const
   ]
 
   DeferredTools*: array[8, string] = [
-    ## The M69 "deferred-8" — registered in the M67/M68 catalog
-    ## (``getCatalog(<tool>)`` returns ``some(...)``) BUT realize-time
-    ## via cakBuiltin still has gaps (missing platform asset, custom
+    ## The M69 "deferred-8" — the stdlib definition carries archive
+    ## realizations for them BUT realize-time via the home archive
+    ## realizer still has gaps (missing platform asset, custom
     ## post-extract step, etc.). Migrating these as live
     ## ``package(...)`` lines would cause ``repro home apply`` to fail
     ## at realize-time; emit them as TODO comments so the user audits
@@ -273,20 +274,12 @@ proc renderTodoComment*(envVar, tool, version, reason: string;
 # ---------------------------------------------------------------------------
 
 proc catalogVersionAvailable(tool, version: string): bool =
-  ## Return true if the catalog for ``tool`` has a slice matching
-  ## ``version``. Used to distinguish moMigrate (clean catalog hit
-  ## with the requested version) from moMissingVersion (catalog hit
-  ## but the version is unknown — the user is on a host with a
-  ## newer/older pin than M67/M68 harvested).
-  try:
-    discard lookupCatalogSlice(tool, version)
-    return true
-  except EUnknownPackageId:
-    return false
-  except EVersionNotInCatalog:
-    return false
-  except CatchableError:
-    return false
+  ## Return true if the stdlib definition of ``tool`` offers a realization
+  ## pinned at ``version``. Distinguishes moMigrate (a definition offers the
+  ## requested version) from moMissingVersion (the user is on a host with a
+  ## newer/older pin than the stdlib carries). GM4b: the versions live on
+  ## the package's ``tarball`` / ``scoopApp`` realizations.
+  version in offeredVersions(tool)
 
 proc planMigration*(parsed: EnvFileParseResult;
                    activity: string;
@@ -327,11 +320,11 @@ proc planMigration*(parsed: EnvFileParseResult;
       continue
     if isDeferredTool(tool):
       line.kind = moDeferred
-      line.reason = "M70 deferred-8: catalog entry exists but " &
-        "cakBuiltin realize-time has a gap (will be fixed by a " &
-        "future milestone)"
+      line.reason = "M70 deferred-8: the package defines archive " &
+        "realizations but the archive realizer has a gap (will be fixed " &
+        "by a future milestone)"
       line.text = renderTodoComment(pin.envVar, tool, pin.version,
-        "deferred until cakBuiltin realize-time supports " & tool, indent)
+        "deferred until the archive realizer supports " & tool, indent)
       result.lines.add(line)
       continue
     if not catalogVersionAvailable(tool, pin.version):

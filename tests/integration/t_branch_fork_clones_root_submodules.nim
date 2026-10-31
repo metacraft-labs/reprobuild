@@ -86,15 +86,15 @@ suite "repro branch fork materialises the root repo's submodules":
       createDir(rootWork / "repos")
       writeFile(rootWork / "projects" / "alpha.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"alpha\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"alpha\"\n" &
+        "\n" &
         "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
           fileUrl(memberOrigin) & "\"\n\n" &
         "includes = [\n  \"repos/lib-a.toml\",\n]\n")
       writeFile(rootWork / "repos" / "lib-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
-        "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
+        "remote = \"lib-a-origin\"\nmainline = \"main\"\n")
       discard requireGit(q(gitBin) & " init -b main " & q(rootWork))
       gitConfig(gitBin, rootWork)
       discard requireGit(q(gitBin) & " -C " & q(rootWork) &

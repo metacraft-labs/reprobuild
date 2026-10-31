@@ -1,9 +1,11 @@
 ## M69 — verify `env.userVariable` records are synthesized from a
 ## realized package's per-tool env table.
 ##
-## The M64 cakBuiltin adapter populates `RealizedRecord.envBindings`
-## with the (substituted) per-tool env entries declared in the
-## catalog's `env:` block. The M69 apply pipeline (step 5) must turn
+## The realizers populate `RealizedRecord.envBindings` with the
+## (substituted) per-tool `env` entries a package's `tarball`
+## realization declares, substituting `${prefix}` in the home activation
+## projection of the shared tarball edge's result. The M69 apply pipeline
+## (step 5) must turn
 ## those entries into `env.userVariable` resource records keyed by
 ## a stable, per-package address. This test exercises the
 ## synthesizer (`planEnvBindings`) directly so we can assert the
@@ -21,10 +23,10 @@
 ##   * Different packages produce non-colliding addresses.
 ##   * The bin-dir PATH record (`env.userPath`) is emitted alongside
 ##     the env vars.
-##   * **Negative**: packages whose catalog declares NO `env:` block
+##   * **Negative**: packages whose realization declares NO `env`
 ##     (ghc, nim, zig, cmake — see the M69 scrutiny revert) emit
-##     ZERO `env.userVariable` records when routed through the live
-##     catalog. Only the `env.userPath` bin-dir record is produced.
+##     ZERO `env.userVariable` records when resolved through the live
+##     definitions. Only the `env.userPath` bin-dir record is produced.
 ##     The companion positive assertion exercises `maven` and
 ##     `gradle` (the two M69 retained env blocks — MAVEN_HOME /
 ##     GRADLE_HOME, both standard environment variables exported by
@@ -34,7 +36,8 @@ import std/[os, strutils, tables, unittest]
 import repro_home_resources
 import repro_home_apply/env_binding
 import repro_home_apply/realize
-import repro_home_apply/catalog_lookup
+import repro_home_apply/package_catalog
+import repro_home_apply/builtin_adapter
 
 proc makeRecord(pkg, exePath: string;
                 bindings: seq[tuple[name, value: string]]): RealizedRecord =
@@ -52,23 +55,29 @@ proc findResource(plan: EnvBindingPlan; address: string):
   (false, Resource(kind: rkEnvUserPath))
 
 proc syntheticRealizedFromCatalog(packageId: string): RealizedRecord =
-  ## Build a fake `RealizedRecord` whose `envBindings` reflects what
-  ## the M64 cakBuiltin realizer would produce from the LIVE catalog
-  ## slice (substituting `${prefix}` with a synthetic prefix). This
-  ## exercises the catalog → realize → planEnvBindings round-trip
-  ## without downloading anything.
-  let slice = lookupCatalogSlice(packageId)
-  let prefix = "C:\\store\\prefixes\\AB\\" & packageId & "-" & slice.resolvedVersion
+  ## Build the `RealizedRecord` a realization of the LIVE definition would
+  ## produce for an x86_64-windows target, without downloading anything:
+  ## resolve it (the real selection), then substitute `${prefix}` in the
+  ## selected realization's `env` with a synthetic prefix — the substitution
+  ## shared tarball realization performs (`builtin_adapter.substituteEnv`).
+  let r = resolveProfilePackage(packageId,
+    realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1),
+    DefaultSelectionPolicy)
+  doAssert r.selection.kind == rkTarball,
+    packageId & " has no Windows archive"
+  let record = r.selection.tarball
+  let prefix = "C:\\store\\prefixes\\AB\\" & packageId & "-" &
+    r.selection.version
   result.packageId = packageId
-  result.adapter = akBuiltin
+  result.adapter = akTarball
   result.prefixAbsolutePath = prefix
-  if slice.slice.bin_relpath.len > 0:
-    result.resolvedExecutablePath = prefix / slice.slice.bin_relpath[0]
-  result.resolvedVersion = slice.resolvedVersion
-  for k, v in slice.slice.env.pairs:
-    var sub = v
-    sub = sub.replace("${prefix}", prefix)
-    result.envBindings.add((name: k, value: sub))
+  result.resolvedExecutablePath = prefix / record.executablePath
+  result.resolvedVersion = r.selection.version
+  var raw: seq[tuple[name, value: string]] = @[]
+  for binding in record.detail.env:
+    let eq = binding.find('=')
+    raw.add((name: binding[0 ..< eq], value: binding[eq + 1 .. ^1]))
+  result.envBindings = substituteEnv(raw, prefix)
 
 suite "M69 env_binding synthesis":
 
@@ -150,17 +159,17 @@ suite "M69 env_binding synthesis":
     check pathLookup.r.pathEntries[0].endsWith("bin")
     check pathLookup.r.pathEntries[0] == expectedBinDir
 
-suite "M69 env_binding: live-catalog round-trip":
-  ## These tests exercise the catalog → planEnvBindings round-trip
-  ## against the live `packages/*.nim` slices. They lock in the
+suite "M69 env_binding: live-definition round-trip":
+  ## These tests exercise the definition → planEnvBindings round-trip
+  ## against the live `packages/*.nim` realizations. They lock in the
   ## post-revert contract: the 4 packages whose hand-fabricated env
   ## bindings were removed (ghc/nim/zig/cmake) emit ZERO
   ## env.userVariable resources, while the 2 retained env bindings
   ## (maven, gradle) still emit their MAVEN_HOME / GRADLE_HOME
-  ## records. The catalog is the ONLY source for the env table — no
-  ## hand-merged code path injects bindings outside the catalog.
+  ## records. The realization is the ONLY source for the env table — no
+  ## hand-merged code path injects bindings outside it.
 
-  test "package(maven) round-trip emits MAVEN_HOME from the live catalog":
+  test "package(maven) round-trip emits MAVEN_HOME from the live definition":
     let rec = syntheticRealizedFromCatalog("maven")
     let plan = planEnvBindings(@[rec])
     let lookup = findResource(plan, "home.package.maven.env.MAVEN_HOME")
@@ -168,7 +177,7 @@ suite "M69 env_binding: live-catalog round-trip":
     check lookup.r.kind == rkEnvUserVariable
     check lookup.r.envVarName == "MAVEN_HOME"
 
-  test "package(gradle) round-trip emits GRADLE_HOME from the live catalog":
+  test "package(gradle) round-trip emits GRADLE_HOME from the live definition":
     let rec = syntheticRealizedFromCatalog("gradle")
     let plan = planEnvBindings(@[rec])
     let lookup = findResource(plan, "home.package.gradle.env.GRADLE_HOME")
@@ -178,7 +187,7 @@ suite "M69 env_binding: live-catalog round-trip":
 
   test "package(ghc) round-trip emits ZERO env.userVariable resources":
     # GHC has no canonical user-facing HOME env var; the M69 scrutiny
-    # revert removed the fabricated `GHC_HOME` entry. The catalog
+    # revert removed the fabricated `GHC_HOME` entry. The realization
     # declares no env bindings, so planEnvBindings must produce ONLY
     # the bin-dir PATH record for ghc and zero env.userVariable.
     let rec = syntheticRealizedFromCatalog("ghc")

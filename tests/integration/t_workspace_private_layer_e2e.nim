@@ -1,8 +1,14 @@
 ## M25 — Private manifest layering integrated end-to-end.
 ##
 ## The milestone demo path: a composer-mode workspace lists two
-## ``[[manifest]]`` layers (one public, one private). The four scenarios
-## the milestone enumerates are:
+## ``[[manifest]]`` layers (one public, one private) after the root base
+## layer. They are declared where layers live (Workspace-Settings-Files.md
+## §3–§4): the committed ``repro-workspace.toml`` declares the public layer
+## with its url, and the private layer by NAME only (``name = "private"``,
+## ``visibility = "private"``); each user's ``repro-workspace.local.toml``
+## supplies that layer's credential-bearing url. ``.repro/workspace-state.toml``
+## records only the project and branch. The four scenarios the milestone
+## enumerates are:
 ##
 ##   (a) ``repro workspace init`` succeeds for the user with access to
 ##       both layers, materialising every repo declared across the union
@@ -127,8 +133,7 @@ proc publicProjectToml(originPubA, originPubB: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"pub-a-origin\"\nfetch = \"" &
       originPubA & "\"\n\n" &
     "[[remote]]\nname = \"pub-b-origin\"\nfetch = \"" &
@@ -143,8 +148,7 @@ proc privateProjectToml(originPrivate: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"priv-origin\"\nfetch = \"" &
       originPrivate & "\"\n\n" &
     "includes = [\n" &
@@ -152,33 +156,33 @@ proc privateProjectToml(originPrivate: string): string =
     "]\n"
 
 const libPublicAFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-public-a"
 path = "lib-public-a"
 remote = "pub-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libPublicBFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-public-b"
 path = "lib-public-b"
 remote = "pub-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libPrivateFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-private"
 path = "lib-private"
 remote = "priv-origin"
-revision = "main"
+mainline = "main"
 """
 
 # ---- fixture builder ------------------------------------------------------
@@ -202,19 +206,29 @@ type
 proc writeWorkspaceToml(workspaceRoot: string;
                         publicManifestUrl, privateManifestUrl: string):
                           string =
+  ## Write the state file (returned) and the two settings files: the shared
+  ## one declares the public layer and names the private one, whose url the
+  ## user's local file supplies.
   let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
-  result = dotRepo / "workspace.toml"
-  let body =
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
+  result = dotRepo / "workspace-state.toml"
+  writeFile(result,
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n")
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
     "[[manifest]]\n" &
     "url = \"" & publicManifestUrl & "\"\n" &
     "visibility = \"public\"\nbranch = \"main\"\n\n" &
     "[[manifest]]\n" &
+    "name = \"private\"\n" &
+    "visibility = \"private\"\n")
+  writeFile(workspaceRoot / "repro-workspace.local.toml",
+    "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+    "[[manifest]]\n" &
+    "name = \"private\"\n" &
     "url = \"" & privateManifestUrl & "\"\n" &
-    "visibility = \"private\"\nbranch = \"main\"\n"
-  writeFile(result, body)
+    "branch = \"main\"\n")
 
 proc setupFixture(gitBin, slug: string;
                   privateManifestReachable: bool): Fixture =
@@ -235,7 +249,7 @@ proc setupFixture(gitBin, slug: string;
 
   # Two bare repos stand in for the manifest layer URLs. The private
   # manifest bare is either kept reachable (full-access user) or removed
-  # after seeding to simulate "no access" (the URL in workspace.toml
+  # after seeding to simulate "no access" (the local settings file's URL
   # still points at it, but a git clone fails).
   result.publicManifestBare = result.scratch / "bare-public-manifest.git"
   result.privateManifestBare = result.scratch / "bare-private-manifest.git"
@@ -254,7 +268,7 @@ proc setupFixture(gitBin, slug: string;
   ])
   if not privateManifestReachable:
     # Simulate "no private access" by removing the private manifest's
-    # bare origin AFTER it was seeded. The workspace.toml URL still
+    # bare origin AFTER it was seeded. The local settings file's URL still
     # points at it, but git clone will fail with "does not appear to
     # be a git repository" — exactly the access-control shape the
     # M25 spec exercises.
@@ -387,8 +401,9 @@ suite "M25 — private manifest layering integrated end-to-end":
       # Drive M11 on the workspace the M25 init produced. The lock
       # writer composes the same layers, gathers per-repo HEAD SHAs,
       # and writes ``locks/<project>/<repo>/<sha>.toml`` (RA-1 per-repo
-      # layout, no index) under the public manifest layer's checkout
-      # (the first layer in workspace.toml).
+      # layout, no index) under the record store — the workspace root, the
+      # base layer, since no ``[records]`` is declared
+      # (Workspace-Settings-Files.md §3).
       let lockRes = invokeLock(fx)
       if lockRes.code != 0:
         checkpoint("lock output: " & lockRes.output)
@@ -404,6 +419,9 @@ suite "M25 — private manifest layering integrated end-to-end":
 
       let lockPath = lockReport["lockFilePath"].getStr()
       check fileExists(lockPath)
+      # ...in the record store, the workspace root (see above), not in the
+      # public layer's checkout as when the first layer was the store.
+      check lockPath.startsWith(fx.workspaceRoot / "locks" / "myproject")
       # RA-1: per-repo path keyed by the full trigger SHA; no index.
       let trigRepo = lockReport["triggerRepo"].getStr()
       let trigSha = lockReport["triggerSha"].getStr()
@@ -471,5 +489,6 @@ suite "M25 — private manifest layering integrated end-to-end":
       check skipped["visibility"].getStr() == "private"
       check skipped["provenance"].getStr() ==
         fileUrl(fx.privateManifestBare)
-      check skipped["index"].getInt() == 1
+      # Layer 0 is the root base layer, 1 the public layer, 2 the private.
+      check skipped["index"].getInt() == 2
       check manifestLayerUnreachableTag in skipped["diagnostic"].getStr()

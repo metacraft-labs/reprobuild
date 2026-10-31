@@ -78,6 +78,15 @@
 ##   Both are exercised inline (assertions 5 + 6). The build-impl falsifiability
 ##   (dropping the splice) is inherited from SC-2/SC-3's own falsifiable seams.
 ##
+## Declared producers and tools: every consuming edge names the producers it
+## consumes plus the tools it runs in its tool-identity refs, and each producer
+## edge names the tools it runs, as the SC-2/SC-3/SC-5 fixtures do. Package-level
+## ``uses:`` is the DISCOVERY set; ADMISSION (build + splice) follows the selected
+## edge's own declaration (Cross-Repo-Source-Consumption.md §4.2b.3, since
+## 776517b31 "build: scope producer tools to consuming actions"). Without the refs
+## the producers are never built and the consume step fails, which is the
+## "under-declaring fails loudly" case of §4.2b.4, not a splice defect.
+##
 ## Skip rule: ``cc``/``sh``/``git`` missing on PATH, or ``./build/bin/repro``
 ## unbuilt, or a non-Linux host (the ``.so`` layout assumed here is Linux; kept
 ## Linux-only to stay hermetic, matching SC-3/SC-5).
@@ -121,17 +130,20 @@ package exeprod:
 
   uses:
     "sh"
+    "mkdir"
+    "chmod"
 
   executable exeprod:
     name: "exeprod"
 
   build:
-    discard shell(
+    let buildExe = shell(
       command = "mkdir -p build/bin && " &
         "printf '#!/bin/sh\necho """ & exeStamp & """\n' > build/bin/exeprod && " &
         "chmod +x build/bin/exeprod",
       actionId = "exeprod.build.exeprod",
       extraOutputs = @["build/bin/exeprod"])
+    appendRegisteredActionToolIdentityRefs(buildExe.id, ["mkdir", "chmod"])
 """
 
 # ---- The sibling LIBRARY producer repo (SC-3 shape). ----
@@ -155,12 +167,15 @@ package libprod:
 
   uses:
     "sh"
+    "mkdir"
+    "cc"
+    "cp"
 
   library scprodlib:
     kind: shared
 
   build:
-    discard shell(
+    let buildLib = shell(
       command = "mkdir -p build/lib build/include && " &
         "cc -shared -fPIC -o build/lib/libscprodlib.so greeting.c && " &
         "cp greeting.h build/include/greeting.h",
@@ -168,6 +183,7 @@ package libprod:
       extraInputs = @["greeting.c", "greeting.h"],
       extraOutputs = @["build/lib/libscprodlib.so", "build/include/greeting.h"],
       cacheable = false)
+    appendRegisteredActionToolIdentityRefs(buildLib.id, ["mkdir", "cc", "cp"])
 """
 
 # ---- The consuming C program (SC-3 shape). ----
@@ -194,11 +210,13 @@ package consumer:
 
   uses:
     "sh"
+    "mkdir"
+    "cc"
     "exeprod"
     "libprod"
 
   build:
-    discard shell(
+    let consume = shell(
       command = "mkdir -p build && " &
         "exeprod > build/exe.txt && " &
         "cc -o build/consume main.c -lscprodlib && " &
@@ -207,6 +225,8 @@ package consumer:
       extraInputs = @["main.c"],
       extraOutputs = @["build/exe.txt", "build/consume", "build/consumed.txt"],
       cacheable = false)
+    appendRegisteredActionToolIdentityRefs(consume.id,
+      ["exeprod", "libprod", "mkdir", "cc"])
 """
 
 proc q(value: string): string = quoteShell(value)

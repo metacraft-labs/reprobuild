@@ -131,6 +131,7 @@ stage_src SHM_QUEUE_SRC                  nim-shm-queue/src
 stage_src CODETRACER_PINNED_SRC          codetracer/src
 stage_src REPRO_CT_TEST_RUNNER_SRC       reprobuild-ct-test-runner
 stage_src REPRO_TEST_ADAPTERS_SRC        reprobuild-test-adapters/src
+stage_src TEST_CERTIFICATES_TOOLS_SRC    test-certificates-tools/src
 # CT_INTERPOSE_SRC IS GONE, and this line is where the scratch copy of
 # this script would still abort: M1's N16/N19 removed the variable from
 # `ReprobuildWrapperVariables`, from the flake and from the forwarding

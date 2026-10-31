@@ -72,7 +72,7 @@ proc writeEnv(outp: var seq[byte]; env: openArray[EnvVar]) =
     outp.writeString(item.value)
 
 proc readEnv(bytes: openArray[byte]; pos: var int): seq[EnvVar] =
-  let length = int(readU32Le(bytes, pos))
+  let length = readElementCount(bytes, pos, 4)
   result = newSeq[EnvVar](length)
   for i in 0 ..< length:
     result[i] = EnvVar(name: readString(bytes, pos), value: readString(bytes, pos))
@@ -101,7 +101,7 @@ proc readProcess(bytes: openArray[byte]; pos: var int): ProcessSpec =
     raiseEnvelopeError(eeMalformed, "invalid command kind")
   result.kind = CommandKind(kindByte)
   result.executable = readPath(bytes, pos)
-  let argc = int(readU32Le(bytes, pos))
+  let argc = readElementCount(bytes, pos, 4)
   result.args = newSeq[string](argc)
   for i in 0 ..< argc:
     result.args[i] = readString(bytes, pos)
@@ -154,14 +154,14 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int): DependencyGathe
     raiseEnvelopeError(eeMalformed, "invalid evidence completeness")
   result.kind = DependencyGatheringKind(kind)
   result.completeness = DependencyEvidenceCompleteness(completeness)
-  let reportCount = int(readU32Le(bytes, pos))
+  let reportCount = readElementCount(bytes, pos, 4)
   result.recognizedReports = newSeq[RecognizedDependencyReportSpec](reportCount)
   for i in 0 ..< reportCount:
     let name = DependencyFormatName(readString(bytes, pos))
     let reportCompleteness = readByte(bytes, pos)
     if reportCompleteness > byte(ord(decDiagnosticOnly)):
       raiseEnvelopeError(eeMalformed, "invalid report evidence completeness")
-    let outputCount = int(readU32Le(bytes, pos))
+    let outputCount = readElementCount(bytes, pos, 4)
     var outputs = newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
       outputs[j] = readExpectedFile(bytes, pos)
@@ -170,15 +170,15 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int): DependencyGathe
         formatName: name,
         outputs: outputs,
         completeness: DependencyEvidenceCompleteness(reportCompleteness))
-  let converterCount = int(readU32Le(bytes, pos))
+  let converterCount = readElementCount(bytes, pos, 4)
   result.postBuildConverters = newSeq[PostBuildDependencyConverterSpec](converterCount)
   for i in 0 ..< converterCount:
     result.postBuildConverters[i].converterProcess = readProcess(bytes, pos)
-    let inputCount = int(readU32Le(bytes, pos))
+    let inputCount = readElementCount(bytes, pos, 4)
     result.postBuildConverters[i].inputs = newSeq[ExpectedDependencyFile](inputCount)
     for j in 0 ..< inputCount:
       result.postBuildConverters[i].inputs[j] = readExpectedFile(bytes, pos)
-    let outputCount = int(readU32Le(bytes, pos))
+    let outputCount = readElementCount(bytes, pos, 4)
     result.postBuildConverters[i].outputs = newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
       result.postBuildConverters[i].outputs[j] = readExpectedFile(bytes, pos)

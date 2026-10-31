@@ -58,9 +58,16 @@ import nimcrypto/sha2 as ncSha2
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
+from repro_core/link_target import readSymlinkTarget
+from repro_core/relocation import recipeSourceName
+from repro_core/target_object_check import TargetObjectExemption,
+  TargetObjectExemptionsEnvVar, encodeTargetObjectExemptions,
+  validateTargetObjectExemption
+export TargetObjectExemption
 import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/shell_fetch
 import repro_project_dsl/source_cache_identity
+import repro_project_dsl/selector_names
 import repro_project_dsl/reprobuild_packages_catalog
 export reprobuild_packages_catalog
 # How a macro shells out at compile time. A `std`-only leaf, deliberately
@@ -75,6 +82,15 @@ import repro_project_dsl/compile_time_shell
 # is what lets the emitted code resolve those names inside a recipe.
 import repro_lock_files
 import repro_lock_files/ct_registry
+# Test-Certificates TC-9b: the branch-policy model, for `enactCertificatePolicy`
+# (the `package` macro's compile-time check, the runtime registry and the
+# provider's emission). A `std`-only leaf. Imported by name and NOT
+# re-exported: a recipe that writes a policy imports `repro_certificates`, and
+# every other recipe keeps its namespace free of the policy vocabulary.
+from repro_lock/certificate_policy import BranchCertificatePolicy,
+  CertificatePolicyEmitEnvVar, CertificatePolicyGraphStableName,
+  renderCertificatePolicyEmission, undeclaredRequirement,
+  withDeclaredInRelativeTo
 export cache_key, bcsTypes, install_mirror_resolver, shell_fetch
 export repro_lock_files, ct_registry
 

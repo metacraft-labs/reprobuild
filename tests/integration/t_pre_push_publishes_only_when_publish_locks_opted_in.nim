@@ -100,21 +100,20 @@ proc projectTomlWith1Remote(libAUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"lib-a\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "includes = [\n" &
     "  \"repos/lib-a.toml\",\n" &
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -173,14 +172,14 @@ proc writeBootstrapConfig(fx: Fixture; publishLocks: Option[bool]) =
   ## Write ``.repro-workspace.toml`` with a (harmless, never-fetched) manifest
   ## ``url`` and, optionally, an explicit ``publish_locks`` flag.
   var body =
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"" & fileUrl(fx.manifestBare) & "\"\n" &
     "branch = \"main\"\n"
   if publishLocks.isSome:
     body.add("publish_locks = " & (if publishLocks.get(): "true" else: "false") &
       "\n")
-  writeFile(fx.workspaceRoot / ".repro-workspace.toml", body)
+  writeFile(fx.workspaceRoot / "repro-workspace.toml", body)
 
 proc writeRefsFile(path: string; localSha: string) =
   let zeroSha = "0000000000000000000000000000000000000000"

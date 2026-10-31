@@ -18,6 +18,7 @@
 ##   a one-time warning (per codetracer-specs §15.1).
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 from repro_test_support import ctShimFixturePath, requireBinary
 
 proc workspaceRoot(): string =

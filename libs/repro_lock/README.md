@@ -7,14 +7,19 @@ This library serializes the solver's resolved package graph
 (`UnifiedSolution` from `repro_solver`) — concrete versions, variant
 (option) assignments, per-package source identities, the global
 optimality decision, the platform fact, and solver-inputs provenance —
-into a TOML file (`reprobuild.solved-graph-lock.v2`) committed in the
+into a TOML file (`reprobuild.solved-graph-lock.v3`) committed in the
 project repo at the canonical path `repro.lock`, and loads it back
 deterministically (write→read round-trips).
 
-There is exactly **one** on-disk schema and every writer here emits it, so
-anything this library writes it can read back — pinned by the regression
-`tests/t_lock_writer_output_reads_back.nim`. The historical `…v1` tag is
-rejected on read; nothing writes it.
+Every writer here emits the one current schema, v3, so anything this
+library writes it can read back — pinned by the regression
+`tests/t_lock_writer_output_reads_back.nim`. A `deps` record pins a
+dependency's identity (name, coordinates, integrity) and carries **no**
+checkout path; the lock's own repository is marked `self = "true"`, and a
+reader derives every other dependency's location locally from its name. The
+previous `…v2` schema is still read, with each recorded `path` ignored except
+`"."`, which marks the self entry. The historical `…v1` tag is rejected on
+read; nothing writes v1 or v2.
 
 It is **distinct from** the manifest-repo SHA lock in
 `repro_workspace_manifests` (`lock_writer.nim` / `executeWorkspaceLock`),
@@ -37,4 +42,31 @@ not workspace VCS state.
   write.
 - `sameSolution` — structural equality used by `repro lock validate` to
   detect a tampered or stale lock.
+- `repro_lock/provisioning` (re-exported) — the locked provisioning
+  realization (ReproOS-Campaign-Completion M7 deliverable 2): one record per
+  (package, host platform, target platform) binding the canonical interface
+  fingerprint, the selected contributor and its contribution fingerprint, the
+  catalog workspace/remote/full-width revision/interface-artifact identity,
+  the realization kind, lock identity and integrity, and the selected
+  capabilities. Serialized under the `provisioning` key of the same v2
+  document ONLY when non-empty, so every existing lock re-serializes
+  byte-identically; each record carries its own version tag
+  (`reprobuild.locked-provisioning-realization.v1`). The reader is strict
+  (missing/unknown/duplicate fields, truncation and non-canonical spelling
+  refuse). `withProvisioningRealizations` sets the records;
+  `lockedRealizationFor` hands one back ONLY against the current interface
+  and contribution fingerprints; `lockedProvisioningClaims` hands the raw
+  records to the provisioning resolver
+  (`repro_interface_artifacts/contribution_selection`, M7 D3), which checks
+  each one against the composed catalogs before selecting from it. The
+  records are NOT part of `lockIdentityOf`, so a contribution-only refresh
+  leaves typechecking cached; the realization and build edges that select a
+  record are keyed on its contribution fingerprint instead (the resolver's
+  `ProvisioningPin`, folded into the acquisition plan's lock identity by
+  `repro_tool_profiles`, M7 D4).
+  `withProvisioningCarriedForward` is how `repro lock refresh` / `repro lock
+  solve --write` (`repro_lock_gen`) keep the array: carried forward
+  unchanged, and a refresh refuses rather than drop an array it cannot read.
+  The writer that turns a composed catalog selection into a record is
+  `repro_interface_artifacts/contribution_lock`.
 - `inputsDigestOf` / `currentPlatformId` — provenance helpers.

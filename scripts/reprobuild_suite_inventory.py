@@ -16,8 +16,10 @@ preserving each runner summary under bench-results.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ast
 import dataclasses
+import functools
 import hashlib
 import json
 import os
@@ -30,9 +32,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -503,7 +505,8 @@ def nim_code_only(text: str) -> str:
     modules live in triple-quoted strings — so a scan of the raw bytes answers
     "what does this file MENTION" rather than "what does this file DO".
 
-    Used here for the disqualifying-SYMBOL scan only. The import scan below
+    Used for code-symbol references, including compiler-flow variable references.
+    The import scan below
     deliberately still reads the raw text, because blanking string literals
     also blanks a quoted import path (`import "../../libs/x"`), and losing
     those would silently narrow the very closure this predicate walks.
@@ -749,6 +752,8 @@ class TestSpec:
     requires_repro_binary: bool
     target_os: str
     language: str = "nim"
+    group: str = ""
+    single_reason: str = ""
 
     @property
     def stem(self) -> str:
@@ -955,6 +960,7 @@ def external_source_checkouts(
             "STACKABLE_HOOKS_SRC",
         ),
         "reprobuild-test-adapters": ("REPRO_TEST_ADAPTERS_SRC",),
+        "test-certificates-tools": ("TEST_CERTIFICATES_TOOLS_SRC",),
         "reprobuild-ct-test-runner": ("REPRO_CT_TEST_RUNNER_SRC",),
     }
     for name, env_names in env_sources.items():
@@ -1000,6 +1006,7 @@ def runtime_metadata(
         "NIM_STACKABLE_HOOKS_SRC",
         "STACKABLE_HOOKS_SRC",
         "REPRO_TEST_ADAPTERS_SRC",
+        "TEST_CERTIFICATES_TOOLS_SRC",
         "REPRO_CT_TEST_RUNNER_SRC",
     ]
     tools: dict[str, str] = {"python": f"Python {platform.python_version()}"}
@@ -1044,6 +1051,158 @@ def parse_string_seq(src: str) -> list[str]:
     return re.findall(r'"((?:\\"|[^"])*)"', src)
 
 
+def nim_unescape(text: str) -> str:
+    """Undo the escapes ``strutils.escape`` writes for the generator's
+    ``group`` / ``singleReason`` literals (ASCII text only)."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "x" and i + 3 < len(text):
+                out.append(chr(int(text[i + 2 : i + 4], 16)))
+                i += 4
+                continue
+            out.append({"n": "\n", "t": "\t", "r": "\r"}.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def hosting_binary(root: Path, spec: TestSpec) -> str:
+    """The repo-relative binary that carries ``spec``'s cases.
+
+    Test-Binary-Grouping M2: a grouped source is compiled into
+    ``build/test-bin/<group>``, not into its own ``spec.binary``. When that
+    group failed to compile, ``scripts/test_group_fallback.py`` builds the
+    source's own binary instead, so the group binary is preferred when it
+    exists, the source's own when only that exists, and the group's path is
+    reported as the missing one when neither does.
+    """
+    if not spec.group or not spec.binary:
+        return spec.binary
+    group_binary = (PurePosixPath(spec.binary).parent / spec.group).as_posix()
+    if (root / group_binary).exists() or not (root / spec.binary).exists():
+        return group_binary
+    return spec.binary
+
+
+# Where the recipe writes each group's generated module
+# (``ct_test_nim_unittest/grouping.GroupModuleDir``).
+GROUP_MODULE_DIR = "build/test-groups"
+
+_GROUP_IMPORT_RE = re.compile(r'^import\s+"([^"]+)"\s*$', re.M)
+
+
+def group_module_members(root: Path, group: str) -> set[str] | None:
+    """The repo-relative sources the generated module of ``group`` imports.
+
+    That module is the group binary's only compile input, so the sources it
+    imports are exactly the members the binary carries. ``None`` when the
+    module is absent: nothing can then be said about membership.
+    """
+    module = root / GROUP_MODULE_DIR / f"{group}.nim"
+    try:
+        text = module.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    members: set[str] = set()
+    for target in _GROUP_IMPORT_RE.findall(text):
+        path = PurePosixPath(GROUP_MODULE_DIR, target + ".nim")
+        parts: list[str] = []
+        for part in path.parts:
+            if part == "..":
+                if parts:
+                    parts.pop()
+            elif part != ".":
+                parts.append(part)
+        members.add("/".join(parts))
+    return members
+
+
+def built_binary_for(root: Path, spec: TestSpec) -> str | None:
+    """The built binary that carries ``spec``'s cases, or ``None``.
+
+    A single source is built when its own binary exists. A grouped source
+    is built only when its GROUP binary exists AND the group's generated
+    module imports it: the group binary is what the suite builds for it, so
+    a missing group binary is a build defect even when a single-file binary
+    of the same source happens to be on disk.
+    """
+    if not spec.binary:
+        return None
+    if not spec.group:
+        return spec.binary if (root / spec.binary).is_file() else None
+    group_binary = (PurePosixPath(spec.binary).parent / spec.group).as_posix()
+    if not (root / group_binary).is_file():
+        return None
+    members = group_module_members(root, spec.group)
+    if members is None or spec.source not in members:
+        return None
+    return group_binary
+
+
+# Quarantine reason for a grouped source that contributes no case to the
+# catalog of the group binary carrying it.
+NO_MEMBER_CASES_STATUS = "no-member-cases"
+
+
+def member_catalog(outcome: dict[str, Any], source: str) -> dict[str, Any]:
+    """A group binary's catalog narrowed to one member's cases: the rows whose
+    ``file`` is the member's file name (the ``--list-json`` ``file`` field is
+    the declaring module's file name).
+
+    The result may be an ``ok`` catalog of zero cases; that is the probe's
+    fact and is what the disk cache stores. ``classify_member_outcomes``
+    turns it into the inventory's verdict.
+    """
+    if outcome.get("status") != "ok":
+        return outcome
+    name = PurePosixPath(source).name
+    cases = [
+        case
+        for case in outcome.get("cases") or []
+        if PurePosixPath(str(case.get("file") or "").replace("\\", "/")).name == name
+    ]
+    return {**outcome, "cases": cases}
+
+
+def classify_member_outcomes(
+    root: Path, specs: list[TestSpec], results: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Report a grouped source that declares no case as ``no-member-cases``.
+
+    On its own such a source builds a binary that registers nothing, which
+    the probe quarantines as ``no-protocol-support``. Inside a group the
+    binary enumerates its other members, so the member's narrowed catalog is
+    an ``ok`` of zero rows; counting that as ``catalog`` with 0 cases would
+    silently move the source out of the pinned quarantine. Applied after the
+    cache is written, so the cache keeps holding only ``ok`` probe results.
+    """
+    classified = dict(results)
+    for spec in specs:
+        outcome = results.get(spec.source)
+        if (
+            outcome is None
+            or outcome.get("status") != "ok"
+            or outcome.get("cases")
+            or hosting_binary(root, spec) == spec.binary
+        ):
+            continue
+        classified[spec.source] = {
+            "status": NO_MEMBER_CASES_STATUS,
+            "detail": (
+                f"{hosting_binary(root, spec)} enumerates, and none of its "
+                f"cases is declared by {PurePosixPath(spec.source).name} on "
+                "this host"
+            ),
+        }
+    return classified
+
+
 def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
     text = (root / "repro_tests.nim").read_text(encoding="utf-8")
     spec_re = re.compile(
@@ -1055,7 +1214,12 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
         r"extraPassC:\s*@\[(.*?)\],\s*"
         r"extraPassL:\s*@\[(.*?)\],\s*"
         r"targetOs:\s*(\w+),\s*"
-        r"selfInterposes:\s*(true|false)\)",
+        r"selfInterposes:\s*(true|false)"
+        # Test-Binary-Grouping M2. Optional so that a table (or a test
+        # fixture) written before the two fields existed still parses, as
+        # all-single.
+        r'(?:,\s*group:\s*"((?:\\.|[^"\\])*)"'
+        r'(?:,\s*singleReason:\s*"((?:\\.|[^"\\])*)")?)?\s*\)',
         re.S,
     )
     nim_specs = [
@@ -1065,6 +1229,8 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
             defines=parse_string_seq(m.group(3)),
             requires_repro_binary=m.group(4) == "true",
             target_os=m.group(7),
+            group=nim_unescape(m.group(9) or ""),
+            single_reason=nim_unescape(m.group(10) or ""),
         )
         for m in spec_re.finditer(text)
     ]
@@ -1175,9 +1341,10 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
 #
 # WHAT IT DOES NOT COVER. Python tests (`pythonTestPaths`) are out of scope
 # here; `run_tests.sh` finds those with its own `find tests -name 'test_*.py'`
-# and so does not have this defect. Shell gates under `tests/integration/` are
-# standalone by design (N55) and are covered by
-# `scripts/list_standalone_shell_gates.sh`.
+# and so does not have this defect. Shell test scripts under `tests/` ARE
+# covered: any shell test script not referenced across `repro_tests.nim`,
+# `Justfile`, `.github/`, `scripts/`, or `tests/` must be recorded in
+# `scripts/uninvoked-shell-tests-baseline.txt` as accepted debt.
 
 DECLARED_SOURCE_ROOTS = ("tests", "libs", "tools", "recipes", "apps")
 
@@ -1192,6 +1359,10 @@ DECLARED_SOURCE_SKIP_PREFIXES = (
 )
 
 DECLARED_SOURCES_REGENERATE_COMMAND = "nim r scripts/generate_test_edges.nim"
+UNINVOKED_SHELL_TESTS_BASELINE_PATH = Path(
+    "scripts/uninvoked-shell-tests-baseline.txt"
+)
+
 
 
 def _is_test_shaped_source(rel: str) -> bool:
@@ -1261,6 +1432,105 @@ def bundled_test_sources(root: Path, nim_specs: list[TestSpec]) -> list[str]:
         ):
             members.add(member)
     return sorted(members)
+ 
+ 
+def load_uninvoked_shell_tests_baseline(path: Path) -> set[str]:
+    """Read uninvoked shell tests baseline, ignoring comments and blank lines."""
+    if not path.is_file():
+        return set()
+    entries: set[str] = set()
+    for line in read_text(path).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        entries.add(stripped)
+    return entries
+
+
+def walk_shell_test_scripts(root: Path) -> list[str]:
+    """Every shell test script under tests/ (*.sh), repo-relative, sorted."""
+    base = root / "tests"
+    if not base.is_dir():
+        return []
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [
+            d for d in dirnames if d not in (".git", "nimcache", "build")
+        ]
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        for name in filenames:
+            if name.endswith(".sh"):
+                found.append(name if rel_dir == "." else rel_dir + "/" + name)
+    return sorted(found)
+
+
+def find_unreferenced_shell_scripts(
+    root: Path, shell_scripts: list[str], baseline_path: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """Detect unreferenced shell test scripts across repro_tests.nim, Justfile, .github/, scripts/, tests/.
+
+    A script is unreferenced if its basename is not present in any other file
+    across those locations, excluding directories like .git, nimcache, build,
+    and excluding the baseline file and the script itself.
+    """
+    if not shell_scripts:
+        return [], []
+
+    target_files: list[Path] = []
+    for single in ("repro_tests.nim", "Justfile"):
+        f = root / single
+        if f.is_file():
+            target_files.append(f)
+
+    for dname in (".github", "scripts", "tests"):
+        dp = root / dname
+        if dp.is_dir():
+            for dirpath, dirnames, filenames in os.walk(dp):
+                dirnames[:] = [
+                    d for d in dirnames if d not in (".git", "nimcache", "build")
+                ]
+                for name in filenames:
+                    target_files.append(Path(dirpath) / name)
+
+    resolved_baseline = (
+        baseline_path.resolve()
+        if baseline_path and baseline_path.is_file()
+        else None
+    )
+
+    target_contents: list[tuple[Path, str]] = []
+    for tf in target_files:
+        try:
+            resolved_tf = tf.resolve()
+        except OSError:
+            continue
+        if resolved_baseline and resolved_tf == resolved_baseline:
+            continue
+        try:
+            content = tf.read_text(encoding="utf-8", errors="replace")
+            target_contents.append((resolved_tf, content))
+        except OSError:
+            pass
+
+    unreferenced: list[str] = []
+    referenced: list[str] = []
+
+    for rel_path in shell_scripts:
+        candidate_path = (root / rel_path).resolve()
+        candidate_name = Path(rel_path).name
+        is_ref = False
+        for tf_path, content in target_contents:
+            if tf_path == candidate_path:
+                continue
+            if candidate_name in content:
+                is_ref = True
+                break
+        if is_ref:
+            referenced.append(rel_path)
+        else:
+            unreferenced.append(rel_path)
+
+    return sorted(unreferenced), sorted(referenced)
 
 
 # ---------------------------------------------------------------------------
@@ -1514,14 +1784,45 @@ def declared_source_drift(root: Path) -> dict[str, Any]:
     expected = {rel for rel in covered if _is_test_shaped_source(rel)}
     unreachable = sorted(expected - found_set)
 
-    undeclared = [rel for rel in found if rel not in covered]
+    undeclared_nim = [rel for rel in found if rel not in covered]
+
+    shell_candidates = walk_shell_test_scripts(root)
+    baseline_path = root / UNINVOKED_SHELL_TESTS_BASELINE_PATH
+    shell_baseline_missing = bool(shell_candidates and not baseline_path.is_file())
+
+    baseline_entries = (
+        load_uninvoked_shell_tests_baseline(baseline_path)
+        if baseline_path.is_file()
+        else set()
+    )
+    shell_unreferenced, shell_referenced = find_unreferenced_shell_scripts(
+        root, shell_candidates, baseline_path=baseline_path
+    )
+    shell_baseline = [s for s in shell_unreferenced if s in baseline_entries]
+    shell_undeclared = [
+        s for s in shell_unreferenced if s not in baseline_entries
+    ]
+
+    undeclared = sorted(undeclared_nim + shell_undeclared)
+
     return {
-        "clean": not undeclared and not unreachable,
+        "clean": (
+            not undeclared
+            and not unreachable
+            and not shell_baseline_missing
+        ),
         "candidateCount": len(found),
+        "nimCandidateCount": len(found),
         "declaredCount": len(declared),
         "bundledCount": len(bundled),
         "undeclared": undeclared,
+        "undeclared_nim": undeclared_nim,
+        "undeclared_shell": shell_undeclared,
         "unreachable": unreachable,
+        "shellCandidateCount": len(shell_candidates),
+        "shellReferencedCount": len(shell_referenced),
+        "shellBaselineCount": len(shell_baseline),
+        "shellBaselineMissing": shell_baseline_missing,
     }
 
 
@@ -1536,14 +1837,27 @@ def format_declared_source_drift(drift: dict[str, Any]) -> str:
         )
         for rel in drift["unreachable"]:
             lines.append(f"  - {rel}")
-    if drift["undeclared"]:
+
+    if drift.get("shellBaselineMissing"):
         lines.append(
-            f"FAIL: {len(drift['undeclared'])} test source(s) exist in the "
+            f"FAIL: {UNINVOKED_SHELL_TESTS_BASELINE_PATH} not found. "
+            "It records accepted debt for uninvoked shell test scripts. "
+            "Its absence is a failure rather than a skip."
+        )
+
+    nim_undeclared = drift.get("undeclared_nim")
+    if nim_undeclared is None:
+        nim_undeclared = [
+            r for r in drift.get("undeclared", []) if not r.endswith(".sh")
+        ]
+    if nim_undeclared:
+        lines.append(
+            f"FAIL: {len(nim_undeclared)} test source(s) exist in the "
             "tree but are in no build edge. Nothing compiles them and nothing "
             "runs them, and no other gate can see that, because every other "
             "gate derives its universe from repro_tests.nim:"
         )
-        for rel in drift["undeclared"]:
+        for rel in nim_undeclared:
             lines.append(f"  - {rel}")
         lines.append(
             "Enrol them by regenerating the edge table, or -- if one is "
@@ -1557,7 +1871,29 @@ def format_declared_source_drift(drift: dict[str, Any]) -> str:
             "need widening -- that IS the defect, not a reason to add an "
             "exception here."
         )
+
+    shell_undeclared = drift.get("undeclared_shell")
+    if shell_undeclared is None:
+        shell_undeclared = [
+            r for r in drift.get("undeclared", []) if r.endswith(".sh")
+        ]
+    if shell_undeclared:
+        lines.append(
+            f"FAIL: {len(shell_undeclared)} shell test script(s) under tests/ "
+            "are not referenced by any test runner, workflow, Justfile or "
+            "script, and are not recorded in "
+            f"{UNINVOKED_SHELL_TESTS_BASELINE_PATH}:"
+        )
+        for rel in shell_undeclared:
+            lines.append(f"  - {rel}")
+        lines.append(
+            "Enrol them in a test runner, invoke them from Justfile or CI, "
+            "delete them if obsolete, or record them in "
+            f"{UNINVOKED_SHELL_TESTS_BASELINE_PATH} if accepted debt."
+        )
+
     return "\n".join(lines)
+
 
 
 def read_text(path: Path) -> str:
@@ -1708,6 +2044,23 @@ def nim_identifier_matches(token: NimToken, expected: str) -> bool:
 
 
 def nim_tokens(text: str) -> list[NimToken]:
+    """Return the tokens of ``text``; see ``_lex_nim_tokens``.
+
+    The suite inventory and its test module lex every test source once per
+    question they ask of it, and the same process asks many questions. The
+    tokens are a pure function of the text and ``NimToken`` is frozen, so
+    each distinct text is lexed once; callers get their own list.
+    """
+
+    return list(_lex_nim_tokens_cached(text))
+
+
+@functools.lru_cache(maxsize=None)
+def _lex_nim_tokens_cached(text: str) -> tuple[NimToken, ...]:
+    return tuple(_lex_nim_tokens(text))
+
+
+def _lex_nim_tokens(text: str) -> list[NimToken]:
     """Lex enough Nim syntax to find command-style test declarations.
 
     The inventory must not mistake fixture source, shell snippets, or comments
@@ -2866,6 +3219,11 @@ QUARANTINE_REASON_DESCRIPTIONS = {
     "timeout": "--list-json exceeded the per-binary wall-clock bound",
     "unparseable-json": "--list-json stdout contained no decodable catalog document",
     "malformed-catalog": "the catalog document has no `tests` array",
+    "no-member-cases": (
+        "the source is grouped into a test binary that enumerates, and none "
+        "of that binary's cases is declared by this source on this host "
+        "(on its own it would build a binary with no protocol support)"
+    ),
 }
 
 # Probe-failure taxonomy, split by WHAT THE FAILURE IS A FACT ABOUT. This
@@ -2884,6 +3242,9 @@ INTRINSIC_QUARANTINE_REASONS = frozenset(
         # binary's output, not the host's.
         "unparseable-json",
         "malformed-catalog",
+        # The group binary answered; this source declared nothing in it.
+        # A fact about the source and the binary's bytes, like the above.
+        "no-member-cases",
     }
 )
 
@@ -3431,16 +3792,24 @@ def run_catalog_seed(
     # flip that lands on the wrong source is a case count attributed to the
     # wrong file -- silently, and with the right total.
     by_stem: dict[str, str | None] = {}
+    # Test-Binary-Grouping M2: a group binary carries several sources; each
+    # member takes the rows its own file declared (``member_catalog``).
+    by_group: dict[str, list[str]] = {}
     for spec in specs:
         if spec.language != "nim" or not spec.binary:
             continue
-        stem = Path(spec.binary).stem
+        host = hosting_binary(root, spec)
+        stem = Path(host).stem
+        if host != spec.binary:
+            by_group.setdefault(stem, []).append(spec.source)
+            continue
         by_stem[stem] = None if stem in by_stem else spec.source
 
     entries: dict[str, Any] = {}
     for stem, node in binaries.items():
+        members = by_group.get(stem)
         source = by_stem.get(stem)
-        if source is None or not isinstance(node, Mapping):
+        if (source is None and not members) or not isinstance(node, Mapping):
             continue
         cases = node.get("cases")
         size = node.get("size")
@@ -3468,10 +3837,12 @@ def run_catalog_seed(
             rows.append({field: entry.get(field) for field in CATALOG_CASE_FIELDS})
         if malformed:
             continue
-        entries[source] = {
-            "key": f"{size}:{mtime_ns}",
-            "result": {"status": "ok", "cases": rows},
-        }
+        outcome = {"status": "ok", "cases": rows}
+        for owner in members or [source]:
+            entries[owner] = {
+                "key": f"{size}:{mtime_ns}",
+                "result": member_catalog(outcome, owner) if members else outcome,
+            }
     report["used"] = True
     report["importedBinaries"] = len(entries)
     return entries, report
@@ -3492,6 +3863,8 @@ def specs_digest(specs: list[TestSpec]) -> str:
         digest.update(spec.source.encode("utf-8"))
         digest.update(b"\0")
         digest.update((spec.binary or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((spec.group or "").encode("utf-8"))
         digest.update(b"\0")
         digest.update((spec.language or "").encode("utf-8"))
         digest.update(b"\0\0")
@@ -3601,7 +3974,9 @@ def catalog_index(
     for spec in specs:
         if spec.language != "nim" or not spec.binary:
             continue
-        binary_path = root / spec.binary
+        # Test-Binary-Grouping M2: the binary that carries this source's
+        # cases, which for a grouped source is its group's.
+        binary_path = root / hosting_binary(root, spec)
         key = binary_cache_key(binary_path)
         if key is None:
             results[spec.source] = {
@@ -3643,20 +4018,33 @@ def catalog_index(
             continue
         pending.append((spec.source, binary_path))
 
+    by_source_all = {spec.source: spec for spec in specs}
     with tempfile.TemporaryDirectory(prefix="repro-catalog-probe-") as scratch:
         probe_cwd = Path(scratch)
         if pending:
             from concurrent.futures import ThreadPoolExecutor
 
-            def run_one(item: tuple[str, Path]) -> tuple[str, dict[str, Any]]:
-                source, binary_path = item
-                return source, probe_binary_catalog(
+            # One probe per BINARY: a group binary carries up to fifty
+            # sources, and each takes its own rows from the one catalog.
+            unique_binaries = sorted({binary_path for _, binary_path in pending})
+
+            def run_one(binary_path: Path) -> tuple[Path, dict[str, Any]]:
+                return binary_path, probe_binary_catalog(
                     binary_path, probe_cwd, env, timeout_seconds
                 )
 
+            probed: dict[Path, dict[str, Any]] = {}
             with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-                for source, outcome in pool.map(run_one, pending):
-                    results[source] = outcome
+                for binary_path, outcome in pool.map(run_one, unique_binaries):
+                    probed[binary_path] = outcome
+            for source, binary_path in pending:
+                outcome = probed[binary_path]
+                spec = by_source_all[source]
+                results[source] = (
+                    member_catalog(outcome, source)
+                    if hosting_binary(root, spec) != spec.binary
+                    else outcome
+                )
 
         # Serial retry pass. Environmental failures are the ones the
         # parallel pass itself can manufacture, so they are re-measured
@@ -3676,9 +4064,12 @@ def catalog_index(
                 f"({outcome.get('status')}); budget {retry_timeout_seconds}s",
                 file=sys.stderr,
             )
+            host = hosting_binary(root, spec)
             second = probe_binary_catalog(
-                root / spec.binary, probe_cwd, env, retry_timeout_seconds
+                root / host, probe_cwd, env, retry_timeout_seconds
             )
+            if host != spec.binary:
+                second = member_catalog(second, source)
             results[source] = second
             retried[source] = second
 
@@ -3709,7 +4100,7 @@ def catalog_index(
             if spec.language != "nim" or not spec.binary:
                 continue
             outcome = results.get(spec.source)
-            key = binary_cache_key(root / spec.binary)
+            key = binary_cache_key(root / hosting_binary(root, spec))
             if outcome is None or key is None:
                 continue
             # NEVER cache a non-ok probe. A cached `timeout` replays a
@@ -3723,6 +4114,7 @@ def catalog_index(
             refreshed[spec.source] = {"key": key, "result": outcome}
         store_catalog_cache(cache_path, refreshed)
 
+    results = classify_member_outcomes(root, specs, results)
     _CATALOG_INDEX_MEMO[memo_key] = results
     return results
 
@@ -4227,6 +4619,90 @@ def nim_runtime_compiler_api_invocations(
     return matches
 
 
+def compiler_reference_code(text: str) -> str:
+    """Code references plus conservative interpolation-capable string refs.
+
+    Plain quoted path/argument names are not variable reads. Braced strings
+    can contain real Nim strformat expressions (fmt"{compiler}", &"...",
+    or an imported formatting macro). Retain their reference text rather than
+    pretending a code-only lexer parses arbitrary macro interpolation. This
+    deliberately preserves conservative detection for literal braces too.
+    Compiler-pattern matching still consumes the original command strings.
+    """
+    braced_strings = [
+        token.value
+        for token in nim_tokens(text)
+        if token.kind == "string" and "{" in token.value and "}" in token.value
+    ]
+    return nim_code_only(text) + "\n" + "\n".join(braced_strings)
+
+
+def executor_command_expression(expression: str, executor: str) -> str:
+    """Keep command-bearing arguments of known std/osproc executors.
+
+    Environment/options/working-directory values are not executable argv.
+    Unknown wrappers remain conservative. In particular, execCmdEx's input
+    stays visible: a shell can execute compiler commands supplied on stdin.
+    Mask by lexer positions so existing raw command patterns and line numbers
+    retain their exact spelling, including interpolation and multiline text.
+    """
+    ignored_positions = {
+        "startProcess": {1, 3, 4},
+        "execProcess": {1, 3, 4},
+        "execCmdEx": {1, 2, 3},
+        "execCmd": set(),
+    }
+    if executor not in ignored_positions:
+        return expression
+    tokens = nim_tokens(expression)
+    opening = next((i for i, token in enumerate(tokens) if token.value == "("), None)
+    if opening is None:
+        return expression
+    lines = expression.splitlines(keepends=True)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+
+    def offset(token: NimToken) -> int:
+        index = starts[token.line - 1]
+        column = 0
+        while index < len(expression) and column < token.column:
+            column = ((column // 8 + 1) * 8 if expression[index] == "\t"
+                      else column + 1)
+            index += 1
+        return index
+
+    masked = list(expression)
+    depth = 0
+    argument_start = opening + 1
+    argument_index = 0
+    for i in range(opening + 1, len(tokens)):
+        token = tokens[i]
+        if token.kind == "string":
+            continue
+        boundary = depth == 0 and token.value in {",", ")"}
+        if boundary:
+            argument = [item for item in tokens[argument_start:i]
+                        if item.kind != "newline"]
+            if argument:
+                named = (len(argument) > 1 and argument[1].value == "=")
+                ignored = (nim_name_key(argument[0].value) in {"env", "options", "workingdir"}
+                           if named else argument_index in ignored_positions[executor])
+                if ignored:
+                    for position in range(offset(argument[0]), offset(token)):
+                        if masked[position] != "\n":
+                            masked[position] = " "
+            if token.value == ")":
+                break
+            argument_start = i + 1
+            argument_index += 1
+        elif token.value in {"(", "[", "{"}:
+            depth += 1
+        elif token.value in {")", "]", "}"}:
+            depth -= 1
+    return "".join(masked)
+
+
 def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
     lines = text.splitlines()
     assignment_blocks: dict[str, tuple[int, int, str]] = {}
@@ -4260,30 +4736,40 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
     assignment_names = set(assignment_blocks)
     dependencies: dict[str, set[str]] = {}
     for name, (_, _, block) in assignment_blocks.items():
+        # A quoted path component or comment is not a variable reference.
+        # Keep raw command strings for COMPILER_PATTERNS below; only this
+        # reference graph ignores ordinary literal/comment text and retains
+        # braced formatter strings conservatively.
+        block_code = compiler_reference_code(block)
         dependencies[name] = {
             candidate
             for candidate in assignment_names
             if candidate != name
-            and re.search(r"\b" + re.escape(candidate) + r"\b", block)
+            and re.search(r"\b" + re.escape(candidate) + r"\b", block_code)
         }
 
     executed_vars: set[str] = set()
+    executor_command_lines: dict[int, list[str]] = {}
     for line_idx, line in enumerate(lines):
-        executor = EXECUTOR_PATTERN.search(line)
-        if executor is None:
-            continue
-        expression = line[executor.start() :]
-        balance = expression.count("(") - expression.count(")")
-        cursor = line_idx + 1
-        while balance > 0 and cursor < len(lines):
-            expression += "\n" + lines[cursor]
-            balance += lines[cursor].count("(") - lines[cursor].count(")")
-            cursor += 1
-        executed_vars.update(
-            name
-            for name in assignment_names
-            if re.search(r"\b" + re.escape(name) + r"\b", expression)
-        )
+        # Include nested calls too: a compiler spawned while constructing an
+        # environment is still a real spawn, unlike passive environment data.
+        for executor in EXECUTOR_PATTERN.finditer(line):
+            expression = line[executor.start() :]
+            balance = expression.count("(") - expression.count(")")
+            cursor = line_idx + 1
+            while balance > 0 and cursor < len(lines):
+                expression += "\n" + lines[cursor]
+                balance += lines[cursor].count("(") - lines[cursor].count(")")
+                cursor += 1
+            command = executor_command_expression(expression, executor.group(1))
+            for offset, command_line in enumerate(command.splitlines()):
+                executor_command_lines.setdefault(line_idx + offset + 1, []).append(command_line)
+            expression_code = compiler_reference_code(command)
+            executed_vars.update(
+                name
+                for name in assignment_names
+                if re.search(r"\b" + re.escape(name) + r"\b", expression_code)
+            )
 
     flows_to_executor: dict[str, bool] = {}
 
@@ -4374,6 +4860,12 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
             EXECUTOR_PATTERN.search(stripped)
             or inside_multiline_executor
         )
+        if direct_exec and idx in executor_command_lines:
+            direct_exec = any(
+                pattern.search(command_line)
+                for command_line in executor_command_lines[idx]
+                for name, pattern in COMPILER_PATTERNS if name in pattern_names
+            )
         matches.append(
             {
                 "path": path,
@@ -5546,6 +6038,7 @@ def build_inventory(
             "sourceFingerprint": current_source_fingerprint,
             "status": git_value(root, "status", "--short"),
             "runtime": runtime_metadata() if describe_environment else None,
+            "catalogHost": current_catalog_host(),
         },
         "static": {
             "nimTestBinaryCount": len(nim_specs),
@@ -5896,6 +6389,84 @@ def load_tracked_inventory(root: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def current_catalog_host() -> dict[str, str]:
+    """Stable OS/CPU identity for the platform-dependent binary catalog."""
+    os_name = {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(
+        sys.platform, sys.platform
+    )
+    machine = platform.machine().lower()
+    cpu = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    return {"os": os_name, "cpu": cpu}
+
+
+def catalog_currency_projection(
+    document: Mapping[str, Any],
+    platform_cases: Mapping[str, Mapping[str, set[str]]],
+    quarantine_by_os: Mapping[str, Mapping[str, str]],
+) -> dict[str, tuple[str, int]]:
+    """Remove only explicitly pinned platform cases from each binary count.
+
+    The inventory's catalog is measured on one host. Comparing its raw total
+    on another host cannot work: compile-time gates register different cases.
+    The exact per-source case ledger is the normalization oracle. Subtracting
+    that host's named exclusive cases leaves the common cases, which must
+    agree PER SOURCE on both platforms. A new platform-conditioned source or
+    renamed case is rejected separately by the ledger's declaration census and
+    exact live-name assertions; this is never an exemption for gated sources.
+
+    Quarantines are likewise exact, named platform facts. Only those entries
+    are normalized to catalog provenance, with zero common cases. Unexpected
+    exclusions fail before any normalization. All other provenance is retained.
+    """
+    metadata = document.get("metadata")
+    host = metadata.get("catalogHost") if isinstance(metadata, Mapping) else None
+    if not isinstance(host, dict) or set(host) != {"os", "cpu"}:
+        raise ValueError("inventory metadata.catalogHost must name its OS and CPU")
+    if host not in (
+        {"os": "linux", "cpu": "x86_64"},
+        {"os": "darwin", "cpu": "arm64"},
+    ):
+        raise ValueError(f"no exact platform case ledger for catalog host {host!r}")
+    os_name = host["os"]
+    expected_quarantine = dict(quarantine_by_os[os_name])
+    actual_quarantine = {
+        item["source"]: item["reason"]
+        for item in document["catalogEnumeration"]["quarantine"]
+    }
+    if actual_quarantine != expected_quarantine:
+        raise ValueError(
+            f"{os_name} quarantine differs from its pinned membership: "
+            f"expected {expected_quarantine!r}, got {actual_quarantine!r}"
+        )
+    result = {}
+    count_sources: dict[str, int] = {}
+    for item in document["tests"]:
+        source = item["source"]
+        if source in result:
+            raise ValueError(f"duplicate catalog source {source}")
+        count_sources[item["countSource"]] = count_sources.get(item["countSource"], 0) + 1
+        count = item["sourceCaseCount"]
+        provenance = item["countSource"]
+        if source in expected_quarantine:
+            if count != 0 or provenance != "quarantined":
+                raise ValueError(f"{source}: quarantined source contributes cases")
+            provenance = "catalog"
+        if source in platform_cases:
+            count -= len(platform_cases[source][os_name])
+        if count < 0:
+            raise ValueError(f"{source}: catalog lacks pinned {os_name} cases")
+        result[source] = (provenance, count)
+    if count_sources != document["catalogEnumeration"]["countSourceCounts"]:
+        raise ValueError("inventory countSourceCounts does not count its entries")
+    if not set(expected_quarantine) <= set(result):
+        raise ValueError("inventory omits pinned quarantine sources")
+    if not set(platform_cases) <= set(result):
+        raise ValueError("inventory omits pinned platform case sources")
+    if sum(item["sourceCaseCount"] for item in document["tests"]) != document["static"]["sourceCaseCount"]:
+        raise ValueError("inventory sourceCaseCount does not sum its entries")
+    return result
+
+
 def source_inventory_drift(
     recorded: Mapping[str, Any], measured: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -5992,6 +6563,327 @@ def format_source_inventory_drift(drift: Mapping[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Drift attribution (`--attribute-to REV`)
+# ---------------------------------------------------------------------------
+#
+# WHY. The two checks above name every stale source, and say nothing about
+# whether the change being checked put it there. When the mainline itself went
+# stale, every push and pull request after it was refused naming files its
+# author had never touched (reprobuild-pm issue 2026-10-01: three foreign files
+# on PR #478 and on five consecutive `dev` commits), and people learned to read
+# the job as noise. That is the seventh such event; the refusal has to say
+# which lines are the pusher's.
+#
+# HOW. Measure the SAME drift at REV -- REV's recorded artifact against a scan
+# of REV's tree, with this script's own functions -- and split the tree's drift
+# by identity: an item REV's drift lists identically is inherited, anything
+# else (including a source REV had at `16 -> 17` that is now `16 -> 18`) was
+# introduced. Only on drift: a green tree pays nothing.
+#
+# WHAT IT DOES NOT DO. Change the verdict. The tree being published is stale
+# either way and the remedy is the same one command; attribution only says
+# whose staleness it is, so a pusher can tell their own lines from inherited
+# ones without having to diff two revisions by hand.
+
+ATTRIBUTION_SCANNER_PATH = Path("scripts/reprobuild_suite_inventory.py")
+
+STATIC_DRIFT_ITEM_KEYS = (
+    "lostSources",
+    "decreased",
+    "gainedSources",
+    "increased",
+    "relabelled",
+)
+SOURCE_INVENTORY_DRIFT_ENTRY_KEYS = (
+    "lostSources",
+    "gainedSources",
+    "changedSources",
+)
+
+
+class AttributionUnavailable(Exception):
+    """Attribution cannot be computed reliably; the message says why."""
+
+
+def _partition_drift_items(
+    head: Mapping[str, Any], base: Mapping[str, Any], keys: tuple[str, ...]
+) -> dict[str, dict[str, list[Any]]]:
+    introduced: dict[str, list[Any]] = {key: [] for key in keys}
+    inherited: dict[str, list[Any]] = {key: [] for key in keys}
+    for key in keys:
+        already = list(base.get(key, ()))
+        for item in head.get(key, ()):
+            (inherited if item in already else introduced)[key].append(item)
+    return {"introduced": introduced, "inherited": inherited}
+
+
+def attribute_static_case_count_drift(
+    head: Mapping[str, Any], base: Mapping[str, Any]
+) -> dict[str, dict[str, list[Any]]]:
+    """Split a `static_case_count_drift` into introduced and inherited items.
+
+    An item is inherited only when `base` lists it IDENTICALLY: base
+    `(src, 16, 17)` and head `(src, 16, 18)` is introduced, because this
+    change moved the source further. Items only `base` lists (fixed since) are
+    not reported in either partition.
+    """
+    return _partition_drift_items(head, base, STATIC_DRIFT_ITEM_KEYS)
+
+
+def attribute_source_inventory_drift(
+    head: Mapping[str, Any], base: Mapping[str, Any]
+) -> dict[str, dict[str, list[Any]]]:
+    """Split a `source_inventory_drift` into introduced and inherited items.
+
+    Entry-level items compare whole (a changed source by its full field-diff
+    list). An aggregate section is inherited only when `base` lists it too
+    AND every entry-level item is inherited: the aggregates are sums over the
+    entries, so once this change moved any entry it has a share in every
+    section that moved with it.
+    """
+    result = _partition_drift_items(
+        head, base, SOURCE_INVENTORY_DRIFT_ENTRY_KEYS
+    )
+    entries_inherited = not any(result["introduced"].values())
+    base_sections = list(base.get("changedSections", ()))
+    result["introduced"]["changedSections"] = []
+    result["inherited"]["changedSections"] = []
+    for section in head.get("changedSections", ()):
+        side = (
+            "inherited"
+            if entries_inherited and section in base_sections
+            else "introduced"
+        )
+        result[side]["changedSections"].append(section)
+    return result
+
+
+def _static_drift_item_line(key: str, item: Any) -> str:
+    if key == "lostSources":
+        return f"- {item} (no longer declared)"
+    if key == "gainedSources":
+        return f"+ {item} (new source)"
+    if key == "relabelled":
+        source, was, now = item
+        return f"! {source}: language {was} -> {now}"
+    source, was, now = item
+    return f"{'+' if now > was else '-'} {source}: {was} -> {now} ({now - was:+d})"
+
+
+def _source_inventory_drift_item_line(key: str, item: Any) -> str:
+    if key == "lostSources":
+        return f"- {item} (recorded but no longer declared)"
+    if key == "gainedSources":
+        return f"+ {item} (declared but absent from the artifact)"
+    if key == "changedSources":
+        fields = ", ".join(field["field"] for field in item["fields"])
+        return f"! {item['source']}: {fields}"
+    return f"~ aggregate section {item}"
+
+
+def format_drift_attribution(
+    partition: Mapping[str, Mapping[str, list[Any]]],
+    keys: tuple[str, ...],
+    item_line: Any,
+    base_label: str,
+    regenerate_command: str,
+) -> str:
+    """Render a partition as the labelled block printed after the drift text."""
+    lines = [f"attribution against {base_label}:"]
+    introduced = [
+        item_line(key, item) for key in keys for item in partition["introduced"][key]
+    ]
+    inherited = [
+        item_line(key, item) for key in keys for item in partition["inherited"][key]
+    ]
+    if introduced:
+        lines.append("  introduced by this change:")
+        lines.extend(f"    {line}" for line in introduced)
+    if inherited:
+        lines.append(
+            f"  already stale at {base_label} (this change did not put these "
+            "there):"
+        )
+        lines.extend(f"    {line}" for line in inherited)
+    if not introduced:
+        # Said plainly, because the reader who sees ONLY inherited lines is the
+        # one about to dismiss the whole job: the refusal still stands, and
+        # the fix is still theirs to carry if they want to publish this tree.
+        lines.extend(
+            [
+                f"  This change introduced none of the drift above; all of it "
+                f"was already stale at {base_label}.",
+                "  The tree being published is still stale, so the verdict "
+                "stands and the remedy is the same one command:",
+                f"    {regenerate_command}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _attribution_git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    # GIT_INDEX_FILE / GIT_WORK_TREE are dropped: a hook may run with them set
+    # for the checkout being pushed, and `worktree add` must not write the
+    # temporary tree's index into it.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("GIT_INDEX_FILE", "GIT_WORK_TREE")
+    }
+    return subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, env=env
+    )
+
+
+def resolve_attribution_base(root: Path, rev: str) -> tuple[str, str]:
+    """Return `(sha, short sha)` for REV, or raise `AttributionUnavailable`.
+
+    Refuses when the scanner differs between REV and the one running now. The
+    base drift is measured with THIS scanner against an artifact REV's scanner
+    wrote, so a scanner edit in the range would surface at REV as drift and
+    be mis-reported as inherited -- precisely the drift this change caused.
+    """
+    resolved = _attribution_git(
+        root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        raise AttributionUnavailable(f"{rev!r} does not resolve to a commit here")
+    sha = resolved.stdout.strip()
+    short = _attribution_git(root, "rev-parse", "--short", sha).stdout.strip()
+    short = short or sha[:12]
+    running = Path(__file__).resolve()
+    tracked = root / ATTRIBUTION_SCANNER_PATH
+    if tracked.is_file() and tracked.resolve() == running:
+        # `git diff` rather than a byte compare so a CRLF checkout of an
+        # unchanged scanner is not reported as a scanner change.
+        diff = _attribution_git(
+            root, "diff", "--quiet", sha, "--", str(ATTRIBUTION_SCANNER_PATH)
+        )
+        same = diff.returncode == 0
+        if diff.returncode not in (0, 1):
+            raise AttributionUnavailable(
+                f"could not compare {ATTRIBUTION_SCANNER_PATH} with {short}: "
+                + first_line(diff.stderr)
+            )
+    else:
+        # Run against another tree (`--repo-root`): what matters is the
+        # scanner actually executing, so compare its bytes with REV's blob.
+        shown = subprocess.run(
+            ["git", "show", f"{sha}:{ATTRIBUTION_SCANNER_PATH.as_posix()}"],
+            cwd=root,
+            capture_output=True,
+        )
+        same = shown.returncode == 0 and shown.stdout == running.read_bytes()
+    if not same:
+        raise AttributionUnavailable(
+            f"{ATTRIBUTION_SCANNER_PATH} differs between {short} and the scanner "
+            "running now, so drift measured at "
+            f"{short} would not be comparable"
+        )
+    return sha, short
+
+
+@contextlib.contextmanager
+def materialized_revision(root: Path, sha: str):
+    """Yield a temporary detached worktree of `sha`; always removed after.
+
+    The `finally` covers exceptions and KeyboardInterrupt alike: a leaked
+    worktree is registered in the user's repository and outlives this run.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="suite-drift-attribution-"))
+    tree = scratch / "tree"
+    try:
+        added = _attribution_git(
+            root, "worktree", "add", "--detach", "--quiet", str(tree), sha
+        )
+        if added.returncode != 0:
+            raise AttributionUnavailable(
+                "could not create a worktree of "
+                f"{sha[:12]}: {first_line(added.stderr)}"
+            )
+        yield tree
+    finally:
+        _attribution_git(root, "worktree", "remove", "--force", str(tree))
+        _attribution_git(root, "worktree", "prune")
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _static_drift_at(tree: Path) -> tuple[dict[str, Any], str | None]:
+    measured = static_case_counts(tree)
+    try:
+        recorded = load_static_case_counts(tree)
+    except (OSError, ValueError) as error:
+        return static_case_count_drift({}, {}), (
+            f"{STATIC_CASE_COUNTS_PATH} is unreadable there ({error})"
+        )
+    return static_case_count_drift(recorded, measured), None
+
+
+def _source_inventory_drift_at(tree: Path) -> tuple[dict[str, Any], str | None]:
+    measured = source_inventory(tree)
+    try:
+        recorded = load_source_inventory(tree)
+    except (OSError, ValueError, InventoryProjectionError) as error:
+        empty = {key: [] for key in SOURCE_INVENTORY_DRIFT_ENTRY_KEYS}
+        empty["changedSections"] = []
+        return empty, f"{SOURCE_INVENTORY_PATH} is unreadable there ({error})"
+    return source_inventory_drift(recorded, measured), None
+
+
+ATTRIBUTION_KINDS: dict[str, tuple[Any, Any, tuple[str, ...], Any, str]] = {
+    "static": (
+        _static_drift_at,
+        attribute_static_case_count_drift,
+        STATIC_DRIFT_ITEM_KEYS,
+        _static_drift_item_line,
+        STATIC_CASE_COUNTS_REGENERATE_COMMAND,
+    ),
+    "inventory": (
+        _source_inventory_drift_at,
+        attribute_source_inventory_drift,
+        SOURCE_INVENTORY_DRIFT_ENTRY_KEYS + ("changedSections",),
+        _source_inventory_drift_item_line,
+        SOURCE_INVENTORY_REGENERATE_COMMAND,
+    ),
+}
+
+
+def report_drift_attribution(
+    root: Path, rev: str, head: Mapping[str, Any], kind: str
+) -> str:
+    """Return the attribution block for `head`, or one `note:` line.
+
+    Never raises for an attribution failure (KeyboardInterrupt still
+    propagates, after the worktree is removed): the drift text and the
+    verdict are already decided, and attribution is an annotation on them.
+    """
+    drift_at, attribute, keys, item_line, regenerate = ATTRIBUTION_KINDS[kind]
+    try:
+        sha, short = resolve_attribution_base(root, rev)
+        with materialized_revision(root, sha) as tree:
+            try:
+                base, unreadable = drift_at(tree)
+            except (Exception, SystemExit) as error:  # noqa: BLE001
+                # `parse_repro_tests` signals a malformed table with
+                # SystemExit; at REV that is a reason to skip attribution,
+                # not to end this process.
+                raise AttributionUnavailable(
+                    f"could not measure the drift at {short}: {error}"
+                ) from None
+    except AttributionUnavailable as error:
+        return f"note: drift attribution skipped: {error}."
+    block = format_drift_attribution(
+        attribute(head, base), keys, item_line, short, regenerate
+    )
+    if unreadable:
+        block = (
+            f"note: at {short}, {unreadable}; treating its drift as empty, so "
+            "every item below counts as introduced.\n" + block
+        )
+    return block
 
 
 def md_table(headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -7041,13 +7933,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--check-declared-sources",
         action="store_true",
         help=(
-            "compare the test sources present in the tree against the "
-            "entry set repro_tests.nim declares, and exit non-zero when "
-            "a test file exists that nothing builds or runs. Needs no "
-            "built test binaries, no compiler and no nix. This is the "
-            "only gate whose universe is the FILESYSTEM rather than "
-            "repro_tests.nim, which is why it is the only one that can "
-            "see a test that was never enrolled"
+            "compare the Nim and shell test sources present in the tree against "
+            "the entry set repro_tests.nim declares and the uninvoked shell "
+            "test baseline, and exit non-zero when a test file exists that "
+            "nothing builds, references or runs. Needs no built test binaries, "
+            "no compiler and no nix. This is the only gate whose universe is "
+            "the FILESYSTEM rather than repro_tests.nim, which is why it is "
+            "the only one that can see a test that was never enrolled"
         ),
     )
     parser.add_argument(
@@ -7062,6 +7954,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "binaries, no compiler and no nix. This is what stops the gate "
             "and the generator agreeing by coincidence on today's tree while "
             "disagreeing about the first file of a new shape that lands"
+        ),
+    )
+    parser.add_argument(
+        "--attribute-to",
+        metavar="REV",
+        default=None,
+        help=(
+            "with --check-static-case-counts or --check-inventory: when the "
+            "tree has drifted, measure the same drift at REV (in a temporary "
+            "git worktree, removed afterwards) and say which stale items this "
+            "change introduced and which were already stale at REV. Never "
+            "changes the verdict or the exit code, and costs nothing on a "
+            "clean tree. Skipped with a note when REV does not resolve or "
+            "when " + str(ATTRIBUTION_SCANNER_PATH) + " differs between REV "
+            "and the running scanner"
         ),
     )
     parser.add_argument(
@@ -7085,127 +7992,226 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# ---------------------------------------------------------------------------
+# The suite-artifact actions.
+#
+# One function per action flag, composed by `SUITE_ARTIFACT_ACTIONS` below.
+# Each takes the parsed arguments (the two checks read `--attribute-to` from
+# them), returns its own exit status and is otherwise independent of the others:
+# `main` runs every requested one and returns the worst status.
+#
+# "Early exit" in the comments below is kept from when these were arms of an
+# `if` chain in `main`, and still says the thing that matters -- every one of
+# them runs BEFORE any binary probing, so each stays reachable in a tree with
+# nothing built. What is no longer true is that reaching one of them stops the
+# others; that was the defect. See `SUITE_ARTIFACT_ACTIONS`.
+# ---------------------------------------------------------------------------
+
+
+def _action_write_static_case_counts(root: Path, args: argparse.Namespace) -> int:
+    # Early exit, BEFORE any binary probing: the baseline is a static scan and
+    # must stay refreshable in a tree with nothing built. Making it depend on
+    # `build_inventory` would recreate the defect it replaces.
+    recorded: dict[str, tuple[str, int]] = {}
+    if (root / STATIC_CASE_COUNTS_PATH).is_file():
+        recorded = load_static_case_counts(root)
+    measured = static_case_counts(root)
+    drift = static_case_count_drift(recorded, measured)
+    written = write_static_case_counts(root, measured)
+    print(f"wrote {rel(written, root)} ({len(measured)} sources, "
+          f"{drift['measuredTotal']} statically visible cases)")
+    if recorded and not drift["clean"]:
+        print(format_static_case_count_drift(drift))
+    return 0
+
+
+def _action_check_static_case_counts(root: Path, args: argparse.Namespace) -> int:
+    measured = static_case_counts(root)
+    drift = static_case_count_drift(load_static_case_counts(root), measured)
+    if drift["clean"]:
+        print(
+            f"{STATIC_CASE_COUNTS_PATH}: "
+            f"{drift['measuredTotal']} test cases across "
+            f"{len(measured)} sources, as recorded"
+        )
+        return 0
+    print(format_static_case_count_drift(drift), file=sys.stderr)
+    if args.attribute_to:
+        print(
+            "\n" + report_drift_attribution(
+                root, args.attribute_to, drift, "static"
+            ),
+            file=sys.stderr,
+        )
+    return 1
+
+
+def _action_write_inventory_sources(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: BEFORE any binary probing. A gate
+    # that needs the build cannot run before the build, and the whole point of
+    # this one is that it can.
+    recorded_sources: dict[str, Any] | None = None
+    if (root / SOURCE_INVENTORY_PATH).is_file():
+        # Tolerant HERE and nowhere else. This is the remedy command the
+        # gate's refusal prints, so it has to work against whatever is on
+        # disk -- including a file written by an older revision of this
+        # script that predates a field, which `--check-inventory` would
+        # rightly refuse to read. Refusing to REGENERATE such a file would
+        # leave a contributor with a gate they cannot satisfy.
+        try:
+            recorded_sources = load_source_inventory(root)
+        except (InventoryProjectionError, json.JSONDecodeError) as error:
+            print(
+                f"note: {SOURCE_INVENTORY_PATH} could not be read "
+                f"({error}); rewriting it from the tree."
+            )
+    measured_sources = source_inventory(root)
+    written = write_source_inventory(root, measured_sources)
+    print(
+        f"wrote {rel(written, root)} "
+        f"({len(measured_sources['tests'])} entries)"
+    )
+    if recorded_sources is not None:
+        drift = source_inventory_drift(recorded_sources, measured_sources)
+        if not drift["clean"]:
+            print(format_source_inventory_drift(drift))
+    return 0
+
+
+def _action_check_declared_sources(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: BEFORE any binary probing. This
+    # one reads the tree and one generated file and nothing else.
+    drift = declared_source_drift(root)
+    if drift["clean"]:
+        print(
+            "declared test sources: "
+            f"{drift['candidateCount']} Nim test sources in the tree, all "
+            f"enrolled ({drift['declaredCount']} own build edges, "
+            f"{drift['bundledCount']} folded into pure-unit bundles); "
+            f"{drift['shellCandidateCount']} shell test scripts "
+            f"({drift['shellReferencedCount']} referenced, "
+            f"{drift['shellBaselineCount']} accepted baseline debt)"
+        )
+        return 0
+    print(format_declared_source_drift(drift), file=sys.stderr)
+    return 1
+
+
+def _action_check_shape_parity(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: this one reads one generated file
+    # and nothing else -- not even the tree.
+    drift = shape_parity_drift(root)
+    if drift["clean"]:
+        print(
+            "test-source shape parity: "
+            f"{drift['rows']} path shapes classified identically by "
+            "scripts/generate_test_edges.nim and by this gate "
+            f"({drift['generatorAccepts']} accepted by both, "
+            f"{drift['rows'] - drift['generatorAccepts']} refused by both)"
+        )
+        return 0
+    print(format_shape_parity_drift(drift), file=sys.stderr)
+    return 1
+
+
+def _action_check_inventory(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: BEFORE any binary probing. A gate
+    # that needs the build cannot run before the build, and the whole point of
+    # this one is that it can.
+    if not (root / SOURCE_INVENTORY_PATH).is_file():
+        # Fatal, never skipped. A check that passes when the artifact it
+        # guards is absent reports green and proves nothing.
+        print(
+            f"FAIL: {SOURCE_INVENTORY_PATH} not found; there is no "
+            "tracked entry set to check. Generate it and commit it:",
+            file=sys.stderr,
+        )
+        print(f"  {SOURCE_INVENTORY_REGENERATE_COMMAND}", file=sys.stderr)
+        return 1
+    drift = source_inventory_drift(
+        load_source_inventory(root), source_inventory(root)
+    )
+    if drift["clean"]:
+        print(
+            f"{SOURCE_INVENTORY_PATH}: "
+            f"{drift['measuredEntryCount']} entries, "
+            "language/owner/binary/class/static-case-count as recorded"
+        )
+        return 0
+    print(format_source_inventory_drift(drift), file=sys.stderr)
+    if args.attribute_to:
+        print(
+            "\n" + report_drift_attribution(
+                root, args.attribute_to, drift, "inventory"
+            ),
+            file=sys.stderr,
+        )
+    return 1
+
+
+SUITE_ARTIFACT_ACTIONS: dict[
+    str, Callable[[Path, argparse.Namespace], int]
+] = {
+    "write_static_case_counts": _action_write_static_case_counts,
+    "write_inventory_sources": _action_write_inventory_sources,
+    "check_static_case_counts": _action_check_static_case_counts,
+    "check_inventory": _action_check_inventory,
+    "check_declared_sources": _action_check_declared_sources,
+    "check_shape_parity": _action_check_shape_parity,
+}
+"""The six suite-artifact actions, keyed by `parse_args` destination, IN THE
+ORDER THEY RUN.
+
+INDEPENDENT ACTIONS, NOT MUTUALLY EXCLUSIVE SUBCOMMANDS. These used to be a
+chain of `if args.<flag>: ... return 0` arms in `main`, which is the correct
+shape for subcommands and the wrong one for this: every campaign brief in
+this repository says
+
+    reprobuild_suite_inventory.py --write-static-case-counts
+                                  --write-inventory-sources
+
+and under the chain the first arm regenerated its artifact and returned 0
+before the second was ever reached. The second artifact stayed stale and the
+run still exited 0, so a truthful "regenerated, exit 0" report was routinely
+followed by a red `--check-inventory`. See
+`reprobuild-pm/issues/2026-10-09-generate-test-edges-accepts-any-flag-and-
+reports-success.md`.
+
+THE ORDER IS THIS TABLE'S, NOT ARGV'S. Writes first, then checks, so that a
+write-then-check invocation is coherent whichever way the flags were typed —
+the checks see what the writers just produced instead of racing the order
+somebody happened to type. Nothing in `main` sorts or re-reads argv; it walks
+this table.
+
+A FAILING CHECK DOES NOT STOP THE REST. `main` runs every requested action
+and returns the WORST status any of them returned, because a composition that
+stopped at the first red would hide every later gate behind it and make a
+contributor rediscover the drifts one run at a time.
+
+ONE TABLE, SO A SEVENTH FLAG CANNOT BE FORGOTTEN. `tests/unit/
+test_reprobuild_suite_inventory.py`'s `SuiteArtifactActionCompositionTests`
+derives the parser's boolean `--write-*` / `--check-*` destinations and
+requires them to be exactly this table's keys, so an action flag that parses
+but is composed nowhere is a test failure rather than a flag that silently
+does nothing.
+"""
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     root = Path(args.repo_root).resolve()
 
-    # Early exit, BEFORE any binary probing: the baseline is a static scan and
-    # must stay refreshable in a tree with nothing built. Making it depend on
-    # `build_inventory` would recreate the defect it replaces.
-    if args.write_static_case_counts:
-        recorded: dict[str, tuple[str, int]] = {}
-        if (root / STATIC_CASE_COUNTS_PATH).is_file():
-            recorded = load_static_case_counts(root)
-        measured = static_case_counts(root)
-        drift = static_case_count_drift(recorded, measured)
-        written = write_static_case_counts(root, measured)
-        print(f"wrote {rel(written, root)} ({len(measured)} sources, "
-              f"{drift['measuredTotal']} statically visible cases)")
-        if recorded and not drift["clean"]:
-            print(format_static_case_count_drift(drift))
-        return 0
-
-    if args.check_static_case_counts:
-        measured = static_case_counts(root)
-        drift = static_case_count_drift(load_static_case_counts(root), measured)
-        if drift["clean"]:
-            print(
-                f"{STATIC_CASE_COUNTS_PATH}: "
-                f"{drift['measuredTotal']} test cases across "
-                f"{len(measured)} sources, as recorded"
-            )
-            return 0
-        print(format_static_case_count_drift(drift), file=sys.stderr)
-        return 1
-
-    # Same placement and the same reason: BEFORE any binary probing. A gate
-    # that needs the build cannot run before the build, and the whole point of
-    # this one is that it can.
-    if args.write_inventory_sources:
-        recorded_sources: dict[str, Any] | None = None
-        if (root / SOURCE_INVENTORY_PATH).is_file():
-            # Tolerant HERE and nowhere else. This is the remedy command the
-            # gate's refusal prints, so it has to work against whatever is on
-            # disk -- including a file written by an older revision of this
-            # script that predates a field, which `--check-inventory` would
-            # rightly refuse to read. Refusing to REGENERATE such a file would
-            # leave a contributor with a gate they cannot satisfy.
-            try:
-                recorded_sources = load_source_inventory(root)
-            except (InventoryProjectionError, json.JSONDecodeError) as error:
-                print(
-                    f"note: {SOURCE_INVENTORY_PATH} could not be read "
-                    f"({error}); rewriting it from the tree."
-                )
-        measured_sources = source_inventory(root)
-        written = write_source_inventory(root, measured_sources)
-        print(
-            f"wrote {rel(written, root)} "
-            f"({len(measured_sources['tests'])} entries)"
-        )
-        if recorded_sources is not None:
-            drift = source_inventory_drift(recorded_sources, measured_sources)
-            if not drift["clean"]:
-                print(format_source_inventory_drift(drift))
-        return 0
-
-    # Same placement and the same reason: BEFORE any binary probing. This
-    # one reads the tree and one generated file and nothing else.
-    if args.check_declared_sources:
-        drift = declared_source_drift(root)
-        if drift["clean"]:
-            print(
-                "declared test sources: "
-                f"{drift['candidateCount']} test sources in the tree, all "
-                f"enrolled ({drift['declaredCount']} own build edges, "
-                f"{drift['bundledCount']} folded into pure-unit bundles)"
-            )
-            return 0
-        print(format_declared_source_drift(drift), file=sys.stderr)
-        return 1
-
-    # Same placement and the same reason: this one reads one generated file
-    # and nothing else -- not even the tree.
-    if args.check_shape_parity:
-        drift = shape_parity_drift(root)
-        if drift["clean"]:
-            print(
-                "test-source shape parity: "
-                f"{drift['rows']} path shapes classified identically by "
-                "scripts/generate_test_edges.nim and by this gate "
-                f"({drift['generatorAccepts']} accepted by both, "
-                f"{drift['rows'] - drift['generatorAccepts']} refused by both)"
-            )
-            return 0
-        print(format_shape_parity_drift(drift), file=sys.stderr)
-        return 1
-
-    # Same placement and the same reason: BEFORE any binary probing. A gate
-    # that needs the build cannot run before the build, and the whole point of
-    # this one is that it can.
-    if args.check_inventory:
-        if not (root / SOURCE_INVENTORY_PATH).is_file():
-            # Fatal, never skipped. A check that passes when the artifact it
-            # guards is absent reports green and proves nothing.
-            print(
-                f"FAIL: {SOURCE_INVENTORY_PATH} not found; there is no "
-                "tracked entry set to check. Generate it and commit it:",
-                file=sys.stderr,
-            )
-            print(f"  {SOURCE_INVENTORY_REGENERATE_COMMAND}", file=sys.stderr)
-            return 1
-        drift = source_inventory_drift(
-            load_source_inventory(root), source_inventory(root)
-        )
-        if drift["clean"]:
-            print(
-                f"{SOURCE_INVENTORY_PATH}: "
-                f"{drift['measuredEntryCount']} entries, "
-                "language/owner/binary/class/static-case-count as recorded"
-            )
-            return 0
-        print(format_source_inventory_drift(drift), file=sys.stderr)
-        return 1
+    # Every requested action runs, in THIS TABLE's order rather than argv's,
+    # and the exit status is the worst any of them returned. When at least one
+    # action flag is given the full inventory/report path below is skipped, as
+    # it always was: these actions are the build-free surfaces and must stay
+    # reachable in a tree with nothing built.
+    requested = [name for name in SUITE_ARTIFACT_ACTIONS if getattr(args, name)]
+    if requested:
+        status = 0
+        for name in requested:
+            status = max(status, SUITE_ARTIFACT_ACTIONS[name](root, args))
+        return status
 
     json_path = Path(args.json)
     report_path = Path(args.write_report)

@@ -29,11 +29,15 @@ import repro_home_resources
 import repro_homebrew_adapter
 import repro_local_store
 
+import ./app_activation
+from ./builtin_adapter import appPlacedItem, isMacosInstallerApp
 import ./dep_graph
 import ./env_binding
 import ./errors
 import ./plan
 import ./realize
+import ./home_lock
+import ./package_catalog
 import ./materialize_files
 import ./materialize_managed_blocks
 import ./materialize_launchers
@@ -41,6 +45,7 @@ import ./current_rotation
 import ./partial_recovery
 import ./stow
 import ./suppression
+import ./file_facts
 
 const
   KillStepEnvVar* = "REPRO_TEST_APPLY_KILL_AFTER_STEP"
@@ -103,15 +108,25 @@ type
     piaDestroy = "destroy"            ## resource: would be destroyed
     piaNoOp = "no-op"                 ## resource / item: nothing to do
     piaSkip = "skip"                  ## stow: loose file, not materialized
+    piaRelease = "release"            ## a record of a concern the host no
+                                      ## longer applies: left in place, no
+                                      ## longer recorded (never destroyed)
 
   PlanItem* = object
     ## One previewed operation in a `repro home apply --plan` run.
-    category*: string                 ## "package" | "stow" | "generated-file"
+    category*: string                 ## "package" | "app-bundle" | "stow"
+                                       ## | "generated-file"
                                        ## | "managed-block" | "launcher"
                                        ## | "resource"
     name*: string                     ## package id / target path / address
     action*: PlanItemAction
     detail*: string                   ## human-readable extra context
+    concern*: HomeConcern             ## the concern the operation belongs
+                                      ## to (Gradual-Nix-To-Reprobuild-
+                                      ## Migration.md §Concern-scoped apply)
+    notApplied*: bool                 ## the host does not apply `concern`:
+                                      ## planned and shown, never executed,
+                                      ## never drift
 
   PlanPreview* = object
     ## M72 Deliverable 2: the result of `repro home apply --plan`.
@@ -122,6 +137,13 @@ type
                                        ## would produce
     isNoOp*: bool                      ## true when the plan matches the
                                        ## active generation exactly
+    host*: string                      ## the host the plan is for
+    applied*: AppliedConcerns          ## the concerns the apply would
+                                       ## execute on `host`
+    notAppliedCount*: int              ## items of other concerns (shown,
+                                       ## not executed)
+    releasedCount*: int                ## records of concerns no longer
+                                       ## applied (`piaRelease` items)
 
   ApplyMode* = enum
     ## Hint to step 3 (configurable refinalize) describing what kind
@@ -161,6 +183,28 @@ type
       ## M65: number of generated files whose digest changed (or
       ## whose path is new in this generation). These are written
       ## through the staging-then-rename protocol.
+    applied*: AppliedConcerns
+      ## GM7: the concerns this apply executed (the host's
+      ## `hosts.<host>.applies`, or every concern).
+    notAppliedCount*: int
+      ## GM7: planned operations of concerns the host does not apply —
+      ## package references, stow entries, generated files, resources —
+      ## that were not executed.
+    released*: seq[string]
+      ## GM7: what the previous generation recorded in a concern this
+      ## apply does not own, released rather than removed: left in place
+      ## and not recorded by the new generation. One `<kind> <name>` line
+      ## each.
+    deferred*: seq[string]
+      ## Resources whose update, replace or destroy was deferred because
+      ## the live object is in use -- a placed application that is running
+      ## (Store-And-Installation-Layout.md § macOS Application Bundles,
+      ## "Running applications"). One `<address> <why>` line each; the
+      ## next apply does them.
+    keptVendorUpdates*: seq[string]
+      ## Placed applications that updated themselves to a newer build of
+      ## their vendor than the profile declares, kept rather than
+      ## downgraded ("Vendor updates"). One `<address> <version>` line each.
 
   ApplyOptions* = object
     profileDir*: string                ## "" → resolveProfileDir()
@@ -216,6 +260,24 @@ type
                                         ## so downstream snapshot
                                         ## hashing reads the source
                                         ## file as intent input.
+    relock*: bool                       ## GM4b: ignore the home-profile
+                                        ## lock's pins and re-select every
+                                        ## package under the current
+                                        ## policy (`--relock`); the lock
+                                        ## is rewritten from the result.
+    appTrust*: AppTrustPolicy           ## GM4c: relaxations of the macOS
+                                        ## application trust checks
+                                        ## (Developer ID chain,
+                                        ## notarization). ``{}`` — the
+                                        ## zero value — is strict, and
+                                        ## no CLI path sets anything
+                                        ## else; only a test whose
+                                        ## fixture bundles are built at
+                                        ## test time (and so cannot be
+                                        ## Apple-signed or notarized)
+                                        ## does. Signature integrity,
+                                        ## bundle id, version and team
+                                        ## are never relaxed.
     recordOnlyGeneratedFiles*: bool     ## M71 Phase E: source-side
                                         ## remote-bundle evaluation.
                                         ## Package-owned generated files
@@ -325,11 +387,12 @@ proc resolveConfigurablePlaceholders(content: string;
     if dot > 0:
       let pkg = key[0 ..< dot]
       let cfgKey = key[dot + 1 .. ^1]
+      # Last write wins, as in `effectiveConfigAssignments`: `overrides`
+      # are in declaration order, so the last match is the effective one.
       for c in overrides:
         if c.packageName == pkg and c.configKey == cfgKey:
           resolved = unquoteValueSource(c.configValue)
           found = true
-          break
     if found:
       rewritten.add(resolved)
     else:
@@ -1153,29 +1216,59 @@ proc resourceFromEntry(profilePath, homeDir: string;
       break
 
 proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
+                             activities: HashSet[string];
                              nodes: seq[IntentNode];
                              into: var DesiredSet) =
   ## Walk a `resources:` block body, emitting one `Resource` per
   ## reachable `nkResourceEntry`. A `nkCondBlock` is recursed into
-  ## only when its predicate evaluates true against the host —
-  ## reusing the planner's `evaluateHostPredicate` so a
+  ## only when its predicate evaluates true against the host
+  ## (`applicableResourceEntries`, the one guard walker), so a
   ## `when windows:`-guarded resource is materialized on Windows and
-  ## absent under a non-matching predicate.
-  for node in nodes:
-    case node.kind
-    of nkResourceEntry:
-      let r = resourceFromEntry(profilePath, homeDir, node)
-      if r.address in into.resources:
+  ## absent under a non-matching predicate; an activity-scoped resource
+  ## (GM9) only when `activities` enables its activity. Two resources may
+  ## share an address as long as no host gets both.
+  ##
+  ## Likewise two resources a host gets may not write one real-world
+  ## object -- one file, one variable, one block, one unit -- under two
+  ## addresses (`file_facts.sharesTargetWith`). Each address is bound to
+  ## what it writes, so the apply would write the object twice (the last
+  ## declaration winning, and the next apply reporting the first
+  ## resource's drift against the second's write), and removing either
+  ## resource later would destroy what the other still declares. The pair
+  ## is refused here, at plan time and before anything is written, naming
+  ## both addresses and whatever they disagree on; `repro home facts` runs
+  ## this same planner, so facts and apply refuse the same profiles
+  ## (reprobuild-pm issue
+  ## 2026-10-18-home-apply-applies-two-resources-for-one-path-or-variable;
+  ## Home-Profile-Resource-Lifecycle.md §One Real-World Object, One
+  ## Resource). Unlike a
+  ## stow file on a resource's path (`resolveStowResourceOverlap`), an
+  ## agreeing pair is refused too: a stow file has no binding to release,
+  ## a second resource does.
+  var lineOf = initTable[string, int]()
+  for node in applicableResourceEntries(nodes, ctx, activities):
+    let r = resourceFromEntry(profilePath, homeDir, node)
+    if r.address in into.resources:
+      resourceProfileError(profilePath, node.resourceHeaderLine,
+        "duplicate resource address `" & r.address &
+        "` in the profile's `resources:` block")
+    for _, earlier in into.resources:
+      if earlier.sharesTargetWith(r):
+        let differing = differingTargetFields(earlier, r)
+        let both = "resources `" & earlier.address & "` (line " &
+          $lineOf.getOrDefault(earlier.address) & ") and `" & r.address &
+          "` both write `" & resourceTargetLabel(r, homeDir) & "` (" &
+          $r.kind & ")"
         resourceProfileError(profilePath, node.resourceHeaderLine,
-          "duplicate resource address `" & r.address &
-          "` in the profile's `resources:` block")
-      into.add(r)
-    of nkCondBlock:
-      if evaluateHostPredicate(node.predicateAst, ctx):
-        collectProfileResources(profilePath, homeDir, ctx,
-          node.condChildren, into)
-    else:
-      discard
+          if differing.len > 0:
+            both & " and disagree on " & differing.join(" and ") &
+              "; one object has one writer: remove one of them"
+          else:
+            both & "; they agree, but each resource owns what it " &
+              "writes, so removing either would destroy the other's: " &
+              "declare it once")
+    lineOf[r.address] = node.resourceHeaderLine
+    into.add(r)
 
 proc parseProfileResources*(profile: Profile; homeDir: string;
                             ctx: HostContext):
@@ -1183,11 +1276,21 @@ proc parseProfileResources*(profile: Profile; homeDir: string;
   ## M78: build a `DesiredSet` from the parsed profile's `resources:`
   ## block. Predicates are resolved against `ctx`. Raises
   ## `EUnstructured` on a malformed entry.
+  ##
+  ## GM9: an activity-scoped resource is planned only when the host's
+  ## selection -- `enabledActivitiesFor(profile, ctx.host)`, the planner's
+  ## one host-selection rule, which `buildPlan` applies to packages too --
+  ## enables its activity. The selection is computed only for a profile
+  ## that has such a resource, so a profile without one plans resources
+  ## exactly as before.
   result = initDesiredSet()
   let blkOpt = findResourcesBlock(profile)
   if blkOpt.isNone:
     return
-  collectProfileResources(profile.path, homeDir, ctx,
+  var activities = initHashSet[string]()
+  if hasActivityScopedResource(blkOpt.get.resourcesEntries):
+    activities = enabledActivitiesFor(profile, ctx.host)
+  collectProfileResources(profile.path, homeDir, ctx, activities,
     blkOpt.get.resourcesEntries, result)
 
 proc parseProfileResources*(profile: Profile; homeDir, host: string):
@@ -1287,6 +1390,11 @@ proc resourceSeedString*(desired: DesiredSet): string =
       # the (name, version, args) triple drives the generation id.
       result.add(r.caskName & "\x1e" & r.caskVersion &
         "\x1e" & r.caskArgs.join(","))
+    of rkMacosAppBundle:
+      # GM4c: synthesized from realized packages, whose selections are
+      # already in the generation id; a profile cannot declare one. Seeded
+      # anyway so the case stays exhaustive and meaningful.
+      result.add(r.appBundleTargetDir & "\x1e" & r.appBundleName)
     result.add('\x1d')
 
 proc composeDesiredResources*(profile: Profile; homeDir: string;
@@ -1399,11 +1507,50 @@ proc resolveProfileFromOpts(opts: ApplyOptions): Profile =
     if p.path.len == 0:
       p.path = opts.profilePath
     return p
-  loadProfileOrRaise(opts.profilePath)
+  result = loadProfileOrRaise(opts.profilePath)
+  # GM4: this fallback reads `home.nim` as TEXT; it does not run the
+  # compile-then-adapt step that reads and expands plan-time data files
+  # (`expandedHomeProfile`). Planning without the rows would apply a
+  # profile with part of its declaration silently missing, so refuse
+  # (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped).
+  if result.dataFileRefs.len > 0:
+    raiseIntentLoad(opts.profilePath, "the profile declares plan-time data " &
+      "files (" & result.dataFileRefs.join(", ") & "), which this apply " &
+      "path cannot expand: it reads home.nim as text instead of compiling " &
+      "it. Use `repro home apply` on the host itself")
+
+proc profileIntentSnapshot*(profileDir: string; profile: Profile):
+    IntentSnapshot =
+  ## The generation's intent snapshot: the profile's source files plus
+  ## (GM4) the plan-time data files the planner expanded for `profile`, with
+  ## the exact bytes it read (`Profile.loadedDataFiles`). Recording the data
+  ## here puts it in the generation id and keeps it with the generation, so
+  ## rollback and `repro home history` never consult the live file. The
+  ## one constructor for both the plan preview and the apply.
+  ##
+  ## The source files are the top-level `*.nim` files plus everything under
+  ## the profile directory the compile was observed reading
+  ## (`profileSourceFiles` over `Profile.compiledFrom`), so helper modules
+  ## imported from subdirectories are recorded too. A data file is recorded
+  ## once, with its data role.
+  var dataPaths = initHashSet[string]()
+  for f in profile.loadedDataFiles:
+    dataPaths.incl f.path.replace('\\', '/')
+  for e in profileSourceFiles(profileDir, profile.compiledFrom):
+    if e.path notin dataPaths:
+      result.files.add e
+  for f in profile.loadedDataFiles:
+    var bytes = newSeq[byte](f.content.len)
+    for i, ch in f.content:
+      bytes[i] = byte(ord(ch))
+    result.files.add IntentFileEntry(path: f.path, content: bytes,
+      role: ifrData)
+  result.schemaVersion = encodedVersion(result)
 
 proc deriveGenerationId(plan: ApplyPlan;
                         intentSnapshotDigest: Digest256;
-                        resourcesSeed: string = ""): GenerationId =
+                        resourcesSeed: string = "";
+                        selectionSeed: string = ""): GenerationId =
   ## Per the spec ("Generation Identity") the generation id is
   ## content-addressed over the resolved plan + intent snapshot +
   ## host identity. It explicitly does NOT include the activation
@@ -1423,6 +1570,15 @@ proc deriveGenerationId(plan: ApplyPlan;
   for b in intentSnapshotDigest: buf.add(b)
   for ch in plan.hostIdentity: buf.add(byte(ord(ch)))
   for ch in resourcesSeed: buf.add(byte(ord(ch)))
+  # GM4b: what each package reference SELECTED (kind + lock identity) is
+  # part of the resolved plan. Without it a generation whose profile text is
+  # unchanged would be a no-op even when the selection moved — a new
+  # realization offered, a PATH executable replaced, a lock re-derived —
+  # and the moved selection would never be realized. Appended only when
+  # non-empty, so a package-less profile keeps the id it had.
+  if selectionSeed.len > 0:
+    for ch in "\x00selections:": buf.add(byte(ord(ch)))
+    for ch in selectionSeed: buf.add(byte(ord(ch)))
   let full = blake3.digest(buf)
   for i in 0 ..< GenerationIdSize:
     result[i] = full[i]
@@ -1476,6 +1632,26 @@ proc parseTwoPartIdentity(resourceId, prefix: string): tuple[a, b: string] =
 # ---------------------------------------------------------------------------
 # No-op verification
 # ---------------------------------------------------------------------------
+
+const DeferredPayloadMark = "+deferred"
+  ## Appended to a recorded binding's `payloadKind` when the apply deferred
+  ## a change to it because the live object was in use (a running
+  ## application). The bytes and digests are the live object's, as for any
+  ## no-op; the mark only stops the next apply's no-op short-circuit, which
+  ## would otherwise find the record matching the live object and never
+  ## make the change the profile asks for.
+
+proc isDeferredMarked(payloadKind: string): bool =
+  payloadKind.endsWith(DeferredPayloadMark)
+
+proc withoutDeferredMark(payloadKind: string): string =
+  if isDeferredMarked(payloadKind):
+    payloadKind[0 ..< payloadKind.len - DeferredPayloadMark.len]
+  else:
+    payloadKind
+
+proc withDeferredMark(payloadKind: string): string =
+  withoutDeferredMark(payloadKind) & DeferredPayloadMark
 
 proc verifyManifestDigests(stateDir: string; store: var Store;
                            activeGenIdHex, homeDir: string;
@@ -1658,6 +1834,20 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
                   encodedVersion.add(char(rb.payloadBytes[j]))
               break
           live = observeHomebrewCask(caskName, encodedVersion)
+      of rkMacosAppBundle:
+        # GM4c: the placed bundle still carries the recorded identity --
+        # or its vendor's own update of it, which is not drift
+        # (Store-And-Installation-Layout.md § macOS Application Bundles,
+        # "Vendor updates"). A record whose change was deferred (the
+        # application was running) is owed a change: never a no-op.
+        if isDeferredMarked(rb.payloadKind):
+          return false
+        live = observeAppBundleAt(rb.realWorldIdentity)
+        if live.present and live.digest != recordedDigest and
+            isAcceptedVendorUpdate(rb.payloadBytes, live.rawBytes,
+              rb.realWorldIdentity):
+          inc outVerified
+          continue
     except CatchableError:
       return false
     if not live.present:
@@ -1671,30 +1861,63 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
 # M72 Deliverable 2: `repro home apply --plan` dry-run
 # ---------------------------------------------------------------------------
 
+proc bindingOfLiveObject(address: string; desired: Resource;
+                         observed: ObservedState): ResourceBinding =
+  ## The binding that records a live object as it is, without a driver
+  ## write: pre- == post-write == the observation. Used by `repro home
+  ## adopt` (an existing object claimed) and by a first apply whose object
+  ## already holds the declared state.
+  let payloadKind =
+    case desired.kind
+    of rkWindowsRegistryValue: $desired.registryPayload.kind
+    of rkEnvUserVariable: $desired.envVarPayload.kind
+    of rkEnvUserPath: "joined-entries"
+    of rkWindowsStartup: "string"
+    of rkShellIntegration: "shell-block"
+    of rkFsManagedBlock: "managed-block"
+    of rkLinuxGsettings: "gvariant-literal"
+    of rkSystemdUserUnit: "unit-content"
+    of rkMacosUserDefault: "defaults-literal"
+    of rkLaunchdUserAgent: "plist-content"
+    of rkFsUserFile: "user-file"
+    of rkVscodeExtension: "vscode-extensions"
+    of rkLinuxDconfKey: "gvariant-literal"
+    of rkLinuxKdeConfigKey: "kde-config-value"
+    of rkHomebrewFormula: "homebrew-formula-version"
+    of rkHomebrewCask: "homebrew-cask-version"
+    of rkMacosAppBundle: "app-bundle-identity"
+  toResourceBinding(address, desired.kind, realWorldIdentity(desired),
+    observed, observed.rawBytes, payloadKind, desired.lifecyclePolicy)
+
 proc previewStowItem(profileDir, homeDir: string;
-                     entry: StowEntry): PlanItem =
+                     entry: StowEntry;
+                     recordedStow: Table[string, GeneratedFile]): PlanItem =
   ## Read-only classification of one stow entry: would it create a
   ## link, cache-hit (target already correct), or hit a conflict
   ## (target exists as a regular file / wrong link)? Performs ONLY
-  ## reads — never touches the filesystem.
+  ## reads — never touches the filesystem. `recordedStow` is the current
+  ## generation's stow records by target path: a target that is still the
+  ## link (or copy) recorded there from another source is replaced, as the
+  ## apply does (`stow.isRecordedStowTarget`).
   result.category = "stow"
   result.name = entry.targetAbsolutePath
   let target = entry.targetAbsolutePath
   let source = entry.sourceAbsolutePath
+  if target in recordedStow and
+      isRecordedStowTarget(target, source, recordedStow[target]):
+    result.action = piaLink
+    result.detail = "would replace what the current generation " &
+      "recorded (-> " & recordedStow[target].stowSource & ") with -> " & source
+    return
   if not fileExists(extendedPath(target)) and not symlinkExists(extendedPath(target)) and
      not dirExists(extendedPath(target)):
     result.action = piaLink
     result.detail = "would link -> " & source
     return
   if symlinkExists(extendedPath(target)):
-    # Compare by file identity (robust across Windows reparse-point
-    # resolution quirks) — the same check the materializer uses.
-    var pointsAtSource = false
-    try:
-      pointsAtSource = fileExists(extendedPath(source)) and sameFile(target, source)
-    except OSError, IOError:
-      pointsAtSource = false
-    if pointsAtSource:
+    # The materializer's own predicate (`stow.linkPointsAtSource`): file
+    # identity, else the link's text when the link cannot be followed.
+    if linkPointsAtSource(target, source):
       result.action = piaCacheHit
       result.detail = "already correct link"
     elif stowTargetMatchesSource(target, source):
@@ -1706,12 +1929,10 @@ proc previewStowItem(profileDir, homeDir: string;
       result.detail = "existing link's resolved content is byte-identical " &
         "to the stow source"
     else:
-      var resolved = ""
-      try: resolved = expandSymlink(extendedPath(target))
-      except OSError: resolved = ""
+      let pointsAt = readLinkTargetBestEffort(target)
       result.action = piaConflictDrift
       result.detail = "existing symlink points at a different source (" &
-        resolved & ")"
+        (if pointsAt.len > 0: pointsAt else: "target unreadable") & ")"
     return
   # A regular file (or directory) at the target path.
   if fileExists(extendedPath(target)):
@@ -1728,6 +1949,495 @@ proc previewStowItem(profileDir, homeDir: string;
     result.action = piaConflictDrift
     result.detail = "a directory occupies the stow file's target path"
 
+# ---------------------------------------------------------------------------
+# GM4b: package resolution context, selection seed, home-profile lock
+# ---------------------------------------------------------------------------
+
+proc targetIsThisHost(opts: ApplyOptions): bool =
+  ## Whether the apply's target is the machine running it — the condition
+  ## for consulting the host inventory (PATH, Scoop). A profile evaluated
+  ## for another host (``--host`` remote apply, a bundle built for a
+  ## different platform) must not resolve against this machine's PATH.
+  let here = currentHostContext()
+  opts.host == currentHost() and
+    opts.targetContext.platform == here.platform and
+    opts.targetContext.arch == here.arch
+
+proc packageResolutionCatalog(opts: ApplyOptions; plan: ApplyPlan):
+    ProfileCatalog =
+  ## The catalog definitions the plan's references resolve against.
+  # Provisioning-Contributions.md §"Profile Package References": a name the
+  # `reprobuild-packages` catalog defines is projected the way a recipe
+  # beside the profile would project its `uses:` (`catalog_projection`).
+  var names: seq[string] = @[]
+  for p in plan.packages:
+    names.add(p.packageId)
+  # A profile's `catalogs:` section imports contribution catalogs into the
+  # same projection, as a recipe's `import` does.
+  projectCatalogPackages(names, opts.profilePath,
+    opts.stateDir / "catalog-projection", plan.catalogImports)
+
+proc packageResolutionContext(opts: ApplyOptions; plan: ApplyPlan;
+                              catalog: ProfileCatalog):
+    ProfileResolutionContext =
+  ## The one resolution context of an apply: target and policy from the
+  ## options and the profile, the lock from beside the profile. ``--plan``
+  ## and apply build it the same way, so they select the same realizations.
+  let lock = readHomeProfileLock(homeProfileLockPath(opts.profileDir))
+  profileResolutionContext(plan.adapterPreference,
+    opts.targetContext.platform, opts.targetContext.arch,
+    targetIsThisHost(opts), lock, opts.relock, catalog)
+
+proc ownedAppBundleAddresses(stateDir: string; store: var Store;
+                             activeGenIdHex: string): HashSet[string] =
+  ## GM4c: the `macos.appBundle` addresses the active generation placed and
+  ## still owns (a binding with a non-zero post-write digest). Empty when
+  ## there is no active generation or its manifest cannot be read, which
+  ## errs towards refusing to replace anything.
+  if activeGenIdHex.len == 0:
+    return
+  let pointerFile = pointerPath(stateDir, activeGenIdHex)
+  if not fileExists(extendedPath(pointerFile)):
+    return
+  try:
+    let envelope = readPointerFile(pointerFile)
+    var key: PrefixIdBytes
+    for i in 0 ..< 32:
+      key[i] = envelope.activationManifestDigest[i]
+    let manifest = decodeManifestBytes(readCasBlob(store, key))
+    for rb in manifest.resourceBindings:
+      if rb.resourceKind == $rkMacosAppBundle and
+          not isZeroDigest(rb.postWriteDigest):
+        result.incl(rb.resourceAddress)
+  except CatchableError:
+    discard
+
+# ---------------------------------------------------------------------------
+# GM7: concern-scoped apply (Gradual-Nix-To-Reprobuild-Migration.md
+# §Concern-scoped apply)
+# ---------------------------------------------------------------------------
+
+proc placesApplication*(pp: PackagePreview): bool =
+  ## Whether the realization selected for a package reference places an
+  ## application: an `app-bundle` record, or a macOS installer application
+  ## (Store-And-Installation-Layout.md § macOS Application Bundles,
+  ## § Installer applications). The ONE test for the `applications` concern
+  ## of a package: the plan's app-bundle section, the apply's realization
+  ## filter and its activation all derive from it.
+  ##
+  ## The install shape alone decides it, not ``archiveRoute``: every tarball
+  ## record is realized by the shared provisioning edge (``arExtract``), so
+  ## the route no longer distinguishes an application from a plain archive.
+  pp.resolved and pp.resolution.selection.kind == rkTarball and
+    (pp.resolution.archive.installMethod == imAppBundle or
+     isMacosInstallerApp(pp.resolution.archive))
+
+proc addApplicationCommands*(plan: var ApplyPlan;
+                             previews: seq[PackagePreview]) =
+  ## Add a launcher for every command an application package's selected
+  ## record declares (``extraExecutable``), and refuse what the plan cannot
+  ## honour, before anything is realized (Store-And-Installation-Layout.md
+  ## § macOS Application Bundles, "Command line"):
+  ##
+  ## * a declared command path that is not inside the placed bundle
+  ##   (reason ``command-path``);
+  ## * a ``binaries`` name the profile gives an application reference that
+  ##   its record does not provide (reason ``undeclared-binary``) -- the
+  ##   name used to be read only as a PATH probe and silently dropped once
+  ##   an application was selected (Core-Invariants.md §Unrecognised Input
+  ##   Is Rejected, Not Skipped);
+  ## * two packages exporting the same command (``command-collision``).
+  ##
+  ## Called by ``--plan`` and by the apply, after resolution and before the
+  ## generation id is derived, so the commands are part of the plan bytes
+  ## and the preview lists what the apply writes.
+  var planned = initTable[string, PlannedPackage]()
+  for p in plan.packages:
+    planned[p.packageId] = p
+  for pp in previews:
+    if not placesApplication(pp):
+      continue
+    let archive = pp.resolution.archive
+    let realization =
+      if pp.resolution.selection.lockIdentity.len > 0:
+        pp.resolution.selection.lockIdentity
+      else: archive.urlUsed
+    var provided = @[pp.packageId]
+    for rel in applicationCommandPaths(archive):
+      let problem = applicationCommandPathError(archive, rel)
+      let name = commandNameOf(rel)
+      if problem.len > 0:
+        raisePackageCommandRefused(pp.packageId, name, realization,
+          "command-path", "", "the realization " & realization &
+          " declares the command " & rel.escape & "; " & problem)
+      provided.add(name)
+      if name == pp.packageId:
+        # The declared command and the package launcher share a name: the
+        # declared command is what that name runs.
+        for l in plan.launchers.mitems:
+          if l.fromPackageId == pp.packageId and l.commandName == name:
+            l.executableRelPath = rel
+        continue
+      plan.launchers.add(PlannedLauncher(commandName: name,
+        fromPackageId: pp.packageId, executableRelPath: rel))
+    if pp.packageId in planned:
+      for binary in planned[pp.packageId].binaries:
+        if binary notin provided:
+          raisePackageCommandRefused(pp.packageId, binary, realization,
+            "undeclared-binary", "", "the profile declares binaries " &
+            "containing '" & binary & "', but the selected realization " &
+            realization & " places an application that provides only " &
+            provided.join(", ") & ". Declare the command on the " &
+            "application record (extraExecutable = \"<Name>.app/...\") " &
+            "or remove it from binaries")
+  var owner = initTable[string, string]()
+  for l in plan.launchers:
+    if l.commandName in owner and owner[l.commandName] != l.fromPackageId:
+      raisePackageCommandRefused(l.fromPackageId, l.commandName, "",
+        "command-collision", owner[l.commandName], "the command '" &
+        l.commandName & "' is exported by package " & owner[l.commandName] &
+        " and by package " & l.fromPackageId & "; a home profile bin " &
+        "directory can hold only one")
+    owner[l.commandName] = l.fromPackageId
+  plan.launchers.sort(proc(a, b: PlannedLauncher): int =
+    cmp(a.commandName, b.commandName))
+
+proc packageConcern*(pp: PackagePreview): HomeConcern =
+  ## A package reference's concern: `applications` when its selected
+  ## realization places an application, `packages` otherwise — including a
+  ## reference with no realization, which has no install shape to call an
+  ## application.
+  if placesApplication(pp): hcApplications else: hcPackages
+
+proc packageClassificationKey*(name, version: string): string =
+  ## The key a package reference is classified under (`concerns.packages` of
+  ## `repro home export`, and the evaluation's `name` / `version`): the name,
+  ## or `name@version` for a reference that pins a version, since a pinned
+  ## version may select a different realization.
+  if version.len == 0: name else: name & "@" & version
+
+type
+  PackageClassification* = object
+    ## Reprobuild's package classification for ONE target platform, as
+    ## `repro home export` publishes it (`concerns.packages.<system>`;
+    ## Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply, "The
+    ## per-package split comes from Reprobuild"). Keys are
+    ## `packageClassificationKey`s. A reference in neither set selects a
+    ## realization that places no application.
+    applications*: HashSet[string]
+      ## References whose selection places an application (`applications`).
+    unresolved*: HashSet[string]
+      ## References that resolve to nothing for the target (`packages`, as
+      ## a reference with no realization always is).
+    unknownDefinitions*: HashSet[string]
+      ## The subset of `unresolved` no package definition this repro can
+      ## see names at all: a catalog it could not reach might define them,
+      ## possibly as applications.
+
+proc concernOf*(classification: PackageClassification; key: string):
+    HomeConcern =
+  if key in classification.applications: hcApplications else: hcPackages
+
+proc profilePackageReferences*(profile: Profile): seq[PlannedPackage] =
+  ## Every package reference of every activity of `profile`, whichever host
+  ## enables the activity and whichever platform its guard selects -- once
+  ## per `packageClassificationKey`, with the first occurrence's binaries.
+  ## The classification an export publishes covers all of them, so a
+  ## consumer evaluating any host for any platform finds its packages there.
+  var seen = initHashSet[string]()
+  proc add(outp: var seq[PlannedPackage]; node: IntentNode;
+           activity: string) =
+    let key = packageClassificationKey(node.packageName, node.packageVersion)
+    if key notin seen:
+      seen.incl key
+      outp.add PlannedPackage(packageId: node.packageName,
+        fromActivity: activity, requestedVersion: node.packageVersion,
+        binaries: node.packageBinaries)
+  proc walk(outp: var seq[PlannedPackage]; body: seq[IntentNode];
+            activity: string) =
+    # Guards nest (the planner conjoins them, `plan.packageOriginsFromBody`),
+    # so a reference at any depth is one some host and platform may plan.
+    for node in body:
+      case node.kind
+      of nkPackageRef:
+        outp.add(node, activity)
+      of nkCondBlock:
+        outp.walk(node.condChildren, activity)
+      else:
+        discard
+  for child in profile.root.children:
+    if child.kind != nkActivity:
+      continue
+    result.walk(child.activityChildren, child.activityName)
+
+proc classifyPackages*(references: seq[PlannedPackage];
+                       adapterPreference: OrderedTable[string, seq[string]];
+                       platform, arch: string;
+                       catalog: ProfileCatalog): PackageClassification =
+  ## THE package classification `repro home export` publishes for one
+  ## target: each reference resolved as the planner resolves it for a target
+  ## that is not the host, without its local lock -- the profile's policy
+  ## and catalog only. A shared document cannot depend on the host-local
+  ## `home.lock`, `PATH` or Scoop inventory. The selection is classified by
+  ## `packageConcern`. `repro home apply` on a host that splits `packages`
+  ## from `applications` computes it too and refuses when its own selection
+  ## disagrees (`refuseClassificationDisagreement`).
+  # Preview retains failures as per-package diagnostics for a plan. A
+  # classification publishes ownership, so it cannot turn a failed catalog
+  # projection into an ordinary missing realization and guess its concern.
+  for reference in references:
+    if reference.packageId in catalog.failures:
+      raise newException(ValueError, "cannot classify package '" &
+        reference.packageId & "': " & catalog.failures[reference.packageId])
+  let ctx = profileResolutionContext(adapterPreference, platform, arch,
+    false, catalog = catalog)
+  let previews = previewPackageResolutions(references, ctx)
+  for i, pp in previews:
+    let key = packageClassificationKey(references[i].packageId,
+      references[i].requestedVersion)
+    if packageConcern(pp) == hcApplications:
+      result.applications.incl key
+    elif pp.kind == ppkMissing:
+      result.unresolved.incl key
+      if pp.unknownDefinition:
+        result.unknownDefinitions.incl key
+
+proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
+                                      previews: seq[PackagePreview];
+                                      applied: AppliedConcerns;
+                                      catalog: ProfileCatalog) =
+  ## On a host whose declaration gives `packages` and `applications` to
+  ## different sides, the Nix side reads which package is an application
+  ## from the export (`classifyPackages`, made without the host-local lock
+  ## or inventory). Actual previews still honor the local lock, so a pin
+  ## that changes a package's concern must be checked as well.
+  ## A package this host's selection puts in the other concern would then be
+  ## applied by neither side (or by both): refuse, naming it and the remedy.
+  ## A host that keeps both concerns on one side never consults it.
+  if not applied.declared or
+      (hcPackages in applied.concerns) == (hcApplications in applied.concerns):
+    return
+  let exported = classifyPackages(plan.packages, plan.adapterPreference,
+    opts.targetContext.platform, opts.targetContext.arch, catalog)
+  var problems: seq[string]
+  for i, pp in previews:
+    let key = packageClassificationKey(plan.packages[i].packageId,
+      plan.packages[i].requestedVersion)
+    let here = packageConcern(pp)
+    let there = exported.concernOf(key)
+    if here != there:
+      problems.add pp.packageId & " is `" & $here & "` by this host's " &
+        "selection (" & pp.detail & ") but `" & $there & "` by the " &
+        "selection `repro home export` publishes, which cannot consult this " &
+        "host's home.lock, PATH or Scoop inventory"
+  if problems.len > 0:
+    raisePlanFailed("hosts." & opts.host & ".applies gives `packages` and " &
+      "`applications` to different tools, and the Nix side reads which " &
+      "package is an application from `repro home export`; " &
+      problems.join("; ") & ". Order `adapterPreference` so that a " &
+      "host-inventory kind (path, scoop) does not precede the application's " &
+      "realization; inspect the current catalog and use `--relock` to " &
+      "replace a differing local pin, or give both concerns to the same side")
+
+proc concernSeed(applied: AppliedConcerns): string =
+  ## The generation-id contribution of a concern declaration: the applied
+  ## set, so narrowing or widening it is a new generation. Empty without a
+  ## declaration, so the ids of undeclared profiles are unchanged.
+  if applied.declared:
+    "\x00concerns:" & concernNames(applied.concerns).join(",")
+  else:
+    ""
+
+proc readGenerationManifest(stateDir: string; store: var Store;
+                            generationIdHex: string): Option[ActivationManifest] =
+  ## The activation manifest of a generation, or none when there is no such
+  ## generation or its manifest cannot be read.
+  if generationIdHex.len == 0:
+    return none(ActivationManifest)
+  let pointerFile = pointerPath(stateDir, generationIdHex)
+  if not fileExists(extendedPath(pointerFile)):
+    return none(ActivationManifest)
+  try:
+    let envelope = readPointerFile(pointerFile)
+    var key: PrefixIdBytes
+    for i in 0 ..< 32:
+      key[i] = envelope.activationManifestDigest[i]
+    some(decodeManifestBytes(readCasBlob(store, key)))
+  except CatchableError:
+    none(ActivationManifest)
+
+type
+  ReleasedRecord* = object
+    ## A record of the previous generation in a concern the new apply does
+    ## not own: released, not removed.
+    category*: string    ## "generated-file" | "managed-block" | "resource"
+    name*: string        ## path, `<file>#<block>`, or resource address
+    concern*: HomeConcern
+
+proc releasedRecordsOf*(manifest: ActivationManifest;
+                        owned: ConcernSet): seq[ReleasedRecord] =
+  ## What `manifest` recorded in concerns outside `owned`, classified by
+  ## the one classification (`repro_home_resources/concerns`). Launchers are
+  ## not listed: they live in the generation's own bin directory, not in the
+  ## home, and follow the generation.
+  if GeneratedFileConcern notin owned:
+    for gf in manifest.generatedFiles:
+      result.add ReleasedRecord(category: "generated-file",
+        name: gf.absoluteOutputPath, concern: GeneratedFileConcern)
+  if ManagedBlockRecordConcern notin owned:
+    for mb in manifest.managedBlocks:
+      result.add ReleasedRecord(category: "managed-block",
+        name: mb.hostFilePath & "#" & mb.blockId,
+        concern: ManagedBlockRecordConcern)
+  let apps = applicationPackagesOf(manifest)
+  for rb in manifest.resourceBindings:
+    if rb.resourceKind.len == 0 or isZeroDigest(rb.postWriteDigest):
+      # A V1 stub, or a record of a destroyed resource: nothing is placed.
+      continue
+    let concern = concernOfBinding(rb, apps)
+    if concern notin owned:
+      result.add ReleasedRecord(category: "resource",
+        name: rb.resourceAddress, concern: concern)
+
+proc selectionSeedOf(previews: seq[PackagePreview]): string =
+  ## Canonical bytes of what every reference selected, for the generation
+  ## id (``deriveGenerationId``). Test-seam bindings contribute their
+  ## detail text; an unresolved reference its failure.
+  for pv in previews:
+    result.add(pv.packageId & "\x1f")
+    if pv.resolved:
+      let selection = pv.resolution.selection
+      result.add($selection.kind & "\x1f" & selection.lockIdentity)
+    else:
+      result.add($pv.kind & "\x1f" & pv.detail)
+    result.add("\n")
+
+proc lockRecordOf(ctx: ProfileResolutionContext;
+                  previews: seq[PackagePreview]): HomeLockTarget =
+  result = HomeLockTarget(target: describeTarget(ctx.target),
+    policy: ctx.policy, policySource: ctx.policySource)
+  for pv in previews:
+    if not pv.resolved:
+      continue
+    let selection = pv.resolution.selection
+    result.packages.add(HomeLockSelection(package: pv.packageId,
+      kind: selection.kind, contributor: selection.contributor,
+      version: selection.version, lockIdentity: selection.lockIdentity,
+      ambient: selection.ambient))
+
+proc recordSelectionsInLock(opts: ApplyOptions;
+                            ctx: ProfileResolutionContext;
+                            previews: seq[PackagePreview]) =
+  ## Serialise this apply's selections into ``home.lock`` beside the
+  ## profile (Provisioning-Contributions.md §"The home-profile lock"): the
+  ## record of this target is replaced, every other target's record is
+  ## carried forward. Written only when it changes, so an unchanged apply
+  ## does not touch the profile directory.
+  let path = homeProfileLockPath(opts.profileDir)
+  let existing = readHomeProfileLock(path)
+  let base =
+    if existing.isSome: existing.get
+    else: HomeProfileLock(schema: HomeProfileLockSchemaV1)
+  let updated = base.withTarget(lockRecordOf(ctx, previews))
+  if existing.isSome and serializeHomeProfileLock(existing.get) ==
+      serializeHomeProfileLock(updated):
+    return
+  writeHomeProfileLock(path, updated)
+
+type
+  ProfileSelections* = object
+    ## Every package reference of a profile, resolved for one target —
+    ## what ``--plan`` prints and what an apply realizes and locks.
+    target*: string
+      ## ``describeTarget`` spelling, e.g. ``aarch64-macos``.
+    policy*: SelectionPolicy
+    policySource*: string
+    previews*: seq[PackagePreview]
+
+proc resolveProfileSelections*(rawOpts: ApplyOptions): ProfileSelections =
+  ## Resolve every package reference of the profile ``rawOpts`` names, for
+  ## its target, exactly as ``--plan`` and apply do — load intent, build the
+  ## plan, build the resolution context (lock included), select. Mutates
+  ## nothing. The library entry point for callers that need the selections
+  ## themselves (kind, contributor, lock identity) rather than plan text.
+  let opts = resolveOptions(rawOpts)
+  if not fileExists(extendedPath(opts.profilePath)):
+    raiseIntentLoad(opts.profilePath,
+      "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
+  let profile = resolveProfileFromOpts(opts)
+  let applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
+  let ctx = packageResolutionContext(opts, applyPlan,
+    packageResolutionCatalog(opts, applyPlan))
+  result.target = describeTarget(ctx.target)
+  result.policy = ctx.policy
+  result.policySource = ctx.policySource
+  result.previews = previewPackageResolutions(applyPlan.packages, ctx)
+
+type
+  PlannedDesiredState* = object
+    ## The desired state of a home, as the planning half of the apply
+    ## computes it: what `repro home apply --plan` previews and what the
+    ## host-facts producer (`host_facts.collectHostFacts`) reports. One
+    ## constructor, `planDesiredState`, so the two can never plan
+    ## differently.
+    options*: ApplyOptions          ## the resolved options
+    profile*: Profile
+    plan*: ApplyPlan                ## packages, and every planned file
+                                    ## (synthetic + stow, after stow
+                                    ## shadowing) in `plan.generatedFiles`
+    stowDiscovery*: StowDiscovery
+    desiredResources*: DesiredSet   ## the composed `resources:` set,
+                                    ## topologically ordered
+    applied*: AppliedConcerns       ## the concerns an apply executes on
+                                    ## the host; the planned state above
+                                    ## always covers EVERY concern (host
+                                    ## facts describe them all)
+
+proc planDesiredState*(rawOpts: ApplyOptions): PlannedDesiredState =
+  ## Steps 2 and 4 of the apply (load intent, build the plan, stow
+  ## discovery and shadowing) plus the composed desired resource set, for
+  ## the host and target platform in `rawOpts`. Performs only reads: no
+  ## store write, no generation, nothing under `homeDir` (stow discovery
+  ## reads the profile's `stow/` tree; target paths are computed, not
+  ## touched). Raises what the apply raises for an intent that cannot be
+  ## planned (`EApplyIntentLoad`, `EHomePlanCyclicDependency`, ...).
+  let opts = resolveOptions(rawOpts)
+  result.options = opts
+  if not fileExists(extendedPath(opts.profilePath)):
+    raiseIntentLoad(opts.profilePath,
+      "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
+  result.profile = resolveProfileFromOpts(opts)
+  result.plan = buildPlan(result.profile, opts.profileDir, opts.targetContext)
+  var packageIds: seq[string]
+  for p in result.plan.packages:
+    packageIds.add(p.packageId)
+  let synthetic = parseSyntheticPackageGenerates(opts.homeDir, packageIds,
+    result.plan.configContributions)
+  for s in synthetic:
+    result.plan.generatedFiles.add(s)
+  # GM11: only the stow packages this host gets (activity-scoped claims).
+  result.stowDiscovery = selectStowEntries(
+    discoverStowEntries(opts.profileDir, opts.homeDir), result.profile,
+    opts.targetContext)
+  # Two packages on one path: refused before anything is written.
+  refuseStowPackagesOnOnePath(result.stowDiscovery.entries)
+  if result.stowDiscovery.entries.len > 0:
+    for sp in stowEntriesToPlanned(result.stowDiscovery.entries):
+      result.plan.generatedFiles.add(sp)
+  let suppressed = suppressStowShadowed(result.plan.generatedFiles,
+    result.plan.configContributions)
+  result.plan.generatedFiles = suppressed.files
+  result.desiredResources = composeDesiredResources(result.profile,
+    opts.homeDir, opts.targetContext)
+  # A stow file and an `fs.userFile` on one path: one writer when they
+  # agree, refused when they do not (`resolveStowResourceOverlap`).
+  let overlap = resolveStowResourceOverlap(result.plan.generatedFiles,
+    result.stowDiscovery.entries, result.desiredResources, opts.profileDir,
+    opts.homeDir, opts.targetContext.platform)
+  result.plan.generatedFiles = overlap.files
+  result.stowDiscovery.entries = overlap.stowEntries
+  result.applied = appliedConcernsFor(result.profile, opts.host)
+
 proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   ## M72 Deliverable 2: `repro home apply --plan`. A NON-MUTATING
   ## preview of the FULL apply. Runs the planning half of the pipeline
@@ -1740,95 +2450,156 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   ##
   ## Mutates NOTHING: no store writes, no generation written, no
   ## `current` rotation, no file/registry writes, no `scoop install`.
-  ## The package-catalog query (`scoop list`, bucket-manifest reads)
-  ## is a READ and is allowed; `scoop install` is not — the planner
-  ## calls `resolvePackage` (a pure query), never `realizeScoopAdapter`.
+  ## Package resolution (PATH probes, `scoop list`, bucket-manifest reads)
+  ## is a READ and is allowed; `scoop install` is not — the planner calls
+  ## `previewPackageResolutions` (a pure query), never a realizer, and
+  ## reads the home-profile lock without writing it.
   ##
   ## The apply lock is intentionally NOT acquired: a read-only plan
   ## must never block a concurrent real apply.
   let opts = resolveOptions(rawOpts)
   ensureStateDir(opts.stateDir)
 
-  # ---- Step 2: load intent ----------------------------------------------
-  if not fileExists(extendedPath(opts.profilePath)):
-    raiseIntentLoad(opts.profilePath,
-      "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
-  let profile = resolveProfileFromOpts(opts)
-
-  # ---- Step 4: build plan + synthetic seams + stow discovery ------------
-  var applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
+  # ---- Steps 2 and 4: load intent, build plan + synthetic seams + stow
+  # discovery (`planDesiredState`, shared with the host-facts producer) --
+  let state = planDesiredState(opts)
+  let profile = state.profile
+  var applyPlan = state.plan
+  let stowDiscovery = state.stowDiscovery
+  let stowEntries = stowDiscovery.entries
   var packageIds: seq[string]
   for p in applyPlan.packages:
     packageIds.add(p.packageId)
-  let synthetic = parseSyntheticPackageGenerates(opts.homeDir, packageIds,
-    applyPlan.configContributions)
-  for s in synthetic:
-    applyPlan.generatedFiles.add(s)
-  let stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
-  let stowEntries = stowDiscovery.entries
-  if stowEntries.len > 0:
-    let stowPlanned = stowEntriesToPlanned(stowEntries)
-    for sp in stowPlanned:
-      applyPlan.generatedFiles.add(sp)
-  let suppressed = suppressStowShadowed(applyPlan.generatedFiles,
-    applyPlan.configContributions)
-  applyPlan.generatedFiles = suppressed.files
 
   # ---- Step 6: derive generation id + no-op detection -------------------
-  let intentSnapshot = IntentSnapshot(schemaVersion: 1'u16,
-    files: defaultWalkProfileFiles(opts.profileDir))
+  let intentSnapshot = profileIntentSnapshot(opts.profileDir, profile)
   let snapshotBytes = encodeSnapshot(intentSnapshot)
   let snapshotDig = digestOf(snapshotBytes)
   # M78: the generation-id resource seed is the composed desired set
   # (profile `resources:` block + `REPRO_TEST_RESOURCES` override),
   # so a change to a profile-declared resource produces a distinct id.
-  let resourcesSeed = resourceSeedString(
-    composeDesiredResources(profile, opts.homeDir, opts.targetContext))
-  let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed)
+  let applied = state.applied
+  result.host = opts.host
+  result.applied = applied
+  let owned = applied.concerns
+  # GM7: the applied concern set is part of the generation id (empty seed
+  # without a declaration).
+  let resourcesSeed = resourceSeedString(state.desiredResources) &
+    concernSeed(applied)
+  # GM4b: resolve every package reference first — the selections are part
+  # of the generation id. Resolution is static metadata plus host-inventory
+  # READS (PATH, `scoop list`, bucket manifests); nothing is realized and the
+  # home-profile lock is read, never written.
+  let catalog = packageResolutionCatalog(opts, applyPlan)
+  let resolutionCtx = packageResolutionContext(opts, applyPlan, catalog)
+  let packagePreviews = previewPackageResolutions(applyPlan.packages,
+    resolutionCtx)
+  addApplicationCommands(applyPlan, packagePreviews)
+  # GM7: on a host that splits `packages` from `applications`, the Nix side
+  # reads the export's classification; refuse a package this host would put
+  # in the other concern.
+  refuseClassificationDisagreement(opts, applyPlan, packagePreviews, applied,
+    catalog)
+  let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed,
+    selectionSeedOf(packagePreviews))
   result.generationIdHex = generationIdHex(candidateId)
   let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
 
-  # ---- Package preview: production catalog resolution (READ ONLY) -------
-  # The catalog query (scoop list / bucket manifests) is a read; the
-  # preview never calls `realizeScoopAdapter`, so no `scoop install`
-  # runs. `previewPackageResolutions` lives in `realize.nim` so the
-  # preview and the real dispatch share one resolution path.
-  #
-  # M2.5: resolve the per-host adapter chain from the parsed profile's
-  # `adapterPreference:` block (empty -> M65 platform default). Threaded
-  # into both the preview and the realize call sites so PLAN and apply
-  # report the same per-adapter verdict.
-  let previewAdapterChain = resolveAdapterChainFor(
-    applyPlan.adapterPreference, currentHostOsKey())
-  for pp in previewPackageResolutions(applyPlan.packages,
-      chain = previewAdapterChain):
+  # ---- Package preview (READ ONLY) --------------------------------------
+  # The selections computed above, one plan line each. The same context
+  # resolves the real apply's packages, so the plan and the apply cannot
+  # select differently.
+  # GM7: a reference of a concern the host does not apply is shown, never
+  # realized, and never a failure -- a missing realization included.
+  var packageConcernOf = initTable[string, HomeConcern]()
+  for pp in packagePreviews:
+    let concern = packageConcern(pp)
+    packageConcernOf[pp.packageId] = concern
     var item = PlanItem(category: "package", name: pp.packageId,
-      detail: pp.detail)
+      detail: pp.detail, concern: concern, notApplied: concern notin owned)
     case pp.kind
     of ppkRealize: item.action = piaRealize
     of ppkCacheHit: item.action = piaCacheHit
     of ppkMissing:
       item.action = piaMissing
-      inc result.driftCount
+      if not item.notApplied:
+        inc result.driftCount
     result.items.add(item)
 
-  # ---- Stow preview -----------------------------------------------------
-  for entry in stowEntries:
-    let item = previewStowItem(opts.profileDir, opts.homeDir, entry)
-    if item.action == piaConflictDrift:
-      inc result.driftCount
-    result.items.add(item)
-  # M73: a file directly under `stow/` is not valid GNU `stow` layout
-  # — report it as a skipped stow item; it is not materialized.
-  for loose in stowDiscovery.looseFiles:
-    result.items.add(PlanItem(category: "stow",
-      name: StowSubdirName & "/" & loose,
-      action: piaSkip,
-      detail: "loose file directly under stow/ — not a GNU stow " &
-        "package; skipped (IStowLooseFile)"))
+  # ---- Application bundles (READ ONLY) ----------------------------------
+  # GM4c: a resolved application is placed in ~/Applications by the apply.
+  # The plan names the target and reports a path the active generation does
+  # not own, which the apply refuses to replace (Store-And-Installation-
+  # Layout.md § macOS Application Bundles, "Ownership"). Only for this host:
+  # another host's Applications directory is not readable from here.
+  # The resource preview below leaves these addresses to this section: they
+  # are synthesized from realized packages, which a plan does not realize.
+  var plannedAppAddresses: HashSet[string]
+  # A macOS installer application places the product its installer
+  # produced -- a bundle, or the folder holding it -- exactly as an
+  # `app-bundle` record places its bundle (§ Installer applications).
+  for pp in packagePreviews:
+    if placesApplication(pp):
+      plannedAppAddresses.incl(appBundleAddress(pp.packageId))
+  if not opts.recordOnlyGeneratedFiles and targetIsThisHost(opts):
+    var ownedApps: HashSet[string]
+    var ownedRead = false
+    for pp in packagePreviews:
+      if appBundleAddress(pp.packageId) notin plannedAppAddresses:
+        continue
+      if not ownedRead:
+        ownedRead = true
+        try:
+          var store = openStore(opts.storeRoot)
+          defer:
+            try: store.close() except CatchableError: discard
+          ownedApps = ownedAppBundleAddresses(opts.stateDir, store,
+            activeGenIdHex)
+        except CatchableError:
+          discard
+      let address = appBundleAddress(pp.packageId)
+      let target = applicationsDir(apsHome, opts.homeDir) /
+        appPlacedItem(pp.resolution.archive).item
+      var item = PlanItem(category: "app-bundle", name: target,
+        concern: hcApplications, notApplied: hcApplications notin owned)
+      let present = symlinkExists(target) or fileExists(target) or
+        dirExists(target)
+      if present and address notin ownedApps and
+          address notin opts.adoptAddresses:
+        item.action = piaConflictDrift
+        item.detail = "occupied by a bundle Reprobuild did not place; " &
+          "the apply refuses to replace it (remove it, or claim it with " &
+          "`repro home adopt " & address & "`)"
+        if not item.notApplied:
+          inc result.driftCount
+      elif present:
+        item.action = piaUpdate
+        let placedVersion = describeIdentityVersion(
+          observeAppBundleAt(target).rawBytes)
+        item.detail = "placed by the active generation (" & address &
+          (if placedVersion.len > 0: ", " & placedVersion & " there now"
+           else: "") &
+          "); re-placed when the realized bundle differs and is newer " &
+          "than a vendor update of it"
+        let pids = processesRunningFrom(target)
+        if pids.len > 0:
+          var ids: seq[string]
+          for pid in pids:
+            ids.add $pid
+          item.detail.add("; running (pid " & ids.join(", ") &
+            "): a replacement is deferred until it quits")
+      else:
+        item.action = piaCreate
+        item.detail = "would place " & pp.packageId & "'s verified bundle (" &
+          address & ")"
+      result.items.add(item)
 
-  # ---- Generated files / managed blocks / launchers preview -------------
+  # ---- The current generation's file records -----------------------------
+  # Read once, for the stow preview (a link the current generation recorded
+  # is its own, `stow.isRecordedStowTarget`) and the generated-file preview
+  # (cache-hit digests).
   var prevFileDigests = initTable[string, Digest256]()
+  var recordedStow = initTable[string, GeneratedFile]()
   if activeGenIdHex.len > 0:
     let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
     if fileExists(extendedPath(prevPointerFile)):
@@ -1844,13 +2615,38 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
         let prevManifest = decodeManifestBytes(prevBytes)
         for gf in prevManifest.generatedFiles:
           prevFileDigests[gf.absoluteOutputPath] = gf.postWriteDigest
+          if gf.ownershipPolicy in {gfoStowSymlink, gfoStowCopy}:
+            recordedStow[gf.absoluteOutputPath] = gf
       except CatchableError:
         discard
+
+  # ---- Stow preview -----------------------------------------------------
+  let filesApplied = GeneratedFileConcern in owned
+  for entry in stowEntries:
+    var item = previewStowItem(opts.profileDir, opts.homeDir, entry,
+      recordedStow)
+    item.concern = GeneratedFileConcern
+    item.notApplied = not filesApplied
+    if item.action == piaConflictDrift and filesApplied:
+      inc result.driftCount
+    result.items.add(item)
+  # M73: a file directly under `stow/` is not valid GNU `stow` layout
+  # — report it as a skipped stow item; it is not materialized.
+  for loose in stowDiscovery.looseFiles:
+    result.items.add(PlanItem(category: "stow",
+      name: StowSubdirName & "/" & loose,
+      concern: GeneratedFileConcern, notApplied: not filesApplied,
+      action: piaSkip,
+      detail: "loose file directly under stow/ — not a GNU stow " &
+        "package; skipped (IStowLooseFile)"))
+
+  # ---- Generated files / managed blocks / launchers preview -------------
   for g in applyPlan.generatedFiles:
     if g.sourceKind != pgfsPackageOutput:
       continue
     var item = PlanItem(category: "generated-file",
-      name: g.absoluteOutputPath)
+      name: g.absoluteOutputPath, concern: GeneratedFileConcern,
+      notApplied: not filesApplied)
     let candidateDigest = digestOf(g.contentBytes)
     if g.absoluteOutputPath in prevFileDigests and
        prevFileDigests[g.absoluteOutputPath] == candidateDigest and
@@ -1866,19 +2662,22 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   for mb in syntheticBlocks:
     result.items.add(PlanItem(category: "managed-block",
       name: mb.hostFilePath & "#" & mb.blockId,
+      concern: ManagedBlockRecordConcern,
+      notApplied: ManagedBlockRecordConcern notin owned,
       action: piaWrite,
       detail: "would materialize managed block"))
   for l in applyPlan.launchers:
+    let concern = packageConcernOf.getOrDefault(l.fromPackageId, hcPackages)
     result.items.add(PlanItem(category: "launcher",
       name: l.commandName,
+      concern: concern, notApplied: concern notin owned,
       action: piaWrite,
       detail: "launcher for package " & l.fromPackageId))
 
   # ---- Resource preview (reuses the M68 read-only planner) --------------
   # M78: the desired set is the profile's `resources:` block, with
   # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
-  let desiredResources = composeDesiredResources(profile, opts.homeDir,
-    opts.targetContext)
+  let desiredResources = state.desiredResources
   # M69 Phase C follow-up: defence-in-depth layer 1 — the SAME
   # pre-dispatch gate as `runApply`. The `--plan` path composes the
   # plan via `composePlan` -> `observeResource` -> the observe procs
@@ -1891,47 +2690,93 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     if validationErr.len > 0:
       raiseResourceDriver(addr1, $res.kind,
         "pre-dispatch validation", validationErr)
-  var recordedBindings = initOrderedTable[string, RecordedBinding]()
+  # GM7: the previous generation's records of a concern this host no longer
+  # applies are released (left in place, not recorded again), never
+  # destroyed; the rest feed the lifecycle as before.
+  var prevManifest = none(ActivationManifest)
   if activeGenIdHex.len > 0:
-    let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
-    if fileExists(extendedPath(prevPointerFile)):
-      try:
-        let prevEnv = readPointerFile(prevPointerFile)
-        var prevKey: PrefixIdBytes
-        for i in 0 ..< 32:
-          prevKey[i] = prevEnv.activationManifestDigest[i]
-        var store = openStore(opts.storeRoot)
-        defer:
-          try: store.close() except CatchableError: discard
-        let prevBytes = readCasBlob(store, prevKey)
-        let prevManifest = decodeManifestBytes(prevBytes)
-        for rb in prevManifest.resourceBindings:
-          if rb.resourceKind.len == 0: continue
-          recordedBindings[rb.resourceAddress] = toRecorded(rb)
-      except CatchableError:
-        discard
+    try:
+      var store = openStore(opts.storeRoot)
+      defer:
+        try: store.close() except CatchableError: discard
+      prevManifest = readGenerationManifest(opts.stateDir, store,
+        activeGenIdHex)
+    except CatchableError:
+      discard
+  var recordedBindings = initOrderedTable[string, RecordedBinding]()
+  var recordedConcern = initTable[string, HomeConcern]()
+  if prevManifest.isSome:
+    let apps = applicationPackagesOf(prevManifest.get)
+    for rb in prevManifest.get.resourceBindings:
+      if rb.resourceKind.len == 0: continue
+      let concern = concernOfBinding(rb, apps)
+      if concern notin owned:
+        continue
+      # GM4c: a placed application that is still planned is previewed in
+      # the app-bundle section; without its realized identity the
+      # resource planner would read it as destroyed.
+      if rb.resourceKind == $rkMacosAppBundle and
+          rb.resourceAddress in plannedAppAddresses:
+        continue
+      recordedBindings[rb.resourceAddress] = toRecorded(rb)
+      recordedConcern[rb.resourceAddress] = concern
+    for r in releasedRecordsOf(prevManifest.get, owned):
+      result.items.add(PlanItem(category: r.category, name: r.name,
+        action: piaRelease, concern: r.concern,
+        detail: "recorded by the active generation in concern `" &
+          $r.concern & "`, which " & opts.host & " no longer applies: " &
+          "left in place and no longer managed"))
+      inc result.releasedCount
+  var ownedDesired = initDesiredSet()
+  var otherDesired = initDesiredSet()
+  for address, res in desiredResources.resources:
+    if concernOfResourceKind(res.kind) in owned:
+      ownedDesired.resources[address] = res
+    else:
+      otherDesired.resources[address] = res
   let reconcilePolicy =
     if opts.reconcileStowDrift or getEnv(ReconcileDriftEnvVar) == "1" or
        getEnv(AcceptOverwriteEnvVar) == "1":
       rpReconcileDrift
     else:
       rpFailClosed
-  let resourcePlan = composePlan(desiredResources, recordedBindings,
-    DecisionOptions(reconcile: reconcilePolicy, enforcePreventDestroy: true))
-  for a in resourcePlan.actions:
-    var item = PlanItem(category: "resource", name: a.address)
-    case a.kind
-    of rakCreate: item.action = piaCreate
-    of rakUpdate: item.action = piaUpdate
-    of rakReplace: item.action = piaUpdate
-    of rakDestroy: item.action = piaDestroy
-    of rakNoOp: item.action = piaNoOp
-    of rakAdopt: item.action = piaNoOp
-    of rakDriftBlocked:
-      item.action = piaConflictDrift
-      inc result.driftCount
-    item.detail = a.summary
-    result.items.add(item)
+  proc addResourceItems(preview: var PlanPreview; plan: PlanReport;
+                        desired: DesiredSet; notApplied: bool) =
+    for a in plan.actions:
+      let concern =
+        if a.address in desired.resources:
+          concernOfResourceKind(desired.resources[a.address].kind)
+        else:
+          recordedConcern.getOrDefault(a.address, hcPackages)
+      var item = PlanItem(category: "resource", name: a.address,
+        concern: concern, notApplied: notApplied)
+      case a.kind
+      of rakCreate: item.action = piaCreate
+      of rakUpdate: item.action = piaUpdate
+      of rakReplace: item.action = piaUpdate
+      of rakDestroy: item.action = piaDestroy
+      of rakNoOp: item.action = piaNoOp
+      of rakAdopt: item.action = piaNoOp
+      of rakDriftBlocked:
+        item.action = piaConflictDrift
+        if not notApplied:
+          inc preview.driftCount
+      item.detail = a.summary
+      preview.items.add(item)
+  result.addResourceItems(composePlan(ownedDesired, recordedBindings,
+    DecisionOptions(reconcile: reconcilePolicy, enforcePreventDestroy: true)),
+    ownedDesired, notApplied = false)
+  if otherDesired.resources.len > 0:
+    # What the resources of the other concerns would do if this host applied
+    # them: against the live state, with no recorded binding (they are not
+    # this generation's). Observation only; nothing is executed.
+    result.addResourceItems(composePlan(otherDesired,
+      initOrderedTable[string, RecordedBinding](),
+      DecisionOptions(reconcile: reconcilePolicy,
+        enforcePreventDestroy: true)), otherDesired, notApplied = true)
+  for item in result.items:
+    if item.notApplied:
+      inc result.notAppliedCount
 
   # ---- No-op classification ---------------------------------------------
   result.isNoOp = activeGenIdHex.len > 0 and
@@ -1940,28 +2785,84 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
 proc renderPlanPreview*(preview: PlanPreview): string =
   ## Stable, line-oriented rendering of a `--plan` preview. The gate
   ## asserts on the category headers and the per-item action verbs.
+  ##
+  ## GM7: items of a concern the host does not apply are listed apart, after
+  ## the applied ones, under `not applied on <host>`; records released by a
+  ## narrowed concern set under `released`. Neither section exists for a
+  ## host that applies every concern and released nothing, so the rendering
+  ## of an undeclared profile is unchanged.
   result = "repro home apply --plan: " & $preview.items.len &
     " operation(s) previewed, " & $preview.driftCount & " drift(s)\n"
   result.add("  target generation: " & preview.generationIdHex & "\n")
+  if preview.applied.declared:
+    result.add("  concerns applied: " &
+      describeAppliedConcerns(preview.applied, preview.host) & "\n")
+    if preview.notAppliedCount > 0:
+      result.add("  not applied: " & $preview.notAppliedCount &
+        " operation(s) of concerns " & preview.host & " leaves to " &
+        "another tool\n")
   if preview.isNoOp:
     result.add("  plan status: no-op (matches the active generation)\n")
-  var categories = @["package", "stow", "generated-file", "managed-block",
-    "launcher", "resource"]
+  let categories = @["package", "app-bundle", "stow", "generated-file",
+    "managed-block", "launcher", "resource"]
+  proc renderItem(outp: var string; item: PlanItem; prefix = "") =
+    outp.add("    " & prefix & $item.action & "  " & item.name)
+    if item.detail.len > 0:
+      outp.add("  (" & item.detail & ")")
+    outp.add("\n")
   for cat in categories:
     var any = false
     for item in preview.items:
-      if item.category == cat:
+      if item.category == cat and not item.notApplied and
+          item.action != piaRelease:
         if not any:
           result.add("  [" & cat & "]\n")
           any = true
-        result.add("    " & $item.action & "  " & item.name)
-        if item.detail.len > 0:
-          result.add("  (" & item.detail & ")")
-        result.add("\n")
+        result.renderItem(item)
+  for concern in HomeConcern:
+    var any = false
+    for cat in categories:
+      for item in preview.items:
+        if item.notApplied and item.concern == concern and
+            item.category == cat:
+          if not any:
+            result.add("  [not applied on " & preview.host & ": concern " &
+              $concern & " is not in hosts." & preview.host &
+              ".applies]\n")
+            any = true
+          result.renderItem(item, "[" & cat & "] ")
+  var anyReleased = false
+  for item in preview.items:
+    if item.action == piaRelease:
+      if not anyReleased:
+        result.add("  [released: recorded in concerns " & preview.host &
+          " no longer applies; left in place]\n")
+        anyReleased = true
+      result.renderItem(item, "[" & item.category & "] ")
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+proc refuseUnmanagedAppBundles(activations: seq[Resource];
+                               owned: HashSet[string];
+                               adoptAddresses: seq[string]) =
+  ## GM4c: raise `EAppBundleCollision` for the first activation whose target
+  ## path is occupied by a bundle the active generation does not own
+  ## (Store-And-Installation-Layout.md § macOS Application Bundles,
+  ## "Ownership"). An address being adopted is claimed, not replaced.
+  for res in activations:
+    if res.address in owned or res.address in adoptAddresses:
+      continue
+    let target = realWorldIdentity(res)
+    if symlinkExists(target) or fileExists(target) or dirExists(target):
+      var e = newException(EAppBundleCollision, "repro home apply: " &
+        target.escape & " already exists and was not placed by " &
+        "Reprobuild; refusing to replace it (resource " & res.address &
+        "). Remove or rename it, or claim it with `repro home adopt " &
+        res.address & "`.")
+      e.targetPath = target
+      raise e
 
 proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
   ## Execute the apply pipeline. Synchronous; takes the `apply.lock`
@@ -1987,6 +2888,16 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         "no home.nim at expected path (profile-dir: " & opts.profileDir &
         ")")
     let profile = resolveProfileFromOpts(opts)
+    # GM7: the concerns this apply executes on the host
+    # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply). The
+    # whole profile is still planned -- the generation id covers it -- but
+    # only operations of these concerns run; the rest are counted, and what
+    # the previous generation recorded in the others is released.
+    let applied = appliedConcernsFor(profile, opts.host)
+    let owned = applied.concerns
+    let filesApplied = GeneratedFileConcern in owned
+    let blocksApplied = ManagedBlockRecordConcern in owned
+    result.applied = applied
     if shouldKillAfter(2):
       writeMarker(opts.stateDir, "", "killed-after-step-2")
       raiseKilledByTestHook(2)
@@ -2026,8 +2937,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       applyPlan.configContributions)
     for s in synthetic:
       applyPlan.generatedFiles.add(s)
-    let stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
-    let stowEntries = stowDiscovery.entries
+    # GM11: only the stow packages this host gets (activity-scoped claims).
+    let stowDiscovery = selectStowEntries(
+      discoverStowEntries(opts.profileDir, opts.homeDir), profile,
+      opts.targetContext)
+    # Two packages on one path: refused here, before the commit marker
+    # (`planDesiredState` applies the same rule for `--plan` and facts).
+    refuseStowPackagesOnOnePath(stowDiscovery.entries)
+    var stowEntries = stowDiscovery.entries
     if stowEntries.len > 0:
       let stowPlanned = stowEntriesToPlanned(stowEntries)
       for sp in stowPlanned:
@@ -2054,6 +2971,20 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     applyPlan.generatedFiles = suppressed.files
     for d in suppressed.diagnostics:
       applyPlan.diagnostics.add(d)
+    # A stow file and an `fs.userFile` resource naming one path: the
+    # resource is the one writer when the two agree on mode and digest, and
+    # the apply is refused here -- before the commit marker, so before
+    # anything is written -- when they do not (Home-Profile-Intent-Layer.md
+    # §Stow-Style Dotfile Support; `planDesiredState` applies the same rule
+    # for `--plan` and `repro home facts`).
+    let overlap = resolveStowResourceOverlap(applyPlan.generatedFiles,
+      stowEntries, composeDesiredResources(profile, opts.homeDir,
+        opts.targetContext), opts.profileDir, opts.homeDir,
+      opts.targetContext.platform)
+    applyPlan.generatedFiles = overlap.files
+    stowEntries = overlap.stowEntries
+    for d in overlap.diagnostics:
+      applyPlan.diagnostics.add(d)
     if opts.recordOnlyGeneratedFiles:
       if stowEntries.len > 0:
         raisePlanFailed("remote bundle evaluation cannot replay stow " &
@@ -2079,8 +3010,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     var storeClosed = false
     try:
       # ---- Step 6: no-op short-circuit ----------------------------------
-      let intentSnapshot = IntentSnapshot(schemaVersion: 1'u16,
-        files: defaultWalkProfileFiles(opts.profileDir))
+      let intentSnapshot = profileIntentSnapshot(opts.profileDir, profile)
       let snapshotBytes = encodeSnapshot(intentSnapshot)
       let snapshotDig = digestOf(snapshotBytes)
       # M78: the generation-id resource seed is the composed desired
@@ -2090,14 +3020,59 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # not taken). M68 Phase B: an adopt run also contributes its
       # adopt-address set so the adopted binding lands in a new id.
       var resourcesSeed = resourceSeedString(
-        composeDesiredResources(profile, opts.homeDir, opts.targetContext))
+        composeDesiredResources(profile, opts.homeDir, opts.targetContext)) &
+        concernSeed(applied)
       if opts.adoptAddresses.len > 0:
         resourcesSeed.add("\x00adopt:")
         for a in opts.adoptAddresses:
           resourcesSeed.add(a)
           resourcesSeed.add(",")
+      # GM4b: resolve every package reference before the no-op check — the
+      # selections are part of the generation id — with the same context
+      # `--plan` uses. Step 7 realizes these packages in the same context.
+      let catalog = packageResolutionCatalog(opts, applyPlan)
+      let resolutionCtx = packageResolutionContext(opts, applyPlan, catalog)
+      let packagePreviews = previewPackageResolutions(applyPlan.packages,
+        resolutionCtx)
+      # The commands application packages declare become launchers (and
+      # part of the generation id); see `addApplicationCommands`.
+      addApplicationCommands(applyPlan, packagePreviews)
+      # GM7: see `refuseClassificationDisagreement` (`runApplyPlan`).
+      refuseClassificationDisagreement(opts, applyPlan, packagePreviews,
+        applied, catalog)
       let candidateId = deriveGenerationId(applyPlan, snapshotDig,
-        resourcesSeed)
+        resourcesSeed, selectionSeedOf(packagePreviews))
+      # GM7: the package references this apply realizes -- those whose
+      # concern (`packageConcern`, from the selection the plan made) the host
+      # applies. A reference of another concern is never realized, so one
+      # with no realization does not fail the apply.
+      var ownedPackageIds = initHashSet[string]()
+      for pp in packagePreviews:
+        if packageConcern(pp) in owned:
+          ownedPackageIds.incl pp.packageId
+        else:
+          inc result.notAppliedCount
+      var ownedPackages: seq[PlannedPackage]
+      for p in applyPlan.packages:
+        if p.packageId in ownedPackageIds:
+          ownedPackages.add p
+      var ownedLaunchers: seq[PlannedLauncher]
+      for l in applyPlan.launchers:
+        if l.fromPackageId in ownedPackageIds:
+          ownedLaunchers.add l
+      let materializedStowEntries =
+        if filesApplied: stowEntries
+        else: newSeq[StowEntry]()
+      if not filesApplied:
+        result.notAppliedCount += stowEntries.len
+        for g in applyPlan.generatedFiles:
+          if g.sourceKind == pgfsPackageOutput:
+            inc result.notAppliedCount
+      let prevManifest = readGenerationManifest(opts.stateDir, store,
+        activeGenIdHex)
+      if prevManifest.isSome:
+        for r in releasedRecordsOf(prevManifest.get, owned):
+          result.released.add(r.category & " " & r.name)
       # No-op detection (spec §"No-Op Detection"): a re-apply is a
       # no-op iff the planner's content id matches the active
       # generation's recorded id AND all of the active generation's
@@ -2125,6 +3100,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           result.generationIdHex = activeGenIdHex
           result.verifiedDigestCount = verifyCount
           stdout.writeLine(NoOpLogPrefix & $verifyCount & " recorded digests")
+          # The selections equal the active generation's (they are in its
+          # id); recording them creates a missing lock and is otherwise a
+          # byte-identical no-op.
+          if not opts.recordOnlyGeneratedFiles:
+            recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
           return
 
       if shouldKillAfter(6):
@@ -2144,15 +3124,23 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       createDir(extendedPath(earlyGenDir))
 
       # ---- Step 7: realize packages -------------------------------------
-      # M2.5: same per-host chain selection the preview path uses, so
-      # `repro home apply --plan` and `repro home apply` cannot diverge
-      # on which adapter resolves a given package.
-      let realizeAdapterChain = resolveAdapterChainFor(
-        applyPlan.adapterPreference, currentHostOsKey())
-      let realized = realizePlannedPackages(store, applyPlan.packages,
-        chain = realizeAdapterChain)
+      # GM4b: the resolution context `--plan` uses, so the plan and the
+      # apply cannot select differently.
+      let realized = realizePlannedPackages(store, ownedPackages,
+        resolutionCtx, opts.appTrust)
       if shouldKillAfter(7):
         raiseKilledByTestHook(7)
+      # ---- Step 7b (GM4c): refuse an unmanaged application bundle ----
+      # A bundle at an Applications-directory path that the previous
+      # generation did not record (or recorded as destroyed) belongs to
+      # someone else -- the user, another installer -- even when it is the
+      # same application. Refused HERE, before step 8 writes any file, so
+      # the apply changes nothing in the home directory.
+      if not opts.recordOnlyGeneratedFiles:
+        refuseUnmanagedAppBundles(
+          planAppBundleActivations(realized, opts.homeDir),
+          ownedAppBundleAddresses(opts.stateDir, store, activeGenIdHex),
+          opts.adoptAddresses)
 
       # ---- Step 8: stage generated files + managed blocks ---------------
       # M65 cache-hit-vs-rebuilt accounting: pre-load the previous
@@ -2193,7 +3181,32 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           srpReconcileDrift
         else:
           srpFailClosed
-      for entry in stowEntries:
+      # A removed `fs.userFile` that agreed with a stow file hands its path
+      # back: remove the file it wrote (only while its bytes are what it
+      # recorded writing) so the stow file is linked again, and release its
+      # binding in step 9b instead of destroying it (`file_facts`).
+      let stowIds = stowTargetIds(materializedStowEntries, opts.homeDir)
+      if prevManifest.isSome and stowIds.len > 0:
+        let handoverDesired = composeDesiredResources(profile, opts.homeDir,
+          opts.targetContext)
+        for rb in prevManifest.get.resourceBindings:
+          if rb.resourceKind.len == 0: continue
+          let recorded = toRecorded(rb)
+          if handedToStow(recorded, handoverDesired, stowIds, opts.homeDir):
+            discard removeUnchangedUserFile(recorded)
+      # A path whose stow file now comes from another package: the link (or
+      # copy) the current generation recorded there, if still unchanged, is
+      # its own and is replaced, not refused as drift
+      # (`stow.isRecordedStowTarget`).
+      var recordedStow = initTable[string, GeneratedFile]()
+      if prevManifest.isSome:
+        for gf in prevManifest.get.generatedFiles:
+          if gf.ownershipPolicy in {gfoStowSymlink, gfoStowCopy}:
+            recordedStow[gf.absoluteOutputPath] = gf
+      for entry in materializedStowEntries:
+        if entry.targetAbsolutePath in recordedStow:
+          discard releaseRecordedStowTarget(entry.targetAbsolutePath,
+            entry.sourceAbsolutePath, recordedStow[entry.targetAbsolutePath])
         let rec = materializeStowEntry(opts.profileDir, opts.homeDir, entry,
           stowReconcile)
         var staged: StagedFileRecord
@@ -2254,7 +3267,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # synthesize the `StagedFileRecord` from the cached digest and
       # skip the atomic write entirely.
       for g in applyPlan.generatedFiles:
-        if g.sourceKind != pgfsPackageOutput:
+        if g.sourceKind != pgfsPackageOutput or not filesApplied:
           continue
         let candidateDigest = digestOf(g.contentBytes)
         var isCacheHit = false
@@ -2303,9 +3316,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         for i, ch in raw:
           result[i] = byte(ord(ch))
       for g in applyPlan.generatedFiles:
-        if g.sourceKind == pgfsPackageOutput:
+        if g.sourceKind == pgfsPackageOutput and filesApplied:
           discard storeCasBlob(store, g.contentBytes)
-      for entry in stowEntries:
+      for entry in materializedStowEntries:
         if fileExists(extendedPath(entry.sourceAbsolutePath)):
           let bytes = readFileBytes(entry.sourceAbsolutePath)
           discard storeCasBlob(store, bytes)
@@ -2316,7 +3329,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       let syntheticBlocks = parseSyntheticPackageManagedBlocks(opts.homeDir,
         packageIds)
       for mb in syntheticBlocks:
-        appliedManagedBlocks.add(applyManagedBlock(mb))
+        if blocksApplied:
+          appliedManagedBlocks.add(applyManagedBlock(mb))
+        else:
+          inc result.notAppliedCount
       # Diff against the previous generation's manifest: any file or
       # managed block it owned that the new generation does NOT own
       # is removed before we commit. Without this, files that A's plan
@@ -2341,7 +3357,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             let prevManifestBytes = readCasBlob(store, prevManifestKey)
             let prevManifest = decodeManifestBytes(prevManifestBytes)
             for gf in prevManifest.generatedFiles:
-              if gf.absoluteOutputPath notin newPaths:
+              # GM7: a file of a concern this apply does not own is released
+              # (listed in `result.released`), never deleted.
+              if gf.absoluteOutputPath notin newPaths and filesApplied:
                 deleteRemovedFile(gf.absoluteOutputPath)
             # Same for managed blocks.
             var newBlockKeys: seq[string]
@@ -2349,7 +3367,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               newBlockKeys.add(mb.hostFilePath & "\x1a" & mb.blockId)
             for mb in prevManifest.managedBlocks:
               let k = mb.hostFilePath & "\x1a" & mb.blockId
-              if k notin newBlockKeys:
+              if k notin newBlockKeys and blocksApplied:
                 # Strip the sentinel-delimited region from the host file.
                 if fileExists(extendedPath(mb.hostFilePath)):
                   let existing = readFile(extendedPath(mb.hostFilePath))
@@ -2384,8 +3402,13 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       let perGenBin = generationBinDir(opts.stateDir,
         generationIdHex(candidateId))
       createDir(extendedPath(perGenBin))
+      # An application's launchers run its placed copy in ~/Applications
+      # (`app_activation.launcherExecutablePath`); a remote bundle build
+      # places nothing, so its launchers keep the store path.
       let launchers = materializeLaunchers(store, perGenBin, realized,
-        applyPlan.launchers)
+        ownedLaunchers,
+        if opts.recordOnlyGeneratedFiles: ""
+        else: applicationsDir(apsHome, opts.homeDir))
       if shouldKillAfter(9):
         raiseKilledByTestHook(9)
 
@@ -2398,11 +3421,15 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # `ResourceBinding` record for the manifest. `REPRO_TEST_RESOURCES`
       # remains as a TEST-ONLY override merged over the profile entries
       # by address (so existing M68/M70 gates keep working).
-      var desiredResources =
-        if opts.recordOnlyGeneratedFiles:
-          initDesiredSet()
-        else:
-          composeDesiredResources(profile, opts.homeDir, opts.targetContext)
+      var desiredResources = initDesiredSet()
+      if not opts.recordOnlyGeneratedFiles:
+        # GM7: only the declared resources of an applied concern.
+        for address, res in composeDesiredResources(profile, opts.homeDir,
+            opts.targetContext).resources:
+          if concernOfResourceKind(res.kind) in owned:
+            desiredResources.resources[address] = res
+          else:
+            inc result.notAppliedCount
       # M69 step 5: synthesize PATH + per-tool env var resources from
       # the realized records and merge them into the desired set. The
       # synthesis is by-package, so a re-apply with unchanged catalog
@@ -2420,6 +3447,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         for synthRes in envBindingPlan.resources:
           if synthRes.address notin desiredResources.resources:
             desiredResources.resources[synthRes.address] = synthRes
+        # GM4c: every realized macOS application bundle is placed in
+        # ~/Applications by a synthesized `macos.appBundle` resource
+        # (Store-And-Installation-Layout.md § macOS Application Bundles).
+        for appRes in planAppBundleActivations(realized, opts.homeDir):
+          desiredResources.resources[appRes.address] = appRes
       # M69 Phase C follow-up: defence-in-depth layer 1. The four
       # POSIX/macOS home drivers (`gsettings`, `defaults`,
       # `systemd_user`, `launchd_user`) interpolate operator-controlled
@@ -2444,12 +3476,25 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               prevKey[i] = prevEnv.activationManifestDigest[i]
             let prevBytes = readCasBlob(store, prevKey)
             let prevManifest = decodeManifestBytes(prevBytes)
+            let prevApps = applicationPackagesOf(prevManifest)
             for rb in prevManifest.resourceBindings:
               # Only consider V2 records (with resourceKind set);
               # V1 records may have empty kind which we skip.
               if rb.resourceKind.len == 0: continue
+              # GM7: a binding of a concern this apply does not own is
+              # released: not planned (so never destroyed or drift-checked)
+              # and not recorded by the new generation.
+              if concernOfBinding(rb, prevApps) notin owned: continue
+              # A removed `fs.userFile` whose path a stow file of this
+              # generation now links is released too: the stow step has
+              # already put its link there, and destroying the binding would
+              # delete that link (`file_facts.handedToStow`).
+              let recorded = toRecorded(rb)
+              if handedToStow(recorded, desiredResources, stowIds,
+                  opts.homeDir):
+                continue
               # Skip destroyed records (postWriteDigest is zero).
-              recordedBindings[rb.resourceAddress] = toRecorded(rb)
+              recordedBindings[rb.resourceAddress] = recorded
           except CatchableError:
             discard
       var reconcilePolicy = rpFailClosed
@@ -2483,6 +3528,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         if a notin desiredResources.resources:
           raiseAdoptUndeclared(a)
         adoptSet.incl(a)
+      # GM4c: replacing a bundle is allowed only when the previous
+      # generation recorded (and did not destroy) it; the early check after
+      # step 7 refused every other occupied target already.
+      proc managesAppBundle(address: string): bool =
+        address in recordedBindings and
+          not isZeroDigest(recordedBindings[address].postWriteDigest)
       var appliedResourceBindings: seq[ResourceBinding]
       for action in planReport.actions:
         # Adopt override: regardless of what the lifecycle decided
@@ -2490,33 +3541,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         # as-is from the live observation.
         if action.address in adoptSet:
           let desired = desiredResources.resources[action.address]
-          let identity = realWorldIdentity(desired)
           let observed = observeResource(desired)
           var rb: ResourceBinding
           if observed.present:
             # Adopt the live bytes verbatim: preWrite == postWrite
             # == digest(observed). No driver write happened.
-            let adoptPayloadKind =
-              case desired.kind
-              of rkWindowsRegistryValue: $desired.registryPayload.kind
-              of rkEnvUserVariable: $desired.envVarPayload.kind
-              of rkEnvUserPath: "joined-entries"
-              of rkWindowsStartup: "string"
-              of rkShellIntegration: "shell-block"
-              of rkFsManagedBlock: "managed-block"
-              of rkLinuxGsettings: "gvariant-literal"
-              of rkSystemdUserUnit: "unit-content"
-              of rkMacosUserDefault: "defaults-literal"
-              of rkLaunchdUserAgent: "plist-content"
-              of rkFsUserFile: "user-file"
-              of rkVscodeExtension: "vscode-extensions"
-              of rkLinuxDconfKey: "gvariant-literal"
-              of rkLinuxKdeConfigKey: "kde-config-value"
-              of rkHomebrewFormula: "homebrew-formula-version"
-              of rkHomebrewCask: "homebrew-cask-version"
-            rb = toResourceBinding(action.address, desired.kind,
-              identity, observed, observed.rawBytes,
-              adoptPayloadKind, desired.lifecyclePolicy)
+            rb = bindingOfLiveObject(action.address, desired, observed)
             # `toResourceBinding` sets preWriteDigest from the
             # observed state when present — for adopt the pre- and
             # post-write digests are intentionally equal.
@@ -2533,7 +3563,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           raiseIfDriftBlocked(action)
         of rakNoOp:
           # Cache-hit: re-record the previous binding's bytes so
-          # rollback diffs cleanly.
+          # rollback diffs cleanly. A deferred change (the object is in
+          # use) and a kept vendor update are no-ops too: the live object
+          # is still the recorded one (or its vendor's update of it), so
+          # the record stays. A deferred record is marked, so the next
+          # apply cannot short-circuit past the change it still owes.
           if action.address in recordedBindings:
             let prev = recordedBindings[action.address]
             var rb = ResourceBinding(
@@ -2545,9 +3579,32 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               hasPreWriteDigest: prev.hasPreWriteDigest,
               preWriteDigest: prev.preWriteDigest,
               postWriteDigest: prev.postWriteDigest,
-              payloadKind: prev.payloadKind,
+              payloadKind:
+                if action.deferred: withDeferredMark(prev.payloadKind)
+                else: withoutDeferredMark(prev.payloadKind),
               payloadBytes: prev.payloadBytes)
             appliedResourceBindings.add(rb)
+            if action.deferred:
+              result.deferred.add(action.address & " " & action.summary)
+            if action.keptVendorUpdate:
+              let observed = observeRecorded(action.address, prev)
+              result.keptVendorUpdates.add(action.address & " " &
+                describeIdentityVersion(observed.rawBytes))
+          elif action.address in desiredResources.resources and
+              not action.deferred:
+            # A first apply that found the object already holding the
+            # declared state: record it as written (pre- == post-write ==
+            # the observation, as `repro home adopt` does), so the next
+            # apply knows the object is this generation's -- a later change
+            # of the declared content is then an ordinary update, and
+            # removing the resource destroys it. Without the record, the
+            # next apply would see an unrecorded object, which for a whole
+            # object is drift (`lifecycle.decideAction`).
+            let desired = desiredResources.resources[action.address]
+            let observed = observeResource(desired)
+            if observed.present and desired.kind != rkMacosAppBundle:
+              appliedResourceBindings.add(
+                bindingOfLiveObject(action.address, desired, observed))
         of rakCreate, rakUpdate, rakReplace:
           let desired = desiredResources.resources[action.address]
           let identity = realWorldIdentity(desired)
@@ -2700,6 +3757,45 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             postWriteBytes = applyHomebrewCask(desired.caskName,
               desired.caskVersion, desired.caskArgs)
             payloadKindStr = "homebrew-cask-version"
+          of rkMacosAppBundle:
+            # GM4c: copy the store bundle beside the target, verify the
+            # staged copy (trust checks + the store bundle's identity),
+            # rename it into place. Replacing an existing bundle is allowed
+            # only when this profile placed it (checked above as well).
+            # A refusal of the staged copy, or a failed copy or rename, is
+            # an apply failure naming the package, the bundle and the
+            # check; `stageAppBundle` / `commitStagedAppBundle` have already
+            # removed the staged copy and left the target as it was.
+            #
+            # The placed item may be a FOLDER (an installer application's
+            # product folder, Store-And-Installation-Layout.md § Installer
+            # applications): it is staged and verified as a whole, and what
+            # is recorded is the placed item's identity -- the folder
+            # identity for a folder, the bundle's for a bundle.
+            let placed =
+              try:
+                let staged = stageAppBundle(desired.appBundleSource,
+                  desired.appBundleTargetDir, desired.appBundleName,
+                  desired.appBundleExpectation, desired.appBundleTrust,
+                  managedPrior = managesAppBundle(action.address),
+                  pinned = desired.appBundleIdentity,
+                  mainBundle = desired.appBundleMainPath)
+                discard commitStagedAppBundle(staged)
+                staged.itemIdentity
+              except EAppBundleRefused as err:
+                raiseAppBundleFailed(
+                  packageIdOfAppBundleAddress(action.address),
+                  action.address, desired.appBundleName,
+                  desired.appBundleTargetDir / desired.appBundleName,
+                  err.check, err.msg)
+              except EAppBundlePlacement as err:
+                raiseAppBundleFailed(
+                  packageIdOfAppBundleAddress(action.address),
+                  action.address, desired.appBundleName,
+                  desired.appBundleTargetDir / desired.appBundleName,
+                  "placement", err.msg)
+            postWriteBytes = placed
+            payloadKindStr = "app-bundle-identity"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,
             desired.lifecyclePolicy)
@@ -2816,6 +3912,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             if prev.resourceId.startsWith(caskPrefix):
               destroyHomebrewCask(
                 prev.resourceId[caskPrefix.len .. ^1])
+          of rkMacosAppBundle:
+            # GM4c: the lifecycle established the bundle at the recorded
+            # path is the one this profile placed (observed identity ==
+            # recorded post-write identity); remove it.
+            preWrite = observeRecorded(action.address, prev)
+            removeAppBundle(prev.resourceId)
           of rkFsUserFile:
             # `resourceId` is the resolved host path verbatim. The
             # destroy direction deletes the file; the pre-write
@@ -2903,6 +4005,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           postWriteBlockBytes: mb.postWriteBlockBytes,
           postWriteFileDigest: mb.postWriteFileDigest))
       manifest.resourceBindings = appliedResourceBindings
+      # GM7: the generation records the concerns it applied (schema 3), so
+      # rollback releases rather than removes what it did not own.
+      manifest.concernsDeclared = applied.declared
+      if applied.declared:
+        manifest.ownedConcerns = concernNames(owned)
       let manifestBytes = encodeManifest(manifest)
 
       # Build the envelope before rotation; writeGeneration also
@@ -2940,6 +4047,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
 
       # Clear the partial-apply marker — success.
       clearMarker(opts.stateDir)
+
+      # GM4b: the generation is committed and current; serialise what it
+      # selected into the home-profile lock. A remote bundle built here is
+      # applied elsewhere and records nothing beside this profile.
+      if not opts.recordOnlyGeneratedFiles:
+        recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
 
       result.kind = aokFreshApplied
       result.generationIdHex = generationIdHex(candidateId)

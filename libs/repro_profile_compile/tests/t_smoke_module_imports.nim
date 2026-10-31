@@ -1,10 +1,8 @@
 ## M83 Phase F1 smoke tests for the sibling-module resolution path.
 ##
 ## These tests live next to the other `repro_profile_compile/`
-## smoke tests because the module-resolution machinery is owned by
-## `repro_profile_compile/sources.nim` (the source-discovery walker
-## + digest) and exercised end-to-end by the `compileProfileBinary`
-## proc that the helper subcommand drives.
+## smoke tests and drive the `compileProfileBinary` proc that the
+## helper subcommand runs.
 ##
 ## Coverage:
 ##
@@ -19,8 +17,13 @@
 ##   - A module-author error (e.g. a template body that does not
 ##     type-check) surfaces a clean Nim diagnostic via
 ##     `CompileFailure.stderrText` instead of a silent failure.
-##   - The source digest covers EVERY transitively-imported module;
-##     touching a deeply-nested leaf invalidates the digest.
+##
+## Removed with the import-scan freshness key: the cases that asserted the
+## `discoverProfileSources` walk and the `computeProfileDigest` digest covered
+## the module closure. The property they stood for — editing ANY module in the
+## closure, leaf or outer, recompiles the profile — is asserted against the
+## monitored edge in `tests/e2e/m83/t_e2e_profile_modules.nim`, from what
+## io-mon observed `nim` read rather than from a text walk.
 ##
 ## Each test compiles its profile on the fly via the same
 ## `compileProfileBinary` proc the production helper subcommand
@@ -138,21 +141,6 @@ suite "M83 Phase F1: single sibling-module compile":
     check "alpha" in names
     check "beta" in names
 
-  test "discoverProfileSources finds the single sibling module":
-    let dir = createTempDir("repro-m83-f1-single-disc-", "")
-    defer:
-      try: removeDir(dir) except OSError: discard
-    discard writeProfileFile(dir, "home.nim", SimpleHomeNim)
-    discard writeProfileFile(dir, "modules/single_helper.nim",
-      SimpleHelperNim)
-    let sources = discoverProfileSources(dir / "home.nim")
-    check sources.len == 2
-    var found = false
-    for s in sources:
-      if s.endsWith("single_helper.nim"):
-        found = true
-    check found
-
   test "profile compile resolves vendored SSZ dependencies explicitly":
     let dir = createTempDir("repro-m83-f1-dependency-paths-", "")
     defer:
@@ -245,24 +233,6 @@ suite "M83 Phase F1: transitive sibling-module compile":
     let names = packageNames(j, "default")
     check "inner-pkg" in names
     check "outer-pkg" in names
-
-  test "discoverProfileSources walks the transitive closure":
-    let dir = createTempDir("repro-m83-f1-trans-disc-", "")
-    defer:
-      try: removeDir(dir) except OSError: discard
-    discard writeProfileFile(dir, "home.nim", TransitiveHomeNim)
-    discard writeProfileFile(dir, "modules/outer.nim",
-      TransitiveOuterNim)
-    discard writeProfileFile(dir, "modules/inner.nim",
-      TransitiveInnerNim)
-    let sources = discoverProfileSources(dir / "home.nim")
-    check sources.len == 3
-    var hasInner, hasOuter = false
-    for s in sources:
-      if s.endsWith("inner.nim"): hasInner = true
-      if s.endsWith("outer.nim"): hasOuter = true
-    check hasInner
-    check hasOuter
 
 # ---------------------------------------------------------------------------
 # 3. Activity-body splat composes multiple helper calls.
@@ -371,91 +341,6 @@ suite "M83 Phase F1: module-author error surfaces cleanly":
     # file so the user knows where to look — the error is reported
     # against `broken.nim`, not the macro library.
     check "broken" in diag
-
-# ---------------------------------------------------------------------------
-# 5. Source-digest covers the transitive closure.
-# ---------------------------------------------------------------------------
-
-suite "M83 Phase F1: source digest covers the closure":
-
-  test "touching a leaf module changes the source digest":
-    let dir = createTempDir("repro-m83-f1-digest-leaf-", "")
-    defer:
-      try: removeDir(dir) except OSError: discard
-    discard writeProfileFile(dir, "home.nim", TransitiveHomeNim)
-    discard writeProfileFile(dir, "modules/outer.nim",
-      TransitiveOuterNim)
-    let leafPath = writeProfileFile(dir, "modules/inner.nim",
-      TransitiveInnerNim)
-
-    let sourcesBefore = discoverProfileSources(dir / "home.nim")
-    let before = computeProfileDigest(sourcesBefore, dir)
-
-    var contents = readFile(extendedPath(leafPath))
-    contents.add("\n## touch leaf to perturb digest\n")
-    writeFile(extendedPath(leafPath), contents)
-
-    let sourcesAfter = discoverProfileSources(dir / "home.nim")
-    let after = computeProfileDigest(sourcesAfter, dir)
-    check before.digestHex != after.digestHex
-
-  test "touching outer module also changes the source digest":
-    let dir = createTempDir("repro-m83-f1-digest-outer-", "")
-    defer:
-      try: removeDir(dir) except OSError: discard
-    discard writeProfileFile(dir, "home.nim", TransitiveHomeNim)
-    let outerPath = writeProfileFile(dir, "modules/outer.nim",
-      TransitiveOuterNim)
-    discard writeProfileFile(dir, "modules/inner.nim",
-      TransitiveInnerNim)
-
-    let before = computeProfileDigest(
-      discoverProfileSources(dir / "home.nim"), dir)
-
-    var contents = readFile(extendedPath(outerPath))
-    contents.add("\n## touch outer to perturb digest\n")
-    writeFile(extendedPath(outerPath), contents)
-
-    let after = computeProfileDigest(
-      discoverProfileSources(dir / "home.nim"), dir)
-    check before.digestHex != after.digestHex
-
-  test "digest is stable across re-reads of unchanged sources":
-    let dir = createTempDir("repro-m83-f1-digest-stable-", "")
-    defer:
-      try: removeDir(dir) except OSError: discard
-    discard writeProfileFile(dir, "home.nim", TransitiveHomeNim)
-    discard writeProfileFile(dir, "modules/outer.nim",
-      TransitiveOuterNim)
-    discard writeProfileFile(dir, "modules/inner.nim",
-      TransitiveInnerNim)
-    let sources = discoverProfileSources(dir / "home.nim")
-    let d1 = computeProfileDigest(sources, dir)
-    let d2 = computeProfileDigest(sources, dir)
-    check d1.digestHex == d2.digestHex
-    check d1.manifest == d2.manifest
-
-  test "digest manifest lists every module in the closure":
-    let dir = createTempDir("repro-m83-f1-digest-manifest-", "")
-    defer:
-      try: removeDir(dir) except OSError: discard
-    discard writeProfileFile(dir, "home.nim", TransitiveHomeNim)
-    discard writeProfileFile(dir, "modules/outer.nim",
-      TransitiveOuterNim)
-    discard writeProfileFile(dir, "modules/inner.nim",
-      TransitiveInnerNim)
-    let sources = discoverProfileSources(dir / "home.nim")
-    let digest = computeProfileDigest(sources, dir)
-    var paths: seq[string]
-    for line in digest.manifest.strip().splitLines():
-      let parts = line.split('\t')
-      check parts.len == 2
-      paths.add(parts[0])
-    check "home.nim" in paths
-    check "modules/outer.nim" in paths or
-      "modules\\outer.nim" in paths
-    check "modules/inner.nim" in paths or
-      "modules\\inner.nim" in paths
 
 # ---------------------------------------------------------------------------
 # 6. Single sibling — splat semantics with mixed bare-ident packages.
