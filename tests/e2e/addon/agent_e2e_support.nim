@@ -282,8 +282,10 @@ proc armFetchSeam*(g: Guest; point: string) =
                 " && echo " & point & " > " & FetchSeamDir & "/test-pause-at")
 
 proc resumeSeam*(g: Guest; dir: string) =
-  discard g.run("touch " & dir & "/test-resume && chmod 0666 " & dir &
-                "/test-resume")
+  ## Release a paused seam. Only ``touch``: the paused process removes the
+  ## file as soon as it sees it (the fetch unit's dynamic user may, in its
+  ## 0777 control directory), so anything run on it afterwards races.
+  discard g.run("touch " & dir & "/test-resume")
 
 proc startFetchNoWait*(g: Guest) =
   discard g.run("systemctl start --no-block repro-agent-fetch.service")
