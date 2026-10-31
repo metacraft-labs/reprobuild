@@ -46,7 +46,7 @@
 import std/[algorithm, options, os, strutils]
 
 from repro_core/link_target import readSymlinkTarget
-from repro_core/paths import extendedPath
+from repro_core/paths import extendedPath, isOrdinaryFileUnderRuntimeMount
 import ./pattern_scoped_enumeration
 when defined(posix):
   from std/posix import Stat, stat, S_ISREG
@@ -233,6 +233,12 @@ proc toLogicalPath*(roots: openArray[LogicalRoot]; physical: string):
     if base.len == 0:
       continue
     if target == base or target.startsWith(base & "/"):
+      # The `/dev` system root is not an answer for the ordinary files under
+      # `/dev/shm`: an untracked path is left out of the key, and these are real
+      # inputs. They are named as any path under no root is.
+      if root.kind == lrkUntracked and
+          original.isOrdinaryFileUnderRuntimeMount():
+        continue
       let kind = if root.kind == lrkUntracked: lpkUntracked else: lpkTracked
       # Keep the ORIGINAL spelling of the relative part: case matters for
       # content on case-sensitive hosts and is merely cosmetic elsewhere.

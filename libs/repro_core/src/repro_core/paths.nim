@@ -169,6 +169,31 @@ func isXdgRuntimeDirPath*(normalized: string): bool =
   # `/run/userland`, and never a non-numeric component.
   uidLen > 0 and (uidLen == rest.len or rest[uidLen] == '/')
 
+func isOrdinaryFileUnderRuntimeMount*(normalized: string): bool =
+  ## True for two more places under a volatile prefix that hold ordinary files,
+  ## for the reason `isXdgRuntimeDirPath` gives. `normalized` must already use
+  ## forward slashes.
+  ##
+  ## * A path in a DIRECTORY under `/dev/shm`. POSIX shared-memory objects and
+  ##   named semaphores are flat entries of `/dev/shm`, because shm_open(3)
+  ##   names may not contain a further slash
+  ##   (https://man7.org/linux/man-pages/man3/shm_open.3.html). Those stay
+  ##   volatile, and they are what tools touch there by accident. Anything in a
+  ##   subdirectory was put there as a file, typically a build tree someone moved
+  ##   to `/dev/shm` for speed. A project directly at `/dev/shm/<name>` has its
+  ##   files covered and only the enumeration of `<name>` itself still dropped,
+  ##   because the path alone cannot tell that directory from an object.
+  ## * `/run/media/<user>/<volume>`, where desktop hosts automount removable and
+  ##   secondary disks, projects on them included.
+  ##
+  ## Dropping these reads made an edited input look unchanged, so a stale result
+  ## was served and a test certificate was issued for content that fails.
+  const shmRoot = "/dev/shm/"
+  if normalized.startsWith(shmRoot):
+    let slash = normalized.find('/', shmRoot.len)
+    return slash > shmRoot.len and slash < normalized.high
+  normalized.startsWith("/run/media/")
+
 func isVolatileRuntimeStatePath*(path: string): bool =
   ## True for paths that describe the running kernel or the host's live
   ## runtime state at one instant. Such a path cannot be reopened and
@@ -179,7 +204,8 @@ func isVolatileRuntimeStatePath*(path: string): bool =
   ## outright. `/run` is a tmpfs of ordinary files and qualifies only
   ## because most of it holds host runtime state (pid files, `nscd`,
   ## `systemd`, dbus). Its `/run/user/<uid>` subtree does not — see
-  ## `isXdgRuntimeDirPath`.
+  ## `isXdgRuntimeDirPath`. `isOrdinaryFileUnderRuntimeMount` carves out the two
+  ## other places a project's files can really be.
   ##
   ## THIS IS A SILENT DROP, so it is deliberately narrow. A path that
   ## lands here leaves no diagnostic behind: the monitor records the read
@@ -189,6 +215,8 @@ func isVolatileRuntimeStatePath*(path: string): bool =
   ## paths that genuinely cannot be re-read — and why the XDG runtime
   ## directory, which can, is excluded.
   let normalized = path.replace('\\', '/')
+  if normalized.isOrdinaryFileUnderRuntimeMount():
+    return false
   if normalized == "/dev" or normalized.startsWith("/dev/") or
      normalized == "/proc" or normalized.startsWith("/proc/") or
      normalized == "/sys" or normalized.startsWith("/sys/"):

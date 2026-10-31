@@ -44,6 +44,13 @@ proc toolstore(base: string): string =
 
 suite "portable fingerprints":
 
+  test "the /dev system root does not swallow an ordinary file under /dev/shm":
+    let roots = @[LogicalRoot(label: "system-/dev", path: "/dev",
+      kind: lrkUntracked)]
+    check toLogicalPath(roots, "/dev/shm/build/input.txt").kind == lpkOutside
+    check toLogicalPath(roots, "/dev/shm/sem.mp-1").kind == lpkUntracked
+    check toLogicalPath(roots, "/dev/urandom").kind == lpkUntracked
+
   test "two checkouts at different absolute paths agree exactly":
     let a = createTempDir("repro-pfp-a-", "")
     let b = createTempDir("repro-pfp-bbbbbbbb-", "")

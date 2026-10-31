@@ -165,7 +165,7 @@ libs/repro_build_engine/tests/test_m6_entropy_blessing.nim	nim	27
 libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim	nim	20
 libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	14
 libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	6
-libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	9
+libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	10
 libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim	nim	9
 libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim	nim	12
 libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	nim	5
@@ -507,7 +507,7 @@ libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim	nim	1
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4
 libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim	nim	7
 libs/repro_local_store/tests/t_per_computation_output_dirs.nim	nim	5
-libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	17
+libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	18
 libs/repro_local_store/tests/t_portable_memo.nim	nim	8
 libs/repro_local_store/tests/t_prefix_owning_path.nim	nim	4
 libs/repro_local_store/tests/t_published_trace_record.nim	nim	9
@@ -1655,6 +1655,7 @@ tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
 tests/integration/t_earlier_draft_certificate_is_rejected_with_a_reissue_remedy.nim	nim	1
 tests/integration/t_edge_attestation_binding_resists_substitution.nim	nim	25
 tests/integration/t_edge_attestation_quorum_is_k_of_n.nim	nim	21
+tests/integration/t_edited_input_under_dev_shm_is_not_served_or_certified.nim	nim	1
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
 tests/integration/t_emulator_is_not_a_verifier_bypass.nim	nim	15
