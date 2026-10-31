@@ -322,6 +322,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim",
+    binary: "build/test-bin/t_addon_key_lists_accept_utf8_comments",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let keyA = peerAuth.generateKeypair().publicKey"),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
     binary: "build/test-bin/t_addon_ledger_and_plan",
     defines: @[],

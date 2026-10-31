@@ -18,6 +18,8 @@
 ##     it, and the old key does not;
 ##   * a revoked recipient key: BOTH producers refuse to seal to it, given
 ##     the same list file;
+##   * a key list with UTF-8 comments and a byte-order mark reads as the same
+##     keys on both sides (the 2026-10-31 producer outage);
 ##   * the compiled-profile pin (flags bit 1): Python pins the digest of a
 ##     compile, this library computes the same digest over the same two
 ##     texts and refuses a compile that emitted anything else; and, given a
@@ -45,7 +47,7 @@
 ## the wire is produced and read by the real implementations, with real
 ## ECDSA-P256 keys and real ECIES seals.
 
-import std/[json, os, osproc, strutils, times, unittest]
+import std/[algorithm, json, os, osproc, sets, strutils, times, unittest]
 
 import repro_deploy_agent
 import repro_deploy_agent/secrets
@@ -345,6 +347,38 @@ suite "RDMF v3 cross-implementation conformance":
         readFile(again / "r").strip()
       check compiledProfileRefusal(m, readFile(again / "c"),
         readFile(again / "a"), readFile(again / "r").strip()) == ""
+
+  test "key lists with UTF-8 comments read the same in both (the 2026-10-31 incident)":
+    # infra's committed revoked-keys file carries "§10.3" in a comment; the
+    # Python producer opened it as ASCII and every render failed. Both
+    # sides must read such a file -- and one with a byte-order mark -- as
+    # the same set of keys.
+    let k1 = peerAuth.generateKeypair().publicKey
+    let k2 = peerAuth.generateKeypair().publicKey
+    let listFile = work / "utf8-keys.txt"
+    writeFile(listFile, "\xEF\xBB\xBF# revoked (ReproOS Add-On Mode §10.3, CRED-2)\n" &
+      "# naïve café — “quoted” ✓\n" & hexOf(k1) & "\r\n  # ✓ indented\n" &
+      hexOf(k2) & "\n")
+    var nimKeys: seq[string]
+    for k in peerAuth.loadTrustAnchors(listFile).publicKeys: nimKeys.add(hexOf(k))
+    nimKeys.sort()
+    check nimKeys.len == 2
+    let revoked = loadRevokedRecipientKeys(listFile)
+    check revoked.isRevoked(k1) and revoked.isRevoked(k2)
+    let probe = work / "keys_probe.py"
+    writeFile(probe, "import importlib.util, sys\n" &
+      "spec = importlib.util.spec_from_file_location('rdm', sys.argv[1])\n" &
+      "mod = importlib.util.module_from_spec(spec); sys.modules['rdm'] = mod; spec.loader.exec_module(mod)\n" &
+      "a = sorted(k.hex() for k in mod.load_trust_anchors(sys.argv[2]))\n" &
+      "r = sorted(k.hex() for k in mod.load_revoked_recipient_keys(sys.argv[2]))\n" &
+      "print(' '.join(a)); print(' '.join(r))\n")
+    let p = execCmdEx(quoteShellCommand(@[python, "-I", probe, producer(), listFile]))
+    check p.exitCode == 0
+    let lines = p.output.strip().splitLines()
+    check lines.len == 2
+    if lines.len == 2:
+      check lines[0] == nimKeys.join(" ")
+      check lines[1] == nimKeys.join(" ")
 
   test "this library's v3 manifest decodes in Python, byte for byte":
     let recipient = peerAuth.generateKeypair()

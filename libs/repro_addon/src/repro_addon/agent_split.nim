@@ -100,7 +100,9 @@ const
 # ---------------------------------------------------------------------------
 
 proc parseAgentConf*(text: string): AgentConf =
-  ## ``key = value`` lines; ``#`` comments; ``source`` repeats.
+  ## ``key = value`` lines; ``#`` comments (any bytes, UTF-8 included);
+  ## ``source`` repeats. A leading UTF-8 byte-order mark is skipped.
+  let text = if text.startsWith("\xEF\xBB\xBF"): text[3 .. ^1] else: text
   for raw in text.splitLines():
     let line = raw.strip()
     if line.len == 0 or line[0] == '#': continue
