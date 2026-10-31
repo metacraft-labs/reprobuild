@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2560,
+    "nimTestBinaries": 2561,
     "pureUnitConsolidationGroups": 74,
     "pureUnitTests": 711,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2600
+    "testEntries": 2601
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1476,7 +1476,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1420,
+      "integration": 1421,
       "platform/destructive": 162,
       "pure unit": 711,
       "unclassified": 289
@@ -1687,9 +1687,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2560,
+    "nimTestBinaryCount": 2561,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2600
+    "testEntryCount": 2601
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8392,8 +8392,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28306,6 +28306,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_reproos_service_parity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_revert_keeps_earlier_drift",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_infra",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_revert_keeps_earlier_drift.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

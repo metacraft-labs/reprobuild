@@ -307,6 +307,13 @@ from repro_deploy_agent/agent_mutations import KnownAgentMutations
 const
   AddonMutation* {.strdefine: "reproAddonMutation".} = ""
   KnownAddonMutations* = ["uninstall-skips-diversion-removal",
+                          # Not a falsifier: a failure injected once
+                          # (while /var/tmp/repro-addon-fail-before-ledger
+                          # exists) after the flip and before the ledger
+                          # is written, so a gate drives the automatic
+                          # revert of a switch whose ledger copy still
+                          # describes the previous generation.
+                          "switch-fails-before-ledger",
                           "bootstrap-installs-jq", "preflight-writes",
                           "recipient-key-0644", "provisions-publisher-key",
                           "apply-skips-kind-check",

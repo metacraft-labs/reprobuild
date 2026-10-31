@@ -39,7 +39,7 @@ libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
-libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	5
+libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	9
 libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
@@ -1126,6 +1126,7 @@ tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim	nim	1
 tests/e2e/addon/t_e2e_addon_refused_recovery_keeps_its_record.nim	nim	1
 tests/e2e/addon/t_e2e_addon_removal_respects_ledger.nim	nim	1
 tests/e2e/addon/t_e2e_addon_reproos_service_parity.nim	nim	1
+tests/e2e/addon/t_e2e_addon_revert_keeps_earlier_drift.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_follow_generations.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_without_memory_controller.nim	nim	1
 tests/e2e/addon/t_e2e_addon_sequence_floor_survives_and_is_root_only.nim	nim	1

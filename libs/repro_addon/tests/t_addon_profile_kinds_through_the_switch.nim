@@ -23,13 +23,14 @@
 ## group and user, read through the real passwd driver; the tool's bytes
 ## come from the real driver's renderers.
 
-import std/[strutils, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/packages/apt_closure
 import repro_elevation/posix_system_driver
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_addon/addon_apply
+import repro_addon/agent_record
 import repro_addon/collision
 
 let Lock = renderAptClosureLock(AptClosureLock(
@@ -122,3 +123,63 @@ suite "an account is decided as its driver compares it":
     let missing = group("root", "0", @["repro-no-such-user-7c1e"])
     expect AddonDriftError:
       discard decideAccount(missing, "", false, false, false)
+
+suite "legacy LoadCredential= under the agent's --secrets-dir (§10.3)":
+  # Operator decision 2026-10-31: a full-engine agent keeps its
+  # --secrets-dir delivery through the switch. At f25f69eda0 every
+  # hand-written LoadCredential= was refused; the first test fails there.
+  const Dir = "/var/lib/repro/agent/secrets"
+  proc unitWith(line: string): string =
+    "[Service]\nExecStart=/bin/true\n" & line & "\n"
+  test "a source under the registered directory is accepted, nothing else":
+    check rawCredentialDirective(unitWith("LoadCredential=pushover:" & Dir &
+      "/secrets/alertmanager/pushover"), [Dir]) == ""
+    check rawCredentialDirective(unitWith("LoadCredential=x:" & Dir &
+      "/bundle/a.py"), [Dir]) == ""
+    for bad in ["LoadCredential=x:/run/other/a",
+                "LoadCredential=x:" & Dir & "-evil/a",
+                "LoadCredential=x:" & Dir & "/../agent/recipient.key",
+                "LoadCredential=x:" & Dir,
+                "LoadCredential=x:" & Dir & "/%i",
+                "LoadCredential=x",
+                "LoadCredential=x:relative/a"]:
+      check rawCredentialDirective(unitWith(bad), [Dir]) == "LoadCredential"
+    check rawCredentialDirective(unitWith("LoadCredentialEncrypted=x:" &
+      Dir & "/a"), [Dir]) == "LoadCredentialEncrypted"
+    check rawCredentialDirective(unitWith("SetCredential=x:y"), [Dir]) ==
+      "SetCredential"
+    # No directory registered: refused as before.
+    check rawCredentialDirective(unitWith("LoadCredential=x:" & Dir & "/a")) ==
+      "LoadCredential"
+
+  test "the agent registers its directory; a malformed one is refused":
+    let tmp = createTempDir("addon-legacy-secrets-", "")
+    defer: removeDir(tmp)
+    registerLegacySecretsDir(tmp, Dir)
+    registerLegacySecretsDir(tmp, Dir)              # idempotent
+    check registeredLegacySecretsDirs(tmp) == @[Dir]
+    for bad in ["/", "relative", Dir & "/", "/var//lib", "/var/lib/../x"]:
+      expect AgentRecordError:
+        registerLegacySecretsDir(tmp, bad)
+    let prof = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemUnit, address: "systemUnit:a.service",
+      suName: "a.service",
+      suContent: unitWith("LoadCredential=k:" & Dir & "/secrets/a/k"))])
+    checkScope(prof, registeredLegacySecretsDirs(tmp))
+    expect EAddOnOutOfScope:
+      checkScope(prof)
+
+suite "an owned account's update reports the groups it drops":
+  test "the live groups the resource does not declare":
+    let u = SystemResource(kind: srkPasswdUser, address: "user:nut",
+      puName: "nut", puGroups: @["dialout"])
+    check droppedSupplementaryGroups(u,
+      "dialout:x:20:nut\nplugdev:x:46:pi,nut\naudio:x:29:pi\nnut:x:120:\n") ==
+      @["plugdev"]
+    check droppedSupplementaryGroups(group("nut"), "x:x:1:nut\n").len == 0
+
+suite "a depends_on naming a timer is a unit dependency (§4.1, §7.3)":
+  test "units and timers propagate as units; files do not":
+    check isUnitDependency("systemd.systemUnit")
+    check isUnitDependency("systemd.systemTimer")
+    check not isUnitDependency("fs.systemFile")

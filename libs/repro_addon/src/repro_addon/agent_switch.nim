@@ -63,7 +63,8 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
                           dispatcher: BuildActionDispatcher = nil;
                           apply: AddonApplyFn = nil;
                           driftSink: proc(d: string) {.closure, gcsafe.} = nil;
-                          unitNames: UnitNamesResolver = systemdUnitNames):
+                          unitNames: UnitNamesResolver = systemdUnitNames;
+                          legacySecretsDir = ""):
     ApplyHook =
   ## The agent's apply on an add-on host: the manifest's profile through
   ## the add-on switch into ``stateDir``, recording the manifest's
@@ -81,6 +82,10 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
   ## and every build action is bound to the closure digest the manifest
   ## pins. Freshness, the sequence floor, quarantine and the pause are the
   ## tick's (``requireAttestations``).
+  ##
+  ## ``legacySecretsDir`` is the full engine's `--secrets-dir`: registered
+  ## with the add-on, a hand-written `LoadCredential=` from under it is the
+  ## legacy delivery §10.3 accepts.
   let run = if apply != nil: apply else: defaultAddonApply()
   result = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     {.cast(gcsafe).}:
@@ -128,11 +133,15 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
       try:
         if agentStateDir.len > 0:
           registerAgentState(stateDir, agentStateDir)
+        if legacySecretsDir.len > 0:
+          registerLegacySecretsDir(stateDir, legacySecretsDir)
         let r = run(AddonApplyOptions(stateDir: stateDir,
           hostIdentity: hostIdentity, userProfileText: text,
           buildActions: actions, buildActionDispatcher: dispatcher,
           agentRecord: agentRecordOf(m), agentSequence: m.sequence,
-          rollbackFloor: m.rollbackFloor))
+          rollbackFloor: m.rollbackFloor,
+          legacySecretsDirs: (if legacySecretsDir.len > 0: @[legacySecretsDir]
+                              else: @[])))
         if driftSink != nil:
           for d in r.drift: driftSink("apply drift " & d)
         # Below the signed rollback floor a failure keeps the generation
@@ -188,7 +197,8 @@ proc legacyLastDeployment(legacyStateDir, target: string):
     discard
 
 proc migrationOptions(stateDir, legacyStateDir, target,
-                      hostIdentity: string): AddonApplyOptions =
+                      hostIdentity: string;
+                      legacySecretsDir = ""): AddonApplyOptions =
   ## The switch a migration runs: the profile the legacy agent's current
   ## generation applied, recorded as that agent's last deployment.
   let gen = legacyAgentGeneration(legacyStateDir)
@@ -201,11 +211,14 @@ proc migrationOptions(stateDir, legacyStateDir, target,
     userProfileText: env.profileText,
     agentSequence: last.sequence,
     agentRecord: AgentRecord(deploymentId: last.deploymentId,
-      sequence: last.sequence, migratedFrom: gen))
+      sequence: last.sequence, migratedFrom: gen),
+    legacySecretsDirs: (if legacySecretsDir.len > 0: @[legacySecretsDir]
+                        else: @[]))
 
 proc migrateLegacyAgentState*(stateDir, legacyStateDir, target,
                               hostIdentity: string;
-                              apply: AddonApplyFn = nil): AddonApplyResult =
+                              apply: AddonApplyFn = nil;
+                              legacySecretsDir = ""): AddonApplyResult =
   ## Commit the profile the legacy agent last applied as an add-on
   ## generation. The objects are the agent's own writes, unchanged since, so
   ## the switch adopts them as they are (spec §4.3, "present, unowned,
@@ -213,16 +226,23 @@ proc migrateLegacyAgentState*(stateDir, legacyStateDir, target,
   ## that differs refuses the switch with nothing written, and the migration
   ## is retried by the next tick.
   let run = if apply != nil: apply else: defaultAddonApply()
-  run(migrationOptions(stateDir, legacyStateDir, target, hostIdentity))
+  if legacySecretsDir.len > 0:
+    registerLegacySecretsDir(stateDir, legacySecretsDir)
+  run(migrationOptions(stateDir, legacyStateDir, target, hostIdentity,
+                       legacySecretsDir))
 
 proc planLegacyMigration*(stateDir, legacyStateDir, target,
                           hostIdentity: string;
-                          apply: AddonApplyFn = nil): AddonApplyResult =
+                          apply: AddonApplyFn = nil;
+                          legacySecretsDir = ""): AddonApplyResult =
   ## What the migration would do, decided and reported with nothing written
   ## (``planOnly``): every object it would adopt, write or refuse, and the
   ## service transitions. ``stateDir`` and ``legacyStateDir`` may be copies
   ## of the host's (`repro system addon migration-plan`).
   let run = if apply != nil: apply else: defaultAddonApply()
-  var o = migrationOptions(stateDir, legacyStateDir, target, hostIdentity)
+  # Nothing is registered: a plan writes nothing, the directory is this
+  # apply's only.
+  var o = migrationOptions(stateDir, legacyStateDir, target, hostIdentity,
+                           legacySecretsDir)
   o.planOnly = true
   run(o)

@@ -94,6 +94,12 @@ const
   FxExtra = "repro-fxextra"      ## a live member the profile does not name
   FxTool = "repro-fxtool"
   KeepConf = "/etc/repro-agent-fixture/keep.conf"
+  LegacySecrets = "/var/lib/repro/agent/secrets"
+    ## rpi2's full-engine agent's --secrets-dir (§10.3, "Legacy delivery")
+  CredSecret = LegacySecrets & "/secrets/repro-fx-cred/token"
+  CredServiceText = "[Unit]\nDescription=legacy credential\n\n[Service]\n" &
+    "ExecStart=/bin/sleep infinity\nLoadCredential=token:" & CredSecret &
+    "\n\n[Install]\nWantedBy=multi-user.target\n"
   CachesConf = "/etc/repro/caches.conf"
   Anchors = "/etc/repro/anchors/deploy-signers.anchors"
 
@@ -116,13 +122,17 @@ proc kindMix(lockText: string): string =
   "passwd.group {\n  name = \"" & FxGroup & "\"\n  members = [\"" & FxUser &
     "\"]\n}\n\n" &
   "linux.addOnTool {\n  command = \"" & FxTool & "\"\n  aptClosureLock = " &
-    quoteSystemValue(lockText) & "\n}\n\n"
+    quoteSystemValue(lockText) & "\n}\n\n" &
+  "systemd.systemUnit {\n  name = \"repro-fx-cred.service\"\n  content = " &
+    quoteSystemValue(CredServiceText) & "\n}\n\n"
 
-proc profile(changeMarker, caches, anchors, lockText: string): string =
+proc profile(changeMarker, caches, anchors, lockText: string;
+             extra = ""; addOnExtra = ""): string =
   ## keep-svc reads a file of the profile; caches.conf and the anchors are
   ## generation 0's objects, declared as rpi2's profile declares them.
-  "addOn {\n  managedEtcPrefixes = [\"" & parentDir(KeepConf) & "/\"]\n}\n\n" &
-    kindMix(lockText) &
+  "addOn {\n  managedEtcPrefixes = [\"" & parentDir(KeepConf) & "/\"]\n" &
+    addOnExtra & "}\n\n" &
+    kindMix(lockText) & extra &
     fileResource(KeepConf, "keep = 1\n") &
     unitResource("keep-svc", "keep",
       "  depends_on = [\"fs.systemFile:" & KeepConf & "\"]\n") &
@@ -188,13 +198,26 @@ proc fakeLegacyAgent(g: Guest; text, caches: string; lock: AptClosureLock) =
   g.copyTo(g.runDir / "caches.conf", CachesConf)
   discard g.run("systemctl daemon-reload && systemctl enable --now " &
                 "keep-svc.service change-svc.service")
+  # A unit loading a secret from the legacy --secrets-dir by hand.
+  discard g.run("mkdir -p " & parentDir(CredSecret) & " && printf secret > " &
+                CredSecret & " && chmod 0600 " & CredSecret)
+  writeFile(g.runDir / "repro-fx-cred.service", CredServiceText)
+  g.copyTo(g.runDir / "repro-fx-cred.service",
+           "/etc/systemd/system/repro-fx-cred.service")
   # The timer and its service, as the legacy agent's driver left them.
   writeFile(g.runDir / TickTimer, TickTimerText)
   writeFile(g.runDir / TickService, TickServiceText)
   g.copyTo(g.runDir / TickTimer, "/etc/systemd/system/" & TickTimer)
   g.copyTo(g.runDir / TickService, "/etc/systemd/system/" & TickService)
   discard g.run("systemctl daemon-reload && systemctl enable --now " &
-                TickTimer & " && systemctl start " & TickService)
+                TickTimer & " repro-fx-cred.service && systemctl start " &
+                TickService)
+  # The full-engine agent registers its --secrets-dir with the add-on on
+  # its first tick (``registerLegacySecretsDir``); the static agent the gate
+  # drives has none, so the registration is made here, as that agent would.
+  discard g.run("mkdir -p /var/lib/repro/system/addon && printf '%s\\n' " &
+                LegacySecrets & " > /var/lib/repro/system/addon/" &
+                "legacy-secrets-dirs")
   # The accounts, and a member the profile does not name (rpi2's nut group).
   discard g.run("useradd -M -s /usr/sbin/nologin " & FxUser & " && " &
                 "useradd -M -s /usr/sbin/nologin " & FxExtra & " && " &
@@ -252,14 +275,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let anchorsText = g.run("cat " & Anchors)
     let caches = caches0 & "# written by the deploy agent outside the switch\n"
     let (fxLock, fxLockText) = g.fxToolLock()
-    proc prof(marker: string): string =
-      profile(marker, caches, anchorsText, fxLockText)
+    proc prof(marker: string; extra = ""; addOnExtra = "";
+              cachesText = caches): string =
+      profile(marker, cachesText, anchorsText, fxLockText, extra, addOnExtra)
     # 1. Migration (c).
     g.fakeLegacyAgent(prof("v1"), caches, fxLock)
     let keep0 = g.unitState("keep-svc")
     let change0 = g.unitState("change-svc")
     let anchorsStat0 = g.statOf(Anchors)
     let timer0 = g.timerState()
+    let cred0 = g.unitState("repro-fx-cred")
     let wrapper = addOnToolWrapperPath(FxTool)
     let manifest = addOnToolManifestPath(FxTool)
     let tool0 = g.statOf(wrapper) & " " & g.statOf(manifest)
@@ -319,6 +344,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.entriesAt(manifest).len == 1,
          tool0 & " / " & g.statOf(wrapper) & " " & g.statOf(manifest) & " " &
          $wrapperEntry)
+    step("the legacy LoadCredential= unit was adopted, not restarted",
+         "systemUnit:repro-fx-cred.service" in g.ledgerOf() and
+         g.unitState("repro-fx-cred") == cred0, cred0 & " / " &
+         g.unitState("repro-fx-cred"))
+    # A LoadCredential= from anywhere else is refused, with nothing written
+    # (§10.3): an operator plan of the same profile plus one such unit.
+    writeFile(g.runDir / "outside.profile", prof("v1",
+      extra = "systemd.systemUnit {\n  name = \"repro-fx-outside.service\"\n" &
+        "  content = " & quoteSystemValue("[Service]\nExecStart=/bin/true\n" &
+        "LoadCredential=token:/etc/repro-agent-fixture/token\n") & "\n}\n\n"))
+    g.copyTo(g.runDir / "outside.profile", "/var/tmp/outside.profile")
+    r = g.exec(repro & " infra plan --profile /var/tmp/outside.profile")
+    step("a LoadCredential= outside the agent's --secrets-dir is refused",
+         r.exitCode == 2 and "LoadCredential" in r.stderr & r.stdout and
+         "repro-fx-outside" in r.stderr & r.stdout,
+         r.stdout & r.stderr)
     # 2. An agent apply commits an add-on generation (a).
     let keep1 = g.unitState("keep-svc")
     let m2 = g.publishManifest(signer, Target, 2, prof("v2"), @[], "")
@@ -363,8 +404,45 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     r = g.tick(repro, Target, @[m2])
     step("after resume the tick converges",
          r.outcomeOf() in ["aoConverged", "aoApplied"], r.stdout & r.stderr)
+    # 4b. An agent switch that fails after its flip, over a caches.conf
+    # changed by hand to the bytes manifest 3 declares (accepted without a
+    # write): manifest 3 adds a unit whose health check fails, and the
+    # switch is reverted automatically, with no pending marker left. (The
+    # case where the failed switch had not yet written its ledger, the one
+    # that refused at f25f69eda0, is e2e_addon_revert_keeps_earlier_drift.)
+    let genBefore3 = g.currentGeneration()
+    let caches3 = caches & "# changed by hand before manifest 3\n"
+    writeFile(g.runDir / "caches3", caches3)
+    g.copyTo(g.runDir / "caches3", CachesConf)
+    let m3 = g.publishManifest(signer, Target, 3, prof("v2",
+      extra = "systemd.systemUnit {\n  name = \"repro-fx-fail.service\"\n" &
+        "  content = " & quoteSystemValue(unitText("repro-fx-fail", "fail")) &
+        "\n  healthCheck = \"tcp:127.0.0.1:9\"\n}\n\n",
+      addOnExtra = "  confirmTimeout = 15\n", cachesText = caches3), @[], "")
+    r = g.tick(repro, Target, @[m3])
+    step("a switch that fails after its flip is reverted over earlier drift",
+         r.outcomeOf() == "aoRolledBack" and
+         ("rolled back to " & genBefore3) in r.stdout & r.stderr and
+         g.exec("test ! -e /var/lib/repro/system/addon/pending").exitCode == 0 and
+         g.exec("systemctl is-active repro-fx-fail.service").stdout.strip() !=
+           "active",
+         r.stdout & r.stderr & "\ncaches.conf now:\n" &
+         g.exec("cat " & CachesConf).stdout & "\npending:\n" &
+         g.exec("cat /var/lib/repro/system/addon/pending").stdout)
+    # The revert re-applied generation 2's caches.conf; put back explicitly,
+    # whatever it did, so the rollback below starts from the ledger's bytes.
+    writeFile(g.runDir / "caches2", caches)
+    g.copyTo(g.runDir / "caches2", CachesConf)
     # 5. Generation 0 takes its caches.conf back (b of the supersede rule).
+    # Every unit handed back was adopted, with the bytes it has: none is
+    # restarted (keep-svc stands for rpi2's Alertmanager).
+    let keepBefore0 = g.unitState("keep-svc")
     r = g.exec(repro & " system rollback " & gen0, timeoutSec = 1200)
+    step("a rollback to generation 0 restarts no handed-back unit",
+         r.exitCode == 0 and g.unitState("keep-svc") == keepBefore0 and
+         g.unitState("repro-fx-cred") == cred0,
+         keepBefore0 & " / " & g.unitState("keep-svc") & " ; " & cred0 &
+         " / " & g.unitState("repro-fx-cred"))
     cachesEntries = g.entriesAt(CachesConf)
     step("a rollback to generation 0 restores generation 0's caches.conf",
          r.exitCode == 0 and g.run("cat " & CachesConf) == caches0 and

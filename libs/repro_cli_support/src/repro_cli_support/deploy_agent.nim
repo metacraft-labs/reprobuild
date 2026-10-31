@@ -495,7 +495,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
         let legacyGen = legacyAgentGeneration(flags.stateDir)
         try:
           let r = migrateLegacyAgentState(addonState, flags.stateDir,
-            flags.target, host)
+            flags.target, host, legacySecretsDir = flags.secretsDir)
           echo "repro deploy-agent: migration: add-on generation " &
             r.generationId & " took over agent generation " & legacyGen &
             " (applied " & $r.infra.appliedCount & ", no-op " &
@@ -528,7 +528,8 @@ proc runDeployAgentCommand*(args: seq[string]): int =
             (false, "", "", "", e.msg)
       deps = AgentDeps(
         apply: addonAgentApplyHook(addonState, host, flags.stateDir,
-          compiler, mkBuildActionDispatcher(flags.cacheRoot, ctx)))
+          compiler, mkBuildActionDispatcher(flags.cacheRoot, ctx),
+          legacySecretsDir = flags.secretsDir))
       throughAddonSwitch = true
   if not throughAddonSwitch:
     deps = AgentDeps(
