@@ -319,6 +319,32 @@ suite "a nix realization is held to the declared range":
       executableName: "zlib", rawConstraint: "zlib >=2.0")
     enforceUsesVersionRange(viaAttr, ngUse)
 
+  test "an attribute's `^outputs` selector is not part of the package name":
+    # `uses "zstd-dev >=0"` is realized through `#zstd^*` (Nix's installable
+    # output selector) as `zstd-1.5.7-dev`. The attribute is `zstd`, the
+    # store path's pname, so 1.5.7 holds; comparing against `zstd^*` refused
+    # it as unverifiable (reprobuild-pm issue 2026-10-31-uses-version-check-
+    # drops-a-dev-output-store-path-version-because-the-nix-attribute-keeps-
+    # its-output-suffix).
+    let dev = PathOnlyToolProfile(installMethod: "nix",
+      nixSelector: "github:NixOS/nixpkgs/addf7cf5f383a3101ecfba091b98d0a1263dc9b8#zstd^*",
+      resolvedExecutablePath: "/nix/store/abc-zstd-1.5.7-dev/include/zstd.h",
+      selectedStorePath: "/nix/store/abc-zstd-1.5.7-dev/include/zstd.h")
+    let zstdDev = InterfaceToolUse(packageSelector: "zstd-dev",
+      executableName: "zstd-dev", rawConstraint: "zstd-dev >=0")
+    enforceUsesVersionRange(dev, zstdDev)
+    # The version is now read, not skipped: a range excluding 1.5.7 is
+    # refused as out of range, naming the version, not as unverifiable.
+    let tooNew = InterfaceToolUse(packageSelector: "zstd-dev",
+      executableName: "zstd-dev", rawConstraint: "zstd-dev >=2")
+    try:
+      enforceUsesVersionRange(dev, tooNew)
+      check false
+    except OSError as err:
+      check "reports version 1.5.7" in err.msg
+      check "outside the declared range" in err.msg
+      check "zstd-dev >=2" in err.msg
+
   test "the probe outranks the store path name":
     # A wrapper's store path names the wrapper's version, not the tool's.
     let useDef = InterfaceToolUse(packageSelector: "rustc",

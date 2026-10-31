@@ -2030,13 +2030,22 @@ proc storePathNamesRequestedPackage(pname: string; useDef: InterfaceToolUse;
                                     profile: PathOnlyToolProfile): bool =
   ## Whether a store path's pname is the package the use requested: the
   ## use's selector, or the nix attribute it was realized through (the part
-  ## of ``nixSelector`` after ``#``, last dotted component).
+  ## of ``nixSelector`` after ``#``, without a trailing ``^<outputs>``
+  ## output selector, last dotted component). ``^`` is Nix's installable
+  ## output-selection syntax (``#zstd^*``, ``#openssl^dev,out``; see
+  ## https://nix.dev/manual/nix/latest/command-ref/new-cli/nix#installables),
+  ## not part of the attribute: ``#zstd^*`` realized as ``zstd-1.5.7-dev``
+  ## names ``zstd``.
   if pname.len == 0: return false
   let p = pname.toLowerAscii()
   if p == useDef.packageSelector.toLowerAscii(): return true
   var attr = profile.nixSelector
   let hash = attr.rfind('#')
   if hash >= 0: attr = attr[hash + 1 .. ^1]
+  # Strip the output selector before the dot split, so the split sees only
+  # the attribute path.
+  let caret = attr.find('^')
+  if caret >= 0: attr = attr[0 ..< caret]
   let dot = attr.rfind('.')
   if dot >= 0: attr = attr[dot + 1 .. ^1]
   attr.len > 0 and p == attr.toLowerAscii()
