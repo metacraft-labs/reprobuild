@@ -517,7 +517,7 @@
       # until the v0.1.0 tag carries it; then it moves to the tag. Keep this
       # URL, flake.lock, package.nix, repro.lock and .github/sibling-repos
       # aligned.
-      url = "github:metacraft-labs/test-certificates-tools/9864082065c8acb1db315e65a6a4157a3ab77117";
+      url = "github:metacraft-labs/test-certificates-tools/ddc6b18ee2987ca0fff177f51133eb3eadc9fc2a";
       flake = false;
     };
     # A source-only input was removed from this set, and this note is where
