@@ -264,7 +264,7 @@ libs/repro_core/tests/t_python_dep_scanner.nim	nim	16
 libs/repro_core/tests/t_relocatable_names_keep_dotdot_after_a_symlink.nim	nim	9
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
 libs/repro_core/tests/t_source_root_installed_layout.nim	nim	9
-libs/repro_core/tests/t_target_object_check.nim	nim	27
+libs/repro_core/tests/t_target_object_check.nim	nim	32
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
 libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	28
@@ -377,7 +377,7 @@ libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim	nim	11
-libs/repro_dsl_stdlib/tests/t_target_refuses_a_constructor_that_does_not_thread_it.nim	nim	13
+libs/repro_dsl_stdlib/tests/t_target_refuses_a_constructor_that_does_not_thread_it.nim	nim	20
 libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_windows_monitor_artifacts.nim	nim	9
@@ -2142,7 +2142,7 @@ tests/integration/t_tampered_uki_fails_unseal.nim	nim	6
 tests/integration/t_tarball_compiler_archiver_views.nim	nim	3
 tests/integration/t_tarball_mode_builds_a_fall_through_source_recipe.nim	nim	1
 tests/integration/t_tarball_provisioning_cold_store_extractors.nim	nim	3
-tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim	nim	3
+tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim	nim	5
 tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim	nim	1
 tests/integration/t_tdx_agent_backend.nim	nim	28

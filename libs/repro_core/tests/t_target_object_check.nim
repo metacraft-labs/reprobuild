@@ -319,3 +319,46 @@ suite "declared exemptions":
                 TargetObjectExemption(path: "usr/lib/*.o", reason: "x"),
                 TargetObjectExemption(path: "usr/lib/a\tb", reason: "x")]:
       expect ValueError: validateTargetObjectExemption(bad)
+
+suite "the publication gate":
+  test "a host-platform or CPU-less publication is not checked":
+    let root = stageTree([("bin/tool", "armhf.so")])
+    defer: removeDir(root)
+    let host = hostTriple().split('-')
+    check targetObjectMismatchesForPublication(root, host[0], "linux", "gnu",
+      "").len == 0
+    check targetObjectMismatchesForPublication(root, "any", "linux", "", "").len == 0
+
+  test "the rpi2 identity takes armhf objects and refuses host ones":
+    # armv7 / linux / gnu / "": the consumer's conventions, which do not
+    # state the float ABI, so only machine, class and data are held.
+    let good = stageTree([("usr/bin/a", "armhf.so"), ("usr/lib/b.a", "armhf.a")])
+    defer: removeDir(good)
+    check targetObjectMismatchesForPublication(good, "armv7", "linux", "gnu",
+      "").len == 0
+    let bad = stageTree([("usr/bin/a", "x86_64.o")])
+    defer: removeDir(bad)
+    let p = targetObjectMismatchesForPublication(bad, "armv7", "linux", "gnu", "")
+    check p.len == 1 and "EM_X86_64" in p[0]
+
+  test "an ABI field that states the float ABI is held to it":
+    let soft = stageTree([("usr/lib/a.so", "armsoft.so")])
+    defer: removeDir(soft)
+    check targetObjectMismatchesForPublication(soft, "armv7", "linux",
+      "gnueabihf", "").len == 1
+    check targetObjectMismatchesForPublication(soft, "armv7", "linux",
+      "gnu", "").len == 0
+
+  test "a libc field names the loader a dynamic image must use":
+    let root = stageTree([("bin/a", "armhf-glibc-exe")])
+    defer: removeDir(root)
+    check targetObjectMismatchesForPublication(root, "armv7", "linux",
+      "gnueabihf", "musl-1.2.5").len == 1
+    check targetObjectMismatchesForPublication(root, "armv7", "linux",
+      "gnueabihf", "glibc-2.41").len == 0
+
+  test "a declared exemption passes its path":
+    let root = stageTree([("usr/lib/bpf/p.o", "x86_64.o")])
+    defer: removeDir(root)
+    check targetObjectMismatchesForPublication(root, "armv7", "linux", "gnu",
+      "", [TargetObjectExemption(path: "usr/lib/bpf/p.o", reason: "BPF")]).len == 0

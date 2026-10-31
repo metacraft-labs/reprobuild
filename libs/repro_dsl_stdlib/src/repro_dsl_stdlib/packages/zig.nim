@@ -91,3 +91,76 @@ package zig:
       extractPath = "zig-x86_64-linux-0.16.0",
       cpu = "x86_64",
       os = "linux"
+
+  # zig as the C toolchain of a `cross_zig` target (Reprobuild-Standard-
+  # Library.md §"`CrossTarget`" and step 4 of §"Worked Example:
+  # Cross-Compilation"): `zig cc` is a clang driver carrying its own musl and
+  # compiler-rt, and `zig ar` an LLVM archiver, for every target in
+  # `adapters/cross_zig`'s table. `operations/compile`, `link` and `archive`
+  # emit these when the active `CrossTarget` is a zig one; the adapter's
+  # `cFlags` (`-target <zig triple> -mcpu=<cpu>`) arrive as `targetArgs`.
+  # https://ziglang.org/learn/overview/#cross-compiling-is-a-first-class-use-case
+  executable zig:
+    cli:
+      # Full capture for the same reasons as `packages/clang.nim`'s driver:
+      # zig cc is clang, in process.
+      dependencyPolicy automaticMonitor,
+        captureBreadth = fullCapture
+
+      subcmd "cc":
+        boolFlag pic is bool, alias = "-fPIC"
+        boolFlag debug3 is bool, alias = "-g3"
+        boolFlag compileOnly is bool, alias = "-c"
+        boolFlag shared is bool, alias = "-shared"
+        boolFlag staticLink is bool, alias = "-static"
+        flag includeDirs is seq[string],
+          alias = "-I",
+          format = concat,
+          repeated = true
+        flag libDirs is seq[string],
+          alias = "-L",
+          format = concat,
+          repeated = true
+        flag libs is seq[string],
+          alias = "-l",
+          format = concat,
+          repeated = true
+        flag defines is seq[string],
+          alias = "-D",
+          format = concat,
+          repeated = true
+        flag optimization is string,
+          alias = "-O",
+          format = concat
+        flag standard is string,
+          alias = "-std=",
+          format = concat
+        flag soname is string,
+          alias = "-Wl,-soname,",
+          format = concat
+        flag output is string,
+          alias = "-o",
+          role = output,
+          required = true
+        pos targetArgs is seq[string],
+          position = 0,
+          repeated = true
+        pos sources is seq[string],
+          position = 1,
+          role = input,
+          repeated = true
+
+        outputs output
+
+      subcmd "ar":
+        pos modifiers is string,
+          position = 0
+        pos archive is string,
+          position = 1,
+          role = output
+        pos objects is seq[string],
+          position = 2,
+          role = input,
+          repeated = true
+
+        outputs archive

@@ -45,6 +45,7 @@ import ./decompress
 
 import repro_core/link_target
 import repro_core/paths
+import repro_core/target_object_check
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types as bcsTypes
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/manifest_codec as serverCodec
@@ -841,6 +842,27 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   # Prefix path must exist.
   if not dirExists(req.prefixDir) and not fileExists(req.prefixDir):
     result.error = "publish: prefix path does not exist: " & req.prefixDir
+    return
+
+  # The object check at the publication boundary: a prefix published under
+  # another platform's identity must hold that platform's objects
+  # (CLI/build.md §"Cross Targets: `--target`"). This is the route by which
+  # cross-built bytes reach a cache (Binary-Caches.md §"Publishing for a host
+  # that cannot build"), so host bytes are refused here whoever publishes.
+  let p = req.identity.platform
+  let mismatches =
+    try:
+      targetObjectMismatchesForPublication(req.prefixDir, p.cpu, p.os, p.abi,
+        p.libcVariant, decodeTargetObjectExemptions(
+          getEnv(TargetObjectExemptionsEnvVar)))
+    except UnknownTargetCpu, ValueError:
+      @[getCurrentExceptionMsg()]
+  if mismatches.len > 0:
+    result.error = "publish: " & $mismatches.len & " object(s) under " &
+      req.prefixDir & " are not for the platform it is published under (" &
+      p.cpu & "/" & p.os & "/" & p.abi & "/" & p.libcVariant &
+      "), so nothing is published (the object check):\n  " &
+      mismatches.join("\n  ")
     return
 
   let archivePlan =

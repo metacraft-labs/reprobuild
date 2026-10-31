@@ -810,3 +810,60 @@ proc applyTargetObjectExemptions*(found: seq[string];
           e.reason & ") but holds nothing the check refuses; remove the " &
           "exemption")
   result.sort()
+
+# ---------------------------------------------------------------------------
+# The publication gate: a prefix published under another platform's identity
+# ---------------------------------------------------------------------------
+
+proc isHostPlatform*(cpu, os: string): bool =
+  ## Whether a cache identity's platform names the build host's CPU family
+  ## and OS (the ABI and libc fields are the consumer's conventions and do
+  ## not change which objects a host build produces).
+  let host = hostTriple()
+  canonicalCpu(cpu) == canonicalCpu(host.split('-')[0]) and
+    tripleOs(cpu & "-unknown-" & os) == tripleOs(host)
+
+proc targetObjectRuleForPlatform*(cpu, os, abi, libcVariant: string):
+    TargetObjectRule =
+  ## The rule a prefix published under the platform (``cpu``, ``os``,
+  ## ``abi``, ``libcVariant``) of a cache identity is held to. Raises
+  ## ``UnknownTargetCpu`` for a CPU with no rule. The identity's ABI field
+  ## is the CONSUMER's convention (a static-musl armhf binary is published as
+  ## ``armv7 / linux / gnu / ""`` for a glibc Raspberry Pi; Binary-Caches.md
+  ## §"Publishing for a host that cannot build"), so the ARM float ABI is
+  ## checked only when that field states it (``…hf`` hard, ``…eabi`` soft),
+  ## and the loader only when the libc field names glibc or musl.
+  result = targetObjectRuleFor(cpu & "-unknown-" & os &
+    (if abi.len > 0: "-" & abi else: ""))
+  if result.machine == EM_ARM:
+    let a = abi.toLowerAscii()
+    result.armFloat =
+      if a.endsWith("hf"): afaHard
+      elif a.endsWith("eabi"): afaSoft
+      else: afaNotArm
+  let libc = libcVariant.toLowerAscii()
+  result.libc =
+    if result.os != tofLinux: tlcOther
+    elif libc.startsWith("glibc"): tlcGnu
+    elif libc.startsWith("musl"): tlcMusl
+    else: tlcOther
+
+proc targetObjectMismatchesForPublication*(prefix, cpu, os, abi,
+                                           libcVariant: string;
+    exemptions: openArray[TargetObjectExemption] = []): seq[string] =
+  ## The publication gate (CLI/build.md §"Cross Targets: `--target`"):
+  ## every mismatch in ``prefix`` against the platform it is about to be
+  ## published under, or @[] when that platform is the build host's (a host
+  ## prefix may legitimately carry another target's objects, e.g. a
+  ## ``rust-std`` component) or names no CPU (``""`` / ``any``: data).
+  ## Raises ``UnknownTargetCpu`` for a non-host CPU with no rule.
+  if cpu.len == 0 or cpu.toLowerAscii() in ["any", "noarch", "all"] or
+      isHostPlatform(cpu, os):
+    return
+  let rule = targetObjectRuleForPlatform(cpu, os, abi, libcVariant)
+  var found: seq[string]
+  if dirExists(prefix) and not symlinkExists(prefix):
+    found = treeMismatches(prefix, rule, "")
+  elif fileExists(prefix):
+    found = targetObjectMismatchesInFile(prefix, rule, prefix.extractFilename)
+  applyTargetObjectExemptions(found, exemptions, requireUse = false)

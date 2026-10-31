@@ -12611,8 +12611,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_target_object_check.nim",
-      "sourceSuiteCount": 10,
-      "staticCaseCount": 27,
+      "sourceSuiteCount": 11,
+      "staticCaseCount": 32,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14659,8 +14659,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_target_refuses_a_constructor_that_does_not_thread_it.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 13,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -46399,6 +46399,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
+        "repro_peer_cache",
         "repro_project_dsl",
         "repro_test_support"
       ],
@@ -46406,7 +46407,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
