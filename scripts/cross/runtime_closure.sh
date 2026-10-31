@@ -41,6 +41,10 @@ cross_glibc_sonames=(libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1
 # What the engine dlopens by leaf name (repro_dsl_stdlib/packaging/
 # runtime_contract.reprobuildDlopenLeafNames, Linux).
 cross_dlopen_leaf_names=(libzstd.so.1 libclingo.so)
+# What the prefix's Nim compiler dlopens: libpcre, by soname (Nim's
+# std/re tries libpcre.so.3, .so.1, .so; the native build bakes the store's
+# pcre into its RUNPATH, nix/pkgs/by-name/re/reprobuild/nim-fork.nix).
+cross_nim_dlopen_names=(libpcre.so.1)
 
 cross_is_glibc() {
   local n="$1" g
@@ -105,6 +109,37 @@ build_target_clingo() {
   cp "${built}" "${libdir}/libclingo.so"
 }
 
+build_target_pcre() {
+  # pcre 8.x, the version the native Nim loads (this flake's nixpkgs), as a
+  # shared library, installed under its soname (libpcre.so.1).
+  local cc="$1" sysroot="$2" libdir="$3" work="$4" src built soname
+  src="$(nix build --no-link --print-out-paths --inputs-from "${repo_root:?}" nixpkgs#pcre.src)" ||
+    return 1
+  rm -rf "${work}"
+  mkdir -p "${work}/src"
+  if [ -d "${src}" ]; then cp -r "${src}/." "${work}/src"; else tar -C "${work}/src" --strip-components=1 -xf "${src}"; fi
+  chmod -R u+w "${work}/src"
+  # pcre 8.x's own autotools build (its CMake build predates what current
+  # CMake accepts), cross-configured for the target triple.
+  local triple
+  triple="$(basename "${cc}")"; triple="${triple%-cc}"
+  ( cd "${work}/src" && ./configure --host="${triple}" CC="${cc}" \
+      --disable-cpp --disable-static --enable-shared --enable-utf \
+      --enable-unicode-properties --disable-pcregrep-libz \
+      --disable-pcregrep-libbz2 >"${work}/configure.log" 2>&1 ) || {
+    tail -n 30 "${work}/configure.log" >&2; return 1; }
+  make -C "${work}/src" -j "${NIX_BUILD_CORES:-$(nproc)}" libpcre.la \
+    >"${work}/build.log" 2>&1 || { tail -n 30 "${work}/build.log" >&2; return 1; }
+  mkdir -p "${work}/build"
+  cp -L "$(find "${work}/src/.libs" -name 'libpcre.so.*' -type f | head -n1)" "${work}/build/" 2>/dev/null
+  built="$(find "${work}/build" -name 'libpcre.so*' -type f | head -n1)"
+  [ -n "${built}" ] || { echo "runtime_closure: no libpcre.so was built" >&2; return 1; }
+  soname="$("${READELF:?}" -d "${built}" | sed -n 's/.*(SONAME).*\[\(.*\)\].*/\1/p')"
+  mkdir -p "${libdir}"
+  cp "${built}" "${libdir}/${soname:-libpcre.so.1}"
+  [ -e "${libdir}/libpcre.so.1" ] || cp "${built}" "${libdir}/libpcre.so.1"
+}
+
 bundle_runtime_closure() {
   local stage="$1" sysroot="$2" triple="$3" changed=1 f n src rel up
   mkdir -p "${stage}/lib"
@@ -156,6 +191,11 @@ check_prefix_closure() {
   for n in "${cross_dlopen_leaf_names[@]}"; do
     [ -e "${stage}/lib/${n}" ] || bad+=("the engine dlopens ${n}")
   done
+  if [ -e "${stage}/nim/bin/nim" ]; then
+    for n in "${cross_nim_dlopen_names[@]}"; do
+      [ -e "${stage}/lib/${n}" ] || bad+=("the Nim compiler dlopens ${n}")
+    done
+  fi
   if [ "${#bad[@]}" -gt 0 ]; then
     echo "runtime_closure: not inside the prefix (and not the C library):" >&2
     printf '  %s\n' "${bad[@]}" >&2
