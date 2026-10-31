@@ -61,6 +61,15 @@ suite "agent split: configuration and units":
     check "MemorySwapMax=0" in apply
     check "LimitMEMLOCK=infinity" in apply
     check "CAP_NET_ADMIN" notin apply
+    # The two broad capabilities it keeps are bounded (A8 review, low):
+    # mount namespaces only, and no ptrace-class system calls.
+    check "RestrictNamespaces=mnt" in apply
+    check "@debug" in apply and "SystemCallFilter=~" in apply
+    # Neither unit resolves names through the resolver's sockets (H2).
+    for u in [fetch, apply]:
+      check "/run/systemd/resolve" in u
+    when not mutated("agent-dns-via-resolved"):
+      check "/run/dbus" in fetch
     # Inline-safe: the canonical text cannot carry quotes or braces.
     assertInlineSafe("fetch", fetch)
     assertInlineSafe("apply", apply)
@@ -87,10 +96,49 @@ suite "agent split: the apply unit's refusals":
     when mutated("agent-allows-management-path"):
       check managementPathRefusal(p) == ""
     else:
-      check "sshd drop-in" in managementPathRefusal(p)
+      check "management path" in managementPathRefusal(p)
     let ok = parseSystemProfile("fs.systemFile {\n  path = \"/etc/app/x.conf\"\n" &
       "  content = \"a\"\n}\naddOn { managedEtcPrefixes = [\"/etc/app/\"] }\n")
     check managementPathRefusal(ok) == ""
+
+  test "every file of the management path is refused":
+    let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
+    for path in ["/etc/ssh/sshd_config", "/etc/pam.d/sshd", "/etc/nologin",
+                 "/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/authorized_keys/root",
+                 "/etc/firewalld/zones/public.xml", "/etc/systemd/networkd.conf",
+                 "/etc/systemd/networkd.conf.d/x.conf", "/etc/hosts.deny",
+                 "/etc/iptables/rules.v4", "/etc/systemd/network/10-a.link"]:
+      checkpoint path
+      let p = SystemProfile(resources: @[SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:" & path, sfPath: path)])
+      when mutated("agent-allows-management-path"):
+        check managementPathRefusal(p, noNames) == ""
+      else:
+        check managementPathRefusal(p, noNames).len > 0
+
+  test "units are matched by every name systemd knows, and by their aliases":
+    let aliased: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} =
+      if u == "my-login.service": @["my-login.service", "sshd.service"] else: @[]
+    let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
+    let dropIn = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemDropIn, address: "dropIn:my-login",
+      diUnit: "my-login.service", diName: "10-x.conf")])
+    let installAlias = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemUnit, address: "unit:fw", suName: "fw.service",
+      suContent: "[Service]\nExecStart=/bin/true\n[Install]\nAlias=nftables.service\n")])
+    let instance = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemDropIn, address: "dropIn:ssh@", diUnit: "ssh@x.service",
+      diName: "10-x.conf")])
+    when mutated("agent-allows-management-path"):
+      check managementPathRefusal(dropIn, aliased) == ""
+    elif mutated("agent-management-path-names-only"):
+      check managementPathRefusal(dropIn, aliased) == ""
+      check managementPathRefusal(installAlias, noNames) == ""
+      check managementPathRefusal(instance, noNames).len > 0
+    else:
+      check "sshd.service" in managementPathRefusal(dropIn, aliased)
+      check "nftables.service" in managementPathRefusal(installAlias, noNames)
+      check managementPathRefusal(instance, noNames).len > 0
 
   test "a compiled profile may not widen the managed prefixes":
     let current = parseSystemProfile(

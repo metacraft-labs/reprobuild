@@ -17,7 +17,15 @@
 ##   * one recipient-key rotation: Python seals to the new key, which opens
 ##     it, and the old key does not;
 ##   * a revoked recipient key: BOTH producers refuse to seal to it, given
-##     the same list file.
+##     the same list file;
+##   * the compiled-profile pin (flags bit 1): Python pins the digest of a
+##     compile, this library computes the same digest over the same two
+##     texts and refuses a compile that emitted anything else; and, given a
+##     real profile compiler (`RDMF_PROFILE_COMPILER`, the engine's
+##     `reprobuild`), Python compiles a source profile with it and this test
+##     compiles the same source again, in another directory, and reproduces
+##     the pin (`RDMF_PROFILE_COMPILER_REQUIRED=1` makes its absence a
+##     failure).
 ##
 ## Where the Python producer comes from: `RDMF_PYTHON_PRODUCER` (the script)
 ## and `RDMF_PYTHON` (an interpreter with the `cryptography` package). When
@@ -110,10 +118,14 @@ proc writeKey(path: string; kp: PeerKeypair) =
   writeFile(path, "ecdsa-p256:" & hexOf(kp.privateKey) & "\n")
   setFilePermissions(path, {fpUserRead, fpUserWrite})
 
+var tickCount = 0
+
 proc tickOf(manifestPath: string; anchors: TrustAnchors; now: int64;
             applied: var seq[DeployManifest]): AgentOutcome =
-  let stateDir = work / ("agent-" & $epochTime().int64 & "-" & $applied.len &
-                         "-" & $now)
+  # A fresh agent per tick: two ticks in one second must not share the
+  # agent's state (its last accepted issuedAt among it).
+  inc tickCount
+  let stateDir = work / ("agent-" & $tickCount)
   createDir(stateDir)
   let cfg = AgentConfig(target: Target, sources: @[manifestPath],
     anchors: anchors, stateDir: stateDir, requireAttestations: true)
@@ -274,6 +286,66 @@ suite "RDMF v3 cross-implementation conformance":
       @[SecretFile(path: "web/token", mode: 0o400,
                    content: cast[seq[byte]]("ok"))], list)
 
+  test "Python's compiled-profile pin is the digest this library computes; another compile is refused":
+    let canon = work / "compiled.canonical"
+    let acts = work / "compiled.actions"
+    writeFile(canon, readFile(profile))
+    writeFile(acts, "[]")
+    let path = render("compiled", @["--max-age-seconds", "3600",
+      "--issued-at", $(now - 10), "--sequence", "10",
+      "--compiled-canonical", canon, "--compiled-actions", acts,
+      "--compile-platform", "linux", "--compile-arch", "arm32",
+      "--compile-host", "rpi2", "--compiler-revision", "abc123"])
+    let m = decodeManifest(cast[seq[byte]](readFile(path)))
+    check verifyTrusted(m, anchors)
+    check m.compiledProfile.digest == compiledProfileDigest(readFile(profile), "[]")
+    check m.compiledProfile.platform == "linux"
+    check m.compiledProfile.arch == "arm32"
+    check m.compiledProfile.host == "rpi2"
+    check m.compiledProfile.compilerRevision == "abc123"
+    check compiledProfileRefusal(m, readFile(profile), "[]", "abc123") == ""
+    let evil = readFile(profile) & "systemd.systemUnit {}\n"
+    check "digest mismatch" in compiledProfileRefusal(m, evil, "[]", "abc123")
+    check "digest mismatch" in compiledProfileRefusal(m, readFile(profile),
+      "[{\"id\":\"x\"}]", "abc123")
+    check CompilerRevisionMismatch in compiledProfileRefusal(m,
+      readFile(profile), "[]", "def456")
+
+  test "a real compiler: Python's pin is reproduced by a second compile here":
+    let compiler = getEnv("RDMF_PROFILE_COMPILER")
+    if compiler.len == 0:
+      check getEnv("RDMF_PROFILE_COMPILER_REQUIRED") != "1"
+      echo "SKIPPED: no RDMF_PROFILE_COMPILER (the engine's reprobuild); the " &
+        "compile determinism half is NOT checked here"
+    else:
+      let src = work / "source.nim"
+      writeFile(src, "import repro_profile\n\nprofile \"conformance\":\n" &
+        "  resources:\n    fsSystemFile(path = \"/etc/repro-conformance\", " &
+        "content = \"x\\n\",\n      address = \"conf\")\n")
+      let r = py(@["render", "--target", Target, "--profile", src,
+        "--signing-key", signerKey, "--state-dir", work / "state-real",
+        "--output", work / "real.rdm", "--producer", "conformance",
+        "--max-age-seconds", "3600", "--sequence", "11",
+        "--profile-compiler", compiler, "--compile-platform", "linux",
+        "--compile-arch", "x86_64", "--compile-host", "conformance-host"])
+      check r.code == 0
+      let m = decodeManifest(cast[seq[byte]](readFile(work / "real.rdm")))
+      let again = work / "again"
+      createDir(again / "src")
+      let module = stageProfileSources(again / "src", m.profileText,
+                                       m.profileFiles)
+      let c = execCmdEx(quoteShellCommand(@[compiler, "deploy-agent",
+        "compile-profile", "--staged", module, "--canonical-out",
+        again / "c", "--actions-out", again / "a", "--state-dir",
+        again / "state", "--host", m.compiledProfile.host, "--platform",
+        m.compiledProfile.platform, "--arch", m.compiledProfile.arch,
+        "--revision-out", again / "r"]))
+      check c.exitCode == 0
+      check m.compiledProfile.compilerRevision ==
+        readFile(again / "r").strip()
+      check compiledProfileRefusal(m, readFile(again / "c"),
+        readFile(again / "a"), readFile(again / "r").strip()) == ""
+
   test "this library's v3 manifest decodes in Python, byte for byte":
     let recipient = peerAuth.generateKeypair()
     var m = DeployManifest(target: Target, sequence: 9'u64,
@@ -282,6 +354,10 @@ suite "RDMF v3 cross-implementation conformance":
       issuedAt: uint64(now - 30), maxAgeSeconds: 900'u64, rollbackFloor: 8'u64,
       closureDigests: @[ClosureDigest(actionId: "prefix-a", digest: DigestA),
                         ClosureDigest(actionId: "prefix-b", digest: DigestB)],
+      compiledProfile: CompiledProfilePin(
+        digest: compiledProfileDigest("canonical", "[]"),
+        compilerRevision: "nim-rev", platform: "linux",
+        arch: "x86_64", host: "nim-host"),
       buildActions: @[], hasSecrets: true,
       secrets: sealSecrets(recipient.publicKey, Target,
         @[SecretFile(path: "web/token", mode: 0o400,
@@ -295,7 +371,12 @@ suite "RDMF v3 cross-implementation conformance":
     check r.code == 0
     let j = parseJson(r.output)
     check j["formatVersion"].getInt == 3
-    check j["flags"].getInt == 1
+    check j["flags"].getInt == 3
+    check j["attestations"]["compiledProfile"]["digest"].getStr ==
+      compiledProfileDigest("canonical", "[]")
+    check j["attestations"]["compiledProfile"]["host"].getStr == "nim-host"
+    check j["attestations"]["compiledProfile"]["compilerRevision"].getStr ==
+      "nim-rev"
     check j["sequence"].getInt == 9
     check j["signatureVerifies"].getBool
     check j["attestations"]["issuedAt"].getBiggestInt == now - 30

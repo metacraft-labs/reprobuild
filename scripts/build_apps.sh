@@ -272,6 +272,17 @@ if [ -n "${REPROBUILD_MUTATIONS:-}" ]; then
   nim_mode_flags+=("-d:reproMutations")
 fi
 
+# One add-on-mode falsifying mutation (libs/repro_addon/src/repro_addon/
+# mutations.nim and repro_deploy_agent/agent_mutations.nim), compiled in only
+# when a gate's red run asks for it. The engine's own agent mutations (the
+# add-on host path of `repro deploy-agent`) need a mutated ENGINE, which a
+# gate builds as the Nix package with this variable set
+# (`overrideAttrs (_: { REPRO_ADDON_MUTATION = "<name>"; })`); an unknown
+# name fails the compile.
+if [ -n "${REPRO_ADDON_MUTATION:-}" ]; then
+  nim_mode_flags+=("-d:reproAddonMutation=${REPRO_ADDON_MUTATION}")
+fi
+
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
     ;;

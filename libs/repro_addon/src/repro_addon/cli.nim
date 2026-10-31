@@ -50,6 +50,7 @@ import repro_local_store/store as local_store
 import ./addon_apply
 import ./addon_rollback
 import ./agent_record
+import ./agent_repin
 import ./agent_switch
 import ./apt_hook
 import ./base_identity
@@ -111,6 +112,10 @@ commands:
       Generate the next recipient key and print its public half; the
       current key is deleted when the first envelope sealed to the new
       one opens.
+  agent-repin [--apply <digest>]
+      Resolve the deploy agent's origins again and print the plan for the
+      fetch unit's egress allow-list and hosts file (writing nothing), or
+      apply the plan the digest names as one switch (spec §9.1).
   agent-tick --source <manifest>... [--target T] [--allowed-signers F]
       One deploy-agent tick in one process: verify (RDMF v3 required),
       accept the sealed section, apply the profile through the switch; it
@@ -436,6 +441,8 @@ proc runAddonCli*(args: seq[string]): int =
       return runAgentApplyCli(rest)
     of "resume":
       return runResumeCli(rest)
+    of "agent-repin":
+      return runAgentRepinCli(rest)
     of "migration-plan":
       return runMigrationPlanCli(rest)
     of "test-sleep":

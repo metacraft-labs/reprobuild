@@ -159,6 +159,8 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
       m.revertReason & " (the revert was finished at boot)", false)
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
+  # A switch the rollback floor kept in place is resolved by its commit.
+  if fileExists(floorHoldPath(stateDir)): removeFile(floorHoldPath(stateDir))
   @["the switch to " & current & " had committed (marker at step " &
     $m.step & "); finished its step 9"]
 

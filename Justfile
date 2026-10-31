@@ -208,6 +208,12 @@ e2e_addon_induced_health_failure_cannot_revert_below_floor:
 e2e_addon_fetch_unit_reaches_only_its_origins:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_fetch_unit_reaches_only_its_origins
 
+e2e_addon_compromised_compiler_is_refused:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_compromised_compiler_is_refused
+
+e2e_addon_engine_agent_enforces_a8:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_engine_agent_enforces_a8
+
 e2e_addon_sequence_floor_survives_and_is_root_only:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_sequence_floor_survives_and_is_root_only
 

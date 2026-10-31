@@ -49,6 +49,7 @@ import repro_deploy_agent/tick_status
 
 import ./addon_apply
 import ./addon_secrets
+import ./agent_checks
 import ./agent_record
 import ./agent_switch
 import ./apt_hook
@@ -58,6 +59,9 @@ import ./generation0
 import ./host_exec
 import ./ledger
 import ./mutations
+import ./verified_compile
+
+export agent_checks, verified_compile
 import ./preflight
 import ./seams
 import ./secrets_ops
@@ -74,14 +78,14 @@ type
     ## The staging area cannot be copied as the apply unit requires.
 
 const
-  ManagementPathRefusal* = "EAddOnManagementPath"
-    ## The prefix of the refusal an agent apply reports for an sshd drop-in
-    ## or a firewall or network resource (spec §7.5, threat model G27).
   StagingLatestName* = "latest"
   StagingResultName* = "result"
   StagedManifestName* = "manifest.rdm"
   StagedCanonicalName* = "profile.canonical"
   StagedActionsName* = "actions.json"
+  StagedCompilerRevisionName* = "compiler.revision"
+    ## The fetch unit's compiler's own revision (untrusted, diagnostic: it
+    ## names the cause of a mismatch, the digest decides).
   StagedOutputsDir* = "outputs"
   StagedDebsDir* = "debs"
   StagedNotesName* = "notes"
@@ -135,15 +139,6 @@ proc fetchStagingRoot*(): string =
     "staging"
 
 proc applyCopyDir*(): string = AgentDir / ApplyCopyDirName
-
-proc isCanonicalProfileText*(text: string): bool =
-  ## Whether ``text`` is the canonical resource text an add-on apply
-  ## parses (as opposed to profile source that needs a compiler).
-  try:
-    discard parseSystemProfile(text)
-    true
-  except CatchableError:
-    false
 
 proc actionsToJson*(actions: seq[ProfileBuildAction]): string = $(%actions)
 
@@ -207,7 +202,8 @@ proc compileProfile(conf: AgentConf; m: DeployManifest;
   let argv = @[conf.profileCompiler, "deploy-agent", "compile-profile",
     "--staged", module, "--canonical-out", dir / StagedCanonicalName,
     "--actions-out", dir / StagedActionsName,
-    "--state-dir", workspace / "state"]
+    "--state-dir", workspace / "state",
+    "--revision-out", dir / StagedCompilerRevisionName] & compileFactArgs(m)
   let r = runHostTool(argv, timeoutSec = CompileTimeoutSec)
   if r.exitCode != 0:
     return "the profile compiler failed (exit " & $r.exitCode & "): " &
@@ -440,66 +436,6 @@ proc copyLatestStaging*(stagingRoot, dest: string): string =
 # The apply.
 # ---------------------------------------------------------------------------
 
-const ManagementPathFiles = ["/etc/ssh/sshd_config",
-  # The firewall class's configuration files (nftables, iptables-persistent,
-  # ufw) and the network class's (networkd, netplan, ifupdown).
-  "/etc/nftables.conf", "/etc/network/interfaces"]
-const ManagementPathDirs = ["/etc/ssh/sshd_config.d/", "/etc/nftables.d/",
-  "/etc/iptables/", "/etc/ufw/", "/etc/systemd/network/", "/etc/netplan/",
-  "/etc/network/interfaces.d/", "/etc/NetworkManager/"]
-const ManagementPathUnits = ["ssh.service", "sshd.service", "ssh.socket",
-                             "sshd.socket"]
-
-proc managementPathRefusal*(p: SystemProfile): string =
-  ## Why a deploy-agent apply may not carry ``p`` (spec §7.5, §4.5; threat
-  ## model G27), or "": an ``sshd`` drop-in or configuration file, a
-  ## drop-in for the ssh units, and anything of the ``firewall`` and
-  ## ``network`` classes. Until the management-path guard exists (§13 Q6)
-  ## only an operator apply may touch them.
-  when mutated("agent-allows-management-path"):
-    return ""
-  for r in p.resources:
-    case r.kind
-    of srkFsSystemFile, srkLinuxDpkgDiversion:
-      let path = if r.kind == srkFsSystemFile: r.sfPath else: r.ddPath
-      if path in ManagementPathFiles:
-        return r.address & " writes " & path & " (a management-path class)"
-      for d in ManagementPathDirs:
-        if path.startsWith(d):
-          return r.address & " writes " & path &
-            (if d.startsWith("/etc/ssh/"): " (an sshd drop-in)"
-             else: " (the firewall or network class)")
-    of srkSystemdSystemDropIn:
-      if r.diUnit in ManagementPathUnits:
-        return r.address & " is a drop-in for " & r.diUnit
-    of srkSystemdSystemUnit:
-      if r.suName in ManagementPathUnits:
-        return r.address & " replaces " & r.suName
-    of srkLinuxFirewallRule:
-      return r.address & " is of the firewall class"
-    else:
-      discard
-    if r.address.startsWith("network.") or r.address.startsWith("networkd."):
-      return r.address & " is of the network class"
-  ""
-
-proc agentPrefixRefusal*(compiled, current: SystemProfile): string =
-  ## A profile the fetch unit compiled is untrusted: it may not declare a
-  ## managed ``/etc`` prefix the current generation does not (spec §9.1:
-  ## "a compromised compiler can produce at most what the profile could
-  ## have declared"; widening the prefixes takes signed canonical text or
-  ## an operator apply). "" when it does not widen them.
-  when mutated("agent-apply-skips-recheck"):
-    return ""
-  let have = managedPrefixes(current)
-  for pfx in compiled.addOn.managedEtcPrefixes:
-    if pfx notin have:
-      return "the compiled profile declares the managed prefix " & pfx &
-        ", which the current generation does not; a profile compiled on " &
-        "the host may not widen the prefixes (sign canonical text, or " &
-        "apply it as an operator)"
-  ""
-
 proc stagedAptFetcher(copyDir: string): AptDebFetcher =
   ## The apply unit's ``.deb`` source: its own copy of what the fetch unit
   ## staged, never the network. A member that was not staged fails the
@@ -514,38 +450,81 @@ proc stagedAptFetcher(copyDir: string): AptDebFetcher =
         "the lock's size")
     copyFile(src, dest)
 
+proc stagedCwdRefusal*(cwd, storeRoot: string): string =
+  ## Why an action may not materialise its outputs under ``cwd``, or "".
+  ## A compiled action's ``cwd`` is the fetch unit's word, so it is held to
+  ## the one shape a store prefix has (spec §8.3): ``<store>/prefixes/
+  ## <name>/<version>``, spelled canonically (no empty, ``.`` or ``..``
+  ## segment, no trailing ``/``), with no symbolic link on any existing
+  ## component below the store root. A string-prefix test alone let
+  ## ``<store>/../../etc/cron.d`` through.
+  when mutated("agent-install-trusts-cwd"):
+    if cwd.startsWith(storeRoot & "/"): return ""
+  let base = storeRoot & "/prefixes/"
+  if not cwd.startsWith(base):
+    return cwd & " is not under " & base
+  let rest = cwd[base.len .. ^1]
+  let segs = rest.split('/')
+  if segs.len != 2:
+    return cwd & " is not " & base & "<name>/<version>"
+  for seg in segs:
+    if seg.len == 0 or seg == "." or seg == ".." or '\0' in seg:
+      return cwd & " is not a canonical store path"
+  var cur = storeRoot
+  for seg in @["prefixes"] & segs:
+    cur = cur / seg
+    if symlinkExists(cur):
+      return cwd & ": " & cur & " is a symbolic link"
+  ""
+
 proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
                            copyDir: string; storeRoot = StoreRoot) =
   ## Verify each action's staged outputs against the digest the signed
   ## manifest pins, BEFORE anything is moved into the store, linked or
-  ## named in a unit; then copy them under the action's ``cwd`` in the
+  ## named in a unit; then copy exactly those declared outputs -- nothing
+  ## else the staging directory holds -- under the action's ``cwd`` in the
   ## store, through the private writable view. Raises on the first
-  ## mismatch or missing output.
+  ## refusal, mismatch or missing output; nothing is written before every
+  ## action has passed.
   let pinned = pinActionsToClosureDigests(m, actions)
   if pinned.refusal.len > 0:
     raise newException(AddonApplyError, "closure digests: " & pinned.refusal)
   for i, a in pinned.actions:
-    if not a.cwd.startsWith(storeRoot & "/"):
+    let bad = stagedCwdRefusal(a.cwd, storeRoot)
+    if bad.len > 0:
       raise newException(AddonApplyError, "build action " & a.id &
-        " materialises under " & a.cwd & ", outside " & storeRoot)
+        " may not materialise there: " & bad & "; nothing was written")
     var staged = a
     staged.cwd = copyDir / StagedOutputsDir / $i
     let refusal = closureDigestRefusal(m, a.id, localOutputsDigest(staged))
     if refusal.len > 0:
       raise newException(AddonApplyError, refusal & "; nothing of it was " &
         "moved into the store")
+    # A prefix path already holding other bytes is another closure's: it
+    # is never overwritten in place (a new version is a new path).
+    for rel in outputRelPaths(a):
+      let dst = a.cwd / rel
+      if (fileExists(dst) or dirExists(dst) or symlinkExists(dst)) and
+          localOutputsDigest(a) != a.expectedOutputDigest:
+        raise newException(AddonApplyError, a.cwd & " already holds outputs " &
+          "that do not hash to " & a.id & "'s pin; refusing to overwrite them")
   for i, a in pinned.actions:
     # Present already, with the pinned bytes: nothing to do.
     if localOutputsDigest(a) == a.expectedOutputDigest: continue
     if storeRoot == StoreRoot: enterWritableStoreView()
     createDir(a.cwd)
     let src = copyDir / StagedOutputsDir / $i
-    for kind, p in walkDir(src):
-      let dst = a.cwd / extractFilename(p)
-      if dirExists(dst): removeDir(dst)
-      elif fileExists(dst) or symlinkExists(dst): removeFile(dst)
-      if kind == pcDir: copyDirWithPermissions(p, dst)
-      else: copyFileWithPermissions(p, dst)
+    when mutated("agent-install-copies-undeclared"):
+      var rels: seq[string]
+      for kind, p in walkDir(src, relative = true): rels.add(p)
+    else:
+      let rels = outputRelPaths(a)
+    for rel in rels:
+      let p = src / rel
+      let dst = a.cwd / rel
+      createDir(parentDir(dst))
+      if dirExists(p): copyDirWithPermissions(p, dst)
+      elif fileExists(p): copyFileWithPermissions(p, dst)
     if localOutputsDigest(a) != a.expectedOutputDigest:
       raise newException(AddonApplyError, "the outputs of " & a.id &
         " do not hash to their pin after the copy into the store")
@@ -587,8 +566,8 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
                                            m.profileFiles)
           let r = runHostTool(@[conf.profileCompiler, "deploy-agent",
             "compile-profile", "--staged", module, "--canonical-out",
-            d / StagedCanonicalName, "--actions-out", d / StagedActionsName],
-            timeoutSec = CompileTimeoutSec)
+            d / StagedCanonicalName, "--actions-out", d / StagedActionsName] &
+            compileFactArgs(m), timeoutSec = CompileTimeoutSec)
           if r.exitCode != 0:
             return (false, "profile compile failed: " & r.output)
           text = readFile(d / StagedCanonicalName)
@@ -601,25 +580,27 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
                 readFile(copyDir / StagedNotesName).strip() & ")")
             return (false, why)
           text = readFile(copyDir / StagedCanonicalName)
-          if actions.len == 0 and fileExists(copyDir / StagedActionsName):
-            actions = actionsFromJson(readFile(copyDir / StagedActionsName))
+          let actionsJson = if fileExists(copyDir / StagedActionsName):
+                              readFile(copyDir / StagedActionsName) else: ""
+          # The fetch unit's compile is a cache of the producer's: what it
+          # emitted is applied only when it hashes to the signed pin (B1).
+          let revision = if fileExists(copyDir / StagedCompilerRevisionName):
+                           readFile(copyDir / StagedCompilerRevisionName).strip()
+                         else: ""
+          let pin = compiledProfileCheck(m, text, actionsJson, revision)
+          if pin.len > 0:
+            recordCompiledProfileRefusal(m, pin)
+            return (false, pin)
+          if actions.len == 0 and actionsJson.len > 0:
+            actions = actionsFromJson(actionsJson)
       var prof: SystemProfile
       try: prof = parseSystemProfile(text)
       except CatchableError as e:
         return (false, "the profile does not parse: " & e.msg)
-      if not canonical:
-        let current = parseSystemProfile(
-          if fileExists(userProfilePath(DefaultStateDir)):
-            readFile(userProfilePath(DefaultStateDir)) else: "")
-        let widen = agentPrefixRefusal(prof, current)
-        if widen.len > 0:
-          return (false, $adOutOfScope & ": " & widen & "; nothing was written")
-      let mgmt = managementPathRefusal(prof)
-      if mgmt.len > 0:
-        return (false, ManagementPathRefusal & ": refused in a deploy-agent " &
-          "apply: " & mgmt & "; sshd drop-ins and the firewall and network " &
-          "classes need an operator apply with an open session until the " &
-          "management-path guard exists (spec §7.5); nothing was written")
+      let refusal = agentProfileRefusal(m, prof, not canonical,
+                                        DefaultStateDir)
+      if refusal.len > 0:
+        return (false, refusal)
       if actions.len > 0:
         if copyDir.len == 0:
           return (false, "the manifest carries build actions, which only " &
@@ -641,6 +622,9 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
           result = runAddonApply(o2)
         except AddonRolledBack as e:
           raise newException(EApplyRolledBack, e.msg)
+        except AddonFailedAtFloor as e:
+          # Not committed, not reverted: the floor kept the switch in place.
+          raise newException(EApplyFailedAtFloor, e.msg)
         failedAtFloor = result.failedAtFloor
         for d in result.drift: ctx.drift.add("apply drift " & d))
       if r.ok and failedAtFloor.len > 0:

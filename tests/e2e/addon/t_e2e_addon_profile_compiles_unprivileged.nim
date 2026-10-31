@@ -5,7 +5,10 @@
 ## is the full reprobuild engine (a Nix closure of it, copied into the
 ## guest, named by ``REPRO_ADDON_ENGINE_CLOSURE``); the fetch unit runs it
 ## (``repro deploy-agent compile-profile``) and stages the canonical text
-## it produces, and the apply unit applies that text. A watcher started
+## it produces, and the apply unit applies that text -- only because it
+## hashes to the digest the producer signed for its own compile of the same
+## source with the same engine on the test host (``producerCompile``; the
+## compile is deterministic across the two machines). A watcher started
 ## before the tick samples every compiler process (``nim``, ``gcc``,
 ## ``cc1``) with its UID (``/proc/<pid>/status``) and its control group
 ## (the ``systemd-cgls`` view, read from ``/proc/<pid>/cgroup``): at least
@@ -37,25 +40,7 @@ const
 
 let engine = getEnv("REPRO_ADDON_ENGINE_CLOSURE")
 
-proc closureTar(): string =
-  ## The engine's closure as one tar of absolute store paths (cached).
-  result = reproRoot() / "build" / ("a8-engine-closure-" &
-    engine.extractFilename & ".tar")
-  if fileExists(result): return
-  let (paths, c) = execCmdEx("nix-store -qR " & quoteShell(engine))
-  doAssert c == 0, paths
-  let lst = result & ".list"
-  writeFile(lst, paths)
-  let (o, c2) = execCmdEx("tar -cf " & quoteShell(result & ".tmp") &
-    " -T " & quoteShell(lst))
-  doAssert c2 == 0, o
-  moveFile(result & ".tmp", result)
-
-proc installEngine(g: Guest) =
-  let tar = closureTar()
-  g.copyTo(tar, "/root/engine.tar")
-  discard g.run("tar -xf /root/engine.tar -C / && rm /root/engine.tar",
-                timeoutSec = 1800)
+proc installEngine(g: Guest) = g.installEngineClosure(engine)
 
 const Watcher = """
 while true; do
@@ -74,7 +59,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard g.run("cat > /root/watch.sh <<'EOS'\n" & Watcher & "EOS\n")
   discard g.run("rm -f /root/compilers.log; setsid nohup sh /root/watch.sh " &
                 ">/dev/null 2>&1 & echo started")
-  discard producer.publish(PublishSpec(sequence: 1, profileText: Source))
+  # The producer compiles the same source with the same engine on this
+  # machine and pins the digest (B1): the guest's compile reproducing it is
+  # the cross-host determinism check (x86_64 producer, Debian/Ubuntu guest).
+  let pin = producerCompile(engine, Source)
+  record["compiledProfilePin"] = %pin.digest
+  record["compilerRevision"] = %pin.compilerRevision
+  discard producer.publish(PublishSpec(sequence: 1, profileText: Source,
+    compiledProfile: pin))
   let t = g.tickUnits(timeoutSec = 2400)
   discard g.exec("pkill -f /root/watch.sh")
   record["tick"] = %($t)

@@ -266,6 +266,18 @@
 ## ``agent-extract-follows-links``            the fetch unit's archive
 ##                                            extraction writes through a
 ##                                            symlink component
+## ``agent-install-copies-undeclared``       the apply unit copies every
+##                                            staged entry, not only the
+##                                            declared outputs
+## ``agent-install-trusts-cwd``               a compiled action's ``cwd``
+##                                            is checked by string prefix
+## ``agent-dns-via-resolved``                 the fetch unit can reach
+##                                            systemd-resolved / D-Bus
+## ``agent-management-path-names-only``       ssh/firewall/network units
+##                                            are matched by name only,
+##                                            aliases not resolved
+## ``floor-only-on-confirm``                  the rollback floor bounds only
+##                                            confirmation failures
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -338,7 +350,12 @@ const
                           "agent-compiles-in-apply",
                           "agent-rereads-staging",
                           "agent-substitutes-untrusted",
-                          "agent-extract-follows-links"]
+                          "agent-extract-follows-links",
+                          "agent-install-copies-undeclared",
+                          "agent-install-trusts-cwd",
+                          "agent-dns-via-resolved",
+                          "agent-management-path-names-only",
+                          "floor-only-on-confirm"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

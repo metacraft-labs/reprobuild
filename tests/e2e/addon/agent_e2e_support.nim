@@ -82,6 +82,9 @@ type PublishSpec* = object
   buildActions*: seq[ProfileBuildAction]
   deploymentId*: string
   plainV2*: bool            ## emit no attestation block (a v1/v2 manifest)
+  compiledProfile*: CompiledProfilePin
+    ## The producer's compile of a source ``profileText``
+    ## (``producerCompile``); empty for canonical text.
 
 proc publish*(p: Producer; s: PublishSpec): seq[byte] =
   ## Sign and serve one manifest at the target's ``latest.rdm``.
@@ -94,6 +97,7 @@ proc publish*(p: Producer; s: PublishSpec): seq[byte] =
     m.maxAgeSeconds = if s.maxAgeSeconds > 0: s.maxAgeSeconds else: 86_400'u64
     m.rollbackFloor = s.rollbackFloor
     m.closureDigests = s.closureDigests
+    m.compiledProfile = s.compiledProfile
   signManifest(p.signer, m)
   result = encodeManifest(m)
   var bytes = newString(result.len)
@@ -101,6 +105,62 @@ proc publish*(p: Producer; s: PublishSpec): seq[byte] =
   let tmp = p.dir / AgentTarget / ".latest.rdm.tmp"
   writeFile(tmp, bytes)
   moveFile(tmp, p.dir / AgentTarget / "latest.rdm")
+
+proc engineClosureTar(engine: string): string =
+  ## ``engine``'s closure as one tar of absolute store paths (cached).
+  result = reproRoot() / "build" / ("a8-engine-closure-" &
+    engine.extractFilename & ".tar")
+  if fileExists(result): return
+  let (paths, c) = execCmdEx("nix-store -qR " & quoteShell(engine))
+  doAssert c == 0, paths
+  let lst = result & ".list"
+  writeFile(lst, paths)
+  let (o, c2) = execCmdEx("tar -cf " & quoteShell(result & ".tmp") &
+    " -T " & quoteShell(lst))
+  doAssert c2 == 0, o
+  moveFile(result & ".tmp", result)
+
+proc installEngineClosure*(g: Guest; engine: string) =
+  ## The full engine (a Nix store path holding ``bin/reprobuild``, built
+  ## from this tree; ``REPRO_ADDON_ENGINE_CLOSURE``) with its closure, at
+  ## the same store paths in the guest.
+  let tar = engineClosureTar(engine)
+  g.copyTo(tar, "/root/engine.tar")
+  discard g.run("tar -xf /root/engine.tar -C / && rm /root/engine.tar",
+                timeoutSec = 1800)
+
+const CompileHost* = "a8-testbed"
+  ## The host identity a gate's producer compiles source profiles for.
+
+proc producerCompile*(engine, source: string; arch = "x86_64";
+                      host = CompileHost;
+                      files: seq[ProfileFile] = @[]): CompiledProfilePin =
+  ## The producer's side of the compiled-profile pin: compile ``source``
+  ## on THIS machine with ``engine`` (a store path holding
+  ## ``bin/reprobuild``), for the facts the target's agent will compile
+  ## with, and pin the digest and the engine's revision -- what infra's
+  ## renderer does with ``--profile-compiler``.
+  let work = getTempDir() / ("a8-producer-compile-" & $getCurrentProcessId() &
+    "-" & $epochTime().int64)
+  createDir(work / "src")
+  defer: removeDir(work)
+  writeFile(work / "src" / StagedProfileModule, source)
+  for f in files:
+    createDir(parentDir(work / "src" / f.path))
+    writeFile(work / "src" / f.path, f.content)
+  let cmd = quoteShellCommand(@[engine / "bin" / "reprobuild", "deploy-agent",
+    "compile-profile", "--staged", work / "src" / StagedProfileModule,
+    "--canonical-out", work / "c", "--actions-out", work / "a",
+    "--digest-out", work / "d", "--revision-out", work / "r",
+    "--state-dir", work / "state", "--host", host, "--platform", "linux",
+    "--arch", arch])
+  let (o, c) = execCmdEx("env HOME=" & quoteShell(work / "home") & " " & cmd)
+  doAssert c == 0, "the producer's compile failed: " & o
+  result = CompiledProfilePin(digest: readFile(work / "d").strip(),
+    compilerRevision: readFile(work / "r").strip(), platform: "linux",
+    arch: arch, host: host)
+  doAssert result.digest == compiledProfileDigest(readFile(work / "c"),
+    readFile(work / "a"))
 
 proc agentFlags*(a: Anchors; p: Producer; cacheUrl = ""): string =
   ## Preflight / bootstrap options: the anchors, the agent's target and

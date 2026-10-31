@@ -137,7 +137,7 @@ proc contentDigestHex(d: ContentDigest): string =
     result.add(HexChars[(int(b) shr 4) and 0xf])
     result.add(HexChars[int(b) and 0xf])
 
-proc outputRelPaths(action: ProfileBuildAction): seq[string]
+proc outputRelPaths*(action: ProfileBuildAction): seq[string]
   ## Forward declaration — the full definition lives below in the
   ## output-prefix mapping section; ``cacheFingerprintHex`` needs the
   ## cwd-relative output paths to build a placement-independent key.
@@ -247,7 +247,7 @@ proc publishIdentityFlags*(idy: CacheEntryIdentity): seq[string] =
 # byte-identically.
 # ---------------------------------------------------------------------------
 
-proc outputRelPaths(action: ProfileBuildAction): seq[string] =
+proc outputRelPaths*(action: ProfileBuildAction): seq[string] =
   ## Normalise the action's declared outputs to cwd-relative POSIX-style
   ## paths. An absolute output under `cwd` is made relative; a relative one
   ## is normalised (`./out.bin` is `out.bin`, `a/../b` is `b`); the working

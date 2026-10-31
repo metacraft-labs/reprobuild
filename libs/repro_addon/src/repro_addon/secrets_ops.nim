@@ -311,7 +311,7 @@ proc tickApply*(stateDir: string; l: SecretsLayout; m: DeployManifest;
     result = (true, "generation " & r.generationId &
       (if r.drift.len > 0: "; " & $r.drift.len & " object(s) left as " &
          "actionable drift" else: ""))
-  except EAddOnUnsupportedBase, EApplyRolledBack:
+  except EAddOnUnsupportedBase, EApplyRolledBack, EApplyFailedAtFloor:
     # Typed through to the agent: aoUnsupportedBase, exit 2 (spec §7.9);
     # aoRolledBack, the deployment quarantined (spec §9.2, A8).
     try: discardStaged(l)

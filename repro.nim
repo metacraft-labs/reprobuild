@@ -345,6 +345,45 @@ const
     ## macOS too; every test that imports
     ## `tests/e2e/m83/profile_compile_edge_harness.nim` executes it.
 
+  binaryCacheHelperConsumers = block:
+    ## The tests that run the binary-cache server or its client CLI as
+    ## helpers (``reprobuild.test_helpers.repro_binary_cache``, ``_m6`` with
+    ## TLS, ``repro_binary_cache_client_cli``). Without a row a focused run of
+    ## one of them found no helper unless a whole-graph build had made it
+    ## earlier (found by the A8 review: two deploy-agent tests needed it
+    ## copied by hand).
+    const
+      Base = TestGraphArtifact(path: "build/test-bin/repro_binary_cache",
+        actionId: "reprobuild.test_helpers.repro_binary_cache")
+      M6 = TestGraphArtifact(path: "build/test-bin/repro_binary_cache_m6",
+        actionId: "reprobuild.test_helpers.repro_binary_cache_m6")
+      Cli = TestGraphArtifact(
+        path: "build/test-bin/repro_binary_cache_client_cli",
+        actionId: "reprobuild.test_helpers.repro_binary_cache_client_cli")
+    var rows: seq[TestGraphArtifacts]
+    for (source, artifacts) in [
+        ("libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim", @[Base]),
+        ("libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim", @[M6]),
+        ("libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim", @[Base]),
+        ("libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim", @[M6]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p2_manifest_fetch.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p3_streaming_sink.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p4_engine_dispatch.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p5_closure_walk.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p6_daemon_substitute.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p6_daemon_substitute_ipc.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p7_in_process_substitute.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a2_5_p8_throughput_bench.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim", @[Base, Cli]),
+        ("libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim", @[Base, Cli]),
+        ("libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_r1_client_trust.nim", @[Base])]:
+      rows.add TestGraphArtifacts(source: source, artifacts: artifacts)
+    rows
+
   profileCompileNimSpyConsumers = block:
     var rows: seq[TestGraphArtifacts]
     for name in ["t_e2e_profile_compile_staticread_payload_change",
@@ -492,7 +531,8 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/test-bin/repro_catalog_harvester",
         actionId: "reprobuild.test_helpers.repro_catalog_harvester")]),
-  ] & profileCompileNimSpyConsumers & (when defined(linux) or defined(macosx): @[
+  ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
+    (when defined(linux) or defined(macosx): @[
     TestGraphArtifacts(
       source: "tests/e2e/codetracer-subset/" &
         "t_e2e_codetracer_in_place_project_file.nim",

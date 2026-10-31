@@ -13,6 +13,12 @@
 ## ``detAo3``. Vacuity guard: the evidence-sink connect succeeds from the
 ## host's own control group.
 ##
+## A name looked up from inside the unit (its mount namespace, its user,
+## its control group) does not resolve: the host's resolver services over
+## AF_UNIX are hidden from it, and the NSS ``dns`` fallback is denied by the
+## IP filter (second falsifying mutation, ``agent-dns-via-resolved``: the
+## resolver sockets stay visible and ``getent`` answers).
+##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=agent-fetch-unrestricted-egress``):
 ## no ``IPAddressAllow=`` / ``IPAddressDeny=`` pair; the third connect gets
 ## through: red.
@@ -74,6 +80,27 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       det[name] = %c
       step("a connect to the " & name & " (" & host & ":" & $port &
            ") from the fetch unit is denied", c != 0, $c)
+    # Name resolution through the host's resolver services (AF_UNIX:
+    # systemd-resolved's varlink and D-Bus, nscd), which the IP filter
+    # never sees: from the unit's mount namespace, as its user, in its
+    # control group, `getent hosts` must fail. Vacuity guard: it succeeds
+    # outside the unit.
+    let pid = g.run("systemctl show -p MainPID --value repro-agent-fetch.service").strip()
+    let uid = g.run("stat -c %u /proc/" & pid).strip()
+    let gid = g.run("stat -c %g /proc/" & pid).strip()
+    let outside = g.exec("getent hosts example.com")
+    step("vacuity guard: the host resolves example.com outside the unit",
+         outside.exitCode == 0, outside.stdout & outside.stderr)
+    let inside = g.exec("echo $$ > /sys/fs/cgroup/system.slice/" &
+      "repro-agent-fetch.service/cgroup.procs && nsenter --target " & pid &
+      " --mount --setuid " & uid & " --setgid " & gid &
+      " timeout 20 getent hosts example.com")
+    det["resolverViaUnixSockets"] = %inside.exitCode
+    # The same name as the vacuity guard's: one that resolves outside.
+    # (getent exits non-zero when ANY name of several fails, so one name.)
+    step("no name resolves from inside the fetch unit (no DNS channel " &
+         "through the host's resolver)", inside.exitCode != 0 and
+         inside.stdout.strip().len == 0, inside.stdout & inside.stderr)
     record["detAo3"] = det
     g.resumeSeam(FetchSeamDir)
   g.waitApplyIdle()

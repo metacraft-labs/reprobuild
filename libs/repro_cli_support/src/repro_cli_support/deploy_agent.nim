@@ -42,7 +42,7 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[json, os, strutils]
+import std/[base64, json, os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -50,6 +50,7 @@ import repro_deploy_agent/secrets
 import repro_peer_cache/auth as peerAuth
 import repro_home_intent/host_identity
 import repro_profile
+from repro_core import ReprobuildSourceRevision
 import ./infra
 # Add-on mode owns Linux filesystem and ledger operations, so its closure
 # reaches `repro_addon/linux_fs` and its `<sys/vfs.h>` bindings. Keep those
@@ -59,6 +60,9 @@ import ./infra
 when defined(linux):
   import repro_addon/addon_apply
   import repro_addon/agent_switch
+  import repro_addon/verified_compile
+  import repro_deploy_agent/agent_mutations
+  from repro_core/source_root import publicCliImagePath
 import repro_elevation
 import repro_profile_compile
 
@@ -169,19 +173,54 @@ proc runDeployAgentKeygen(args: seq[string]): int =
   echo peerAuth.publicKeyHex(key.publicKey)
   0
 
+const CompiledProfileStdioMarker* = "REPRO-COMPILED-PROFILE "
+  ## The line ``compile-profile --stdio`` writes its result on (base64 of a
+  ## JSON object ``{"canonical", "actions"}``, each base64), so whatever the
+  ## compiler prints around it cannot be mistaken for it.
+
+proc compileTargetFor(host, platform, arch: string): SystemPlanTarget =
+  ## The plan target of an agent compile: the ``default`` activity, with the
+  ## predicate facts overridden by whatever the caller names. A producer
+  ## compiles for its target's facts, and the target's agent compiles with
+  ## the same ones from the signed pin, so one compiler revision gives one
+  ## output on both (Deploy-Agent.md §"The compiled-profile pin").
+  result = defaultSystemPlanTarget(host)
+  if platform.len > 0: result.facts.platform = platform
+  if arch.len > 0: result.facts.arch = arch
+
 proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## ``repro deploy-agent compile-profile --staged <module.nim>
-  ## --canonical-out <file> --actions-out <file> [--state-dir D]``: compile a
+  ## --canonical-out <file> --actions-out <file> [--state-dir D]
+  ## [--host H] [--platform P] [--arch A] [--digest-out F]
+  ## [--revision-out F]``: compile a
   ## staged manifest profile (its bundle beside it, as
   ## ``stageProfileSources`` writes it) to the canonical resource text and
   ## the build actions, through the same Phase-F3 path ``repro infra apply``
-  ## uses, and write both; apply nothing. The unprivileged fetch unit of a
-  ## ReproOS add-on host runs this as its profile compiler, so the compiler
-  ## never runs in the root apply unit (ReproOS add-on §9.1).
-  var staged, canonicalOut, actionsOut, stateDir = ""
+  ## uses, and write both; apply nothing. ``--digest-out`` also writes the
+  ## ``compiledProfileDigest`` of the two, the pin a producer signs, and
+  ## ``--revision-out`` the source revision of this compiler, which it pins
+  ## beside the digest.
+  ##
+  ## ``compile-profile --stdio [--host H] [--platform P] [--arch A]``
+  ## reads ``{"profileText", "profileFiles": [{"path", "content"}]}`` (each
+  ## text base64) on stdin, compiles it in a scratch directory under
+  ## ``$TMPDIR``, and prints the result on one ``CompiledProfileStdioMarker``
+  ## line. It is how a root process has a profile compiled by an
+  ## unprivileged one (``repro_addon/verified_compile``).
+  ##
+  ## The unprivileged fetch unit of a ReproOS add-on host runs this as its
+  ## profile compiler, so the compiler never runs as root (ReproOS add-on
+  ## §9.1).
+  var staged, canonicalOut, actionsOut, stateDir, digestOut, revisionOut = ""
+  var host, platform, arch = ""
+  var hostGiven, stdio = false
   var i = 0
   while i < args.len:
     let a = args[i]
+    if a == "--stdio":
+      stdio = true
+      inc i
+      continue
     if i + 1 >= args.len:
       stderr.writeLine("repro deploy-agent compile-profile: " & a &
         " needs a value")
@@ -191,28 +230,82 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
     of "--canonical-out": canonicalOut = args[i + 1]
     of "--actions-out": actionsOut = args[i + 1]
     of "--state-dir": stateDir = args[i + 1]
+    of "--digest-out": digestOut = args[i + 1]
+    of "--revision-out": revisionOut = args[i + 1]
+    of "--host":
+      host = args[i + 1]
+      hostGiven = true
+    of "--platform": platform = args[i + 1]
+    of "--arch": arch = args[i + 1]
     else:
       stderr.writeLine("repro deploy-agent compile-profile: unknown option " & a)
       return 2
     i += 2
-  if staged.len == 0 or canonicalOut.len == 0 or actionsOut.len == 0:
+  var profileText = ""
+  var workspace = ""
+  if stdio:
+    if staged.len > 0 or canonicalOut.len > 0 or actionsOut.len > 0:
+      stderr.writeLine("repro deploy-agent compile-profile: --stdio takes " &
+        "its profile on stdin and prints its result; --staged and the " &
+        "output files do not apply")
+      return 2
+    var files: seq[ProfileFile]
+    try:
+      let j = parseJson(stdin.readAll())
+      profileText = base64.decode(j["profileText"].getStr())
+      for f in j{"profileFiles"}.getElems():
+        files.add(ProfileFile(path: f["path"].getStr(),
+                              content: base64.decode(f["content"].getStr())))
+      workspace = getTempDir() / ("repro-compile-" & $getCurrentProcessId())
+      if dirExists(workspace): removeDir(workspace)
+      staged = stageProfileSources(workspace / "source", profileText, files)
+    except CatchableError as e:
+      stderr.writeLine("repro deploy-agent compile-profile: unreadable " &
+        "--stdio input: " & e.msg)
+      return 2
+    # A dynamic user has no home: the compiler's caches go to the scratch.
+    for v in ["HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]:
+      putEnv(v, workspace / "home")
+    createDir(workspace / "home")
+    stateDir = workspace / "state"
+  elif staged.len == 0 or canonicalOut.len == 0 or actionsOut.len == 0:
     stderr.writeLine("usage: repro deploy-agent compile-profile --staged " &
-      "<module.nim> --canonical-out <file> --actions-out <file> [--state-dir D]")
+      "<module.nim> --canonical-out <file> --actions-out <file> " &
+      "[--state-dir D] [--host H] [--platform P] [--arch A] " &
+      "[--digest-out F] [--revision-out F]\n       repro deploy-agent compile-profile --stdio " &
+      "[--host H] [--platform P] [--arch A]")
     return 2
+  else:
+    profileText = readFile(staged)
   if stateDir.len == 0: stateDir = staged.parentDir / ".compile-state"
   var bundlePaths: seq[string]
   for f in walkDirRec(staged.parentDir):
     if f != staged: bundlePaths.add(f)
   var text = ""
   var actions: seq[ProfileBuildAction]
-  let host = try: selectHost("", false).name except CatchableError: ""
-  if not resolveSystemProfileText(staged, readFile(staged), stateDir,
+  if not hostGiven:
+    host = try: selectHost("", false).name except CatchableError: ""
+  if not resolveSystemProfileText(staged, profileText, stateDir,
       "repro deploy-agent compile-profile", text,
       planCommand = "repro infra plan", outBuildActions = addr actions,
-      target = defaultSystemPlanTarget(host), declaredInputs = bundlePaths):
+      target = compileTargetFor(host, platform, arch),
+      declaredInputs = bundlePaths):
     return 1
+  let actionsJson = $(%actions)
+  if stdio:
+    echo CompiledProfileStdioMarker & base64.encode($(%*{
+      "canonical": base64.encode(text), "actions": base64.encode(actionsJson),
+      "revision": ReprobuildSourceRevision}))
+    try: removeDir(workspace) except CatchableError: discard
+    return 0
   writeFile(canonicalOut, text)
-  writeFile(actionsOut, $(%actions))
+  writeFile(actionsOut, actionsJson)
+  if digestOut.len > 0:
+    writeFile(digestOut, compiledProfileDigest(text, actionsJson) & "\n")
+  if revisionOut.len > 0:
+    # The revision this compiler was built from, which a producer pins
+    # beside the digest (``CompiledProfilePin.compilerRevision``).
+    writeFile(revisionOut, ReprobuildSourceRevision & "\n")
   0
 
 proc runDeployAgentCommand*(args: seq[string]): int =
@@ -297,7 +390,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
       recordTick(flags.stateDir, flags.target, rec)
       return 2
 
-  let cfg = AgentConfig(
+  var cfg = AgentConfig(
     target: flags.target,
     sources: flags.sources,
     anchors: anchors,
@@ -388,9 +481,25 @@ proc runDeployAgentCommand*(args: seq[string]): int =
           recordTick(flags.stateDir, flags.target, rec)
           return 1
       let ctx = FixtureContext(filePrefix: flags.stateDir)
+      # An add-on host's agent is held to the add-on agent's rules (A8,
+      # owner decision B3): the v3 attestation block is required (freshness,
+      # the rollback floor, the closure-digest pins), and a source profile
+      # is compiled by a dynamic user, never in this root process, and
+      # applied only when the compile reproduces the producer's signed pin.
+      when not agentMutated("engine-agent-skips-a8"):
+        cfg.requireAttestations = true
+      let engineExe = launcherOf(publicCliImagePath())
+      let compiler: ManifestCompiler = proc(m: DeployManifest):
+          tuple[ok: bool; canonical, actionsJson, revision, error: string]
+          {.gcsafe.} =
+        {.cast(gcsafe).}:
+          try:
+            unprivilegedCompile(engineExe, m)
+          except CatchableError as e:
+            (false, "", "", "", e.msg)
       deps = AgentDeps(
-        apply: addonAgentApplyHook(addonState, host, flags.stateDir, resolver,
-          mkBuildActionDispatcher(flags.cacheRoot, ctx)))
+        apply: addonAgentApplyHook(addonState, host, flags.stateDir,
+          compiler, mkBuildActionDispatcher(flags.cacheRoot, ctx)))
       throughAddonSwitch = true
   if not throughAddonSwitch:
     deps = AgentDeps(

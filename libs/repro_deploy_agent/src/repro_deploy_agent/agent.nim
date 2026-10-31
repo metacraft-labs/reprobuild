@@ -32,6 +32,8 @@
 ## ``runInfraApply``. This mirrors the Linux agent's ``DeployAgentDependencies``
 ## seam (fetch/run/query process runners injected for tests).
 
+when defined(posix):
+  import std/posix
 import std/[algorithm, asyncdispatch, asyncfutures, httpclient, monotimes, os,
             strutils, times, uri]
 
@@ -232,6 +234,35 @@ proc sequenceStatePath*(cfg: AgentConfig): string =
   (if cfg.floorDir.len > 0: cfg.floorDir else: cfg.stateDir) /
     "deploy-agent" / (safeTargetName(cfg.target) & ".seq")
 
+proc writeStateFileDurably*(path, content: string) =
+  ## Replace ``path`` with ``content`` so that a crash or power cut leaves
+  ## the old file or the new one, never an empty or torn one: write a
+  ## temporary beside it, fsync it, rename it over ``path``, fsync the
+  ## directory. The agent's floor, quarantine and pause live in such files.
+  let dir = parentDir(path)
+  if dir.len > 0: createDir(dir)
+  when agentMutated("agent-state-plain-write"):
+    writeFile(path, content)
+    return
+  let tmp = path & ".tmp-" & $getCurrentProcessId()
+  var f: File
+  if not open(f, tmp, fmWrite):
+    raise newException(IOError, "cannot write " & tmp)
+  try:
+    f.write(content)
+    f.flushFile()
+    when defined(posix):
+      if posix.fsync(f.getFileHandle()) != 0:
+        raise newException(IOError, "fsync of " & tmp & " failed")
+  finally:
+    f.close()
+  moveFile(tmp, path)
+  when defined(posix):
+    let d = posix.open(dir.cstring, O_RDONLY)
+    if d >= 0:
+      discard posix.fsync(d)
+      discard posix.close(d)
+
 proc readLastAppliedSequence*(cfg: AgentConfig): uint64 =
   ## The highest sequence ever applied for this target, or 0 when none.
   let path = sequenceStatePath(cfg)
@@ -239,7 +270,14 @@ proc readLastAppliedSequence*(cfg: AgentConfig): uint64 =
     return 0'u64
   let text = readFile(path).strip()
   if text.len == 0:
-    return 0'u64
+    # Fail closed: an empty floor is a torn write or tampering, never
+    # "nothing applied yet" (that is an absent file), so it must not let
+    # an older sequence apply.
+    when agentMutated("agent-state-plain-write"):
+      return 0'u64
+    raise newException(CatchableError,
+      "empty last-applied-sequence state at " & path & "; refusing to " &
+      "guess the floor (restore it, or remove it to accept any sequence)")
   try:
     result = parseBiggestUInt(text)
   except ValueError:
@@ -251,11 +289,7 @@ proc readLastAppliedSequence*(cfg: AgentConfig): uint64 =
       "corrupt last-applied-sequence state at " & path & ": " & text)
 
 proc writeLastAppliedSequence*(cfg: AgentConfig; sequence: uint64) =
-  let path = sequenceStatePath(cfg)
-  let dir = parentDir(path)
-  if dir.len > 0 and not dirExists(dir):
-    createDir(dir)
-  writeFile(path, $sequence & "\n")
+  writeStateFileDurably(sequenceStatePath(cfg), $sequence & "\n")
 
 # ---------------------------------------------------------------------------
 # Quarantine (``aoRolledBack``) and the operator's pause (``aoPaused``).
@@ -295,7 +329,8 @@ proc readQuarantine*(cfg: AgentConfig):
 proc writeQuarantine*(cfg: AgentConfig; sequence: uint64; deploymentId: string) =
   let path = quarantinePath(cfg)
   createDir(parentDir(path))
-  writeFile(path, "# deployment reverted by its own apply; not retried\n" &
+  writeStateFileDurably(path,
+    "# deployment reverted by its own apply; not retried\n" &
     $sequence & " " & deploymentId & "\n")
 
 proc clearQuarantine*(cfg: AgentConfig) =
@@ -326,8 +361,8 @@ proc readPauseMarker*(stateDir: string):
 proc writePauseMarker*(stateDir, generation, operator: string) =
   let path = pauseMarkerPath(stateDir)
   createDir(parentDir(path))
-  writeFile(path, "generation=" & generation & "\noperator=" & operator &
-    "\nat=" & now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'") & "\n")
+  writeStateFileDurably(path, "generation=" & generation & "\noperator=" &
+    operator & "\nat=" & now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'") & "\n")
 
 proc clearPauseMarker*(stateDir: string): bool =
   ## Remove the marker; true when there was one.
@@ -337,8 +372,31 @@ proc clearPauseMarker*(stateDir: string): bool =
     return true
   false
 
+const MaxIssuedAtFutureSkewSeconds* = 300'i64
+  ## How far ahead of this host's clock a manifest's ``issuedAt`` may be
+  ## before it is refused: clock skew between producer and target, not a
+  ## validity period.
+
+proc issuedAtStatePath*(cfg: AgentConfig): string =
+  ## Beside the sequence floor: the ``issuedAt`` of the manifest last
+  ## applied (or last seen converged), so an older signing time is refused.
+  (if cfg.floorDir.len > 0: cfg.floorDir else: cfg.stateDir) /
+    "deploy-agent" / (safeTargetName(cfg.target) & ".issued")
+
+proc readLastIssuedAt*(cfg: AgentConfig): uint64 =
+  let path = issuedAtStatePath(cfg)
+  if not fileExists(path): return 0
+  let text = readFile(path).strip()
+  try: parseBiggestUInt(text)
+  except ValueError:
+    raise newException(CatchableError,
+      "corrupt last-issuedAt state at " & path & ": " & text)
+
+proc writeLastIssuedAt*(cfg: AgentConfig; issuedAt: uint64) =
+  writeStateFileDurably(issuedAtStatePath(cfg), $issuedAt & "\n")
+
 proc staleness*(m: DeployManifest; nowUnix: int64):
-    tuple[stale: bool; ageSeconds: int64] =
+    tuple[stale: bool; ageSeconds: int64; future: bool] =
   ## Whether ``m`` is older than the maximum age it carries. A manifest
   ## without the attestation block makes no freshness claim and is never
   ## stale here (an agent that needs the claim requires the block).
@@ -348,6 +406,13 @@ proc staleness*(m: DeployManifest; nowUnix: int64):
     return
   result.stale = result.ageSeconds > 0 and
     uint64(result.ageSeconds) > m.maxAgeSeconds
+  # An issuedAt in the future would otherwise be fresh forever (a producer
+  # whose clock ran ahead, or a signing key used to pre-date manifests):
+  # beyond a small skew it is refused as stale too.
+  when not agentMutated("agent-issued-at-future-trusted"):
+    if result.ageSeconds < -MaxIssuedAtFutureSkewSeconds:
+      result.stale = true
+      result.future = true
 
 proc attestationRefusal*(m: DeployManifest): string =
   ## Why an agent that requires the v3 attestation block refuses ``m``,
@@ -625,10 +690,30 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   if age.stale:
     return AgentOutcome(kind: aoStale, target: cfg.target,
       sequence: selected.sequence, deploymentId: selected.deploymentId,
-      message: "manifest at sequence " & $selected.sequence & " was issued " &
-        $age.ageSeconds & " s ago, past its maximum age of " &
-        $selected.maxAgeSeconds & " s: the source may be frozen",
-      errorCode: "stale_manifest")
+      message: (if age.future:
+          "manifest at sequence " & $selected.sequence & " claims to be " &
+          "issued " & $(-age.ageSeconds) & " s in the future, beyond the " &
+          $MaxIssuedAtFutureSkewSeconds & " s skew allowed: the producer's " &
+          "or this host's clock is wrong"
+        else:
+          "manifest at sequence " & $selected.sequence & " was issued " &
+          $age.ageSeconds & " s ago, past its maximum age of " &
+          $selected.maxAgeSeconds & " s: the source may be frozen"),
+      errorCode: (if age.future: "issued_in_future" else: "stale_manifest"))
+  # A signing time older than the one last accepted is a replay of an
+  # older signature, whatever this host's clock says (it may have none
+  # worth trusting: no RTC, unauthenticated NTP).
+  when not agentMutated("agent-issued-at-future-trusted"):
+    if selected.hasAttestations:
+      let lastIssued = readLastIssuedAt(cfg)
+      if selected.issuedAt < lastIssued:
+        return AgentOutcome(kind: aoStale, target: cfg.target,
+          sequence: selected.sequence, deploymentId: selected.deploymentId,
+          message: "manifest at sequence " & $selected.sequence & " was " &
+            "issued at " & $selected.issuedAt & ", before the manifest this " &
+            "host last accepted (" & $lastIssued & "): an older signature " &
+            "is being replayed",
+          errorCode: "issued_at_regressed")
 
   # -- PAUSE (a local operator rollback, spec §9.3 of the add-on) --------
   let pause = readPauseMarker(cfg.stateDir)
@@ -643,6 +728,9 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   # -- MONOTONICITY ------------------------------------------------------
   let lastApplied = readLastAppliedSequence(cfg)
   if selected.sequence <= lastApplied:
+    if selected.hasAttestations and selected.sequence == lastApplied and
+        selected.issuedAt > readLastIssuedAt(cfg):
+      writeLastIssuedAt(cfg, selected.issuedAt)
     return AgentOutcome(kind: aoConverged, target: cfg.target,
       sequence: selected.sequence, deploymentId: selected.deploymentId,
       message: "already converged at sequence " & $lastApplied &
@@ -711,6 +799,7 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
       errorCode: "unsupported_base")
   except EApplyFailedAtFloor as e:
     writeLastAppliedSequence(cfg, selected.sequence)
+    if selected.hasAttestations: writeLastIssuedAt(cfg, selected.issuedAt)
     clearQuarantine(cfg)
     return AgentOutcome(kind: aoApplyFailed, target: cfg.target,
       sequence: selected.sequence, deploymentId: selected.deploymentId,
@@ -735,6 +824,7 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   # Persist only AFTER a successful apply so a failed apply never advances
   # the monotonic floor (a wrong-signer/failed manifest can't poison it).
   writeLastAppliedSequence(cfg, selected.sequence)
+  if selected.hasAttestations: writeLastIssuedAt(cfg, selected.issuedAt)
   clearQuarantine(cfg)
   return AgentOutcome(kind: aoApplied, target: cfg.target,
     sequence: selected.sequence, deploymentId: selected.deploymentId,

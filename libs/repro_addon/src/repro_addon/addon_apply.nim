@@ -101,6 +101,12 @@ export health.ConfirmOutcome
 
 type
   AddonApplyError* = object of CatchableError
+  AddonFailedAtFloor* = object of AddonApplyError
+    ## A switch failed after its flip and was NOT reverted, because the
+    ## signed rollback floor is above the sequence of the generation it
+    ## would go back to (spec §7.5): the host keeps what the switch wrote;
+    ## when the switch did not commit, its pending marker stays (a recovery
+    ## finishes it forward, never reverts it) and ``floor-hold`` records why.
   AddonRolledBack* = object of AddonApplyError
     ## The switch did not complete -- a health check failed within
     ## ``confirmTimeout``, a write was refused, a step failed -- and it was
@@ -308,6 +314,11 @@ proc generationAgentSequence*(stateDir, generationId: string): uint64 =
   let p = stateDir / "generations" / generationId / AgentSequenceFileName
   if not fileExists(p): return 0
   try: parseBiggestUInt(readFile(p).strip()) except CatchableError: 0'u64
+
+proc floorHoldPath*(stateDir: string): string =
+  ## Present while a switch the rollback floor kept from reverting is
+  ## pending: a recovery may finish it, never revert it.
+  stateDir / "addon" / "floor-hold"
 
 proc invocationTablePath*(stateDir: string): string =
   addonDir(stateDir) / "invocations"
@@ -3334,6 +3345,33 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     marker.detail = why
     writePendingMarker(stateDir, marker)
     let isRevert = purpose == "revert" or opts.replayOf == "revert"
+    # A8, spec §7.5: the rollback floor bounds EVERY automatic revert, not
+    # only a failed confirmation. A failure after the flip is left in
+    # place -- marker and all -- and reported, never reverted below it.
+    when not mutated("floor-only-on-confirm"):
+      if floorBlocksRevert and marker.step >= ssFlip and not opts.recordOnly:
+        writeFileAtomic(floorHoldPath(stateDir), "rollbackFloor=" &
+          $opts.rollbackFloor & "\nsequence=" & $opts.agentSequence &
+          "\nfrom=" & committedPrevious & "\n", 0o600)
+        let attemptLog = if hookGeneration.len > 0: hookGeneration
+                         else: committedPrevious
+        if attemptLog.len > 0:
+          appendAuditRecord(applyLogPath(stateDir, attemptLog), AuditRecord(
+            timestamp: getTime().toUnix(), operationKind: "addon.switch",
+            resourceAddress: "generation:" & attemptLog,
+            outcome: "failed-at-floor",
+            diagnostic: "rollback floor " & $opts.rollbackFloor & "; not " &
+              "reverted to " & committedPrevious & "; not committed: " & why,
+            recordClass: AuditClassLiveState))
+        discard writeEvidenceRecord("failed-at-floor", %*{
+          "attempt": hookGeneration, "previous": committedPrevious,
+          "rollbackFloor": opts.rollbackFloor, "sequence": opts.agentSequence,
+          "committed": false, "failures": [why]})
+        raise newException(AddonFailedAtFloor, why & "\nthe switch failed " &
+          "after its flip and was not reverted: the signed rollback floor " &
+          $opts.rollbackFloor & " is above " & committedPrevious & "; the " &
+          "pending marker at " & pendingMarkerPath(stateDir) & " stays, and " &
+          "a recovery finishes the switch forward")
     if isRevert or opts.recordOnly or committedPrevious.len == 0:
       # A revert that fails, a record-only replay (its caller reverts), or
       # a first switch (bootstrap) with nothing to go back to (owner
@@ -3448,6 +3486,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       recordClass: AuditClassLiveState))
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
+  # A switch the rollback floor kept in place is resolved by its commit.
+  if fileExists(floorHoldPath(stateDir)): removeFile(floorHoldPath(stateDir))
 
 type
   FailedReplayRevert* = object
@@ -3502,6 +3542,10 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
   if fromGen.len == 0:
     return FailedReplayRevert(why: "a first switch (bootstrap) has no " &
       "generation to go back to")
+  if fileExists(floorHoldPath(stateDir)):
+    return FailedReplayRevert(why: "the signed rollback floor kept this " &
+      "switch from reverting (" & floorHoldPath(stateDir) & "); finish it " &
+      "with `repro system addon recover`, or apply a newer manifest")
   let current = readCurrentGenerationId(stateDir)
   if current != fromGen:
     return FailedReplayRevert(why: "`current` names " &
