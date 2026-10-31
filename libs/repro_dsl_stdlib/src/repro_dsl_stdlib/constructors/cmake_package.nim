@@ -275,11 +275,10 @@ proc cmake_package*(srcDir: string;
     requireZigDeclared("cmake_package")
   else:
     requireCrossTargetConsulted("cmake_package")
-  # A target build's build and staging trees are keyed by the target, so a
-  # native and a target configure of one recipe never share (and wipe) one
-  # tree (CLI/build.md §"Cross Targets: `--target`").
-  let buildDir = targetKeyedPath(buildDir)
-  let destdir = targetKeyedPath(destdir)
+  # A target build's build tree (and the staging tree inside it) is keyed by
+  # the target, so a native and a target configure of one recipe never
+  # share (and wipe) one tree (CLI/build.md §"Cross Targets: `--target`").
+  let buildDir = targetKeyedDir(buildDir)
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let effectiveDestRoot =

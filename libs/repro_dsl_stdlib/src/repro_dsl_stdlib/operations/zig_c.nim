@@ -69,6 +69,18 @@ proc targetKeyedPath*(path: string): string =
   for part in parts[1 .. ^1]:
     result = result / part
 
+proc targetKeyedDir*(dir: string): string =
+  ## A DIRECTORY a target build writes (a constructor's build tree), keyed
+  ## on its LAST component: ``.repro/build/zlib-native`` becomes
+  ## ``.repro/build/zlib-native@<triple>`` beside the native one, not a new
+  ## ``.repro@<triple>`` beside ``.repro``. Unchanged for a native build.
+  if dir.len == 0 or effectiveInstallMirrorTarget().len == 0:
+    return dir
+  let trimmed = dir.strip(leading = false, chars = {'/', '\\'})
+  let parent = trimmed.parentDir
+  let name = targetKeyedOutputName(trimmed.extractFilename)
+  if parent.len == 0: name else: parent / name
+
 proc libraryHeaderDirs(api: LibraryApi): seq[string] =
   if api.declared:
     for h in api.headers: result.add(h)

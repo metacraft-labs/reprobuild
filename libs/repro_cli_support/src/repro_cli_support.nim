@@ -12512,11 +12512,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if not tarballFallThrough:
       seedBootstrapCycleBreakTools()
     var pendingSourceUses = buildArtifact.projectInterface.toolUses
+    # Which side of a `--target` build each queued use is for. A
+    # `nativeBuildDeps:` tool runs on the build host, so its source recipe is
+    # built natively -- and so is everything that recipe needs, because it
+    # is all for the tool (From-Source-Build-Recipes.md §"Package-level
+    # dependency declarations"). Without this every queued use inherited the
+    # process-wide `targetTriple` and a build tool was built for the target.
+    var pendingNative: seq[bool]
+    for use in pendingSourceUses:
+      pendingNative.add(use.depKind == DepKindNative)
     var expandedSourceRecipes = initHashSet[string]()
     var nextSourceUse = 0
     template enqueueSourceDependencies(directory: string; runtimeOnly: bool) =
       let recipeDir = absolutePath(directory)
-      let expansionKey = recipeDir & ":" & $runtimeOnly
+      let expansionKey = recipeDir & ":" & $runtimeOnly & ":" & $nativeSide
       if expansionKey notin expandedSourceRecipes:
         expandedSourceRecipes.incl(expansionKey)
         # A restored prefix is not evidence of a complete dependency closure.
@@ -12573,10 +12582,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         for dependency in dependencies:
           if dependency.depKind != DepKindNative:
             pendingSourceUses.add(dependency)
+            pendingNative.add(nativeSide)
 
     while nextSourceUse < pendingSourceUses.len:
       let useDef = pendingSourceUses[nextSourceUse]
+      let nativeSide = pendingNative[nextSourceUse]
       inc nextSourceUse
+      # A native-side use is resolved and built with the target removed
+      # from the variant channel, so the sibling's sub-build (and its object
+      # check) is a native build; restored on every exit from this iteration.
+      let variantsBefore = getEnv("REPRO_VARIANTS")
+      let variantsWereSet = existsEnv("REPRO_VARIANTS")
+      if nativeSide:
+        putEnv("REPRO_VARIANTS", variantsWithoutTarget(variantsBefore))
+      defer:
+        if variantsWereSet: putEnv("REPRO_VARIANTS", variantsBefore)
+        else: delEnv("REPRO_VARIANTS")
       if tarballFallThrough and
           not tarballModeFallsThroughToFromSource(useDef):
         continue
@@ -12638,6 +12659,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             toolName & "\" at " & siblingRecipeDir)
           fromSourceResolvedRecipes.incl(siblingRecipeDir)
           pendingSourceUses.add(useDef)
+          pendingNative.add(nativeSide)
           continue
       # The bootstrap floor suppresses recursive construction only after a
       # configured source-artifact cache had a chance to restore the mirror.
@@ -12734,6 +12756,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       fromSourceResolvedRecipes.incl(siblingRecipeDir)
       if not dryRun:
         pendingSourceUses.add(useDef)
+        pendingNative.add(nativeSide)
 
   # Cross-Repo-Source-Consumption SC-2 (§4.2) — producer graph load + splice
   # (executable channel). A pre-pass that mirrors the from-source auto-recurse

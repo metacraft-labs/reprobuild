@@ -461,10 +461,12 @@ proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
   # environment (CLI/build.md: they are recorded beside the mirror).
   result.add("; printf '%s\\n' \"${")
   result.add(TargetObjectExemptionsEnvVar)
-  result.add(":-}\" | while IFS= read -r l; do [ -n \"$l\" ] && ")
+  # `if`, not `[ … ] &&`: the loop's status is its last command's, and a
+  # failed test on the final (empty) line would fail the whole action.
+  result.add(":-}\" | while IFS= read -r l; do if [ -n \"$l\" ]; then ")
   result.add("printf '")
   result.add(TargetObjectExemptionSidecarKey)
-  result.add("=%s\\n' \"$l\"; done >> ")
+  result.add("=%s\\n' \"$l\"; fi; done >> ")
   result.add(shellDoubleQuote(sidecarPath))
   result.add("; ;; esac; ")
 

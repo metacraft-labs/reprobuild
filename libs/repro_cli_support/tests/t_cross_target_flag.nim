@@ -68,3 +68,14 @@ suite "the published platform is the consumer's":
     check consumerPlatformForTarget("x86_64-pc-windows-msvc").abi == "msvc"
     expect ValueError:
       discard targetTripleOs("riscv64-unknown-elf")
+
+suite "a build-host sub-build inside a --target build":
+  test "its variant channel carries no target, and keeps everything else":
+    check variantsWithoutTarget("") == ""
+    check variantsWithoutTarget("targetTriple=armv7-unknown-linux-musleabihf") == ""
+    check variantsWithoutTarget(
+      "buildType=release,targetTriple=armv7-unknown-linux-musleabihf") ==
+      "buildType=release"
+    check variantsWithoutTarget(
+      "targetTriple=a,buildType=debug,compiler=clang,targetTriple=b") ==
+      "buildType=debug,compiler=clang"
