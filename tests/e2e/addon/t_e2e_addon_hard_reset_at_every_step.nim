@@ -78,14 +78,16 @@ import repro_test_support/reasoned_skip
 import ./addon_testbed
 
 const
-  BootVariance* = ["mounts:/tmp", "mounts:/dev"]
+  BootVariance* = ["mounts:/tmp", "mounts:/dev", "mounts:/run"]
     ## Differences between two boots of the same base that no switch makes:
     ## the base's tmpfs ``/tmp`` reports ``size=`` in its options at some
     ## boots and not at others (measured on Debian 13 across a QEMU
     ## ``system_reset``: the kernel prints ``size=`` only when the size
     ## differs from its default, half of RAM), and devtmpfs ``/dev`` is
     ## sized from the memory free at boot (``size=998208k`` against
-    ## ``998204k``, measured the same way). The add-on manages neither.
+    ## ``998204k``, measured the same way), and so is ``/run``'s tmpfs
+    ## (``size=201484k`` against ``201488k`` on Ubuntu 24.04, measured
+    ## across a revert in this gate). The add-on manages none of them.
   BAccount = "reprofixb"
   KeptAccount* = ["accounts:user:" & BAccount, "accounts:group:" & BAccount,
                   "etc:/etc/passwd", "etc:/etc/passwd-", "etc:/etc/group",
