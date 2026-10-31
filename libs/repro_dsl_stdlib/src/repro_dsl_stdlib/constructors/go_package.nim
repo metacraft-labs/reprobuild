@@ -39,6 +39,36 @@
 ## `-trimpath` is passed because a Go binary otherwise embeds the absolute
 ## path of its build directory, which would make the same source produce
 ## different bytes under two different scratch roots.
+##
+## ## Several commands from one module
+##
+## `extraBinaries` names further `(binaryName, mainPackage)` pairs that the
+## same build edge compiles into the same destdir, one `go build -o` each.
+## A module that ships a node, a client and a tool from one `go.sum` is one
+## download and one closure, so splitting it over several recipes would
+## fetch and verify the same modules once per command.
+##
+## ## Static cgo
+##
+## Some modules cannot be built without cgo: they bind a C library that
+## has no Go implementation (BLS signatures, KZG commitments). A cgo build
+## against the host's C toolchain links the host's libc dynamically, so
+## the result runs only where that libc is. `staticCgo = true` instead
+## makes zig the C compiler and linker, targeting the host architecture's
+## musl, and asks Go for a fully static executable:
+##
+##   * `CC` / `CXX` are the wrappers of `adapters/cross_zig` for the
+##     musl triple of the host CPU (one wrapper implementation in the
+##     tree, not one per constructor);
+##   * `-tags netgo,osusergo` select Go's own DNS resolver and user lookup,
+##     which a static musl binary needs because there is no NSS to load
+##     (https://pkg.go.dev/net#hdr-Name_Resolution, https://pkg.go.dev/os/user);
+##   * `-ldflags '-linkmode external -extldflags -static'` hands the final
+##     link to zig with `-static` (https://pkg.go.dev/cmd/link).
+##
+## Zig keeps a compilation cache; its global and local caches are pointed
+## under this recipe's scratch tree so the build neither reads nor writes
+## the user's home.
 
 import std/[options, os, strutils]
 
@@ -46,6 +76,7 @@ import repro_project_dsl
 
 import ../types/package_result
 import ../active_context
+import ../adapters/cross_zig
 
 const
   FetchScratchSubdir = ".repro/fetch"
@@ -73,6 +104,47 @@ proc goDestdir*(projectRoot: string): string =
 
 proc goModDownloadStampPath*(projectRoot: string): string =
   projectRoot / GoScratchSubdir / "mod-download.stamp"
+
+proc goZigCacheDir*(projectRoot: string): string =
+  ## Root of zig's global and local caches for a `staticCgo` build. Under
+  ## the recipe's scratch tree, so `repro clean` takes it and the build
+  ## never touches `$HOME/.cache/zig`.
+  projectRoot / GoScratchSubdir / "zig-cache"
+
+proc goStaticCgoTriple*(cpu = hostCPU): string =
+  ## The musl triple a `staticCgo` build targets: the row of
+  ## `ZigCrossTargets` for the CPU Go compiles for (Go's default `GOARCH`
+  ## is the host's, and the C half must match it). A CPU without a row is
+  ## refused by name rather than linked for the wrong architecture.
+  for t in ZigCrossTargets:
+    if t.nimCpu == cpu and t.rustTriple.endsWith("-linux-musl"):
+      return t.rustTriple
+  raise newException(ValueError,
+    "go_package: staticCgo has no zig musl target for the CPU '" & cpu &
+    "'; add a row to cross_zig.ZigCrossTargets.")
+
+const
+  GoStaticCgoTags* = ["netgo", "osusergo"]
+    ## Go's own resolver and user lookup: a static musl binary has no NSS.
+  GoStaticCgoLdflags* = "-linkmode external -extldflags -static"
+    ## The final link goes to the external linker (zig), told `-static`.
+
+proc goMergedTags*(tags: seq[string]; staticCgo: bool): seq[string] =
+  ## The recipe's tags, followed by the static-cgo tags it did not already
+  ## name. Order is kept so a recipe's own list renders as before.
+  result = tags
+  if staticCgo:
+    for t in GoStaticCgoTags:
+      if t notin result:
+        result.add(t)
+
+proc goMergedLdflags*(ldflags: string; staticCgo: bool): string =
+  ## The recipe's ldflags, followed by the static-cgo link flags.
+  if not staticCgo:
+    return ldflags
+  if ldflags.len == 0:
+    return GoStaticCgoLdflags
+  ldflags & " " & GoStaticCgoLdflags
 
 proc goActionIdPart(packageName: string): string =
   for ch in packageName:
@@ -145,7 +217,9 @@ proc go_package*(binaryName: string;
                  ldflags = "";
                  tags: seq[string] = @[];
                  cgo = false;
-                 extraEnv: seq[(string, string)] = @[]): GoPackageResult =
+                 extraEnv: seq[(string, string)] = @[];
+                 extraBinaries: seq[(string, string)] = @[];
+                 staticCgo = false): GoPackageResult =
   ## Fetch → module download → build, for an upstream Go module.
   ##
   ## `binaryName` is required, unlike the cargo shape: `go build -o` names
@@ -160,6 +234,12 @@ proc go_package*(binaryName: string;
   ## CGO-enabled build would silently acquire a dependency on whatever C
   ## toolchain and system headers the host happens to have — which is a
   ## dependency the recipe has not declared.
+  ##
+  ## `extraBinaries` are further `(binaryName, mainPackage)` pairs built by
+  ## the same edge into the same `usr/bin`. `staticCgo` builds a static
+  ## cgo executable with zig as the C toolchain (see the module header);
+  ## the recipe must declare `zig` in `nativeBuildDeps`. Both default to
+  ## off, and with both off the emitted actions are unchanged.
   requireCrossTargetConsulted("go_package")
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
@@ -225,33 +305,81 @@ proc go_package*(binaryName: string;
     commandStatsId = "go_package.mod_download",
     toolIdentityRefs = @["sh", "mkdir", "go"])
 
-  let outputPath = effectiveDestdir / "usr" / "bin" / binaryName
+  let binDir = effectiveDestdir / "usr" / "bin"
+  let outputPath = binDir / binaryName
+  for (name, _) in extraBinaries:
+    if name.len == 0 or name == binaryName or '/' in name:
+      raise newException(ValueError,
+        "go_package: extraBinaries name '" & name & "' must be a plain " &
+        "file name distinct from binaryName '" & binaryName & "'")
+  var outputs = @[outputPath]
+  for (name, _) in extraBinaries:
+    let path = binDir / name
+    if path in outputs:
+      raise newException(ValueError,
+        "go_package: extraBinaries names '" & name & "' twice")
+    outputs.add(path)
+
+  # Static cgo: zig, through the cross adapter's wrappers, is the C
+  # compiler and the external linker; its caches live in scratch.
+  var buildDeps = @[downloadEdge.id]
+  var buildInputs = @[downloadStamp]
+  var buildToolRefs = @["sh", "mkdir", "go"]
+  var ignoredRoots = @[effectiveDestdir, modCache]
+  var cgoEnv = ""
+  if staticCgo:
+    let triple = goStaticCgoTriple()
+    let root = if projectRoot.len > 0: projectRoot else: "."
+    let wrapperDir = zigCrossWrapperDir(root, triple)
+    let zigCache =
+      if projectRoot.len > 0: goZigCacheDir(projectRoot)
+      else: GoScratchSubdir / "zig-cache"
+    cgoEnv.add("CC=\"" & q(wrapperDir / "cc") & "\" ")
+    cgoEnv.add("CXX=\"" & q(wrapperDir / "c++") & "\" ")
+    cgoEnv.add("ZIG_GLOBAL_CACHE_DIR=\"" & q(zigCache / "global") & "\" ")
+    cgoEnv.add("ZIG_LOCAL_CACHE_DIR=\"" & q(zigCache / "local") & "\" ")
+    buildToolRefs.add("zig")
+    ignoredRoots.add(zigCache)
+    if projectRoot.len > 0:
+      let wrappers = emitZigCrossWrappersAction(projectRoot, pkgName, triple)
+      buildDeps.add(wrappers.id)
+      buildInputs.add(wrappers.outputs)
+
+  let effectiveTags = goMergedTags(tags, staticCgo)
+  let effectiveLdflags = goMergedLdflags(ldflags, staticCgo)
+
+  proc goBuildCommand(output, pkg: string): string =
+    # GOPROXY=off is what makes this offline: a module the download step
+    # did not fetch is a hard error here rather than a quiet network call.
+    result = "GOMODCACHE=\"" & q(modCache) & "\" "
+    result.add("GOPROXY=off GOFLAGS=-mod=mod ")
+    result.add("CGO_ENABLED=" & (if cgo or staticCgo: "1" else: "0") & " ")
+    result.add(cgoEnv)
+    result.add("go build ")
+    # -trimpath because a Go binary otherwise embeds the absolute path of
+    # its build directory, and the same source would produce different
+    # bytes under two different scratch roots.
+    result.add("-trimpath ")
+    if effectiveTags.len > 0:
+      result.add("-tags \"" & q(effectiveTags.join(",")) & "\" ")
+    if effectiveLdflags.len > 0:
+      result.add("-ldflags \"" & q(effectiveLdflags) & "\" ")
+    result.add("-o \"" & q(output) & "\" ")
+    result.add("\"" & q(pkg) & "\"")
+
   var buildScript = "set -e; "
-  buildScript.add("mkdir -p \"" & q(parentDir(outputPath)) & "\"; ")
+  buildScript.add("mkdir -p \"" & q(binDir) & "\"; ")
   buildScript.add("cd \"" & q(srcAbs) & "\"; ")
-  # GOPROXY=off is what makes this offline: a module the download step did
-  # not fetch is a hard error here rather than a quiet network call.
-  buildScript.add("GOMODCACHE=\"" & q(modCache) & "\" ")
-  buildScript.add("GOPROXY=off GOFLAGS=-mod=mod ")
-  buildScript.add("CGO_ENABLED=" & (if cgo: "1" else: "0") & " ")
-  buildScript.add("go build ")
-  # -trimpath because a Go binary otherwise embeds the absolute path of
-  # its build directory, and the same source would produce different bytes
-  # under two different scratch roots.
-  buildScript.add("-trimpath ")
-  if tags.len > 0:
-    buildScript.add("-tags \"" & q(tags.join(",")) & "\" ")
-  if ldflags.len > 0:
-    buildScript.add("-ldflags \"" & q(ldflags) & "\" ")
-  buildScript.add("-o \"" & q(outputPath) & "\" ")
-  buildScript.add("\"" & q(mainPackage) & "\"")
+  buildScript.add(goBuildCommand(outputPath, mainPackage))
+  for (name, pkg) in extraBinaries:
+    buildScript.add("; " & goBuildCommand(binDir / name, pkg))
 
   let buildEdge = buildAction(
     id = "go-build-" & goActionIdPart(pkgName),
     call = inlineExecCall(@["sh", "-c", buildScript], projectRoot),
-    deps = @[downloadEdge.id],
-    inputs = @[downloadStamp],
-    outputs = @[outputPath],
+    deps = buildDeps,
+    inputs = buildInputs,
+    outputs = outputs,
     pool = "compile",
     # ``effectiveDestdir`` is also this edge's declared write ROOT below, so
     # the engine DERIVES the enumeration ignore for it
@@ -264,10 +392,10 @@ proc go_package*(binaryName: string;
     # the read channel -- ``go build -o`` writes the destdir and does not
     # read it back -- so the asymmetric guard is the whole reason it stays.
     # ``modCache`` is a genuine exception: read back on every run and not a
-    # declared output of anything.
-    dependencyPolicy = automaticMonitorPolicy(@[effectiveDestdir, modCache]),
+    # declared output of anything, and so is zig's cache under `staticCgo`.
+    dependencyPolicy = automaticMonitorPolicy(ignoredRoots),
     commandStatsId = "go_package.build",
-    toolIdentityRefs = @["sh", "mkdir", "go"])
+    toolIdentityRefs = buildToolRefs)
   if projectRoot.len > 0:
     setRegisteredActionDeclaredOutputs(buildEdge.id, @[effectiveDestdir])
     # The source stays read-only: a build that wrote into its own
