@@ -276,7 +276,10 @@ suite "boot ordering of the add-on's own units (§7.7, §10.3)":
       if o.unit == SecretsUnit: secrets = o.content
       if o.unit == ReassertUnit: reassert = o.content
     check secrets.len > 0 and reassert.len > 0
-    check "DefaultDependencies=no" in secrets
+    # Default dependencies: it mounts the ramfs through systemd-run, which
+    # needs the system bus (after basic.target).
+    check "DefaultDependencies=no" notin secrets
+    check ReassertUnit notin secrets.split("Before=")[0]
     check "TimeoutStartSec=" & $SecretsUnitTimeoutSec & "s" in secrets
     check "Before=" & ReassertUnit in secrets
     check "After=local-fs.target repro-store.mount " & SecretsUnit in reassert

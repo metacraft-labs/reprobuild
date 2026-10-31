@@ -234,15 +234,21 @@ proc secretsUnit(reproExe: string): string =
     # ordering A7 first shipped (credential units `After=` the re-assert
     # unit) -- and multi-user.target with them.
     let order = "After=local-fs.target repro-store.mount " & ReassertUnit &
-                "\nBefore=repro-addon.target shutdown.target\n"
+                "\nBefore=repro-addon.target\n"
   else:
     let order = "After=local-fs.target repro-store.mount\n" &
-                "Before=" & ReassertUnit & " repro-addon.target shutdown.target\n"
+                "Before=" & ReassertUnit & " repro-addon.target\n"
+  # Default dependencies (after basic.target, so after sockets.target and
+  # the system bus's socket): the secrets ramfs is mounted in the host's
+  # mount namespace by a transient unit (`runInHostNamespaces`, i.e.
+  # systemd-run), which needs the system bus. Measured on Debian 12/13 and
+  # Ubuntu 24.04 with `DefaultDependencies=no`: "Failed to connect to
+  # system scope bus via local transport", and every credential unit
+  # failed. A unit with credentials is an ordinary service, after
+  # basic.target itself, so this costs it nothing.
   "[Unit]\n" &
   "Description=Reprobuild add-on secrets for this boot\n" &
-  "DefaultDependencies=no\n" &
   order &
-  "Conflicts=shutdown.target\n" &
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
