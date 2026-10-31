@@ -197,10 +197,10 @@ proc writeCurrentGenerationId*(stateDir, generationId: string;
     let target = generationDir(stateDir, generationId)
     when InfraMutation == "current-remove-then-create":
       # The falsifying mutation: the pre-A5 commit, which removed the old
-      # link before creating the new one -- a crash between the two leaves
-      # no `current` at all.
+      # link (durably) before creating the new one -- a crash between leaves
+      # no `current` at all, whatever the writeback.
       if symlinkExists(extendedPath(p)) or fileExists(extendedPath(p)):
-        try: removeFile(extendedPath(p)) except OSError: discard
+        try: (removeFile(extendedPath(p)); fsyncDirPath(stateDir)) except OSError: discard
       if onPoint != nil: onPoint("commit-current-removed")
       createSymlink(extendedPath(target), extendedPath(p))
       fsyncDirPath(stateDir)
