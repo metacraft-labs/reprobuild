@@ -291,13 +291,17 @@ proc runAgentFetch*(conf: AgentConf; anchors: TrustAnchors;
   var canonical = m.profileText
   var actions = m.buildActions
   if not isCanonicalProfileText(m.profileText):
-    # The compile's scratch lives in the unit's private /tmp (DynamicUser
-    # implies PrivateTmp=yes): it is thrown away with the unit, and the
-    # engine's monitored profile run cannot exec a binary it built under
-    # the dynamic user's StateDirectory (measured on Debian 13: "io
-    # monitor: Permission denied"; the same compile under /tmp succeeds).
-    let workspace = getTempDir() / "repro-agent-compile"
-    if dirExists(workspace): removeDir(workspace)
+    # The compile works under the unit's state directory, so its caches
+    # (the compiled profile binary, the nimcache) survive to the next tick
+    # and an unchanged profile is not compiled again. systemd mounts a
+    # DynamicUser unit's StateDirectory= noexec (measured on Debian 13,
+    # systemd 257), and the compile runs the binary it links; the unit
+    # therefore names this directory in ExecPaths= (generation0
+    # `agentFetchUnit`), and the compile refuses a noexec state directory
+    # by name rather than failing on the exec.
+    let workspace = stagingRoot.parentDir / AgentCompileDirName
+    # The staged sources are rebuilt on every tick (`stageProfileSources`);
+    # only the compiler's state persists.
     let why = compileProfile(conf, m, dir, workspace)
     if why.len > 0:
       notes.add("profile: " & why)

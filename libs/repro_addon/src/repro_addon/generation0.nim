@@ -127,6 +127,9 @@ const
   AgentFetchTimer* = "repro-agent-fetch.timer"
   AgentApplyUnit* = "repro-agent-apply.service"
   AgentFetchStateName* = "repro-agent-fetch"
+  AgentCompileDirName* = "compile"
+    ## The profile compile's directory under the fetch unit's state
+    ## directory (its caches persist between ticks).
     ## The fetch unit's ``StateDirectory=``: ``/var/lib/repro-agent-fetch``
     ## (``/var/lib/private/...`` under ``DynamicUser=``), the staging area.
   AgentApplyCapabilities* = ["CAP_CHOWN", "CAP_DAC_OVERRIDE",
@@ -488,6 +491,14 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   let hostsBind = if a.hosts.len > 0:
                     "BindReadOnlyPaths=" & AgentHostsPath & ":/etc/hosts\n"
                   else: ""
+  # The compile links and runs the profile binary under the state
+  # directory, which systemd mounts noexec for a dynamic user; the state
+  # directory alone is made exec-capable again (systemd.exec(5) ExecPaths=).
+  # The whole state directory, which exists before the unit's namespace is
+  # set up (the compile directory below it may not yet); "-" tolerates a
+  # spelling the host does not have.
+  let compileExec = "ExecPaths=-/var/lib/private/" & AgentFetchStateName &
+    " -/var/lib/" & AgentFetchStateName & "\n"
   let stateHidden = when mutated("agent-floor-in-fetch-state"): ""
                     else: "InaccessiblePaths=-/var/lib/repro\n"
   # The fetch unit needs no system bus either (resolved answers there too).
@@ -517,7 +528,7 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   "ProtectKernelModules=yes\n" &
   "ProtectControlGroups=yes\n" &
   "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
-  stateHidden & noResolver & egress & hostsBind
+  stateHidden & noResolver & compileExec & egress & hostsBind
 
 proc agentFetchTimer*(): string =
   "[Unit]\n" &
