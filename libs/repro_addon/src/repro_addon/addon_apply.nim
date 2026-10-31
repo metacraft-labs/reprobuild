@@ -2113,7 +2113,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       let networkdInUse = nd.activeState == "active" or
         nd.unitFileState in ["enabled", "enabled-runtime", "linked",
                              "linked-runtime", "alias"]
-      let nwd = networkdRefusal(r.sysctlKey, r.sysctlValue, networkdInUse)
+      let nwd = networkdRefusal(r.sysctlKey, r.sysctlValue, networkdInUse,
+                                networkdVersion = hostSystemdVersion())
       if nwd.len > 0:
         raise newException(AddonCollisionError, "refusing " & r.address &
           ": " & nwd)
@@ -2762,7 +2763,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## ActiveState, and -- for an exclusive unit -- the control group's
     ## population (§7.3: "confirmed exited" is the group, not the state).
     ## Both are pinned by the plan id.
-    f.activeState = readUnitProvision(f.unit).activeState
+    let prov = readUnitProvision(f.unit)
+    f.activeState = prov.activeState
+    f.loadedAtPlan = prov.loadState == "loaded"
     # A unit an interrupted or failed switch had running is planned as
     # running, so its replay or revert starts it again (step 2 may have
     # stopped it; a restart applies only to an active unit).
@@ -2901,6 +2904,20 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         facts[i].stopDependents = unitStopDependents(facts[i].unit)
         facts[i].reloadDependents = unitListProperty(facts[i].unit,
                                                      "PropagatesReloadTo")
+        # Its active upholders (Upholds=, §7.3), and for a removed unit the
+        # ones its own ledgered UpheldBy= link makes.
+        for u in unitListProperty(facts[i].unit, "UpheldBy"):
+          if readUnitProvision(u).activeState in ["active", "reloading",
+                                                  "activating"]:
+            facts[i].upholders.add(u)
+        if facts[i].removed:
+          for e in previous.entries:
+            if e.resource == facts[i].address and e.class == lcInstallLink:
+              let dir = e.path.parentDir.extractFilename
+              if dir.endsWith(".upholds") and
+                  e.path.extractFilename == facts[i].unit:
+                let u = dir[0 ..< dir.len - ".upholds".len]
+                if u in facts[i].upholders: facts[i].ownUpholdLinks.add(u)
         for d in facts[i].dependents & facts[i].stopDependents:
           if d in factUnits: continue
           let frag = unitProperty(d, "FragmentPath")
@@ -2924,6 +2941,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   let unpropagatedFacts = facts
   propagateDependencyChanges(facts, unitDeps)
   result.transitions = planTransitions(facts)
+  # Upholds= (§7.3): each active upholder of a unit step 2 stops is
+  # planned (its own link removed first, or paused) or the plan refuses,
+  # with nothing written.
+  for refusal in planUpholds(result.transitions, facts):
+    if refusal.exclusive:
+      raise newAddOnExclusiveOverlap(refusal.unit, refusal.detail)
+    raise newException(AddonApplyError, "refusing the plan: unit " &
+      refusal.unit & ": " & refusal.detail & "; nothing was written")
 
   # --- The plan id (spec §7.1): everything the plan was computed from. ---
   # The profile texts, the ledger it compared against, every target's
@@ -2952,7 +2977,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       else:
         inputs.add("unit\t" & f.unit & "\t" & f.activeState & "\t" & $f.alive &
           "\t" & f.triggers.join(",") & "\t" & f.dependents.join(",") &
-          "\t" & f.stopDependents.join(","))
+          "\t" & f.stopDependents.join(",") & "\t" & f.upholders.join(",") &
+          "\t" & $f.loadedAtPlan)
         for pred in f.predecessors:
           inputs.add("predecessor\t" & pred & "\t" &
             readUnitProvision(pred).activeState & "\t" & $unitAliveness(pred))
@@ -3120,6 +3146,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## What steps 2 and 7 run: the plan's transitions, or -- when step 2's
     ## re-check keeps removed units in place -- those planned again
     ## without them.
+  var keptAsDrift: seq[string]
+    ## The removed units step 2's re-check kept in place, in the order the
+    ## plan listed them: the apply's printed transition list marks them
+    ## (``executedTransitions``).
   # The install links of each removed unit, decided in step 2 together
   # with the unit's own destroy (``removalDisables``).
   var removedUnitEntries: seq[tuple[unit, address: string;
@@ -3252,7 +3282,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         disableOnRemoval.add((unit: u.unit, links: links))
       var keptUnits = initHashSet[string]()
       for u in removedUnitEntries:
-        if u.address in hookKept: keptUnits.incl(u.unit)
+        if u.address in hookKept:
+          keptUnits.incl(u.unit)
+          keptAsDrift.add(u.unit)
       if keptUnits.len > 0:
         when not mutated("kept-units-still-stopped"):
           var without: seq[UnitFacts]
@@ -3260,6 +3292,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
             if not (f.removed and f.unit in keptUnits): without.add(f)
           propagateDependencyChanges(without, unitDeps)
           stepTransitions = planTransitions(without)
+          # Fewer stops than the plan: no refusal can be new here.
+          discard planUpholds(stepTransitions, without)
       let pre = runPreStop(stepTransitions, disableOnRemoval, onStop)
       for kept in pre.keptLinks:
         # Changed in the instant between the re-check and the unlink.
@@ -3284,6 +3318,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## withholds the commit.
     {.cast(gcsafe).}:
       var problems: seq[string]
+      var reloadedAt = 0.0
+        ## CLOCK_MONOTONIC seconds just after step 6's daemon-reload; 0
+        ## when there was none.
       hookGeneration = generationId
       # Steps 4 and 5 are the drivers' writes, in the profile's apply
       # order (links and copies interleave); both are complete here.
@@ -3299,7 +3336,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       # the daemon reload, sysctl through the host's own service, and
       # the kernel values a removed sysctl resource leaves behind.
       try:
-        if anyUnitChange or replaying: daemonReload()
+        if anyUnitChange or replaying:
+          daemonReload()
+          # From here on every start runs the generation's definitions:
+          # step 7 accepts an exclusive instance started after this point
+          # (an upholder's restart) as the new one (``runStart``).
+          reloadedAt = monotonicSeconds()
         if replaying:
           # The interrupted switch may have written a sysusers or tmpfiles
           # fragment and died before its tool ran; the replay finds the
@@ -3361,7 +3403,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       if clean and problems.len == 0:
         try:
           runStart(stepTransitions, paused, notRunning,
-                   noBlock = opts.nonBlockingStarts)
+                   noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt)
           # A replay or a revert plans the units the interrupted switch had
           # running as running, but `try-restart` leaves a unit the crash
           # (or step 2) stopped stopped: start every such unit of this
@@ -3621,6 +3663,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     infraError = "repro infra apply failed: " & e.msg
   result.generationId = hookGeneration
   result.ledger = newLedger
+  if keptAsDrift.len > 0 and not mutated("apply-prints-reviewed-plan"):
+    # What steps 2 and 7 executed, not the reviewed plan: the re-check
+    # kept removed units, the rest was planned again without them.
+    result.transitions = executedTransitions(stepTransitions, keptAsDrift)
   result.restored = hookRestored
   if hookKept.len > 0:
     result.drift.add(hookKeptDrift)

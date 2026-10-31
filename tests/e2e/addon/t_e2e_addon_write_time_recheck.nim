@@ -27,7 +27,9 @@
 ##   link is replaced by a hand-written unit file. Step 2 removes install
 ##   links only after observing them again: the file is kept, reported as
 ##   drift, and the unit is left in place whole -- its file, its WantedBy
-##   link and their ledger entries stay, and it is not stopped.
+##   link and their ledger entries stay, and it is not stopped. The
+##   transition list the apply prints is the one it ran: the kept unit
+##   appears as ``leave`` ("kept as drift"), never as ``stop``.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=pause-before-write-no-recheck``):
 ## the same seam with the write-time re-check not installed. (a) then
@@ -35,7 +37,10 @@
 ## path, (c) deletes the hand edit, (d) unlinks the hand-written file in
 ## step 2: red. ``REPRO_ADDON_MUTATION=kept-units-still-stopped`` (the same
 ## seam; the kept unit is still stopped with the plan's transitions) turns
-## (d)'s "still active" red.
+## (d)'s "still active" red, and ``apply-prints-reviewed-plan`` (the same
+## seam; the apply prints the reviewed plan's transition list instead of
+## the re-planned one steps 2 and 7 ran) turns (d)'s printed-list check
+## red: the kept unit is listed as stopped, with no ``leave`` entry.
 ##
 ## The default run (no ``REPRO_ADDON_MUTATION``) selects the
 ## ``pause-before-write`` build: the seam is the instrument of this gate,
@@ -49,7 +54,7 @@
 import std/[json, os, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
-import repro_addon/[fingerprint, ledger]
+import repro_addon/[fingerprint, ledger, transitions]
 
 import ./addon_testbed
 
@@ -212,6 +217,20 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            g.exec("ls -la " & unitFile & " " & wants).stdout & g.exec("ls -la " & unitFile & " " & wants).stderr)
       let act = g.exec("systemctl is-active repro-fx-rc.service").stdout.strip()
       step("(d) the kept unit is still active", act == "active", act)
+      # The transition list the apply printed is what it ran: the kept
+      # unit is marked as drift (``leave``), not listed as stopped.
+      var ts: seq[Transition]
+      var parseErr = ""
+      try: ts = parseTransitions(rd.stdout)
+      except TransitionParseError as e: parseErr = e.msg
+      var keptLeave, keptStop = false
+      for t in ts:
+        if t.unit == "repro-fx-rc.service":
+          if t.verb == tvLeave and "kept as drift" in t.reason: keptLeave = true
+          if t.verb in {tvStop, tvStopStart}: keptStop = true
+      step("(d) the printed transition list is the executed one: the kept unit leave/kept-as-drift, no stop",
+           parseErr.len == 0 and keptLeave and not keptStop,
+           parseErr & "\n" & rd.stdout)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

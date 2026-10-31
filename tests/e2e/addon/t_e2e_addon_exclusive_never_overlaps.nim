@@ -58,6 +58,11 @@
 ## listening again after the switch; an exclusive unit that ``Requires=``
 ## the anchor, under ``KillMode=process`` with a SIGTERM-ignoring worker,
 ## refuses the anchor's change; ``PropagatesStopTo=`` stops its dependent.
+## ``Upholds=`` (g16): an exclusive unit held up by one of the add-on's own
+## services is stop-started with the upholder paused around it; a removed
+## unit held up through its own ``UpheldBy=`` link loses the link before
+## its stop and stays stopped; one held up by a hand-written service is
+## refused at plan time, naming it, with nothing written.
 ## The gate runs on the seam build (pause points compiled in, inert unless
 ## a control file asks; ``scripts/run_addon_gate.sh``).
 ##
@@ -85,6 +90,11 @@
 ## - ``partof-not-propagated``: the plan leaves what systemd carries along
 ##   ``PartOf=``, ``Requires=`` and ``PropagatesStopTo=`` implicit (g12b,
 ##   g14b, g15b): red.
+## - ``upholder-not-planned``: the planner ignores ``UpheldBy=`` -- the
+##   upheld unit's stop-start is undone by its upholder and refused (g16b),
+##   the unit held up by its own ``UpheldBy=`` link is started again after
+##   its stop (g16d, systemd 253 and later), and the hand-written upholder
+##   is not named (g16f): red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_exclusive_never_overlaps``).
 ## Bases: ``REPRO_ADDON_BASES`` (default here: debian-13-amd64,ubuntu-24.04-amd64).
@@ -651,6 +661,85 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("g15b: the dependent is stopped, as systemd's own propagation leaves it",
          g.exec("systemctl is-active repro-fixture-excl-e4.service").stdout.strip() != "active" and
          g.run("grep -c '^stop e4 ' " & LogPath & "; true").strip() == "1", g.run("cat " & LogPath))
+
+    discard g.run("mv " & LogPath & " " & LogPath & ".part9; : > " & LogPath)
+
+    # g16: Upholds= (§7.3). systemd starts an upheld unit again as soon as
+    # it stops, so a stop-start or a removal must deal with the upholder.
+    let base16 = base14 & @[xrUnit("v2"), x2Unit("v2"), e4]
+    let upholder = ("repro-fixture-excl-up.service", "[Unit]\nDescription=upholder\n" &
+      "Upholds=repro-fixture-excl-uh.service\n\n[Service]\nExecStart=/bin/sleep infinity\n\n" &
+      "[Install]\nWantedBy=multi-user.target\n")
+    proc uhUnit(id: string): (string, string) =
+      ("repro-fixture-excl-uh.service", exclusiveUnit(id))
+    applied("g16a-upheld", profile(base16 & @[upholder, uhUnit("uh1")]))
+    discard g.exec("systemctl stop repro-fixture-excl-uh.service; sleep 2")
+    step("vacuity guard: the upholder holds uh up (UpheldBy=; a plain stop is undone by systemd)",
+         "repro-fixture-excl-up.service" in
+           g.run("systemctl show -p UpheldBy --value repro-fixture-excl-uh.service") and
+         g.run("systemctl is-active repro-fixture-excl-uh.service; true").strip() == "active",
+         g.run("cat " & LogPath))
+    let plan16 = g.planProfile(repro, "g16b-plan", profile(base16 & @[upholder, uhUnit("uh2")]))
+    step("g16b: the stop-start pauses the add-on's own upholder",
+         "stop-start\trepro-fixture-excl-uh.service" in plan16.stdout and
+         "pauses upholder repro-fixture-excl-up.service" in plan16.stdout,
+         plan16.stdout & plan16.stderr)
+    applied("g16b-upheld-changes", profile(base16 & @[upholder, uhUnit("uh2")]))
+    noOverlap("g16b-upheld-changes")
+    step("g16b: uh2 runs and the upholder runs again",
+         "uh2" in g.run("systemctl show -p ExecStart --value repro-fixture-excl-uh.service") and
+         g.run("systemctl is-active repro-fixture-excl-uh.service").strip() == "active" and
+         g.run("systemctl is-active repro-fixture-excl-up.service").strip() == "active",
+         g.run("cat " & LogPath))
+    # A unit held up through its own [Install] UpheldBy= link (systemd 253
+    # and later make the link; 252 makes none, so nothing holds it up).
+    var sdVersion = 0
+    try: sdVersion = parseInt(g.run("systemctl --version | head -n1 | awk '{print $2}'").strip())
+    except ValueError: discard
+    let uhl = ("repro-fixture-excl-uhl.service", "[Unit]\nDescription=exclusive fixture uhl\n" &
+      "X-Repro-Exclusive=true\n\n[Service]\nExecStart=/usr/local/bin/repro-fixture-exclusive uhl\n\n" &
+      "[Install]\nUpheldBy=multi-user.target\n")
+    applied("g16c-own-upheld-link", profile(base16 & @[uhl]))
+    let uhlLink = "/etc/systemd/system/multi-user.target.upholds/repro-fixture-excl-uhl.service"
+    if sdVersion >= 253:
+      step("vacuity guard: uhl is held up by multi-user.target through its own link",
+           g.sha256InGuest(uhlLink) == "link" and "multi-user.target" in
+             g.run("systemctl show -p UpheldBy --value repro-fixture-excl-uhl.service"),
+           g.run("ls -la /etc/systemd/system/multi-user.target.upholds/; true"))
+      let plan16d = g.planProfile(repro, "g16d-plan", profile(base16))
+      step("g16d: removing it removes its own UpheldBy= link before the stop",
+           "stop\trepro-fixture-excl-uhl.service" in plan16d.stdout and
+           "its own UpheldBy= link removed first" in plan16d.stdout,
+           plan16d.stdout & plan16d.stderr)
+    applied("g16d-own-upheld-removed", profile(base16))
+    discard g.exec("sleep 2")
+    step("g16d: uhl stays stopped and its link is gone",
+         g.exec("systemctl is-active repro-fixture-excl-uhl.service").stdout.strip() != "active" and
+         g.sha256InGuest(uhlLink) == "absent" and
+         g.run("grep -c '^stop uhl ' " & LogPath & "; true").strip() == "1",
+         g.run("cat " & LogPath))
+    # An upholder that is not the add-on's: refused at plan time, naming it.
+    let uh3 = proc(id: string): (string, string) =
+      ("repro-fixture-excl-uh3.service", exclusiveUnit(id))
+    applied("g16e-upheld-by-a-hand-unit", profile(base16 & @[uh3("uh3a")]))
+    discard g.putProfile("handup", "[Unit]\nDescription=hand-written upholder\n" &
+      "Upholds=repro-fixture-excl-uh3.service\n\n[Service]\nExecStart=/bin/sleep infinity\n")
+    discard g.run("cp /root/addon/handup.profile /etc/systemd/system/repro-fixture-hand-up.service && " &
+      "systemctl daemon-reload && systemctl start repro-fixture-hand-up.service")
+    let f16 = g.takeFingerprint(repro)
+    let r16 = g.applyProfile(repro, "g16f-refused", profile(base16 & @[uh3("uh3b")]))
+    step("g16f: refused with EAddOnExclusiveOverlap, naming the hand-written upholder",
+         r16.exitCode == 2 and "EAddOnExclusiveOverlap" in r16.stderr and
+         "held up by repro-fixture-hand-up.service" in r16.stderr,
+         "exit " & $r16.exitCode & "\n" & r16.stdout & r16.stderr)
+    let i16 = identityReport(f16, g.takeFingerprint(repro))
+    step("g16f: the refused apply wrote nothing (fingerprint unchanged)", i16.ok, i16.text)
+    step("g16f: uh3a is the only instance, uh3b never started",
+         " uh3b " notin g.run("cat " & LogPath) and
+         g.run("grep -c '^start uh3a ' " & LogPath & "; true").strip() == "1",
+         g.run("cat " & LogPath))
+    discard g.run("systemctl stop repro-fixture-hand-up.service; " &
+      "rm -f /etc/systemd/system/repro-fixture-hand-up.service; systemctl daemon-reload")
 
     applied("g11-remove", profile([]))
     discard g.run("rm -f /etc/systemd/system/repro-fixture-excl-c.service " &

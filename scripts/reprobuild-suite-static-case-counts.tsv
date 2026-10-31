@@ -45,8 +45,8 @@ libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
-libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	32
-libs/repro_addon/tests/t_addon_switch_planning.nim	nim	26
+libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
+libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7

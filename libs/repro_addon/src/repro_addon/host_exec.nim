@@ -153,6 +153,26 @@ proc runSystemctl*(args: openArray[string]): HostToolResult =
   for a in args: argv.add(a)
   runHostTool(argv)
 
+proc systemdMajor*(versionOutput: string): int =
+  ## ``systemd 257 (257.8-1~deb13u2)`` -> 257; 0 when unparsable.
+  let lines = versionOutput.splitLines()
+  if lines.len == 0: return 0
+  let f = lines[0].splitWhitespace()
+  if f.len >= 2 and f[0] == "systemd":
+    try: return parseInt(f[1]) except ValueError: discard
+  0
+
+proc hostSystemdVersion*(): int =
+  ## The major version of the host's systemd (``systemctl --version``), 0
+  ## when it cannot be read. systemd-networkd ships in the same source
+  ## package and release, so this is networkd's version too.
+  try:
+    let r = runSystemctl(["--version"])
+    if r.exitCode == 0: return systemdMajor(r.output)
+  except CatchableError:
+    discard
+  0
+
 proc runInHostNamespaces*(argv: openArray[string];
                           timeoutSec = 0): HostToolResult =
   ## Run ``argv`` as a transient unit of the host's systemd and return its

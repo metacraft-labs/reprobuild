@@ -33,6 +33,7 @@ import repro_peer_cache/auth as peerAuth
 import ./fingerprint
 import ./generation0
 import ./host_exec
+export host_exec.systemdMajor
 import ./linux_fs
 import ./mutations
 import ./store_root
@@ -252,13 +253,6 @@ proc firstLine(path: string): string =
     result = readFile(path).splitLines()[0].strip()
   except IOError, OSError, IndexDefect:
     result = ""
-
-proc systemdMajor*(versionOutput: string): int =
-  ## ``systemd 257 (257.8-1~deb13u2)`` -> 257; 0 when unparsable.
-  let f = versionOutput.splitLines()[0].splitWhitespace()
-  if f.len >= 2 and f[0] == "systemd":
-    try: return parseInt(f[1]) except ValueError: discard
-  0
 
 proc fstabRootOptions*(text: string): string =
   ## The options field of the fstab entry for ``/``, "" if none.

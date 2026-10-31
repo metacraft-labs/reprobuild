@@ -167,6 +167,18 @@
 ##                                            re-check keeps in place is
 ##                                            still stopped with the plan's
 ##                                            transitions
+## ``apply-prints-reviewed-plan``            (with the pause seam) the
+##                                            apply prints the reviewed
+##                                            plan's transition list, not
+##                                            the one steps 2 and 7 ran
+##                                            after the re-check kept a
+##                                            removed unit
+## ``upholder-not-planned``                   the planner ignores
+##                                            ``UpheldBy=``: an active
+##                                            upholder is neither paused
+##                                            around the unit, nor the
+##                                            unit's own uphold link
+##                                            removed first, nor refused
 ## ``secrets-on-disk``                        secrets are materialised under
 ##                                            ``/var/lib/repro/secrets`` (the
 ##                                            root filesystem) and the tmpfs
@@ -316,6 +328,8 @@ const
                           "refused-recovery-forgets-marker",
                           "secrets-after-recovery",
                           "kept-units-still-stopped",
+                          "apply-prints-reviewed-plan",
+                          "upholder-not-planned",
                           "secrets-on-disk",
                           "secrets-on-tmpfs",
                           "secrets-single-retained-envelope",
@@ -369,6 +383,7 @@ template mutated*(name: static string): bool =
 
 const TestPauseSeam* = AddonMutation in ["pause-before-write",
                                          "pause-before-write-no-recheck",
-                                         "kept-units-still-stopped"]
+                                         "kept-units-still-stopped",
+                                         "apply-prints-reviewed-plan"]
   ## The write-time re-check gate's pause seam is compiled in (a test-only
   ## build; see the table above). False in every product build.

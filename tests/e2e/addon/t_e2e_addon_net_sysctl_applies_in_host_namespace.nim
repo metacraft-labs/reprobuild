@@ -17,11 +17,16 @@
 ## or ``/etc/sysctl.conf`` assigning one of the keys another value would
 ## put that value back at every boot; the plan refuses the resource
 ## (exit 2), naming the file, and nothing is written. So is a forwarding
-## key while systemd-networkd is in use and configured (here globally, in
-## ``networkd.conf.d``) to write forwarding itself with another value
-## (the same value is not refused), and so is a per-link key of a link
-## networkd manages; the record notes whether the base runs networkd and
-## which link it manages.
+## key while systemd-networkd is in use and configured to write
+## forwarding itself with another value (the same value is not refused),
+## as the base's networkd release does it: from systemd 256 on
+## ``networkd.conf``'s ``IPv4Forwarding=`` sets the global knob either
+## way and ``IPForward=`` is ignored; before 256 ``networkd.conf`` has no
+## such setting and ``IPForward=`` in a ``.network`` file (here a drop-in
+## of the file networkd applied to the managed link) only ever turns
+## forwarding on, so ``IPForward=no`` refuses nothing. A per-link key of
+## a link networkd manages is refused too; the record notes whether the
+## base runs networkd, its systemd release and which link it manages.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=sysctl-in-apply-namespace``):
 ## the switch runs ``systemd-sysctl`` on the fragments in the apply's own
@@ -32,7 +37,7 @@
 ##
 ## *Mocking.* None: a real kernel, systemd and the static add-on binary.
 
-import std/[json, strutils, times, unittest]
+import std/[json, os, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -54,6 +59,15 @@ linux.sysctl {
 }
 """
   Empty = "addOn {\n  managedEtcPrefixes = []\n}\n"
+  ForwardingOff = """addOn {
+  managedEtcPrefixes = []
+}
+
+linux.sysctl {
+  key = "net.ipv4.ip_forward"
+  value = "0"
+}
+"""
 
 proc observedLines(output: string): seq[(string, string)] =
   ## The `sysctl observed (host namespaces):` section of an apply.
@@ -145,13 +159,23 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let networkdInUse = g.exec("systemctl is-active --quiet systemd-networkd.service || " &
       "systemctl is-enabled --quiet systemd-networkd.service").exitCode == 0
     record["networkdInUse"] = %networkdInUse
+    var sdVersion = 0
+    try:
+      sdVersion = parseInt(g.run("systemctl --version | head -n1 | awk '{print $2}'").strip())
+    except ValueError: discard
+    record["systemdVersion"] = %sdVersion
+    step("vacuity guard: the base's systemd release is known", sdVersion > 0, $sdVersion)
+    let globalKnob = sdVersion >= 256
     discard g.run("mkdir -p /etc/systemd/networkd.conf.d && printf '[Network]\\nIPv4Forwarding=no\\n' " &
       "> /etc/systemd/networkd.conf.d/99-repro-fixture.conf")
     let nwd = g.planProfile(repro, "sysctl-networkd", Profile)
-    if networkdInUse:
-      step("networkd configured to write forwarding refuses the forwarding key (exit 2), naming the setting",
+    if networkdInUse and globalKnob:
+      step("networkd >= 256 configured to write forwarding refuses the forwarding key (exit 2), naming the setting",
            nwd.exitCode == 2 and "IPv4Forwarding=no" in nwd.stderr and
            "net.ipv4.ip_forward" in nwd.stderr, "exit " & $nwd.exitCode & "\n" & nwd.stdout & nwd.stderr)
+    elif networkdInUse:
+      step("networkd before 256 has no networkd.conf forwarding setting: refuses nothing",
+           nwd.exitCode == 0, "exit " & $nwd.exitCode & "\n" & nwd.stdout & nwd.stderr)
     else:
       step("without networkd in use its configuration refuses nothing",
            nwd.exitCode == 0, "exit " & $nwd.exitCode & "\n" & nwd.stdout & nwd.stderr)
@@ -165,6 +189,32 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let managedLink = g.run("networkctl list --no-legend 2>/dev/null | " &
       "awk '$5==\"configured\" && $2!=\"lo\" {print $2; exit}'; true").strip()
     record["networkdManagedLink"] = %managedLink
+    # IPForward= in a drop-in of the .network file networkd applied to the
+    # managed link: before 256 it only ever turns forwarding ON (``no``
+    # writes nothing); from 256 on it is ignored.
+    if networkdInUse and managedLink.len > 0:
+      let netFile = g.run("idx=$(cat /sys/class/net/" & managedLink & "/ifindex); " &
+        "sed -n 's/^NETWORK_FILE=//p' /run/systemd/netif/links/$idx").strip()
+      record["networkdNetworkFile"] = %netFile
+      step("vacuity guard: networkd names the .network file of " & managedLink,
+           netFile.endsWith(".network"), netFile)
+      let dropDir = "/etc/systemd/network/" & netFile.extractFilename & ".d"
+      discard g.run("rm -f /etc/systemd/networkd.conf.d/99-repro-fixture.conf; mkdir -p " & dropDir &
+        " && printf '[Network]\\nIPForward=no\\n' > " & dropDir & "/99-repro-fixture.conf")
+      let fwdNo = g.planProfile(repro, "sysctl-networkd-ipforward-no", Profile)
+      step("IPForward=no (never turns forwarding off) refuses nothing",
+           fwdNo.exitCode == 0, "exit " & $fwdNo.exitCode & "\n" & fwdNo.stdout & fwdNo.stderr)
+      discard g.run("printf '[Network]\\nIPForward=yes\\n' > " & dropDir & "/99-repro-fixture.conf")
+      let fwdYes = g.planProfile(repro, "sysctl-networkd-ipforward-yes", ForwardingOff)
+      if globalKnob:
+        step("networkd >= 256 ignores IPForward=yes: ip_forward = 0 refuses nothing",
+             fwdYes.exitCode == 0, "exit " & $fwdYes.exitCode & "\n" & fwdYes.stdout & fwdYes.stderr)
+      else:
+        step("networkd before 256 turns forwarding on for IPForward=yes: ip_forward = 0 is refused (exit 2), naming it",
+             fwdYes.exitCode == 2 and "IPForward=yes" in fwdYes.stderr and
+             "net.ipv4.ip_forward" in fwdYes.stderr,
+             "exit " & $fwdYes.exitCode & "\n" & fwdYes.stdout & fwdYes.stderr)
+      discard g.run("rm -rf " & dropDir)
     if networkdInUse and managedLink.len > 0:
       let perLink = "addOn {\n  managedEtcPrefixes = []\n}\n\nlinux.sysctl {\n" &
         "  key = \"net.ipv6.conf." & managedLink & ".accept_ra\"\n  value = \"0\"\n}\n"

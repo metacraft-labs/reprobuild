@@ -32,7 +32,7 @@
 ## namespaces, and the effective values are observed by a transient unit
 ## the host's systemd runs for us (``systemd-run --wait --pipe``).
 
-import std/[algorithm, os, sets, strutils, tables, times]
+import std/[algorithm, monotimes, os, sets, strutils, tables, times]
 
 import repro_infra/addon_diagnostics
 import repro_local_store/store
@@ -370,9 +370,57 @@ proc runPreStop*(ts: seq[Transition];
   ## active triggers (sockets, timers, paths) are stopped first, so they
   ## cannot start its old definition again before step 7. Last, every
   ## exclusive unit step 7 will start is checked with its predecessors,
-  ## so a refusal happens here, before the flip.
+  ## so a refusal happens here, before the flip. A unit held up by
+  ## ``Upholds=`` has its upholds released first (``Transition.upholders``,
+  ## ``Transition.unlinkFirst``; spec §7.3): the add-on's own upholders are
+  ## paused like triggers (``paused``, started again by ``runStart``), and
+  ## a removed unit's own ``UpheldBy=`` link goes before its stop.
   template note(u: string) =
     if onStop != nil: onStop(u)
+  # The units with an entry of their own in step 2: an upholder among them
+  # is stopped by its own entry and not started again by the switch.
+  var ownStops: seq[string]
+  for t in preStopEntries(ts): ownStops.add(t.unit)
+  var unlinked: seq[string]
+  let disableList = @disable     # an openArray cannot be captured
+  proc removeInstallLinks(d: tuple[unit: string;
+                                   links: seq[tuple[path, target: string]]];
+                          kept: var seq[string]) =
+    note("disable:" & d.unit)
+    for l in d.links:
+      # Only while it is still the add-on's link (pointing where the ledger
+      # says); anything else at the path is left and reported. An empty
+      # target is the re-check's falsifying build: unlink whatever is there.
+      if l.target.len == 0:
+        discard removeLeafNoFollow(l.path)
+      elif removeLinkIfTarget(l.path, l.target) == lrDifferent:
+        kept.add(l.path)
+  proc releaseUpholds(t: Transition; res: var PreStopResult) =
+    ## Upholds= (§7.3): before ``t.unit`` stops, a removed unit held up by
+    ## its own UpheldBy= link loses the link (systemd reloaded, so the
+    ## dependency is gone), and the add-on's own upholders are paused --
+    ## stopped now, started again after step 7. What still holds the unit
+    ## up after that would start it again at once: refused, before the
+    ## flip.
+    if t.unlinkFirst:
+      for d in disableList:
+        if d.unit == t.unit and d.unit notin unlinked:
+          removeInstallLinks(d, res.keptLinks)
+          unlinked.add(d.unit)
+      daemonReload()
+    for u in t.upholders:
+      if unitIsActive(u):
+        note("trigger:" & u)
+        stopUnit(u)
+        if u notin ownStops and u notin res.paused: res.paused.add(u)
+    if t.unlinkFirst or t.upholders.len > 0:
+      var still: seq[string]
+      for u in unitListProperty(t.unit, "UpheldBy"):
+        if u notin t.upholders and unitIsActive(u): still.add(u)
+      if still.len > 0:
+        raise newAddOnExclusiveOverlap(t.unit, "it is still held up by " &
+          still.join(", ") & " through Upholds= after step 2 released " &
+          "what the plan named; systemd would start it again at once")
   when mutated("exclusive-as-plain-restart"):
     # The falsifying mutation: an exclusive unit gets no special step.
     # Its old instance is stopped AFTER the successor starts (`runStart`
@@ -395,6 +443,7 @@ proc runPreStop*(ts: seq[Transition];
       if t.verb == tvStopStart and not unitIsActive(t.unit) and
           unitAliveness(t.unit) == uaEmpty:
         result.notRunning.add(t.unit)
+      releaseUpholds(t, result)
       note(t.unit)
       if t.exclusive and not (mutated("removed-exclusive-stop-unconfirmed") and
                               t.verb == tvStop):
@@ -407,18 +456,31 @@ proc runPreStop*(ts: seq[Transition];
         if t.exclusive and t.verb in {tvStart, tvStopStart}:
           confirmExited(@[t.unit] & t.predecessors, t.unit)
   for d in disable:
-    note("disable:" & d.unit)
-    for l in d.links:
-      # Only while it is still the add-on's link (pointing where the ledger
-      # says); anything else at the path is left and reported. An empty
-      # target is the re-check's falsifying build: unlink whatever is there.
-      if l.target.len == 0:
-        discard removeLeafNoFollow(l.path)
-      elif removeLinkIfTarget(l.path, l.target) == lrDifferent:
-        result.keptLinks.add(l.path)
+    if d.unit in unlinked: continue     # removed before its stop (Upholds=)
+    removeInstallLinks(d, result.keptLinks)
+
+proc monotonicSeconds*(): float =
+  ## CLOCK_MONOTONIC in seconds: the clock systemd stamps a unit's
+  ## ``*TimestampMonotonic`` properties with (microseconds), shared by
+  ## every process of the host.
+  ## (``std/monotimes`` reads CLOCK_MONOTONIC on Linux, in nanoseconds.)
+  getMonoTime().ticks.float / 1e9
+
+proc startedSince*(unit: string; since: float): bool =
+  ## Did the unit's current activation begin after ``since`` (CLOCK_MONOTONIC
+  ## seconds)? systemd's ``InactiveExitTimestampMonotonic`` is when the unit
+  ## left ``inactive`` for this activation. False when it cannot be read.
+  let v = unitProperty(unit, "InactiveExitTimestampMonotonic")
+  if v.len == 0: return false
+  try:
+    let us = parseBiggestUInt(v)
+    us > 0'u64 and us.float / 1e6 > since
+  except ValueError:
+    false
 
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
-               notRunning: openArray[string] = []; noBlock = false) =
+               notRunning: openArray[string] = []; noBlock = false;
+               reloadedAt = 0.0) =
   ## Step 7: start, restart or reload in the order given. A
   ## ``stop-start`` unit was stopped in step 2 and is started here. Every
   ## start of an exclusive unit first confirms the unit and its
@@ -429,6 +491,15 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
   ## -- also for a unit that had ended before step 2 and is not started,
   ## and, last, any paused trigger not yet restarted: a trigger step 2
   ## paused is never left stopped by a switch that completes.
+  ##
+  ## An exclusive unit found running that already runs the generation's
+  ## definition -- one systemd did not know at plan time (``fresh``), or one
+  ## whose activation began after step 6's daemon-reload (``reloadedAt``,
+  ## CLOCK_MONOTONIC seconds; 0 = unknown) -- was started by an upholder
+  ## started before it in this step, or by its own ``UpheldBy=`` link once
+  ## enabled (§7.3 Upheld units). It is left running and only its
+  ## predecessors are confirmed exited: stopping it would have the upholder
+  ## start it again at once, and the confirmation could never succeed.
   let pausedSet = @paused
   var restored: seq[string]
   proc restoreTriggers(units: openArray[string]) =
@@ -452,9 +523,14 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
         else: startUnit(t.unit)
       else:
         if t.exclusive and not mutated("exclusive-planned-by-active-state"):
-          if unitAliveness(t.unit) != uaEmpty or unitIsActive(t.unit):
-            stopExclusive(t.unit)
-          confirmExited(@[t.unit] & t.predecessors, t.unit)
+          let newInstance = unitIsActive(t.unit) and
+            (t.fresh or (reloadedAt > 0 and startedSince(t.unit, reloadedAt)))
+          if newInstance:
+            confirmExited(t.predecessors, t.unit)
+          else:
+            if unitAliveness(t.unit) != uaEmpty or unitIsActive(t.unit):
+              stopExclusive(t.unit)
+            confirmExited(@[t.unit] & t.predecessors, t.unit)
         # The paused triggers start just before their unit: systemd
         # refuses to start an `Accept=no` socket whose service already
         # runs, and the old instance was confirmed exited above, so an

@@ -8493,7 +8493,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim",
       "sourceSuiteCount": 8,
-      "staticCaseCount": 32,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8512,7 +8512,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_switch_planning.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 26,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
