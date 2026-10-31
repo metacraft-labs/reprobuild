@@ -6713,6 +6713,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_profile_compile_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_profile_compile/tests/t_compiled_profile_keeps_secrets_and_credentials.nim",
+    binary: "build/test-bin/t_compiled_profile_keeps_secrets_and_credentials",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_profile_compile_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim",
     binary: "build/test-bin/t_guarded_intent_plans_per_host",
     defines: @[],

@@ -1042,6 +1042,15 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       (if sp.addOn.confirmTimeoutSec > 0:
          "  confirmTimeout = " & $sp.addOn.confirmTimeoutSec & "\n"
        else: "") & "}\n\n")
+  # The secrets the profile declares (`secrets.secretFile`), each once and
+  # in profile order: they are not resources, but a unit's `credentials`
+  # must name one, and the apply materialises exactly these (spec
+  # ReproOS-Add-On-Mode §10.3). Leaving them out of the text would make a
+  # compiled profile lose every secret its units load.
+  for d in sp.secretFiles:
+    result.add(SecretFileStanzaTag & " {\n  service = " &
+      quoteSystemValue(d.service) & "\n  name = " & quoteSystemValue(d.name) &
+      "\n}\n\n")
   for r in sp.resources:
     var pairs: seq[(string, string)] = @[]
     case r.kind
@@ -1153,6 +1162,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("exclusive", "true"))
       if r.suHealthCheck.len > 0:
         pairs.add(("healthCheck", quoteSystemValue(r.suHealthCheck)))
+      if r.suCredentials.len > 0:
+        pairs.add(("credentials", renderListLiteral(r.suCredentials)))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))

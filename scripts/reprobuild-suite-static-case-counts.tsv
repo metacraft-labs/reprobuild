@@ -617,6 +617,7 @@ libs/repro_profile_compile/tests/t_addon_profile_collision_and_managed_prefixes.
 libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	9
 libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
+libs/repro_profile_compile/tests/t_compiled_profile_keeps_secrets_and_credentials.nim	nim	1
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	13
