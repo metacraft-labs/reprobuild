@@ -335,6 +335,9 @@ cross_env=(
   -u OPENSSL_LIBDIR -u OPENSSL_PREFIX -u SQLITE_LIBDIR -u SQLITE_PREFIX
   -u BLAKE3_PREFIX -u XXHASH_PREFIX -u CLINGO_PREFIX -u ZSTD_PREFIX
   REPROBUILD_USE_SYSTEM_HASH_LIBS=0
+  # config.nims then offers no /nix/store prefix and no host directory for
+  # any library (an architecture filter cannot tell musl from glibc).
+  REPRO_CROSS_SYSROOT="${sysroot}"
 )
 
 # ---------------------------------------------------------------------------

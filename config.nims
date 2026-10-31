@@ -1131,9 +1131,20 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
       return prefix
   ""
 
+let crossSysroot = getEnv("REPRO_CROSS_SYSROOT")
+  ## Set by `scripts/cross/build_linux_cross.sh`: the target's libraries come
+  ## from this sysroot through the linker's default search, and from nowhere
+  ## else. No store prefix and no host directory may be offered then. An
+  ## architecture filter cannot tell a musl archive from a glibc one: an
+  ## armhf glibc cross link was handed
+  ## `sqlite-static-armv7l-unknown-linux-musleabihf` (left in the store by a
+  ## static add-on build) and failed on its musl `__*_time64` symbols
+  ## (measured 2026-10-31).
+
 proc nixStorePrefixes(namePattern: string): seq[string] =
   ## The `/nix/store` directories matching the glob `namePattern`
-  ## (`*-sqlite-*`, ...), sorted bytewise.
+  ## (`*-sqlite-*`, ...), sorted bytewise; none under a cross build's
+  ## sysroot (`crossSysroot`).
   ##
   ## Expanded by the shell's own glob and `printf` builtin, with no external
   ## tool. This used to be `find ... | sort`, but the provider-compile and
@@ -1152,7 +1163,7 @@ proc nixStorePrefixes(namePattern: string): seq[string] =
   ## `walkDir` does. The shell's glob order follows the locale, so the
   ## result is sorted here, as `nixLibDirIn` in `repro_interface_artifacts`
   ## sorts its own.
-  if not dirExists("/nix/store"):
+  if crossSysroot.len > 0 or not dirExists("/nix/store"):
     return @[]
   let listing = gorgeEx("for d in /nix/store/" & namePattern &
     "; do [ -d \"$d\" ] && [ ! -L \"$d\" ] && printf '%s\\n' \"$d\"; " &
@@ -1333,6 +1344,8 @@ when not defined(windows) and not defined(macosx):
       nixLdflagsLibDir(sqliteNames)
     elif nixInPlay and nixLibDir("*-sqlite-*", sqliteNames).len > 0:
       nixLibDir("*-sqlite-*", sqliteNames)
+    elif crossSysroot.len > 0:
+      ""   # the linker finds the sysroot's own (see `crossSysroot`)
     else:
       firstExistingLibDir(
         [
