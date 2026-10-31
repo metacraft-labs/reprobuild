@@ -44,8 +44,9 @@
 ##
 ## *Falsifying mutations*: ``secrets-on-tmpfs`` accepts a plain directory
 ## on /run's tmpfs, so the swap pass finds C4 in the swap file;
-## ``secrets-scope-allows-swap`` runs the plaintext-holding processes and
-## units without ``MemorySwapMax=0``, so the held C5 reaches the swap file;
+## ``secrets-plaintext-swappable`` neither locks the plaintext buffers in RAM
+## nor runs the processes and units that hold them with ``MemorySwapMax=0``,
+## so the held C5 reaches the swap file;
 ## ``secrets-on-disk`` materialises into
 ## ``/var/lib/repro/secrets`` (the root filesystem) with the tmpfs check
 ## off; the scan then finds the canaries and the gate goes red
@@ -268,8 +269,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "secret put --service swap-probe --name held'); do cat " &
         "/sys/fs/cgroup$(cut -d: -f3 /proc/$p/cgroup)/memory.swap.max; done").stdout
       let heldLines = heldCg.strip().splitLines()
-      step("swap pass: a secret put holds C5 in a group that may not swap",
-           held and heldLines.len == 1 and heldLines[0] == "0",
+      let heldLck = g.exec("for p in $(pgrep -f '^/[^ ]*repro system addon " &
+        "secret put --service swap-probe --name held'); do grep VmLck " &
+        "/proc/$p/status | tr -dc 0-9; done").stdout.strip()
+      step("swap pass: a secret put holds C5 locked in RAM (VmLck >= 16 MiB) " &
+           "in a group that may not swap",
+           held and heldLines.len == 1 and heldLines[0] == "0" and
+           heldLck.len > 0 and parseInt(heldLck) >= 16384,
+           "VmLck kB " & heldLck & " / swap.max " &
            heldCg & g.exec("cat /root/addon/held.log; ps -eo pid,cgroup,args | " &
                            "grep '[s]ecret put'").stdout)
       let fill = randomBytes(32)

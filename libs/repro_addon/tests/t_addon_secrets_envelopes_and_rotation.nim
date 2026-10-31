@@ -103,9 +103,10 @@ suite "envelopes and rotation":
     # The old generation's copy was re-sealed: it opens with the new key.
     let (present, e1) = readEnvelopeFile(b.layout, generationEnvelopePath(gen1))
     check present
-    var o1 = openEnvelope(b.layout, e1)
-    check o1.files[0].content == bytesOf("v1")
-    wipe(o1.files)
+    let o1 = openEnvelope(b.layout, e1)
+    let v1 = "v1"
+    check o1.entries.len == 1 and o1.entries[0].len == 2 and
+      equalMem(o1.buf.toPtr(o1.entries[0].off), unsafeAddr v1[0], 2)
     # Generation 2's copy and the latest hold v2.
     discard materialiseFromEnvelope(b.layout, A, generationEnvelopePath(gen2))
     check readFile(b.layout.runDir / "web" / "a") == "v2"
@@ -253,3 +254,18 @@ suite "envelopes and rotation":
     # The commit itself would have promoted it; when its copy failed it
     # stays for the retry -- the tick does not delete it.
     check fileExists(stagedEnvelopePath(b.layout))
+
+  test "opened plaintext lives in a buffer locked in RAM, wiped when it goes":
+    let b = newBed("locked")
+    defer: removeDir(b.root)
+    let pub = b.pubOf(recipientKeyPath(b.layout))
+    var l = b.layout
+    l.lockPlaintext = true      # a small buffer locks within the default limit
+    let o = openEnvelope(l, env(pub, [("web/a", "plain")]))
+    check o.buf.locked
+    check o.entries[0].path == "web/a" and o.entries[0].len == 5
+    # The sealed payload limit.
+    var big = newSeq[byte](MaxPlaintextBytes + 1)
+    expect AddonSecretsFailed:
+      discard openEnvelope(l, RetainedEnvelope(target: "t",
+        sealed: SealedSecrets(ciphertext: big)))

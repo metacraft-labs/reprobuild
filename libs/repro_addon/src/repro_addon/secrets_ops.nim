@@ -155,15 +155,16 @@ proc planConsumers(stateDir: string; services: seq[string]): ConsumerPlan =
     elif exclusive: result.exclusive.add(r.suName)
     else: result.restart.add(r.suName)
 
-proc addEntry(l: SecretsLayout; path, entry, content, target: string;
-              createIfAbsent: bool): string =
+proc addEntry(l: SecretsLayout; path, entry: string; content: LockedBytes;
+              target: string; createIfAbsent: bool): string =
   ## Re-seal the envelope at ``path`` with ``entry`` added or replaced, to
   ## the key that opens it (the current key when there is no envelope and
-  ## ``createIfAbsent``). Returns the target it was sealed for, "" when
-  ## nothing was there to change.
+  ## ``createIfAbsent``). The new payload is built in a locked buffer from
+  ## the opened one and ``content`` (itself locked), and sealed in place.
+  ## Returns the target it was sealed for, "" when nothing was there.
   let (present, env) = readEnvelopeFile(l, path)
   if not present and not createIfAbsent: return ""
-  var files: seq[SecretFile]
+  var opened: OpenedEnvelope
   var tgt = target
   var sealTo: PublicKeyBytes
   if present:
@@ -172,8 +173,7 @@ proc addEntry(l: SecretsLayout; path, entry, content, target: string;
         path & " is sealed for target '" & env.target & "', not '" &
         target & "'")
     tgt = env.target
-    let opened = openEnvelope(l, env)
-    files = opened.files
+    opened = openEnvelope(l, env)
     let keyPath = if opened.byNextKey: nextRecipientKeyPath(l)
                   else: recipientKeyPath(l)
     sealTo = derivePublicKey(loadRecipientKeyChecked(keyPath, l.owner))
@@ -181,25 +181,41 @@ proc addEntry(l: SecretsLayout; path, entry, content, target: string;
     if tgt.len == 0: tgt = readHostname()
     sealTo = derivePublicKey(loadRecipientKeyChecked(recipientKeyPath(l),
                                                      l.owner))
-  var bytes = newSeq[byte](content.len)
-  for i, c in content: bytes[i] = byte(c)
+  var parts: seq[tuple[path: string; mode: uint32; data: pointer; len: int]]
   var replaced = false
-  for f in files.mitems:
-    if f.path == entry:
-      f.content = bytes
-      f.mode = uint32(SecretFileMode)
+  for e in opened.entries:
+    if e.path == entry:
+      parts.add((entry, uint32(SecretFileMode), content.toPtr, content.len))
       replaced = true
+    else:
+      parts.add((e.path, e.mode, opened.buf.toPtr(e.off), e.len))
   if not replaced:
-    files.add(SecretFile(path: entry, mode: uint32(SecretFileMode),
-                         content: bytes))
-  writeEnvelopeFile(l, path, RetainedEnvelope(target: tgt,
-    sealed: sealSecrets(sealTo, tgt, files)))
-  wipe(files)
-  if bytes.len > 0: zeroMem(addr bytes[0], bytes.len)
+    parts.add((entry, uint32(SecretFileMode), content.toPtr, content.len))
+  var payload = encodeLocked(l, parts)
+  writeEnvelopeFile(l, path, sealLocked(sealTo, tgt, payload))
   tgt
 
+proc readLockedFd*(l: SecretsLayout; fd: cint; what: string): LockedBytes =
+  ## Everything readable from ``fd`` (stdin) into a buffer locked in RAM,
+  ## never through a string; at most ``MaxPlaintextBytes``.
+  result = newLockedBytes(0, requireLock = l.lockPlaintext)
+  while true:
+    if result.len == result.capacity:
+      if result.len >= MaxPlaintextBytes:
+        raise newException(AddonSecretsFailed, what & " is larger than " &
+          $MaxPlaintextBytes & " bytes")
+      grow(result, min(MaxPlaintextBytes, 2 * result.capacity), l.lockPlaintext)
+    let n = posix.read(fd, addr result.data[result.len],
+                       result.capacity - result.len)
+    if n < 0:
+      if errno == EINTR: continue
+      raise newException(AddonSecretsFailed, "cannot read " & what & ": " &
+        osErrorMsg(osLastError()))
+    if n == 0: break
+    result.len += n
+
 proc secretPut*(stateDir: string; l: SecretsLayout; service, name: string;
-                content: string; target = ""): seq[string] =
+                content: LockedBytes; target = ""): seq[string] =
   ## ``repro system addon secret put``: seal ``content`` as the entry
   ## ``<service>/<name>`` to the host's own recipient key, merged into the
   ## latest envelope and into the current generation's own copy (the other
@@ -435,15 +451,15 @@ proc reexecInNoSwapScope*(): int =
   ## (``execv``), and returns an exit status after printing why it could
   ## not. A process re-executed this way whose group may still swap is
   ## refused, never re-entered.
-  if not processMaySwap(): return -1
-  when mutated("secrets-scope-allows-swap"):
-    if getEnv(NoSwapScopeEnv) == "1": return -1
+  # The plaintext itself is locked in RAM (``locked_buffer``) on every
+  # host; the scope is defence in depth, and only where a cgroup v2 memory
+  # controller makes ``MemorySwapMax=`` mean something.
+  if not memoryControllerActive() or not processMaySwap(): return -1
   if getEnv(NoSwapScopeEnv) == "1":
-    stderr.write("repro-addon: this command runs in a scope with " &
-      "MemorySwapMax=0, and its control group still may swap (" &
-      "memory.swap.max is '" & ownCgroupSwapMax() & "'); refusing to " &
-      "handle plaintext secrets\n")
-    return 1
+    stderr.write("repro-addon: note: the scope's MemorySwapMax=0 did not " &
+      "take (memory.swap.max is '" & ownCgroupSwapMax() & "'); the " &
+      "plaintext is still locked in RAM\n")
+    return -1
   var argv: seq[string]
   try:
     argv = noSwapScopeArgv(getAppFilename(), commandLineParams())
@@ -497,19 +513,15 @@ proc runSecretPutCli*(args: seq[string]): int =
   except ValueError as e:
     stderr.write("repro system addon secret put: " & e.msg & "\n")
     return 2
+  let layout = defaultSecretsLayout()
   try:
-    hardenProcessForSecrets()   # before the plaintext is read
-  except CatchableError as e:
-    stderr.write("repro system addon secret put: " & e.msg & "\n")
-    return 1
-  var content = stdin.readAll()
-  defer: wipe(content)
-  if content.len == 0:
-    stderr.write("repro system addon secret put: no secret on stdin\n")
-    return 2
-  try:
-    for line in secretPut(DefaultStateDir, defaultSecretsLayout(), service,
-                          name, content, target):
+    guardPlaintext(layout)   # before the plaintext is read
+    let content = readLockedFd(layout, 0, "the secret on stdin")
+    if content.len == 0:
+      stderr.write("repro system addon secret put: no secret on stdin\n")
+      return 2
+    for line in secretPut(DefaultStateDir, layout, service, name, content,
+                          target):
       stdout.write(line & "\n")
     0
   except CatchableError as e:

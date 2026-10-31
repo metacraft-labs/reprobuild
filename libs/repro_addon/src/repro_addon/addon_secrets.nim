@@ -92,10 +92,12 @@ import repro_peer_cache/auth as peerAuth
 import ./fingerprint
 import ./host_exec
 import ./ledger
+import ./locked_buffer
 import ./mutations
 import ./seams
 
 export agentSecrets.SecretFile, agentSecrets.SealedSecrets
+export locked_buffer
 
 var
   oDirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
@@ -164,9 +166,10 @@ type
     hostRoot*: string
       ## Prefix under which ``runDir`` is reached: ``/proc/1/root`` on a
       ## host (PID 1's mount namespace), "" in tests.
-    requireNoSwap*: bool
-      ## Refuse to open an envelope unless this process's control group may
-      ## not swap (``memory.swap.max`` 0): its heap holds plaintext.
+    lockPlaintext*: bool
+      ## Plaintext buffers must be locked in RAM: a failed ``mlock`` refuses
+      ## (production). Without it locking is best effort (unprivileged unit
+      ## tests).
 
   RetainedEnvelope* = object
     ## A sealed envelope kept on the host, with the target name it was
@@ -174,8 +177,19 @@ type
     target*: string
     sealed*: SealedSecrets
 
+  EntryView* = object
+    ## One sealed entry inside an opened envelope's locked buffer: its path
+    ## and mode, and where its bytes are (``off`` .. ``off + len``). The
+    ## bytes are never copied out of the buffer.
+    path*: string
+    mode*: uint32
+    off*, len*: int
+
   OpenedEnvelope* = object
-    files*: seq[SecretFile]
+    ## The plaintext of an envelope, in a buffer locked in RAM
+    ## (``locked_buffer``), parsed in place.
+    buf*: LockedBytes
+    entries*: seq[EntryView]
     byNextKey*: bool
       ## Opened by ``recipient.key.next``: the producer has moved to the
       ## new key, and committing a generation with it retires the old one.
@@ -204,7 +218,7 @@ proc defaultSecretsLayout*(): SecretsLayout =
   ## The add-on host's layout (spec §5.3, §10.3).
   result = SecretsLayout(agentDir: "/var/lib/repro/agent",
     runDir: SecretsRunRoot, owner: 0, fs: sfRamfs, hostRoot: "/proc/1/root",
-    requireNoSwap: not mutated("secrets-scope-allows-swap"))
+    lockPlaintext: true)
   when mutated("secrets-on-disk"):
     # FALSIFYING MUTATION (e2e_addon_no_plaintext_secret_on_disk): the
     # plaintext goes to a directory on the root filesystem, reached by the
@@ -259,6 +273,15 @@ const NoSwapScopeEnv* = "REPRO_ADDON_NOSWAP_SCOPE"
   ## Set by ``noSwapScopeArgv`` in the re-executed process, so a scope that
   ## did not take effect is refused instead of re-entered.
 
+proc memoryControllerActive*(): bool =
+  ## Whether the cgroup v2 memory controller is available (so
+  ## ``MemorySwapMax=`` means something): ``memory`` in the root's
+  ## ``cgroup.controllers``. Raspberry Pi kernels often boot without it.
+  try:
+    "memory" in readFile("/sys/fs/cgroup/cgroup.controllers").splitWhitespace()
+  except CatchableError:
+    false
+
 proc ownCgroupSwapMax*(): string =
   ## ``memory.swap.max`` of this process's own control group (cgroup v2),
   ## "" when it cannot be read.
@@ -286,27 +309,34 @@ proc noSwapScopeArgv*(exe: string; args: openArray[string]): seq[string] =
     fail("systemd-run is not installed; a process that holds plaintext " &
       "secrets must run in a scope that may not swap")
   result = @[run, "--scope", "--quiet", "--collect"]
-  when not mutated("secrets-scope-allows-swap"):
+  when not mutated("secrets-plaintext-swappable"):
     result.add(["-p", "MemorySwapMax=0"])
   result.add("--")
   result.add(exe)
   for a in args: result.add(a)
 
 proc guardPlaintext*(l: SecretsLayout) =
-  ## Before this process holds plaintext: ``hardenProcessForSecrets`` and,
-  ## on a host, a control group that may not swap -- the plaintext in this
-  ## process's heap then never reaches a swap device (spec §10.3).
+  ## Before this process holds plaintext: ``hardenProcessForSecrets`` and a
+  ## raised ``RLIMIT_MEMLOCK``, so the buffers that will hold it can be
+  ## locked in RAM (spec §10.3, owner decision of 2026-10-31: plaintext is
+  ## kept out of swap by locking it, with or without a memory controller;
+  ## ``MemorySwapMax=0`` is kept wherever one exists).
   hardenProcessForSecrets()
-  if l.requireNoSwap and processMaySwap():
-    fail("this process may be swapped (its control group's memory.swap.max " &
-      "is '" & ownCgroupSwapMax() & "'); plaintext secrets are handled only " &
-      "in a unit or scope with MemorySwapMax=0")
+  raiseMemlockLimit()
+
+proc lockedBuffer(l: SecretsLayout; n: int): LockedBytes =
+  try:
+    newLockedBytes(n, requireLock = l.lockPlaintext)
+  except LockedBufferError as e:
+    fail(e.msg)
 
 proc wipe*(s: var string) =
   ## Zero a plaintext buffer this module owns before it is freed.
   if s.len > 0: zeroMem(addr s[0], s.len)
 
 proc wipe*(files: var seq[SecretFile]) =
+  ## Test data only (``openedFromFiles``); production plaintext lives in
+  ## locked buffers.
   for f in files.mitems:
     if f.content.len > 0: zeroMem(addr f.content[0], f.content.len)
 
@@ -562,46 +592,145 @@ proc keyExists(path: string): bool =
   var st: Stat
   lstat(path.cstring, st) == 0
 
+const MaxPlaintextBytes* = 64 * 1024 * 1024
+  ## The largest envelope payload the add-on opens: every byte of it is
+  ## locked in RAM while it is open (spec §10.3).
+
+proc getU32At(b: LockedBytes; pos: var int; what: string): uint32 =
+  if b.len - pos < 4:
+    fail("the opened envelope is truncated reading " & what)
+  for i in 0 ..< 4:
+    result = result or (uint32(b.data[pos + i]) shl uint32(i * 8))
+  inc pos, 4
+
+proc parseEntries(b: LockedBytes): seq[EntryView] =
+  ## The canonical payload (``encodeSecretFiles``' layout), parsed in place:
+  ## views into ``b``, no byte of a secret copied.
+  var pos = 0
+  let count = int(getU32At(b, pos, "the entry count"))
+  if count > (b.len div 12) + 1:
+    fail("the opened envelope claims more entries than it can hold")
+  for _ in 0 ..< count:
+    let plen = int(getU32At(b, pos, "a path length"))
+    if b.len - pos < plen: fail("the opened envelope is truncated reading a path")
+    var path = newString(plen)
+    for i in 0 ..< plen: path[i] = char(b.data[pos + i])
+    inc pos, plen
+    try:
+      validateSecretPath(path)
+    except SecretsError as e:
+      fail(e.msg)
+    let mode = getU32At(b, pos, "a mode")
+    let clen = int(getU32At(b, pos, "a content length"))
+    if b.len - pos < clen: fail("the opened envelope is truncated reading " & path)
+    result.add(EntryView(path: path, mode: mode, off: pos, len: clen))
+    inc pos, clen
+  if pos != b.len:
+    fail("the opened envelope has trailing bytes")
+
+proc openWith(l: SecretsLayout; key: PrivateKeyBytes; env: RetainedEnvelope;
+              opened: var OpenedEnvelope): string =
+  ## Decrypt ``env`` with ``key`` into a locked buffer; "" when it opened,
+  ## else why not.
+  var buf = lockedBuffer(l, env.sealed.ciphertext.len)
+  try:
+    openSecretsInPlace(key, env.target, env.sealed, buf.toPtr, buf.len)
+  except SecretsError as e:
+    return e.msg
+  opened.buf = move(buf)
+  opened.entries = parseEntries(opened.buf)
+  ""
+
 proc openEnvelope*(l: SecretsLayout; env: RetainedEnvelope): OpenedEnvelope =
-  ## Open ``env`` with the host's key. During a rotation the next key is
-  ## tried first (the producer seals to it once it has it), then the
-  ## current one. Either key is checked at load. Raises
-  ## ``AddonSecretsFailed`` when neither opens it. The caller owns the
-  ## plaintext and ``wipe``s it.
+  ## Open ``env`` with the host's key into a buffer locked in RAM. During a
+  ## rotation the next key is tried first (the producer seals to it once it
+  ## has it), then the current one. Either key is checked at load. Raises
+  ## ``AddonSecretsFailed`` when neither opens it, or the payload is larger
+  ## than ``MaxPlaintextBytes``.
   guardPlaintext(l)
+  if env.sealed.ciphertext.len > MaxPlaintextBytes:
+    fail("the sealed envelope holds " & $env.sealed.ciphertext.len &
+      " bytes of secrets, more than the " & $MaxPlaintextBytes & " the add-on " &
+      "locks in RAM at once")
   var tried: seq[string]
   if keyExists(nextRecipientKeyPath(l)):
     let k = loadRecipientKeyChecked(nextRecipientKeyPath(l), l.owner)
-    try:
-      return OpenedEnvelope(files: openSecrets(k, env.target, env.sealed),
-                            byNextKey: true)
-    except SecretsError as e:
-      tried.add("the next key: " & e.msg)
+    let why = openWith(l, k, env, result)
+    if why.len == 0:
+      result.byNextKey = true
+      return
+    tried.add("the next key: " & why)
   let k = loadRecipientKeyChecked(recipientKeyPath(l), l.owner)
-  try:
-    return OpenedEnvelope(files: openSecrets(k, env.target, env.sealed))
-  except SecretsError as e:
-    tried.add("the current key: " & e.msg)
+  let why = openWith(l, k, env, result)
+  if why.len == 0: return
+  tried.add("the current key: " & why)
   when mutated("rotation-keeps-old-key"):
     # NEGATIVE CONTROL (e2e_addon_recipient_key_rotation): the retired key
     # was kept, and still opens what was sealed to it.
     let retired = l.agentDir / RetiredKeyName
     if keyExists(retired):
       let old = loadRecipientKeyChecked(retired, l.owner)
-      try:
-        return OpenedEnvelope(files: openSecrets(old, env.target, env.sealed))
-      except SecretsError as e:
-        tried.add("the retired key: " & e.msg)
+      let w = openWith(l, old, env, result)
+      if w.len == 0: return
+      tried.add("the retired key: " & w)
   fail("the sealed envelope for target '" & env.target & "' does not open " &
     "with this host's recipient key (" & tried.join("; ") & ")")
 
-proc missingEntries(files: openArray[SecretFile];
+proc entry*(o: OpenedEnvelope; path: string): int =
+  ## The index of the entry ``path`` in ``o``, -1 when absent.
+  for i, e in o.entries:
+    if e.path == path: return i
+  -1
+
+proc encodeLocked*(l: SecretsLayout;
+                   parts: openArray[tuple[path: string; mode: uint32;
+                                          data: pointer; len: int]]): LockedBytes =
+  ## The canonical payload of ``parts`` built in a locked buffer, each
+  ## part's bytes copied from where they lie (another locked buffer).
+  var total = 4
+  for p in parts: total += 12 + p.path.len + p.len
+  result = lockedBuffer(l, total)
+  var pos = 0
+  template put32(v: uint32) =
+    for i in 0 ..< 4:
+      result.data[pos + i] = byte((v shr uint32(8 * i)) and 0xff)
+    inc pos, 4
+  put32(uint32(parts.len))
+  for p in parts:
+    try:
+      validateSecretPath(p.path)
+    except SecretsError as e:
+      fail(e.msg)
+    put32(uint32(p.path.len))
+    for c in p.path:
+      result.data[pos] = byte(c)
+      inc pos
+    put32(p.mode)
+    put32(uint32(p.len))
+    if p.len > 0: copyMem(addr result.data[pos], p.data, p.len)
+    inc pos, p.len
+
+proc sealLocked*(pub: PublicKeyBytes; target: string;
+                 payload: var LockedBytes): RetainedEnvelope =
+  ## Seal ``payload`` in place (it holds ciphertext afterwards).
+  RetainedEnvelope(target: target,
+    sealed: sealSecretsInPlace(pub, target, payload.toPtr, payload.len))
+
+proc openedFromFiles*(l: SecretsLayout; files: openArray[SecretFile]): OpenedEnvelope =
+  ## An opened envelope holding ``files`` (test data; production opens
+  ## sealed envelopes).
+  var parts: seq[tuple[path: string; mode: uint32; data: pointer; len: int]]
+  for f in files:
+    parts.add((f.path, f.mode, (if f.content.len > 0: pointer(unsafeAddr f.content[0])
+                                 else: nil), f.content.len))
+  result.buf = encodeLocked(l, parts)
+  result.entries = parseEntries(result.buf)
+
+proc missingEntries(o: OpenedEnvelope;
                     decls: openArray[SecretFileDecl]): seq[string] =
   for d in decls:
-    var found = false
-    for f in files:
-      if f.path == secretEntryPath(d.service, d.name): found = true
-    if not found: result.add(secretEntryPath(d.service, d.name))
+    if o.entry(secretEntryPath(d.service, d.name)) < 0:
+      result.add(secretEntryPath(d.service, d.name))
 
 proc stageEnvelope*(l: SecretsLayout; env: RetainedEnvelope;
                     decls: openArray[SecretFileDecl]) =
@@ -610,9 +739,8 @@ proc stageEnvelope*(l: SecretsLayout; env: RetainedEnvelope;
   ## generation it comes with; then it is kept as the staged envelope. It
   ## replaces nothing the host runs: the apply's commit promotes it, a
   ## failed apply discards it.
-  var opened = openEnvelope(l, env)
-  let missing = missingEntries(opened.files, decls)
-  wipe(opened.files)
+  let opened = openEnvelope(l, env)
+  let missing = missingEntries(opened, decls)
   if missing.len > 0:
     fail("the sealed section carries no entry for " & missing.join(", ") &
       ", which the profile it comes with declares; nothing was accepted")
@@ -740,14 +868,10 @@ proc retireCurrentKey*(l: SecretsLayout; resealPaths: openArray[string];
   for p in resealPaths:
     let (present, env) = readEnvelopeFile(l, p)
     if not present: continue
-    var files: seq[SecretFile]
-    try:
-      files = openSecrets(oldKey, env.target, env.sealed)
-    except SecretsError:
+    var opened: OpenedEnvelope
+    if openWith(l, oldKey, env, opened).len > 0:
       continue                     # sealed to the next key already
-    writeEnvelopeFile(l, p, RetainedEnvelope(target: env.target,
-      sealed: sealSecrets(newPub, env.target, files)))
-    wipe(files)
+    writeEnvelopeFile(l, p, sealLocked(newPub, env.target, opened.buf))
   let dfd = openAgentDir(l)
   defer: discard posix.close(dfd)
   when mutated("rotation-keeps-old-key"):
@@ -833,9 +957,7 @@ proc commitEnvelope*(l: SecretsLayout; source, generationCopy: string;
         if fsync(dfd) != 0:
           fail("cannot flush " & l.agentDir & ": " & errText())
       if keyExists(nextRecipientKeyPath(l)):
-        var opened = openEnvelope(l, env)
-        let byNext = opened.byNextKey
-        wipe(opened.files)
+        let byNext = openEnvelope(l, env).byNextKey
         if byNext:
           var paths = @resealPaths
           if latestEnvelopePath(l) notin paths: paths.add(latestEnvelopePath(l))
@@ -901,15 +1023,28 @@ proc openOrCreateDirAt(parentFd: cint; leaf, path: string; owner: int): cint =
   checkOwnedPrivateDir(fd, path, owner)
   fd
 
-proc readSecretLeaf(dfd: cint; leaf, path: string):
-    tuple[present: bool; text: string; mode: int] =
+proc leafHolds(l: SecretsLayout; dfd: cint; leaf, path: string;
+               data: pointer; len: int): bool =
+  ## Whether ``leaf`` under ``dfd`` is a ``0400`` regular file holding
+  ## exactly the ``len`` bytes at ``data``. Its bytes are read into a
+  ## locked buffer, never into a string.
   let fd = openRegularLeaf(dfd, leaf, path)
-  if fd < 0: return
+  if fd < 0: return false
   defer: discard posix.close(fd)
   var st: Stat
-  discard fstat(fd, st)
-  (true, readAllFd(fd, path, limit = 256 * 1024 * 1024),
-   int(st.st_mode) and 0o7777)
+  if fstat(fd, st) != 0 or int(st.st_size) != len or
+      (int(st.st_mode) and 0o7777) != SecretFileMode:
+    return false
+  var have = lockedBuffer(l, len)
+  var off = 0
+  while off < len:
+    let n = posix.read(fd, addr have.data[off], len - off)
+    if n < 0:
+      if errno == EINTR: continue
+      fail("cannot read " & path & ": " & errText())
+    if n == 0: return false
+    off += n
+  len == 0 or equalMem(have.data, data, len)
 
 proc removeTreeAt(dfd: cint; leaf: string) =
   ## Remove ``leaf`` under ``dfd`` without following anything: a file or
@@ -950,7 +1085,7 @@ proc listDirAt(dfd: cint): seq[string] =
     if n notin [".", ".."]: result.add(n)
   discard closedir(d)
 
-proc writeSecretAt(dfd: cint; dirPath, name, content: string) =
+proc writeSecretAt(dfd: cint; dirPath, name: string; data: pointer; len: int) =
   ## Create ``dirPath/name`` with its final mode at ``open(2)`` and publish
   ## it by ``renameat`` (see the module header). ``dirPath`` is the path
   ## the directory is reached by from this process.
@@ -961,6 +1096,8 @@ proc writeSecretAt(dfd: cint; dirPath, name, content: string) =
     # through_symlinks): the reused deploy agent's write before it was
     # fixed -- a path-based write that follows a link at the staged name
     # and creates the file with the process umask's mode, narrowed after.
+    var content = newString(len)
+    if len > 0: copyMem(addr content[0], data, len)
     writeFile(dirPath / staged, content)
     setFilePermissions(dirPath / staged, {fpUserRead})
     moveFile(dirPath / staged, path)
@@ -992,8 +1129,8 @@ proc writeSecretAt(dfd: cint; dirPath, name, content: string) =
         if fchmod(fd, Mode(SecretFileMode)) != 0:
           fail("cannot set mode 0400 on " & path & ": " & errText())
       var off = 0
-      while off < content.len:
-        let n = posix.write(fd, unsafeAddr content[off], content.len - off)
+      while off < len:
+        let n = posix.write(fd, cast[pointer](cast[int](data) + off), len - off)
         if n < 0:
           if errno == EINTR: continue
           fail("cannot write " & path & ": " & errText())
@@ -1095,16 +1232,16 @@ proc prepareRunDir(l: SecretsLayout): cint =
   checkFs(l, result, l.runDir)
 
 proc materialise*(l: SecretsLayout; decls: openArray[SecretFileDecl];
-                  files: openArray[SecretFile]; seamStateDir = ""):
-    seq[string] =
+                  opened: OpenedEnvelope; seamStateDir = ""): seq[string] =
   ## Make ``l.runDir`` hold exactly the declared secrets: each
-  ## ``<service>/<name>`` of ``decls`` with the bytes of the sealed entry of
-  ## that path, and nothing else (an undeclared file or service directory
-  ## is removed). Returns the services whose secrets changed, sorted. A
-  ## declared entry ``files`` does not carry refuses before anything is
-  ## written. With ``seamStateDir`` the seam build can stop after the first
-  ## secret is written (``secrets-mid-write``).
-  let missing = missingEntries(files, decls)
+  ## ``<service>/<name>`` of ``decls`` with the bytes of the opened entry of
+  ## that path -- written straight from the locked buffer -- and nothing
+  ## else (an undeclared file or service directory is removed). Returns the
+  ## services whose secrets changed, sorted. A declared entry the envelope
+  ## does not carry refuses before anything is written. With
+  ## ``seamStateDir`` the seam build can stop after the first secret is
+  ## written (``secrets-mid-write``).
+  let missing = missingEntries(opened, decls)
   if missing.len > 0:
     fail("the sealed envelope carries no entry for " & missing.join(", ") &
       "; nothing was materialised")
@@ -1127,21 +1264,14 @@ proc materialise*(l: SecretsLayout; decls: openArray[SecretFileDecl];
     names.sort()
     var changed = false
     for n in names:
-      var want = ""
-      for f in files:
-        if f.path == secretEntryPath(svc, n):
-          want = newString(f.content.len)
-          for i, b in f.content: want[i] = char(b)
-      var have = readSecretLeaf(sfd, n, sdir / n)
-      let same = have.present and have.text == want and have.mode == SecretFileMode
-      wipe(have.text)
-      if not same:
-        writeSecretAt(sfd, hostPath(l, sdir), n, want)
+      let e = opened.entries[opened.entry(secretEntryPath(svc, n))]
+      let data = opened.buf.toPtr(e.off)
+      if not leafHolds(l, sfd, n, sdir / n, data, e.len):
+        writeSecretAt(sfd, hostPath(l, sdir), n, data, e.len)
         changed = true
         inc written
         if written == 1 and seamStateDir.len > 0:
           seamPause(seamStateDir, "secrets-mid-write")
-      wipe(want)
     for leaf in listDirAt(sfd):
       if leaf notin names:
         removeTreeAt(sfd, leaf)
@@ -1152,6 +1282,11 @@ proc materialise*(l: SecretsLayout; decls: openArray[SecretFileDecl];
       removeTreeAt(rfd, leaf)
       if leaf notin result: result.add(leaf)
   result.sort()
+
+proc materialise*(l: SecretsLayout; decls: openArray[SecretFileDecl];
+                  files: openArray[SecretFile]; seamStateDir = ""): seq[string] =
+  ## ``materialise`` from test data (``openedFromFiles``).
+  materialise(l, decls, openedFromFiles(l, files), seamStateDir)
 
 proc clearMaterialised*(l: SecretsLayout): seq[string] =
   ## Remove every materialised secret (a generation that declares none).
@@ -1175,9 +1310,8 @@ proc openForDecls(l: SecretsLayout; decls: openArray[SecretFileDecl];
       "is no sealed envelope at " & envelope & " (deliver one through the " &
       "deploy agent or `repro system addon secret put`)")
   result = openEnvelope(l, env)
-  let missing = missingEntries(result.files, decls)
+  let missing = missingEntries(result, decls)
   if missing.len > 0:
-    wipe(result.files)
     fail("the sealed envelope " & envelope & " carries no entry for " &
       missing.join(", "))
 
@@ -1190,11 +1324,8 @@ proc materialiseFromEnvelope*(l: SecretsLayout;
   ## is missing or unusable.
   if decls.len == 0:
     return clearMaterialised(l)
-  var opened = openForDecls(l, decls, envelope)
-  try:
-    result = materialise(l, decls, opened.files, seamStateDir)
-  finally:
-    wipe(opened.files)
+  let opened = openForDecls(l, decls, envelope)
+  materialise(l, decls, opened, seamStateDir)
 
 proc materialiseFromRetained*(l: SecretsLayout;
                               decls: openArray[SecretFileDecl];
@@ -1208,8 +1339,7 @@ proc checkSecretsAvailable*(l: SecretsLayout; decls: openArray[SecretFileDecl];
   ## passes its check, an envelope that opens, an entry per declaration --
   ## decided before a switch writes anything. Writes nothing.
   if decls.len == 0: return
-  var opened = openForDecls(l, decls, envelope)
-  wipe(opened.files)
+  discard openForDecls(l, decls, envelope)
 
 proc plannedSecretChanges*(l: SecretsLayout; decls: openArray[SecretFileDecl];
                            envelope: string): seq[string] =
@@ -1220,7 +1350,6 @@ proc plannedSecretChanges*(l: SecretsLayout; decls: openArray[SecretFileDecl];
   var opened: OpenedEnvelope
   if decls.len > 0:
     opened = openForDecls(l, decls, envelope)
-  defer: wipe(opened.files)
   let dir = hostPath(l, l.runDir)
   var rfd: cint = -1
   if dirExists(dir) and not symlinkExists(dir):
@@ -1242,19 +1371,14 @@ proc plannedSecretChanges*(l: SecretsLayout; decls: openArray[SecretFileDecl];
       if sfd < 0: changed = true
     if sfd >= 0:
       for n in names:
-        var want = ""
-        for f in opened.files:
-          if f.path == secretEntryPath(svc, n):
-            want = newString(f.content.len)
-            for i, b in f.content: want[i] = char(b)
-        var have = (present: false, text: "", mode: 0)
+        let e = opened.entries[opened.entry(secretEntryPath(svc, n))]
+        var same = false
         try:
-          have = readSecretLeaf(sfd, n, l.runDir / svc / n)
+          same = leafHolds(l, sfd, n, l.runDir / svc / n,
+                           opened.buf.toPtr(e.off), e.len)
         except AddonSecretsFailed:
           discard
-        if not have.present or have.text != want: changed = true
-        wipe(have.text)
-        wipe(want)
+        if not same: changed = true
       for leaf in listDirAt(sfd):
         if leaf notin names and not leaf.startsWith("."): changed = true
       discard posix.close(sfd)

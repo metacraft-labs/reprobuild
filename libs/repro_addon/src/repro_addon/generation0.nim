@@ -158,10 +158,12 @@ WantedBy=repro-addon.target
 """
 
 const NoSwapLine =
-  # Both boot units open sealed envelopes, so their heap holds plaintext
-  # secrets: their control group may not swap (spec §10.3).
-  when mutated("secrets-scope-allows-swap"): ""
-  else: "MemorySwapMax=0\n"
+  # Both boot units open sealed envelopes. The plaintext is locked in RAM
+  # (``locked_buffer``), which LimitMEMLOCK=infinity lets them do whatever
+  # the size; where a cgroup v2 memory controller exists their control
+  # group also may not swap, as defence in depth (spec §10.3).
+  when mutated("secrets-plaintext-swappable"): "LimitMEMLOCK=infinity\n"
+  else: "MemorySwapMax=0\nLimitMEMLOCK=infinity\n"
 
 proc reassertUnit(reproExe: string): string =
   # Boot-time re-assertion (§7.7): finishes or reverts an interrupted

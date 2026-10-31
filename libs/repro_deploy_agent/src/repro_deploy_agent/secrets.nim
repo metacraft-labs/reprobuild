@@ -284,6 +284,37 @@ proc deriveKeyAndNonce(shared: array[SharedSecretLen, byte];
   for i in 0 ..< GcmNonceLen:
     result.nonce[i] = stream[AesKeyLen + i]
 
+proc gcmTransformPtr(key: array[AesKeyLen, byte];
+                     nonce: array[GcmNonceLen, byte];
+                     aad: string;
+                     data: pointer; dataLen: int;
+                     encrypt: bool;
+                     tag: var array[GcmTagLen, byte]): bool =
+  ## Run AES-256-GCM over the ``dataLen`` bytes at ``data`` in place (a
+  ## buffer the caller owns -- a locked one, for plaintext that must not
+  ## reach swap). When `encrypt`, writes the authentication tag into `tag`
+  ## and returns true. When decrypting, checks `tag` and returns whether it
+  ## matched -- the caller MUST NOT use the data if this returns false.
+  var keyCopy = key
+  var nonceCopy = nonce
+  var aadCopy = aad
+  var bc: bsslBlock.AesCtCtrKeys
+  bsslBlock.aesCtCtrInit(bc, addr keyCopy[0], csize_t(AesKeyLen))
+  var gc: bsslAead.GcmContext
+  bsslAead.gcmInit(gc, addr bc.vtable, bsslHash.ghashCtmul32)
+  bsslAead.gcmReset(gc, addr nonceCopy[0], csize_t(GcmNonceLen))
+  if aadCopy.len > 0:
+    bsslAead.gcmAadInject(gc, addr aadCopy[0], csize_t(aadCopy.len))
+  bsslAead.gcmFlip(gc)
+  bsslAead.gcmRun(gc, (if encrypt: cint(1) else: cint(0)),
+                  (if dataLen > 0: data else: nil), csize_t(dataLen))
+  if encrypt:
+    bsslAead.gcmGetTag(gc, addr tag[0])
+    result = true
+  else:
+    result = bsslAead.gcmCheckTag(gc, addr tag[0]) == 1'u32
+  zeroMem(addr keyCopy[0], AesKeyLen)
+
 proc gcmTransform(key: array[AesKeyLen, byte];
                   nonce: array[GcmNonceLen, byte];
                   aad: string;
@@ -679,3 +710,58 @@ proc ensureRecipientKeyFile*(path: string;
       return readRecipientKeyFile(path)
     writeFile(path, text)
   RecipientKey(publicKey: kp.publicKey, created: true)
+
+# ---------------------------------------------------------------------------
+# Seal / open in place, in a buffer the caller owns.
+#
+# For a caller that must keep plaintext out of memory it does not control --
+# the ReproOS add-on locks its plaintext in RAM so that no page of it can be
+# swapped (repro_addon/locked_buffer). The payload is the canonical encoding
+# `encodeSecretFiles` produces; the caller parses or builds it in place.
+# ---------------------------------------------------------------------------
+
+proc openSecretsInPlace*(recipientPrivKey: peerAuth.PrivateKeyBytes;
+                         target: string; sealed: SealedSecrets;
+                         dst: pointer; dstLen: int) =
+  ## Decrypt `sealed` into the `dstLen` bytes at `dst` (exactly the
+  ## ciphertext's length). Raises `SecretsError` -- with `dst` zeroed -- on a
+  ## failed tag check or an unusable ephemeral key: no unauthenticated byte
+  ## is left for the caller.
+  if dstLen != sealed.ciphertext.len:
+    raise newException(SecretsError, "openSecretsInPlace: buffer of " &
+      $dstLen & " bytes for a ciphertext of " & $sealed.ciphertext.len)
+  let recipientPub = peerAuth.derivePublicKey(recipientPrivKey)
+  var shared = ecdhSharedX(recipientPrivKey, sealed.ephemeralPubKey)
+  let derived = deriveKeyAndNonce(shared, target, sealed.ephemeralPubKey,
+                                  recipientPub)
+  zeroMem(addr shared[0], shared.len)
+  if dstLen > 0:
+    copyMem(dst, unsafeAddr sealed.ciphertext[0], dstLen)
+  var tag = sealed.tag
+  if not gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
+                         dst, dstLen, encrypt = false, tag = tag):
+    if dstLen > 0: zeroMem(dst, dstLen)
+    raise newException(SecretsError,
+      "sealed secrets failed authentication for target '" & target &
+      "': wrong recipient key, wrong target, or tampered ciphertext")
+
+proc sealSecretsInPlace*(recipientPubKey: peerAuth.PublicKeyBytes;
+                         target: string; payload: pointer;
+                         payloadLen: int): SealedSecrets =
+  ## Encrypt the `payloadLen` bytes of plaintext at `payload` in place to
+  ## `recipientPubKey` and return the sealed section; afterwards the buffer
+  ## holds ciphertext only.
+  let ephemeral = peerAuth.generateKeypair()
+  var shared = ecdhSharedX(ephemeral.privateKey, recipientPubKey)
+  let derived = deriveKeyAndNonce(shared, target, ephemeral.publicKey,
+                                  recipientPubKey)
+  zeroMem(addr shared[0], shared.len)
+  var tag: array[GcmTagLen, byte]
+  discard gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
+                          payload, payloadLen, encrypt = true, tag = tag)
+  result.ephemeralPubKey = ephemeral.publicKey
+  result.nonce = derived.nonce
+  result.tag = tag
+  result.ciphertext = newSeq[byte](payloadLen)
+  if payloadLen > 0:
+    copyMem(addr result.ciphertext[0], payload, payloadLen)

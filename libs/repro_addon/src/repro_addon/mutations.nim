@@ -184,10 +184,18 @@
 ##                                            restart or stop-start
 ## ``rotation-not-reconciled``                a rotation cut short after its
 ##                                            rename is never completed
-## ``secrets-scope-allows-swap``              the processes that hold
-##                                            plaintext run without
-##                                            MemorySwapMax=0 and are not
-##                                            refused for it
+## ``secrets-plaintext-swappable``            plaintext buffers are not
+##                                            locked in RAM and the
+##                                            processes and units that hold
+##                                            them run without
+##                                            MemorySwapMax=0
+## ``secrets-plaintext-unlocked``             plaintext buffers are not
+##                                            locked in RAM (MemorySwapMax=0
+##                                            is kept)
+## ``replay-reverts-on-secrets``              a recovery replay whose
+##                                            secrets cannot be
+##                                            materialised reverts the
+##                                            switch instead of finishing it
 ## ``retirement-not-resumed``                 a key retirement interrupted
 ##                                            between overwrite and rename
 ##                                            is never finished
@@ -262,7 +270,9 @@ const
                           "secrets-single-retained-envelope",
                           "credentials-not-planned",
                           "rotation-not-reconciled",
-                          "secrets-scope-allows-swap",
+                          "secrets-plaintext-swappable",
+                          "secrets-plaintext-unlocked",
+                          "replay-reverts-on-secrets",
                           "retirement-not-resumed",
                           "recipient-key-mode-unchecked",
                           "secrets-write-then-narrow",

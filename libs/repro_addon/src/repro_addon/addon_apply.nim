@@ -2864,7 +2864,17 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           discard materialiseFromEnvelope(secretsLayout, secretDecls,
             secretsSource, seamStateDir = stateDir)
         except CatchableError as ex:
-          if purpose == "revert":
+          # A revert, and a recovery's replay, finish whatever the secrets
+          # do: going back to the old generation (or, for a replay, undoing
+          # a switch the crash interrupted) over a secret that cannot be
+          # materialised now would trade a recoverable degraded state for
+          # a mixture. The failure is recorded in the generation's apply log,
+          # the re-assert unit reports it as degraded naming the cause, and
+          # the next re-assert or apply materialises the secrets again.
+          let finishAnyway =
+            when mutated("replay-reverts-on-secrets"): purpose == "revert"
+            else: purpose == "revert" or replaying
+          if finishAnyway:
             secretsFailure = "step 6 (secrets): " & ex.msg
             stderr.writeLine("repro-addon: " & secretsFailure)
           else:

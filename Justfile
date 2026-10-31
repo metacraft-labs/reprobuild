@@ -153,6 +153,9 @@ e2e_addon_recipient_key_rotation:
 e2e_addon_secrets_follow_generations:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_secrets_follow_generations
 
+e2e_addon_secrets_without_memory_controller:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_secrets_without_memory_controller
+
 t_addon_recipient_key_mode_checked_at_load:
     bash ./scripts/run_addon_unit_mutation.sh t_addon_recipient_key_mode_checked_at_load recipient-key-mode-unchecked
 

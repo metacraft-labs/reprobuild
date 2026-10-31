@@ -970,3 +970,20 @@ proc rolledBackRecords*(g: Guest): int =
   let r = g.exec("cat /var/lib/repro/system/generations/*/log/apply.log " &
                  "2>/dev/null | grep -a -o rolled-back | wc -l")
   try: parseInt(r.stdout.strip()) except ValueError: -1
+
+proc addKernelCmdline*(g: Guest; args: string; timeoutSec = 900) =
+  ## Boot the guest's kernel with ``args`` appended to its command line from
+  ## the next boot on: a GRUB drop-in (``/etc/default/grub.d``, read by
+  ## ``update-grub`` on every base of the matrix) and ``update-grub``. The
+  ## caller reboots.
+  discard g.run("mkdir -p /etc/default/grub.d && printf '%s\\n' " &
+    quoteShell("GRUB_CMDLINE_LINUX=\"$GRUB_CMDLINE_LINUX " & args & "\"") &
+    " > /etc/default/grub.d/99-repro-addon-testbed.cfg && update-grub " &
+    ">/dev/null 2>&1", timeoutSec = timeoutSec)
+
+proc rebootGuest*(g: Guest; timeoutSec = 600) =
+  ## A clean reboot (QEMU runs with -no-reboot: the process ends and the
+  ## same disk is booted again).
+  discard g.exec("systemctl reboot", timeoutSec = 30)
+  discard g.waitPoweredOff(timeoutSec)
+  g.boot()
