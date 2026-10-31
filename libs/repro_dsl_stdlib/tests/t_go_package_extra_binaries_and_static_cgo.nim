@@ -10,10 +10,11 @@
 ## static executable.
 ##
 ## THE CONSTRAINT. Both options default to off, and with both off the
-## emitted build edge must be byte-for-byte what it was before they
-## existed: its script is part of the action fingerprint, so any drift
-## would rebuild every Go recipe in the catalog for nothing. The first
-## suite pins that script as a literal.
+## emitted build edge is exactly the literal pinned in the first suite: its
+## script is part of the action fingerprint, so any drift rebuilds every Go
+## recipe in the catalog. The options did not change it; the assembler
+## path rewrite (last suite) did, deliberately, because without it the
+## binary's bytes depended on the checkout's path.
 ##
 ## WHAT IS EXERCISED, AND WHAT IS MOCKED. Nothing is mocked. The
 ## constructor is called as a recipe calls it, with no provider project
@@ -63,7 +64,7 @@ template withPackage(body: untyped) =
 
 suite "go_package: defaults are unchanged":
 
-  test "the build script is the one emitted before the new options":
+  test "the build script is the pinned literal":
     withPackage:
       let r = go_package("hello", mainPackage = "./cmd/hello",
         ldflags = "-X main.version=v1", tags = @["a"])
@@ -71,14 +72,21 @@ suite "go_package: defaults are unchanged":
       check act.id == "go-build-" & Pkg
       check scriptOf(act) ==
         "set -e; mkdir -p \".repro/build/go/out/usr/bin\"; cd \"src\"; " &
-        "GOMODCACHE=\".repro/build/go/modcache\" GOPROXY=off " &
-        "GOFLAGS=-mod=mod CGO_ENABLED=0 go build -trimpath -tags \"a\" " &
+        "mkdir -p \".repro/build/go/toolexec\"; " &
+        "printf '%s' '" & goAsmTrimpathWrapper() & "' > " &
+        "\".repro/build/go/toolexec/asm-trimpath\"; " &
+        "chmod 755 \".repro/build/go/toolexec/asm-trimpath\"; " &
+        "GOMODCACHE=\".repro/build/go/modcache\" " &
+        "GOCACHE=\".repro/build/go/cache\" " &
+        "REPRO_GO_ASM_TRIMPATH=\".repro/build/go/modcache\" GOPROXY=off " &
+        "GOFLAGS=-mod=mod CGO_ENABLED=0 go build -trimpath " &
+        "-toolexec \".repro/build/go/toolexec/asm-trimpath\" -tags \"a\" " &
         "-ldflags \"-X main.version=v1\" " &
         "-o \".repro/build/go/out/usr/bin/hello\" \"./cmd/hello\""
       check act.outputs == @[".repro/build/go/out/usr/bin/hello"]
       check act.deps == @["go-mod-download-" & Pkg]
       check act.inputs == @[".repro/build/go/mod-download.stamp"]
-      check act.toolIdentityRefs == @["sh", "mkdir", "go"]
+      check act.toolIdentityRefs == @["sh", "mkdir", "printf", "chmod", "go"]
 
   test "cgo = true alone still uses the host toolchain, as before":
     withPackage:
@@ -164,3 +172,28 @@ suite "go_package: staticCgo":
     check goMergedTags(@["x"], false) == @["x"]
     check goMergedLdflags("-s", false) == "-s"
     check goMergedLdflags("", true) == GoStaticCgoLdflags
+
+suite "go_package: assembly paths are rewritten for every file":
+
+  test "every go build runs under the wrapper, written once per edge":
+    # An assembly file #included from another directory keeps its absolute
+    # path under -trimpath alone (gnark-crypto's `field/asm/*.s` put the
+    # module cache's absolute path into geth and prysm).
+    withPackage:
+      let s = scriptOf(buildOf(go_package("a",
+        extraBinaries = @[("b", "./cmd/b")])))
+      check s.count("printf '%s'") == 1
+      check s.count("-toolexec \".repro/build/go/toolexec/asm-trimpath\"") == 2
+      check s.count("REPRO_GO_ASM_TRIMPATH=\".repro/build/go/modcache\"") == 2
+      # Not -asmflags: go build records it in the binary.
+      check "-asmflags" notin s
+      check s.find("chmod 755") < s.find("go build")
+
+  test "the wrapper only touches the assembler's -trimpath":
+    let w = goAsmTrimpathWrapper()
+    check '\'' notin w
+    check w.startsWith("#!/bin/sh\n")
+    check "asm|asm.exe) ;;" in w
+    check "*) exec \"$tool\" \"$@\" ;;" in w
+    check "a=\"$a;$REPRO_GO_ASM_TRIMPATH\"" in w
+    check "[ \"$a\" = -trimpath ]" in w

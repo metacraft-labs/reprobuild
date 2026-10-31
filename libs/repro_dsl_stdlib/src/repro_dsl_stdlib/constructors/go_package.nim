@@ -38,7 +38,11 @@
 ##
 ## `-trimpath` is passed because a Go binary otherwise embeds the absolute
 ## path of its build directory, which would make the same source produce
-## different bytes under two different scratch roots.
+## different bytes under two different scratch roots. `-trimpath` misses
+## assembly files `#include`d across directories, so the build runs the
+## assembler through a small `-toolexec` wrapper that adds the module cache
+## to its rewrites (`goAsmTrimpathWrapper`), with a per-recipe `GOCACHE`
+## so no object assembled without it is reused.
 ##
 ## ## Several commands from one module
 ##
@@ -128,6 +132,52 @@ const
     ## Go's own resolver and user lookup: a static musl binary has no NSS.
   GoStaticCgoLdflags* = "-linkmode external -extldflags -static"
     ## The final link goes to the external linker (zig), told `-static`.
+
+const GoAsmTrimVar* = "REPRO_GO_ASM_TRIMPATH"
+  ## Environment variable naming the module cache root, which the
+  ## `-toolexec` wrapper appends to the assembler's `-trimpath` rewrites.
+
+proc goCacheDir*(projectRoot: string): string =
+  ## `GOCACHE` for this recipe. Per recipe for the reason `GOMODCACHE` is,
+  ## and because Go's build cache does not key an object on the
+  ## environment a `-toolexec` wrapper reads: an object assembled before
+  ## the wrapper existed (or for another checkout) would otherwise be
+  ## reused with its absolute paths still in it.
+  projectRoot / GoScratchSubdir / "cache"
+
+proc goAsmTrimpathWrapperPath*(projectRoot: string): string =
+  projectRoot / GoScratchSubdir / "toolexec" / "asm-trimpath"
+
+proc goAsmTrimpathWrapper*(): string =
+  ## The `go build -toolexec` program that completes `-trimpath` for
+  ## assembly. `-trimpath` hands the assembler one rewrite per package, its
+  ## own directory; a `.s` file `#include`d from ANOTHER directory keeps its
+  ## absolute path in the binary's line table (gnark-crypto's
+  ## `field/asm/*.s`, included by its curve packages, put the module
+  ## cache's absolute path into geth and prysm). The wrapper appends the
+  ## module cache root (`$REPRO_GO_ASM_TRIMPATH`) as one more rewrite, so
+  ## such a file reads `<module>@<version>/...` as the package's own files
+  ## do; Go's rewrites stay first and win for every file they cover. Every
+  ## other tool runs unchanged. Contains no single quote: the build script
+  ## writes it with `printf '%s' '<text>'`.
+  ## https://pkg.go.dev/cmd/go#hdr-Compile_packages_and_dependencies
+  ## (`-toolexec`), https://pkg.go.dev/cmd/asm (`-trimpath`).
+  "#!/bin/sh\n" &
+  "tool=$1\n" &
+  "shift\n" &
+  "case ${tool##*/} in\n" &
+  "  asm|asm.exe) ;;\n" &
+  "  *) exec \"$tool\" \"$@\" ;;\n" &
+  "esac\n" &
+  "next=\n" &
+  "for a do\n" &
+  "  shift\n" &
+  "  if [ \"$next\" = 1 ]; then a=\"$a;$" & GoAsmTrimVar & "\"; fi\n" &
+  "  next=\n" &
+  "  if [ \"$a\" = -trimpath ]; then next=1; fi\n" &
+  "  set -- \"$@\" \"$a\"\n" &
+  "done\n" &
+  "exec \"$tool\" \"$@\"\n"
 
 proc goMergedTags*(tags: seq[string]; staticCgo: bool): seq[string] =
   ## The recipe's tags, followed by the static-cgo tags it did not already
@@ -324,8 +374,15 @@ proc go_package*(binaryName: string;
   # compiler and the external linker; its caches live in scratch.
   var buildDeps = @[downloadEdge.id]
   var buildInputs = @[downloadStamp]
-  var buildToolRefs = @["sh", "mkdir", "go"]
-  var ignoredRoots = @[effectiveDestdir, modCache]
+  var buildToolRefs = @["sh", "mkdir", "printf", "chmod", "go"]
+  let goCache =
+    if projectRoot.len > 0: goCacheDir(projectRoot)
+    else: GoScratchSubdir / "cache"
+  let asmWrapper =
+    if projectRoot.len > 0: goAsmTrimpathWrapperPath(projectRoot)
+    else: GoScratchSubdir / "toolexec" / "asm-trimpath"
+  var ignoredRoots = @[effectiveDestdir, modCache, goCache,
+                       parentDir(asmWrapper)]
   var cgoEnv = ""
   if staticCgo:
     let triple = goStaticCgoTriple()
@@ -352,6 +409,8 @@ proc go_package*(binaryName: string;
     # GOPROXY=off is what makes this offline: a module the download step
     # did not fetch is a hard error here rather than a quiet network call.
     result = "GOMODCACHE=\"" & q(modCache) & "\" "
+    result.add("GOCACHE=\"" & q(goCache) & "\" ")
+    result.add(GoAsmTrimVar & "=\"" & q(modCache) & "\" ")
     result.add("GOPROXY=off GOFLAGS=-mod=mod ")
     result.add("CGO_ENABLED=" & (if cgo or staticCgo: "1" else: "0") & " ")
     result.add(cgoEnv)
@@ -360,6 +419,11 @@ proc go_package*(binaryName: string;
     # its build directory, and the same source would produce different
     # bytes under two different scratch roots.
     result.add("-trimpath ")
+    # The wrapper that completes -trimpath for assembly (see
+    # `goAsmTrimpathWrapper`). Not a build flag: `go build` records
+    # `-asmflags` in the binary's build information, and the value would
+    # carry the very path being removed; `-toolexec` is not recorded.
+    result.add("-toolexec \"" & q(asmWrapper) & "\" ")
     if effectiveTags.len > 0:
       result.add("-tags \"" & q(effectiveTags.join(",")) & "\" ")
     if effectiveLdflags.len > 0:
@@ -370,6 +434,9 @@ proc go_package*(binaryName: string;
   var buildScript = "set -e; "
   buildScript.add("mkdir -p \"" & q(binDir) & "\"; ")
   buildScript.add("cd \"" & q(srcAbs) & "\"; ")
+  buildScript.add("mkdir -p \"" & q(parentDir(asmWrapper)) & "\"; ")
+  buildScript.add("printf '%s' '" & goAsmTrimpathWrapper() & "' > \"" &
+    q(asmWrapper) & "\"; chmod 755 \"" & q(asmWrapper) & "\"; ")
   buildScript.add(goBuildCommand(outputPath, mainPackage))
   for (name, pkg) in extraBinaries:
     buildScript.add("; " & goBuildCommand(binDir / name, pkg))
@@ -392,7 +459,8 @@ proc go_package*(binaryName: string;
     # the read channel -- ``go build -o`` writes the destdir and does not
     # read it back -- so the asymmetric guard is the whole reason it stays.
     # ``modCache`` is a genuine exception: read back on every run and not a
-    # declared output of anything, and so is zig's cache under `staticCgo`.
+    # declared output of anything, and so are the Go build cache, the
+    # assembler wrapper the edge writes, and zig's cache under `staticCgo`.
     dependencyPolicy = automaticMonitorPolicy(ignoredRoots),
     commandStatsId = "go_package.build",
     toolIdentityRefs = buildToolRefs)
