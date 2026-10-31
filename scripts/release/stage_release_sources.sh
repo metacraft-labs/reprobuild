@@ -130,6 +130,8 @@ stage() {
 
 stage REPRO_TEST_ADAPTERS_SRC reprobuild-test-adapters/src \
   repro_test_adapters/test_runner.nim ../reprobuild-test-adapters/src
+stage TEST_CERTIFICATES_TOOLS_SRC test-certificates-tools/src \
+  test_certificates.nim ../test-certificates-tools/src
 stage REPRO_CT_TEST_RUNNER_SRC reprobuild-ct-test-runner \
   libs/ct_incremental_adapter/src/ct_incremental_adapter.nim \
   ../reprobuild-ct-test-runner

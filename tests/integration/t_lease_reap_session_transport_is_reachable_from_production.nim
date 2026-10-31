@@ -2,7 +2,7 @@
 ## reachable from the PRODUCT, with nothing registered by hand.
 ##
 ## §4.2 states that the daemon destroys over the RP provider-session protocol
-## "so an out-of-tree provider (vm-harness's Incus drivers) is reached without
+## "so an out-of-tree provider (gosti's Incus drivers) is reached without
 ## linking it into the daemon", with in-process linking as the *fallback*. That
 ## was inverted: the transport was selected only when a provider artifact had
 ## been registered with the daemon, `registerLeaseReapProvider` had NO caller
@@ -78,7 +78,7 @@ const
     ## that successfully session-reaped its neighbour.
 
 # The engine side needs the attrs codec only to WRITE the record — exactly as
-# the process that materialized the live `vm_harness.nic` record did. It is
+# the process that materialized the live `gosti.nic` record did. It is
 # dropped again before the reap, which is the state under test.
 type
   FileWorldAttrs = object

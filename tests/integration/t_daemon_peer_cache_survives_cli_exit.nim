@@ -38,6 +38,14 @@
 ## every OS. On Linux it stays a monitored edge,
 ## which also covers the `mkdir -p build` probe described below.
 ##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.6): the action is
+## recorded under `ffpChecksum` (the recipe says `acfpChecksum`). Under the
+## default `ffpTimestamp` its record would never be published, so nothing
+## would cross to daemon B. Every entry A publishes is checked to carry a
+## checksum-policy, Level-0 record. The refusal of a timestamp record itself
+## is pinned at engine level (`t_peer_cache_refuses_timestamp_records_across_hosts`)
+## and over the wire (`t_peer_cache_two_phase_lan_roundtrip`, steps 5 and 6).
+##
 ## MOCK POLICY — none: real `repro` binaries, real daemons, real sockets,
 ## real TLS with per-daemon host CAs pinned by each other, real project
 ## builds, real disk stores. Multicast is turned off
@@ -52,6 +60,8 @@ import repro_test_support
 import repro_test_support/descendant_guard_expectations
 
 import ../../libs/repro_peer_cache/tests/m7_test_pki
+import repro_local_store
+import repro_peer_cache
 
 const
   ActionId = "m0-peer-cache-artifact"
@@ -130,7 +140,8 @@ proc writeProject(projectRoot: string) =
     "        inputs = @[\"input.txt\"],\n" &
     "        outputs = @[\"build/artifact.txt\"],\n" &
     depfileArg &
-    "        cacheable = true)\n" &
+    "        cacheable = true,\n" &
+    "        actionCachePolicy = acfpChecksum)\n" &
     "      defaultBuildAction(action)\n")
 
 proc newNode(base, name: string): DaemonNode =
@@ -258,6 +269,22 @@ proc actionReport(output: string): JsonNode =
       return action
   nil
 
+proc memoEntryRecords(cacheRoot: string):
+    seq[tuple[level: EvidenceLevel; policy: FileFingerprintPolicy]] =
+  ## What each published memo entry says about the record it carries.
+  let base = cacheRoot / "peer-memo" / "v1"
+  if not dirExists(base):
+    return @[]
+  for path in walkDirRec(base):
+    if path.endsWith(".rpme"):
+      let raw = readFile(path)
+      var bytes = newSeq[byte](raw.len)
+      if raw.len > 0:
+        copyMem(addr bytes[0], unsafeAddr raw[0], raw.len)
+      let entry = decodeMemoEntry(bytes)
+      result.add((entry.evidenceLevel,
+        decodeActionResultRecord(entry.recordBytes).policy))
+
 proc memoEntries(cacheRoot: string): seq[string] =
   let base = cacheRoot / "peer-memo" / "v1"
   if not dirExists(base):
@@ -303,6 +330,10 @@ suite "Distributed-Execution M0: daemon-hosted peer cache":
     # The worker published into ws-a's action-cache root.
     let publishedA = memoEntries(nodeA.cacheRoot)
     check publishedA.len >= 1
+    # M17: what crosses hosts is a checksum (or hybrid) Level-0 record.
+    for published in memoEntryRecords(nodeA.cacheRoot):
+      check published.level == elComplete
+      check published.policy in {ffpChecksum, ffpHybrid}
     # The producer CLI has exited (runShell waited for it); daemon A has not.
     check nodeA.process.running
 

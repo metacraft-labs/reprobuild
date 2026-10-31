@@ -144,6 +144,7 @@ type
     testRunnerSlot*: RootRef
     toolchainSlot*: RootRef
     crossTargetSlot*: RootRef
+    crossTargetConsulted*: bool
     featureSetSlot*: RootRef
     lockFileSlot*: RootRef
       ## Named-Lock-Files NLF-M7 (§4.4) — the FIFTH slot, and deliberately a

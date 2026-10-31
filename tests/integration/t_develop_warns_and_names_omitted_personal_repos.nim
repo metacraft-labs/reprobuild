@@ -104,19 +104,18 @@ proc projectToml(coreUrl, mineUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"mine-origin\"\nfetch = \"" & mineUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n  \"repos/mine.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc committedLock(url, sha: string): string =
   "schema = \"reprobuild.solved-graph-lock.v2\"\n\n" &
@@ -171,9 +170,9 @@ suite "DS-3: an unreachable PERSONAL backend warns and NAMES the omissions":
 
       let personalBackend = ws / ".repro" / "manifests-personal"
       check not dirExists(personalBackend)
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"personal\", backend = \"git-checkout\", " &

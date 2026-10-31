@@ -64,8 +64,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SIBLINGS_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
 [ -z "${BEARSSL_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/nim-bearssl" ] && \
   export BEARSSL_SRC="$SIBLINGS_ROOT/nim-bearssl"
-[ -z "${VM_HARNESS_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/vm-harness/src" ] && \
-  export VM_HARNESS_SRC="$SIBLINGS_ROOT/vm-harness/src"
+[ -z "${GOSTI_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/gosti/src" ] && \
+  export GOSTI_SRC="$SIBLINGS_ROOT/gosti/src"
 
 OUT_DIR="${MVP_OUT_DIR:-$REPO_ROOT/build/d2-mvp-multi}"
 CONFIG_PATH="${MVP_CONFIG_PATH:-$REPO_ROOT/recipes/reproos-mvp-config-multi.nim}"
@@ -989,7 +989,7 @@ done
 
 # ---------------------------------------------------------------------------
 # Stage 4c (X2): ship the reproos-rebuild CLI binary + initial generation
-# state in the rootfs so the t_vm_harness_hyperv_reproos_gen_switch test
+# state in the rootfs so the t_gosti_hyperv_reproos_gen_switch test
 # can exercise apply / switch / rollback against a real generation tree.
 # ---------------------------------------------------------------------------
 

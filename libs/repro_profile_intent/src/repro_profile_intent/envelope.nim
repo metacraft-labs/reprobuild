@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 10'u16           ## Current envelope schema version.
+  RbpiSchemaVersion* = 13'u16           ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -104,6 +104,25 @@ const
     ##     an activity's ``stow:`` block claims. Bumped because a build that
     ##     did not know the key would materialize a claimed package on every
     ##     host, including the ones that do not select its activity.
+    ##  11 (ReproOS add-on mode): the GM10 ``"systemManagedElsewhere"`` map
+    ##     becomes the three-valued ``"hostSystems"`` map (host -> map with
+    ##     ``"mode"`` text -- ``managedElsewhere`` or ``addOn`` -- an optional
+    ##     ``"managedBy"`` text and an optional ``"activities"`` array of
+    ##     text, the system activities an add-on entry selects). Bumped
+    ##     because a schema-10 reader would decode an add-on host as one whose
+    ##     whole system is managed here, and plan or switch it as such.
+    ##  12 (ReproOS add-on mode, managed prefixes): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"addOn"`` map with a ``"managedEtcPrefixes"``
+    ##     array of text -- the profile's ``addOn:`` section. Bumped because
+    ##     a build that did not know the key would plan the profile without
+    ##     its managed prefixes and let every ``/etc`` path through the
+    ##     add-on's scope check.
+    ##  13 (ReproOS add-on mode, spec §13 decision 17): ``"hostSystems"``
+    ##     ``"mode"`` gains the value ``full`` -- a fully managed host that
+    ##     selects system activities through the block form. Bumped because
+    ##     a schema-11 reader refuses the value as corrupt rather than
+    ##     reading it, so a profile using it must be recompiled by a build
+    ##     that knows it.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

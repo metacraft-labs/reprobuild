@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "selection": {
     "host": "m1",
     "hostDeclared": false,
@@ -61,19 +61,14 @@
   },
   "provenance": {
     "repro": {
-      "version": "0.2.6",
-      "sourceRevision": "c0a2b186e658a931beaf96fe78287c344c7202fd-dirty"
+      "version": "0.2.18",
+      "sourceRevision": "01e2eaf5f4f69afbe438c7b5fe1111364c2089c7-dirty"
     },
     "hostSource": "env",
     "profile": {
       "root": "home.nim",
-      "digest": "a06d57fe1462fc471d51571496d8a3edda157e24f1ad250ad4de8abc85c4cde2",
-      "inputs": [
-        {
-          "path": "home.nim",
-          "blake3": "b266fba63788110f8f974c5aeebbd025cf9e7da09df958bdbd1fbefa11e02f35"
-        }
-      ]
+      "digest": null,
+      "inputs": []
     },
     "dataFiles": [],
     "compile": {

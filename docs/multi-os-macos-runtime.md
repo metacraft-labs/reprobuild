@@ -20,7 +20,7 @@ fallback if a tool turns out to need APIs Darling has not implemented.
   (consumes the layout decided here).
 * D3 — extend the catalog format with `runtime=darling` records
   (consumes the layout decided here).
-* D4 — `vm-harness` end-to-end macOS-via-Darling boot test.
+* D4 — `gosti` end-to-end macOS-via-Darling boot test.
 
 ## Summary of decisions
 

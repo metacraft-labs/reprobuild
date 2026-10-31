@@ -108,30 +108,29 @@ proc projectToml(pubUrl, coreUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"pub-origin\"\nfetch = \"" & pubUrl & "\"\n\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "includes = [\n  \"repos/pub.toml\",\n  \"repos/core.toml\",\n]\n"
 
 proc pubFragment(withDepends: bool): string =
   result =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"pub\"\n" &
     "path = \"pub\"\n" &
     "remote = \"pub-origin\"\n" &
-    "revision = \"main\"\n"
+    "mainline = \"main\"\n"
   if withDepends:
     result.add("depends = [\"core\"]\n")
 
 proc coreFragment(): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"core\"\n" &
   "path = \"core\"\n" &
   "remote = \"core-origin\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc readReport(ws: string): JsonNode =
   parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
@@ -161,9 +160,9 @@ proc buildWorkspace(gitBin, scratch: string; withDepends: bool):
   let teamBackend = ws / "manifests-team"
   initGitRepo(gitBin, teamBackend)
 
-  writeFile(ws / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(ws / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"https://example.invalid/manifests.git\"\n\n" &
     "[locking]\n" &
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &

@@ -1485,6 +1485,58 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check canonicalPasswdUserStateMaskedBy(observed, desired) !=
       canonicalPasswdUserDesired(desired)
 
+  test "a declared group that is also the primary group counts as membership":
+    # rpi2, 2026-10-30, reprobuild d7c86107b: `passwdGroup("nut")` plus
+    # `passwdUser("nut", extraGroups = @["nut"])`. The account's primary
+    # group is `nut`; `id -nG nut` prints `nut` once, the parser files it
+    # as the primary, and the declared group read as missing forever --
+    # the post-apply re-probe failed closed on every tick.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["nut"])
+    let observed = parsePasswdObservation(
+      "nut:x:999:1002::/nonexistent:/usr/sbin/nologin", "nut", "nut")
+    check observed.groups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, desired) ==
+      canonicalPasswdUserDesired(desired)
+    check not passwdUserNeedsUpdate(diffPasswdUser(desired, observed))
+    # A primary group the resource does not declare still does not count
+    # as a declared supplementary group, and one missing declared group
+    # is still drift.
+    let wantsMore = PasswdUserDesired(name: "nut", groups: @["dialout", "nut"])
+    let d = diffPasswdUser(wantsMore, observed)
+    check d.missingGroups == @["dialout"]
+    check d.extraGroups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, wantsMore) !=
+      canonicalPasswdUserDesired(wantsMore)
+
+  test "the declared set is authoritative: apply removes an undeclared group":
+    # The post-apply check is additive (macOS adds default groups nobody
+    # declared), but the apply itself is not: `usermod --groups` REPLACES
+    # the supplementary set with the declared one, so a group the account
+    # is in and the resource does not declare is dropped.
+    let desired = PasswdUserDesired(name: "nut", groups: @["nut"])
+    let observed = PasswdUserObservation(present: true, uid: "999",
+      primaryGroup: "nut", shell: "/usr/sbin/nologin",
+      groups: @["sudo"])
+    let diff = diffPasswdUser(desired, observed)
+    check diff.extraGroups == @["sudo"]
+    check passwdUserNeedsUpdate(diff)
+    check buildUsermodArgs(desired, diff) == @["--groups", "nut", "nut"]
+
+  test "useradd takes an existing same-named group as the primary only when declared":
+    # `useradd nut` with USERGROUPS_ENAB refuses when group `nut` exists
+    # ("use -g"); rpi2 tick-1 at d7c86107b.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["dialout", "nut"])
+    check buildUseraddArgs(desired, sameNameGroupExists = true) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--gid", "nut",
+        "--groups", "dialout"]
+    check buildUseraddArgs(desired) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--groups", "dialout,nut"]
+    expect EUseraddGroupCollision:
+      discard buildUseraddArgs(PasswdUserDesired(name: "nut"),
+        sameNameGroupExists = true)
+
   test "parsePasswdObservation: primary group filtered out of supplementary set":
     # Debian / Ubuntu's `useradd reprotest --groups users` (with the
     # default `USERGROUPS_ENAB=yes`) creates a per-user primary
@@ -2779,7 +2831,7 @@ kernel.x = 7
       expect ENotImplementedPlatform:
         discard observeLinuxSysctl(op)
       expect ENotImplementedPlatform:
-        discard applyLinuxSysctl(op)
+        discard applyLinuxSysctl(FixtureContext(), op)
       expect ENotImplementedPlatform:
         discard destroyLinuxSysctl(op)
 
@@ -4366,7 +4418,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
           suEnabled: false)
         var caught = false
         try:
-          discard applySystemdSystemUnit(op)
+          discard applySystemdSystemUnit(FixtureContext(), op)
         except EProtocol as e:
           caught = true
           # The diagnostic must name the distro AND point at the

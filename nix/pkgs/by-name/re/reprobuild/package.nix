@@ -74,6 +74,12 @@
   # (`fetchFromGitHub` and the flake's github fetcher produce the same store
   # path for the same revision).
   #
+  # An entry for a source input added AFTER the `src` commit (its lock has no
+  # such node yet) mirrors this tree's `flake.lock` instead, and the check
+  # holds it to that until the next release snapshot moves `src` past it.
+  # The metacraft-labs/nixpkgs fork must map such an input in its `pins.json`
+  # when it syncs the first release that carries it (nix/README.md).
+  #
   # `src` and `version` are deliberately NOT arguments: `callPackage` fills an
   # argument from the package set whenever the set HAS that name, default or no
   # default, and nixpkgs does have a `src` attribute (a throw that renames it to
@@ -99,14 +105,14 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "059c549306621e2f769adf75630b0b7f29018dca";
-    hash = "sha256-hyHnzb34vl3uEz9fJ1oAhkvEVg4lTPEe0zCvW4+/weA=";
+    rev = "3af8a4e937dcf68666d1e47e4191cad496c6d793";
+    hash = "sha256-w2b3D6BdOA5NZthVhIcsAuti1Pz1UxiEDnCwjwkJdM4=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "b4794ba69fa7ccb0b568de7c582a576994c63e5b";
-    hash = "sha256-RGX61GRKRYBM/BY4ua/xDpzxwhDo5EQ/CLjqLmBScPU=";
+    rev = "31be9a10007c007af429951616c13bc275587c76";
+    hash = "sha256-xEqzwMISwpA/JwzhSKK+TRU67Dj/F7Z8rSwOoYj/Cv4=";
   },
   # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
   # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
@@ -123,26 +129,26 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f";
-    hash = "sha256-icTohrpTUcX6H+AHQlcC2uB6nAMJs0dTAwIi/Uaxc5E=";
+    rev = "e0fe6b4461f0555a7b44d57f42d1dbc6e07d1255";
+    hash = "sha256-OgJJqJG6WS5bjimeCj5labICT2PoxuS9ABOFzq40twI=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-gset";
-    rev = "c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27";
-    hash = "sha256-XhSstf5oG7LjRSlpM2RsiNwwFe/+y5vrPvnZHWPm6H8=";
+    rev = "6333cc915689559b00f81371734783c2e894ca45";
+    hash = "sha256-DHLmzNF3ECzivASL9sfAddPRp1P8CkBhbouD9Y6kXWk=";
   },
   shmQueueSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-queue";
-    rev = "91451f2250beb89d1d221f0a77be0841c19b182e";
-    hash = "sha256-HYS07QHtkHQ4Pm7yBuQm27dhQ3mOYquwp2GWIEuupqo=";
+    rev = "84fd76b174d4868e703ba3d599668ee340e0b6ea";
+    hash = "sha256-ph1AMDJSXCDuvC4JH6NxSU7yXEFYz4UjJ1zW+Tj19EA=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
-    rev = "f1745b89e93179eca20778943bbafae91ebb6dfd";
-    hash = "sha256-ndmzx0UL212fTATeBur6lf+i35exffgv4oBWr8GEiLo=";
+    rev = "008950fa91fdd68a44f77f9c454eff5b7bf139fa";
+    hash = "sha256-zoUpXtJicwLQjvG/CiGlFkC6BucIOsV7OKpOFflXTuA=";
   },
   ctTestRunnerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -156,14 +162,23 @@
     rev = "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24";
     hash = "sha256-bDuj7DYj2nZtvG0em05EMy6/hK/RWIE917GHHZPq62Y=";
   },
+  # The `test_certificates` package (test-certificates-tools): the store,
+  # note-framing and note-merge rules of the test-certificate standard, which
+  # the engine links instead of re-implementing. Source only, pure stdlib.
+  testCertificatesToolsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "test-certificates-tools";
+    rev = "9864082065c8acb1db315e65a6a4157a3ab77117";
+    hash = "sha256-zxOEf1NeCOiKN1KMxwFsr2leww43cfJJB0Oo2g2JZSA=";
+  },
   # Source only. reprobuild compiles `runquota_client`/`_codec`/`_core`/`_ipc`/
   # `_process`/`_protocol` out of this tree. The separate runquotaTools package
   # owns compilation of its binaries and their build-time dependencies.
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "f5a644cde174234af8e193413e17b0e47d29e6f5";
-    hash = "sha256-gLoCSqZTycI43QU2QOB3v+pJ3I0fUiHTluLoM4n+8Lk=";
+    rev = "9818dc0c90be8ba7993424a7bbfbb6e009ffa965";
+    hash = "sha256-A9b+rJTlp/pz6MgmZot/WDfvozmOYzBpPFOhRbxUUAM=";
   },
 }:
 let
@@ -215,7 +230,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.17";
+  version = "0.2.19";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -226,8 +241,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "bc474ec2976a220049a6f22c7211105ea24d093a";
-    hash = "sha256-t3yD9kNYCpp3nPzVAUyv0coZ9rqPLgoClMibZb7mPQE=";
+    rev = "f7903db3c1799562d9de1f5ca99ee31f8519efd8";
+    hash = "sha256-D6rOfOyGnaQCehpBi7bzPEUUVqDuvQ7Ud+w7RW2s10Q=";
   };
 
   strictDeps = true;
@@ -292,6 +307,7 @@ stdenv.mkDerivation (finalAttrs: {
     CODETRACER_PINNED_SRC = "${codetracerSrc}/src";
     REPRO_CT_TEST_RUNNER_SRC = "${ctTestRunnerSrc}";
     REPRO_TEST_ADAPTERS_SRC = "${testAdaptersSrc}/src";
+    TEST_CERTIFICATES_TOOLS_SRC = "${testCertificatesToolsSrc}/src";
     REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
     RUNQUOTA_SRC = "${runquotaSrc}";
     SQLITE_PREFIX = "${sqlite.out}";
@@ -424,6 +440,7 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
+        --set-default TEST_CERTIFICATES_TOOLS_SRC ${testCertificatesToolsSrc}/src \
         --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
         --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
         --set-default RUNQUOTA_SRC ${runquotaSrc} \
@@ -519,6 +536,7 @@ stdenv.mkDerivation (finalAttrs: {
         codetracerSrc
         ctTestRunnerSrc
         testAdaptersSrc
+        testCertificatesToolsSrc
         runquotaSrc
         ;
     };

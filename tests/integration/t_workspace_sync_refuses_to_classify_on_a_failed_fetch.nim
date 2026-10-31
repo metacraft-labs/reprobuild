@@ -78,20 +78,19 @@ proc seedOrigin(gitBin, originPath, workPath: string): string =
   requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
 
 proc repoFragmentToml(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & name & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc projectToml(remotes: seq[(string, string)]): string =
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"fetchproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "\n"
   for (name, url) in remotes:
     result.add("[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url &
       "\"\n\n")

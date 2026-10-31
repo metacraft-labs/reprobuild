@@ -149,18 +149,17 @@ proc projectToml(coreUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc readReport(ws: string): JsonNode =
   parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
@@ -230,9 +229,9 @@ suite "a refusal names a command that runs where the operator is standing":
       discard requireGit(q(gitBin) & " -C " & q(teamManifest) &
         " commit -qm seed")
 
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [" &
@@ -398,8 +397,8 @@ suite "a refusal names a command that runs where the operator is standing":
 
       writeFile(ws3 / "projects" / "pair.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"pair\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"pair\"\n" &
+        "\n" &
         "[[remote]]\nname = \"lead-origin\"\nfetch = \"file://" &
           scratch / "c-origin-lead.git" & "\"\n\n" &
         "[[remote]]\nname = \"follower-origin\"\nfetch = \"file://" &

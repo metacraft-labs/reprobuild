@@ -23,11 +23,11 @@
 ## rebase's action tag is ``force_push_rebase``, so all twelve were counted
 ## as ordinary updates.
 ##
-## ``vm-harness``, divergent in exactly the same way, WAS refused in that
+## ``gosti``, divergent in exactly the same way, WAS refused in that
 ## same run. The discriminator was ``.repro/workspace/force-pushes.json``:
 ## the twelve recorders had a recorded superseded SHA (so
 ## ``forcePushedBaseSha`` was non-empty and ``canAutoRebase`` held), and
-## ``vm-harness`` did not. A safety property that depends on whether the
+## ``gosti`` did not. A safety property that depends on whether the
 ## tool happened to be watching when the remote moved is not a safety
 ## property, so the gate is now the FLAG.
 ##
@@ -140,13 +140,13 @@ proc setupRewriteFixture(gitBin, slug: string;
   createDir(result.workspaceRoot / "projects")
   createDir(result.workspaceRoot / "repos")
   writeFile(result.workspaceRoot / "repos" / "lib.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"lib\"\npath = \"lib\"\nremote = \"lib-origin\"\n" &
-    "revision = \"main\"\n")
+    "mainline = \"main\"\n")
   writeFile(result.workspaceRoot / "projects" / "myproject.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"myproject\"\n" &
-    "default_revision = \"main\"\ntrunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-origin\"\nfetch = \"" &
     fileUrl(result.originPath) & "\"\n\nincludes = [\n  \"repos/lib.toml\",\n]\n")
 

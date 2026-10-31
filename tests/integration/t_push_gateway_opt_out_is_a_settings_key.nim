@@ -86,7 +86,7 @@ proc seedBareRepo(gitBin, scratch, barePath: string) =
 proc projectToml(fetch, repo: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\nincludes = [\"repos/" &
     repo & ".toml\"]\n\n[project]\nname = \"demo\"\n" &
-    "default_revision = \"main\"\ntrunk = \"main\"\n\n[[remote]]\n" &
+    "\n[[remote]]\n" &
     "name = \"acme\"\nfetch = \"" & fetch & "\"\n"
 
 proc fragmentToml(name: string): string =
@@ -114,8 +114,8 @@ proc settingsText(pushGateway: string): string =
     "visibility = \"public\"\n")
 
 proc bootstrapText(pushGateway: string): string =
-  "schema = \"reprobuild.workspace.bootstrap.v1\"\npush_gateway = \"" &
-    pushGateway & "\"\n\n[manifest]\n" &
+  "schema = \"reprobuild.workspace.settings.v1\"\npush_gateway = \"" &
+    pushGateway & "\"\n\n[records]\n" &
     "url = \"https://git.example.invalid/acme/records.git\"\n"
 
 proc gatewayRow(root: string): tuple[detail: string; settingsRows: int] =
@@ -187,7 +187,7 @@ suite "the per-workspace push-gateway opt-out is a settings key":
 
       # Leg 2 — the old bootstrap.v1 file with the opt-out.
       let legacyRoot = seedRoot(scratch / "legacy", fetch)
-      writeFile(legacyRoot / ".repro-workspace.toml", bootstrapText("off"))
+      writeFile(legacyRoot / "repro-workspace.toml", bootstrapText("off"))
       require runRepro(["ws", "enable", "demo",
         "--workspace-root=" & legacyRoot]).code == 0
       checkResolves("bootstrap.v1 off", legacyRoot, expectPextra = false)
@@ -202,11 +202,11 @@ suite "the per-workspace push-gateway opt-out is a settings key":
       checkRefused("settings.v1 on", runRepro(["workspace", "list", "demo",
         "--workspace-root=" & badRoot]), badRoot / "repro-workspace.toml")
       let badLegacyRoot = seedRoot(scratch / "bad-legacy", fetch)
-      writeFile(badLegacyRoot / ".repro-workspace.toml",
+      writeFile(badLegacyRoot / "repro-workspace.toml",
         bootstrapText("disabled"))
       checkRefused("bootstrap.v1 disabled", runRepro(["workspace", "list", "demo",
         "--workspace-root=" & badLegacyRoot]),
-        badLegacyRoot / ".repro-workspace.toml")
+        badLegacyRoot / "repro-workspace.toml")
 
       # Leg 4 — the local file may not set it.
       let localRoot = seedRoot(scratch / "local", fetch)

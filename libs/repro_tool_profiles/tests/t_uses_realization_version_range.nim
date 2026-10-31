@@ -182,3 +182,97 @@ suite "reprobuild's own Nim records satisfy the ranges it asks for":
     check useDef.tarballProvisioning[0].detail.version == "2.2.10"
     check tarballAcquisitionPlan(useDef).url ==
       "https://nim-lang.org/download/nim-2.2.10_x64.zip"
+
+# ---------------------------------------------------------------------------
+# A nixPackage arm carries no declared version: whatever the pinned nixpkgs
+# builds is what the tool reports, so the range is held AFTER realization,
+# against the version probe. Nothing is mocked: the refusal is a pure
+# function of the recipe's constraint and the probe's recorded output, which
+# is how `resolveNixTool` calls it (reprobuild-pm issue
+# 2026-10-30-path-mode-realizes-a-nix-rustc-outside-the-declared-version-range).
+# ---------------------------------------------------------------------------
+
+proc nixProfile(versionOutput: string): PathOnlyToolProfile =
+  result = PathOnlyToolProfile(installMethod: "nix", nixSelector: "nixpkgs#rustc",
+    resolvedExecutablePath: "/nix/store/x-rustc-wrapper/bin/rustc")
+  result.probes.add(ToolProbeResult(
+    spec: ToolProbeSpec(kind: tpkVersion, name: "version", args: @["--version"]),
+    exitCode: 0, output: versionOutput))
+
+suite "a nix realization is held to the declared range":
+  test "the version a tool reports is read from its probe output":
+    check versionFromProbeOutput("rustc 1.91.1 (ed61e7d7e 2025-11-07) (built from a source tarball)\n") == "1.91.1"
+    check versionFromProbeOutput("cargo 1.94.0 (f5fe2fd5e 2026-01-07)") == "1.94.0"
+    check versionFromProbeOutput("This is perl 5, version 40, subversion 0 (v5.40.0)") == "5.40.0"
+    check versionFromProbeOutput("v20.11.1") == "20.11.1"
+    check versionFromProbeOutput("cmake version 3.31") == "3.31.0"
+    check versionFromProbeOutput("GNU Make 4.4.1\nBuilt for x86_64") == "4.4.1"
+    check versionFromProbeOutput("usage: thing [options]") == ""
+
+  test "the nixpkgs rustc outside the recipe's range is refused by name":
+    let useDef = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    let profile = nixProfile("rustc 1.91.1 (ed61e7d7e 2025-11-07) (built from a source tarball)")
+    check realizedVersionOf(profile) == "1.91.1"
+    try:
+      enforceUsesVersionRange(profile, useDef)
+      check false
+    except OSError as err:
+      check "rustc >=1.94 <1.95" in err.msg
+      check "1.91.1" in err.msg
+      check "nixpkgs#rustc" in err.msg
+
+  test "a version in range, or no range at all, is accepted":
+    let inRange = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    enforceUsesVersionRange(nixProfile("rustc 1.94.0 (abc 2026-01-07)"), inRange)
+    let noRange = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc")
+    enforceUsesVersionRange(nixProfile("rustc 1.91.1 (x)"), noRange)
+    check usesVersionRangeRefusal(noRange, "", "nix://x") == ""
+
+  test "a range that cannot be verified is refused, not assumed":
+    let useDef = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    expect OSError:
+      enforceUsesVersionRange(nixProfile("usage: rustc [OPTIONS]"), useDef)
+    try:
+      enforceUsesVersionRange(nixProfile("usage: rustc [OPTIONS]"), useDef)
+    except OSError as err:
+      check "report no version" in err.msg
+
+  test "a library's version is the one its nixpkgs store path names":
+    check nixStorePathVersion("/nix/store/l7xwm1f6-zlib-1.3.1/lib/libz.so") == "1.3.1"
+    check nixStorePathVersion("/nix/store/abc-zlib-1.3.1-dev") == "1.3.1"
+    check nixStorePathVersion("/nix/store/abc-openssl-3.6.1-bin/bin/openssl") == "3.6.1"
+    check nixStorePathVersion("/nix/store/abc-python3-3.12.8") == "3.12.8"
+    check nixStorePathVersion("/nix/store/x-rustc-wrapper/bin/rustc") == ""
+    check nixStorePathVersion("/usr/lib/libz.so") == ""
+
+  test "a library with no version probe is held to its store path's version":
+    # zlib has no `--version`: before the store path was read, every nix
+    # library with a declared range was refused as unverifiable, which
+    # stopped `packages/source/openssl` (`uses "zlib >=1.2.11"`) in path mode.
+    let zlib = InterfaceToolUse(packageSelector: "zlib",
+      executableName: "zlib", rawConstraint: "zlib >=1.2.11")
+    let lib = PathOnlyToolProfile(installMethod: "nix", nixSelector: "nixpkgs#zlib",
+      resolvedExecutablePath: "/nix/store/l7xwm1f6-zlib-1.3.1/lib/libz.so",
+      selectedStorePath: "/nix/store/l7xwm1f6-zlib-1.3.1")
+    enforceUsesVersionRange(lib, zlib)
+    let tooNew = InterfaceToolUse(packageSelector: "zlib",
+      executableName: "zlib", rawConstraint: "zlib >=1.4")
+    try:
+      enforceUsesVersionRange(lib, tooNew)
+      check false
+    except OSError as err:
+      check "1.3.1" in err.msg
+      check "zlib >=1.4" in err.msg
+
+  test "the probe outranks the store path name":
+    # A wrapper's store path names the wrapper's version, not the tool's.
+    let useDef = InterfaceToolUse(packageSelector: "rustc",
+      executableName: "rustc", rawConstraint: "rustc >=1.94 <1.95")
+    var profile = nixProfile("rustc 1.91.1 (x)")
+    profile.selectedStorePath = "/nix/store/abc-rustc-wrapper-1.94.0"
+    expect OSError:
+      enforceUsesVersionRange(profile, useDef)

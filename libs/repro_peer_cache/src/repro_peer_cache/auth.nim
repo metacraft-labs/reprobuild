@@ -123,6 +123,11 @@ proc toHexN(buf: openArray[byte]): string =
 proc toHex32(buf: array[P256PrivLen, byte]): string = toHexN(buf)
 proc toHex65(buf: array[P256PubLen, byte]): string = toHexN(buf)
 
+proc publicKeyHex*(pub: PublicKeyBytes): string =
+  ## The 130-char lower-case hex of the uncompressed point: the one-key-per-
+  ## line form trust-anchor, allowed-signers and recipient-pubkey files hold.
+  toHex65(pub)
+
 proc parseHexBuf(hex: string; expectedBytes: int; what: string):
     seq[byte] =
   if hex.len != expectedBytes * 2:
@@ -137,10 +142,37 @@ proc parseHexBuf(hex: string; expectedBytes: int; what: string):
       raise newException(AuthError,
         what & ": invalid hex digit at position " & $(2 * i))
 
+proc isZeroScalar(value: PrivateKeyBytes): bool =
+  for b in value:
+    if b != 0:
+      return false
+  true
+
+proc scalarLessThanP256Order(value: PrivateKeyBytes): bool =
+  for i in 0 ..< P256PrivLen:
+    if value[i] < P256Order[i]:
+      return true
+    if value[i] > P256Order[i]:
+      return false
+  false
+
 proc parsePrivHex(hex: string): PrivateKeyBytes =
+  ## A private scalar read from a file is held to the same range the
+  ## generator samples from, [1, n-1]: a zero scalar has the point at
+  ## infinity for a public key (every ECDH secret derived against it is
+  ## public), and a scalar at or above the group order aliases another
+  ## key. Neither is a key, however well the file is protected, so the
+  ## loader refuses it by name rather than deriving a "public half".
   let buf = parseHexBuf(hex, P256PrivLen, "private-key hex")
   for i in 0 ..< P256PrivLen:
     result[i] = buf[i]
+  if result.isZeroScalar:
+    raise newException(AuthError,
+      "private-key scalar is zero: not a P-256 private key")
+  if not result.scalarLessThanP256Order:
+    raise newException(AuthError,
+      "private-key scalar is not below the P-256 group order: not a " &
+      "P-256 private key")
 
 proc parsePubHex(hex: string): PublicKeyBytes =
   let buf = parseHexBuf(hex, P256PubLen, "public-key hex")
@@ -187,20 +219,6 @@ proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
   # released.
   for i in 0 ..< P256PubLen:
     result[i] = pkBuf[i]
-
-proc isZeroScalar(value: PrivateKeyBytes): bool =
-  for b in value:
-    if b != 0:
-      return false
-  true
-
-proc scalarLessThanP256Order(value: PrivateKeyBytes): bool =
-  for i in 0 ..< P256PrivLen:
-    if value[i] < P256Order[i]:
-      return true
-    if value[i] > P256Order[i]:
-      return false
-  false
 
 proc randomP256Scalar(): PrivateKeyBytes =
   ## Generate a uniformly distributed P-256 private scalar in [1, n-1] from OS
@@ -298,13 +316,20 @@ proc verifySignature*(anchors: TrustAnchors;
 # Key file I/O.
 # ---------------------------------------------------------------------------
 
+proc privateKeyFileText*(priv: PrivateKeyBytes): string =
+  ## The exact contents of an `ecdsa-p256:<hex>` private-key file — what
+  ## `loadPrivateKeyFile` reads. For callers that must create the file
+  ## themselves (exclusively, with a restrictive mode) instead of through
+  ## `loadOrGenerateKeypair`.
+  KeyFilePrefix & toHex32(priv) & "\n"
+
 proc writeKeyFile(path: string; priv: PrivateKeyBytes) =
   ## Persists the private scalar to `path` as `ecdsa-p256:<hex>` so the
   ## file is unambiguously an ECDSA-P256 key, not an M3 stand-in seed.
   let parent = parentDir(path)
   if parent.len > 0 and not dirExists(parent):
     createDir(parent)
-  writeFile(path, KeyFilePrefix & toHex32(priv) & "\n")
+  writeFile(path, privateKeyFileText(priv))
 
 proc writeCertFile(path: string; pub: PublicKeyBytes) =
   ## Persists the public key to `path` as a single 130-char hex line.

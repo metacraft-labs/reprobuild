@@ -20,7 +20,8 @@ const StoreRootEnvVar* = "REPRO_STORE_ROOT"
 
 const RealizationInfoFileName* = ".realization-info"
   ## Per-recipe sidecar written under
-  ## ``<recipesRoot>/<depName>/.repro/output/.realization-info``.
+  ## ``<recipesRoot>/<depName>/.repro/output/.realization-info`` (with
+  ## ``@<triple>`` appended under ``--target``; ``targetKeyedOutputName``).
 
 type
   InstallMirrorMode* = enum
@@ -29,6 +30,92 @@ type
     immHashedWithLegacyFallback = "hashed-with-legacy-fallback"
 
 const LegacyInstallSubpath = ".repro/output/install"
+  ## The producer staging root and legacy consumer root of a NATIVE build.
+  ## A cross build's is this plus ``@<triple>`` (``installMirrorSubpath``).
+
+const InstallMirrorTargetSeparator* = "@"
+
+proc activeTargetTripleTag*(): string =
+  ## The triple the build compiles FOR, or "" for a native build: the
+  ## ``targetTriple`` assignment of ``REPRO_VARIANTS``, the env
+  ## ``repro build --target=<triple>`` (and ``--variant``) writes for the
+  ## provider hop. ``native`` is "" too.
+  ##
+  ## ReproOS-Add-On-Mode A15. This module sits below the stdlib, so it reads
+  ## the assignment itself rather than ask ``toolchain_policy``; the two read
+  ## one env entry with one spelling, and the stdlib's solver-assigned value
+  ## can only ever agree with it (the solver consumed the same contribution
+  ## at ``prSet``). Read here and in ``toolchain_policy`` only.
+  for assignment in getEnv("REPRO_VARIANTS").split(','):
+    let kv = assignment.split('=', 1)
+    if kv.len == 2 and kv[0].strip() == "targetTriple":
+      let value = kv[1].strip()
+      if value.len > 0 and value.toLowerAscii() != "native":
+        return value
+      return ""
+  ""
+
+var installMirrorTargetOverride {.threadvar.}: tuple[active: bool,
+                                                        triple: string]
+  ## ``withInstallMirrorTarget``'s state: while active, the mirror is keyed
+  ## by ``triple`` ("" = native) instead of the build's target.
+
+proc installMirrorSubpathFor*(triple: string): string =
+  ## The install mirror subpath of a build for ``triple``; "" is native.
+  if triple.len == 0: LegacyInstallSubpath
+  else: LegacyInstallSubpath & InstallMirrorTargetSeparator & triple
+
+proc effectiveInstallMirrorTarget*(): string =
+  ## The triple the mirror is keyed by right now: an override in effect,
+  ## else the build's target.
+  if installMirrorTargetOverride.active: installMirrorTargetOverride.triple
+  else: activeTargetTripleTag()
+
+proc targetKeyedOutputName*(name: string): string =
+  ## ``name`` for a native build, ``name@<triple>`` under ``--target``: the
+  ## spelling of every entry of a recipe's ``.repro/output/`` that one build
+  ## writes (the install mirror, the per-artifact staging directories, the
+  ## realization sidecar), so a native and a target build of one recipe
+  ## never read or overwrite each other's.
+  let triple = effectiveInstallMirrorTarget()
+  if triple.len == 0: name
+  else: name & InstallMirrorTargetSeparator & triple
+
+proc outputEntryTarget*(entryName: string): tuple[name, triple: string] =
+  ## Split a ``.repro/output/`` entry name into the base name and the
+  ## triple it was written for ("" = native); the inverse of
+  ## ``targetKeyedOutputName``.
+  let at = entryName.find(InstallMirrorTargetSeparator)
+  if at < 0: (entryName, "")
+  else: (entryName[0 ..< at],
+         entryName[at + InstallMirrorTargetSeparator.len .. ^1])
+
+template withInstallMirrorTarget*(targetTriple: string; body: untyped) =
+  ## Run ``body`` with the install mirror keyed by ``targetTriple``
+  ## ("" = native) whatever the build's target. The host/target split at
+  ## the mirror: a ``nativeBuildDeps:`` entry runs on the build host, so a
+  ## consumer resolving one under ``--target`` reads the sibling's NATIVE
+  ## mirror, while its ``buildDeps:`` / ``runtimeDeps:`` read the target's.
+  let saved = installMirrorTargetOverride
+  installMirrorTargetOverride.active = true
+  installMirrorTargetOverride.triple = targetTriple
+  try:
+    body
+  finally:
+    installMirrorTargetOverride = saved
+
+proc installMirrorSubpath*(): string =
+  ## Where a recipe's install mirror lives under the recipe directory:
+  ## ``.repro/output/install`` for a native build and
+  ## ``.repro/output/install@<triple>`` under ``repro build --target``
+  ## (From-Source-Build-Recipes.md §"Package-level dependency
+  ## declarations", "The install mirror is keyed by the target"). One rule
+  ## for the producer's staging root, the consumer's resolver and the
+  ## tool-profile side's sibling probes, so a host build and a target build
+  ## of one recipe coexist and a ``buildDeps:`` of a cross build resolves to
+  ## the target build of the same recipe -- the thing a target-suffixed
+  ## package name used to stand in for.
+  installMirrorSubpathFor(effectiveInstallMirrorTarget())
 const InstallMirrorPublishToolName* = "repro-install-mirror-publish"
 const InstallMirrorCoreToolNames* = ["sh", "rm", "mkdir", "cp", "touch"]
   ## External commands emitted by every install-mirror shell action. Keep
@@ -54,7 +141,7 @@ proc currentInstallMirrorMode*(): InstallMirrorMode =
     immLegacy
 
 proc legacyDepMirrorRoot(recipesRoot, depName: string): string =
-  (recipesRoot / depName / LegacyInstallSubpath).replace("\\", "/")
+  (recipesRoot / depName / installMirrorSubpath()).replace("\\", "/")
 
 proc resolveCasStoreRoot*(): string =
   let fromEnv = getEnv(StoreRootEnvVar)
@@ -74,14 +161,20 @@ proc resolveCasStoreRoot*(): string =
     return getHomeDir() & ".cache/repro/store"
 
 proc realizationInfoPath*(recipesRoot, depName: string): string =
-  (recipesRoot / depName / ".repro" / "output" / RealizationInfoFileName)
-    .replace("\\", "/")
+  (recipesRoot / depName / ".repro" / "output" /
+    targetKeyedOutputName(RealizationInfoFileName)).replace("\\", "/")
 
 proc currentRealizationPlatformTag*(): string =
   ## Stable producer identity for mutable source-package mirrors. This is the
   ## machine that produced the realization, not a package-manager namespace.
   let host = currentHost()
-  host.os.toLowerAscii() & "-" & host.cpu.toLowerAscii()
+  result = host.os.toLowerAscii() & "-" & host.cpu.toLowerAscii()
+  # A target build's realization is not the host's: the sidecar of a cross
+  # build names the target, so a hashed-store lookup made for the host
+  # never follows a cross build's sidecar and vice versa.
+  let triple = effectiveInstallMirrorTarget()
+  if triple.len > 0:
+    result.add(InstallMirrorTargetSeparator & triple)
 
 proc toForwardSlash(value: string): string =
   result = value
@@ -214,7 +307,8 @@ proc realizationInfoMatchesCurrentPlatform*(recipeDir: string): bool =
   ## A missing sidecar is the pre-install compatibility case used by staged
   ## artifacts. Once a producer writes the sidecar, it must identify this
   ## process's OS and CPU; empty legacy sidecars are deliberately stale.
-  let path = recipeDir / ".repro" / "output" / RealizationInfoFileName
+  let path = recipeDir / ".repro" / "output" /
+    targetKeyedOutputName(RealizationInfoFileName)
   if not fileExists(path):
     return true
   let info = readRealizationInfoFile(parentDir(recipeDir),

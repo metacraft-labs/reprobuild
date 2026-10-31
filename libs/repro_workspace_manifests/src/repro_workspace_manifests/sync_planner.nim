@@ -796,11 +796,6 @@ type
     mscDirty             ## Uncommitted changes; integration needs a clean tree.
     mscInterruptedFastForward ## Compatible partial upstream content; manual recovery.
     mscDetachedHead      ## No branch to reconcile.
-    mscNoMainlineBranch
-      ## The repo resolves no role at all: a legacy `repo.v1` fragment that
-      ## pins only a `revision` and declares no `branch` (a `repo.v2` fragment
-      ## without a mainline does not load, Workspace-Branch-Roles.md §3.3).
-      ## Retired together with `repo.v1` reading.
     mscNoRoleRef
       ## `<remote>/<roleBranch>` is absent after fetching. A REFUSAL: the role
       ## is declared, so its branch missing on the remote is a defect to fix,
@@ -828,8 +823,10 @@ type
       ## The role requested (`mainline`, `unstable`, a custom role). Used to
       ## name the role in diagnostics.
     roleBranch*: string
-      ## The branch the role resolved to for this repo; empty when the repo
-      ## resolves no role (`mscNoMainlineBranch`).
+      ## The branch the role resolved to for this repo. Never empty: a repo
+      ## read from a fragment always resolves a mainline (§3.3), and a
+      ## workspace whose repos declare no roles at all is refused before any
+      ## observation is made.
     roleDeclaredBy*: string
       ## Where the declaration that supplied `roleBranch` lives, for the
       ## remedy a `no_role_ref` refusal names ("the fragment's `unstable`",
@@ -866,7 +863,6 @@ proc mainlineSyncCaseTag*(c: MainlineSyncCase): string =
   of mscDirty: "dirty"
   of mscInterruptedFastForward: "interrupted_fast_forward"
   of mscDetachedHead: "detached_head"
-  of mscNoMainlineBranch: "no_mainline_branch"
   of mscNoRoleRef: "no_role_ref"
   of mscMissingCheckout: "missing_checkout"
 
@@ -888,22 +884,14 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
   result.roleBranch = obs.roleBranch
   result.action = msaNone
   let roleName = if obs.role.len > 0: obs.role else: "mainline"
-  let roleFlag = "--to=" & roleName
 
-  # The manifest is this mode's input, so a fragment that resolves no role is
-  # named rather than skipped — the same rule `switch` follows. Only a legacy
-  # `repo.v1` fragment pinning a bare `revision` can get here.
-  if obs.roleBranch.len == 0:
-    result.syncCase = mscNoMainlineBranch
-    result.refusalReason = "repo '" & resolved.path &
-      "' declares no `branch` in its manifest fragment" &
-      (if resolved.fragmentPath.len > 0: " (" & resolved.fragmentPath & ")"
-       else: "") &
-      (if obs.exists: " — `" & roleFlag & "` reconciles toward the branch " &
-         "its roles resolve to, and every role falls back to that mainline"
-       else: " — cannot clone without a target branch")
-    result.message = result.refusalReason
-    return
+  # Every repo the planner sees resolved its role from declarations
+  # (Workspace-Branch-Roles.md §3.3); the CLI refuses a workspace whose repos
+  # declare none before it observes anything, so an empty branch here is a
+  # caller defect, not a state of the workspace.
+  doAssert obs.roleBranch.len > 0,
+    "classifyMainlineSync: repo '" & resolved.path & "' reached the planner " &
+      "without a resolved " & roleName & " branch"
 
   if not obs.exists:
     result.syncCase = mscMissingCheckout

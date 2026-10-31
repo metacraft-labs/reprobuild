@@ -382,6 +382,7 @@ proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
     ("CODETRACER_PINNED_SRC", src & "/codetracer/src"),
     ("REPRO_CT_TEST_RUNNER_SRC", src & "/reprobuild-ct-test-runner"),
     ("REPRO_TEST_ADAPTERS_SRC", src & "/reprobuild-test-adapters/src"),
+    ("TEST_CERTIFICATES_TOOLS_SRC", src & "/test-certificates-tools/src"),
     # ``CT_INTERPOSE_SRC`` WAS HERE AND IS GONE. It named
     # ``share/repro/src/ct-interpose``, the package shipped that tree,
     # and no consumer has read the variable since ``86cb1bf6`` removed

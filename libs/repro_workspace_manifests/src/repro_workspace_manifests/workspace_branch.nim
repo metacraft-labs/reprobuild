@@ -4,60 +4,29 @@
 ## file it lives in.
 ##
 ## The state file is ``<workspaceRoot>/.repro/workspace-state.toml``
-## (``reprobuild.workspace.state.v1``, Workspace-Settings-Files.md §5). It
-## replaces ``<workspaceRoot>/.repro/workspace.toml``
-## (``reprobuild.workspace.local.v1``), which is still READ until the old
-## names are retired (§8). The two files carry the same ``[workspace]`` table
-## (``project``, ``projects``, ``branch``, ``feature_started``).
+## (``reprobuild.workspace.state.v1``, Workspace-Settings-Files.md §5): the
+## ``[workspace]`` table (``project``, ``projects``, ``branch``,
+## ``feature_started``) and nothing else.
 ##
-## **Which file, and what happens to the old one** (§8 step 1 — the rule this
-## module implements until ``repro health --fix`` migrates a checkout):
-##
-##   * READS prefer ``workspace-state.toml`` and fall back to
-##     ``workspace.toml`` (``workspaceTomlPath``).
-##   * WRITES go to ``workspace-state.toml`` only. The first write in a
-##     checkout that has only the old file creates the new one FROM the old
-##     one — its text and comments — with the schema line changed and its
-##     ``[[manifest]]`` layers moved to ``repro-workspace.local.toml`` (the
-##     state file carries no layers, §5), and then applies the edit. Nothing
-##     is lost and nothing is copied twice. A write to an old file that
-##     carries layers and that records nothing new writes nothing at all
-##     (``recordWorkspaceState``): moving the layers changes how the
-##     workspace composes, which only a real change — or
-##     ``repro health --fix`` — may do.
-##   * The OLD FILE IS LEFT UNTOUCHED, and once the new file exists THIS
-##     repro ignores it: every read stops at the new name.
-##
-## **The hazard: version skew.** "Ignored" holds only for repro builds that
-## know the new name. An OLDER repro (0.2.x, still pinned in places during
-## the transition) reads and writes ``.repro/workspace.toml`` and has never
-## heard of ``workspace-state.toml``. So in a checkout used by both, the two
-## files CAN diverge: the new binary migrates to ``workspace-state.toml`` and
-## records ``beta``; the old binary then writes ``gamma`` into
-## ``workspace.toml``; each binary now reports a different active set, and
-## neither knew. This module cannot prevent that — the old binary is already
-## shipped — so it DETECTS it and says so (``workspaceStateSkew``): every
-## state read through ``workspaceTomlPath`` reports, on stderr and once per
-## process, that an older repro changed a file this one does not read. The
-## remedy is to inspect both and remove the stale one: ``repro health --fix``
-## (``migrateWorkspaceStateFile``) removes a left-over old file only when it
-## holds nothing unseen, and refuses to choose between two diverged records.
-##
-## Detection keys on a SNAPSHOT, not on mtimes: when a write migrates the old
-## file it also saves the old file's exact bytes beside it
-## (``legacyStateSnapshotPath``). Skew is "both files exist and the old file is
-## no longer byte-identical to that snapshot" — or there is no snapshot, which
-## means the old file appeared after the new one existed (an older repro
-## created it). An mtime comparison was rejected: the new binary's next write
-## bumps ``workspace-state.toml`` past the old file's mtime and would hide an
-## unreconciled change for good.
+## **The state file's retired name.** No verb reads or writes the state file
+## under its retired name (``retired_names.nim``). A checkout that records its
+## state ONLY there is refused with the remedy (``workspaceTomlPath``):
+## reading it as "no state" would silently forget the active project set and
+## branch. The one reader of the retired file is ``repro health --fix``
+## (``migrateWorkspaceStateFile``), which moves it to the current name and its
+## ``[[manifest]]`` layers to ``repro-workspace.local.toml`` (§8 step 2). A
+## retired file left over BESIDE a current one is inert: every read stops at
+## the current name, and ``repro health`` reports the leftover, which
+## ``--fix`` removes when it records nothing the current file lacks (it
+## compares against the migration snapshot an earlier release saved,
+## ``retiredStateSnapshotPath``, and refuses to choose between two diverged
+## records — ``workspaceStateSkew``).
 ##
 ## Two operating modes:
 ##
-##   1. **Composer mode** — the workspace declares ``[[manifest]]`` layers:
-##      in the state file (where ``local.v1`` kept them) or in the settings
-##      files (``repro-workspace.toml`` / ``repro-workspace.local.toml``, where
-##      they live now). ``effectiveWorkspaceLocal`` merges the two sources.
+##   1. **Composer mode** — the settings files (``repro-workspace.toml`` /
+##      ``repro-workspace.local.toml``) declare ``[[manifest]]`` layers.
+##      ``effectiveWorkspaceLocal`` adds them to the state.
 ##
 ##   2. **Single-project mode** — no layers. The state file is
 ##      *metadata-only*: ``[workspace] project = "<name>"`` and
@@ -78,6 +47,7 @@ import diagnostics
 import reader
 import manifest_editor
 import settings
+import retired_names
 import repro_core/workspace_root
 
 # The marker predicates live with the one workspace-root discovery walk in
@@ -94,34 +64,37 @@ export workspace_root.firstMembershipManifestPath,
 const
   workspaceStateFileName* = workspace_root.StateFileName
     ## The state file's name under ``.repro/`` (Workspace-Settings-Files.md §5).
-  legacyWorkspaceStateFileName* = workspace_root.LegacyStateFileName
-    ## The state file's OLD name under ``.repro/``. Read, never written.
+  retiredWorkspaceStateFileName* = workspace_root.RetiredStateFileName
+    ## The state file's retired name under ``.repro/``. Read only by
+    ## ``repro health --fix`` (``migrateWorkspaceStateFile``).
 
 proc workspaceStatePath*(workspaceRoot: string): string =
   ## ``<workspaceRoot>/.repro/workspace-state.toml`` — where the state file is
   ## WRITTEN, whether or not it exists yet.
   workspaceRoot / ".repro" / workspaceStateFileName
 
-proc legacyWorkspaceStatePath*(workspaceRoot: string): string =
-  ## ``<workspaceRoot>/.repro/workspace.toml`` — the old state file.
-  workspaceRoot / ".repro" / legacyWorkspaceStateFileName
+proc retiredWorkspaceStatePath*(workspaceRoot: string): string =
+  ## The state file under its retired name (``retiredWorkspaceStateFileName``).
+  workspaceRoot / ".repro" / retiredWorkspaceStateFileName
 
-proc legacyStateSnapshotPath*(workspaceRoot: string): string =
-  ## ``<workspaceRoot>/.repro/workspace.toml.at-migration`` — the old state
-  ## file's exact bytes at the moment a write migrated it to the new name.
-  ## Never read as state; only compared against the old file to detect an
-  ## older repro writing it afterwards (see the module note).
-  workspaceRoot / ".repro" / (legacyWorkspaceStateFileName & ".at-migration")
+proc retiredStateSnapshotPath*(workspaceRoot: string): string =
+  ## The retired state file's exact bytes as an earlier release saved them
+  ## when it migrated that file to the current name (``.at-migration``
+  ## beside it). Never read as state; only compared against a left-over
+  ## retired file, to tell whether an older repro wrote it afterwards (see
+  ## the module note).
+  workspaceRoot / ".repro" / (retiredWorkspaceStateFileName & ".at-migration")
 
 proc workspaceStateSkew*(workspaceRoot: string): string =
-  ## A diagnostic when BOTH state files exist and the old one carries changes
-  ## this repro does not see — written by an older repro after the migration —
-  ## or "" when there is nothing to report. See the module note for the rule.
+  ## A diagnostic when BOTH state files exist and the retired one carries
+  ## changes the current one does not — written by an older repro after the
+  ## migration — or "" when there is nothing to report. For ``repro health``,
+  ## which must not delete such a file; see the module note for the rule.
   let current = workspaceStatePath(workspaceRoot)
-  let legacy = legacyWorkspaceStatePath(workspaceRoot)
+  let legacy = retiredWorkspaceStatePath(workspaceRoot)
   if not (fileExists(current) and fileExists(legacy)):
     return ""
-  let snapshot = legacyStateSnapshotPath(workspaceRoot)
+  let snapshot = retiredStateSnapshotPath(workspaceRoot)
   var unseen = true
   try:
     unseen = not fileExists(snapshot) or readFile(snapshot) != readFile(legacy)
@@ -129,14 +102,12 @@ proc workspaceStateSkew*(workspaceRoot: string): string =
     unseen = true
   if not unseen:
     return ""
-  "warning: two workspace state files exist: " & current & " (read by this " &
-    "repro) and " & legacy & " (read and written by older repro builds). " &
-    "An older repro has changed " & legacy & " since this repro last " &
-    "migrated it, so the active project set, branch or feature mark it " &
-    "recorded is NOT seen here, and each repro now reports a different " &
-    "state. Inspect both files, keep the right content in " & current &
-    ", and remove " & legacy & " (`repro health --fix` removes it only " &
-    "when it holds nothing this repro does not read)."
+  "two workspace state files exist: " & current & " (the state file) and " &
+    legacy & " (its retired name, read and written only by older repro " &
+    "builds). An older repro has changed " & legacy & " since it was " &
+    "migrated, so the active project set, branch or feature mark it " &
+    "recorded is NOT the state. Inspect both files, keep the right content " &
+    "in " & current & ", and remove " & legacy & "."
 
 var printedNotices {.threadvar.}: seq[string]
   ## Notices this process already printed. A notice is about the checkout, not
@@ -148,8 +119,8 @@ var noticesSuppressed {.threadvar.}: bool
   ## Set by ``withoutWorkspaceNotices`` for the extent of a quiet path.
 
 template withoutWorkspaceNotices*(body: untyped) =
-  ## Run ``body`` with workspace notices (state-file skew, skipped settings
-  ## layers) neither computed nor printed. For read-only paths whose contract
+  ## Run ``body`` with workspace notices (skipped settings layers) neither
+  ## computed nor printed. For read-only paths whose contract
   ## forbids output they did not ask for and work beyond cheap reads — the
   ## shell prompt above all (CLI/prompt.md: silent when there is nothing to
   ## show, cheap reads only on every render). The notices are a property of the
@@ -183,14 +154,12 @@ proc reportSkippedSettingsLayers*(skipped: seq[SkippedSettingsLayer]) =
 
 proc reportWorkspaceNotices(workspaceRoot: string) =
   ## Everything a command must say about a workspace whatever it goes on to do,
-  ## computed once per root per process:
-  ##
-  ##   * state-file version skew (``workspaceStateSkew``);
-  ##   * settings layers skipped for want of a url (Workspace-Settings-Files.md
-  ##     §4). This must be said even when EVERY layer is skipped — and then the
-  ##     workspace resolves as a single project and never reaches the composer
-  ##     — so it cannot live on the composer path; it lives here, on the state
-  ##     read every workspace-resolving path makes.
+  ## computed once per root per process: the settings layers skipped for want
+  ## of a url (Workspace-Settings-Files.md §4). This must be said even when
+  ## EVERY layer is skipped — and then the workspace resolves as a single
+  ## project and never reaches the composer — so it cannot live on the
+  ## composer path; it lives here, on the state read every workspace-resolving
+  ## path makes.
   ##
   ## A settings file that does not parse is NOT reported here: the path that
   ## reads it for its own purpose raises the strict reader's diagnostic.
@@ -203,7 +172,6 @@ proc reportWorkspaceNotices(workspaceRoot: string) =
   if key in noticedRoots:
     return
   noticedRoots.add(key)
-  emitWorkspaceNotice(workspaceStateSkew(workspaceRoot))
   try:
     let settingsPath = findWorkspaceSettingsPath(workspaceRoot)
     if settingsPath.len > 0:
@@ -236,16 +204,21 @@ proc isSettingsMarkedRoot(dir: string): bool =
   settingsFileIn(dir).len > 0
 
 proc workspaceTomlPath*(workspaceRoot: string): string =
-  ## The state file to READ: ``.repro/workspace-state.toml`` when it exists,
-  ## else the old ``.repro/workspace.toml`` when THAT exists, else the new name
+  ## The state file, ``.repro/workspace-state.toml``, whether or not it exists
   ## (so ``fileExists(workspaceTomlPath(root))`` answers "does this checkout
   ## record any state", and a caller that goes on to create the file creates
-  ## it under the new name). Native layout only — the legacy Google-``repo``
-  ## ``.repo/`` location is not consulted.
+  ## it here). Native layout only — the legacy Google-``repo`` ``.repo/``
+  ## location is not consulted.
+  ##
+  ## A checkout that records its state only under the retired name is
+  ## REFUSED here with the remedy (``retired_names.refuseRetiredStateFile``):
+  ## answering "no state" would make every verb forget its project set and
+  ## branch without a word. Inside ``repro health`` the refusal is set aside
+  ## for its ``workspace-state`` row instead, and the answer is "no state".
   ##
   ## Every state read resolves its file here, so this is also where the
-  ## workspace notices are reported (``reportWorkspaceNotices``: state-file
-  ## skew, skipped settings layers) — when the checkout records state, AND
+  ## workspace notices are reported (``reportWorkspaceNotices``: skipped
+  ## settings layers) — when the checkout records state, AND
   ## when it records none but is a workspace root by its settings file
   ## (Workspace-Settings-Files.md §6: the file in the directory itself, or the
   ## file ``REPRO_WORKSPACE_CONFIG`` names in it). The settings layers of §4
@@ -256,16 +229,14 @@ proc workspaceTomlPath*(workspaceRoot: string): string =
   if fileExists(current):
     reportWorkspaceNotices(workspaceRoot)
     return current
-  let legacy = legacyWorkspaceStatePath(workspaceRoot)
-  if fileExists(legacy):
-    reportWorkspaceNotices(workspaceRoot)
-    return legacy
+  if refuseRetiredStateFile(workspaceRoot):
+    return current
   if isSettingsMarkedRoot(workspaceRoot):
     reportWorkspaceNotices(workspaceRoot)
   current
 
 proc hasWorkspaceStateFile*(workspaceRoot: string): bool =
-  ## Whether the checkout records any state, under either name.
+  ## Whether the checkout records any state.
   fileExists(workspaceTomlPath(workspaceRoot))
 
 proc reproDir*(workspaceRoot: string): string =
@@ -299,16 +270,13 @@ type
 
 proc withSettingsLayers*(local: WorkspaceLocal;
                          workspaceRoot: string): EffectiveWorkspaceLocal =
-  ## Add the settings files' ``[[manifest]]`` layers to a state file's layer
-  ## list — the two sources of layers during the transition:
+  ## Add the settings files' ``[[manifest]]`` layers
+  ## (Workspace-Settings-Files.md §3–§4, resolved by ``composeSettingsLayers``)
+  ## to the state, composed AFTER the base.
   ##
-  ##   * the STATE file's own list (``local.v1`` kept layers there), used
-  ##     exactly as before when present;
-  ##   * the SETTINGS files' layers (Workspace-Settings-Files.md §3–§4),
-  ##     resolved by ``composeSettingsLayers`` and composed AFTER the base.
-  ##
-  ## The base is the state file's list when it has one, else the root
-  ## repository itself (§3: "The root repo is always the base layer"),
+  ## The base is a layer list ``local`` already carries (a caller that built
+  ## one itself), else the root repository itself (§3: "The root repo is
+  ## always the base layer"),
   ## contributed as a ``local_path`` layer over ``manifestsRoot`` with the
   ## ``public`` visibility a single-project workspace's repos already carry,
   ## and named ``workspaceRootLayerName`` so the refresh pass can tell it from
@@ -490,10 +458,11 @@ proc isInitializedWorkspace*(workspaceRoot: string): bool =
   ##
   ## Concretely, the marker is present when ANY of:
   ##
-  ##   * a state file exists — ``.repro/workspace-state.toml`` or the old
-  ##     ``.repro/workspace.toml`` (the metadata file ``repro workspace
-  ##     init`` writes once the workspace shell is established —
-  ##     single-project or compositional), OR
+  ##   * a state file exists — ``.repro/workspace-state.toml`` (the metadata
+  ##     file ``repro workspace init`` writes once the workspace shell is
+  ##     established — single-project or compositional); a state file under
+  ##     its retired name is refused with its remedy (``workspaceTomlPath``),
+  ##     never read as "not initialized", OR
   ##   * (MO-2) ``<workspaceRoot>/repro.lock`` exists — a committed-lock-
   ##     only repo with no manifest repo is a manifest-optional workspace,
   ##     so the hooks/gate must enforce there too.
@@ -609,7 +578,7 @@ proc moveLayersToLocalSettings*(workspaceRoot, fromPath: string;
   ##   * the settings files already compose a layer with the same source
   ##     (url, or resolved ``local_path``) and the same branch and
   ##     visibility — PRESENT, not written again (so a repeated migration,
-  ##     or one after the first state write already moved the layers, is a
+  ##     or one after an earlier release already moved the layers, is a
   ##     no-op);
   ##   * the same source with a different branch or visibility, or supplied
   ##     as the url of a shared named layer — a CONFLICT;
@@ -726,10 +695,10 @@ proc moveLayersToLocalSettings*(workspaceRoot, fromPath: string;
 
 type
   StateFileFindingKind* = enum
-    sffOldNameOnly   ## only ``.repro/workspace.toml`` exists
-    sffOldLeftover   ## the old file (or its migration snapshot) is left over
-                     ## beside the new one, and holds nothing unseen
-    sffSkew          ## both exist and an older repro changed the old one
+    sffOldNameOnly   ## only the retired name exists
+    sffOldLeftover   ## the retired file (or its migration snapshot) is left
+                     ## over beside the current one, and holds nothing unseen
+    sffSkew          ## both exist and an older repro changed the retired one
     sffLayersInState ## ``[[manifest]]`` layers in ``workspace-state.toml``
 
   StateFileFinding* = object
@@ -743,8 +712,8 @@ proc inspectWorkspaceStateFiles*(workspaceRoot: string): seq[StateFileFinding] =
   ## not parse at all is left to the malformed-file row and not reported
   ## here. Empty when the checkout is migrated, or records no state.
   let current = workspaceStatePath(workspaceRoot)
-  let legacy = legacyWorkspaceStatePath(workspaceRoot)
-  let snapshot = legacyStateSnapshotPath(workspaceRoot)
+  let legacy = retiredWorkspaceStatePath(workspaceRoot)
+  let snapshot = retiredStateSnapshotPath(workspaceRoot)
   proc layerCount(path: string): int =
     try: readStateFileForMigration(path).manifest.len
     except CatchableError: 0
@@ -761,15 +730,15 @@ proc inspectWorkspaceStateFiles*(workspaceRoot: string): seq[StateFileFinding] =
         result.add(StateFileFinding(kind: sffSkew, message: skew))
       else:
         result.add(StateFileFinding(kind: sffOldLeftover, message:
-          "the old state file " & legacy & " is left over beside " & current &
-          " and records nothing this repro does not read"))
+          "the state file's retired name " & legacy & " is left over " &
+          "beside " & current & " and records nothing the state file lacks"))
     elif fileExists(snapshot):
       result.add(StateFileFinding(kind: sffOldLeftover, message:
         "the migration snapshot " & snapshot & " is left over"))
   elif fileExists(legacy):
     let n = layerCount(legacy)
     result.add(StateFileFinding(kind: sffOldNameOnly, message:
-      "the state file has its old name " & legacy &
+      "the state file has its retired name " & legacy &
       (if n > 0: " and carries " & $n & " `[[manifest]]` layer(s) that " &
          "belong in " & localSettingsFileName
        else: "")))
@@ -778,7 +747,8 @@ proc migrateWorkspaceStateFile*(workspaceRoot: string): seq[string] =
   ## Bring a checkout's state file to Workspace-Settings-Files.md §5, as
   ## ``repro health --fix`` does (§8 step 2), and return one line per action:
   ##
-  ##   * ``.repro/workspace.toml`` is MOVED to ``.repro/workspace-state.toml``
+  ##   * the state file under its retired name is MOVED to
+  ##     ``.repro/workspace-state.toml``
   ##     (``state.v1``): its text through the manifest editor — comments and
   ##     the ``[workspace]`` table kept — re-labelled, without its
   ##     ``[[manifest]]`` layers, which go to ``repro-workspace.local.toml``
@@ -803,8 +773,8 @@ proc migrateWorkspaceStateFile*(workspaceRoot: string): seq[string] =
       raise newException(StateMigrationError, f.message &
         " `repro health --fix` does not choose between the two records")
   let current = workspaceStatePath(workspaceRoot)
-  let legacy = legacyWorkspaceStatePath(workspaceRoot)
-  let snapshot = legacyStateSnapshotPath(workspaceRoot)
+  let legacy = retiredWorkspaceStatePath(workspaceRoot)
+  let snapshot = retiredStateSnapshotPath(workspaceRoot)
   proc report(outcome: LayerMoveOutcome; source: string): seq[string] =
     for d in outcome.added:
       result.add("moved manifest layer " & d & " from " & source & " to " &
@@ -838,6 +808,10 @@ proc migrateWorkspaceStateFile*(workspaceRoot: string): seq[string] =
         currentLayers), current))
       var doc = loadManifestDoc(current)
       discard doc.removeArrayTable("manifest")
+      # A file under the current name may still declare the retired schema
+      # (it was copied, not re-rendered); without its layers it is exactly a
+      # state.v1 file, so it says so.
+      discard doc.setKey("", "schema", tomlStr(schemaWorkspaceStateV1))
       doc.saveManifestDoc()
       result.add("removed the `[[manifest]]` layers from " & current)
     if fileExists(legacy):
@@ -845,8 +819,8 @@ proc migrateWorkspaceStateFile*(workspaceRoot: string): seq[string] =
         result.add(report(moveLayersToLocalSettings(workspaceRoot, legacy,
           legacyLayers), legacy))
       removeFile(legacy)
-      result.add("removed the old state file " & legacy & " (" & current &
-        " is the state file)")
+      result.add("removed the state file's retired name " & legacy & " (" &
+        current & " is the state file)")
   else:
     result.add(report(moveLayersToLocalSettings(workspaceRoot, legacy,
       legacyLayers), legacy))
@@ -864,60 +838,16 @@ proc migrateWorkspaceStateFile*(workspaceRoot: string): seq[string] =
     result.add("removed the migration snapshot " & snapshot)
 
 proc recordWorkspaceState(workspaceRoot: string; local: WorkspaceLocal) =
-  ## Write ``local`` to the state file through the manifest editor, ALWAYS
-  ## under the new name (``workspaceStatePath``). See the module note for the
-  ## rule; in short:
-  ##
-  ##   * the new file exists — edit it key by key (a hand-added comment
-  ##     survives);
-  ##   * only the old file exists — start the new file from the old file's
-  ##     text, re-labelled ``state.v1`` and WITHOUT its ``[[manifest]]``
-  ##     layers, which move to ``repro-workspace.local.toml``
-  ##     (``moveLayersToLocalSettings``: the state file carries no layers,
-  ##     §5), and edit that; the old file is not written, its bytes are
-  ##     snapshotted (``legacyStateSnapshotPath``), and this repro ignores it
-  ##     from now on because reads stop at the new name — an OLDER repro does
-  ##     not, which the snapshot lets us report. A layer that cannot be moved
-  ##     (``StateMigrationError``) fails the write before any file changes;
-  ##   * neither exists — render a new file from the typed value.
+  ## Write ``local`` to the state file through the manifest editor: an
+  ## existing file is edited key by key (a hand-added comment survives), a
+  ## missing one is rendered from the typed value. Callers read the state
+  ## through ``workspaceTomlPath`` first, which refuses a checkout recording
+  ## its state only under the retired name, so nothing here can shadow it.
   let target = workspaceStatePath(workspaceRoot)
-  let legacy = legacyWorkspaceStatePath(workspaceRoot)
-  if fileExists(target) or fileExists(legacy):
-    var doc = loadManifestDoc(if fileExists(target): target else: legacy)
-    let migrating = doc.path != target
-    if migrating and local.manifest.len > 0:
-      # The old file carries layers, and moving them changes how the
-      # workspace composes: the root becomes the base layer and the moved
-      # layers compose additively (§3, §4), where the old file's first layer
-      # was the base. A write that records nothing new — a verb re-recording
-      # the same project set or branch — must not make that change behind the
-      # operator's back, so it writes nothing at all and the old file stays
-      # the state this repro reads. A write that records something new moves
-      # the layers (``local`` was read from the old file, layers included)
-      # and says so.
-      var probe = doc
-      if not probe.applyWorkspaceState(local.workspace):
-        return
-      let moved = moveLayersToLocalSettings(workspaceRoot, legacy,
-        local.manifest)
-      emitWorkspaceNotice("note: " & legacy & " carried " &
-        $local.manifest.len & " `[[manifest]]` layer(s); they now live in " &
-        moved.localPath & " (the state file carries none), and the " &
-        "workspace root is now the base layer, and so the lock record " &
-        "store unless repro-workspace.toml declares `[records]`. The old " &
-        "file is left for older repro builds; `repro health --fix` " &
-        "removes it")
-      discard doc.removeArrayTable("manifest")
-    if migrating:
-      # Remember exactly what was migrated, so a later write to the old file
-      # by an older repro is detectable (``workspaceStateSkew``).
-      writeWorkspaceManifestFile(legacyStateSnapshotPath(workspaceRoot),
-        readFile(legacy))
-    doc.path = target
+  if fileExists(target):
+    var doc = loadManifestDoc(target)
     discard doc.setKey("", "schema", tomlStr(schemaWorkspaceStateV1))
     discard doc.applyWorkspaceState(local.workspace)
-    if migrating:
-      doc.changed = true
     doc.saveManifestDoc()
   else:
     var fresh = local
@@ -951,8 +881,8 @@ proc writeWorkspaceProjects*(workspaceRoot: string; projects: seq[string]) =
   ## first-seen order so re-adding an already-active project is a no-op.
   ##
   ## When the state file already exists the writer reads it
-  ## through the strict reader and preserves the branch / manifest layers
-  ## / feature-started fields verbatim, replacing only the project set.
+  ## through the strict reader and preserves the branch and feature-started
+  ## fields verbatim, replacing only the project set.
   ## Idempotent: re-running with the same set yields a byte-identical file.
   var deduped: seq[string]
   for p in projects:
@@ -984,10 +914,9 @@ proc writeWorkspaceBranch*(workspaceRoot, project, branch: string) =
   ##   it through the M5 strict reader, replaces
   ##   ``workspace.branch``, and re-emits the canonical TOML.
   ##   ``project`` is IGNORED when the file already exists — the
-  ##   existing project name is authoritative (it was set by the
-  ##   composer-mode workspace and changing it would orphan the
-  ##   manifest layers).
-  ## - If the file does NOT exist, a metadata-only workspace.toml is
+  ##   existing project name is authoritative (the settings files' layers
+  ##   compose for it, and changing it would orphan them).
+  ## - If the file does NOT exist, a metadata-only state file is
   ##   created with ``[workspace] project = "<project>"`` and
   ##   ``branch = "<branch>"`` and no ``[[manifest]]`` entries. This
   ##   is the single-project (M9 init) path. Callers MUST pass a
@@ -1030,8 +959,8 @@ proc writeWorkspaceBranchWithStarted*(workspaceRoot, project, branch: string;
   ## NOT feature branches, e.g. ``main``).
   ##
   ## Semantics mirror ``writeWorkspaceBranch``: when the file already
-  ## exists in composer mode the existing project and manifest layers
-  ## are preserved verbatim; in single-project mode the file is created
+  ## exists the existing project is preserved verbatim; otherwise the file
+  ## is created
   ## from scratch with just the metadata keys. Idempotent: re-running
   ## with the same arguments produces byte-identical output.
   if branch.len == 0:

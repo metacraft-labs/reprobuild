@@ -16,6 +16,16 @@
 ##   || weak || pathSetDigest || strong || BLAKE3(recordBytes)
 ##   || u32 n || outputDigest[n] || i64 issuedAt || issuerHostId
 ##
+## An entry that states its evidence level (memo entry v3, campaign M17) is
+## signed under the v2 domain, with the level byte after the issuer:
+##
+##   "reprobuild/peer-cache/memo-attestation/v2\0" || ...as above...
+##   || u8 evidenceLevel
+##
+## so the level a consumer judges the record by is the level its issuer
+## signed, and an entry stripped of its level no longer verifies. An entry
+## with no stated level keeps the v1 message its issuer signed.
+##
 ## A consumer accepts an entry only when
 ##
 ##   * the leaf verifies against its OWN trust anchors at the CONSUMER'S
@@ -61,6 +71,8 @@ import ./types
 
 const
   AttestationDomain = "reprobuild/peer-cache/memo-attestation/v1\x00"
+  AttestationDomainWithEvidence =
+    "reprobuild/peer-cache/memo-attestation/v2\x00"
   PublishingRoles* = {lrDaemon, lrBuildWorker}
 
 type
@@ -78,7 +90,9 @@ proc putU32(dst: var seq[byte]; v: uint32) =
   for s in countup(0, 24, 8): dst.add(byte((v shr uint32(s)) and 0xff))
 
 proc attestationMessage*(entry: MemoEntry): seq[byte] =
-  for ch in AttestationDomain: result.add(byte(ord(ch)))
+  let stated = entry.evidenceLevel != elUnstated
+  for ch in (if stated: AttestationDomainWithEvidence else: AttestationDomain):
+    result.add(byte(ord(ch)))
   for b in bytes(entry.weakFingerprint): result.add(b)
   for b in bytes(entry.pathSetDigest): result.add(b)
   for b in bytes(entry.strongFingerprint): result.add(b)
@@ -90,6 +104,8 @@ proc attestationMessage*(entry: MemoEntry): seq[byte] =
     result.add(byte((cast[uint64](entry.issuedAtUnix) shr uint64(shift)) and
       0xff'u64))
   for b in bytes(entry.issuerHostId): result.add(b)
+  if stated:
+    result.add(evidenceLevelByte(entry.evidenceLevel))
 
 proc attest*(entry: var MemoEntry; leaf: LeafCredential; now = 0'i64) =
   ## Signs `entry` as `leaf`'s host. Raises `IdentityError` for a role that

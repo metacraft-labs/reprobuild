@@ -126,6 +126,11 @@ import ct_test_history
 # CodeTracer's write path.
 import repro_test_stats
 
+# Test-Binary-Grouping M2: the naming convention of group binaries. A pure
+# module with no dependencies; see ``caseSourceOf``.
+from ct_test_nim_unittest/grouping import CaseSourceIndex,
+  parseCaseSourceIndex, isGroupBinary, caseSourceOf, memberStems
+
 # ``closeProcessOnce``: the runner's only way to release a spawned child's
 # pipes. ``osproc.close`` double-closes a ``poStdErrToStdOut`` child's merged
 # descriptor on POSIX; see the module. Shared with the build engine, whose
@@ -700,6 +705,28 @@ type
   TestCase = object
     binary: string          ## absolute path to the compiled test binary
     binaryStem: string      ## file basename without extension
+    source: string
+      ## THE CASE'S IDENTITY in result files, the console and the
+      ## parallel-run report: the test SOURCE FILE it was declared in,
+      ## repo-relative when the runner can resolve it.
+      ##
+      ## Test-Binary-Grouping M2 compiles up to fifty sources into one
+      ## ``t_group_*`` binary, so the binary no longer names the test. A
+      ## case must keep its identity whether its file is grouped or single
+      ## (and when a failed group falls back to single compiles), so it is
+      ## keyed on what does not move: the source. Resolved by
+      ## ``caseSourceOf``; for a single-file binary it is that binary's
+      ## source, exactly what the stem used to stand for. The binary stays
+      ## in the report as an attribute (``binary`` / ``binary_stem``).
+    sourceStem: string
+      ## ``source``'s file name without extension. Equal to ``binaryStem``
+      ## for every single-file binary, so result-file names and exclusivity
+      ## are unchanged for those.
+    ambiguity: string
+      ## Non-empty when this case's ``--run`` name is not unique inside its
+      ## binary (two grouped members declare the same ``suite::test``).
+      ## ``--run`` cannot address it, so the case is reported ERROR rather
+      ## than run as whichever of the two the binary happens to pick.
     protocolAware: bool     ## true if the binary speaks --list-json
     qualifiedName: string   ## ``suite::test``; "" when whole-binary
     suite: string
@@ -1775,6 +1802,28 @@ proc buildEngine(repoRoot: string): bool =
       $exitCode
     return false
   true
+
+# ---------------------------------------------------------------------------
+# Test-Binary-Grouping M2: from a binary and a catalog row to the case's
+# source file.
+#
+# The answer comes from ``repro_tests.nim`` in the project root -- the table
+# the build graph is generated from, which records each source's ``group``.
+# Reading it changes nothing about WHAT runs (that is still "every test
+# executable in --bin-dir"); it only names what ran. Without it (the runner's
+# own tests run synthetic binaries in scratch directories) a group case falls
+# back to its catalog ``file`` and a single binary's case to the binary stem.
+# ---------------------------------------------------------------------------
+
+proc loadSourceIndex(projectRoot: string): CaseSourceIndex =
+  ## ``repro_tests.nim`` of the project root, or an empty index.
+  let path = projectRoot / "repro_tests.nim"
+  if not fileExists(path):
+    return parseCaseSourceIndex("")
+  try:
+    parseCaseSourceIndex(readFile(path))
+  except CatchableError:
+    parseCaseSourceIndex("")
 
 proc qualifyName(binaryStem, suite, name: string): string =
   if suite.len > 0:
@@ -3855,7 +3904,7 @@ proc reportExecution(history: ptr HistoryReporter; testLease: var TestLease;
     var generic = GenericTestFacts(
       testId:
         if res.testCase.qualifiedName.len > 0: res.testCase.qualifiedName
-        else: res.testCase.binaryStem,
+        else: res.testCase.sourceStem,
       suite: res.testCase.suite,
       status: historyStatus(res, outcome, groupRefused),
       durationMs: res.durationMs,
@@ -3949,7 +3998,7 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
   # spawn and finished AFTER the wait, so the spine row's start, finish
   # and duration describe the test rather than the bookkeeping around it.
   var testLease = history.acquireLease(
-    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.binaryStem),
+    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.sourceStem),
     memoryBytes = leaseMemoryBytes(memoryLimitBytes))
   var childOutcome: ChildRunOutcome
   var groupRefused = false
@@ -4214,7 +4263,16 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
                     memoryLimitBytes = 0'u64): TestResult =
   result.testCase = tc
   result.status = tsFail
-  let resultFile = resultsDir / (tc.binaryStem & "__" &
+  if tc.ambiguity.len > 0:
+    # See ``TestCase.ambiguity``: no verdict can be obtained for a name
+    # ``--run`` cannot select, so this is the harness's ERROR, not a FAIL.
+    result.status = tsHarnessError
+    result.harnessError = tc.ambiguity
+    result.stdout = "repro_test_runner: " & tc.ambiguity & "\n"
+    return
+  # Keyed on the case's SOURCE, not on the binary: a case writes the same
+  # result file whether its file is compiled alone or into a group binary.
+  let resultFile = resultsDir / (tc.sourceStem & "__" &
     tc.qualifiedName.multiReplace([
       ("::", "__"), ("/", "_"), (" ", "_"), ("\t", "_")]) & ".json")
   result.resultFile = resultFile
@@ -4264,7 +4322,7 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # M19: the lease spans the execution, so the spine row's start, finish
   # and duration describe the test rather than the queueing around it.
   var testLease = history.acquireLease(
-    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.binaryStem),
+    (if tc.qualifiedName.len > 0: tc.qualifiedName else: tc.sourceStem),
     memoryBytes = leaseMemoryBytes(memoryLimitBytes))
   var childOutcome: ChildRunOutcome
   try:
@@ -4670,11 +4728,19 @@ proc emitProgress(quiet: bool; res: TestResult) =
   if quiet:
     return
   let label = "[" & $res.status & "]"
+  # The source names the test; a group binary is named after it, because
+  # "which binary" is what a reader needs to reproduce the run by hand.
+  let inBinary =
+    if res.testCase.binaryStem != res.testCase.sourceStem and
+        res.testCase.binaryStem.len > 0:
+      " [in " & res.testCase.binaryStem & "]"
+    else:
+      ""
   let name =
     if res.testCase.protocolAware:
-      res.testCase.binaryStem & " " & res.testCase.qualifiedName
+      res.testCase.sourceStem & " " & res.testCase.qualifiedName & inBinary
     else:
-      res.testCase.binaryStem & " (whole-binary)"
+      res.testCase.sourceStem & " (whole-binary)" & inBinary
   # Show the skip reason inline: the console log is where a reader looks
   # first, and "SKIP" without a reason is exactly the opaque signal this
   # change exists to remove.
@@ -4816,6 +4882,11 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
     of tsSkip: inc skipped
     of tsHarnessError: inc harnessErrors
     var node = newJObject()
+    # ``source`` is the case's identity (Test-Binary-Grouping M2): the test
+    # file it was declared in, the same whether that file is compiled alone
+    # or into a ``t_group_*`` binary. ``binary`` / ``binary_stem`` say
+    # which executable ran it, and are attributes, not identity.
+    node["source"] = %r.testCase.source
     node["binary"] = %r.testCase.binary
     node["binary_stem"] = %r.testCase.binaryStem
     node["protocol_aware"] = %r.testCase.protocolAware
@@ -5314,19 +5385,23 @@ proc matchesFilter(stem: string; filters: seq[string]): bool =
   false
 
 proc requiresExclusiveExecution(tc: TestCase): bool =
-  tc.binaryStem in ExclusiveStems
+  ## Per case, by the case's SOURCE: an exclusive test keeps its exclusivity
+  ## when its file is compiled into a group binary.
+  tc.sourceStem in ExclusiveStems or tc.binaryStem in ExclusiveStems
 
 proc exclusiveRank(tc: TestCase): int =
   ## Latency-sensitive microbenchmarks must run before the heavyweight
   ## self-hosted build cluster. They are exclusive because concurrent load would
   ## pollute the measurement; running them after the build cluster can also
   ## inherit unrelated post-build host settling and daemon cleanup noise.
-  if tc.binaryStem == "t_e2e_shell_hook_noop_latency":
+  if tc.sourceStem == "t_e2e_shell_hook_noop_latency":
     return 0
   result = 10
 
 proc cmpExclusiveTestCase(a, b: TestCase): int =
   result = cmp(exclusiveRank(a), exclusiveRank(b))
+  if result == 0:
+    result = cmp(a.sourceStem, b.sourceStem)
   if result == 0:
     result = cmp(a.binaryStem, b.binaryStem)
 
@@ -5436,6 +5511,8 @@ proc ensureWorkspaceSourceEnv(repoRoot: string) =
   putEnvIfUnsetDir("REPROBUILD_SOURCE_ROOT", repoRoot)
   putEnvIfUnsetDir("REPRO_TEST_ADAPTERS_SRC",
     parent / "reprobuild-test-adapters" / "src")
+  putEnvIfUnsetDir("TEST_CERTIFICATES_TOOLS_SRC",
+    parent / "test-certificates-tools" / "src")
   putEnvIfUnsetDir("REPRO_CT_TEST_RUNNER_SRC",
     parent / "reprobuild-ct-test-runner")
   putEnvIfUnsetDir("CODETRACER_SRC", parent / "codetracer" / "src")
@@ -5526,10 +5603,23 @@ proc main() =
 
   # Build the work queue: one TestCase per protocol test, or one
   # whole-binary TestCase per non-protocol binary.
+  #
+  # Test-Binary-Grouping M2: a ``--filter`` names TESTS, and a test whose
+  # file is compiled into a group binary is not named by the binary's stem.
+  # So a binary passes the pre-probe filter when its own stem matches or one
+  # of its members' does, and each case is then filtered on its own source.
+  let sourceIndex = loadSourceIndex(cwd)
+  proc binaryPassesFilter(stem: string): bool =
+    if matchesFilter(stem, opts.filters):
+      return true
+    for member in sourceIndex.memberStems(stem):
+      if matchesFilter(member, opts.filters):
+        return true
+    false
   var filteredBinaries: seq[string] = @[]
   for binary in binaries:
     let stem = splitFile(binary).name
-    if matchesFilter(stem, opts.filters):
+    if binaryPassesFilter(stem):
       filteredBinaries.add(binary)
   stderr.writeLine "repro_test_runner: probing " &
     $filteredBinaries.len & " of " & $binaries.len & " binaries"
@@ -5571,14 +5661,30 @@ proc main() =
   let retainRawRows = opts.catalogWritePath.len > 0
   for binary in binaries:
     let stem = splitFile(binary).name
-    if not matchesFilter(stem, opts.filters):
+    if not binaryPassesFilter(stem):
       continue
     let probe = probeBinary(binary, retainRawRows)
     probed.add((stem: stem, path: binary, protocol: probe.protocol,
                 catalog: probe.catalog, rawRows: probe.rawRows))
     if probe.protocol:
       inc protocolBinaries
+      # ``--run`` selects by name alone. Two members of one group binary
+      # declaring the same ``suite::test`` cannot both be addressed, so both
+      # are refused loudly (ERROR) instead of running whichever the binary
+      # picks under two identities. The generator keeps such files apart when
+      # it can see the names statically; this catches the rest.
+      var runNameFiles = initTable[string, seq[string]]()
       for entry in probe.catalog:
+        if entry.runName notin runNameFiles:
+          runNameFiles[entry.runName] = @[]
+        if entry.file notin runNameFiles[entry.runName]:
+          runNameFiles[entry.runName].add(entry.file)
+      for entry in probe.catalog:
+        let source = caseSourceOf(sourceIndex, stem, entry.file)
+        let sourceStem = splitFile(source).name
+        if not (matchesFilter(stem, opts.filters) or
+                matchesFilter(sourceStem, opts.filters)):
+          continue
         # The one place selection can remove work. Note the asymmetry:
         # a case is dropped only when the catalog positively vouches for
         # it (``caseIsUnchanged``); everything else — unknown binary,
@@ -5587,9 +5693,18 @@ proc main() =
         if selection.usable and caseIsUnchanged(priorCatalog, stem, entry):
           inc deselectedCases
           continue
+        let sameName = runNameFiles.getOrDefault(entry.runName)
         var tc = TestCase(
           binary: binary,
           binaryStem: stem,
+          source: source,
+          sourceStem: sourceStem,
+          ambiguity:
+            if sameName.len > 1 and sourceIndex.isGroupBinary(stem):
+              "--run name '" & entry.runName & "' is declared by " &
+                $sameName.len & " files in " & stem & " (" &
+                sameName.join(", ") & "); --run cannot select one of them"
+            else: "",
           protocolAware: true,
           suite: entry.suite,
           name: entry.bare,
@@ -5607,9 +5722,12 @@ proc main() =
       # every time. Under-running here would be the exact silent
       # coverage loss the fail-closed rule exists to prevent.
       inc opaqueBinaries
+      let source = caseSourceOf(sourceIndex, stem, "")
       var tc = TestCase(
         binary: binary,
         binaryStem: stem,
+        source: source,
+        sourceStem: splitFile(source).name,
         protocolAware: false,
         suite: "",
         name: stem,
@@ -6099,7 +6217,7 @@ proc main() =
       if r.status == tsHarnessError:
         stderr.writeLine "  ! " &
           (if r.cancelled: "CANCELLED " else: "ERROR ") &
-          r.testCase.binaryStem & " " &
+          r.testCase.sourceStem & " " &
           r.testCase.qualifiedName & ": " & r.harnessError
   if disagreements > 0:
     stderr.writeLine "repro_test_runner: " & $disagreements &

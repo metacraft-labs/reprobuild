@@ -156,8 +156,8 @@ suite "repro workspace branch-roles":
       writeFile(root / "repos" / "tool.toml",
         fragmentToml("tool", "profile = \"product\"\nmainline = \"trunk\"\n" &
           "unstable = false\n\n[repo.branch-roles]\npartner = \"partner-x\""))
-      writeFile(root / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(root / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
       # `core` is a real clone. After it was cloned the remote gained a
@@ -334,7 +334,7 @@ suite "repro workspace branch-roles":
 
       # Without recorded membership, the positional is the initial resolution
       # target rather than a filter. This path must not borrow sync's name.
-      removeFile(root / ".repro" / "workspace.toml")
+      removeFile(root / ".repro" / "workspace-state.toml")
       let unknownUnrecorded = roles(["nosuchproject"])
       check unknownUnrecorded.code != 0
       check unknownUnrecorded.stdout.len == 0

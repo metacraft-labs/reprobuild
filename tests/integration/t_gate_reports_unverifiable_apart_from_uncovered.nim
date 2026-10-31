@@ -24,6 +24,13 @@
 ##      is asserted at ``evaluateReprobuildCoverage`` and the CI plan's
 ##      ``computeCiPlatformPlan``, which the gates call.
 ##
+## And a fourth, at the two consumers that search the local store:
+##
+##   4. a store search that could not cover a root (an unreadable system
+##      root) is INCOMPLETE: with nothing found where it could look, the
+##      client gate and the CI plan report "search INCOMPLETE" as an
+##      unverifiable outcome, never "no certificate found".
+##
 ## Control: an EMPTY registry (nobody trusted) is NOT COVERED at the client
 ## gate — the other verdict, with the other remedy.
 ##
@@ -34,6 +41,7 @@
 ## Hermetic: local repos, the built ``repro``; no network. Requires git and
 ## ssh-keygen.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, osproc, sequtils, strutils, unittest]
 
 include tc8c_store_fixture
@@ -165,3 +173,42 @@ suite "TC-8c — unverifiable is reported apart from uncovered":
     check publishCertificateToLocalStore(sha256Cert, fx.libAPath).written
     check findCertificatesInLocalStore(atC).found.allIt(
       it.read.cert.vcs.content != sha256Cert.vcs.content)
+
+    # ---- 4. a local-store search that could not cover a root --------------
+    # Transport §2.1/§5, Tooling §2 (find exit 3 vs 1): a root that could not
+    # be read leaves the search INCOMPLETE. With no certificate in what WAS
+    # searched, the client gate and the CI plan both report that — an
+    # unverifiable outcome naming the incomplete search — and never "no
+    # certificate found", whose remedy (run the tests) would be wrong: the
+    # unread root may hold the certificate.
+    when defined(windows):
+      skip("POSIX permission bits are what make the system root unreadable")
+    else:
+      let d = newCommit(fx, "d.txt", "d\n")
+      publishDirectly(fx)
+      seedLock(fx)
+      createDir(fx.systemRoot / "v1")
+      setFilePermissions(fx.systemRoot, {})
+      defer: setFilePermissions(fx.systemRoot,
+        {fpUserRead, fpUserWrite, fpUserExec})
+      var readable = true
+      try:
+        for _ in walkDir(fx.systemRoot, checkDir = true): discard
+      except OSError:
+        readable = false
+      if readable:
+        skip("this process can list a mode-000 directory (it runs as " &
+          "root), so an unreadable system root cannot be constructed here")
+      else:
+        let gate = checkPrePush(fx, d)
+        checkpoint("client gate (incomplete search): " & gate.output)
+        check gate.code == 2
+        check failureProperties(gate.report) == @["certificate-unverifiable"]
+        let evidence = evidenceOf(gate.report, "certificate-unverifiable")
+        check "search INCOMPLETE" in evidence
+        check "no certificate found in the local store" notin evidence
+        let planned4 = planPlatform(ciPlan(fx, host), host)
+        check planned4["verdict"].getStr() == "unverifiable"
+        check strings(planned4, "run") == @["t-unit"]
+        check strings(planned4, "unevaluated").anyIt(
+          "certificate-store-search-incomplete" in it)

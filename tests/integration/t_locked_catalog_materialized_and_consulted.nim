@@ -69,6 +69,16 @@ proc childEnv(extra: openArray[(string, string)] = []): StringTableRef =
   for (k, v) in extra:
     result[k] = v
 
+proc probeCompileCommand(probeScript: string): string =
+  ## Compile and run a probe with a PRIVATE nimcache. Nim's default nimcache
+  ## is keyed by the project name (`~/.cache/nim/probe_d`), and both cases of
+  ## this suite name their probe `probe.nim`: run concurrently, one case
+  ## linked the other's generated C and printed its output (full-suite run
+  ## 41: "module=" and nothing else, exit 0).
+  "nim c -r --hints:off " &
+    quoteShell("--nimcache:" & (probeScript.parentDir / "probe-nimcache")) &
+    " " & quoteShell(probeScript)
+
 proc run(command: string; cwd = ""; env = childEnv()): tuple[code: int; output: string] =
   let res = execCmdEx(command, options = {poStdErrToStdOut, poUsePath},
     workingDir = cwd, env = env)
@@ -128,7 +138,7 @@ suite "locked catalog revision is materialized and consulted":
       "  echo \"probe:\" & p.origin & \":\" & p.root\n"
     writeFile(probeScript, probeCode)
 
-    let (code, output) = run("nim c -r --hints:off " & quoteShell(probeScript), cwd = scratch)
+    let (code, output) = run(probeCompileCommand(probeScript), cwd = scratch)
     checkpoint(output)
     check code == 0
     check ("module=" & (interfaceDir / "repro")) in output
@@ -172,7 +182,7 @@ suite "locked catalog revision is materialized and consulted":
       "echo \"module=\" & search.module\n"
     writeFile(probeScript, probeCode)
 
-    let (code, output) = run("nim c -r --hints:off " & quoteShell(probeScript), cwd = scratch)
+    let (code, output) = run(probeCompileCommand(probeScript), cwd = scratch)
     checkpoint(output)
     check code == 0
     # Sibling MUST win over lock pin

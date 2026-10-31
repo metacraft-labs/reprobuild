@@ -201,6 +201,11 @@ type
     pcX86_64 = "x86_64"
     pcAArch64 = "aarch64"
     pcX86 = "x86"
+    pcArmv7 = "armv7"
+      ## 32-bit ARM, ARMv7 with the hard-float ABI: Debian and Raspberry Pi
+      ## OS ``armhf``, Arch ``armv7h``. The Raspberry Pi 2/3 add-on hosts.
+      ## Nim spells the CPU ``arm`` (``--cpu:arm``); the token here follows
+      ## the architecture name the binary cache keys entries by.
 
   MicroarchLevel* = enum
     ## PMC-2: the microarchitecture axis, as the x86-64 psABI levels.
@@ -1208,6 +1213,7 @@ proc parsePlatformCpuToken*(token: string):
   of "x86_64", "amd64", "x64": (true, pcX86_64)
   of "aarch64", "arm64":       (true, pcAArch64)
   of "x86", "i386", "i686":    (true, pcX86)
+  of "armv7", "armv7l", "armv7h", "armhf": (true, pcArmv7)
   else:             (false, pcAny)
 
 proc parseMicroarchLevelToken*(token: string):
@@ -1903,6 +1909,7 @@ proc cpuIdent(cpu: PlatformCpu): string =
   of pcX86_64: "pcX86_64"
   of pcAArch64: "pcAArch64"
   of pcX86: "pcX86"
+  of pcArmv7: "pcArmv7"
 
 proc microarchLevelIdent(level: MicroarchLevel): string =
   ## PMC-2: the Nim ENUM IDENTIFIER, not the psABI spelling. The
@@ -2339,6 +2346,8 @@ proc detectHostCpu*(): PlatformCpu =
     pcAArch64
   elif defined(i386) or defined(i686) or defined(x86):
     pcX86
+  elif defined(arm):
+    pcArmv7
   else:
     pcAny
 
@@ -2369,4 +2378,4 @@ proc baselineMicroarchLevel*(family: PlatformCpu): MicroarchLevel =
   ## entries that are actually reusable across a fleet.
   case family
   of pcX86_64: mlX86_64_v1
-  of pcAny, pcAArch64, pcX86: mlNone
+  of pcAny, pcAArch64, pcX86, pcArmv7: mlNone

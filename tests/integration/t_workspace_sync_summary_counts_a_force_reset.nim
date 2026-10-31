@@ -97,13 +97,13 @@ suite "repro workspace sync — the digest counts a force-reset":
       check divergedSha != lockedSha
 
       writeFile(workspaceRoot / "repos" / "lib.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib\"\npath = \"lib\"\nremote = \"lib-origin\"\n" &
-        "revision = \"main\"\n")
+        "mainline = \"main\"\n")
       writeFile(workspaceRoot / "projects" / "forceproject.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
         "[project]\nname = \"forceproject\"\n" &
-        "default_revision = \"main\"\ntrunk = \"main\"\n\n" &
+        "\n" &
         "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & fileUrl(origin) &
         "\"\n\nincludes = [\n  \"repos/lib.toml\",\n]\n")
 

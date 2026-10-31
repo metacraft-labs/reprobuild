@@ -22,12 +22,13 @@
 ## declaration and the settings file for a profile's or `[workspace]`'s,
 ## because that is the file the operator has to edit.
 ##
-## One documented exemption is asserted too, so it cannot widen silently: a
-## legacy `repo.v1` fragment that declares no `branch` still loads (before the
-## roles model such a fragment resolved through `revision` /
-## `default_revision`, and the dual-read release keeps reading v1 fragments as
-## they always resolved until `repo.v1` is retired); it simply carries no
-## roles. A `repo.v2` fragment with no mainline is refused.
+## The retired spellings are held to the same load-time rule (§3.3,
+## Retired-Names): the old `repo.v1` schema and the old `[repo] branch` key do
+## not load, each refused naming the file and the key and saying what replaced
+## it. The legacy exemption that once let a `repo.v1` fragment with no
+## `branch` load without roles is retired with that schema: a fragment that
+## pins only a `revision` and resolves no mainline is now refused at
+## `repo.mainline` like any other, so the exemption cannot quietly return.
 ##
 ## No mocks: real files, the real readers and resolver.
 
@@ -123,17 +124,43 @@ suite "§3.5 role validation is refused at manifest load":
         "[workspace]\nmainline = \"0000000000000000000000000000000000000000\"\n"))
       check fx.expectRefused("root value", fx.settingsPath, "workspace.mainline",
         "commit")
-    # The v1 spelling of the mainline is held to the same rule.
+    # The retired spellings of the mainline do not load either. The old
+    # `[repo] branch` key — even carrying a value that would also fail the
+    # branch-name rule — is refused at that key, naming `mainline` as its
+    # replacement; and a fragment still declaring the retired `repo.v1`
+    # schema is refused at `schema` with the remedy.
     block:
-      var fx = newRolesFixture("repro-role-name-v1-")
+      var fx = newRolesFixture("repro-role-name-retired-key-")
+      defer: fx.dispose()
+      fx.seedValid()
+      writeFile(fx.fragmentPath("old"),
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"old\"\n" &
+        "path = \"old\"\nurl_prefix = \"acme\"\nbranch = \"refs/heads/main\"\n")
+      fx.repos.add("old")
+      check fx.expectRefused("retired branch key", fx.fragmentPath("old"),
+        "repo.branch", "a repo's mainline is `mainline`")
+    block:
+      var fx = newRolesFixture("repro-role-name-retired-schema-")
       defer: fx.dispose()
       fx.seedValid()
       writeFile(fx.fragmentPath("old"),
         "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"old\"\n" &
         "path = \"old\"\nurl_prefix = \"acme\"\nbranch = \"refs/heads/main\"\n")
       fx.repos.add("old")
-      check fx.expectRefused("v1 branch", fx.fragmentPath("old"), "repo.branch",
-        "fully-qualified")
+      check fx.expectRefused("retired schema", fx.fragmentPath("old"), "schema",
+        "Change `schema` to \"reprobuild.workspace.repo.v2\"")
+    # A hand-written fragment (not built by `addRepo`) spelling the mainline
+    # with the current key is held to the branch-name rule as well.
+    block:
+      var fx = newRolesFixture("repro-role-name-v2-full-ref-")
+      defer: fx.dispose()
+      fx.seedValid()
+      writeFile(fx.fragmentPath("old"),
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"old\"\n" &
+        "path = \"old\"\nurl_prefix = \"acme\"\nmainline = \"refs/heads/main\"\n")
+      fx.repos.add("old")
+      check fx.expectRefused("full-ref mainline", fx.fragmentPath("old"),
+        "repo.mainline", "fully-qualified")
 
   test "every profile a fragment names exists":
     var fx = newRolesFixture("repro-role-profile-")
@@ -211,16 +238,15 @@ suite "§3.5 role validation is refused at manifest load":
       fx.addRepo("bad", "unstable = \"agents\"")
       check fx.expectRefused("nothing declares it", fx.fragmentPath("bad"),
         "repo.mainline", "has no mainline")
-    # The documented legacy exemption: a v1 fragment without `branch` loads
-    # and carries no roles; its revision comes from where it always did.
+    # The retired legacy exemption: a fragment that pins only a `revision`
+    # used to load without roles. A revision is a pin BESIDE a mainline, not
+    # a substitute for one, so such a fragment no longer loads.
     block:
-      var fx = newRolesFixture("repro-role-v1-legacy-")
+      var fx = newRolesFixture("repro-role-revision-only-")
       defer: fx.dispose()
       writeFile(fx.fragmentPath("old"),
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"old\"\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"old\"\n" &
         "path = \"old\"\nurl_prefix = \"acme\"\nrevision = \"v1.2.3\"\n")
       fx.repos.add("old")
-      let old = fx.resolveDemo().repo("old")
-      check old.roles.len == 0
-      check old.branch == ""
-      check old.revision == "v1.2.3"
+      check fx.expectRefused("revision without mainline", fx.fragmentPath("old"),
+        "repo.mainline", "has no mainline")

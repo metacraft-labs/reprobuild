@@ -109,7 +109,7 @@ proc cloneRepo(gitBin, origin, target: string) =
 
 proc projectToml(appUrl, depUrl, unrelatedUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
+    "[project]\nname = \"app\"\n" &
     "\n" &
     "[[remote]]\nname = \"app-origin\"\nfetch = \"" & appUrl & "\"\n\n" &
     "[[remote]]\nname = \"dep-origin\"\nfetch = \"" & depUrl & "\"\n\n" &
@@ -120,32 +120,32 @@ proc projectToml(appUrl, depUrl, unrelatedUrl: string): string =
 
 const
   AppToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "app"
 path = "app"
 remote = "app-origin"
-revision = "main"
+mainline = "main"
 depends = ["dep"]
 """
   DepToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "dep"
 path = "dep"
 remote = "dep-origin"
-revision = "main"
+mainline = "main"
 """
   UnrelatedToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "unrelated"
 path = "other/app-linked"
 remote = "unrelated-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc setup(gitBin: string): Fixture =
@@ -630,13 +630,13 @@ suite "linked-worktree pre-push repository-local environment isolation":
       # project's repo set as the hook scope is wrong.
       writeFile(fx.workspace / "projects" / "ambient.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"ambient\"\ndefault_revision = \"main\"\n\n" &
+        "[project]\nname = \"ambient\"\n\n" &
         "[[remote]]\nname = \"unrelated-origin\"\nfetch = \"" &
           fileUrl(fx.unrelatedOrigin) & "\"\n\n" &
         "includes = [\"repos/unrelated.toml\"]\n")
       writeFile(fx.workspace / "projects" / "app.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"app\"\ndefault_revision = \"main\"\n\n" &
+        "[project]\nname = \"app\"\n\n" &
         "[[remote]]\nname = \"app-origin\"\nfetch = \"" &
           fileUrl(fx.appOrigin) & "\"\n\n" &
         "[[remote]]\nname = \"dep-origin\"\nfetch = \"" &
@@ -780,13 +780,13 @@ suite "linked-worktree pre-push repository-local environment isolation":
       let fx = setup(gitBin)
       defer: removeDir(fx.scratch)
       writeFile(fx.workspace / "repos" / "ghost-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"ghost-a\"\npath = \"missing/a\"\n" &
-        "remote = \"app-origin\"\nrevision = \"main\"\n")
+        "remote = \"app-origin\"\nmainline = \"main\"\n")
       writeFile(fx.workspace / "repos" / "ghost-b.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"ghost-b\"\npath = \"missing/b\"\n" &
-        "remote = \"app-origin\"\nrevision = \"main\"\n")
+        "remote = \"app-origin\"\nmainline = \"main\"\n")
       let originalProject = readFile(fx.workspace / "projects" / "app.toml")
       writeFile(fx.workspace / "projects" / "app.toml",
         originalProject.replace(
@@ -917,9 +917,9 @@ suite "declared previous pre-push identity":
 
     # Two absent members claiming the same prior URL are ambiguous even
     # though each has a different current URL and checkout path.
-    let ghost = "schema = \"reprobuild.workspace.repo.v1\"\n" &
+    let ghost = "schema = \"reprobuild.workspace.repo.v2\"\n" &
       "[repo]\nname = \"ghost\"\npath = \"missing/ghost\"\n" &
-      "remote = \"dep-origin\"\nrevision = \"main\"\n" &
+      "remote = \"dep-origin\"\nmainline = \"main\"\n" &
       "[extensions]\npreviously = [{ path = \"missing/old-ghost\", " &
       "url_prefix = \"historical\", url_suffix = \"app-origin.git\" }]\n"
     writeFile(fx.workspace / "repos" / "ghost.toml", ghost)
@@ -972,9 +972,9 @@ suite "previous identity adversarial precedence":
       let prior = "old-ghost-" & suffix
       createSymlink(clone, fx.workspace / prior)
       writeFile(fx.workspace / "repos" / ("ghost-" & suffix & ".toml"),
-        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n[repo]\n" &
         "name = \"ghost-" & suffix & "\"\npath = \"missing/" & suffix &
-        "\"\nremote = \"dep-origin\"\nrevision = \"main\"\n" &
+        "\"\nremote = \"dep-origin\"\nmainline = \"main\"\n" &
         "[extensions]\npreviously = [{ path = \"" & prior & "\" }]\n")
     let project = fx.workspace / "projects" / "app.toml"
     writeFile(project, readFile(project).replace("\"repos/unrelated.toml\"]",

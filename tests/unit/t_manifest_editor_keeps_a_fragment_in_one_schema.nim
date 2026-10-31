@@ -1,33 +1,41 @@
-## The manifest editor never leaves a repo fragment in a mix of two schemas.
+## The manifest editor never leaves a repo fragment in a retired spelling.
 ##
-## A `repo.v1` fragment names its mainline `branch`; `repo.v2` names it
-## `mainline` and adds the role keys (Workspace-Branch-Roles.md §3.1, §3.6).
-## The reader refuses a file that mixes them, so a writer that produced one
-## would break the workspace for everyone who reads it. The rule, enforced by
-## the editor (`guardFragmentSchema`) rather than by each caller:
+## A repo fragment has one schema, `repo.v2`, whose mainline key is
+## `mainline` (Workspace-Branch-Roles.md §3.1, §3.6). The `repo.v1` schema and
+## its `branch` key are retired: the reader refuses both, so a writer that
+## produced either would break the workspace for everyone who reads it. The
+## rule, enforced by the editor (`guardFragmentSchema`) rather than by each
+## caller:
 ##
-## * an edit of a key BOTH schemas have (`depends`, `tags`, …) leaves a v1
-##   file v1 — byte for byte outside the edited span. Upgrading on every
-##   unrelated edit would make an older pinned `repro` refuse the file
-##   ("unknown major schema version") because someone ran `repro add`;
-## * setting `mainline` on a v1 file writes `branch`, the v1 spelling of the
-##   same key, and the file stays v1;
-## * writing a key only v2 can say (a role, `profile`, a custom role) into a
-##   v1 file upgrades the WHOLE file first — schema line and `branch` ->
-##   `mainline` together — in one save;
-## * writing `branch` into a v2 file is refused;
-## * a NEW fragment that declares a key only v2 can say is written as v2
-##   with `mainline`, whatever spelling the typed value used. (One that does
-##   not is written as v1: t_repo_fragment_writer_emits_v1_when_v1_can_say_it.)
+## * an edit of a v2 fragment — a shared key (`depends`, `tags`, …) or a role
+##   — is in place, byte for byte outside the edited span, and the file stays
+##   v2 and readable;
+## * writing `branch` into a fragment is refused, naming `mainline`;
+## * a retired `repo.v1` fragment is not edited at all — any edit, even of a
+##   key the two schemas shared, is refused naming the rewrite — because the
+##   result would still not load;
+## * a NEW fragment is written as v2 with `mainline`
+##   (t_repo_fragment_writer_emits_only_repo_v2).
 ##
 ## Every result is read back through the strict reader, so "one schema" is
-## checked by the component that would refuse a mix.
+## checked by the component that would refuse anything else.
 ##
 ## No mocks: real files in a temporary directory, the real editor and reader.
 
 import std/[options, os, strutils, tempfiles, unittest]
 
 import repro_workspace_manifests
+
+const v2Fragment = """schema = "reprobuild.workspace.repo.v2"
+
+# Vendored fork; the mainline is where our patches land.
+[repo]
+name = "widget"
+path = "widget"
+remote = "acme"
+mainline = "dev"   # our patch branch
+depends = ["gizmo"]
+"""
 
 const v1Fragment = """schema = "reprobuild.workspace.repo.v1"
 
@@ -42,75 +50,89 @@ depends = ["gizmo"]
 
 suite "the manifest editor keeps a fragment in one schema":
 
-  test "a shared-key edit leaves a v1 fragment v1 and readable":
+  test "a shared-key edit leaves a v2 fragment v2 and readable":
     let dir = createTempDir("repro-editor-schema-", "")
     defer: removeDir(dir)
     let path = dir / "widget.toml"
-    writeFile(path, v1Fragment)
+    writeFile(path, v2Fragment)
     check addArrayMemberInFile(path, "repo", "depends", "sprocket")
     let text = readFile(path)
-    check text.startsWith("schema = \"reprobuild.workspace.repo.v1\"")
-    check "branch = \"dev\"   # our patch branch" in text
-    check "mainline =" notin text
+    check text == v2Fragment.replace("depends = [\"gizmo\"]",
+      "depends = [\"gizmo\", \"sprocket\"]")
     let f = readRepoFragment(path)
-    check f.schema == schemaRepoFragmentV1
-    check f.repo.mainlineBranch == some("dev")
+    check f.schema == schemaRepoFragmentV2
+    check f.repo.mainline == some("dev")
     check f.repo.depends == @["gizmo", "sprocket"]
 
-  test "a v2-only key upgrades the whole v1 file in one save":
+  test "a role is added in place, in the same schema":
     let dir = createTempDir("repro-editor-schema-", "")
     defer: removeDir(dir)
     let path = dir / "widget.toml"
-    writeFile(path, v1Fragment)
+    writeFile(path, v2Fragment)
     var doc = loadManifestDoc(path)
     check doc.setKey("repo", "unstable", tomlStr("agents"))
     doc.saveManifestDoc()
-    let text = readFile(path)
-    # The schema line and the key were changed together; the comment that
-    # rode on the renamed key, and every other line, survived. The new
-    # scalar lands with the table's other scalars, below `mainline` and
-    # above the `depends` array (t_manifest_editor_places_a_new_scalar_with_
-    # the_scalars).
-    check text == v1Fragment.replace("repo.v1", "repo.v2").replace(
-      "branch = \"dev\"   # our patch branch\n",
+    # The new scalar lands with the table's other scalars, below `mainline`
+    # and above the `depends` array
+    # (t_manifest_editor_places_a_new_scalar_with_the_scalars); the comment
+    # and every other line survive.
+    check readFile(path) == v2Fragment.replace(
+      "mainline = \"dev\"   # our patch branch\n",
       "mainline = \"dev\"   # our patch branch\nunstable = \"agents\"\n")
     let f = readRepoFragment(path)
     check f.schema == schemaRepoFragmentV2
     check f.repo.mainline == some("dev")
     check f.repo.unstable == roleBranch("agents")
 
-  test "setting mainline on a v1 file rewrites branch rather than adding a second key":
+  test "setting mainline rewrites the one key rather than adding a second":
     let dir = createTempDir("repro-editor-schema-", "")
     defer: removeDir(dir)
     let path = dir / "widget.toml"
-    writeFile(path, v1Fragment)
+    writeFile(path, v2Fragment)
     var doc = loadManifestDoc(path)
     check doc.setKey("repo", "mainline", tomlStr("main"))
     doc.saveManifestDoc()
     let f = readRepoFragment(path)
-    check f.schema == schemaRepoFragmentV1
-    check f.repo.mainlineBranch == some("main")
-    check readFile(path).count("branch =") == 1
-    check "mainline =" notin readFile(path)
+    check f.schema == schemaRepoFragmentV2
+    check f.repo.mainline == some("main")
+    check readFile(path).count("mainline =") == 1
+    check "branch =" notin readFile(path)
 
-  test "branch is refused in a v2 fragment":
+  test "branch is refused in a fragment":
     let dir = createTempDir("repro-editor-schema-", "")
     defer: removeDir(dir)
     let path = dir / "widget.toml"
-    writeFile(path, v1Fragment.replace("repo.v1", "repo.v2").replace(
-      "branch = ", "mainline = "))
+    writeFile(path, v2Fragment)
     var doc = loadManifestDoc(path)
     expect ManifestEditError:
       discard doc.setKey("repo", "branch", tomlStr("dev"))
+    check readFile(path) == v2Fragment
+
+  test "a retired repo.v1 fragment is not edited":
+    let dir = createTempDir("repro-editor-schema-", "")
+    defer: removeDir(dir)
+    let path = dir / "widget.toml"
+    writeFile(path, v1Fragment)
+    for (key, value) in [("mainline", tomlStr("main")),
+                         ("unstable", tomlStr("agents")),
+                         ("tags", tomlStrings(@["x"]))]:
+      var doc = loadManifestDoc(path)
+      try:
+        discard doc.setKey("repo", key, value)
+        checkpoint("editing `" & key & "` of a retired repo.v1 file was accepted")
+        fail()
+      except ManifestEditError as e:
+        check "reprobuild.workspace.repo.v2" in e.msg
+        check "`mainline`" in e.msg
+    check readFile(path) == v1Fragment
 
   test "a new fragment declaring a role is written as repo.v2 with mainline":
     let dir = createTempDir("repro-editor-schema-", "")
     defer: removeDir(dir)
     let path = dir / "new.toml"
-    # A typed value still carrying the v1 spelling.
     writeWorkspaceManifestFile(path, repoFragmentText(RepoFragment(
-      schema: schemaRepoFragmentV1, repo: RepoBody(name: "n", path: "n",
-        branch: some("dev"), stable: roleAbsent(),
+      repo: RepoBody(name: "n", path: "n",
+        mainline: some("dev"), stable: roleAbsent(),
         `branch-roles`: CustomRoleTable(entries: @[("beta", roleBranch("b"))])))))
     let text = readFile(path)
     check text == "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &

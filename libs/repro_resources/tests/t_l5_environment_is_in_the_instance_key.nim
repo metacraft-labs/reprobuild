@@ -123,8 +123,8 @@ proc writeWorkspace(root, project: string) =
   ## degradation, and the fixture would then measure the degradation
   ## path while claiming to measure the identity one.
   createDir(root / ".repro")
-  writeFile(root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\n" &
     "project = \"" & project & "\"\n")
 

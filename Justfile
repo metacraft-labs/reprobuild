@@ -65,6 +65,83 @@ bootstrap:
 hcr-agent-lib: bootstrap
     ./build/bin/repro build --tool-provisioning=path --daemon=off .#hcr-agent-lib
 
+# ReproOS add-on mode. `addon-static` builds the musl-static add-on `repro`
+# for the named architectures (amd64 arm64 armhf) and writes its published
+# SHA256SUMS under build/addon/. The `e2e_addon_*` recipes are the add-on's
+# acceptance gates: each runs in disposable guests it creates and destroys
+# (KVM for amd64, TCG for arm64/armhf). Bases: REPRO_ADDON_BASES; falsifying
+# runs: REPRO_ADDON_MUTATION=<name> (the gate must then fail); the Incus
+# inner loop: REPRO_ADDON_BACKEND=incus. See scripts/run_addon_gate.sh.
+addon-static *ARCHES="amd64 arm64 armhf":
+    bash ./scripts/build_addon_static.sh {{ARCHES}}
+
+e2e_addon_bootstrap_uninstall_byte_identity:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
+
+e2e_addon_preflight_is_zero_write:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_preflight_is_zero_write
+
+e2e_addon_bootstrap_changes_nothing_preexisting:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
+
+e2e_addon_bootstrap_installs_anchors_and_private_recipient_key:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key
+
+e2e_addon_store_roots_and_btrfs:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_store_roots_and_btrfs
+
+# The ownership-ledger and collision gates (A3). They run on the two
+# supported bases by default; the Debian 12 upgrade source has no row here.
+e2e_addon_collision_matrix:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_collision_matrix
+
+e2e_addon_divert_survives_package_upgrade:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_divert_survives_package_upgrade
+
+e2e_addon_removal_respects_ledger:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_removal_respects_ledger
+
+e2e_addon_symlink_on_target_path_is_refused:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_symlink_on_target_path_is_refused
+
+# The write-time re-check, made deterministic by a test-only pause seam:
+# the default run uses the `pause-before-write` build (the seam is the
+# gate's instrument); REPRO_ADDON_MUTATION=pause-before-write-no-recheck is
+# its falsifying run.
+e2e_addon_write_time_recheck:
+    REPRO_ADDON_MUTATION="${REPRO_ADDON_MUTATION:-pause-before-write}" REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_write_time_recheck
+
+# A4: the add-on switch and service transitions (Debian 13 and Ubuntu 24.04
+# by default). Falsifying mutations: REPRO_ADDON_MUTATION=exclusive-as-plain-restart
+# (exclusive_never_overlaps), sysctl-in-apply-namespace
+# (net_sysctl_applies_in_host_namespace), path-based-write-follows-links
+# (writes_never_follow_symlinks); the gate is then expected to fail.
+e2e_addon_switch_is_planned_exactly:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_switch_is_planned_exactly
+
+e2e_addon_exclusive_never_overlaps:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_exclusive_never_overlaps
+
+e2e_addon_gc_keeps_current_and_previous:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_gc_keeps_current_and_previous
+
+e2e_addon_writes_never_follow_symlinks:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
+
+# Milestone A5: crash consistency, boot re-assertion, confirm-or-revert. The
+# reset gate runs the seam build (run_addon_gate.sh selects it).
+e2e_addon_hard_reset_at_every_step:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_hard_reset_at_every_step
+
+e2e_addon_base_boots_without_store:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_base_boots_without_store
+
+e2e_addon_confirm_or_revert:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-12-amd64,debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_confirm_or_revert
+
+e2e_addon_net_sysctl_applies_in_host_namespace:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace
+
 test-hcr-native-library-prerequisite:
     nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
 

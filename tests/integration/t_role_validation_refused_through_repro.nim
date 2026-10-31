@@ -23,7 +23,7 @@
 ##      `profiles.product.branch-roles.beta`.
 ##
 ## Leg 2 — the ROOT repository (§3.4), through `repro branch
-## --from-mainlines`, which needs the root's mainline. The root repo is a real
+## --from=mainline`, which needs the root's mainline. The root repo is a real
 ## clone, so it HAS an `origin/HEAD` (`main`):
 ##   a. a `repro-workspace.toml` whose `[workspace]` declares no mainline:
 ##      the fork is refused (exit 2, nothing created) and the report's root
@@ -206,7 +206,7 @@ suite "branch-role validation through repro":
         check head.output.strip() == "refs/remotes/origin/main"
         result.fork = scratch / ("fork-" & slug)
         result.res = runRepro(["branch", "--write-report", result.fork,
-          "--branch=feature-roles", "--from-mainlines",
+          "--branch=feature-roles", "--from=mainline",
           "--workspace-root=" & result.source])
 
       # a. No root mainline declared: refused, origin/HEAD not read.

@@ -411,6 +411,8 @@ when defined(linux):
   proc c_repro_lease_spawn(buf: cstring; len: cint): cint {.importc:
     "repro_lease_spawn".}
   proc c_repro_lease_supported(): cint {.importc: "repro_lease_supported".}
+  proc c_repro_lease_arch_supported(): cint {.importc:
+    "repro_lease_arch_supported".}
   proc c_repro_lease_pidfd_supported(): cint {.importc:
     "repro_lease_pidfd_supported".}
   proc c_repro_lease_userns_supported(): cint {.importc:
@@ -515,6 +517,13 @@ when defined(linux):
     if spec.cgroupPath.len > 0 and not cleanup:
       buf.kv("cgroup", spec.cgroupPath)
     let pid = c_repro_lease_spawn(buf.cstring, cint(buf.len))
+    if pid == -ENOTSUP:
+      # `c/repro_lease_linux.c` has no backend for this CPU (no derived
+      # seccomp floor), and refuses every lease rather than run one
+      # unconfined.
+      outcome.error = "execution leases are not supported on this " &
+        "architecture (" & hostCPU & "): no confinement backend"
+      return -1
     if pid < 0:
       outcome.error = "lease launcher refused its configuration (errno " &
         $(-pid) & ")"
@@ -1321,6 +1330,12 @@ type
     ## What a Linux host offers the lease (`probeLinuxLeaseHost`). Separate
     ## from the decision (`decideLinuxLeaseLayers`) so a test can drive
     ## every combination, including the ones the test host does not have.
+    noConfinementBackend*: bool
+      ## `c/repro_lease_linux.c` has no backend for this CPU (its seccomp
+      ## floor is derived for x86_64 and aarch64 only). Checked FIRST: on such
+      ## a host every other probe answers "absent", which would otherwise be
+      ## reported as a kernel without user namespaces -- the wrong cause, and
+      ## a remedy (enable them) that cannot help.
     userNamespaces*: bool
     pidfdGetfd*: bool
     landlock*: bool
@@ -1333,7 +1348,13 @@ proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
   ## The profile decision on a Linux host (see `availableLeaseLayers`):
   ## both profiles need the namespace layer and pidfd_getfd; TRUSTED runs
   ## Landlock and the floor when present and is never refused for lacking
-  ## them; HARDENED refuses, naming every missing layer.
+  ## them; HARDENED refuses, naming every missing layer. A CPU the launcher
+  ## has no backend for refuses both, before any kernel feature is judged.
+  if probe.noConfinementBackend:
+    return (false, {}, "execution leases are not supported on this " &
+      "architecture (" & hostCPU & "): the lease launcher has no " &
+      "confinement backend for it (its seccomp floor is derived for x86_64 " &
+      "and aarch64), so no worker profile can run here")
   if not probe.userNamespaces:
     return (false, {}, "unprivileged user namespaces are unavailable: " &
       "the lease's new root cannot be built")
@@ -1360,6 +1381,7 @@ proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
 when defined(linux):
   proc probeLinuxLeaseHost*(): LinuxLeaseHostProbe =
     ## This host's answers for `decideLinuxLeaseLayers`.
+    result.noConfinementBackend = c_repro_lease_arch_supported() == 0
     result.userNamespaces = c_repro_lease_userns_supported() != 0
     result.pidfdGetfd = c_repro_lease_pidfd_supported() != 0
     result.landlock = landlockAbi() >= 1

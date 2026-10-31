@@ -290,6 +290,16 @@ proc installTwoPhaseBundle*(cas: var CasStore; cache: var ActionCache;
         " is in a newer format (version " & $newer.version &
         ") than this build reads")
     return (false, "malformed memo entry: " & err.msg)
+  # Campaign M17 (Edge-Derived-Identities.md §3.6 rider of 2026-10-27): a
+  # record from another host that may not cross hosts -- made under
+  # `ffpTimestamp`, not graded Level 0 by its producer (or not graded at
+  # all, as an older producer's entry is), or naming no observed input -- is
+  # refused before anything is written, whoever sent it and whatever the
+  # lookup that handed it here decided. The reason names the policy or the
+  # level.
+  let ruleRefusal = publicationRefusalOf(normalized, entry.evidenceLevel)
+  if ruleRefusal.len > 0:
+    return (false, "refused a record from another host: " & ruleRefusal)
   let pathSet = pathSetOf(normalized)
   if digestOf(bundle.pathSetBytes) != entry.pathSetDigest:
     return (false, "path set blob does not match the entry's digest")

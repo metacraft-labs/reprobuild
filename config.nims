@@ -299,6 +299,22 @@ let reproTestAdaptersSrc = block:
 if repoDirExists(reproTestAdaptersSrc):
   switch("path", reproTestAdaptersSrc)
 
+# The test-certificate standard's store, note-framing and two-note merge rules
+# live in the standalone ``test-certificates-tools`` package (Nim package
+# ``test_certificates``, stdlib-only), which the engine links instead of
+# keeping a second implementation of them. Same resolution as the TestRunner
+# contract above: ``TEST_CERTIFICATES_TOOLS_SRC`` (seeded from the pinned
+# ``test-certificates-tools-src`` flake input by the dev shell and the
+# sandboxed package build), else the sibling checkout.
+let testCertificatesToolsSrc = block:
+  let fromEnv = getEnv("TEST_CERTIFICATES_TOOLS_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "test-certificates-tools" / "src"
+if repoFileExists(testCertificatesToolsSrc / "test_certificates.nim"):
+  switch("path", testCertificatesToolsSrc)
+
 for libName in [
   # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
   # above): ``ct_test_interface`` is the leaf contract, ``ct_test_nim_unittest``
@@ -401,6 +417,9 @@ for libName in [
   "repro_homebrew_adapter",
   "repro_elevation",
   "repro_infra",
+  # ReproOS add-on mode: fingerprint, preflight, bootstrap, uninstall and
+  # the add-on layer over `repro infra apply` on a distribution-owned host.
+  "repro_addon",
   "repro_interface_artifacts",
   "repro_dev_env_artifacts",
   "repro_dev_env_activation",
@@ -671,8 +690,8 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   ## ``optional = true`` says a checkout is EXPECTED to be able to lack this
   ## package, so its report reads as a note rather than a warning. It is for
   ## packages whose absence the tree already tolerates -- today only
-  ## ``VM_HARNESS_SRC``, which ``config.nims`` itself guards with
-  ## ``vmHarnessAvailable`` further down, and which no Nix execution surface
+  ## ``GOSTI_SRC``, which ``config.nims`` itself guards with
+  ## ``gostiAvailable`` further down, and which no Nix execution surface
   ## exports. The distinction is about how surprising the absence is, not
   ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
   ## for why nothing here refuses.
@@ -786,8 +805,77 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # missing nim-shm-gset, which is exactly the version skew that breaks the build.
 # These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
+proc pinnedSiblingRevision(sibling: string): string =
+  ## The revision `.github/sibling-repos` pins for `sibling` (a `name=<sha>` or
+  ## `name!=<sha>` line keyed by the sibling directory's name), or "" when the
+  ## file does not pin it. Comments and bare names resolve to "".
+  let name = sibling.parentDir().extractFilename()   # ../nim-shm-gset/src -> nim-shm-gset
+  let pinsPath = repoPath(".github" / "sibling-repos")
+  if not fileExists(pinsPath): return ""
+  for raw in readFile(pinsPath).splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line[0] == '#': continue
+    for sep in ["!=", "="]:
+      let at = line.find(sep)
+      if at > 0 and line[0 ..< at] == name:
+        return line[at + sep.len .. ^1].strip()
+  return ""
+
+proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: int] =
+  ## `gorgeEx` runs relative to the script's directory, not the process's, so
+  ## the sibling's checkout is named absolutely.
+  gorgeEx("git -C " & quoteShell(repoPath(sibling.parentDir())) & " " & args)
+
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
+  ## Sibling-first, but never silently against an explicit pin.
+  ##
+  ## A workspace checkout at `../<name>/src` is what a developer edits, so it
+  ## wins -- EXCEPT when `$<envName>` names another tree and the sibling is
+  ## BEHIND the revision this repository pins for it in `.github/sibling-repos`
+  ## (neither at that revision, nor ahead of it, nor carrying local changes).
+  ## Such a sibling is stale, not a work in progress, and letting it win
+  ## discards the pin without a trace: at b761df51f a cross build whose
+  ## `SHM_GSET_SRC` named the pinned nim-shm-gset 6333cc9 compiled the engine
+  ## against the sibling at fb981c7 instead, so the installed engine lacked the
+  ## fix the pin carried and still died with SIGBUS on a full tmpfs. The shim,
+  ## whose builder honours the variable, had it. The two images disagreed about
+  ## which nim-shm-gset they were, and nothing said so.
+  ##
+  ## So: sibling at/ahead-of/dirty-against the pin -> sibling (the developer's
+  ## intent); sibling behind the pin while an env pin is set -> the env pin,
+  ## announced; no pin known or no git -> sibling, as before.
+  ## `REPRO_SIBLING_POLICY=sibling|pin` forces either choice.
   if repoFileExists(sibling / marker):
+    let envPath = getEnv(envName)
+    let policy = getEnv("REPRO_SIBLING_POLICY")
+    if policy != "sibling" and envPath.len > 0 and
+        repoFileExists(envPath / marker) and
+        absolutePath(envPath) != absolutePath(sibling):
+      var preferPin = policy == "pin"
+      var why = "REPRO_SIBLING_POLICY=pin"
+      if not preferPin:
+        let pin = pinnedSiblingRevision(sibling)
+        if pin.len > 0:
+          let head = siblingGit(sibling, "rev-parse HEAD")
+          let dirty = siblingGit(sibling, "status --porcelain --untracked-files=no")
+          # `nim check` (and nimsuggest) do not run `gorgeEx`: it answers
+          # ("", 0) there, which this reads as "cannot tell" and keeps the
+          # sibling, as before. Only a real compile can refuse a stale one.
+          let headRev = head.output.strip()
+          if head.exitCode == 0 and dirty.exitCode == 0 and headRev.len >= 12:
+            let atOrAhead = siblingGit(sibling,
+              "merge-base --is-ancestor " & pin & " HEAD").exitCode == 0
+            if not atOrAhead and dirty.output.strip().len == 0:
+              preferPin = true
+              why = "the sibling is at " & headRev[0 ..< 12] &
+                ", which is not at or ahead of the pinned " & pin[0 ..< 12] &
+                " in .github/sibling-repos, and carries no local changes"
+      if preferPin:
+        echo "config.nims: using $" & envName & "=" & envPath &
+          " instead of the sibling " & sibling & " (" & why &
+          "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
+        switch("path", envPath)
+        return
     switch("path", sibling)
     return
   addPackagePath(envName, [], marker, useDevShellFallback = true)
@@ -819,27 +907,27 @@ addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
 # exists, so removing the duplicate loses no resolution and restores the
 # policy.
 
-# R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
+# R2: gosti lives in the sibling ``D:/metacraft/gosti/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
-# (tests/integration/t_r2_iso_boot.nim) imports ``vm_harness`` to drive
+# (tests/integration/t_r2_iso_boot.nim) imports ``gosti`` to drive
 # the bootFromMedia/captureSerial/expectLine primitives against the
-# Hyper-V Gen-2 UEFI backend. Prefer $VM_HARNESS_SRC, then the
+# Hyper-V Gen-2 UEFI backend. Prefer $GOSTI_SRC, then the
 # sibling-repo checkout.
-addPackagePath("VM_HARNESS_SRC", [
-  ".." / "vm-harness" / "src",
-], "vm_harness.nim", optional = true)
+addPackagePath("GOSTI_SRC", [
+  ".." / "gosti" / "src",
+], "gosti.nim", optional = true)
 
-# Define ``vmHarnessAvailable`` only when the optional vm-harness sibling is
+# Define ``gostiAvailable`` only when the optional gosti sibling is
 # actually present. The R2/R9 boot integration tests guard their
-# ``import vm_harness`` on this symbol so they skip-compile when the sibling is
+# ``import gosti`` on this symbol so they skip-compile when the sibling is
 # absent, instead of hard-failing the whole test-build. A missing optional
 # sibling must skip, not be fatal (Workspace-alignment RA-23;
 # Interactive-UX-And-Progress.md Principle 2).
 block:
-  let vmhEnv = getEnv("VM_HARNESS_SRC")
-  if (vmhEnv.len > 0 and repoFileExists(vmhEnv / "vm_harness.nim")) or
-     repoFileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
-    switch("define", "vmHarnessAvailable")
+  let gostiEnv = getEnv("GOSTI_SRC")
+  if (gostiEnv.len > 0 and repoFileExists(gostiEnv / "gosti.nim")) or
+     repoFileExists(".." / "gosti" / "src" / "gosti.nim"):
+    switch("define", "gostiAvailable")
 
 # Lib subdirectories to probe under a system prefix. The order matters:
 # `lib` covers the default + Debian-multiarch case (Debian/Ubuntu install
@@ -855,6 +943,51 @@ const LibSubdirs = [
   "lib/x86_64-linux-gnu",
   "lib/aarch64-linux-gnu",
 ]
+
+proc archiveObjectHeader(archive: string): string =
+  ## The first member of the ar(5) archive `archive` whose data opens with an
+  ## object header (ELF, thin or universal Mach-O), or "" when none does.
+  ## NimScript mirror of `archiveMatchesHostArch` in
+  ## `repro_interface_artifacts`; keep the two in step. Members follow the
+  ## common layout (https://man.freebsd.org/cgi/man.cgi?query=ar&sektion=5):
+  ## a 60-byte header after the 8-byte magic, name in bytes 0..15, decimal
+  ## size in 48..57, data padded to an even offset. The GNU `/` and `//`
+  ## tables and the BSD `__.SYMDEF` are skipped because their data is no
+  ## object header; a BSD `#1/N` name prefixes the data with N name bytes. A
+  ## malformed header, or more than `MaxMembers`, yields "" (accepted).
+  const MaxMembers = 4096
+  proc isObjectHeader(at: int): bool =
+    if at + 4 > archive.len:
+      return false
+    let m = archive[at .. at + 3]
+    m == "\x7FELF" or m == "\xCF\xFA\xED\xFE" or m == "\xCE\xFA\xED\xFE" or
+      m == "\xCA\xFE\xBA\xBE"
+  var pos = 8
+  for _ in 0 ..< MaxMembers:
+    if pos + 60 > archive.len:
+      return ""
+    let name = archive[pos .. pos + 15]
+    var memberSize: int
+    try:
+      memberSize = parseInt(archive[pos + 48 .. pos + 57].strip())
+    except ValueError:
+      return ""
+    if memberSize < 0:
+      return ""
+    var dataPos = pos + 60
+    var dataLen = memberSize
+    if name.startsWith("#1/"):
+      var nameLen: int
+      try:
+        nameLen = parseInt(name[3 .. ^1].strip())
+      except ValueError:
+        return ""
+      dataPos += nameLen
+      dataLen -= nameLen
+    if dataLen >= 8 and isObjectHeader(dataPos):
+      return archive[dataPos ..< min(archive.len, dataPos + 512)]
+    pos = pos + 60 + memberSize + (memberSize and 1)
+  ""
 
 proc libMatchesTargetArch(libFile: string): bool =
   ## NimScript mirror of `soMatchesHostArch` in
@@ -881,14 +1014,24 @@ proc libMatchesTargetArch(libFile: string): bool =
   ## (`EI_DATA`, byte 5) and `e_machine` (bytes 18-19); a thin Mach-O its
   ## word size and `cputype`; a universal Mach-O must carry a slice for the
   ## target `cputype`. An ELF never matches a Darwin target, a Mach-O never
-  ## a non-Darwin one. Anything unclassified -- a static archive, a linker
-  ## script, a short file, an unknown target machine -- is accepted and left
-  ## to the linker, as before this filter existed.
+  ## a non-Darwin one. A static archive is judged by its first member that
+  ## carries an object header (`archiveObjectHeader`): a cross-build leaves
+  ## `sqlite-static-aarch64-unknown-linux-musl` in the store with only a
+  ## `libsqlite3.a`, and an unclassified archive let the glob below hand an
+  ## x86-64 link that directory (`ld: skipping incompatible … libsqlite3.a`,
+  ## `cannot find -lsqlite3`; measured 2026-10-30). Anything else
+  ## unclassified -- a linker script, a short file, an unknown target
+  ## machine -- is accepted and left to the linker, as before this filter
+  ## existed.
   if not repoFileExists(libFile):
     return true
-  let hdr = readFile(repoPath(libFile))
+  var hdr = readFile(repoPath(libFile))
   if hdr.len < 8:
     return true
+  if hdr.startsWith("!<arch>\n"):
+    hdr = archiveObjectHeader(hdr)
+    if hdr.len < 8:
+      return true
   proc b(at: int): uint32 = uint32(ord(hdr[at]))
   proc le32(at: int): uint32 =
     b(at) or (b(at + 1) shl 8) or (b(at + 2) shl 16) or (b(at + 3) shl 24)
@@ -899,6 +1042,7 @@ proc libMatchesTargetArch(libFile: string): bool =
     if hostCPU == "amd64": 0x3E'u32         # EM_X86_64
     elif hostCPU == "arm64": 0xB7'u32       # EM_AARCH64
     elif hostCPU == "i386": 0x03'u32        # EM_386
+    elif hostCPU == "arm": 0x28'u32         # EM_ARM (32-bit armhf/armel)
     else: 0'u32
   let targetCpuType =
     if hostCPU == "amd64": 0x01000007'u32   # CPU_TYPE_X86_64
@@ -944,11 +1088,25 @@ proc libMatchesTargetArch(libFile: string): bool =
         return true
     false
 
-proc holdsLibrary(libDir, dylibName: string; targetArchOnly: bool): bool =
-  ## Whether `libDir/dylibName` exists and -- when `targetArchOnly` -- is a
-  ## file the target's loader can map (see `libMatchesTargetArch`).
-  let path = libDir / dylibName
-  repoFileExists(path) and (not targetArchOnly or libMatchesTargetArch(path))
+proc dirHoldsLibrary(libDir: string; dylibNames: openArray[string];
+                     targetArchOnly: bool): bool =
+  ## Whether `libDir` holds one of `dylibNames` -- and, when
+  ## `targetArchOnly`, none of them built for another architecture.
+  ##
+  ## The directory is judged as a whole because the names are alternatives
+  ## for ONE `-l`: a static archive (`libsqlite3.a`) cannot be classified
+  ## from its header and is accepted on its own, so judging name by name let
+  ## the archive vouch for a directory whose `libsqlite3.so` was foreign --
+  ## and the linker, which prefers the shared object, then took that. A
+  ## cross-compile to armhf on an x86-64 Nix host linked the store's x86-64
+  ## SQLite that way.
+  result = false
+  for dylibName in dylibNames:
+    let path = libDir / dylibName
+    if repoFileExists(path):
+      if targetArchOnly and not libMatchesTargetArch(path):
+        return false
+      result = true
 
 proc firstExistingPrefixLibDir(prefix: string;
                                dylibNames: openArray[string];
@@ -958,9 +1116,8 @@ proc firstExistingPrefixLibDir(prefix: string;
   ## `prefix/lib64`, and the two common Debian-multiarch triples.
   for libSub in LibSubdirs:
     let candidate = prefix / libSub
-    for dylibName in dylibNames:
-      if holdsLibrary(candidate, dylibName, targetArchOnly):
-        return candidate
+    if dirHoldsLibrary(candidate, dylibNames, targetArchOnly):
+      return candidate
   ""
 
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
@@ -1034,9 +1191,8 @@ proc firstExistingLibDir(candidates: openArray[string];
     # standard lib subdirectories so a candidate like `/usr` resolves
     # whether the host is `/usr/lib`, `/usr/lib64`, or a Debian-multiarch
     # triple.
-    for dylibName in dylibNames:
-      if holdsLibrary(path, dylibName, targetArchOnly):
-        return path
+    if dirHoldsLibrary(path, dylibNames, targetArchOnly):
+      return path
     let resolved = firstExistingPrefixLibDir(path, dylibNames, targetArchOnly)
     if resolved.len > 0:
       return resolved

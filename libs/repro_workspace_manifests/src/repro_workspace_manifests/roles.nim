@@ -100,8 +100,7 @@ type
   RoleSettings* = object
     ## What role resolution needs from the workspace settings file: the
     ## profiles, the custom roles and the default profile. Empty when the
-    ## workspace has no settings file, or only the old `.repro-workspace.toml`
-    ## (`bootstrap.v1`), which has no way to declare any of them.
+    ## workspace has no settings file.
     path*: string
       ## The settings file these came from, for diagnostics; "" when none.
     profiles*: seq[(string, BranchRoleDecls)]
@@ -118,12 +117,8 @@ type
     decls*: BranchRoleDecls
 
 proc roleSettingsFrom*(s: WorkspaceSettings): RoleSettings =
-  ## The role-resolution view of a settings record. A `bootstrap.v1` file
-  ## maps to an empty view (keeping its path for diagnostics): it predates
-  ## profiles and custom roles.
+  ## The role-resolution view of a settings record.
   result.path = s.path
-  if s.isLegacySettings:
-    return
   result.profiles = s.profiles
   result.customRoles = s.customRoles
   result.defaultProfile = s.workspace.default_profile
@@ -300,10 +295,6 @@ proc validateRoleSettings*(s: WorkspaceSettings) =
   ## * every profile `[workspace] profile` / `default_profile` names exists;
   ## * every value `[workspace]` and each `[profiles.<name>]` declares is a
   ##   branch name, and every custom role they use is declared.
-  ##
-  ## `bootstrap.v1` files carry none of these and are not checked.
-  if s.isLegacySettings:
-    return
   let rs = roleSettingsFrom(s)
   let schema = schemaWorkspaceSettingsV1
   for decl in s.customRoles:
@@ -418,11 +409,6 @@ proc resolveRootRoles*(s: WorkspaceSettings): seq[ResolvedRole] =
   ## RAISES naming the file and `workspace.mainline`: the root's mainline is a
   ## declaration, and inferring it from the root repo's `origin/HEAD` is the
   ## inference §3.4 forbids.
-  ##
-  ## Only for `settings.v1`. A `bootstrap.v1` file has no `[workspace]`; its
-  ## callers keep reading `[manifest] branch` (`rootMainline`).
-  doAssert not s.isLegacySettings,
-    "resolveRootRoles reads settings.v1 `[workspace]`; bootstrap.v1 has none"
   let rs = roleSettingsFrom(s)
   let declarers = rootDeclarers(s)
   result = resolveRoleSet(rs, declarers)
@@ -467,10 +453,10 @@ proc roleDeclarerText*(r: ResolvedRole): string =
 proc resolveRoleFromMainline*(rs: RoleSettings; mainline,
                               role: string): Option[ResolvedRole] =
   ## Resolve `role` for a repo whose ONLY declaration is a mainline that the
-  ## roles model did not produce: a legacy `repo.v1` fragment whose mainline
-  ## `repro branch` reads from a branch-shaped `revision` or the project's
-  ## `trunk`, or a root repo whose mainline comes from the old
-  ## `.repro-workspace.toml`. Every other role then falls back to that
+  ## roles model did not produce: a repo of a committed-lock-only workspace,
+  ## whose mainline `repro branch` reads from a branch-shaped `revision` or
+  ## the ref the committed lock records for the root. Every other role then
+  ## falls back to that
   ## mainline by the ordinary procedure (§2.2), through the same resolver —
   ## a custom role through its declared `fallback` chain. `none` when
   ## `mainline` is empty (nothing to fall back to).

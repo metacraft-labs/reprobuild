@@ -129,6 +129,9 @@ import repro_dsl_stdlib/packages/python_unittest_runner
 # ``repro_project_dsl`` so the import order is fine either way.
 # ``config.nims`` adds ``libs/ct_test_nim_unittest/src`` to the Nim path.
 import ct_test_nim_unittest
+# Test-Binary-Grouping M2: the group plan's pure helpers (group module text,
+# module path). The plan itself is stamped into ``repro_tests.nim``.
+import ct_test_nim_unittest/grouping
 
 # Spec-Implementation M4: install the in-process ct-test ``TestRunner``
 # adapter (from the ``reprobuild-ct-test-runner`` repo) onto
@@ -363,6 +366,12 @@ const
                  "t_e2e_home_facts_from_isolated_plan",
                  "t_e2e_activity_scoped_resource_follows_host_selection"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
+        artifacts: @[profileCompileNimSpy])
+    # ReproOS add-on mode gates (`tests/e2e/addon/`), on the same harness.
+    for name in ["t_addon_registry_mode_round_trip",
+                 "t_system_profile_host_selection",
+                 "t_addon_mode_mismatch_is_refused"]:
+      rows.add TestGraphArtifacts(source: "tests/e2e/addon/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
     # The clang first-run gate's positive control compiles through a "clang"
     # that drops `-fno-temp-file` (`tests/e2e/m83/exec_without_arg.nim`); a
@@ -889,12 +898,13 @@ package reprobuild:
 
     # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
     #
-    # Each of the three names a workspace PROJECT whose ``repro.nim``
+    # Each of the four names a workspace PROJECT whose ``repro.nim``
     # declares a ``library`` and NO ``executable``:
     #
     #   reprobuild-test-adapters -> ``library repro_test_adapters`` (src/)
     #   nim-stackable-hooks      -> ``library stackable_hooks``     (src/)
     #   nim-shm-queue            -> ``library shm_queue``           (src/)
+    #   test-certificates-tools  -> ``library test_certificates``   (src/)
     #
     # That is Cross-Repo-Source-Consumption §4.2a (SC-11), the Nim
     # library-source channel: reprobuild resolves the producer through the
@@ -940,13 +950,17 @@ package reprobuild:
     # BOOTSTRAP ORDER. ``declaresProducerEdge`` materializes a producer only
     # for a develop override or a committed ``LockedDep``. A bare ``uses:``
     # string with neither falls through to PATH and fails outright, exactly
-    # as the ``runquotad`` note above describes. So these three lines and the
+    # as the ``runquotad`` note above describes. So these lines and the
     # ``repro.lock`` entries that pin them are ONE change: adding a name here
     # without running ``repro lock refresh`` breaks every checkout that has
     # no develop override for it.
     "reprobuild-test-adapters"
     "nim-stackable-hooks"
     "nim-shm-queue"
+    # The test-certificate standard's store, note framing and two-note merge
+    # (``import test_certificates`` in repro_cli_support). Same SC-11 channel
+    # and the same one-change rule: this line and its ``repro.lock`` entry.
+    "test-certificates-tools"
 
     # Note: the remaining system libraries (libblake3, xxhash, sqlite3) and
     # the source-only fixed inputs that are NOT workspace repos (nimcrypto,
@@ -1763,6 +1777,45 @@ package reprobuild:
     var perCaseFixtureGateInputs: seq[TestGraphArtifact] = @[]
     var perCaseFixtureGateNeedsRepro = false
 
+    # TEST-BINARY GROUPING (reprobuild-specs spec/Test-Binary-Grouping.md, M2).
+    #
+    # A row whose ``group`` is set does not get its own binary in
+    # ``test-builds``. Its cases are compiled into ``build/test-bin/<group>``
+    # together with up to 49 other sources that share its compile options, so
+    # the library closure every test drags in is analysed and compiled once
+    # per group instead of once per file (M1: 51 instead of 314 CPU-seconds
+    # per ``tests/unit`` source). The plan is a pure function of the sorted
+    # source list and each source's compile-option key, decided by
+    # ``ct_test_nim_unittest/grouping`` and stamped into the table by the
+    # generator, so this loop only ACCUMULATES per group:
+    #
+    #   * the group MODULE is a ``fs.writeText`` edge, so the generated source
+    #     is a content-keyed graph artefact, never a file in the tree; its
+    #     compile depends on it by output path;
+    #   * the group's EXECUTE edge takes the UNION of its members'
+    #     ``requiredBinaries`` (``requiresReproBinary``, fixture artifacts) and
+    #     their ordering deps, so a member that runs ``build/bin/repro`` still
+    #     re-runs when the CLI changes;
+    #   * every member's OWN compile edge is still registered, outside
+    #     ``test-builds``, in ``test-group-fallback-<group>`` and in
+    #     ``test-builds-per-file``. ``scripts/test_group_fallback.py`` builds
+    #     the first when a group fails to compile, so one broken member costs
+    #     time, not the coverage of its 49 neighbours, and the failure is
+    #     reported against that member. The second is the per-file baseline:
+    #     what ``test-builds`` was before grouping, for measurements and for
+    #     the M2 correctness comparison.
+    #
+    # Parallel sequences indexed by first appearance rather than tables: the
+    # table is sorted by source, so the order is deterministic, and ~50
+    # groups make the linear ``find`` free.
+    var groupNames: seq[string] = @[]
+    var groupMemberSources: seq[seq[string]] = @[]
+    var groupFirstSpec: seq[TestSpec] = @[]
+    var groupRequiredBinaries: seq[seq[string]] = @[]
+    var groupExecuteDeps: seq[seq[string]] = @[]
+    var groupFallbackActions: seq[seq[BuildActionDef]] = @[]
+    var perFileBuildActions: seq[BuildActionDef] = @[]
+
     for spec in reprobuildTestSpecs:
       when defined(windows):
         if spec.source.contains("nix_daemon"):
@@ -1780,11 +1833,49 @@ package reprobuild:
         extraPassC = platformPassC,
         extraPassL = platformPassL & testRuntimePassL,
         extraEnv = sourceOnlyEnv,
+        # A grouped source's own compile is its group's FALLBACK, not a
+        # second test binary: see ``typedTestBinary``.
+        typedTestBinary = spec.group.len == 0,
         )
-      reprobuildTestBuildActions.add(edge.action)
+      perFileBuildActions.add(edge.action)
+      var groupIndex = -1
+      if spec.group.len > 0:
+        # Sources the code below gives an execute edge a group's could not
+        # carry. The generator keeps each of them single
+        # (``RecipeSpecialCasedSources`` and friends in
+        # ``scripts/generate_test_edges.nim``); this is what stops that list
+        # drifting from this file without anyone noticing.
+        doAssert not spec.selfInterposes and
+            spec.source != M4ConsolidationVerificationTest and
+            spec.source != PerCaseFixtureGate and
+            spec.source notin PerCaseFixtureGateSubjects and
+            not spec.source.startsWith("tests/bundles/") and
+            not spec.source.contains("nix_daemon") and
+            spec.source !=
+              "tests/integration/t_hcr_native_library_prerequisite.nim",
+          spec.source & " is grouped into " & spec.group & ", but repro.nim " &
+          "gives it an execute edge a group cannot carry; keep it single in " &
+          "scripts/generate_test_edges.nim and regenerate"
+        for row in optInLayerEdges:
+          doAssert row.source != spec.source,
+            spec.source & " has an opt-in layer edge and must stay single"
+        groupIndex = groupNames.find(spec.group)
+        if groupIndex < 0:
+          groupNames.add(spec.group)
+          groupMemberSources.add(@[])
+          groupFirstSpec.add(spec)
+          groupRequiredBinaries.add(@[])
+          groupExecuteDeps.add(@[])
+          groupFallbackActions.add(@[])
+          groupIndex = groupNames.high
+        groupMemberSources[groupIndex].add(spec.source)
+        groupFallbackActions[groupIndex].add(edge.action)
+      else:
+        reprobuildTestBuildActions.add(edge.action)
       if spec.source == "tests/integration/t_hcr_native_library_prerequisite.nim":
         # The legacy bare default excludes direct test members only. Keep
         # this additive regression's compile edge out of that default too.
+        # (Never grouped: scripts/generate_test_edges.nim keeps it single.)
         reprobuildTestExecuteActions.add(edge.action)
       if spec.source.startsWith("tests/bundles/"):
         pureUnitBundleArtifacts.add(TestGraphArtifact(
@@ -1945,6 +2036,16 @@ package reprobuild:
           executeDeps.add("reprobuild.test_fixtures.install_mirror_openmp_probe")
           requiredBinaries.add(installMirrorFixtureRoot & "/libc-probe.so")
           executeDeps.add("reprobuild.test_fixtures.install_mirror_libc_library")
+      if groupIndex >= 0:
+        # A grouped member's execute requirements go to its group's edge,
+        # emitted after this loop. Union, without duplicates.
+        for path in requiredBinaries:
+          if path notin groupRequiredBinaries[groupIndex]:
+            groupRequiredBinaries[groupIndex].add(path)
+        for dep in executeDeps:
+          if dep notin groupExecuteDeps[groupIndex]:
+            groupExecuteDeps[groupIndex].add(dep)
+        continue
       # NO TOOL REFS ON THE EXECUTE EDGE, AND THAT IS A DECISION.
       #
       # The BUILD edge above declares `gcc` because `nim c` shells out to
@@ -2100,6 +2201,47 @@ package reprobuild:
           extraEnv = optInLayerEnvFor(spec.source, on = true),
           dependencyPolicy = executePolicy)
         discard target(row.targetName, liveEdge)
+
+    # Test-Binary-Grouping M2: one module edge, one compile edge and one
+    # execute edge per group. See the note above the loop.
+    for gi in 0 ..< groupNames.len:
+      let groupName = groupNames[gi]
+      let first = groupFirstSpec[gi]
+      let modulePath = groupModulePath(groupName)
+      let moduleEdge = dslfs.writeText(modulePath,
+        groupModuleText(groupName, groupMemberSources[gi]),
+        actionId = "reprobuild.test_group_module." & groupName)
+      let groupBinary = "build/test-bin/" & groupName
+      # Every member shares ``first``'s compile options: they are part of the
+      # key the plan groups on.
+      let groupPassC: seq[string] =
+        when hostIsMacos: first.extraPassC else: newSeq[string]()
+      let groupPassL: seq[string] =
+        when hostIsMacos: first.extraPassL else: newSeq[string]()
+      let groupEdge = buildNimUnittest.build(
+        source = modulePath,
+        binary = groupBinary,
+        defines = first.defines,
+        paths = testNimPaths,
+        extraPassC = groupPassC,
+        extraPassL = groupPassL & testRuntimePassL,
+        extraEnv = sourceOnlyEnv,
+        after = [moduleEdge])
+      appendRegisteredActionToolIdentityRefs(groupEdge.action.id, ["gcc"])
+      reprobuildTestBuildActions.add(moduleEdge)
+      reprobuildTestBuildActions.add(groupEdge.action)
+      let groupExecute = groupEdge.testBinary.run(
+        deps = groupExecuteDeps[gi],
+        requiredBinaries = groupRequiredBinaries[gi],
+        actionId = reproTestExecuteId(groupBinary),
+        registerImplicitName = false,
+        dependencyPolicy = automaticMonitorPolicy())
+      reprobuildTestExecuteActions.add(groupExecute)
+      discard collect("test-group-fallback-" & groupName,
+        groupFallbackActions[gi])
+
+    # The per-file baseline: every source's own compile, grouped or not.
+    discard collect("test-builds-per-file", perFileBuildActions)
 
     # Bootstrap-And-Self-Build B4: Python tests join the ``test``
     # collection as additional execute edges. Each entry in

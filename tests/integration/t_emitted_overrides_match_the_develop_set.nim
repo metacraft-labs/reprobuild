@@ -376,8 +376,8 @@ suite "NF-1: the emitted overrides are the develop set":
       # is §5's inert knob reached from a different direction, so the shell
       # marker (`.repro/workspace.toml`) has to win over the repo's own lock.
       createDir(ws / ".repro")
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\n" &
         "project = \"nf1\"\n" &
         "branch = \"main\"\n")

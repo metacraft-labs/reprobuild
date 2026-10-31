@@ -260,6 +260,51 @@ proc resolveGpgBin*(): string =
     return found
   ""
 
+type
+  GpgStatusVerdict* = object
+    good*: bool          ## GOODSIG and VALIDSIG seen, nothing refusing
+    signerKeyId*: string ## the VALIDSIG fingerprint (or GOODSIG key id)
+    reason*: string      ## why good is false
+
+const
+  GpgRefusingStatuses = ["BADSIG", "ERRSIG", "EXPSIG", "EXPKEYSIG",
+                         "REVKEYSIG", "NO_PUBKEY", "KEYEXPIRED",
+                         "KEYREVOKED", "NODATA", "UNEXPECTED", "FAILURE"]
+    ## Status keywords that mean the bytes are NOT vouched for by a current
+    ## key, whatever the exit code. gpg 2.4 exits 0 for a good signature by
+    ## an EXPIRED key (EXPKEYSIG with VALIDSIG, and KEYEXPIRED),
+    ## and documents the same for a revoked one (REVKEYSIG), so the exit
+    ## code alone is a fail-open check. doc/DETAILS in the GnuPG source lists
+    ## the keywords.
+
+proc gpgStatusVerdict*(statusOutput: string): GpgStatusVerdict =
+  ## Decide from --status-fd lines whether a verification is good:
+  ## exactly the GOODSIG + VALIDSIG pair, and none of
+  ## GpgRefusingStatuses. A clearsigned file carrying several
+  ## signatures (Debian signs trixie with three keys) is good when every
+  ## signature is good: one refusing status anywhere refuses the whole.
+  var goodSig = ""
+  var validSig = ""
+  var refusals: seq[string] = @[]
+  for line in statusOutput.splitLines:
+    if not line.startsWith("[GNUPG:] "): continue
+    let parts = line.splitWhitespace()
+    if parts.len < 2: continue
+    let keyword = parts[1]
+    if keyword == "GOODSIG" and parts.len >= 3 and goodSig.len == 0:
+      goodSig = parts[2]
+    elif keyword == "VALIDSIG" and parts.len >= 3 and validSig.len == 0:
+      validSig = parts[2]
+    elif keyword in GpgRefusingStatuses:
+      refusals.add(line[len("[GNUPG:] ") .. ^1])
+  if refusals.len > 0:
+    result.reason = refusals.join("; ")
+  elif goodSig.len == 0 or validSig.len == 0:
+    result.reason = "no GOODSIG + VALIDSIG pair in the status output"
+  else:
+    result.good = true
+    result.signerKeyId = validSig
+
 proc verifyViaExternalGpg*(inRelease: string; keyBundleDir: string;
                            gpgBin: string): InReleaseVerification =
   ## Shell-out backend.
@@ -314,16 +359,15 @@ proc verifyViaExternalGpg*(inRelease: string; keyBundleDir: string;
     e.backend = sbExternalGpg
     e.backendLog = fullLog
     raise e
-
-  # Parse the --status-fd output for the signer key id.
-  var signerId = ""
-  for line in verifyOut.splitLines:
-    if line.startsWith("[GNUPG:] VALIDSIG ") or
-       line.startsWith("[GNUPG:] GOODSIG "):
-      let parts = line.splitWhitespace()
-      if parts.len >= 3:
-        signerId = parts[2]
-        break
+  let verdict = gpgStatusVerdict(verifyOut)
+  if not verdict.good:
+    var e = newException(SignatureVerificationError,
+      "gpg --verify did not report a good, valid signature: " &
+      verdict.reason)
+    e.backend = sbExternalGpg
+    e.backendLog = fullLog
+    raise e
+  let signerId = verdict.signerKeyId
 
   let parts = extractClearsignedPayload(inRelease)
   result = InReleaseVerification(
@@ -335,6 +379,32 @@ proc verifyViaExternalGpg*(inRelease: string; keyBundleDir: string;
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+proc verifyInReleaseWithKeyring*(inRelease: string; keyringFile: string):
+    InReleaseVerification =
+  ## Verify against ONE keyring file — apt's ``Signed-By=`` semantics: the
+  ## keys that vouch for this archive are exactly the ones its source
+  ## names, and a key vendored for another archive is never consulted.
+  ## Requires ``gpg`` (the fingerprint allowlist cannot express a
+  ## per-archive key set). ``keyringFile`` is a binary (dearmored) OpenPGP
+  ## keyring, the form apt ships under ``/usr/share/keyrings/``.
+  if not fileExists(keyringFile):
+    var e = newException(SignatureVerificationError,
+      "keyring " & keyringFile & " does not exist")
+    e.backend = sbExternalGpg
+    raise e
+  let gpgBin = resolveGpgBin()
+  if gpgBin.len == 0:
+    var e = newException(SignatureVerificationError,
+      "--keyring needs gpg on PATH (or REPRO_GPG_BIN)")
+    e.backend = sbExternalGpg
+    raise e
+  let dir = createTempDir("apt-harvest-keyring-", "")
+  defer:
+    try: removeDir(dir)
+    except CatchableError: discard
+  copyFile(keyringFile, dir / "keyring.gpg")
+  verifyViaExternalGpg(inRelease, dir, gpgBin)
 
 proc verifyInRelease*(inRelease: string; keyBundleDir: string;
                      preferredBackend = sbExternalGpg):
@@ -360,8 +430,10 @@ proc verifyInRelease*(inRelease: string; keyBundleDir: string;
 proc enforceValidUntil*(payload: string; now: DateTime) =
   ## Extract the ``Valid-Until:`` field from a verified InRelease
   ## payload and raise ``SignatureVerificationError`` if ``now`` is
-  ## past the deadline. Tolerates the absence of the field (some
-  ## snapshot suites omit it for archived releases).
+  ## past the deadline, or if the field is present but not in the
+  ## ``Thu, 29 Oct 2026 22:23:10 UTC`` form the archive format requires: a
+  ## deadline that cannot be read is not a deadline that was checked.
+  ## Tolerates the absence of the field (snapshot archives omit it).
   for rawLine in payload.splitLines:
     let line = rawLine.strip()
     if line.startsWith("Valid-Until:"):
@@ -370,9 +442,12 @@ proc enforceValidUntil*(payload: string; now: DateTime) =
       try:
         parsed = parse(stamp, "ddd, dd MMM yyyy HH:mm:ss 'UTC'", utc())
       except CatchableError:
-        # Other formats: leave validation to the caller; we just
-        # warn through the log.
-        return
+        var e = newException(SignatureVerificationError,
+          "InRelease Valid-Until '" & stamp & "' is not a date this " &
+          "verifier can read; refusing rather than skipping the check")
+        e.backend = sbExternalGpg
+        e.backendLog = "Valid-Until enforcement"
+        raise e
       if now > parsed:
         var e = newException(SignatureVerificationError,
           "InRelease is stale: Valid-Until " & stamp &

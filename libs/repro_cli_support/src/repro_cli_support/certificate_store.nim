@@ -9,37 +9,53 @@
 ## what a certificate covers stay in ``repro_cli_support``, which calls in
 ## here.
 ##
+## What is the reference library's and what is reprobuild's
+## -------------------------------------------------------
+## Root resolution (§2.1), the user-root ownership check (§2.3) and pruning
+## (§2.5) are the ``test_certificates`` library's (test-certificates-tools),
+## linked rather than re-implemented, so they cannot drift from the helper
+## every other producer uses. The WRITER stays here: the library writes only
+## as a RELAY (Tooling §1), and reprobuild's issuance is a SIGNING writer —
+## it made the signature it delivers, and §2.3 lets exactly that writer
+## replace an existing signed copy. Keeping one writer with both roles is
+## smaller than wrapping the relay-only one.
+##
 ## The rules, as implemented
 ## -------------------------
 ## * **Roots (§2.1).** The USER root is ``$TEST_CERTIFICATES_DIR`` when it is
 ##   an absolute path, else the platform's per-user state directory. The
 ##   SYSTEM root is ``$TEST_CERTIFICATES_SYSTEM_DIR/<uid>`` when that is
 ##   absolute, else ``/var/lib/test-certificates/<uid>`` (and the macOS and
-##   Windows equivalents). A relative value is ignored and the reason is kept,
-##   so a user who set it can see why it had no effect. reprobuild's
-##   ``repro test`` runs as the user, so it writes the user root and never the
-##   system root, which belongs to a privileged producer.
-## * **Writing (§2.3).** Owner-only directories hold atomic, flushed record
-##   renames. Every writer holds the root's persistent `.write-lock` through
-##   inspecting and publishing. Unsigned copies keep an existing record;
-##   relayed signed copies replace only a well-formed unsigned twin. Only a
-##   caller that made the new signature can replace an existing signed copy.
+##   Windows equivalents). A relative or empty value is ignored and the reason
+##   is kept, so a user who set it can see why it had no effect; a root with
+##   no usable value is UNRESOLVED, never guessed. reprobuild's ``repro test``
+##   runs as the user, so it writes the user root and never the system root,
+##   which belongs to a privileged producer.
+## * **Writing (§2.3).** An existing user root must be owned by this process's
+##   effective account; that is checked before ANY mutation, the
+##   ``.write-lock`` included, and a foreign root is refused, never adopted
+##   or repaired. New directories are owner-only (``0700``) and new record
+##   files ``0600`` whatever the umask. Atomic, flushed record renames. Every
+##   writer holds the root's persistent `.write-lock` through inspecting and
+##   publishing. Unsigned copies keep an existing record; relayed signed
+##   copies replace only a well-formed unsigned twin. Only a caller that made
+##   the new signature can replace an existing signed copy.
 ## * **Reading (§2.4).** A missing root or directory is "nothing found",
 ##   never an error. A directory that exists and cannot be listed is
 ##   UNREADABLE and is said so: ``walkDir`` is called with ``checkDir``,
 ##   because without it a directory it cannot open yields nothing at all and
 ##   an unreadable store would read as an empty one. Names beginning with
 ##   ``.`` are never records.
-## * **Pruning (§2.5).** Whole content directories, keeping the ``keep`` most
-##   recently written plus the protected ones (the current repository's
-##   ``HEAD^{tree}`` directory, the one just written). A directory leaves the
-##   store in ONE atomic step — renamed, within its parent, to a dot-name no
-##   reader treats as a content directory — and is deleted only after that.
-##   Deleting in place is not atomic: a writer whose first attempt it defeated
-##   retries into the same, still-present directory, and the deletion goes on
-##   to remove the retry's temporary file and the directory under it. A
-##   directory a writer is in (modified a moment ago, or holding a fresh
-##   temporary file) is left alone. A writer whose rename failed because a
+## * **Pruning (§2.5).** ``test_certificates/prune``'s ``pruneRoot``: whole
+##   content directories, keeping the ``keep`` most recently written plus the
+##   protected ones, each renamed aside to a dot-name in ONE atomic step and
+##   only then deleted, a directory being written into left alone, and an
+##   existing root owned by another account refused before anything is
+##   renamed or deleted. WHICH directories are protected is the caller's
+##   (``repro_cli_support``): every ``HEAD`` content id the library's
+##   ``pruneProtection`` computes — unscoped and in each declared scope, in
+##   the native ``git-tree-*`` algorithm and ``manifest-v1-sha256`` — plus
+##   the directory just written. A writer whose rename failed because a
 ##   prune took its directory (the temporary file vanished, or the directory
 ##   is gone or is no longer the one it wrote into) recreates it and retries
 ##   once; the retry's directory was created after the rename aside, so that
@@ -51,36 +67,53 @@ import std/[algorithm, atomics, os, strutils, times]
 
 import repro_cli_support/content_id
 
+# The reference library's modules, imported QUALIFIED ONLY: its names
+# (``parseContentId``, ``PruneStage``, ``StoreRoots``…) overlap this
+# engine's own, and an unqualified import would let an overload silently
+# pick the other one.
+from test_certificates/roots as tcroots import nil
+from test_certificates/prune as tcprune import nil
+from test_certificates/layout as tclayout import nil
+
 when defined(windows):
   import std/winlean
+  from test_certificates/windows_owner as tcowner import nil
 else:
-  from std/posix import fsync, getuid
-  proc c_rename(oldname, newname: cstring): cint {.
-    importc: "rename", header: "<stdio.h>".}
+  import std/posix except Time
+  var storeNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+  var storeOpenDirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+  from test_certificates/permissions as tcperm import nil
 
 const
-  StoreDirName* = "test-certificates"
+  StoreDirName* = tcroots.StoreDirName
     ## The leaf of every per-user and machine-wide root (§2.1).
-  LocalStoreLayout* = "v1"
+  LocalStoreLayout* = tclayout.LayoutVersion
     ## The layout version directory directly under a root (§2.2).
-  DefaultStoreRetention* = 20
+  DefaultStoreRetention* = tcprune.DefaultKeep
     ## The reference policy's number of content directories kept (§2.5).
-  StaleTemporaryAge* = initDuration(hours = 1)
+  StaleTemporaryAge* = tcprune.StaleTemporaryAge
     ## A temporary file older than this belongs to a writer that died. Without
     ## an age, a crashed run would pin its content directory forever.
-  FreshDirectoryAge* = initDuration(seconds = 10)
+  FreshDirectoryAge* = tcprune.FreshDirectoryAge
     ## A content directory modified more recently than this is treated as
     ## being written into: a writer creates the directory a moment BEFORE it
     ## opens its temporary file.
-  TemporaryMarker* = ".tmp-"
+  TemporaryMarker* = tclayout.TemporaryMarker
     ## Part of every temporary name, after the leading ``.``.
-  RemovalMarker* = ".removing-"
+  RemovalMarker* = tclayout.RemovalMarker
     ## Part of the name a content directory is renamed to while a prune
     ## deletes it: ``.<digest>.removing-<pid>-<n>``.
 
 # ---------------------------------------------------------------------------
 # Roots (§2.1)
 # ---------------------------------------------------------------------------
+#
+# Resolution is the reference library's (``test_certificates/roots``): the
+# same pure function of (platform, environment, account) every conforming
+# helper uses, so reprobuild cannot drift from the variables, fallbacks and
+# "a relative or empty value is ignored and reported" rule of §2.1. What stays
+# here is reprobuild's naming of the platform and of the result, which the
+# rest of the engine and its tests already speak.
 
 type
   StoreRootPlatform* = enum
@@ -102,116 +135,41 @@ proc storeRootPlatformFor*(osName: string): StoreRootPlatform =
   of "windows": srpWindows
   else: srpUnix
 
-proc isAbsoluteOn(platform: StoreRootPlatform; path: string): bool =
+proc libraryPlatform(platform: StoreRootPlatform): tcroots.RootPlatform =
   case platform
-  of srpWindows:
-    (path.len >= 3 and path[0] in Letters and path[1] == ':' and
-      path[2] in {'\\', '/'}) or path.startsWith("\\\\")
-  else:
-    path.startsWith("/")
-
-proc joinOn(platform: StoreRootPlatform; parts: varargs[string]): string =
-  let sep = if platform == srpWindows: '\\' else: '/'
-  for part in parts:
-    if result.len == 0:
-      result = part
-    elif result.endsWith(sep):
-      result.add(part)
-    else:
-      result.add(sep)
-      result.add(part)
-
-proc absoluteVariable(platform: StoreRootPlatform; env: StoreEnvironment;
-                      name: string; problems: var seq[string]): string =
-  let value = env(name)
-  if value.len == 0:
-    return ""
-  if not isAbsoluteOn(platform, value):
-    problems.add("$" & name & " is set to the relative path '" & value &
-      "', which is ignored: a store whose location depends on the current " &
-      "directory would be a different store for each process")
-    return ""
-  value
+  of srpUnix: tcroots.rpUnix
+  of srpMacos: tcroots.rpMacos
+  of srpWindows: tcroots.rpWindows
 
 proc resolveCertificateStoreRoots*(platform: StoreRootPlatform;
                                    env: StoreEnvironment;
                                    account: string): CertificateStoreRoots =
   ## Both roots per §2.1. ``account`` is the numeric uid on POSIX systems and
   ## the account SID on Windows; "" leaves the system root unresolved (a guess
-  ## could name another user's partition).
-  let explicitUser = absoluteVariable(platform, env, "TEST_CERTIFICATES_DIR",
-    result.problems)
-  if explicitUser.len > 0:
-    result.user = explicitUser
-  else:
-    case platform
-    of srpUnix:
-      let stateHome = absoluteVariable(platform, env, "XDG_STATE_HOME",
-        result.problems)
-      if stateHome.len > 0:
-        result.user = joinOn(platform, stateHome, StoreDirName)
-      else:
-        let home = absoluteVariable(platform, env, "HOME", result.problems)
-        if home.len > 0:
-          result.user = joinOn(platform, home, ".local", "state", StoreDirName)
-        else:
-          result.problems.add("the user root cannot be resolved: neither " &
-            "$TEST_CERTIFICATES_DIR, $XDG_STATE_HOME nor $HOME is an " &
-            "absolute path")
-    of srpMacos:
-      let home = absoluteVariable(platform, env, "HOME", result.problems)
-      if home.len > 0:
-        result.user = joinOn(platform, home, "Library", "Application Support",
-          StoreDirName)
-      else:
-        result.problems.add("the user root cannot be resolved: neither " &
-          "$TEST_CERTIFICATES_DIR nor $HOME is an absolute path")
-    of srpWindows:
-      let local = absoluteVariable(platform, env, "LOCALAPPDATA",
-        result.problems)
-      if local.len > 0:
-        result.user = joinOn(platform, local, StoreDirName)
-      else:
-        result.problems.add("the user root cannot be resolved: neither " &
-          "%TEST_CERTIFICATES_DIR% nor %LOCALAPPDATA% is an absolute path")
-
-  let explicitSystem = absoluteVariable(platform, env,
-    "TEST_CERTIFICATES_SYSTEM_DIR", result.problems)
-  if account.len == 0:
-    result.problems.add("the system root cannot be resolved: this process " &
-      "does not know its account's " &
-      (if platform == srpWindows: "SID" else: "uid"))
-    return
-  if explicitSystem.len > 0:
-    result.system = joinOn(platform, explicitSystem, account)
-  else:
-    case platform
-    of srpUnix:
-      result.system = joinOn(platform, "/var/lib", StoreDirName, account)
-    of srpMacos:
-      result.system = joinOn(platform, "/Library/Application Support",
-        StoreDirName, account)
-    of srpWindows:
-      let programData = absoluteVariable(platform, env, "ProgramData",
-        result.problems)
-      if programData.len > 0:
-        result.system = joinOn(platform, programData, StoreDirName, account)
-      else:
-        result.problems.add("the system root cannot be resolved: " &
-          "%ProgramData% is not an absolute path")
+  ## could name another user's partition). Every variable read must be a
+  ## non-empty ABSOLUTE path in ``platform``'s terms (a drive-relative
+  ## ``C:state`` is relative); a relative one is reported and the next
+  ## fallback is tried, and a root with no usable value is UNRESOLVED and
+  ## reported, never resolved against the current directory.
+  let resolved = tcroots.resolveRoots(libraryPlatform(platform), env, account)
+  CertificateStoreRoots(user: resolved.user, system: resolved.system,
+    problems: resolved.problems)
 
 proc nativeStoreAccount*(): string =
-  ## The uid on POSIX. On Windows the account SID, which this process has no
-  ## binding to read yet: "" there, so the system root is left unresolved and
+  ## The uid on POSIX; on Windows the SID of this process token's user.
+  ## "" when it cannot be read, which leaves the system root unresolved and
   ## the reason recorded rather than guessed.
-  when defined(windows): ""
-  else: $getuid()
+  let account = tcroots.currentAccount()
+  if account.ok: account.account else: ""
 
 proc nativeCertificateStoreRoots*(): CertificateStoreRoots =
   ## Both roots as this process resolves them now. The environment is read on
   ## every call, never frozen at start-up.
-  resolveCertificateStoreRoots(storeRootPlatformFor(hostOS),
-    proc(name: string): string = getEnv(name), nativeStoreAccount())
+  let account = tcroots.currentAccount()
+  result = resolveCertificateStoreRoots(storeRootPlatformFor(hostOS),
+    proc(name: string): string = getEnv(name), account.account)
+  if not account.ok:
+    result.problems.add(account.problem)
 
 # ---------------------------------------------------------------------------
 # Retention setting (§2.5, operator decision D4)
@@ -428,20 +386,71 @@ proc temporaryName(finalName: string): string =
     $(temporaryCounter.fetchAdd(1) + 1) & "-" & $now.toUnix() &
     $now.nanosecond
 
+const UserRecordFileMode = 0o600
+  ## A record file in the user root (§2.3 step 1): readable and writable by
+  ## its owner only, WHATEVER THE UMASK — so the mode is set explicitly with
+  ## ``fchmod`` after creation rather than left to ``open``'s mode argument,
+  ## which the umask can only narrow (a umask of ``0277`` would otherwise
+  ## leave the owner unable to write) and a permissive one would leave as
+  ## ``0644`` through ``std/syncio``'s ``0666`` default.
+
 proc writeFlushed(path, content: string) =
-  var f: File
-  if not open(f, path, fmWrite):
-    raise newException(IOError, "cannot open '" & path & "' for writing: " &
-      osErrorMsg(osLastError()))
-  try:
-    f.write(content)
-    f.flushFile()
-    when not defined(windows):
-      if fsync(getFileHandle(f)) != 0:
+  ## Create ``path`` (it must not exist: it is a fresh temporary name),
+  ## write ``content``, flush it to disk. On POSIX the file is ``0600``
+  ## before a byte of the record is written.
+  when defined(windows):
+    var f: File
+    if not open(f, path, fmWrite):
+      raise newException(IOError, "cannot open '" & path & "' for writing: " &
+        osErrorMsg(osLastError()))
+    try:
+      f.write(content)
+      f.flushFile()
+    finally:
+      f.close()
+  else:
+    let fd = posix.open(path.cstring, O_WRONLY or O_CREAT or O_EXCL or
+      O_CLOEXEC or storeNoFollow, Mode(UserRecordFileMode))
+    if fd < 0:
+      raise newException(IOError, "cannot create '" & path & "': " &
+        osErrorMsg(osLastError()))
+    var f: File
+    if not open(f, fd, fmWrite):
+      discard posix.close(fd)
+      raise newException(IOError, "cannot open '" & path & "' for writing: " &
+        osErrorMsg(osLastError()))
+    try:
+      if fchmod(fd, Mode(UserRecordFileMode)) != 0:
+        raise newException(IOError, "cannot make '" & path & "' owner-only: " &
+          osErrorMsg(osLastError()))
+      f.write(content)
+      f.flushFile()
+      if fsync(fd) != 0:
         raise newException(IOError, "fsync of '" & path & "' failed: " &
           osErrorMsg(osLastError()))
-  finally:
-    f.close()
+    finally:
+      f.close()
+
+proc userRootOwnerProblem*(root: string): string =
+  ## "" when ``root`` does not exist yet or is owned by this process's
+  ## EFFECTIVE account; otherwise why it must not be touched (Transport
+  ## §2.3: "An existing user root MUST be owned by the writer's effective
+  ## account … refuse and report a root owned by another account, even when
+  ## that root is writable by the caller"). The check is the reference
+  ## library's — ``fstat`` of the opened directory against ``geteuid`` on
+  ## POSIX, the directory's owner SID against the effective token's user on
+  ## Windows — so an unreadable owner is a refusal, never permission.
+  if not dirExists(root) and not symlinkExists(root) and not fileExists(root):
+    return ""
+  when defined(windows):
+    tcowner.checkUserRootOwner(root)
+  else:
+    let fd = posix.open(root.cstring, O_RDONLY or storeOpenDirectory or O_CLOEXEC)
+    if fd < 0:
+      return "could not open the store root '" & root & "' to check its " &
+        "owner: " & osErrorMsg(osLastError())
+    defer: discard posix.close(fd)
+    tcperm.checkOwner(fd, root)
 
 proc touchDirectory(dir: string) =
   ## Mark a content directory written now. A rename into it does this
@@ -473,8 +482,6 @@ when defined(windows):
     {.stdcall, dynlib: "kernel32", importc: "GetLastError".}
   type StoreWriteLock = pointer
 else:
-  import std/posix except Time
-  var storeNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
   proc storeFlock(fd, operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
   type StoreWriteLock = cint
@@ -524,6 +531,13 @@ proc publishStoreRecord*(root, relative, bytes: string; signed: bool;
     return
   let contentDir = relative[0 ..< slash]
   let dir = result.path.parentDir
+  # Before ANY mutation — creating the root's ``.write-lock`` included — an
+  # existing root must be this account's (§2.3). A foreign root is reported
+  # and left exactly as it was; it is never adopted or repaired.
+  let ownerProblem = userRootOwnerProblem(root)
+  if ownerProblem.len > 0:
+    result.error = "refusing to write the certificate store: " & ownerProblem
+    return
   var writeLock: StoreWriteLock
   try:
     createOwnerOnlyDirs(root, "")
@@ -602,43 +616,6 @@ type
     errors*: seq[string]
       ## What could not be removed, and why. Never fatal.
 
-proc beingWritten(dir: string; now: Time): bool =
-  try:
-    if now - getLastModificationTime(dir) < FreshDirectoryAge:
-      return true
-  except OSError:
-    return true
-  try:
-    for kind, path in walkDir(dir, checkDir = true):
-      let name = path.extractFilename
-      if name.startsWith(".") and TemporaryMarker in name:
-        try:
-          if now - getLastModificationTime(path) < StaleTemporaryAge:
-            return true
-        except OSError:
-          return true   # renamed into place a moment ago: a write too
-  except OSError:
-    return true
-  false
-
-var removalCounter: Atomic[int]
-
-proc removalName(digest: string): string =
-  "." & digest & RemovalMarker & $getCurrentProcessId() & "-" &
-    $(removalCounter.fetchAdd(1) + 1)
-
-proc renameAside(path, aside: string) =
-  ## ONE rename of a directory within its parent and nothing else. ``moveDir``
-  ## falls back to copy-and-delete when the rename is refused, which is
-  ## neither atomic nor wanted: Windows refuses exactly when a writer has a
-  ## file open inside.
-  when defined(windows):
-    if moveFileExW(newWideCString(path), newWideCString(aside), 0'i32) == 0:
-      raiseOSError(osLastError(), path)
-  else:
-    if c_rename(path.cstring, aside.cstring) != 0:
-      raiseOSError(osLastError(), path)
-
 proc pruneStoreRoot*(root: string; keep: int; protected: openArray[string];
                      onStep: PruneStepHook = nil;
                      now = getTime()): PruneOutcome =
@@ -646,65 +623,41 @@ proc pruneStoreRoot*(root: string; keep: int; protected: openArray[string];
   ## most recently modified (ties broken by name) and every directory in
   ## ``protected`` (``v1/<algorithm>/<digest>``). ``now`` is the clock the
   ## being-written guards compare with. Leftovers of a prune that died after
-  ## its rename aside are deleted too.
-  let layout = root / LocalStoreLayout
-  if root.len == 0 or not dirExists(layout):
+  ## its rename aside are deleted too. An existing root owned by another
+  ## account is refused before anything is renamed or deleted (§2.5).
+  ##
+  ## The removal itself is the reference library's ``pruneRoot``; this
+  ## wrapper only translates reprobuild's directory-shaped protection and
+  ## step hook into the library's content-id-shaped ones. Deciding WHAT to
+  ## protect — and refusing to prune at all when ``HEAD``'s ids cannot be
+  ## computed — is the caller's (``publishCertificateToLocalStore``).
+  if root.len == 0:
     return
-  var dirs: seq[tuple[relative: string; mtime: Time]]
-  try:
-    for algorithmKind, algorithmPath in walkDir(layout, checkDir = true):
-      if algorithmKind != pcDir:
-        continue
-      for digestKind, digestPath in walkDir(algorithmPath, checkDir = true):
-        if digestKind != pcDir:
-          continue
-        let name = digestPath.extractFilename
-        if name.startsWith("."):
-          # Never a content directory. Any pruner may delete it.
-          try:
-            removeDir(digestPath)
-          except OSError as err:
-            if dirExists(digestPath):
-              result.errors.add("'" & digestPath &
-                "' could not be removed: " & err.msg)
-          continue
-        var mtime: Time
-        try:
-          mtime = getLastModificationTime(digestPath)
-        except OSError:
-          continue                       # gone already
-        dirs.add((LocalStoreLayout & "/" & algorithmPath.extractFilename &
-          "/" & name, mtime))
-  except OSError as err:
-    result.errors.add("the store at '" & layout & "' could not be listed: " &
-      err.msg)
-    return
-  dirs.sort(proc(a, b: tuple[relative: string; mtime: Time]): int =
-    if a.mtime != b.mtime:
-      return (if a.mtime > b.mtime: -1 else: 1)
-    -cmp(a.relative, b.relative))
-  for i, entry in dirs:
-    if i < keep or entry.relative in protected:
-      continue
-    let path = root / toNative(entry.relative)
-    if beingWritten(path, now):
-      continue
-    if onStep != nil:
-      onStep(psChosen, entry.relative)
-    let aside = path.parentDir / removalName(path.extractFilename)
-    try:
-      renameAside(path, aside)
-    except OSError as err:
-      if dirExists(path):
-        result.errors.add("'" & path & "' could not be removed: " & err.msg)
-      continue                           # else another prune took it
-    result.removed.add(entry.relative)
-    if onStep != nil:
-      onStep(psDetached, entry.relative)
-    try:
-      removeDir(aside)
-    except OSError as err:
-      result.errors.add("'" & aside & "' could not be removed: " & err.msg)
+  var ids: seq[string]
+  for dir in protected:
+    let parts = dir.split('/')
+    if parts.len == 3 and parts[0] == LocalStoreLayout:
+      ids.add(parts[1] & ":" & parts[2])
+    else:
+      # A protection that names no content directory protects nothing; say
+      # so rather than prune as if it had been honoured.
+      result.errors.add("'" & dir & "' is not a content directory " &
+        "(v1/<algorithm>/<digest>); nothing was pruned")
+      return
+  let hook: tcprune.PruneStepHook =
+    if onStep == nil: nil
+    else:
+      proc(stage: tcprune.PruneStage; relative: string) =
+        # Spelled out rather than cast by ordinal: the two enums are
+        # declared separately and must not be coupled by their order.
+        onStep((case stage
+          of tcprune.psChosen: psChosen
+          of tcprune.psDetached: psDetached), relative)
+  let pruned = tcprune.pruneRoot(root, max(keep, 0), ids, onStep = hook,
+    now = now)
+  result.removed = pruned.removed
+  result.errors = pruned.errors
+
 
 # ---------------------------------------------------------------------------
 # The working-tree guard

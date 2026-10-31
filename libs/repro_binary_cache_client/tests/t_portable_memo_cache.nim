@@ -9,6 +9,12 @@
 ## host will not publish them; and
 ## several candidate path sets for one weak fingerprint are all discoverable,
 ## with a republish reusing its slot.
+##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a): only checksum- and
+## hybrid-policy records are published, so every action here is recorded
+## under `ffpChecksum` (they were `ffpTimestamp` until then, whose records
+## the publisher now refuses), and "a timestamp-policy record is not
+## published" pins the refusal against this live server.
 
 import std/[net, options, os, osproc, strutils, times, unittest]
 
@@ -78,7 +84,8 @@ proc fingerprintForPayload(payload: string): ContentDigest =
             domain = hdActionFingerprint)
 
 proc buildIn(projectRoot: string; publisher: PortableMemoPublisher;
-             tagged = true): tuple[result: ActionResult, trace: string] =
+             tagged = true; policy = ffpChecksum):
+    tuple[result: ActionResult, trace: string] =
   let action = BuildAction(
     governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
@@ -89,7 +96,7 @@ proc buildIn(projectRoot: string; publisher: PortableMemoPublisher;
     cwd: projectRoot,
     cacheable: true,
     publishToBinaryCache: tagged,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: policy,
     weakFingerprint: fingerprintForPayload("t-pmc-write"),
     builtinText: "built from " & readFile(projectRoot / "src" / "main.c"))
   createDir(projectRoot / "out")
@@ -190,7 +197,7 @@ proc buildChain(projectRoot: string; publisher: PortableMemoPublisher = nil;
     inputs: @[projectRoot / "src" / "main.c"],
     outputs: @[projectRoot / "obj" / "main.o"],
     cwd: projectRoot, cacheable: true, publishToBinaryCache: false,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: ffpChecksum,
     weakFingerprint: fingerprintForPayload("t-pmc-compile"),
     builtinText: "object of " & readFile(projectRoot / "src" / "main.c"))
   let link = BuildAction(
@@ -199,7 +206,7 @@ proc buildChain(projectRoot: string; publisher: PortableMemoPublisher = nil;
     inputs: @[projectRoot / "obj" / "main.o"],
     outputs: @[projectRoot / "bin" / "app"],
     cwd: projectRoot, cacheable: true, publishToBinaryCache: true,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: ffpChecksum,
     weakFingerprint: fingerprintForPayload("t-pmc-link"),
     builtinText: "linked app\n")
   createDir(projectRoot / "obj")
@@ -247,6 +254,24 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     check restoreMemoOutputs(remote("b"), record, rootsOf(b)) == ""
     check readFile(b / "out" / "result.txt") ==
       readFile(a / "out" / "result.txt")
+
+  test "a timestamp-policy record is not published":
+    ## Campaign M17 (Edge-Derived-Identities.md §3.3a): the case above,
+    ## recorded under `ffpTimestamp`. The portable record is still computed
+    ## (it serves this host), but nothing reaches the server, and the trace
+    ## names the policy.
+    let a = project("ts-a", "int timestamp;\n")
+    let built = buildIn(a, publisherFor(remote("ts-a")),
+      policy = ffpTimestamp)
+    checkpoint(built.trace)
+    require built.result.portable
+    check "portable-memo-published" notin built.trace
+    check "portable-memo-publish-refused" in built.trace
+    check "ffpTimestamp input-check policy" in built.trace
+    let b = project("ts-b/elsewhere", "int timestamp;\n")
+    let found = lookupRemoteMemo(remote("ts-b"), rootsOf(b),
+      built.result.portableWeakHex)
+    check found.hit.isNone
 
   test "an untagged action publishes its record but not its bytes":
     let a = project("meta-a", "int meta;\n")
@@ -423,7 +448,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
         outputs: @[p / ".repro" / "preserve-tree" / "t-pmc-fetch.manifest"],
         declaredOutputs: @[p / "fetched"],
         cwd: p, cacheable: false, fixedOutput: fixed,
-        publishToBinaryCache: false, actionCachePolicy: ffpTimestamp,
+        publishToBinaryCache: false, actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-fetch"),
         builtinText: "upstream\nfetched", builtinEntries: @["pkg/index.js"])
       let build = BuildAction(
@@ -432,7 +457,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
         inputs: @[p / "fetched" / "pkg" / "index.js"],
         outputs: @[p / "bin" / "bundle.js"],
         cwd: p, cacheable: true, publishToBinaryCache: true,
-        actionCachePolicy: ffpTimestamp,
+        actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-bundle"),
         builtinText: "bundled\n")
       createDir(p / "bin")
@@ -480,7 +505,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
       kind: bakWriteText, id: "t-pmc-hostbound", deps: @[],
       inputs: @[a / "src" / "main.c"], outputs: @[a / "out" / "hb.txt"],
       cwd: a, cacheable: true, publishToBinaryCache: true,
-      actionCachePolicy: ffpTimestamp,
+      actionCachePolicy: ffpChecksum,
       weakFingerprint: fingerprintForPayload("t-pmc-hostbound"),
       builtinText: "host specific\n", determinism: some(edHostBound))
     createDir(a / "out")
@@ -511,7 +536,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
         outputs: @[p / ".repro" / "preserve-tree" / "t-pmc-tree.manifest"],
         declaredOutputs: @[p / "tree"],
         cwd: p, cacheable: true, publishToBinaryCache: false,
-        actionCachePolicy: ffpTimestamp,
+        actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-tree"),
         builtinText: "tree-src\ntree",
         builtinEntries: @["a.txt", "sub/b.txt"])
@@ -521,7 +546,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
         inputs: @[p / "tree" / "a.txt", p / "tree" / "sub" / "b.txt"],
         outputs: @[p / "bin" / "use"],
         cwd: p, cacheable: true, publishToBinaryCache: true,
-        actionCachePolicy: ffpTimestamp,
+        actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-use"),
         builtinText: "used the tree\n")
       createDir(p / "bin")

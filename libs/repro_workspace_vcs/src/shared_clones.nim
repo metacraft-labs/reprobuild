@@ -2192,6 +2192,21 @@ proc serveSharedPoolUploadPack*(gitBin, pool: string): int =
           # as well as raw refilled tips whose objects have no retaining ref.
           fetchArgs.add("--negotiation-tip=*")
           for tip in hints: fetchArgs.add("--negotiation-tip=" & tip)
+        proc refillWithoutHaves(ids: seq[string]): tuple[code: int; output: string] =
+          # A server need not send a wanted object that one of our haves
+          # reaches, and GitHub does not: it answers an empty pack, and the
+          # fetch dies with "bad revision '<want>'". A blob that a blob:none
+          # pool lacks is normally reachable from its own refs, so negotiated
+          # haves make exactly those wants unservable. Ask for whatever is
+          # still absent the way Git's own lazy fetch does, with no haves.
+          # Only wants the negotiated fetch failed to supply come here; a
+          # commit among them costs its full history, which is still better
+          # than failing the read.
+          var plainArgs: seq[string]
+          for arg in fetchArgs:
+            if not arg.startsWith("--negotiation-tip="): plainArgs.add(arg)
+          refillPoolObjects(gitBin, pool, refillArgs &
+            @["-c", "fetch.negotiationAlgorithm=noop"] & plainArgs, ids)
         proc recoverKnownHistory(incomplete: HashSet[string];
                                  targets: seq[string]): bool =
           var recoveryArgs = @["--no-replace-objects"] & refillArgs &
@@ -2236,7 +2251,14 @@ proc serveSharedPoolUploadPack*(gitBin, pool: string): int =
             recoveryFetchArgs.add("--negotiation-tip=" & tip)
           let recovered = refillPoolObjects(gitBin, pool,
             recoveryArgs & recoveryFetchArgs, targets)
-          if absentPoolObjects(gitBin, pool, targets).len > 0:
+          var stillAbsent = absentPoolObjects(gitBin, pool, targets)
+          var wantedAbsent: seq[string]
+          for id in stillAbsent:
+            if id in absent: wantedAbsent.add(id)
+          if wantedAbsent.len > 0:
+            discard refillWithoutHaves(wantedAbsent)
+            stillAbsent = absentPoolObjects(gitBin, pool, targets)
+          if stillAbsent.len > 0:
             raise newException(IOError, "could not refill shared pool: " &
               recovered.output.strip())
           true
@@ -2254,8 +2276,11 @@ proc serveSharedPoolUploadPack*(gitBin, pool: string): int =
             if id notin targets: targets.add(id)
           let recovered = recoverKnownHistory(incomplete, targets)
           if remaining.len > 0 and not recovered:
-            raise newException(IOError, "could not refill shared pool: " &
-              refill.output.strip())
+            let plain = refillWithoutHaves(remaining)
+            if absentPoolObjects(gitBin, pool, remaining).len > 0:
+              raise newException(IOError, "could not refill shared pool: " &
+                refill.output.strip() & "; without haves: " &
+                plain.output.strip())
         newTips = suppliedCommitTips(gitBin, pool, absent)
         if newTips.len > 0:
           var compacted: seq[string]
@@ -2448,10 +2473,16 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -n "$leaf" ] || continue
   # A registered leaf may be the workspace checkout itself, or a nested repo.
   # Prefer the workspace's marker; plain-git trees retain the sibling fallback.
+  # The settings and state files' RETIRED names mark a workspace here too:
+  # repro refuses to work in such a root until it is migrated, but its
+  # checkouts still borrow from this pool, and a missed parent means objects
+  # they need are not retained.
   workspace=$leaf
   marked=0
   while [ "$workspace" != / ] && [ "$workspace" != . ]; do
-    if [ -f "$workspace/.repro-workspace.toml" ] ||
+    if [ -f "$workspace/repro-workspace.toml" ] ||
+       [ -f "$workspace/.repro/workspace-state.toml" ] ||
+       [ -f "$workspace/.repro-workspace.toml" ] ||
        [ -f "$workspace/.repro/workspace.toml" ]; then
       dirname "$workspace"
       marked=1

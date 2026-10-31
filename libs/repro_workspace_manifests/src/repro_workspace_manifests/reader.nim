@@ -23,7 +23,7 @@ import toml_serialization/types as toml_types
 import types
 import diagnostics
 import manifest_editor
-from repro_core/workspace_root import nil
+import retired_names
 
 # ---- helpers --------------------------------------------------------------
 
@@ -664,22 +664,22 @@ proc previousIdentities*(path: string; extensions: Extensions):
   let node = extensions.raw[previouslyExtensionKey]
   if node.isNil or node.kind != TomlKind.Array:
     raiseManifestError(path, "extensions." & previouslyExtensionKey,
-      schemaRepoFragmentV1, schemaRepoFragmentV1,
+      schemaRepoFragmentV2, schemaRepoFragmentV2,
       "`previously` must be an ARRAY of inline tables, e.g. " &
         "`previously = [{ name = \"old-name\", path = \"old-path\" }]`")
   for index, element in node.arrayVal:
     let keyBase = "extensions." & previouslyExtensionKey & "[" & $index & "]"
     if element.isNil or
         element.kind notin {TomlKind.InlineTable, TomlKind.Table}:
-      raiseManifestError(path, keyBase, schemaRepoFragmentV1,
-        schemaRepoFragmentV1,
+      raiseManifestError(path, keyBase, schemaRepoFragmentV2,
+        schemaRepoFragmentV2,
         "each `previously` entry must be an inline table with any of " &
           "`name`, `path`, `url_prefix`, `url_suffix`")
     var entry: PreviousRepoIdentity
     for key, value in element.tableVal[]:
       if value.isNil or value.kind != TomlKind.String:
-        raiseManifestError(path, keyBase & "." & key, schemaRepoFragmentV1,
-          schemaRepoFragmentV1,
+        raiseManifestError(path, keyBase & "." & key, schemaRepoFragmentV2,
+          schemaRepoFragmentV2,
           "`" & key & "` must be a string")
       case key
       of "name": entry.name = value.stringVal
@@ -687,28 +687,21 @@ proc previousIdentities*(path: string; extensions: Extensions):
       of "url_prefix": entry.url_prefix = value.stringVal
       of "url_suffix": entry.url_suffix = value.stringVal
       else:
-        raiseManifestError(path, keyBase & "." & key, schemaRepoFragmentV1,
-          schemaRepoFragmentV1,
+        raiseManifestError(path, keyBase & "." & key, schemaRepoFragmentV2,
+          schemaRepoFragmentV2,
           "unknown `previously` field '" & key &
             "' (accepted: name, path, url_prefix, url_suffix; `branch` is " &
             "deliberately NOT accepted — a mainline rename strands no " &
             "directory, so `repro switch --mainline` already covers it)")
     if entry.name.len == 0 and entry.path.len == 0 and
         entry.url_prefix.len == 0 and entry.url_suffix.len == 0:
-      raiseManifestError(path, keyBase, schemaRepoFragmentV1,
-        schemaRepoFragmentV1,
+      raiseManifestError(path, keyBase, schemaRepoFragmentV2,
+        schemaRepoFragmentV2,
         "`previously` entry declares no field at all; every field is " &
           "optional but an entry must name at least one")
     result.add(entry)
 
 const
-  repoV2OnlyKeys* = ["mainline", "unstable", "staging", "stable",
-                     "production", "lts", "profile", "branch-roles"]
-    ## The `[repo]` keys `reprobuild.workspace.repo.v2` added
-    ## (Workspace-Branch-Roles.md §3.1). A v1 fragment carrying one is
-    ## rejected rather than read: under v1 a pre-BR1 `repro` would fail on it
-    ## with an unhelpful "unknown key", which is the outage the schema bump
-    ## exists to prevent (§3.6).
   builtinRoleNames* = ["mainline", "unstable", "staging", "stable",
                        "production", "lts"]
     ## Every built-in role name (§2.1). A custom role may not reuse one.
@@ -821,14 +814,10 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
   ## The `[repo]` checks the typed decoder cannot make (Branch-Roles §3.1,
   ## §3.6), run against the generic tree of the same text:
   ##
-  ## * v1 carrying a v2-only key, or v2 carrying `branch`, is refused naming
-  ##   the key — a fragment is in ONE schema, never a mix;
-  ## * v2 refuses any `[repo.<sub-table>]` it does not define, which the typed
-  ##   decoder would otherwise drop without a word;
+  ## * any `[repo.<sub-table>]` the schema does not define is refused, which
+  ##   the typed decoder would otherwise drop without a word;
   ## * `branch-roles` is read from the tree (both spellings), and every role
-  ##   value is checked;
-  ## * nothing is copied between `branch` and `mainline`; read the mainline
-  ##   through `mainlineBranch`, the one accessor that answers for both.
+  ##   value is checked.
   let tree = decodeTree(path, content, schema)
   let repoNode =
     if "repo" in tree.tableVal: tree.tableVal["repo"] else: nil
@@ -836,29 +825,6 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
   if not repoNode.isNil and repoNode.kind in {TomlKind.Table, TomlKind.InlineTable}:
     for k, _ in repoNode.tableVal[]:
       repoKeys.add(k)
-  if schema == schemaRepoFragmentV1:
-    for k in repoV2OnlyKeys:
-      if k in repoKeys:
-        raiseManifestError(path, "repo." & k, schema, schema,
-          "`" & k & "` is a " & schemaRepoFragmentV2 & " key, but this " &
-            "fragment declares " & schemaRepoFragmentV1 & ". A fragment is " &
-            "in one schema: change `schema` to \"" & schemaRepoFragmentV2 &
-            "\" and rename `branch` to `mainline`, or remove `" & k & "`")
-    # Deliberately NO copy of `branch` into `mainline`: the record keeps the
-    # key the file actually used, and `mainlineBranch` (types.nim) is the
-    # single place that answers "what is the mainline" for both schemas.
-    # `branch` has always been documented as a branch name only (never a
-    # commit, never a full ref); §3.5 makes that a load-time check.
-    # An empty `branch` has always meant "none declared" in v1 and still does.
-    if fragment.repo.branch.isSome and fragment.repo.branch.get().len > 0:
-      let rejection = branchNameRejection(fragment.repo.branch.get())
-      if rejection.len > 0:
-        raiseManifestError(path, "repo.branch", schema, schema, rejection)
-    return
-  if "branch" in repoKeys:
-    raiseManifestError(path, "repo.branch", schema, schema,
-      "`branch` is the " & schemaRepoFragmentV1 & " spelling; a " &
-        schemaRepoFragmentV2 & " fragment names its mainline `mainline`")
   var known: seq[string]
   for name, _ in fieldPairs(RepoBody()):
     known.add(name)
@@ -886,20 +852,33 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
     if "branch-roles" in repoKeys: repoNode.tableVal["branch-roles"] else: nil)
 
 proc readRepoFragmentFromContent*(content, path: string): RepoFragment =
-  ## Read `repos/<repo>.toml` in either schema: `repo.v2` (`mainline` and the
-  ## role keys) or `repo.v1` (`branch`). The record keeps the key the file
-  ## used; `mainlineBranch` is the mainline for both, so nothing downstream
-  ## needs to know which schema the file used.
+  ## Read `repos/<repo>.toml` (`repo.v2`: `mainline` and the role keys). A
+  ## fragment declaring the retired schema is refused with a diagnostic that
+  ## says what to change (`retired_names.nim`), not read.
   ##
   ## `content` is the manifest's bytes and `path` is only the DISPLAY path
   ## every diagnostic carries: nothing is read from it, so bytes read from a
   ## git revision (`manifest_source.nim`) pass the same validation as a file.
-  let schema = validateSchemaOneOf(path, content,
-    [schemaRepoFragmentV2, schemaRepoFragmentV1])
+  let observed = probeSchema(path, content, schemaRepoFragmentV2)
+  if observed == retiredRepoFragmentSchema:
+    raiseManifestError(path, "schema", schemaRepoFragmentV2, observed,
+      retiredRepoFragmentSchemaMessage())
+  validateSchema(path, content, schemaRepoFragmentV2)
+  let schema = schemaRepoFragmentV2
+  # The mainline's retired key would otherwise fail the strict decode below
+  # as a bare unknown key; refusing it first lets the diagnostic name
+  # `mainline`.
+  block:
+    let tree = decodeTree(path, content, schema)
+    if "repo" in tree.tableVal:
+      let repoNode = tree.tableVal["repo"]
+      if repoNode.kind in {TomlKind.Table, TomlKind.InlineTable} and
+          retiredRepoBranchKey in repoNode.tableVal:
+        raiseManifestError(path, "repo." & retiredRepoBranchKey, schema,
+          schema, retiredRepoBranchKeyMessage())
   # The typed decoder refuses the header spelling `[repo.branch-roles]` of a
   # sub-table of a typed record, so that table is blanked for the typed pass
-  # and decoded from the generic tree by `checkRepoRoles`, which also refuses
-  # it in a v1 fragment with a diagnostic that says why.
+  # and decoded from the generic tree by `checkRepoRoles`.
   let typedContent =
     try: blankTable(content, "repo.branch-roles")
     except ManifestEditError: content  # let the decoder report the syntax
@@ -979,7 +958,7 @@ proc readUrlPrefix*(path: string): UrlPrefixManifest =
 
 proc readRepoSetFromContent*(content, path: string): RepoSetManifest =
   ## A named membership list (`member_sets` + `member_repos`). The strict
-  ## decode is what forbids identity fields: `default_revision`, `trunk` and
+  ## decode is what forbids identity fields: `default_remote` and
   ## friends are simply not on `RepoSetManifest`, so a shared set cannot
   ## quietly become a half-project. It is also what rejects the single-list
   ## `members` spelling this replaced — a bare name that had to be resolved
@@ -1028,6 +1007,17 @@ proc readProjectManifestFromContent*(content, path: string): ProjectManifest =
   ## every diagnostic carries: nothing is read from it, so bytes read from a
   ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaProjectManifestV1)
+  # The retired `[project]` keys would otherwise fail the strict decode as
+  # bare unknown keys; refusing them first lets the diagnostic name what
+  # replaced each one.
+  let tree = decodeTree(path, content, schemaProjectManifestV1)
+  if "project" in tree.tableVal:
+    let projectNode = tree.tableVal["project"]
+    if projectNode.kind in {TomlKind.Table, TomlKind.InlineTable}:
+      for key in retiredProjectKeys:
+        if key in projectNode.tableVal:
+          raiseManifestError(path, "project." & key, schemaProjectManifestV1,
+            schemaProjectManifestV1, retiredProjectKeyMessage(key))
   result = decodeStrict(path, content, schemaProjectManifestV1,
                         ProjectManifest)
   requireNonEmpty(path, schemaProjectManifestV1, "project.name",
@@ -1190,30 +1180,34 @@ proc readSnapshot*(path: string): Snapshot =
   ## `readSnapshotFromContent` over the bytes of the file at `path`.
   readSnapshotFromContent(slurpManifest(path, schemaSnapshotV1), path)
 
-# ---- .repro/workspace-state.toml (and the old .repro/workspace.toml) -------
+# ---- .repro/workspace-state.toml ------------------------------------------
 
 proc readWorkspaceLocalStrict(path: string;
-                              acceptStateLayers = false): WorkspaceLocal =
-  ## Read a per-checkout state file: `.repro/workspace-state.toml`
-  ## (`reprobuild.workspace.state.v1`) or the old `.repro/workspace.toml`
-  ## (`reprobuild.workspace.local.v1`) it replaces. Both carry the same
-  ## `[workspace]` table and decode into the same record, so a caller does not
-  ## care which file the state came from. Which file to read is decided by
+                              migrating = false): WorkspaceLocal =
+  ## Read the per-checkout state file `.repro/workspace-state.toml`
+  ## (`reprobuild.workspace.state.v1`). Which file to read is decided by
   ## `workspaceTomlPath` (`workspace_branch.nim`), not here.
   ##
-  ## `[[manifest]]` layers are accepted ONLY in the old schema (`local.v1`),
-  ## which kept the layer list here. The state file carries no layers
-  ## (Workspace-Settings-Files.md §5): they live in the two settings files,
-  ## and `repro health --fix` — or the first state write of a repro that
-  ## migrates the old file — moves an old file's layers to
-  ## `repro-workspace.local.toml` (§8 step 2). A `[[manifest]]` in a
-  ## `state.v1` file is therefore refused, naming the file and the key, with
-  ## that remedy: the transitional release that carried an old file's layers
-  ## into the new one left exactly such files behind.
+  ## The state file carries no `[[manifest]]` layers
+  ## (Workspace-Settings-Files.md §5): they live in the two settings files. A
+  ## `[[manifest]]` in a `state.v1` file is refused, naming the file and the
+  ## key, with the remedy `repro health --fix`, which moves them to
+  ## `repro-workspace.local.toml` (§8 step 2): a transitional release left
+  ## exactly such files behind.
+  ##
+  ## `migrating` is set ONLY by `readStateFileForMigration`, the reader of
+  ## `repro health --fix`: it also accepts the state file under its retired
+  ## name and schema (`local.v1`, which kept the layer list here) and layers
+  ## in either schema, because moving them out is that path's whole job.
   ## `name` and `revision` are settings-file layer keys and are refused here.
   let content = slurpManifest(path, schemaWorkspaceStateV1)
-  let schema = validateSchemaOneOf(path, content,
-    [schemaWorkspaceStateV1, schemaWorkspaceLocalV1])
+  let schema =
+    if migrating:
+      validateSchemaOneOf(path, content,
+        [schemaWorkspaceStateV1, schemaWorkspaceLocalV1])
+    else:
+      validateSchema(path, content, schemaWorkspaceStateV1)
+      schemaWorkspaceStateV1
   result = decodeStrict(path, content, schema, WorkspaceLocal)
   requireNonEmpty(path, schema, "workspace.project",
                   result.workspace.project)
@@ -1238,8 +1232,7 @@ proc readWorkspaceLocalStrict(path: string;
             "the state file")
   # After the per-layer checks, so a layer that would be refused anyway is
   # named by its own key first.
-  if schema == schemaWorkspaceStateV1 and result.manifest.len > 0 and
-      not acceptStateLayers:
+  if result.manifest.len > 0 and not migrating:
     raiseManifestError(path, "manifest", schema, schema,
       "the state file carries no `[[manifest]]` layers: layers belong in " &
         "`repro-workspace.toml` (shared) or `repro-workspace.local.toml` " &
@@ -1247,12 +1240,12 @@ proc readWorkspaceLocalStrict(path: string;
         $result.manifest.len & " layer(s) to `repro-workspace.local.toml`")
 
 proc readStateFileForMigration*(path: string): WorkspaceLocal =
-  ## Read a state file of either schema with every rule of the strict reader
-  ## EXCEPT the refusal of `[[manifest]]` layers in a `state.v1` file — for
-  ## the one path that moves such layers out (`repro health --fix`,
+  ## Read a state file — current or retired name, either schema — with every
+  ## rule of the strict reader EXCEPT the refusal of `[[manifest]]` layers,
+  ## for the one path that moves such files and layers (`repro health --fix`,
   ## `workspace_branch.migrateWorkspaceStateFile`) and the health row that
-  ## reports them. Every other reader refuses the file.
-  readWorkspaceLocalStrict(path, acceptStateLayers = true)
+  ## reports them. Every other reader refuses them.
+  readWorkspaceLocalStrict(path, migrating = true)
 
 proc readWorkspaceLocal*(path: string): WorkspaceLocal =
   ## Read a per-checkout state file (``readWorkspaceLocalStrict``). A file
@@ -1292,28 +1285,7 @@ proc readDevelopOverrides*(path: string): DevelopOverrides =
         schemaDevelopOverridesV1, schemaDevelopOverridesV1,
         "required key `override[].created_at` is missing or empty")
 
-# ---- <host-repo>/.repro-workspace.toml (RA-8 host bootstrap config) ---------
-
-const
-  bootstrapConfigFileName* = workspace_root.LegacySettingsFileName
-    ## The OLD name of the workspace settings file (`bootstrap.v1`). Still read
-    ## — through `settings.nim`, which prefers `repro-workspace.toml` — until
-    ## the old names are retired (Workspace-Settings-Files.md §8 step 4).
-  bootstrapPrivateConfigFileName* = ".repro-workspace-private.toml"
-    ## Sibling of the OLD settings file carrying credentialed/SSH manifest
-    ## URLs. Applies only beside `.repro-workspace.toml`; `settings.v1`
-    ## replaces it with named layers whose url `repro-workspace.local.toml`
-    ## supplies.
-
-proc readWorkspaceBootstrapPrivate*(path: string): WorkspaceBootstrapPrivate =
-  ## Read the private companion config (`.repro-workspace-private.toml`). The
-  ## only load-bearing key is `[manifest] private_url`.
-  let content = slurpManifest(path, schemaWorkspaceBootstrapV1)
-  validateSchema(path, content, schemaWorkspaceBootstrapV1)
-  result = decodeStrict(path, content, schemaWorkspaceBootstrapV1,
-                        WorkspaceBootstrapPrivate)
-  requireNonEmpty(path, schemaWorkspaceBootstrapV1, "manifest.private_url",
-                  result.manifest.private_url)
+# ---- reprobuild.config.v1 / shared settings rules ---------------------------
 
 proc readReprobuildConfig*(path: string): ReprobuildConfig =
   ## HL-1 (Unified-Locking-And-Hooks) — read a `reprobuild.config.v1` layered
@@ -1326,7 +1298,7 @@ proc readReprobuildConfig*(path: string): ReprobuildConfig =
   ## TOML file. To stay within the pinned toml-serialization (which rejects the
   ## `[[array.of.tables]]` double-bracket form for nested arrays), both the
   ## `apply_if` bindings and the `[locking] route` entries are authored as
-  ## INLINE-table arrays (the SAME convention `.repro-workspace.toml`'s
+  ## INLINE-table arrays (the SAME convention `repro-workspace.toml`'s
   ## `[locking] route = [{ … }]` already uses), e.g.:
   ##
   ##   schema = "reprobuild.config.v1"
@@ -1341,37 +1313,10 @@ proc readReprobuildConfig*(path: string): ReprobuildConfig =
 
 proc checkPushGatewayValue*(path, schema: string; value: Option[string]) =
   ## Refuse a top-level `push_gateway` whose value Push-Gateway-Wiring-And-
-  ## Policy.md §7.4 does not define, naming the file and the key. The one rule
-  ## both settings schemas share, so the two readers cannot drift.
+  ## Policy.md §7.4 does not define, naming the file and the key.
   if value.isSome and value.get() notin pushGatewayOptOutValues:
     raiseManifestError(path, "push_gateway", schema, schema,
       "`push_gateway` is the per-workspace push-gateway opt-out " &
         "(Push-Gateway-Wiring-And-Policy.md §7.4) and may only be " &
         pushGatewayOptOutValues.mapIt("\"" & it & "\"").join(" or ") &
         "; got \"" & value.get() & "\". Remove the key to keep the default")
-
-proc readWorkspaceBootstrap*(path: string): WorkspaceBootstrap =
-  ## Read a host bootstrap config (`.repro-workspace.toml`). The only
-  ## load-bearing required key is `[manifest] url` — without a manifest URL the
-  ## config does not configure anything and the caller must fail loud rather
-  ## than fall back to a baked-in org default.
-  ##
-  ## When a sibling `.repro-workspace-private.toml` exists next to `path` and
-  ## the public config did not already set `[manifest] private_url`, the
-  ## private companion's `[manifest] private_url` is folded into the returned
-  ## record so credentialed URLs never have to live in the committed file.
-  let content = slurpManifest(path, schemaWorkspaceBootstrapV1)
-  validateSchema(path, content, schemaWorkspaceBootstrapV1)
-  result = decodeStrict(path, content, schemaWorkspaceBootstrapV1,
-                        WorkspaceBootstrap)
-  requireNonEmpty(path, schemaWorkspaceBootstrapV1, "manifest.url",
-                  result.manifest.url)
-  checkPushGatewayValue(path, schemaWorkspaceBootstrapV1, result.push_gateway)
-
-  let privatePath = path.parentDir / bootstrapPrivateConfigFileName
-  if (result.manifest.private_url.isNone or
-      result.manifest.private_url.get().len == 0) and
-      fileExists(privatePath):
-    let priv = readWorkspaceBootstrapPrivate(privatePath)
-    if priv.manifest.private_url.len > 0:
-      result.manifest.private_url = some(priv.manifest.private_url)

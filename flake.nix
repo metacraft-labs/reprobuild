@@ -299,7 +299,29 @@
       # are now graded as loss too.
       # Capture raw renameat2 through syscall() and trapped inline sites,
       # including both exchange paths, instead of reporting unknown loss.
-      url = "github:metacraft-labs/io-mon/6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f";
+      # Bumped to b4679706 (2026-10-30), io-mon's `agents` tip; 6fccd929 is an
+      # ancestor. The Linux shim now builds and runs on 32-bit ARM (armhf):
+      # the ILP32 large-file and 64-bit-time entry points of a 32-bit glibc
+      # are interposed separately, which is what `scripts/cross/
+      # build_linux_cross.sh` ships to an armhf add-on host. LP64 builds are
+      # unchanged.
+      # Bumped b4679706 -> e0fe6b44 (2026-10-30, io-mon `agents`): the shim's inline
+      # raw-syscall trap and syscall(2) owner protocol are compiled on 32-bit ARM too,
+      # on nim-stackable-hooks' ARM EABI substrate (below), and the classifier knows
+      # ARM's stat64/lstat64/fstat64/fstatat64/mmap2. An armhf capture now grades
+      # mcComplete where it graded mcIncomplete on two unsupported-architecture
+      # losses (rpi2). io-mon's own pins of nim-shm-gset/-queue move to the
+      # preallocating revisions below.
+      # Bumped e0fe6b44 -> 7a3e4c89 (2026-10-30, review fixes): a Thumb-capable
+      # image the ARM scanner cannot cover is recorded as a loss (mcIncomplete)
+      # instead of graded complete; 32-bit ARM links libatomic; the trap
+      # handler's non-site fallback notes the signal.
+      # Bumped 7a3e4c89 -> e05beda0 (2026-10-30, re-review blocker): the shim's
+      # inline patch-status global is POD again and keeps its static C
+      # initializer; at 7a3e4c89 Nim re-initialised it after the shim's
+      # constructor, so no late scan ever ran and every dlopen graded the
+      # capture mcIncomplete on both armhf and x86-64.
+      url = "github:metacraft-labs/io-mon/e05beda08343b04b3d53f008ebcd0fe7bd27d8b1";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -317,7 +339,12 @@
       # stability; its authoritative probe additionally rejects OS errors
       # because shard warm-up tolerates uncertainty but live-writer reclamation
       # does not. Keep this URL, flake.lock, and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-shm-gset/c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27";
+      # Bumped c9048e9 -> 6333cc9 (2026-10-30, `agents`): a new shard file is backed
+      # with storage at creation (`posix_fallocate`). With `/tmp` full, the previous
+      # ftruncate-only sizing let the first header store through the MAP_SHARED
+      # mapping fault with SIGBUS inside `reprobuild internal io monitor` (rpi2,
+      # about one cold `repro infra plan` in five); it is ENOSPC at creation now.
+      url = "github:metacraft-labs/nim-shm-gset/6333cc915689559b00f81371734783c2e894ca45";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -333,7 +360,9 @@
       # Includes the Layer-1 EmbeddedRing (repro_shm_index's action-cache ring
       # embeds it in the control region). 91451f22 aligns the workspace agent
       # landing branch and its complete compiler source closure.
-      url = "github:metacraft-labs/nim-shm-queue/91451f2250beb89d1d221f0a77be0841c19b182e";
+      # Bumped 91451f22 -> 84fd76b (2026-10-30, `agents`): the same preallocation
+      # for a new ring segment file as nim-shm-gset's shards.
+      url = "github:metacraft-labs/nim-shm-queue/84fd76b174d4868e703ba3d599668ee340e0b6ea";
       flake = false;
     };
     nimcrypto-src = {
@@ -448,7 +477,13 @@
       # 059c549 (2026-10-22) moves with io-mon-src: io-mon names the Windows
       # borrow-timeout policy (BorrowTimeoutPolicy), which exists only from
       # 059c549 on; its additions since 6082ee94 are Windows-only.
-      url = "github:metacraft-labs/nim-stackable-hooks/059c549306621e2f769adf75630b0b7f29018dca";
+      # Bumped 059c549 -> 3af8a4e (2026-10-30, `agents`): the 32-bit ARM (armhf)
+      # raw-syscall substrate (glibc `syscall` body patch, svc->udf inline trap on
+      # SIGILL, ucontext capture/replay, Elf32 vDSO) io-mon e0fe6b44 compiles against.
+      # Bumped 3af8a4e -> 7533478 (2026-10-30, review fixes): the ARM body patch
+      # writes its target word first; the ARM restore is idempotent; the armhf
+      # test preserves r7.
+      url = "github:metacraft-labs/nim-stackable-hooks/75334780682e70b1adb58bf813d869e7f5df63f5";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -468,6 +503,21 @@
       # shell resolves it from the sibling checkout, but the sandboxed
       # package build has no sibling so we seed it from this input.
       url = "github:metacraft-labs/reprobuild-test-adapters";
+      flake = false;
+    };
+    test-certificates-tools-src = {
+      # The ``test_certificates`` Nim package: the reference implementation of
+      # the test-certificate standard's local store, note framing and two-note
+      # merge (test-certificates-spec Transport §2, §3.1). The engine links it
+      # rather than keeping a second copy of those rules. config.nims reads
+      # TEST_CERTIFICATES_TOOLS_SRC (then falls back to a
+      # ``../test-certificates-tools`` sibling); the sandboxed package build
+      # has no sibling, so seed it from here. Pinned at an ``agents`` commit
+      # (the first that lets the caller name its git, ``PushOptions.gitExe``)
+      # until the v0.1.0 tag carries it; then it moves to the tag. Keep this
+      # URL, flake.lock, package.nix, repro.lock and .github/sibling-repos
+      # aligned.
+      url = "github:metacraft-labs/test-certificates-tools/9864082065c8acb1db315e65a6a4157a3ab77117";
       flake = false;
     };
     # A source-only input was removed from this set, and this note is where
@@ -719,8 +769,19 @@
     # 2026-10-24-d-and-nim-mcr-streaming-flow-tests-fail-once-ct-mcr-is-built).
     # One commit, in compiler/cgen.nim plus its test; this repository builds no
     # source maps, so only consumers that debug Nim output see the change.
+    #
+    # Advanced from cdb6fd14 to 22d525d8 so the compiler builds for a 32-bit
+    # target: `newLineInfo` compared a line with `int high(uint32)`, which does
+    # not fit in a 32-bit `int`, and `scripts/cross/build_linux_cross.sh`
+    # could not build the `nim` an armhf host compiles its profiles
+    # with. Riding along (cdb6fd14..d4ed733d, the fork's `codetracer` tip):
+    # two compiler fixes (owning constructor temporaries under ARC; referent
+    # hooks prepared for canonical references), two `std/macros` additions
+    # (`getOwner`, completed copy-operation inspection) with their VM support,
+    # and lock, test and Nix-shell commits that touch no compiler or stdlib
+    # source.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=cdb6fd1483fcdc570f306ccfee8865f2214f46f7";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=22d525d83ff061f5912121f3519418cda806d36c";
       flake = false;
     };
     nim-csources-src = {
@@ -837,6 +898,7 @@
       nim-stackable-hooks-src,
       reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
+      test-certificates-tools-src,
       codetracer-src,
       runquota-src,
       io-mon-src,
@@ -1076,6 +1138,7 @@
               (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
+              (row "TEST_CERTIFICATES_TOOLS_SRC" "test-certificates-tools-src" "/src")
               (row "CODETRACER_PINNED_SRC" "codetracer-src" "/src")
             ];
           siblingCheckoutSourcesHook = ''
@@ -1295,6 +1358,7 @@
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
+                export TEST_CERTIFICATES_TOOLS_SRC=${test-certificates-tools-src}/src
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -1416,6 +1480,7 @@
               codetracerSrc = codetracer-src;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
               testAdaptersSrc = reprobuild-test-adapters-src;
+              testCertificatesToolsSrc = test-certificates-tools-src;
               runquotaSrc = runquota-src;
               inherit runquotaTools;
             }).overrideAttrs
@@ -1569,6 +1634,7 @@
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
+                TEST_CERTIFICATES_TOOLS_SRC|${test-certificates-tools-src}/src
                 REPROBUILD_USE_SYSTEM_HASH_LIBS|1
                 RUNQUOTA_SRC|${runquota-src}
                 RUNQUOTAD_BIN|${runquotaTools}/bin/runquotad
@@ -1797,6 +1863,7 @@
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
                                       ${reprobuild-test-adapters-src} \
+                                      ${test-certificates-tools-src} \
                                       ${runquota-src} \
                                       ${blake3Prefix} \
                                       ${pkgs.sqlite.out} \
@@ -2077,7 +2144,10 @@
             # time by its rev and its own hash (a locked, pure fetch), so a
             # wrong `src` hash fails here too. Each default's rev must equal
             # the lock node's, and its hash the node's `narHash` where the
-            # lock records one. Decided at evaluation time, like `lib-tests`,
+            # lock records one. A source input this tree gained after
+            # the `src` commit is held to THIS tree's lock instead, until the
+            # next release snapshot moves `src` past it (`pending` in the
+            # result names those). Decided at evaluation time, like `lib-tests`,
             # so it builds nothing.
             nixpkgs-package-src-sync =
               let
@@ -2093,6 +2163,18 @@
                 rootInputs = lock.nodes.${lock.root}.inputs;
                 srcNimbleVersion = nimbleVersionOf "${srcTree}/reprobuild.nimble";
                 lockedOf = input: lock.nodes.${rootInputs.${input}}.locked;
+                # A source input this tree gained AFTER the `src` commit has
+                # no node in that commit's lock, and cannot have one until the
+                # next release moves `src`. Until then its default mirrors
+                # THIS tree's flake.lock, the only lock that pins it; the
+                # release snapshot then holds it to the `src` lock like every
+                # other entry. An input in neither lock is still an error.
+                treeLock = builtins.fromJSON (builtins.readFile ./flake.lock);
+                treeRootInputs = treeLock.nodes.${treeLock.root}.inputs;
+                pendingInputs = args:
+                  builtins.filter (input: !(rootInputs ? ${input}) && treeRootInputs ? ${input}) (
+                    builtins.attrValues args
+                  );
                 defaultNimFork = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/nim-fork.nix { };
                 defaultPackage = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/package.nix {
                   # Same as the flake's own call: the pinned nixpkgs spells it
@@ -2118,6 +2200,7 @@
                   codetracerSrc = "codetracer-src";
                   ctTestRunnerSrc = "reprobuild-ct-test-runner-src";
                   testAdaptersSrc = "reprobuild-test-adapters-src";
+                  testCertificatesToolsSrc = "test-certificates-tools-src";
                   runquotaSrc = "runquota-src";
                 };
                 nimForkArgs = {
@@ -2136,21 +2219,23 @@
                       arg: input:
                       let
                         src = sources.${arg};
-                        locked = lockedOf input;
+                        inSrcLock = rootInputs ? ${input};
+                        lockName = if inSrcLock then "the `src` commit's flake.lock" else "this tree's flake.lock (`${input}` postdates the `src` commit)";
+                        locked = if inSrcLock then lockedOf input else treeLock.nodes.${treeRootInputs.${input}}.locked;
                       in
                       if !(sources ? ${arg}) then
                         [ "${file}: `${arg}` is not in passthru.sources" ]
-                      else if !(rootInputs ? ${input}) then
+                      else if !inSrcLock && !(treeRootInputs ? ${input}) then
                         [
-                          "${file}: `${arg}`: the `src` commit's flake.lock has no input `${input}`"
+                          "${file}: `${arg}`: neither the `src` commit's flake.lock nor this tree's has an input `${input}`"
                         ]
                       else if (src.rev or null) != locked.rev then
                         [
-                          "${file}: `${arg}` defaults to rev ${toString (src.rev or null)}, the `src` commit's flake.lock pins `${input}` at ${locked.rev}"
+                          "${file}: `${arg}` defaults to rev ${toString (src.rev or null)}, ${lockName} pins `${input}` at ${locked.rev}"
                         ]
                       else if locked ? narHash && (src.outputHash or null) != locked.narHash then
                         [
-                          "${file}: `${arg}` hash ${toString (src.outputHash or null)} != the `src` commit's flake.lock `${input}` narHash ${locked.narHash}"
+                          "${file}: `${arg}` hash ${toString (src.outputHash or null)} != ${lockName} `${input}` narHash ${locked.narHash}"
                         ]
                       else
                         [ ]
@@ -2176,6 +2261,8 @@
                     checked =
                       builtins.length (builtins.attrNames packageArgs)
                       + builtins.length (builtins.attrNames nimForkArgs);
+                    # Checked against this tree's lock until `src` moves.
+                    pending = pendingInputs packageArgs ++ pendingInputs nimForkArgs;
                   }
                 )
               else
@@ -2423,6 +2510,7 @@
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
+            TEST_CERTIFICATES_TOOLS_SRC = "${test-certificates-tools-src}/src";
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             # Read by RUNQUOTA'S ``config.nims``, not by ours.
@@ -2583,17 +2671,17 @@
               # are different libraries with different sonames, and this shell
               # needs both for different consumers.
               #
-              # The LINK requirement comes from vm-harness, whose serial-console
-              # matcher (src/vm_harness/serial.nim) is built on Nim's `std/re`
+              # The LINK requirement comes from gosti, whose serial-console
+              # matcher (src/gosti/serial.nim) is built on Nim's `std/re`
               # — a PCRE **1** binding — and pins the dependency into the ELF
               # with `{.passL: "-Wl,--no-as-needed -lpcre -Wl,--as-needed".}`.
               # reprobuild's R2/R9 boot gates
               # (tests/integration/t_r2_iso_boot.nim and t_r9_systemd_boot.nim)
-              # `import vm_harness` whenever the optional sibling checkout is
-              # present (config.nims' `vmHarnessAvailable`), so their `nim c`
-              # link line carries `-lpcre`. vm-harness supplies the matching
+              # `import gosti` whenever the optional sibling checkout is
+              # present (config.nims' `gostiAvailable`), so their `nim c`
+              # link line carries `-lpcre`. gosti supplies the matching
               # `-L` from ITS OWN config.nims via `pcre-config --libs`, and that
-              # file governs builds rooted in vm-harness only — a build rooted
+              # file governs builds rooted in gosti only — a build rooted
               # here reads reprobuild's config.nims instead and never sees it.
               # The `-L` therefore has to come from this shell's NIX_LDFLAGS,
               # exactly as the OpenSSL `-L` does for the `-d:ssl` test edges
@@ -2607,10 +2695,10 @@
               # is consulted by the loader at run time and never by `ld` at
               # link time. Both are needed, for the two different phases.
               #
-              # This mirrors vm-harness's own flake, which lists `pkgs.pcre` in
+              # This mirrors gosti's own flake, which lists `pkgs.pcre` in
               # `buildInputs` (and `pkgs.pcre.dev`, for `pcre-config`, on the
               # lint hook's PATH) for the same library. Listing it here also
-              # puts `pcre-config` on PATH, which is what vm-harness's
+              # puts `pcre-config` on PATH, which is what gosti's
               # config.nims hard-fails without.
               pkgs.pcre
               pkgs.ninja
@@ -2678,6 +2766,9 @@
               # shells out to node. (Safe now that the test runner isolates git
               # config — adding shells no longer perturbs the gpg-signing tests.)
               pkgs.nodejs
+              # The typed tree-sitter generation controls execute the real
+              # generator, including JavaScript grammar evaluation via node.
+              pkgs.tree-sitter
               pkgs.zsh
               pkgs.fish
             ]
@@ -2727,10 +2818,10 @@
               pkgs.grub2_efi
               pkgs.kmod
               # ReproOS attestation boot gates: they boot a
-              # disk image under QEMU through vm-harness's
+              # disk image under QEMU through gosti's
               # QemuBootBackend and assert on its serial console.  The
               # gates themselves live in their owning repositories --
-              # vm-harness (tests/integration/t_boot_smoke_harness_*.nim)
+              # gosti (tests/integration/t_boot_smoke_harness_*.nim)
               # and reproos (tests/test_reproos_image_boot_smoke.nim) --
               # but this is the shell much of the campaign's tooling runs
               # in, so it must be able to host a boot.  Two host inputs
@@ -2741,8 +2832,8 @@
               #     needs an OVMF_CODE.fd loader plus an OVMF_VARS.fd
               #     NVRAM template.  It carries no binaries; it is here
               #     so the pair is realised in the store, and the
-              #     shellHook below names it through VMH_OVMF_CODE /
-              #     VMH_OVMF_VARS rather than leaving the harness to
+              #     shellHook below names it through GOSTI_OVMF_CODE /
+              #     GOSTI_OVMF_VARS rather than leaving the harness to
               #     glob /nix/store for whatever it finds.
               #   * ``swtpm`` -- the software TPM 2.0 emulator that
               #     backs QEMU's ``-tpmdev emulator``.  Attaching a
@@ -2796,16 +2887,16 @@
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               # ReproOS attestation: name the exact edk2 firmware pair the
-              # boot gates should use. vm-harness's firmware resolver
-              # (src/vm_harness/firmware.nim) reads these two variables ahead
+              # boot gates should use. gosti's firmware resolver
+              # (src/gosti/firmware.nim) reads these two variables ahead
               # of any conventional path, and its last-resort fallback is a
               # /nix/store glob whose winner is the lexically greatest store
               # hash -- i.e. not a stable choice. Pinning the pair to this
               # shell's own OVMF means a boot gate asserts against the
               # firmware the flake pins rather than whatever a prior GC root
               # happened to leave behind. Respects an operator override.
-              export VMH_OVMF_CODE="''${VMH_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
-              export VMH_OVMF_VARS="''${VMH_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
+              export GOSTI_OVMF_CODE="''${GOSTI_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
+              export GOSTI_OVMF_VARS="''${GOSTI_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
             '';
           };
 

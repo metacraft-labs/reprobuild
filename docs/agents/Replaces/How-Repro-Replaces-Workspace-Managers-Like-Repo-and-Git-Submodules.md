@@ -44,10 +44,10 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
 
 ### The workspace branch and repository branches
 
-The default workspace branch comes from an explicit project `trunk`, or from
-its root repository's `mainline` in `repro-workspace.toml` when `trunk` is
-absent. The root can declare that mainline directly in `[workspace]` or through
-its `profile` or `default_profile`. Member repositories keep their own mainlines;
+The default workspace branch is the root repository's `mainline`, declared in
+`repro-workspace.toml`. The root can declare that mainline directly in
+`[workspace]` or through its `profile` or `default_profile`; with no
+declaration there is no default workspace branch. Member repositories keep their own mainlines;
 a member's product profile does not determine the workspace branch.
 
 `workspace init` and a fully successful `workspace pull` record this default.

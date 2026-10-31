@@ -15,8 +15,12 @@
 ##
 ## Every group runs, because partial conformance is not a status the standard
 ## recognises (counts at the pinned revision):
-##   * ``payload/``   — byte-exact canonical serialization (16 cases), and the
-##                      non-canonical ``received.toml`` rendering;
+##   * ``payload/``   — byte-exact canonical serialization (18 cases), and
+##                      EVERY supplied ``received.toml`` read back to the same
+##                      bytes through reprobuild's reader (Conformance §1:
+##                      required of an implementation with a TOML reader),
+##                      including ``crlf-multiline``'s physical CRLF read as
+##                      LF beside an escaped CR kept as CR;
 ##   * ``signature/`` — detached-signature verification (6 cases), checking
 ##                      the REASON ``wrong-namespace`` fails, not only that it
 ##                      does;
@@ -24,20 +28,30 @@
 ##                      lists with the TC-8a library (``t_content_id_vectors_
 ##                      match_the_conformance_suite`` re-derives them through
 ##                      git three ways as well);
-##   * ``verify/``    — the three-valued decision (17 cases), the state given
+##   * ``verify/``    — the three-valued decision (19 cases), the state given
 ##                      as the content ids ``state.json`` lists, so an
 ##                      algorithm it does not list is one this consumer cannot
 ##                      compute;
-##   * ``store/``     — the store path of each certificate (7 cases), derived
+##   * ``store/``     — the store path of each certificate (8 cases), derived
 ##                      from the PARSED certificate and compared with the
 ##                      hand-derived ``expected-path.txt``;
-##   * ``notes/``     — note framing (9 cases): ``note.txt`` read through
+##   * ``notes/``     — note framing (33 cases): ``note.txt`` read through
 ##                      reprobuild's note reader (``readCertificateNote``),
 ##                      which must yield exactly the records and skipped pieces
-##                      ``expected.json`` lists; and, for the four writer
-##                      cases, ``add.txt`` added through the note writer
+##                      ``expected.json`` lists; for the 13 writer cases,
+##                      ``add.txt`` added as a RELAY through the note writer
 ##                      (``addCertificateToNote``), which must produce
-##                      ``expected-note.txt`` byte for byte.
+##                      ``expected-note.txt`` byte for byte; and for the 15
+##                      ``merge-*`` cases, ``other.txt`` merged into
+##                      ``base.txt`` (``mergeCertificateNotes``): the exact
+##                      bytes, the reported categories in order, and an
+##                      idempotent re-merge.
+##
+## reprobuild LINKS the reference ``test_certificates`` library for the TOML
+## reader, note framing and the merge. That does not make this walker the
+## library's: it is still written from the directory contract alone, and it
+## drives reprobuild's own entry points (the record classification, the
+## signing-writer rule and the report categories are reprobuild's).
 ## ``index.json`` is cross-checked in BOTH directions over every group, and a
 ## group the walker does not know — on disk or in the index — is a FAILURE:
 ## a fifth group once arrived that the previous walker silently ignored.
@@ -59,8 +73,8 @@ import spec_vectors_pin
 const
   knownGroups = ["payload", "signature", "content", "verify", "store",
                  "notes"]
-  expectedCounts = {"payload": 16, "signature": 6, "content": 7,
-                    "verify": 17, "store": 7, "notes": 9}
+  expectedCounts = {"payload": 18, "signature": 6, "content": 7,
+                    "verify": 19, "store": 8, "notes": 33}
 
 # ---------------------------------------------------------------------------
 # fields.json -> TestCertificate
@@ -202,6 +216,7 @@ suite "test-certificate.v1 conformance vectors":
         walked[knownGroups.find(group)]
 
       # --- group 1: payload/ — byte-exact canonical serialization ---------
+      var receivedWalked: HashSet[string]
       for path in caseDirs(root, "payload"):
         let name = path.extractFilename
         walkedOf("payload").incl(name)
@@ -220,12 +235,15 @@ suite "test-certificate.v1 conformance vectors":
           checkpoint("payload/" & name & "/canonical.txt: " & reread.detail)
         check reread.status == crsOk
         check canonicalCertificatePayload(reread.cert) == expected
-        # OPTIONAL: a deliberately non-canonical rendering of the SAME field
-        # values must parse to exactly the same bytes. This is the property
-        # that lets a cosmetically reformatted certificate still verify
-        # against its own signature (Canonical-Payload §5).
+        # A deliberately non-canonical rendering of the SAME field values
+        # must parse to exactly the same bytes. This is the property that
+        # lets a cosmetically reformatted certificate still verify against
+        # its own signature (Canonical-Payload §5), and Conformance §1 makes
+        # it REQUIRED of an implementation with a TOML reader, which
+        # reprobuild is.
         let received = path / "received.toml"
         if fileExists(received):
+          receivedWalked.incl(name)
           let read = readCertificateRecord(readFile(received))
           if read.status != crsOk:
             checkpoint("payload/" & name & "/received.toml: " & read.detail)
@@ -235,6 +253,31 @@ suite "test-certificate.v1 conformance vectors":
             checkpoint("payload/" & name & "/received.toml: " &
               firstDifference(reserialized, expected))
           check reserialized == expected
+
+      # The received renderings the 9ebbcb3 revision added are REACHED, not
+      # merely tolerated: ``crlf-multiline`` (physical CRLF inside multi-line
+      # basic and literal strings, inside an array too, is read as LF while
+      # an escaped ``\r`` and ``\r\n`` stay CR and CR LF — Canonical-Payload
+      # §5) and ``escapes``. ``content-unknown-algorithm`` has no received
+      # rendering; its canonical bytes carry an opaque, well-formed unknown
+      # content id verbatim, which the loop above reproduced and re-read.
+      check "crlf-multiline" in receivedWalked
+      check "escapes" in receivedWalked
+      check "content-unknown-algorithm" in walkedOf("payload")
+      block crlfIsPhysicalNewlinesOnly:
+        # Both halves of the rule, field by field, so a reader that folds
+        # EVERY CR (or none) is named here and not only by a byte diff:
+        # physical CRLF inside a multi-line basic (``project``) and literal
+        # (``issuer``) string reads as LF; ``\r``, ``\u000D`` and ``\r\n``
+        # escapes stay CR, CR and CR LF.
+        let read = readCertificateRecord(readFile(root / "payload" /
+          "crlf-multiline" / "received.toml"))
+        require read.status == crsOk
+        check read.cert.project == "x\ny"
+        check read.cert.issuer == "x\ny"
+        require read.cert.commands.len == 1
+        check read.cert.commands[0].argv ==
+          @["example-test", "a\rb", "a\rb", "a\r\nb"]
 
       # --- group 2: signature/ — verification, not reproduction -----------
       for path in caseDirs(root, "signature"):
@@ -369,8 +412,35 @@ suite "test-certificate.v1 conformance vectors":
                       "content-differs=not-covered",
                       "content-unknown-algorithm=unverifiable",
                       "content-malformed=not-covered",
-                      "earlier-draft-record=not-covered"]:
+                      "earlier-draft-record=not-covered",
+                      "unknown-keys=not-covered",
+                      "content-algorithm-name=not-covered"]:
         check reached in verifyOutcomes
+      # WHY they are rejected matters as much as THAT they are: an
+      # earlier-draft record carries ``vcs.commit`` / ``vcs.clean``, keys the
+      # v1 schema no longer defines, and must still be classified as the
+      # earlier draft (whose remedy is "re-issue") — the classification runs
+      # AHEAD of the unknown-key rejection (Standard §3.4). Every
+      # ``unknown-keys`` record, one per level, is malformed for its unknown
+      # key or table, not for anything else.
+      for (kind, certPath) in walkDir(root / "verify" /
+          "earlier-draft-record" / "certificates"):
+        if kind == pcFile and certPath.endsWith(".toml"):
+          let read = readCertificateRecord(readFile(certPath))
+          checkpoint("earlier-draft-record/" & certPath.extractFilename &
+            ": " & $read.status & " " & read.detail)
+          check read.status == crsEarlierDraft
+      var unknownKeyRecords = 0
+      for (kind, certPath) in walkDir(root / "verify" / "unknown-keys" /
+          "certificates"):
+        if kind == pcFile and certPath.endsWith(".toml"):
+          inc unknownKeyRecords
+          let read = readCertificateRecord(readFile(certPath))
+          checkpoint("unknown-keys/" & certPath.extractFilename & ": " &
+            $read.status & " " & read.detail)
+          check read.status == crsMalformed
+          check "unknown key or table" in read.detail
+      check unknownKeyRecords == 7
 
       # Direct API callers must obey the same content-id grammar as record
       # verification. Rejection happens before any store directory is touched.
@@ -571,28 +641,52 @@ suite "test-certificate.v1 conformance vectors":
         check final.status == gorPresent
         check final.body == certificateNoteDelimiter & "\n" & certificateNoteRecord(cert)
 
-      # Focused, vendored relay fixtures from spec 71ab19e7 (provenance in
-      # certificate_relay_vectors/README.md), independent of the complete
-      # conformance suite's revision. Every selected case is exercised.
-      for name in ["signed-copy-not-replaced", "signed-duplicate-protects"]:
-        let path = currentSourcePath().parentDir / "certificate_relay_vectors" / name
-        let note = readFile(path / "note.txt")
-        let incoming = readCertificateRecord(readFile(path / "add.txt"))
-        check incoming.status == crsOk
-        let relayed = addCertificateToNote(note, incoming.cert)
-        check relayed.note == readFile(path / "expected-note.txt")
-        check not relayed.changed
-
       # --- group 6: notes/ — note framing (Transport §3.1) ----------------
       # Through reprobuild's REAL note reader and writer — the code that reads
       # the note a push carries and writes the note an issuance attaches —
       # not a second splitter written for the test.
       let vectorKey = readFile(root / "signature" / "keys" /
         "insecure-test-key.pub").strip()
-      var writerCases = 0
+      var writerCases, mergeCases, lfRepairsReported = 0
       for path in caseDirs(root, "notes"):
         let name = path.extractFilename
         walkedOf("notes").incl(name)
+        if name.startsWith("merge-"):
+          # Two-blob merge cases (vectors/README.md, "Two-blob merge cases"):
+          # ``base.txt`` is the published side. The exact bytes, the report
+          # categories in processing order, and a re-merge that changes
+          # nothing.
+          inc mergeCases
+          check not fileExists(path / "note.txt")
+          let base = readFile(path / "base.txt")
+          let other = readFile(path / "other.txt")
+          let expectedNote = readFile(path / "expected-note.txt")
+          let merged = mergeCertificateNotes(base, other)
+          if merged.note != expectedNote:
+            checkpoint("notes/" & name & ": " &
+              firstDifference(merged.note, expectedNote) &
+              "\n--- produced ---\n" & renderBytes(merged.note))
+          check merged.note == expectedNote
+          check merged.changed == (expectedNote != base)
+          var categories: seq[string]
+          for report in merged.reports:
+            check report.kind != nmrOther
+            check report.message.len > 0
+            categories.add($report.kind)
+            if report.kind == nmrLfRepair: inc lfRepairsReported
+          var wantCategories: seq[string]
+          for c in parseFile(path / "expected.json"){"reports"}:
+            wantCategories.add(c.getStr())
+          if categories != wantCategories:
+            checkpoint("notes/" & name & ": reported " & $categories &
+              ", expected " & $wantCategories)
+          check categories == wantCategories
+          let again = mergeCertificateNotes(merged.note, other)
+          check again.note == merged.note
+          check not again.changed
+          # A repeat may report a signed tie again, and nothing else.
+          check again.reports.allIt(it.kind == nmrSignedConflict)
+          continue
         let note = readFile(path / "note.txt")
         let want = parseFile(path / "expected.json"){"pieces"}
         let got = readCertificateNote(note)
@@ -636,9 +730,14 @@ suite "test-certificate.v1 conformance vectors":
               checkpoint(label & ": signature " & $verdict)
             check verdict == scValid
           # A conforming note holds records in the §3.1 record form, which is
-          # exactly what the writer renders.
-          check certificateNoteRecord(entry.read.cert) == entry.piece.text
-        # Writer half: add ``add.txt`` and produce ``expected-note.txt``.
+          # exactly what the writer renders — except that the LAST piece of
+          # a note may lack its final LF (``unterminated-*``), which is still
+          # that record.
+          let rendered = certificateNoteRecord(entry.read.cert)
+          check rendered == entry.piece.text or
+            (i == got.high and rendered == entry.piece.text & "\n")
+        # Writer half: add ``add.txt`` as a RELAY and produce
+        # ``expected-note.txt`` (Conformance §6).
         if fileExists(path / "add.txt"):
           inc writerCases
           check fileExists(path / "expected-note.txt")
@@ -659,7 +758,11 @@ suite "test-certificate.v1 conformance vectors":
           check produced.changed == (expectedNote != note)
         else:
           check not fileExists(path / "expected-note.txt")
-      check writerCases == 4
+      check writerCases == 13
+      check mergeCases == 15
+      # Transport §3.1: a merge that appends after an unterminated piece
+      # REPORTS the LF it supplied — reached, not only permitted.
+      check lfRepairsReported > 0
 
       # --- index.json cross-check, BOTH directions, EVERY group -----------
       # A case that has silently gone missing is a case that stops testing

@@ -575,7 +575,7 @@ proc m9r15iScanQt6CmakeDirs*(qt6DepRecipeDir: string;
   ## config file (what CMake expects as ``<Component>_DIR``).
   ##
   ## Exported for unit-test introspection.
-  let cmakeRoot = qt6DepRecipeDir / ".repro" / "output" / "install" /
+  let cmakeRoot = qt6DepRecipeDir / installMirrorSubpath() /
     "usr" / "lib" / "cmake"
   if not dirExists(cmakeRoot):
     return
@@ -650,15 +650,15 @@ proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
     # in legacy mode the mirror root strips exactly that suffix off
     # the emitted recipe-dir shape.
     let depRecipeDir =
-      if mirrorRoot.endsWith("/.repro/output/install"):
-        mirrorRoot[0 ..< mirrorRoot.len - "/.repro/output/install".len]
+      if mirrorRoot.endsWith("/" & installMirrorSubpath()):
+        mirrorRoot[0 ..< mirrorRoot.len - ("/" & installMirrorSubpath()).len]
       else:
         # Non-legacy mode: the mirror root is content-hashed and does
         # not carry the legacy suffix. Scan the cmake root directly by
         # feeding a synthetic "recipe dir" whose ``+ /.repro/output/install``
         # composes to the mirror root.
         mirrorRoot & "/__pseudo_recipe_dir"
-    if mirrorRoot.endsWith("/.repro/output/install"):
+    if mirrorRoot.endsWith("/" & installMirrorSubpath()):
       m9r15iScanQt6CmakeDirs(depRecipeDir, sink)
     else:
       # For non-legacy layouts, scan the mirror root's cmake tree
@@ -750,7 +750,7 @@ proc m9r15iScanCmakeConfigDirs*(depRecipeDir: string;
   ##
   ## Legacy signature preserved for the existing unit tests; the
   ## resolver-aware collector calls the shared core directly.
-  let cmakeRoot = depRecipeDir / ".repro" / "output" / "install" /
+  let cmakeRoot = depRecipeDir / installMirrorSubpath() /
     "usr" / "lib" / "cmake"
   scanCmakeConfigDirsAt(cmakeRoot, dst)
 
@@ -1263,7 +1263,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     else: destdir
   let srcUsr = effectiveDestRoot & "/usr"
   let escapedSrcUsr = srcUsr.replace("\\", "/").replace("\"", "\\\"")
-  let dstUsrRoot = projectRoot / ".repro" / "output" / "install"
+  # The install mirror is keyed by the target the build compiles for
+  # (`installMirrorSubpath`, ReproOS-Add-On-Mode A15): a cross build's
+  # mirror is `.repro/output/install@<triple>`, beside the native one.
+  let dstUsrRoot = projectRoot / installMirrorSubpath()
   let dstUsr = dstUsrRoot / "usr"
   createDir(dstUsrRoot)
   let escapedDstUsrRoot = dstUsrRoot.replace("\\", "/").replace("\"", "\\\"")
@@ -1525,7 +1528,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   if flagKey in stageCopyEmitted:
     return
   stageCopyEmitted.incl(flagKey)
-  let outputDir = projectRoot / ".repro" / "output" / name
+  let outputDir = projectRoot / ".repro" / "output" /
+    targetKeyedOutputName(name)
   createDir(outputDir)
   let outputPath = outputDir / name
   let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")
@@ -1674,8 +1678,26 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\"; ")
-    script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" &
+    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\" ")
+    # The static shapes a DSL name that already carries the ``lib`` prefix
+    # maps to -- ``library libCrypto:`` is ``libcrypto.a`` -- mirroring the
+    # stripped shared-object probes above. Without these a static-only
+    # build (a cross build for a static-musl target, ReproOS-Add-On-Mode
+    # A15) probed ``liblibcrypto.a`` and nothing else, and the stage copy
+    # reported "no library candidate" for a library that was there.
+    if strippedName != effectiveSourceName:
+      script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".a\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".a\" ")
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".a\" ")
+      if strippedKebabDigits.len > 0 and
+          strippedKebabDigits != strippedLowerName and
+          strippedKebabDigits != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & ".a\" ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".a\" ")
+    script.add("; do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" &
         escapedOut & "\"; exit 0; fi; done; ")
     # M9.R.14g.3 — version-suffix glob fallback for libraries that meson
     # builds with `soversion = '0.19'` and similar (wlroots, gtk-3,
@@ -2091,7 +2113,8 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   if flagKey in stageCopyEmitted:
     return
   stageCopyEmitted.incl(flagKey)
-  let outputDir = projectRoot / ".repro" / "output" / aliasName
+  let outputDir = projectRoot / ".repro" / "output" /
+    targetKeyedOutputName(aliasName)
   createDir(outputDir)
   let outputPath = outputDir / aliasName
   let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")

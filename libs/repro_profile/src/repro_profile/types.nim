@@ -65,12 +65,41 @@ type
     toolIdentityRefs*: seq[string]
     requiresElevation*: bool
     cacheable*: bool
+    substituteOnly*: bool
+      ## The edge is never built on this host: its outputs come from the
+      ## binary cache or the apply fails. For a host that cannot build
+      ## what it runs (a 32-bit ARM appliance), so a cache miss is a
+      ## refusal naming the edge instead of a compile the host cannot
+      ## finish. Requires ``expectedOutputDigest``: an edge whose bytes
+      ## only a publisher's signature vouches for is one every trusted
+      ## publisher could rewrite.
+    expectedOutputDigest*: string
+      ## ``blake3:<64 hex>`` of the edge's output archive (the raw
+      ## ``rbcarc`` the publisher packed, which is what the cache serves
+      ## and what the local outputs pack back to). When set, a
+      ## substitute is accepted only if the fetched archive hashes to it,
+      ## and outputs already present that hash to it are a hit without
+      ## any fetch. The profile that carries it is signed (the deploy
+      ## manifest), so the profile pins the bytes and the cache
+      ## publisher is transport, not authority. Empty: no pin (the
+      ## pre-existing behaviour for edges the host can build itself).
     rebootRequired*: bool
       ## Mirror of ``BuildActionDef.rebootRequired``: the edge's effect
       ## needs a restart before it takes hold. An edge that actually RAN
       ## this apply folds this into ``ApplyResult.restartNeeded``, which is
       ## what makes the apply's reboot notice reachable from a profile
       ## rather than only from the Windows resource drivers.
+
+  AddOnIntent* = object
+    ## What a profile's `addOn:` section declares (ReproOS-Add-On-Mode
+    ## §4.4). The text form's `addOn { managedEtcPrefixes = [...] }` stanza
+    ## is its rendering; the apply refuses an `/etc` path outside the
+    ## prefixes with `EAddOnOutOfScope`.
+    declared*: bool
+    managedEtcPrefixes*: seq[string]
+    confirmTimeoutSec*: int
+      ## `confirmTimeout: <seconds>` (§7.5): how long the add-on switch
+      ## waits for every unit's `healthCheck`; 0 when not declared.
 
   ProfileIntent* = object
     name*: string
@@ -85,13 +114,20 @@ type
       ## validated by the macro; an empty seq is a host where Reprobuild
       ## applies nothing (Gradual-Nix-To-Reprobuild-Migration.md
       ## §Concern-scoped apply).
-    systemManagedElsewhere*: Table[string, string]
-      ## The hosts whose `hosts:` entry says `system: managedElsewhere[(...)]`
-      ## (`repro_profile/host_system`): host -> the pointer to what manages
-      ## the host's system, "" when the entry names none. A host absent from
-      ## this table has its system managed here (Gradual-Nix-To-Reprobuild-
-      ## Migration.md §Hosts, feature 2).
+    hostSystems*: Table[string, HostSystemDecl]
+      ## The hosts whose `hosts:` entry has a `system:` key
+      ## (`repro_profile/host_system`): host -> what the entry declares
+      ## about the host's system scope -- managed elsewhere (with the
+      ## pointer to what manages it), or managed here in add-on mode (with
+      ## the system activities it selects). A host absent from this table
+      ## has its whole system managed here, the default (Gradual-Nix-To-
+      ## Reprobuild-Migration.md §Hosts, feature 2; ReproOS add-on mode).
     resources*: seq[ResourceIntent]
+    addOn*: AddOnIntent
+      ## The profile-wide `addOn:` section of ReproOS add-on mode
+      ## (ReproOS-Add-On-Mode §4.4): the `/etc` prefixes the profile's
+      ## resources may own on an add-on host. `declared` is false for a
+      ## profile without the section.
     stowScopes*: seq[StowScope]
       ## GM11: the `stow/` packages an activity claims (a `stow:` block in
       ## `activity <name>:`), one record per claim. A package no record
@@ -140,6 +176,37 @@ type
       ## it extracts the profile's package references from, as a recipe
       ## imports them (Provisioning-Contributions.md §"Profile Package
       ## References").
+
+  HostSystemMode* = enum
+    ## The values a host entry's `system:` key can take. An entry without a
+    ## `system:` key is `hsmFull` with no activities (`repro_profile/
+    ## host_system`); the spelled form exists to select system activities
+    ## on a fully managed host.
+    hsmManagedElsewhere = "managedElsewhere"
+      ## Something other than this configuration manages the host's system
+      ## scope; `repro infra` refuses the host.
+    hsmAddOn = "addOn"
+      ## The host's system belongs to its distribution; Reprobuild manages a
+      ## declared set of services, files and accounts on top of it (ReproOS
+      ## add-on mode).
+    hsmFull = "full"
+      ## This configuration manages the whole system (ReproOS, or a NixOS /
+      ## nix-darwin switch); spelled only to select system activities
+      ## (`system: {mode: full, activities: [...]}`), or bare `system: full`,
+      ## which means the same as no key.
+
+  HostSystemDecl* = object
+    ## What one `hosts:` entry's `system:` key declares.
+    mode*: HostSystemMode
+    managedBy*: string
+      ## `hsmManagedElsewhere` only: the `managedElsewhere("...")` pointer,
+      ## "" when the entry names none. Always "" for `hsmAddOn` and `hsmFull`.
+    activities*: seq[string]
+      ## `hsmAddOn` and `hsmFull`: the system-profile activities the block
+      ## form's `activities: [...]` selects, in declaration order, on top of
+      ## the system profile's `default` activity (which is always enabled).
+      ## Empty for the short forms `system: addOn` / `system: full`, which
+      ## select `default` alone. Always empty for `hsmManagedElsewhere`.
 
   ActivityElementKind* = enum
     aekPackageRef

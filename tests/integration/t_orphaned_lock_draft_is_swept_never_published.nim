@@ -93,19 +93,19 @@ proc configIdentity(gitBin, repoPath: string) =
 
 proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"lib-a\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"lib-a\"\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -163,9 +163,9 @@ proc setupFixture(gitBin, slug: string; publishLocks: bool): Fixture =
   configIdentity(gitBin, result.libA)
   writeWorkspaceBranch(result.workspaceRoot, project = "lib-a",
     branch = "main")
-  writeFile(result.workspaceRoot / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(result.workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"" & fileUrl(result.storeBare) & "\"\n" &
     "branch = \"main\"\n" &
     (if publishLocks: "publish_locks = true\n" else: ""))

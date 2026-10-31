@@ -16,6 +16,12 @@
 ## Every case below runs an action once (the live record), then hits it (the
 ## derived record) and asserts the two are the same record: same strong
 ## fingerprint, and nothing published twice.
+##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a): only checksum- and
+## hybrid-policy records are published, so the action is recorded under
+## `ffpChecksum`. It used the builtin default, `ffpTimestamp`, until then,
+## and the portable publisher now refuses those records. The last case pins
+## that refusal on both the live and the derived path.
 
 import std/[os, strutils, unittest]
 
@@ -60,9 +66,11 @@ proc writeCapture(path: string; records: varargs[MonitorRecord]) =
 type Built = object
   result: ActionResult
   published: seq[PortableMemoRecord]
+  trace: string
 
 proc build(project, cacheRoot, capture: string;
-           declaredOutputs: seq[string] = @[]): Built =
+           declaredOutputs: seq[string] = @[];
+           policy = ffpChecksum): Built =
   ## One build of a builtin whose monitor capture is `capture`. Every case
   ## runs this twice on one cache root: the first run records the live
   ## portable record, the second is a local hit and derives one.
@@ -71,6 +79,7 @@ proc build(project, cacheRoot, capture: string;
     inputs = [project / "src" / "main.c"],
     outputs = [project / "out" / "result.txt"],
     cacheable = true,
+    actionCachePolicy = policy,
     text = "built\n",
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
   action.declaredOutputs = declaredOutputs
@@ -92,6 +101,8 @@ proc build(project, cacheRoot, capture: string;
   require run.results[0].status in {asSucceeded, asCacheHit, asUpToDate}
   result.result = run.results[0]
   result.published = published[]
+  for event in run.trace:
+    result.trace.add(event.event & ": " & event.detail & "\n")
 
 proc newProject(name: string): string =
   result = TmpDir / name / "proj"
@@ -221,3 +232,27 @@ suite "P3.4b: a portable record derived from a local hit is the live one":
     check warm.result.portableStrongHex == ""
     check "access" in warm.result.portableReason
     check warm.published.len == 0
+
+  test "a timestamp-policy record is published neither live nor from its hit":
+    # M17 (Edge-Derived-Identities.md §3.3a): the portable record is still
+    # computed and serves this host, but a timestamp record never leaves it,
+    # whichever path derived it, and the trace names the policy both times.
+    let project = newProject("timestamp")
+    let capture = TmpDir / "timestamp" / "capture.rdep"
+    writeCapture(capture, fileRead(project / "src" / "main.c"))
+    let cacheRoot = TmpDir / "timestamp" / "cache"
+    let live = build(project, cacheRoot, capture, policy = ffpTimestamp)
+    checkpoint(live.trace)
+    require live.result.launched
+    check live.result.portable
+    check live.published.len == 0
+    check "portable-memo-publish-refused" in live.trace
+    check "ffpTimestamp input-check policy" in live.trace
+    let warm = build(project, cacheRoot, capture, policy = ffpTimestamp)
+    checkpoint(warm.trace)
+    check not warm.result.launched
+    check warm.result.portable
+    check warm.result.portableStrongHex == live.result.portableStrongHex
+    check warm.published.len == 0
+    check "portable-memo-publish-refused" in warm.trace
+    check "ffpTimestamp input-check policy" in warm.trace

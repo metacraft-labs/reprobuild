@@ -13,7 +13,8 @@
 ##     format),
 ##   * applies the highest valid sequence for ``--target`` via the M4
 ##     ``runInfraApply`` path (build-action outputs substituted from the
-##     binary cache when ``REPRO_BINARY_CACHE_URL`` is set).
+##     binary cache when ``caches.conf`` names one with its trusted keys;
+##     see Binary-Caches.md §"Apply-time substitution and publishing").
 ##
 ## Exit codes: 0 = applied OR already-converged OR waiting (nothing to do
 ## yet); 1 = apply failed / source error (retryable — the timer retries);
@@ -45,8 +46,11 @@ import std/[os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
+import repro_deploy_agent/secrets
+import repro_peer_cache/auth as peerAuth
 import repro_home_intent/host_identity
 import repro_profile
+from repro_profile_compile import defaultSystemPlanTarget
 import ./infra
 
 type
@@ -111,8 +115,56 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
         raise newException(ValueError, "unknown flag: " & a)
     inc i
 
+proc runDeployAgentKeygen(args: seq[string]): int =
+  ## ``repro deploy-agent keygen --secrets-key <FILE>`` — generate the
+  ## sealed-secrets recipient key ON THIS HOST (or read the one already
+  ## there) and print its public half, for the producer to seal to
+  ## (Deploy-Agent.md §Recipient key generation). The private key never
+  ## leaves the host.
+  ##
+  ## stdout carries exactly one line, the 130-char hex public key, so the
+  ## command composes (`... keygen --secrets-key K > recipient-pubkey.txt`);
+  ## what happened goes to stderr. Exit 0 on success, 1 when the key cannot
+  ## be created or the existing one is unusable, 2 on a usage error.
+  var keyPath = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    if a == "--secrets-key":
+      inc i
+      if i >= args.len:
+        stderr.writeLine("repro deploy-agent keygen: --secrets-key requires a value")
+        return 2
+      keyPath = args[i]
+    elif a.startsWith("--secrets-key="):
+      keyPath = a["--secrets-key=".len .. ^1]
+    else:
+      stderr.writeLine("repro deploy-agent keygen: unknown argument: " & a)
+      return 2
+    inc i
+  if keyPath.len == 0:
+    stderr.writeLine("repro deploy-agent keygen: --secrets-key <FILE> is required")
+    return 2
+  let key =
+    try:
+      ensureRecipientKeyFile(keyPath)
+    except CatchableError as e:
+      stderr.writeLine("repro deploy-agent keygen: " & e.msg)
+      return 1
+  if key.created:
+    stderr.writeLine("repro deploy-agent keygen: generated a new recipient key at " &
+      keyPath)
+  else:
+    stderr.writeLine("repro deploy-agent keygen: kept the existing recipient key at " &
+      keyPath)
+  echo peerAuth.publicKeyHex(key.publicKey)
+  0
+
 proc runDeployAgentCommand*(args: seq[string]): int =
-  ## ``repro deploy-agent`` entrypoint (one tick).
+  ## ``repro deploy-agent`` entrypoint (one tick), or ``repro deploy-agent
+  ## keygen`` (see `runDeployAgentKeygen`).
+  if args.len > 0 and args[0] == "keygen":
+    return runDeployAgentKeygen(args[1 .. ^1])
   var flags: DeployAgentFlags
   try:
     flags = parseFlags(args)
@@ -205,25 +257,37 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # `repro_cli_support` already depends on `repro_deploy_agent` — importing
   # upward from the hook would close a cycle.
   #
-  # The compiler needs a FILE, so the text is staged under the state dir. It is
-  # written on every tick and deliberately not cached on content: the compile
-  # step downstream keys its own cache on the profile's sources, so a repeat
-  # tick with an unchanged profile still short-circuits there.
+  # The compiler needs FILES, so the text and the manifest's profile bundle
+  # (RDMF v3 `profileFiles`, the files the profile `staticRead`s) are staged
+  # under the state dir by `stageProfileSources`, which rebuilds the tree on
+  # every tick. Deliberately not cached on content: the compile step
+  # downstream keys its own cache on the profile's sources, so a repeat tick
+  # with an unchanged profile still short-circuits there.
   let capturedStateDir = flags.stateDir
-  let resolver: ProfileResolver = proc(profileText: string; outText: var string;
+  # The agent reads no host registry: a signed manifest names its target,
+  # and its producer decides what that target applies. The profile is
+  # planned for this host -- its runtime predicates evaluated here, the
+  # `default` system activity selected -- as `repro infra apply` plans a host
+  # the registry does not declare.
+  let capturedTarget = defaultSystemPlanTarget(host)
+  let resolver: ProfileResolver = proc(profileText: string;
+                                       profileFiles: seq[ProfileFile];
+                                       outText: var string;
                                        outBuildActions: var seq[ProfileBuildAction]):
                                     bool {.gcsafe.} =
     {.cast(gcsafe).}:
       let scratch = capturedStateDir / "deploy-agent"
-      createDir(scratch)
-      # Must be `.nim` and a valid Nim module name — the compiler rejects a
-      # hyphenated stem outright.
-      let profilePath = scratch / "manifest_profile.nim"
-      writeFile(profilePath, profileText)
+      let profilePath = stageProfileSources(scratch, profileText, profileFiles)
+      # The bundle is declared as compile input as well as observed: see
+      # `ProfileCompileOptions.declaredInputs`.
+      var bundlePaths: seq[string]
+      for f in profileFiles:
+        bundlePaths.add(scratch / f.path)
       result = resolveSystemProfileText(profilePath, profileText,
         capturedStateDir, "repro deploy-agent", outText,
         planCommand = "repro infra plan",
-        outBuildActions = addr outBuildActions)
+        outBuildActions = addr outBuildActions, target = capturedTarget,
+        declaredInputs = bundlePaths)
 
   let deps = AgentDeps(
     apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,

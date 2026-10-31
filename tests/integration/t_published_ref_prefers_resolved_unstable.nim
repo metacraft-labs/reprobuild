@@ -26,9 +26,10 @@
 ##   * lib-c declares neither, but names a PROFILE declaring
 ##     `unstable = "canary"` → `canary`;
 ##   * the workspace ROOT repository resolves its roles from the settings
-##     file's `[workspace]` (§3.4): `unstable = "edge"` → `edge`; under the old
-##     `.repro-workspace.toml`, which can declare only a mainline (`[manifest]
-##     branch` of a record store that is the root itself), that mainline;
+##     file's `[workspace]` (§3.4): `unstable = "edge"` → `edge`; a
+##     `[records] branch` (`trunk`, even with the root as the store) is the
+##     store's and no role of the root, so it is not preferred — the `ref`
+##     falls to the remaining order (the checkout's own branch, `main`);
 ##   * NO RESOLUTION — a standalone repository with no workspace manifest and
 ##     no settings file prefers no branch by role: its commit is on `agents`,
 ##     `dev` and its own published branch `work`, and the `ref` is `work`, by
@@ -182,13 +183,13 @@ suite "a committed lock's ref prefers the resolved unstable branch":
       check pinOf(body, ".") == first
       check refOf(body, ".") == "edge"
 
-      # The old `.repro-workspace.toml`: `[manifest] branch` is the root's
-      # mainline when the record store it names IS the root repository (its
-      # `url` and the root's `origin` are one repository).
+      # `[records]` naming the root itself on `trunk`, and no `[workspace]`
+      # roles: the store's branch is not the root's mainline, so nothing is
+      # preferred by role and the checkout's own published branch wins.
       removeFile(fx.ws / "repro-workspace.toml")
-      writeFile(fx.ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\nurl = \"" & fileUrl(rootOrigin) & "\"\n" &
+      writeFile(fx.ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\nurl = \"" & fileUrl(rootOrigin) & "\"\n" &
         "branch = \"trunk\"\n")
       discard fx.git(fx.ws, "add -A")
       let second = fx.commitIn(fx.ws, "root on trunk")
@@ -198,7 +199,8 @@ suite "a committed lock's ref prefers the resolved unstable branch":
       check r.code == 0
       body = readFile(fx.ws / "repro.lock")
       check pinOf(body, ".") == second
-      check refOf(body, ".") == "trunk"
+      check refOf(body, ".") != "trunk"
+      check refOf(body, ".") == "main"
 
   test "with no declared roles no branch is preferred by name":
     if findExe("git").len == 0:

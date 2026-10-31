@@ -390,7 +390,7 @@ suite "L3: crash-safe reaper":
   test "(11) one unreapable record does not abort the sweep; its dependencies are held":
     ## The defect this case pins: a sweep that RAISES on one record reaps
     ## NOTHING. The daemon's wall-clock tick hit it on its very first record —
-    ## a `vm_harness.nic` whose attrs marshaller the daemon does not link — on
+    ## a `gosti.nic` whose attrs marshaller the daemon does not link — on
     ## every one of 141,895 consecutive attempts over 60 days, and reaped
     ## nothing, ever (reprobuild-specs/issues/
     ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md).

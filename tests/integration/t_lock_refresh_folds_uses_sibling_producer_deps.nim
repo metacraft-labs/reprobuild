@@ -216,7 +216,7 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
         createDir(leaf)
         initRepo(gitBin, leaf)
         writeFile(leaf / "repro.nim", resourceProducerRecipe
-          .replace("vm_harness.container", "leaf.instance")
+          .replace("gosti.container", "leaf.instance")
           .replace("wrapper: container", "wrapper: instance")
           .replace("prodres5a", "leafProducer")
           .replace("constraintCarrier", "leafConstraints")

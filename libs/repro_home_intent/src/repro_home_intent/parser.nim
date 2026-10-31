@@ -29,7 +29,8 @@ from repro_profile/concerns import concernListProblem
 # structural editor, so all three agree on which names cannot be bare.
 from repro_project_dsl/selector_names import isNimKeyword
 from repro_profile/host_system import HostSystemKey, ManagedElsewhereKeyword,
-  systemPointerProblem
+  AddOnKeyword, FullKeyword, SystemModeKey, SystemActivitiesKey,
+  systemPointerProblem, systemBlockProblem
 
 import ./errors
 import ./model
@@ -1126,6 +1127,188 @@ proc gatherHostList(ctx: ParseCtx; idx: int; first: string;
     inc j
   (head, idx)
 
+const SystemValueExpected = "`" & ManagedElsewhereKeyword & "`, `" &
+  ManagedElsewhereKeyword & "(\"<managing repository>\")`, `" & AddOnKeyword &
+  "`, `" & FullKeyword & "` or the block form (`" & SystemModeKey & ": " &
+  AddOnKeyword & " | " & FullKeyword & "` and `" & SystemActivitiesKey &
+  ": [...]`)"
+  ## What a `system:` value may be, for diagnostics.
+
+proc finishSystemBlock(ctx: ParseCtx; idx, col: int; hostName: string;
+                       mode: string; hasActivities: bool;
+                       activities: seq[string]): HostSystemDecl =
+  ## Validate a block-form `system:` value with the words the `profile`
+  ## macro uses (`host_system.systemBlockProblem`) and build it.
+  let problem = systemBlockProblem(mode, hasActivities, activities)
+  if problem.len > 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, col + 1,
+      "system: " & problem & " in hosts entry \"" & hostName & "\"",
+      "`" & SystemModeKey & ": " & AddOnKeyword & " | " & FullKeyword &
+      "` and a non-empty `" & SystemActivitiesKey & ": [...]`")
+  HostSystemDecl(mode: (if mode == FullKeyword: hsmFull else: hsmAddOn),
+    activities: activities)
+
+proc readSystemBlockPair(ctx: ParseCtx; idx, col: int; hostName: string;
+                         key, value: string; seen: var seq[string];
+                         mode: var string; hasActivities: var bool;
+                         activities: var seq[string]) =
+  ## One `key: value` of a block-form `system:` value (either spelling).
+  if key in seen:
+    raiseUnstructured(ctx.profilePath, idx + 1, col + 1,
+      "a second `" & key & ":` in the `system:` value of hosts entry \"" &
+      hostName & "\"", "each of `" & SystemModeKey & ":` / `" &
+      SystemActivitiesKey & ":` at most once")
+  seen.add key
+  case key
+  of SystemModeKey:
+    mode = value.strip()
+    if mode.len == 0 or not mode.allCharsInSet(IdentChars):
+      raiseUnstructured(ctx.profilePath, idx + 1, col + 1,
+        "'" & value.strip() & "' as the `system: " & SystemModeKey &
+        ":` of hosts entry \"" & hostName & "\"", "`" & AddOnKeyword & "` or `" &
+        FullKeyword & "`")
+  of SystemActivitiesKey:
+    hasActivities = true
+    activities = splitHostList(ctx, idx, value, col)
+  else:
+    raiseUnstructured(ctx.profilePath, idx + 1, col + 1,
+      "'" & key & ":' in the `system:` value of hosts entry \"" & hostName &
+      "\"", "`" & SystemModeKey & ":` and `" & SystemActivitiesKey & ":`")
+
+proc parseInlineSystemBlock(ctx: ParseCtx; idx: int; raw: string;
+                            startCol: int; hostName: string):
+    HostSystemDecl =
+  ## `{mode: addOn, activities: [a, b]}` on one line, optionally followed by
+  ## a `#` comment. Commas inside the `[...]` list do not split pairs.
+  let s = raw.strip()
+  var depth = 0
+  var close = -1
+  for i, c in s:
+    case c
+    of '[': inc depth
+    of ']': dec depth
+    of '}':
+      if depth == 0:
+        close = i
+        break
+    else: discard
+  if close < 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "an unterminated `{...}` as the `system:` value of hosts entry \"" &
+      hostName & "\"", SystemValueExpected)
+  let tail = s[close + 1 .. ^1].strip()
+  if tail.len > 0 and not tail.startsWith("#"):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & tail & "' after the `system:` value of hosts entry \"" &
+      hostName & "\"", "nothing, or a `#` comment")
+  var pieces: seq[string]
+  var current = ""
+  depth = 0
+  for c in s[1 ..< close]:
+    case c
+    of '[': inc depth; current.add c
+    of ']': dec depth; current.add c
+    of ',':
+      if depth == 0:
+        pieces.add current
+        current = ""
+      else:
+        current.add c
+    else: current.add c
+  if current.strip().len > 0 or pieces.len > 0:
+    pieces.add current
+  var seen: seq[string]
+  var mode = ""
+  var hasActivities = false
+  var activities: seq[string]
+  for piece in pieces:
+    let colon = piece.find(':')
+    if colon <= 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+        "'" & piece.strip() & "' in the `system:` value of hosts entry \"" &
+        hostName & "\"", "`key: value` pairs")
+    readSystemBlockPair(ctx, idx, startCol, hostName,
+      piece[0 ..< colon].strip(), piece[colon + 1 .. ^1], seen, mode,
+      hasActivities, activities)
+  finishSystemBlock(ctx, idx, startCol, hostName, mode, hasActivities,
+    activities)
+
+proc parseIndentedSystemBlock(ctx: ParseCtx; idx, keyIndent: int;
+                              hostName: string):
+    tuple[decl: HostSystemDecl; lastIdx: int] =
+  ## The block form written under a bare `system:` line at 0-based line
+  ## `idx` (indent `keyIndent`): `mode:` / `activities:` lines indented
+  ## deeper, the list free to span lines as any activity list may.
+  var seen: seq[string]
+  var mode = ""
+  var hasActivities = false
+  var activities: seq[string]
+  var j = idx
+  var last = idx
+  var pairIndent = -1
+  while j + 1 < ctx.lines.len:
+    let line = ctx.lines[j + 1]
+    if isBlankOrComment(line):
+      inc j
+      continue
+    let ind = countLeadingSpaces(line)
+    if ind <= keyIndent:
+      break
+    inc j
+    if pairIndent < 0:
+      pairIndent = ind
+    elif ind != pairIndent:
+      raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+        "'" & line.strip() & "' at indent " & $ind & " in the `system:` " &
+        "block of hosts entry \"" & hostName & "\"",
+        "`" & SystemModeKey & ":` / `" & SystemActivitiesKey &
+        ":` at indent " & $pairIndent)
+    let body = trimTrailing(line)[ind .. ^1]
+    let colon = body.find(':')
+    if colon <= 0:
+      raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+        "'" & body & "' in the `system:` block of hosts entry \"" & hostName &
+        "\"", "`" & SystemModeKey & ": ...` or `" & SystemActivitiesKey &
+        ": [...]`")
+    let key = body[0 ..< colon].strip()
+    var value = stripInlineComment(body[colon + 1 .. ^1])
+    if key == SystemActivitiesKey:
+      let gathered = gatherHostList(ctx, j, body[colon + 1 .. ^1], ind)
+      value = gathered.text
+      j = gathered.lastIdx
+    readSystemBlockPair(ctx, j, ind + colon + 1, hostName, key, value, seen,
+      mode, hasActivities, activities)
+    last = j
+  if pairIndent < 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, keyIndent + 1,
+      "an empty `system:` in hosts entry \"" & hostName & "\"",
+      SystemValueExpected)
+  (finishSystemBlock(ctx, idx, keyIndent, hostName, mode, hasActivities,
+    activities), last)
+
+proc parseHostSystemValue(ctx: ParseCtx; idx: int; raw: string;
+                          startCol, keyIndent: int; hostName: string):
+    tuple[decl: HostSystemDecl; lastIdx: int] =
+  ## The value of a block-form host entry's `system:` key at 0-based line
+  ## `idx`, the text form of what the `profile` macro accepts
+  ## (`repro_profile/host_system`), and the 0-based index of its last line.
+  let value = raw.strip()
+  if value.len == 0 or value.startsWith("#"):
+    return parseIndentedSystemBlock(ctx, idx, keyIndent, hostName)
+  if value.startsWith("{"):
+    return (parseInlineSystemBlock(ctx, idx, raw, startCol, hostName), idx)
+  let word = stripInlineComment(value).strip()
+  if word == AddOnKeyword:
+    return (HostSystemDecl(mode: hsmAddOn), idx)
+  if word == FullKeyword:
+    return (HostSystemDecl(mode: hsmFull), idx)
+  if not value.startsWith(ManagedElsewhereKeyword):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & value & "' as the `system:` value of hosts entry \"" & hostName &
+      "\"", SystemValueExpected)
+  let pointer = parseHostSystemText(ctx, idx, raw, startCol, hostName)
+  (HostSystemDecl(mode: hsmManagedElsewhere, managedBy: pointer), idx)
+
 proc parseHostsEntry(ctx: ParseCtx; idx, entryIndent: int): IntentNode =
   let raw = ctx.lines[idx]
   let trimmed = trimTrailing(raw)
@@ -1195,9 +1378,11 @@ proc parseHostsEntry(ctx: ParseCtx; idx, entryIndent: int): IntentNode =
           "each of `activities:` / `applies:` / `system:` at most once")
       seenKeys.add key
       if key == HostSystemKey:
-        result.hostSystemManagedElsewhere = true
-        result.hostSystemManagedBy = parseHostSystemText(ctx, j,
-          body[colon + 1 .. ^1], ind + colon + 1, hostName)
+        let parsed = parseHostSystemValue(ctx, j, body[colon + 1 .. ^1],
+          ind + colon + 1, ind, hostName)
+        result.hostSystemDeclared = true
+        result.hostSystem = parsed.decl
+        j = parsed.lastIdx
         continue
       let keyLine = j
       let gathered = gatherHostList(ctx, j, body[colon + 1 .. ^1], ind)

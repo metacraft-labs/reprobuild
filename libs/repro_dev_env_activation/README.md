@@ -12,3 +12,11 @@ observe its normal exit or signal termination directly. On Windows it starts
 the command and waits. Both preserve the activated argv, environment and working
 directory. Replacement failures raise an error and restore the caller's working
 directory.
+
+On Windows x64, command activation also locates the existing Visual Studio
+host facility for declared MSVC consumers. It reuses the platform environment
+merger, preserving caller and recipe compiler/linker choices. MinGW-only and
+inactive tool declarations do not activate MSVC, and this adds no native ARM
+activation. An unavailable host toolset remains diagnosed by the existing
+locator; no installer is run. Printed artifact data remains project data, not
+a snapshot of the current host's Visual Studio installation.

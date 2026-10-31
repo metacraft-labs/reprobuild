@@ -25,6 +25,47 @@ proc archiveDecompressorTool(archiveUrl: string): string =
   if normalized.endsWith(".tar.zst") or normalized.endsWith(".tzst"):
     return "zstd"
 
+proc isCommitId*(revision: string): bool =
+  ## A full 40-hex SHA-1 object id (the only revision spelling that is not
+  ## a ref); a ``fetch:`` block's ``gitRevision`` may be this or a tag /
+  ## branch name, and the two are fetched differently (``git clone
+  ## --branch`` cannot name a commit).
+  if revision.len != 40: return false
+  for ch in revision:
+    if ch notin {'0' .. '9', 'a' .. 'f', 'A' .. 'F'}: return false
+  true
+
+proc gitArchiveFetchScript*(escapedUrl, escapedRev, escapedTarball: string):
+    string =
+  ## The shell that acquires a git source as a tarball: clone (or, for a
+  ## commit id, fetch exactly that object -- GitHub and every git since 2.5
+  ## serve a reachable commit by id -- which is also the one form that pins
+  ## a PRIVATE repository's revision without a tag) and ``git archive`` it.
+  ## Shared by every emitter that handles ``dfkGitArchive`` so the two
+  ## spellings are decided in one place.
+  # Like `appendCurlDownload`: an archive already on disk is not taken
+  # again. The digest check that follows this script still verifies it, so
+  # a stale or truncated archive is refused rather than trusted; what is
+  # skipped is only the network round trip -- which for a private
+  # repository is also an ssh credential the fetch edge may not have on a
+  # re-run that nothing else needed it for (ReproOS-Add-On-Mode A15).
+  result = "if [ ! -f \"" & escapedTarball & "\" ]; then "
+  result.add("rm -rf \"" & escapedTarball & ".git\"; ")
+  if isCommitId(escapedRev):
+    result.add("git init -q \"" & escapedTarball & ".git\"; ")
+    result.add("git -C \"" & escapedTarball & ".git\" remote add origin \"" &
+      escapedUrl & "\"; ")
+    result.add("git -C \"" & escapedTarball & ".git\" fetch -q --depth 1 origin \"" &
+      escapedRev & "\"; ")
+    result.add("git -C \"" & escapedTarball & ".git\" checkout -q FETCH_HEAD; ")
+  else:
+    result.add("git clone --depth 1 ")
+    if escapedRev.len > 0:
+      result.add("--branch \"" & escapedRev & "\" ")
+    result.add("\"" & escapedUrl & "\" \"" & escapedTarball & ".git\"; ")
+  result.add("(cd \"" & escapedTarball & ".git\" && git archive --format=tar HEAD > \"" &
+    escapedTarball & "\"); fi; ")
+
 proc shellFetchToolIdentityRefs*(hashTools: openArray[string];
                                  copiesDataFile = false;
                                  archiveUrl = ""): seq[string] =

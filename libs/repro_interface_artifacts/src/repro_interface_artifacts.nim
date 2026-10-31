@@ -151,7 +151,7 @@ const BuiltSourcePackageRoots = [
   ("STINT_SRC", compileTimeSourceRoot("STINT_SRC")),
   ("IO_MON_SRC", compileTimeSourceRoot("IO_MON_SRC")),
   ("STACKABLE_HOOKS_SRC", compileTimeSourceRoot("STACKABLE_HOOKS_SRC")),
-  ("VM_HARNESS_SRC", compileTimeSourceRoot("VM_HARNESS_SRC")),
+  ("GOSTI_SRC", compileTimeSourceRoot("GOSTI_SRC")),
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
   ("REPRO_CT_TEST_RUNNER_SRC",
@@ -5057,9 +5057,9 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
     ("STACKABLE_HOOKS_SRC", anchored([
       ".." / "nim-stackable-hooks" / "src",
     ]), "stackable_hooks.nim"),
-    ("VM_HARNESS_SRC", anchored([
-      ".." / "vm-harness" / "src",
-    ]), "vm_harness.nim"),
+    ("GOSTI_SRC", anchored([
+      ".." / "gosti" / "src",
+    ]), "gosti.nim"),
     # SHM-QUEUE-MIGRATE: ``shm_queue`` — the extracted single MPSC ring —
     # reaches this closure through io-mon. ``config.nims`` registers it via
     # ``addPackagePath("SHM_QUEUE_SRC", …, useDevShellFallback = true)``, so it
@@ -6080,6 +6080,17 @@ proc nixLibFile(prefix, libraryName: string): string =
         return path
   ""
 
+const
+  # The size of the largest object-header prefix `soMatchesHostArch` reads: a
+  # fat header plus the slice table of any realistic universal binary (each
+  # ``fat_arch`` is 20 bytes).
+  HeaderBytes = 512
+  ArMagic = [byte('!'), byte('<'), byte('a'), byte('r'), byte('c'),
+             byte('h'), byte('>'), byte('\n')]
+
+proc objectHeaderMatchesHostArch(hdr: seq[byte]): bool
+proc archiveMatchesHostArch(f: File): bool
+
 proc soMatchesHostArch(libFile: string): bool =
   ## Guard the ``/nix/store`` globs (``nixPrefix``, ``nixLibDirIn``) and the
   ## other fallback candidates against picking a library this host's loader
@@ -6112,19 +6123,34 @@ proc soMatchesHostArch(libFile: string): bool =
   ## (https://www.sco.com/developers/gabi/latest/ch4.eheader.html) and
   ## ``<mach-o/loader.h>`` / ``<mach-o/fat.h>`` / ``<mach/machine.h>``.
   ##
-  ## Anything the header does not identify — a static archive (``.a``), a
-  ## linker script (glibc's ``libc.so`` is one), an unreadable or short file,
-  ## or a host machine absent from the tables below — is treated as a match:
-  ## the linker or loader decides, as it did before this guard existed.
-  # The size of the largest prefix this reads: a fat header plus the slice
-  # table of any realistic universal binary (each ``fat_arch`` is 20 bytes).
-  const HeaderBytes = 512
+  ## A static archive (``.a``) is judged by its first member that carries an
+  ## object header (see ``archiveMatchesHostArch``): a cross-build leaves
+  ## ``sqlite-static-aarch64-unknown-linux-musl`` in the store with only a
+  ## ``libsqlite3.a``, and an unclassified archive let ``nixLibDirIn`` hand an
+  ## x86-64 link that directory (``ld: skipping incompatible … libsqlite3.a``,
+  ## ``cannot find -lsqlite3``; measured 2026-10-30).
+  ##
+  ## Anything else the header does not identify — a linker script (glibc's
+  ## ``libc.so`` is one), an unreadable or short file, or a host machine
+  ## absent from the tables below — is treated as a match: the linker or
+  ## loader decides, as it did before this guard existed.
   var f: File
   if not open(f, extendedPath(libFile)):
     return true
   defer: close(f)
   var hdr: array[HeaderBytes, byte]
   let got = readBytes(f, hdr, 0, HeaderBytes)
+  if got < 8:
+    return true
+  if hdr[0 ..< ArMagic.len] == ArMagic:
+    return archiveMatchesHostArch(f)
+  objectHeaderMatchesHostArch(hdr[0 ..< got])
+
+proc objectHeaderMatchesHostArch(hdr: seq[byte]): bool =
+  ## The header test of ``soMatchesHostArch`` over bytes already read:
+  ## ``hdr`` is a file's (or an archive member's) first ``HeaderBytes`` at
+  ## most.
+  let got = hdr.len
   if got < 8:
     return true
   proc le32(at: int): uint32 =
@@ -6137,6 +6163,7 @@ proc soMatchesHostArch(libFile: string): bool =
     EM_386 = 0x03'u16
     EM_X86_64 = 0x3E'u16
     EM_AARCH64 = 0xB7'u16
+    EM_ARM = 0x28'u16
     CPU_TYPE_X86_64 = 0x01000007'u32
     CPU_TYPE_ARM64 = 0x0100000C'u32
     hostIs64 = sizeof(pointer) == 8
@@ -6144,6 +6171,7 @@ proc soMatchesHostArch(libFile: string): bool =
       when hostCPU == "amd64": EM_X86_64
       elif hostCPU == "arm64": EM_AARCH64
       elif hostCPU == "i386": EM_386
+      elif hostCPU == "arm": EM_ARM
       else: 0'u16
     hostCpuType =
       when hostCPU == "amd64": CPU_TYPE_X86_64
@@ -6201,6 +6229,71 @@ proc soMatchesHostArch(libFile: string): bool =
         return true
     false
 
+proc isObjectHeader(hdr: openArray[byte]): bool =
+  ## Whether ``hdr`` opens with a magic ``objectHeaderMatchesHostArch``
+  ## classifies: ELF, or a thin or universal Mach-O.
+  if hdr.len < 4:
+    return false
+  (hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and hdr[2] == byte('L') and
+   hdr[3] == byte('F')) or
+  (hdr[0] in [0xCF'u8, 0xCE'u8] and hdr[1] == 0xFA'u8 and
+   hdr[2] == 0xED'u8 and hdr[3] == 0xFE'u8) or
+  (hdr[0] == 0xCA'u8 and hdr[1] == 0xFE'u8 and hdr[2] == 0xBA'u8 and
+   hdr[3] == 0xBE'u8)
+
+proc archiveMatchesHostArch(f: File): bool =
+  ## Classify a static archive by the first member whose data opens with an
+  ## object header; the archive's own header says nothing about the
+  ## architecture. ``f`` is positioned anywhere; the walk starts after the
+  ## 8-byte global header. Members follow the common ar(5) layout
+  ## (https://man.freebsd.org/cgi/man.cgi?query=ar&sektion=5): a 60-byte
+  ## header whose name is bytes 0..15 and whose decimal size is bytes 48..57,
+  ## data padded to an even offset. The GNU symbol table (``/``) and long-name
+  ## table (``//``) and the BSD ``__.SYMDEF`` are skipped because their data
+  ## is no object header; a BSD ``#1/N`` long name prefixes the data with N
+  ## bytes of name. An archive with no classifiable member (empty, or a
+  ## symbol table only), a malformed header or an over-long walk is accepted
+  ## and left to the linker, as the unclassified case always was.
+  const MaxMembers = 4096
+  let total = getFileSize(f)
+  var pos = int64(ArMagic.len)
+  for _ in 0 ..< MaxMembers:
+    if pos + 60 > total:
+      return true
+    setFilePos(f, pos)
+    var mh: array[60, byte]
+    if readBytes(f, mh, 0, 60) < 60:
+      return true
+    var name = ""
+    for i in 0 ..< 16: name.add(char(mh[i]))
+    var sizeText = ""
+    for i in 48 ..< 58: sizeText.add(char(mh[i]))
+    var memberSize: int64
+    try:
+      memberSize = parseBiggestInt(sizeText.strip())
+    except ValueError:
+      return true
+    if memberSize < 0:
+      return true
+    var dataPos = pos + 60
+    var dataLen = memberSize
+    if name.startsWith("#1/"):
+      var nameLen: int
+      try:
+        nameLen = parseInt(name[3 .. ^1].strip())
+      except ValueError:
+        return true
+      dataPos += nameLen
+      dataLen -= nameLen
+    if dataLen >= 8:
+      setFilePos(f, dataPos)
+      var hdr: array[HeaderBytes, byte]
+      let got = readBytes(f, hdr, 0, min(HeaderBytes, int(dataLen)))
+      if isObjectHeader(hdr.toOpenArray(0, got - 1)):
+        return objectHeaderMatchesHostArch(hdr[0 ..< got])
+    pos = pos + 60 + memberSize + (memberSize and 1)
+  true
+
 proc nixPrefix(namePattern, header: string;
                libraryNames: openArray[string]): string =
   if not dirExists(extendedPath("/nix/store")):
@@ -6242,12 +6335,21 @@ const InterfaceLibSubdirs = [
   ## a `-L` search must probe (plain `lib`, `lib64`, Debian-multiarch triples)
   ## so a bare prefix like `/usr` resolves regardless of host layout.
 
-proc holdsLibrary(libDir, dylibName: string; hostArchOnly: bool): bool =
-  ## Whether `libDir/dylibName` exists and — when `hostArchOnly` — is a file
-  ## this host's loader can map (see `soMatchesHostArch`).
-  let path = libDir / dylibName
-  fileExists(extendedPath(path)) and
-    (not hostArchOnly or soMatchesHostArch(path))
+proc dirHoldsLibrary(libDir: string; dylibNames: openArray[string];
+                     hostArchOnly: bool): bool =
+  ## Mirror of `config.nims`'s `dirHoldsLibrary`: whether `libDir` holds one
+  ## of `dylibNames` -- and, when `hostArchOnly`, none of them built for
+  ## another architecture (see `soMatchesHostArch`). The names are
+  ## alternatives for one `-l`, so a static archive, which the header check
+  ## cannot classify, must not vouch for a directory whose shared object is
+  ## foreign: the linker prefers the shared object.
+  result = false
+  for dylibName in dylibNames:
+    let path = libDir / dylibName
+    if fileExists(extendedPath(path)):
+      if hostArchOnly and not soMatchesHostArch(path):
+        return false
+      result = true
 
 proc firstExistingPrefixLibDir(prefix: string;
                                dylibNames: openArray[string];
@@ -6256,9 +6358,8 @@ proc firstExistingPrefixLibDir(prefix: string;
   ## absolute libdir under `prefix` that holds one of `dylibNames`, or "".
   for libSub in InterfaceLibSubdirs:
     let candidate = prefix / libSub
-    for dylibName in dylibNames:
-      if holdsLibrary(candidate, dylibName, hostArchOnly):
-        return candidate
+    if dirHoldsLibrary(candidate, dylibNames, hostArchOnly):
+      return candidate
   ""
 
 proc firstExistingLibDir(candidates: openArray[string];
@@ -6277,9 +6378,8 @@ proc firstExistingLibDir(candidates: openArray[string];
     let path = candidate.strip()
     if path.len == 0:
       continue
-    for dylibName in dylibNames:
-      if holdsLibrary(path, dylibName, hostArchOnly):
-        return path
+    if dirHoldsLibrary(path, dylibNames, hostArchOnly):
+      return path
     let resolved = firstExistingPrefixLibDir(path, dylibNames, hostArchOnly)
     if resolved.len > 0:
       return resolved
@@ -6623,111 +6723,120 @@ proc resolveSqliteLibDir*(explicitLibDir, explicitPrefix, builtPrefix,
       return stored
   firstExistingLibDir(hostDirs, SqliteLibraryNames)
 
+proc protectSdkCompilePaths(command: var seq[string]; workDir, moduleArg: string;
+                            packageFlags: openArray[string]) =
+  ## Recipe/configuration paths remain usable, but may not replace the SDK's
+  ## selected libraries or their bootstrap dependencies. Do not promote a
+  ## consumer's other auto-discovered/declared package roots with the SDK.
+  let sdkLibs =
+    if workDirIsReprobuildTree(workDir): workDir / "libs"
+    else: reprobuildExternalLibsRoot(workDir)
+  var protectedFlags = initHashSet[string]()
+  if sdkLibs.len > 0:
+    var roots: seq[string]
+    walkLibSrcPathsInto(sdkLibs, roots)
+    for root in roots:
+      protectedFlags.incl("--path:" & root)
+    for flag in bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
+        workDir.parentDir):
+      if flag.startsWith("--path:"): protectedFlags.incl(flag)
+  for flag in packageFlags:
+    if flag.startsWith("--path:"): protectedFlags.incl(flag)
+  var selected: seq[string]
+  var remaining: seq[string]
+  var beforeModule = true
+  for arg in command:
+    if arg == moduleArg: beforeModule = false
+    if beforeModule and arg in protectedFlags:
+      if arg notin selected: selected.add(arg)
+    else:
+      remaining.add(arg)
+  if selected.len == 0:
+    return
+  # Nim parses CLI paths before configuration and then again afterwards;
+  # duplicate roots do not move. Reset only these selected SDK roots before
+  # re-adding them last. All non-SDK options/paths and their order are intact.
+  var priority: seq[string]
+  for flag in selected:
+    priority.add("--excludePath:" & flag["--path:".len .. ^1])
+  priority.add(selected)
+  let moduleAt = remaining.find(moduleArg)
+  doAssert moduleAt >= 0
+  remaining.insert(priority, moduleAt)
+  command = remaining
+
 proc externalHashFlags(workDir = ""): seq[string] =
-  # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
-  # The reprobuild repo vendors portable C sources for both inside the
-  # package-local source trees, and config.nims wires the include paths +
-  # `{.compile:.}` pragmas accordingly. When repro is run as a CLI against an
-  # arbitrary project, the project's nim invocation does NOT pick up
-  # reprobuild's config.nims (different working directory), so we have to
-  # propagate the same define/include flags here. The vendored sources live
-  # alongside the reprobuild library tree, so resolve the include dirs relative
-  # to workDir (which is the reprobuildLibraryWorkDir).
-  # Installed wrappers publish this build-time-only search path. It is never
-  # assigned to LD_LIBRARY_PATH/DYLD_*: those variables would leak package
-  # libraries into arbitrary user actions. Instead, bake the package's
-  # complete runtime closure into the two binaries reprobuild compiles for
-  # itself after installation (the interface runner and project provider).
+  # Generated helpers live outside config.nims. Replay its default portable
+  # hash policy on every host: a release carries these sources, whereas its
+  # consumer need not have hash-library development packages installed.
   result.add(runtimeRpathCompilerFlags(
     getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH").split(PathSep),
     hostRuntimeLinkTarget()))
-
-  when defined(windows):
-    # M9.R.13b.1 — propagate `--define:reproVendoredHash` so the vendored
-    # path in `blake3.nim` / `xxh3.nim` (a `when defined(reproVendoredHash):
-    # {.compile: ...c.}` block guarding the inclusion of the portable C
-    # implementations) actually fires when the interface-extract runner
-    # and the provider compile run outside the reprobuild project's
-    # `config.nims` scope. Without this define the runner picks up only
-    # the `-I` include flags below — `xxh3/capi.c` resolves `XXH3_64bits`
-    # through `xxhash.h` but no implementation translation unit is
-    # compiled, so the link step fails with `undefined reference to
-    # XXH3_64bits` / `XXH3_64bits_withSeed` (the symptom that blocked the
-    # wayland from-source smoke at the interface-extract LINK stage,
-    # M9.R.13a → M9.R.13b handover). The non-Windows branch below
-    # delegates to system-installed libblake3 / libxxhash via `-L` + `-l`
-    # so it doesn't need the define; Windows has no such system install
-    # so the vendored path is the only one available.
-    let envSystem = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii()
-    let useSystem = envSystem in ["1", "true", "yes", "on"]
+  let useSystem = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
+    ["1", "true", "yes", "on"]
+  let blake3Inc = workDir / "libs/blake3/src/blake3/vendor"
+  let xxhashInc = workDir / "libs/xxh3/src/xxh3/vendor"
+  let vendored = not useSystem and workDir.len > 0 and
+    fileExists(extendedPath(blake3Inc / "blake3.h")) and
+    fileExists(extendedPath(blake3Inc / "blake3.c")) and
+    fileExists(extendedPath(xxhashInc / "xxhash.h")) and
+    fileExists(extendedPath(xxhashInc / "xxhash.c"))
+  if vendored or defined(windows):
+    # Nim splices passC text into the compiler command verbatim. Preserve a
+    # relocated source root containing spaces as one include argument.
     if workDir.len > 0:
-      let blake3Inc = workDir / "libs" / "blake3" / "src" / "blake3" /
-        "vendor"
-      let xxhashInc = workDir / "libs" / "xxh3" / "src" / "xxh3" /
-        "vendor"
-      # Quoted, as `config.nims` quotes the same directories: Nim splices
-      # `passC` text into the C compiler's command line verbatim, so a source
-      # root containing a space -- a release unpacked under
-      # `C:\Users\<First Last>\...` -- came apart into a stray `vendor`
-      # "linker input" and every extract runner and provider compile failed
-      # in gcc (reprobuild-pm issue 2026-10-27-interface-extraction-splits-a-
-      # spaced-install-path-in-the-vendored-hash-include).
       if fileExists(extendedPath(blake3Inc / "blake3.h")):
         result.add("--passC:-I" & quoteShell(blake3Inc))
       if fileExists(extendedPath(xxhashInc / "xxhash.h")):
         result.add("--passC:-I" & quoteShell(xxhashInc))
-      if not useSystem and
-         fileExists(extendedPath(blake3Inc / "blake3.c")) and
-         fileExists(extendedPath(xxhashInc / "xxhash.c")):
-        # Mirror `config.nims`'s `switch("define", "reproVendoredHash")`
-        # for the runner / provider compile so the `{.compile:.}` pragmas
-        # in `blake3.nim` / `xxh3.nim` fire and the vendored C sources
-        # land in the link.
-        result.add("--define:reproVendoredHash")
-        result.add("--passC:-DREPRO_VENDORED_HASH")
+    if vendored:
+      result.add("--define:reproVendoredHash")
+      result.add("--passC:-DREPRO_VENDORED_HASH")
+  when defined(windows):
     return
 
-  let blake3Prefix = block:
-    let direct = firstExistingPrefix(
-      [getEnv("BLAKE3_PREFIX"), builtLibraryPrefix("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
-        "/usr/local/opt/blake3"],
-      "include/blake3.h",
-      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
-    if direct.len > 0:
-      direct
-    else:
-      nixPrefix("*-libblake3-*", "include/blake3.h",
+  if not vendored:
+    let blake3Prefix = block:
+      let direct = firstExistingPrefix(
+        [getEnv("BLAKE3_PREFIX"), builtLibraryPrefix("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
+          "/usr/local/opt/blake3"],
+        "include/blake3.h",
         ["libblake3.dylib", "libblake3.so", "libblake3.a"])
-  if blake3Prefix.len > 0:
-    result.add("--passC:-I" & (blake3Prefix / "include"))
-    let libDir = firstExistingPrefixLibDir(blake3Prefix,
-      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
-    result.add("--passL:-L" & libDir)
-    # The source bootstrap has no installed wrapper to supply runtime paths.
-    # The generated runner must find the same library it linked against.
-    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
-    result.add("--passL:-lblake3")
+      if direct.len > 0:
+        direct
+      else:
+        nixPrefix("*-libblake3-*", "include/blake3.h",
+          ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+    if blake3Prefix.len > 0:
+      result.add("--passC:-I" & (blake3Prefix / "include"))
+      let libDir = firstExistingPrefixLibDir(blake3Prefix,
+        ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+      result.add("--passL:-L" & libDir)
+      # The source bootstrap has no installed wrapper to supply runtime paths.
+      # The generated runner must find the same library it linked against.
+      result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
+      result.add("--passL:-lblake3")
 
-  let xxhashPrefix = block:
-    let direct = firstExistingPrefix(
-      [getEnv("XXHASH_PREFIX"), builtLibraryPrefix("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
-        "/usr/local/opt/xxhash"],
-      "include/xxhash.h",
-      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
-    if direct.len > 0:
-      direct
-    else:
-      nixPrefix("*-xxHash-*", "include/xxhash.h",
+    let xxhashPrefix = block:
+      let direct = firstExistingPrefix(
+        [getEnv("XXHASH_PREFIX"), builtLibraryPrefix("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
+          "/usr/local/opt/xxhash"],
+        "include/xxhash.h",
         ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
-  if xxhashPrefix.len > 0:
-    result.add("--passC:-I" & (xxhashPrefix / "include"))
-    let libDir = firstExistingPrefixLibDir(xxhashPrefix,
-      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
-    result.add("--passL:-L" & libDir)
-    # The source bootstrap has no installed wrapper to supply runtime paths.
-    # The generated runner must find the same library it linked against.
-    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
-    result.add("--passL:-lxxhash")
+      if direct.len > 0:
+        direct
+      else:
+        nixPrefix("*-xxHash-*", "include/xxhash.h",
+          ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+    if xxhashPrefix.len > 0:
+      result.add("--passC:-I" & (xxhashPrefix / "include"))
+      let libDir = firstExistingPrefixLibDir(xxhashPrefix,
+        ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+      result.add("--passL:-L" & libDir)
+      # The source bootstrap has no installed wrapper to supply runtime paths.
+      # The generated runner must find the same library it linked against.
+      result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
+      result.add("--passL:-lxxhash")
 
   # OpenSSL: a recipe may load it at module init (`std/net` under `-d:ssl`,
   # or a direct `loadLib`) even when the host recipe declares no ssl link
@@ -7565,7 +7674,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   ## value is baked into the compiled recipe, would do so silently.
   ##
   ## TI1 (Project-Provider-Runtime-Protocol.milestones.org) — a producer may
-  ## declare a RESOURCE MODULE (e.g. vm-harness's ``src/vm_harness/repro/
+  ## declare a RESOURCE MODULE (e.g. gosti's ``src/gosti/repro/
   ## resources.nim``) that carries its ``resourceType`` blocks, plus the extra
   ## ``--path``s that module's imports need. When ``resourceModule`` is given
   ## the extraction runner ALSO imports that module so its module-init
@@ -7678,6 +7787,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   let runnerBin = tempRoot / "extract_runner"
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
+  let packageFlags = reproPackagePathFlags(workDir)
   # The engine's own binary and the consumer's root are handed to the recipe's
   # macro expansion. A macro that needs to resolve a declared dependency calls
   # back through `staticExec` (see `internal resolve-package`) rather than
@@ -7725,19 +7835,11 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   ])
   command.insert(hostFlags, 2)
   command.insert(externalHashFlags(workDir), 2)
-  command.insert(reproPackagePathFlags(workDir), 2)
+  command.insert(packageFlags, 2)
   command.insert(libFlags, 4)
-  # TI2 residual fix (a) — ``--path`` ORDER: the producer-declared resource
-  # module dir + its extra ``--path``s MUST come AFTER the reprobuild lib flags
-  # (``libFlags``, inserted at index 4 above), never before. Nim's module
-  # resolution does NOT reliably prefer the first ``--path`` entry when the same
-  # logical module name exists under two roots, so a producer whose src tree
-  # (or an ``extraPaths`` dir) happens to contain a module colliding with a
-  # reprobuild lib module (e.g. a stray ``repro_*`` leaf) could SHADOW the
-  # reprobuild copy and silently lift against the wrong sources. Appending the
-  # producer paths AFTER ``libFlags`` guarantees the reprobuild libs win on any
-  # ambiguity. (Before TI2 these were inserted at the SAME index 4, which put
-  # them BEFORE ``libFlags`` — the shadowing hazard TI1 flagged as residual.)
+  # Preserve producer resource/search paths. Selected SDK roots are protected
+  # after all recipe/configuration paths have been assembled below; Nim gives
+  # a later path precedence, so placement after libFlags alone is not safe.
   var producerPathFlags: seq[string] = @[]
   if resourceModule.len > 0:
     producerPathFlags.add("--path:" & parentDir(absolutePath(resourceModule)))
@@ -7757,13 +7859,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # The recipe's own configuration chain. The runner, not the recipe, is the
   # main module, so Nim would read the runner directory's `config.nims` /
   # `nim.cfg` chain; the search paths the recipe's chain adds are passed
-  # explicitly instead (`recipeConfigSearchPathFlags`), after every other
-  # path so they cannot shadow a reprobuild library (see TI2 above).
+  # explicitly instead (`recipeConfigSearchPathFlags`). Only the selected SDK
+  # roots are reasserted afterwards; recipe-only imports retain these paths.
   let recipeConfigFlags = recipeConfigSearchPathFlags(absoluteModulePath,
     cwd = tempRoot)
   if recipeConfigFlags.len > 0:
     let runnerAt = command.find(runnerPlaceholder)
     command.insert(recipeConfigFlags, runnerAt)
+  protectSdkCompilePaths(command, workDir, runnerPlaceholder, packageFlags)
   # WHERE THE NIMCACHE AND THE RUNNER LIVE. By default: a slot of the
   # configuration-keyed pool under `interfaceExtractionNimcacheRoot()` (see
   # the block comment above `InterfaceNimcacheSlotCount` for why the key
@@ -8710,6 +8813,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # output binary path.
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
+  let packageFlags = reproPackagePathFlags(workDir)
   # The nimcache root stays independent of the per-recipe scratch/out tree
   # to bound intermediate storage (auto-recurse has one scratchDir per recipe)
   # and so the SAME recipe rebuilt in a fresh scratch dir still finds its own
@@ -8747,7 +8851,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   ])
   result.insert(hostFlags, 2)
   result.insert(externalHashFlags(workDir), 2)
-  result.insert(reproPackagePathFlags(workDir), 2)
+  result.insert(packageFlags, 2)
   result.insert(libFlags, 2)
   if providerDynamicEnabled():
     # Tier 1 shared DSL runtime DLL: opt-in via ``REPRO_PROVIDER_DYNAMIC=1``.
@@ -8783,6 +8887,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # Flags after the module argument are run arguments, so these go before it.
   for flag in extraFlags:
     result.insert(flag, result.len - 1)
+  protectSdkCompilePaths(result, workDir, modulePath, packageFlags)
   let nimcache =
     if providerNimcacheMode() == "per-binary":
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)

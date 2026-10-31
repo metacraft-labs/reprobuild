@@ -481,7 +481,11 @@ proc splitPathList(pathValue: string): seq[string] =
 
 proc configuredProbes*(packageSelector, executableName: string): seq[
     ToolProbeSpec] =
-  discard packageSelector
+  if (packageSelector == "7zip" or packageSelector.startsWith("7zip@")) and
+      executableName.toLowerAscii() in ["7z", "7z.exe"]:
+    # 7-Zip has no --version switch; `i` prints the version banner and
+    # supported formats without opening or modifying an archive.
+    return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["i"])]
   if executableName == "tmux":
     return @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["-V"])]
   if executableName == "sddm":
@@ -1880,6 +1884,126 @@ proc realizeNixToolPaths(useDef: InterfaceToolUse;
     tuple[paths: seq[string]; receipt: string]
   ## Forward declaration -- see the definition, after ``resolveTarballTool``.
 
+proc versionFromProbeOutput*(output: string): string =
+  ## The version a tool's ``--version`` output reports: the first
+  ## ``<digits>.<digits>[.<digits>]`` token (``rustc 1.91.1 (…)`` -> ``1.91.1``,
+  ## ``This is perl 5, version 40 … (v5.40.0)`` -> ``5.40.0``, ``v20.11.1``
+  ## -> ``20.11.1``), padded to three components so ``parseSemver`` reads
+  ## it. "" when the output carries no such token.
+  var i = 0
+  while i < output.len:
+    if output[i] in Digits and (i == 0 or output[i - 1] notin Digits):
+      var j = i
+      var parts = 0
+      var token = ""
+      while j < output.len:
+        if output[j] in Digits:
+          token.add(output[j])
+        elif output[j] == '.' and j + 1 < output.len and
+            output[j + 1] in Digits and parts < 2:
+          token.add('.')
+          inc parts
+        else:
+          break
+        inc j
+      if parts >= 1:
+        if parts == 1: token.add(".0")
+        return token
+      i = j
+    inc i
+  ""
+
+proc realizedVersionOf*(profile: PathOnlyToolProfile): string =
+  ## The version the realized executable itself reported to its version
+  ## probe, or "" when no probe of that kind answered.
+  for probe in profile.probes:
+    if probe.spec.kind == tpkVersion and probe.exitCode == 0:
+      let v = versionFromProbeOutput(probe.output)
+      if v.len > 0: return v
+  ""
+
+proc nixStorePathVersion*(path: string): string =
+  ## The version a nixpkgs store path's name carries, or "".
+  ##
+  ## nixpkgs names a derivation ``<pname>-<version>`` and an output other
+  ## than ``out`` adds ``-<output>``, so the store entry
+  ## ``/nix/store/<hash>-zlib-1.3.1-dev`` names version ``1.3.1``: the first
+  ## ``-`` that a digit follows opens the version, and the next ``-`` closes
+  ## it. That is the version the pinned nixpkgs built, which is what a range
+  ## is held against for a realization with no version probe -- a library
+  ## has no ``--version`` to ask.
+  ## (https://nixos.org/manual/nixpkgs/stable/#sec-package-naming)
+  const StorePrefix = "/nix/store/"
+  let at = path.find(StorePrefix)
+  if at < 0:
+    return ""
+  var entry = path[at + StorePrefix.len .. ^1]
+  let slash = entry.find('/')
+  if slash >= 0:
+    entry = entry[0 ..< slash]
+  let dash = entry.find('-')
+  if dash < 0:
+    return ""
+  let name = entry[dash + 1 .. ^1]
+  for i in 0 ..< name.len - 1:
+    if name[i] == '-' and name[i + 1] in Digits:
+      var version = name[i + 1 .. ^1]
+      let next = version.find('-')
+      if next >= 0:
+        version = version[0 ..< next]
+      return version
+  ""
+
+proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
+                              realizedVersion, realization: string): string =
+  ## The refusal, or "", for a realization that reports `realizedVersion`
+  ## against the range the recipe's `uses:` declares. A declared range is
+  ## honoured by every realization route or the route is refused by name:
+  ## the tarball and scoop arms carry a declared version and are filtered
+  ## before acquisition (`selectTarballRecord`), while a ``nixPackage`` arm
+  ## carries none -- its version is whatever the pinned nixpkgs builds --
+  ## so it is checked AFTER realization, against what the tool reports.
+  ## A range the report cannot be read against is refused too: "the
+  ## version could not be verified" is not "the version is in range"
+  ## (reprobuild-pm issue 2026-10-30-path-mode-realizes-a-nix-rustc-outside-
+  ## the-declared-version-range).
+  let range = requestedUsesVersionRange(useDef)
+  if range.len == 0:
+    return ""
+  let parsed = parsedVersionRange(range)
+  if realizedVersion.len == 0:
+    return "tool-resolution failed: `" & useDef.packageSelector &
+      "` requested by uses \"" & useDef.rawConstraint & "\" was realized " &
+      "by " & realization & ", whose version probe and store path " &
+      "report no version to hold against the declared range '" & range & "'; a realization " &
+      "that cannot be verified is not one that satisfies it"
+  if matchesVersionRange(realizedVersion, parsed):
+    return ""
+  "tool-resolution failed: `" & useDef.packageSelector &
+    "` requested by uses \"" & useDef.rawConstraint & "\" was realized by " &
+    realization & ", which reports version " & realizedVersion &
+    ", outside the declared range '" & range & "'. The pinned nixpkgs " &
+    "does not carry a version in range: pin a realization that does " &
+    "(a tarball arm, or `" & useDef.executableName &
+    "` on PATH), or widen the range"
+
+proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
+                              useDef: InterfaceToolUse) =
+  ## Raise ``OSError`` for a profile whose realized version is outside the
+  ## recipe's declared range (see ``usesVersionRangeRefusal``).
+  # The probe first: it is what the realized program says about itself. A
+  # realization nothing can ask (a library) is held to the version its
+  # nixpkgs store path names instead.
+  var version = realizedVersionOf(profile)
+  if version.len == 0:
+    version = nixStorePathVersion(
+      if profile.selectedStorePath.len > 0: profile.selectedStorePath
+      else: profile.resolvedExecutablePath)
+  let refusal = usesVersionRangeRefusal(useDef, version,
+    "nix://" & profile.nixSelector & " (" & profile.resolvedExecutablePath & ")")
+  if refusal.len > 0:
+    raise newException(OSError, refusal)
+
 proc nixReceiptNamesProfile(receipt: string;
                             profile: PathOnlyToolProfile): bool =
   ## Whether ``receipt`` currently names the realization ``profile``
@@ -1946,6 +2070,9 @@ else:
         result = cached.profile
         # Not part of the profile fingerprint (see the field).
         result.provisioningReceipt = receipt
+        # A cached realization is held to the range too: the range is the
+        # recipe's, the cache remembers only what nixpkgs built.
+        enforceUsesVersionRange(result, useDef)
         return
       # The receipt is missing or names another realization (another pin of
       # the same tool request wrote it last): run the edge, which restores
@@ -2046,6 +2173,8 @@ else:
     if dirExists(extendedPath(selectedStorePath)):
       result.probes = collectConfiguredProbes(resolved,
         useDef.packageSelector, useDef.executableName)
+      # What nixpkgs built is held to the range the recipe declared.
+      enforceUsesVersionRange(result, useDef)
 
     if storeRoot.len > 0 and dirExists(extendedPath(selectedStorePath)):
       let nixPackageName = safeStoreSegment("nix." & plan.packageId,
@@ -3729,10 +3858,16 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
       # The clone carries the sibling's receipt. Drop it: the caller seals
       # this package's own, and a prefix holding somebody else's provenance
       # is worse than one holding none.
-      let clonedReceipt = tempPrefix / ".repro-receipt"
-      if fileExists(extendedPath(clonedReceipt)):
-        try: removeFile(extendedPath(clonedReceipt))
-        except CatchableError: discard
+      for receiptName in [".repro-receipt", ".reprobuild-tarball-receipt.json"]:
+        let clonedReceipt = tempPrefix / receiptName
+        if fileExists(extendedPath(clonedReceipt)):
+          try:
+            # The payload may share inodes, but each view writes its own
+            # provenance. Truncating a linked adapter receipt edits the source.
+            removeFile(extendedPath(clonedReceipt))
+          except CatchableError:
+            removeDir(extendedPath(tempPrefix))
+            raise
       if executableInStorePath(tempPrefix, plan.declaredExecutablePath,
           rejectSymlinks = true).len == 0:
         try: removeDir(extendedPath(tempPrefix))
@@ -3758,15 +3893,14 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
   ## Soft-fail on every path. A cache that is unreachable, unconfigured, or
   ## simply does not have this entry must cost nothing but the lookup — the
   ## upstream download still follows.
-  if getEnv("REPRO_CACHE_DISABLE").len > 0:
+  # The shared resolver (``caches_config.resolveTrustedCacheConfig``): the
+  # same trust the provider-compile cache and the apply-time build-action
+  # substitute act on. Three private copies of "which caches, with which
+  # keys" is three places for a trust decision to drift.
+  let cacheCfg = resolveTrustedCacheConfig()
+  if not cacheCfg.configured:
     return false
-  var endpoints: seq[SubstituteEndpoint] = @[]
-  try:
-    endpoints = loadEndpoints()
-  except CatchableError:
-    return false
-  if endpoints.len == 0:
-    return false
+  let endpoints = cacheCfg.endpoints
   let keyHex = deriveCacheEntryKeyHex(toolCacheIdentity(plan, packageName,
     version))
   try:
@@ -3850,8 +3984,7 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   ## Publishing requires credentials to be configured. Their absence is the
   ## ordinary case for most developers and is silent by design; it is not an
   ## error and must not read like one.
-  if getEnv("REPRO_CACHE_DISABLE").len > 0:
-    return
+  # (``REPRO_CACHE_DISABLE`` is honoured by the shared resolver below.)
   # A caller may relax application trust checks for local fixtures. Such a
   # prefix has not met the normal publication contract, so it must never be
   # advertised under the same cache identity as a strictly verified product.
@@ -3867,10 +4000,14 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   # a property of the package rather than an accident of who is running.
   if barredFromCachePublication(plan):
     return
-  let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
-  let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")
-  if keyPath.len == 0 or certPath.len == 0:
+  # Publish credentials come from the shared resolver too: an operator-
+  # supplied keypair, never a generated one, and the publish endpoint it
+  # resolved. No key means this host does not publish toolchains either.
+  let cacheCfg = resolveTrustedCacheConfig()
+  if not (cacheCfg.configured and cacheCfg.keypairOk):
     return
+  let keyPath = cacheCfg.keyPath
+  let certPath = cacheCfg.certPath
   try:
     let keypair = peerAuth.loadOrGenerateKeypair(certPath, keyPath)
     let identity = toolCacheIdentity(plan, packageName, version)
@@ -3878,7 +4015,7 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
       entryKeyHex: deriveCacheEntryKeyHex(identity),
       prefixDir: prefix,
       identity: identity,
-      endpoint: getEnv("REPRO_BINARY_CACHE_URL", ""),
+      endpoint: cacheCfg.publishEndpoint,
       keypair: keypair)
     if request.endpoint.len == 0:
       return
@@ -5199,9 +5336,9 @@ const
   BootstrapNimPackageId = "nim@" & BootstrapNimVersion
   BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
-    "https://nim-lang.org/download/nim-2.2.10_x64.zip"
+    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip"
   BootstrapNimTarballSha256 =
-    "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
+    "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b"
   # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
   # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
   # x86_64: unsigned), so the monitor shim loads into it like into any other
@@ -7792,6 +7929,15 @@ proc fromSourceRecipeRoot*(workspaceRoot = ""): string =
   let inTree = root / "recipes" / "packages" / "source"
   if dirExists(inTree):
     return inTree
+  # A checkout of the catalog itself (reprobuild-packages: `packages/source`
+  # at its root) is its own recipes root. Before the federated sibling, or a
+  # build run from one worktree of the catalog walked ANOTHER checkout's
+  # siblings (`../reprobuild-packages`), whose mirrors and revisions are
+  # not this build's (reprobuild-pm issue 2026-10-30-sibling-source-recipes-
+  # resolve-only-for-non-native-deps-in-two-modes).
+  let ownCatalog = root / "packages" / "source"
+  if dirExists(ownCatalog):
+    return ownCatalog
   let federated = parentDir(root) / "reprobuild-packages" /
     "packages" / "source"
   if dirExists(federated):
@@ -7819,7 +7965,7 @@ proc fromSourceArtifactCandidate*(recipeRoot, packageName,
   ## (with ``.exe`` suffix appended on Windows when the file exists at
   ## the suffixed path). Callers test ``fileExists`` themselves.
   result = recipeRoot / packageName / ".repro" / "output" /
-    executableName / executableName
+    targetKeyedOutputName(executableName) / executableName
 
 # ---------------------------------------------------------------------------
 # M9.R.14d.1 — library vs executable artefact discovery for from-source deps
@@ -7984,12 +8130,18 @@ proc m9r14dEnumerateArtifacts*(recipeDir: string):
   if not dirExists(extendedPath(outputRoot)):
     return
   let kinds = m9r14dLoadInterfaceKinds(recipeDir)
+  # Only the entries the build being resolved for wrote: a native build's
+  # directories are bare, a target build's carry ``@<triple>``
+  # (``targetKeyedOutputName``), and neither may answer for the other.
+  let wantTriple = effectiveInstallMirrorTarget()
   for kindPc, name in walkDir(extendedPath(outputRoot)):
     if kindPc != pcDir and kindPc != pcLinkToDir:
       continue
-    let artifactName = lastPathPart(name)
-    if artifactName.len == 0: continue
-    let outDir = outputRoot / artifactName
+    let entryName = lastPathPart(name)
+    if entryName.len == 0: continue
+    let (artifactName, entryTriple) = outputEntryTarget(entryName)
+    if entryTriple != wantTriple or artifactName.len == 0: continue
+    let outDir = outputRoot / entryName
     let artKind = kinds.getOrDefault(artifactName, makUnknown)
     let resolved = m9r14dProbeArtifactFile(outDir, artifactName, artKind)
     result.add(M9R14dArtifactCandidate(
@@ -8103,7 +8255,7 @@ proc m9r14hProbeInstallMirrorLibrary*(recipeDir, depName: string): string =
   ## is NEVER re-built within the same dispatcher invocation, even when
   ## the per-process ``fromSourceResolvedRecipes`` cache was cleared
   ## (e.g. by a fresh ``executeBuildTarget`` call from a sub-recurse).
-  let mirrorRoot = recipeDir / ".repro" / "output" / "install" / "usr"
+  let mirrorRoot = recipeDir / installMirrorSubpath() / "usr"
   if not dirExists(extendedPath(mirrorRoot)):
     return ""
   let canon = m9r14dCanonicalizeName(depName)
@@ -8159,7 +8311,7 @@ proc m9r14hProbeInstallMirrorExecutable*(recipeDir, depName: string): string =
   ## Check the install-mirror for a compiled executable artifact.
   ## Probes `<recipeDir>/.repro/output/install/usr/bin/<depName>`
   ## (or with `.exe` on Windows).
-  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  let binDir = recipeDir / installMirrorSubpath() / "usr" / "bin"
   if not dirExists(extendedPath(binDir)):
     return ""
   let bareCandidate = binDir / depName
@@ -8175,7 +8327,7 @@ proc m9r14hInstallMirrorHasExecutable(recipeDir: string): bool =
   ## the ``binutils`` package exposes ``ld``, ``as``, and related tools.
   ## A populated final install-mirror bin directory is sufficient evidence
   ## that such a bootstrap package completed.
-  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  let binDir = recipeDir / installMirrorSubpath() / "usr" / "bin"
   if not dirExists(extendedPath(binDir)):
     return false
   for kind, unusedPath in walkDir(extendedPath(binDir)):
@@ -8212,22 +8364,24 @@ type
 # M9.R.14e.1 — from-source install-tree search-path discovery
 # ---------------------------------------------------------------------------
 
-const FromSourceInstallTreeRoots* = @[
-  # M9.R.14e.1 — installation tree probe roots for a from-source
-  # recipe's sibling install tree. Ordered most-specific first so the
-  # populator emits the M9.R.14e.2 staged-tree first when both layouts
-  # are present.
-  ".repro/output/install/usr",
-  ".repro/output/install",
-  "build/out/usr",
-  # M9.R.15e.11 — some autotools projects (Linux-PAM, glibc) hardcode
-  # libdir=/lib64 in their configure.ac regardless of --prefix, so the
-  # .so files install to ``<destdir>/lib64/`` (no ``/usr/`` segment).
-  # Add the bare destdir root so consumers' LIBRARY_PATH /
-  # CMAKE_PREFIX_PATH find ``<destdir>/lib64/libpam.so`` etc. The
-  # populator's lib + lib64 walk picks up files under either root.
-  "build/out",
-]
+proc fromSourceInstallTreeRoots*(): seq[string] =
+  ## M9.R.14e.1 — installation tree probe roots for a from-source
+  ## recipe's sibling install tree. Ordered most-specific first so the
+  ## populator emits the M9.R.14e.2 staged-tree first when both layouts
+  ## are present. A proc rather than a const since A15: the install mirror
+  ## is keyed by the target (``installMirrorSubpath``).
+  @[
+    installMirrorSubpath() & "/usr",
+    installMirrorSubpath(),
+    "build/out/usr",
+    # M9.R.15e.11 — some autotools projects (Linux-PAM, glibc) hardcode
+    # libdir=/lib64 in their configure.ac regardless of --prefix, so the
+    # .so files install to ``<destdir>/lib64/`` (no ``/usr/`` segment).
+    # Add the bare destdir root so consumers' LIBRARY_PATH /
+    # CMAKE_PREFIX_PATH find ``<destdir>/lib64/libpam.so`` etc. The
+    # populator's lib + lib64 walk picks up files under either root.
+    "build/out",
+  ]
 
 proc addUniquePath*(dst: var seq[string]; value: string) =
   ## Append ``value`` to ``dst`` when it isn't already present AND when
@@ -8247,7 +8401,7 @@ proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
   ## (no transitive walk). Extracted from ``populateFromSourceSearchPaths``
   ## so the M9.R.14f.1 transitive walk can call it per-node without
   ## re-entering the dep-discovery loop.
-  for root in FromSourceInstallTreeRoots:
+  for root in fromSourceInstallTreeRoots():
     let prefixRoot = recipeDir / root
     if not dirExists(extendedPath(prefixRoot)):
       continue
@@ -8617,8 +8771,8 @@ proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
     practicalHardening: phNone)
   refreshProfileIdentity(result)
 
-proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
-                               recipeRoot = ""): FromSourceResolveResult =
+proc tryResolveFromSourceToolImpl(useDef: InterfaceToolUse;
+                                  recipeRoot: string): FromSourceResolveResult =
   ## DSL-port M9.R.9 — non-raising variant of ``resolveFromSourceTool``.
   ## Returns a discriminated outcome the caller pattern-matches on:
   ##
@@ -8664,7 +8818,8 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # candidates can be enumerated (the recipe's `.repro/output/` tree
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
-  let baseCandidate = recipeDir / ".repro" / "output" / name / name
+  let baseCandidate = recipeDir / ".repro" / "output" /
+    targetKeyedOutputName(name) / name
   if not realizationInfoMatchesCurrentPlatform(recipeDir):
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
@@ -8749,7 +8904,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # Probe both the install-mirror and the build/out trees for the
     # canonical CMake-config locations.
     var probeRoots: seq[tuple[root: string, layout: string]] = @[]
-    for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+    for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
       let prefixRoot = recipeDir / prefixSubdir
       if dirExists(extendedPath(prefixRoot)):
         probeRoots.add((root: prefixRoot / "share", layout: "share"))
@@ -8795,7 +8950,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # check; PKG_CONFIG_PATH (built from the install-mirror via
     # ``addUniquePath`` in toolProfileFor) takes care of consumption.
     block pcWalk:
-      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
         let prefixRoot = recipeDir / prefixSubdir
         for pcSubdir in ["lib/pkgconfig", "lib64/pkgconfig",
                          "share/pkgconfig"]:
@@ -8817,7 +8972,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # executable, library, pkg-config file, or CMake config. A regular
     # file in the realized share tree is sufficient build evidence.
     block sharedDataWalk:
-      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
         let shareRoot = recipeDir / prefixSubdir / "share"
         if not dirExists(extendedPath(shareRoot)):
           continue
@@ -8831,7 +8986,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # etc/ssl/certs/ca-certificates.crt rather than an executable or
     # library. Treat a regular staged configuration file as build evidence.
     block configurationDataWalk:
-      for etcSubdir in [".repro/output/install/etc", "build/out/etc"]:
+      for etcSubdir in [installMirrorSubpath() & "/etc", "build/out/etc"]:
         let etcRoot = recipeDir / etcSubdir
         if not dirExists(extendedPath(etcRoot)):
           continue
@@ -8848,7 +9003,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # library file cannot satisfy a missing package.
     let depName = name.toLowerAscii
     block packageLibDataWalk:
-      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      for prefixSubdir in [installMirrorSubpath() & "/usr", "build/out/usr"]:
         let prefixRoot = recipeDir / prefixSubdir
         for libSubdir in ["lib", "lib64"]:
           let libRoot = prefixRoot / libSubdir
@@ -8872,7 +9027,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # passwd, and libsubid, but no "shadow-utils" binary or library. The
     # install-mirror stamp is written only after the complete prefix has been
     # staged, so it is the package-level completion evidence for this shape.
-    let mirrorStamp = recipeDir / ".repro" / "output" / "install" /
+    let mirrorStamp = recipeDir / installMirrorSubpath() /
       ".m9r14e_2_install_mirror.stamp"
     if fileExists(extendedPath(mirrorStamp)):
       resolved = absolutePath(mirrorStamp)
@@ -8927,6 +9082,25 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     useDef.packageSelector, useDef.executableName)
   refreshProfileIdentity(profile)
   FromSourceResolveResult(kind: rrResolved, profile: profile)
+
+proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
+                               recipeRoot = "";
+                               hostSide = false): FromSourceResolveResult =
+  ## Resolve `useDef` to a sibling source recipe's realized artefact.
+  ##
+  ## ReproOS-Add-On-Mode A15: the sibling's install mirror is keyed by the
+  ## target the build compiles for (`installMirrorSubpath`), and WHICH
+  ## side of the host/target split a dependency is on decides which mirror
+  ## is read. `hostSide` is for a `nativeBuildDeps:` entry -- a tool that
+  ## runs on the build host -- and reads the sibling's native mirror even
+  ## under `--target`; a `buildDeps:` / `runtimeDeps:` entry reads the
+  ## target's (From-Source-Build-Recipes.md §"Package-level dependency
+  ## declarations").
+  if hostSide:
+    withInstallMirrorTarget(""):
+      result = tryResolveFromSourceToolImpl(useDef, recipeRoot)
+  else:
+    result = tryResolveFromSourceToolImpl(useDef, recipeRoot)
 
 proc resolveFromSourceTool*(useDef: InterfaceToolUse;
                             recipeRoot = ""): PathOnlyToolProfile =
@@ -9130,9 +9304,28 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # fallback is silent when no tarball metadata exists — the path
     # resolver's original "not found in PATH" diagnostic propagates
     # unchanged.
+    # ReproOS-Add-On-Mode A15: a library a cross build's output links
+    # (`buildDeps:` / `runtimeDeps:`) comes from the sibling source
+    # recipe's build FOR THE TARGET when that build exists -- the
+    # target-keyed install mirror -- ahead of whatever PATH holds, which
+    # can only be a host build. A tool (`nativeBuildDeps:`) stays
+    # PATH-first; its sibling's NATIVE mirror is consulted when PATH has
+    # nothing, before the tarball and nix arms. Neither builds a sibling:
+    # the sibling is realized by its own `repro build` (path mode never
+    # auto-recurses), and an unbuilt sibling is what PATH or an arm
+    # answers for.
+    let libraryDep = useDef.depKind in ["build", "runtime"]
+    if libraryDep and activeTargetTripleTag().len > 0:
+      let sibling = tryResolveFromSourceTool(useDef)
+      if sibling.kind == rrResolved:
+        return sibling.profile
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:
+      let sibling = tryResolveFromSourceTool(useDef,
+        hostSide = useDef.depKind == "native")
+      if sibling.kind == rrResolved:
+        return sibling.profile
       if hasHostTarballProvisioning(useDef):
         try:
           result = resolveTarballTool(useDef, storeRoot)

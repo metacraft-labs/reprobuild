@@ -12,10 +12,15 @@
 ##
 ## The rule is Workspace-Settings-Files.md §6: "The workspace root is the
 ## nearest ancestor directory containing ``repro-workspace.toml``, unless
-## ``REPRO_WORKSPACE_CONFIG`` names the file." During the rename (§8) the old
-## settings name ``.repro-workspace.toml`` marks a root too, and the markers an
-## existing workspace already carries keep working, so a workspace that has
-## not migrated resolves exactly where it resolved before.
+## ``REPRO_WORKSPACE_CONFIG`` names the file."
+##
+## The RETIRED settings and state file names (``RetiredSettingsFileName``,
+## ``RetiredStateFileName``) are never read as settings or state. A directory
+## that holds one WITHOUT the current file still marks a root, for one reason:
+## so that the workspace verbs, the managed hooks and the pre-push gate find
+## the workspace and refuse there with the remedy (``retired_names.nim`` in the
+## manifest library), instead of walking past it, finding no workspace and
+## standing down — which would let a push through ungated.
 ##
 ## Precedence, in order:
 ##
@@ -26,10 +31,10 @@
 ##      nothing, and the walk below runs on the other markers alone.
 ##   2. The NEAREST ancestor of the starting path (inclusive) carrying a
 ##      workspace marker:
-##        * a settings file — ``repro-workspace.toml`` or the old
-##          ``.repro-workspace.toml``;
-##        * a state file — ``.repro/workspace-state.toml`` or the old
-##          ``.repro/workspace.toml``;
+##        * a settings file — ``repro-workspace.toml``, or a retired one
+##          (recognized only to refuse, see above);
+##        * a state file — ``.repro/workspace-state.toml``, or a retired one
+##          (likewise);
 ##        * a resolved manifest checkout inside a ``.repro/`` shell
 ##          (``hasResolvedManifestCheckout``) — which a lock RECORD STORE's
 ##          top-level ``projects/`` + ``locks/`` is not, even once the store
@@ -71,12 +76,14 @@ const
   SettingsFileName* = "repro-workspace.toml"
     ## The shared settings file (Workspace-Settings-Files.md §3). The file that
     ## makes a directory a workspace root.
-  LegacySettingsFileName* = ".repro-workspace.toml"
-    ## The old host bootstrap config, read until the old names are retired.
+  RetiredSettingsFileName* = ".repro-workspace.toml"
+    ## The settings file's retired name. Never read; it marks a root only so
+    ## that commands refuse there with the remedy (module note).
   StateFileName* = "workspace-state.toml"
     ## The state file under ``.repro/`` (§5).
-  LegacyStateFileName* = "workspace.toml"
-    ## The state file's old name under ``.repro/``.
+  RetiredStateFileName* = "workspace.toml"
+    ## The state file's retired name under ``.repro/``. Read only by
+    ## ``repro health --fix``, which moves it to ``StateFileName``.
   CommittedLockFileName* = "repro.lock"
     ## The committed solved-graph lock — the MO-2 manifest-optional marker.
   WorkspaceConfigEnvVar* = "REPRO_WORKSPACE_CONFIG"
@@ -87,8 +94,8 @@ type
     ## Which marker made a directory the workspace root.
     wrmNone            ## no workspace root was found
     wrmConfigEnv       ## ``REPRO_WORKSPACE_CONFIG`` names the settings file
-    wrmSettingsFile    ## ``repro-workspace.toml`` / ``.repro-workspace.toml``
-    wrmStateFile       ## ``.repro/workspace-state.toml`` / ``.repro/workspace.toml``
+    wrmSettingsFile    ## ``repro-workspace.toml``, or a retired settings name
+    wrmStateFile       ## ``.repro/workspace-state.toml``, or a retired state name
     wrmManifestCheckout ## a resolved manifest checkout in a ``.repro/`` shell
     wrmCommittedLock   ## MO-2: a committed ``repro.lock`` and nothing above
 
@@ -100,17 +107,24 @@ proc exists(path: string): bool =
   fileExists(extendedPath(path))
 
 proc settingsFileIn*(dir: string): string =
-  ## The settings file ``dir`` itself holds — ``repro-workspace.toml``, else
-  ## the old ``.repro-workspace.toml`` — or "" when it holds neither. The new
-  ## name wins when both sit in one directory.
+  ## The settings file ``dir`` itself holds — ``repro-workspace.toml`` — or
+  ## "" when it holds none.
   if dir.len == 0:
     return ""
   let current = dir / SettingsFileName
   if exists(current):
     return current
-  let legacy = dir / LegacySettingsFileName
-  if exists(legacy):
-    return legacy
+  ""
+
+proc retiredSettingsFileIn*(dir: string): string =
+  ## The RETIRED settings file ``dir`` holds when it holds no current one, or
+  ## "". Beside a ``repro-workspace.toml`` the retired file is inert: the
+  ## current file governs, and ``repro health`` reports the leftover.
+  if dir.len == 0 or settingsFileIn(dir).len > 0:
+    return ""
+  let retired = dir / RetiredSettingsFileName
+  if exists(retired):
+    return retired
   ""
 
 proc configuredSettingsFile*(): tuple[set: bool; path: string] =
@@ -123,17 +137,24 @@ proc configuredSettingsFile*(): tuple[set: bool; path: string] =
   (true, (if exists(path): path else: ""))
 
 proc stateFileIn*(dir: string): string =
-  ## The state file ``dir`` records — ``.repro/workspace-state.toml``, else the
-  ## old ``.repro/workspace.toml`` — or "". A pure probe: it reports nothing
-  ## (the reporting read is ``workspaceTomlPath`` in the manifest library).
+  ## The state file ``dir`` records — ``.repro/workspace-state.toml`` — or "".
+  ## A pure probe (the reading accessor is ``workspaceTomlPath`` in the
+  ## manifest library).
   if dir.len == 0:
     return ""
   let current = dir / ".repro" / StateFileName
   if exists(current):
     return current
-  let legacy = dir / ".repro" / LegacyStateFileName
-  if exists(legacy):
-    return legacy
+  ""
+
+proc retiredStateFileIn*(dir: string): string =
+  ## The state file under its RETIRED name when ``dir`` records no current
+  ## one, or "". Beside a current state file the retired one is inert.
+  if dir.len == 0 or stateFileIn(dir).len > 0:
+    return ""
+  let retired = dir / ".repro" / RetiredStateFileName
+  if exists(retired):
+    return retired
   ""
 
 proc firstMembershipManifestPath*(root: string): string =
@@ -224,7 +245,9 @@ proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
       firstMembershipManifestPath(workspaceRoot).len > 0:
     let recordStoreShape = dirExists(workspaceRoot / "locks") and
       settingsFileIn(workspaceRoot).len == 0 and
-      stateFileIn(workspaceRoot).len == 0
+      retiredSettingsFileIn(workspaceRoot).len == 0 and
+      stateFileIn(workspaceRoot).len == 0 and
+      retiredStateFileIn(workspaceRoot).len == 0
     if not recordStoreShape:
       return true
   # The materialized sub-layout: an ``init --manifest-url`` shared-cache
@@ -252,9 +275,10 @@ proc workspaceMarkerIn*(dir: string; settingsCount = true): WorkspaceRootMarker 
   ## is NOT reported here; it is tier 3 and only ``discoverWorkspaceRoot``
   ## decides when it counts. ``settingsCount = false`` disregards settings
   ## files (``REPRO_WORKSPACE_CONFIG`` names a file that does not exist).
-  if settingsCount and settingsFileIn(dir).len > 0:
+  if settingsCount and (settingsFileIn(dir).len > 0 or
+      retiredSettingsFileIn(dir).len > 0):
     return wrmSettingsFile
-  if stateFileIn(dir).len > 0:
+  if stateFileIn(dir).len > 0 or retiredStateFileIn(dir).len > 0:
     return wrmStateFile
   if hasResolvedManifestCheckout(dir):
     return wrmManifestCheckout

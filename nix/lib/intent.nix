@@ -5,7 +5,7 @@
 # The document is Reprobuild's: `repro home export` compiles the profile,
 # expands its data files and probes every target platform (reprobuild-pm spec
 # Gradual-Nix-To-Reprobuild-Migration.md §Exporting evaluated intent to Nix,
-# schema in §Export schema (version 4 since GM10); public reference
+# schema in §Export schema (version 5 since ReproOS add-on mode); public reference
 # docs/user-guide/home-export.md). Nix only reads it. Two consumption modes
 # (§Consumption modes), one consumer code path:
 #
@@ -72,12 +72,18 @@
 #     `PATH` (`profileBinPath`; Gradual-Nix-To-Reprobuild-Migration.md
 #     §Concern-scoped apply, "The profile's commands"). Absent otherwise. A
 #     document without that row is refused for such a host.
-#   * system: who manages the host's system scope (GM10;
-#     Gradual-Nix-To-Reprobuild-Migration.md §Hosts, feature 2) --
-#     `{ managed = "elsewhere"; managedBy = <pointer> | null; }` when the
-#     host's `hosts:` entry says `system: managedElsewhere[(...)]`
-#     (`intent.systemManagedElsewhere`), `{ managed = "here"; managedBy =
-#     null; }` otherwise. Always present (`systemManagementOf`, also
+#   * system: who manages the host's system scope, and how (GM10 and
+#     ReproOS add-on mode; Gradual-Nix-To-Reprobuild-Migration.md §Hosts,
+#     feature 2) -- from `intent.hostSystems`: `{ managed = "elsewhere";
+#     managedBy = <pointer> | null; mode = "managedElsewhere"; activities =
+#     [ ]; }` for `system: managedElsewhere[(...)]`, `{ managed = "here";
+#     managedBy = null; mode = "addOn"; activities = [ "default" ... ]; }`
+#     for `system: addOn` (the add-on host's base is its distribution's:
+#     only `mode = "full"` lets a system switch take the whole system),
+#     `{ managed = "here"; managedBy = null; mode = "full"; activities = [
+#     "default" ... ]; }` for `system: {mode: full, activities: [...]}` (a
+#     fully managed host selecting system activities), and the same with
+#     `[ "default" ]` otherwise. Always present (`systemManagementOf`, also
 #     exposed as `reprobuild.lib.hostSystemManagement`, which needs no
 #     target system). A malformed entry, or one for a host the registry does
 #     not declare, is refused, never read as "here".
@@ -106,7 +112,7 @@ let
     ;
 
   format = "repro.home.export";
-  knownSchemaVersions = [ 4 ];
+  knownSchemaVersions = [ 5 ];
 
   # Every condition under which a consumer must not use the document for
   # `system`, as a message, or null. Shared by both modes.
@@ -144,46 +150,93 @@ let
 
   holdsFor = facts: guard: predicate.holds facts guard;
 
-  # Who manages `host`'s system scope, from a validated document's intent
-  # (`systemManagedElsewhere`, export schema 4; `repro_profile/host_system`
-  # `systemManagementFor` on the Reprobuild side). Callers check the host
-  # first (`hostRefusalReason`).
+  # Who manages `host`'s system scope and how, from a validated document's
+  # intent (`hostSystems`, export schema 5; `repro_profile/host_system`
+  # `systemManagementFor` + `enabledSystemActivities` on the Reprobuild
+  # side, `evaluateHomeExport` for the shape). Callers check the host first
+  # (`hostRefusalReason`). The result is
+  #   { managed = "here" | "elsewhere"; managedBy = <pointer> | null;
+  #     mode = "full" | "addOn" | "managedElsewhere"; activities = [...]; }
+  # where `mode` is what a system switch must branch on: only "full" means
+  # the whole system is this configuration's (an add-on host is "here" but
+  # its base belongs to its distribution), and `activities` is the system
+  # activity selection (`default`, then the entry's own), empty for a host
+  # managed elsewhere. A malformed entry, an entry the `profile` macro could
+  # not have produced, or one for an undeclared host is refused -- never
+  # read as "here".
   systemManagementOf =
     doc: host:
     let
-      table = doc.intent.systemManagedElsewhere or { };
+      table = doc.intent.hostSystems or { };
       hosts = doc.intent.hosts or { };
-      bad = builtins.filter (
-        h:
-        let
-          v = table.${h};
-        in
-        !(builtins.isAttrs v)
-        || !(v ? managedBy)
-        || !(v.managedBy == null || (builtins.isString v.managedBy && v.managedBy != ""))
-      ) (builtins.attrNames table);
+      isIdent = s: builtins.isString s && builtins.match "[A-Za-z0-9_]+" s != null;
+      wellFormed =
+        v:
+        builtins.isAttrs v
+        && v ? mode
+        && v ? managedBy
+        && v ? activities
+        && (v.managedBy == null || (builtins.isString v.managedBy && v.managedBy != ""))
+        && builtins.isList v.activities
+        && builtins.all isIdent v.activities
+        && (
+          (
+            v.mode == "managedElsewhere"
+            && v.activities == [ ]
+            && (v.managedBy == null || builtins.match ".*[\n\r].*" v.managedBy == null)
+          )
+          || (
+            (v.mode == "addOn" || v.mode == "full")
+            && v.managedBy == null
+            && !(builtins.elem "default" v.activities)
+            && builtins.length v.activities == builtins.length (
+              builtins.attrNames (
+                builtins.listToAttrs (
+                  map (a: {
+                    name = a;
+                    value = true;
+                  }) v.activities
+                )
+              )
+            )
+          )
+        );
+      bad = builtins.filter (h: !(wellFormed table.${h})) (builtins.attrNames table);
       undeclared = builtins.filter (h: !(hosts ? ${h})) (builtins.attrNames table);
       entry = table.${host} or null;
     in
     if !(builtins.isAttrs table) then
-      throw "reprobuild.lib: the document's intent.systemManagedElsewhere is not an object (host -> { managedBy })"
+      throw "reprobuild.lib: the document's intent.hostSystems is not an object (host -> { mode, managedBy, activities })"
     else if bad != [ ] then
-      throw "reprobuild.lib: intent.systemManagedElsewhere entries ${toJSON bad} are malformed: each must be { managedBy = <non-empty string> | null; }"
+      throw "reprobuild.lib: intent.hostSystems entries ${toJSON bad} are malformed: each must be { mode = \"managedElsewhere\"; managedBy = <non-empty string> | null; activities = [ ]; } or { mode = \"addOn\" | \"full\"; managedBy = null; activities = [ <activity>, ... ]; } (no `default`, no repeats)"
     else if undeclared != [ ] then
-      throw "reprobuild.lib: intent.systemManagedElsewhere names host(s) ${toJSON undeclared}, which the profile's hosts: registry does not declare"
+      throw "reprobuild.lib: intent.hostSystems names host(s) ${toJSON undeclared}, which the profile's hosts: registry does not declare"
     else if entry == null then
       {
         managed = "here";
         managedBy = null;
+        mode = "full";
+        activities = [ "default" ];
+      }
+    else if entry.mode == "addOn" || entry.mode == "full" then
+      {
+        managed = "here";
+        managedBy = null;
+        mode = entry.mode;
+        activities = [ "default" ] ++ entry.activities;
       }
     else
       {
         managed = "elsewhere";
         inherit (entry) managedBy;
+        mode = "managedElsewhere";
+        activities = [ ];
       };
 
   # `reprobuild.lib.hostSystemManagement { host, snapshot ? null, document ? null }`
-  # -> `{ host, managed, managedBy }`: who manages `host`'s system scope,
+  # -> `{ host, managed, managedBy, mode, activities }`: who manages `host`'s
+  # system scope and how (`systemManagementOf`: `mode` is what a system
+  # switch branches on, `activities` the system-activity selection),
   # without evaluating any target system (a system switch asks this before it
   # knows or cares which packages the host gets). Refuses a document of
   # another format or schema version and a host the registry does not

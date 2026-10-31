@@ -2,11 +2,11 @@
 ##
 ## Boots the R9 ISO (R8 kernel 6.6.142 + R9 initramfs containing
 ## from-source systemd 257.9) under Hyper-V Gen-2 UEFI via
-## vm-harness's ``bootFromMedia`` primitive, captures the COM1
+## gosti's ``bootFromMedia`` primitive, captures the COM1
 ## serial stream, and asserts that systemd starts as PID 1 and
 ## reaches a login prompt.
 ##
-## Override ISO via $VMH_REPROOS_R9_ISO; default is
+## Override ISO via $GOSTI_REPROOS_R9_ISO; default is
 ## D:/metacraft/reprobuild/build/r9-build/reproos-r9.iso.
 
 import std/[os, osproc, strutils, tables, times]
@@ -26,10 +26,10 @@ const PlatformSkipReason =
   "t_r9_systemd_boot: Windows host required (Hyper-V backend)"
 
 const SiblingSkipReason =
-  "t_r9_systemd_boot: vm-harness sibling unavailable"
+  "t_r9_systemd_boot: gosti sibling unavailable"
 
-when defined(vmHarnessAvailable):
-  import vm_harness
+when defined(gostiAvailable):
+  import gosti
 
   proc isElevated(): bool =
     let cmd = @["powershell.exe", "-NoLogo", "-NoProfile",
@@ -46,7 +46,7 @@ when defined(vmHarnessAvailable):
       return false
 
   proc findR9Iso(): string =
-    let envOverride = getEnv("VMH_REPROOS_R9_ISO")
+    let envOverride = getEnv("GOSTI_REPROOS_R9_ISO")
     if envOverride.len > 0 and fileExists(envOverride):
       return envOverride
     let cand = "D:" & DirSep & "metacraft" & DirSep & "reprobuild" &
@@ -150,16 +150,16 @@ when defined(vmHarnessAvailable):
           if iso.len == 0:
             skip("R9 reproos-r9.iso not found at default path " &
                  "(D:/metacraft/reprobuild/build/r9-build/reproos-r9.iso); " &
-                 "set VMH_REPROOS_R9_ISO=<path>")
+                 "set GOSTI_REPROOS_R9_ISO=<path>")
           else:
             let suffix = $(epochTime() * 1000.0).int64.toHex().toLowerAscii()
             let vmName = "repro-test-boot-r9-" & suffix[suffix.len - 8 .. ^1]
             let perVmDir =
-              getTempDir() / "vm-harness-e2e-r9-systemd-boot" / vmName
+              getTempDir() / "gosti-e2e-r9-systemd-boot" / vmName
             echo "[info] booting R9 ISO: ", iso
             runR9BootScenario(backend, iso, perVmDir, vmName)
 else:
-  # vm-harness (../vm-harness) is an optional Windows-only sibling. When it
+  # gosti (../gosti) is an optional Windows-only sibling. When it
   # is absent the boot scenario cannot be compiled, so the case is declared
   # as a skip rather than left undeclared — the previous ``echo`` +
   # ``quit(0)`` here made the binary an opaque exit-0 PASS

@@ -58,10 +58,12 @@ on:
 jobs:
   plan:
     name: Plan release
-    # Release jobs run on the dedicated `eph-linux-x64-release` runner class so a
-    # release is not queued behind ordinary CI. The Linux build leg in
-    # .github/release-platforms.json names the same class.
-    runs-on: eph-linux-x64-release
+    permissions:
+      contents: read
+    # Planning only reads source metadata with Node. Use general Linux capacity
+    # so another product's heavy Linux release cannot gate Windows/macOS fan-out.
+    # The heavy Linux build and final publisher keep their dedicated lane.
+    runs-on: [self-hosted, linux, x64]
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.plan.outputs.version }}
@@ -128,6 +130,17 @@ jobs:
                        asset: p.asset.replaceAll('{version}', version) };
             });
             assets.push(...packages.map(p => p.asset));
+
+            // The static add-on binaries, built on one leg.
+            const addon = spec.addon_static;
+            if (addon) {
+              if (!archiveOf[addon.from]) {
+                throw new Error(`addon_static is built on '${addon.from}', which is not a platform in this release`);
+              }
+              for (const a of addon.arches) {
+                assets.push(addon.asset.replaceAll('{version}', version).replaceAll('{arch}', a));
+              }
+            }
 
             const dupes = assets.filter((a, i) => assets.indexOf(a) !== i);
             if (dupes.length) {
@@ -308,6 +321,7 @@ jobs:
             nim-shm-queue-src=../nim-shm-queue
             nim-stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
+            test-certificates-tools-src=../test-certificates-tools
 
       # Clone status-im/nim-bearssl manually on Windows (since it belongs to a
       # foreign organization and is not resolvable by metacraft-labs clone-siblings).
@@ -761,6 +775,26 @@ jobs:
           fi
           cat "${asset}.sha256"
 
+      # The musl-static add-on binaries (.github/release-platforms.json
+      # `addon_static`). Built and statically verified by the same script a
+      # developer runs; each gets a `.sha256`, so it joins SHA256SUMS, the
+      # publish job's asset assertion and the signature like every asset.
+      - name: Build the static add-on binaries
+        if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
+        shell: bash
+        run: |
+          dev-exec bash -c '
+            set -euo pipefail
+            version=$(grep "^version\s*=" reprobuild.nimble | sed -E "s/version\s*=\s*\"([^\"]+)\"/\1/")
+            bash scripts/build_addon_static.sh amd64 arm64 armhf
+            for a in amd64 arm64 armhf; do
+              name="repro-addon-${version}-linux-${a}"
+              cp "build/addon/${a}/repro" "${name}"
+              sha256sum "${name}" > "${name}.sha256"
+              cat "${name}.sha256"
+            done
+          '
+
       # Native packages (.deb, .rpm) are carriers for the same bytes as this
       # leg's archive, so they are built right here, from the archive just
       # checksummed, inside the dev shell (`dev-exec`). The publish job has no
@@ -860,6 +894,7 @@ jobs:
             reprobuild_*.deb.sha256
             reprobuild-*.rpm
             reprobuild-*.rpm.sha256
+            repro-addon-*
           if-no-files-found: error
           retention-days: 7
 

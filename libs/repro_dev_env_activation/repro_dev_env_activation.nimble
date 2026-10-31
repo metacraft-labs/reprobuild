@@ -3,3 +3,5 @@ author = "Metacraft Labs"
 description = "Development-environment shell activation rendering"
 license = "Apache-2.0"
 requires "nim >= 2.2.0"
+
+requires "repro_platform"

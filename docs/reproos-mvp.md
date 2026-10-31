@@ -24,8 +24,8 @@ plus the reprobuild build driver that produces it.
   (`recipes/reproos-mvp-config/build-mvp-iso.sh`) that walks the
   full pipeline from MVP config to bootable ISO.
 
-* A vm-harness acceptance gate
-  (`vm-harness/tests/e2e/t_vm_harness_hyperv_reproos_mvp_foreign.nim`)
+* A gosti acceptance gate
+  (`gosti/tests/e2e/t_gosti_hyperv_reproos_mvp_foreign.nim`)
   that boots the ISO under Hyper-V Gen-2 UEFI, autologs in as root,
   and asserts each foreign-package binary prints its expected version
   string within the 60-second wall-clock budget.
@@ -39,10 +39,10 @@ integration. We deliver in **three honest stages**:
 |-------|-------------|----------------|
 | D1-stage1 | Config + harvest + per-package prefix materialization + launcher manifest emit | Windows host (no WSL2 required) |
 | D1-stage2 | One foreign binary executes through the launcher in a real Linux kernel | WSL2 with unprivileged user namespaces enabled |
-| D1-stage3 | Bootable ISO boots in vm-harness; all 5 binaries produce expected output | Hyper-V Gen-2 UEFI elevated PowerShell + repro-ubuntu WSL build environment |
+| D1-stage3 | Bootable ISO boots in gosti; all 5 binaries produce expected output | Hyper-V Gen-2 UEFI elevated PowerShell + repro-ubuntu WSL build environment |
 
 D1-stage1 + D1-stage2 are repeatable green; D1-stage3 needs the
-repro-ubuntu R9 systemd install tree on the host. The vm-harness
+repro-ubuntu R9 systemd install tree on the host. The gosti
 test SKIPs cleanly when the ISO is absent — it never silently
 passes.
 
@@ -152,7 +152,7 @@ will close that gap.
 On a Windows host or a kernel with userns disabled the smoke test
 SKIPs with an explanation.
 
-## D1-stage3: bootable ISO + vm-harness gate
+## D1-stage3: bootable ISO + gosti gate
 
 Stage 3 needs:
 * the R9 from-source systemd install tree on the build host (built
@@ -173,13 +173,13 @@ wsl -d repro-ubuntu env MVP_STAGE=iso bash \
   /mnt/d/metacraft/reprobuild/recipes/reproos-mvp-config/build-mvp-iso.sh
 ```
 
-Then run the vm-harness acceptance gate from an elevated PowerShell:
+Then run the gosti acceptance gate from an elevated PowerShell:
 
 ```powershell
 . D:/metacraft/env.ps1
-cd D:/metacraft/vm-harness
+cd D:/metacraft/gosti
 nim c -r --threads:on --hints:off --warnings:off `
-  tests/e2e/t_vm_harness_hyperv_reproos_mvp_foreign.nim
+  tests/e2e/t_gosti_hyperv_reproos_mvp_foreign.nim
 ```
 
 Expected passing scenario:
@@ -281,15 +281,15 @@ The dnf and pacman harvesters mirror the apt harvester's structure:
 - **Catalog emission**: same C1 schema; one JSON file per package
   in the union closure under `<output-dir>/<distro>/<name>.json`.
 
-### D2 vm-harness gates
+### D2 gosti gates
 
-Two new tests land in `vm-harness/tests/e2e/`:
+Two new tests land in `gosti/tests/e2e/`:
 
-- `t_vm_harness_hyperv_reproos_multi_distro.nim` — 9-package boot test.
+- `t_gosti_hyperv_reproos_multi_distro.nim` — 9-package boot test.
   Asserts all 9 shims produce their expected version banner via the
   C3 launcher. The dnf/pacman htop shims include a `(distro)` tag in
   their banner so the regex can disambiguate against the apt-htop run.
-- `t_vm_harness_hyperv_reproos_gen_switch.nim` — generation switch.
+- `t_gosti_hyperv_reproos_gen_switch.nim` — generation switch.
   Boots gen-A ISO, applies config; reboots into gen-B ISO's config via
   `reproos-rebuild switch`, asserts the snapshot-B git banner; then
   `reproos-rebuild rollback` and asserts the snapshot-A banner is

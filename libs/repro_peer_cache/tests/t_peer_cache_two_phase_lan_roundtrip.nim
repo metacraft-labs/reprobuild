@@ -24,15 +24,54 @@
 ##      output blob (BLAKE3-verified). The record's `$WORKSPACE/...` paths
 ##      are rebased onto ws-b and the binary is restored there without
 ##      running the compiler.
+##      A warm re-run of B right after executes nothing: the restored
+##      record is reusable in place on B, which it is only because the
+##      engine refreshes a restored record's output state to the files it
+##      wrote (before that, every warm build after a peer hit re-ran the
+##      edge).
 ##   3. B edits `config.h` (main.c and the weak fingerprint unchanged). The
 ##      peer lookup finds A's selector but the recomputed strong fingerprint
 ##      differs: a strong-fingerprint miss, not a false hit. B rebuilds and
 ##      publishes a SECOND selector under the same weak fingerprint; A's
 ##      entry is untouched and both are served side by side.
-##   4. B reverts `config.h`. The original execution is still served — from
-##      B's own records or, because the timestamp policy sees a fresh mtime,
-##      through A's selector again — and the v1 binary is restored over the
-##      v2 one without running the compiler.
+##   4. B reverts `config.h`. B's own records hold the original execution
+##      (installed from A in step 2, describing the v1 binary as restored
+##      there) and the reverted file matches its checksum again, but the
+##      build runs IN PLACE and `out/hello` holds the v2 binary step 3
+##      compiled, not the output that record describes: the lookup
+##      fails closed and B recompiles (Incremental-Invalidation.md §"Minimum
+##      check set" Step 3.3, "declared outputs must already exist and match
+##      the recorded output metadata"; §"Output change time is the
+##      tamper-evident field"). The re-execution observes exactly what A's
+##      did, so it is A's selector again: B's store still holds two
+##      selectors, A's entry in it is byte-identical (a second write for an
+##      existing selector is a no-op, Peer-Cache.md §"Publish (producer)"),
+##      and A's own store is untouched.
+##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a and §3.6 riders of
+## 2026-10-27, §10 decision 11): the build runs under `ffpChecksum`. It ran
+## under `ffpTimestamp` until then, and a timestamp-policy record now never
+## crosses hosts. Two steps pin that, at both ends:
+##
+##   5. B builds a checkout under `ffpTimestamp`. B does not publish it: the
+##      engine never hands it to the publisher, the trace names the policy,
+##      and B's memo store gains no entry.
+##   6. A timestamp-policy record is hand-injected into A's memo store,
+##      attested by A and claiming Level 0, as an older or non-conforming A
+##      would have published it, and A serves it as such an A would (this
+##      build's entry reader declines it; node A falls back to the raw store
+##      for what the reader declines). B, from a checkout with no record of the
+##      edge, looks it up over TCP: A serves the selector, the strong
+##      fingerprint matches, the attestation verifies, and B still refuses
+##      the entry (`fetchTwoPhase`, naming the policy), installs nothing and
+##      executes the action. The refusal is a miss, not a suspicion.
+##
+## The peer key is the portable weak fingerprint, the action's static
+## description over logical paths (Peer-Cache.md §"Two-phase memoization
+## plane", Identities). A test-only `weakFingerprint` override is not part
+## of it, so two actions that differ in nothing else are ONE edge to every
+## peer; the edges of steps 5 and 6 therefore differ from the hello edge in
+## their description (the output they declare), not only in their local key.
 ##
 ## Throughout, no content-plane reply fails verification, so no peer is
 ## ever marked suspect.
@@ -56,6 +95,7 @@ import repro_build_engine
 import repro_hash
 import repro_local_store
 import repro_peer_cache
+import repro_cas_store
 import repro_cli_support/peer_cache_wiring
 
 import ./m7_test_pki
@@ -114,11 +154,16 @@ proc writeWorkspace(ws: string; config: string) =
   writeFile(ws / "config.h", config)
   writeFile(ws / "build.sh", BuildScript)
 
-proc helloGraph(ws: string): BuildGraph =
+proc helloGraph(ws: string; policy = ffpChecksum; variant = ""): BuildGraph =
   ## One compile+link action. Absolute output path (so the record names a
   ## path INSIDE the workspace that must be rebased), relative inputs, and
   ## a depfile that reports `config.h`.
-  let output = ws / "out" / "hello"
+  ##
+  ## `variant` names a DIFFERENT edge: it is spelled into the output the
+  ## action declares, which is in the portable weak fingerprint peers key
+  ## on (`portableStaticFieldsOf`), and into the local weak fingerprint.
+  ## A weak text alone would change only the latter.
+  let output = ws / "out" / ("hello" & variant)
   let compile = action(ActionId,
     ["/bin/sh", "build.sh", ccPath(), output],
     cwd = ws,
@@ -126,8 +171,9 @@ proc helloGraph(ws: string): BuildGraph =
     outputs = [output],
     depfile = "out/hello.d",
     cacheable = true,
-    weakFingerprint = weakFingerprintFromText("t-peer-cache-two-phase.hello"),
-    actionCachePolicy = ffpTimestamp,
+    weakFingerprint = weakFingerprintFromText(
+      "t-peer-cache-two-phase.hello" & variant),
+    actionCachePolicy = policy,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
   graph([compile])
 
@@ -177,6 +223,23 @@ proc runProducerNode(ws, cacheRoot, stateDir, readyFile, stopFile: string;
   let host = startPeerCacheHost(tlsConfig(node, profile = profile),
     nodePeerId('A'),
     cacheRoot = cacheRoot, stateDir = stateDir)
+  # Step 6 injects into this node's store an entry that only an OLDER or
+  # non-conforming build serves: this build's entry reader applies the M17
+  # publication rule to what it serves (`entryReaderFor`), so it declines a
+  # timestamp-policy record (`t_peer_cache_refuses_timestamp_records_across_
+  # hosts`, "the producer does not serve a non-conforming entry already in
+  # its memo store"). Node A plays that older build for what its reader
+  # declines, serving it straight from the store, so that B's own refusal
+  # is what step 6 exercises. Everything A's reader serves goes through it
+  # unchanged.
+  let conformingReader = host.server.memoEntryReader
+  let rawStorage = openPeerCacheStorage(cacheRoot)
+  host.server.memoEntryReader = proc(weak, strong: BlobDigest):
+      Option[seq[byte]] {.gcsafe.} =
+    {.cast(gcsafe).}:
+      result = conformingReader(weak, strong)
+      if result.isNone:
+        result = rawStorage.memo.readMemoEntryBytes(weak, strong)
   let hooks = newPeerCacheEngineHooks(host.client,
     openPeerCacheStorage(cacheRoot), host.registry, host.attestorFor())
   let res = runBuild(helloGraph(ws), nodeEngineConfig(cacheRoot, ws, hooks))
@@ -389,8 +452,29 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check peerA in hostB.registry.findPeersWithBlob(entryA.pathSetDigest)
     check peerA in hostB.registry.findPeersWithBlob(entryA.outputDigests[0])
 
+    # ---- (2b) a warm re-run after the peer hit executes nothing -----------
+    # The installed record described A's inodes; the restore wrote fresh
+    # ones. The engine refreshes the record to what it restored
+    # (`refreshRestoredOutputs`), so B's in-place consultation now reuses it:
+    # no execution, no second trip to A (Incremental-Invalidation.md
+    # §"Validation Criteria": a warm re-run of an unchanged graph executes
+    # zero actions). Before the refresh existed the record was rejected here
+    # on every warm build ("output metadata changed") and the edge re-ran.
+    let memoTripsBeforeWarm = hostB.client.memoRoundTripCount
+    let warm = runBuild(helloGraph(wsB), configB)
+    let warmItem = warm.byId(ActionId)
+    checkpoint("warm B build: status=" & $warmItem.status & " reason=" &
+      warmItem.reason & traceOf(warm))
+    check warmItem.cacheDecision == cdHit
+    check warmItem.status == asUpToDate
+    check not warmItem.launched
+    check hooksB.stats.hits == 1
+    check hostB.client.memoRoundTripCount == memoTripsBeforeWarm
+    for event in warm.trace:
+      check event.event != "cache-rejected"
+
     # ---- (3) dynamic header edit: strong-fingerprint miss ---------------
-    sleep(20)  # a fresh mtime for the timestamp policy
+    sleep(20)  # a fresh mtime too, though the checksum policy needs none
     writeFile(wsB / "config.h", ConfigV2)
     let missesBefore = hooksB.stats.strongMisses
     let hitsBefore = hooksB.stats.hits
@@ -456,16 +540,148 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     servedCounts.sort()
     check servedCounts == @[1, 2]
 
-    # ---- (4) revert: the original execution is served again ------------
+    # ---- (4) revert: the original record is found, the in-place rule ----
+    # ---- fails closed, and the re-execution is A's selector again --------
     sleep(20)
     writeFile(wsB / "config.h", ConfigV1)
+    let publishesBeforeRevert = hooksB.stats.publishes
     let third = runBuild(helloGraph(wsB), configB)
     let again = third.byId(ActionId)
     checkpoint("third B build: status=" & $again.status & " reason=" &
-      again.reason & traceOf(third))
-    check again.cacheDecision in {cdHit, cdHybridCutoff}
-    check not again.launched
+      again.reason & " publish=" & hooksB.stats.lastPublishReason &
+      traceOf(third))
+    # The newest record whose inputs are unchanged is the v1 record B
+    # installed from A, which describes the v1 binary as the restore wrote
+    # it in step 2 (step 2b reused it in place on that basis). The build
+    # runs in place (`nodeEngineConfig`) and `out/hello` now holds the v2
+    # binary step 3 compiled, so the output on disk is not the one the
+    # record describes: the lookup rejects it rather than fall through or
+    # restore (Incremental-Invalidation.md §"Minimum check set" Step 3.3;
+    # Action-Cache-Per-Edge-Store.md §5.3), and the action re-executes.
+    check again.cacheDecision == cdRejected
+    var rejections = 0
+    for event in third.trace:
+      if event.event == "cache-rejected" and
+          "output metadata changed" in event.detail:
+        inc rejections
+    check rejections == 1
+    check again.launched
+    check again.status == asSucceeded
     check execProcess(wsB / "out" / "hello").strip() == "hello from config v1"
+    # The re-execution observed what A's execution observed, so its
+    # selector is A's. The publisher ran, and writing an existing selector
+    # is a no-op: B still holds exactly its two selectors, A's attested
+    # entry is byte-identical, and A's store is untouched.
+    check hooksB.stats.publishes == publishesBeforeRevert + 1
+    let selectorsAfterRevert = storageB.memo.listSelectors(weak)
+    check selectorsAfterRevert.len == 2
+    check selectorA in selectorsAfterRevert
+    check selectorBOwn in selectorsAfterRevert
+    check storageB.memo.readMemoEntryBytes(weak,
+      selectorA.strongFingerprint).get() == encodeMemoEntry(entryA)
+    check storageA.memo.listSelectors(weak) == @[selectorA]
+
+    # ---- (5) M17: B does not publish a timestamp-policy record ----------
+    let wsBT = base / "pb" / "ws-b-timestamp"
+    writeWorkspace(wsBT, ConfigV1)
+    let publishesBeforeT = hooksB.stats.publishes
+    let skipsBeforeT = hooksB.stats.publishSkips
+    # Its own edge (see `helloGraph`): A holds nothing for it, so B's lookup
+    # misses on the peers and the action runs.
+    let tsBuilt = runBuild(helloGraph(wsBT, ffpTimestamp, "-timestamp-producer"),
+      nodeEngineConfig(cacheB, wsBT, hooksB))
+    let tsItem = tsBuilt.byId(ActionId)
+    checkpoint("timestamp B build: status=" & $tsItem.status & " publish=" &
+      hooksB.stats.lastPublishReason & traceOf(tsBuilt))
+    check tsItem.status == asSucceeded
+    check tsItem.launched
+    # Never handed to the publisher: no publish, and no skip either.
+    check hooksB.stats.publishes == publishesBeforeT
+    check hooksB.stats.publishSkips == skipsBeforeT
+    var tsRefusals = 0
+    for event in tsBuilt.trace:
+      if event.event == "peer-cache-publish-refused" and
+          "ffpTimestamp input-check policy" in event.detail:
+        inc tsRefusals
+    check tsRefusals == 1
+    check storageB.memo.weakFingerprints() == @[weak]
+
+    # ---- (6) M17: B refuses a timestamp-policy entry A serves ----------
+    # The record: one execution of the edge under ffpTimestamp, in a
+    # checkout of its own, with its output blob kept in its CAS.
+    let tsVariant = "-timestamp-consumer"
+    let wsT = base / "pt" / "ws-t"
+    writeWorkspace(wsT, ConfigV1)
+    let cacheT = base / "node-t-cache"
+    var configT = defaultBuildEngineConfig(cacheT)
+    configT.bypassRunQuota = true
+    configT.maxParallelism = 1'u32
+    configT.deferLocalOutputBlobs = false
+    configT.portableRoots = @[LogicalRoot(label: "project", path: wsT,
+      kind: lrkTracked)]
+    let madeT = runBuild(helloGraph(wsT, ffpTimestamp, tsVariant), configT)
+    let tsMade = madeT.byId(ActionId)
+    checkpoint("timestamp record build: status=" & $tsMade.status &
+      traceOf(madeT))
+    ensure tsMade.status == asSucceeded
+    ensure tsMade.portableWeakHex.len == 64
+    let tsKey = digestFromHex(tsMade.portableWeakHex)
+    let tsRaw = readFile(dependencyEvidencePath(cacheT, ActionId))
+    var tsRecordBytes = newSeq[byte](tsRaw.len)
+    if tsRaw.len > 0:
+      copyMem(addr tsRecordBytes[0], unsafeAddr tsRaw[0], tsRaw.len)
+    let tsRecord = decodeActionResultRecord(tsRecordBytes)
+    ensure tsRecord.policy == ffpTimestamp
+    ensure tsRecord.outputPayloadKind == opkCasBlobs
+    # The entry `publishTwoPhase` wrote for it before M17, claiming Level 0,
+    # attested by A with the credential A's own host attests with, and put
+    # into A's stores (memo entry, PathSet blob, output blob) on disk, where
+    # A serves them from.
+    let ctxT = TwoPhaseContext(peerKey: tsKey, cwd: wsT, workspaceRoot: wsT,
+      portable: true)
+    let normalizedT = normalizeRecord(tsRecord, ctxT)
+    let pathSetT = pathSetOf(normalizedT)
+    let pathSetBytesT = encodePeerPathSet(pathSetT)
+    let pathSetDigestT = digestOf(pathSetBytesT)
+    var forged = MemoEntry(weakFingerprint: tsKey,
+      pathSetDigest: pathSetDigestT,
+      strongFingerprint: twoPhaseStrongFingerprint(tsKey, pathSetDigestT,
+        identitiesFor(pathSetT, ctxT)),
+      recordBytes: encodeActionResultRecord(normalizedT),
+      evidenceLevel: elComplete)
+    block:
+      var tsStore = openCasStore(cacheT)
+      var aStore = openCasStore(cacheA)
+      defer:
+        tsStore.close()
+        aStore.close()
+      discard aStore.casPut(pathSetBytesT)
+      for output in tsRecord.outputs:
+        forged.outputDigests.add(blobDigestFromBytes(output.blob.digest.bytes))
+        discard aStore.casPut(tsStore.casGet(
+          toContentHash(output.blob.digest.bytes)))
+    attest(forged, mintNodeCredential(nodeA.identity, lrDaemon,
+      identityPolicyOf(profile)))
+    check storageA.memo.writeMemoEntry(forged)
+    # B looks the edge up from a checkout and a cache root with no record
+    # of it, so the lookup goes to the peers.
+    let wsBC = base / "pb" / "ws-b-consumer"
+    writeWorkspace(wsBC, ConfigV1)
+    let hitsBeforeT = hooksB.stats.hits
+    let installsBeforeT = hooksB.stats.installs
+    let consumedT = runBuild(helloGraph(wsBC, ffpChecksum, tsVariant),
+      nodeEngineConfig(base / "node-b-consumer-cache", wsBC, hooksB))
+    let consumed = consumedT.byId(ActionId)
+    checkpoint("timestamp consumer B build: status=" & $consumed.status &
+      " fetch=" & hooksB.stats.lastFetchReason & " install=" &
+      hooksB.stats.lastInstallReason & traceOf(consumedT))
+    # The same edge: B asked the peers for exactly the injected key.
+    check consumed.portableWeakHex == tsMade.portableWeakHex
+    check consumed.status == asSucceeded
+    check consumed.launched
+    check hooksB.stats.hits == hitsBeforeT
+    check hooksB.stats.installs == installsBeforeT
+    check "ffpTimestamp input-check policy" in hooksB.stats.lastFetchReason
 
     # ---- no markSuspect false positives, and A really served -------------
     check hostB.client.suspectMarks == 0

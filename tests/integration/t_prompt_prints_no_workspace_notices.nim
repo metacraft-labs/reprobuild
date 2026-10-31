@@ -1,9 +1,8 @@
 ## `repro prompt` never prints workspace notices.
 ##
 ## Workspace notices — a settings layer skipped for want of a url
-## (Workspace-Settings-Files.md §4) and the state-file version-skew warning
-## (§8) — are a property of the checkout that every verb the operator runs
-## reports once, on stderr. The prompt is not such a verb: it runs on EVERY
+## (Workspace-Settings-Files.md §4) — are a property of the checkout that every
+## verb the operator runs reports once, on stderr. The prompt is not such a verb: it runs on EVERY
 ## shell render, and CLI/prompt.md requires it to stay silent when it has
 ## nothing to show and to do only cheap reads. Printing a notice there would put
 ## the same line under every prompt, and computing it reads and decodes the
@@ -17,13 +16,15 @@
 ##      workspace, so the prompt prints nothing at all — stdout AND stderr
 ##      empty;
 ##   2. an initialized root (state file) whose `repro-workspace.toml` declares
-##      the same url-less layer AND that carries both state files with no
-##      migration snapshot (the version-skew condition): the prompt prints its
-##      segment on stdout and nothing on stderr.
+##      the same url-less layer, and which also carries a state file left over
+##      under its retired name with no migration snapshot: the prompt prints
+##      its segment on stdout and nothing on stderr.
 ##
-## Positive control: `repro workspace list` at fixture 2 DOES print both
-## notices, so the fixture really carries them and the silence is the
-## prompt's doing.
+## Positive control: `repro workspace list` at fixture 2 DOES print the
+## skipped-layer notice, so the fixture really carries it and the silence is
+## the prompt's doing. The left-over retired state file is inert for every
+## verb: no skew notice is printed by `workspace list` either (state-file
+## skew is reported by `repro health` alone).
 ##
 ## Mutation check: making `withoutWorkspaceNotices` leave notices enabled
 ## fails the empty-stderr assertions for both fixtures.
@@ -64,8 +65,8 @@ proc seedProject(root: string) =
   createDir(root / "projects")
   writeFile(root / "projects" / "demo.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\nincludes = []\n\n" &
-    "[project]\nname = \"demo\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n")
+    "[project]\nname = \"demo\"\n" &
+    "")
 
 suite "the prompt prints no workspace notices":
 
@@ -83,7 +84,8 @@ suite "the prompt prints no workspace notices":
     check quiet.stdout == ""
     check quiet.stderr == ""
 
-    # Fixture 2 — initialized root with a skipped layer and state-file skew.
+    # Fixture 2 — initialized root with a skipped layer and a state file
+    # left over under its retired name.
     let ws = scratch / "ws"
     seedProject(ws)
     writeFile(ws / "repro-workspace.toml", settingsWithUrllessLayer)
@@ -101,8 +103,10 @@ suite "the prompt prints no workspace notices":
     check rendered.stdout.strip().len > 0
     check rendered.stderr == ""
 
-    # Positive control: an ordinary verb at the same root reports both.
+    # Positive control: an ordinary verb at the same root reports the skipped
+    # layer — and, the retired state file being inert, no skew.
     let listed = runRepro(["workspace", "list", "--workspace-root=" & ws], ws)
     checkpoint("control stderr: " & listed.stderr)
+    check listed.code == 0
     check skipMarker in listed.stderr
-    check skewMarker in listed.stderr
+    check skewMarker notin listed.stderr

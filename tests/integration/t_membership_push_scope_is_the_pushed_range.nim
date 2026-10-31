@@ -117,9 +117,9 @@ proc remoteTip(fx: Fixture; branch: string): string =
 const siblings = ["lib-a", "lib-b", "lib-c"]
 
 proc fragmentToml(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\nname = \"" & name & "\"\npath = \"" & name & "\"\n" &
-  "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+  "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
 
 proc setupFixture(gitBin, slug: string): Fixture =
   ## A FLAT native-layout workspace whose root is the membership repo (it
@@ -133,8 +133,8 @@ proc setupFixture(gitBin, slug: string): Fixture =
   let ws = result.workspace
   createDir(ws)
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"ws\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"ws\"\n" &
+    "\n"
   var includes: seq[string]
   for name in siblings:
     let origin = result.scratch / ("origin-" & name & ".git")

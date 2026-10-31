@@ -67,17 +67,17 @@ proc workspaceWithFlake(scratch: string): string =
   createDir(ws / ".repro")
   createDir(ws / "projects")
   createDir(ws / "repos")
-  writeFile(ws / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\n" &
+  writeFile(ws / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\n" &
     "project = \"app\"\nbranch = \"main\"\n")
   writeFile(ws / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\n" &
-    "name = \"app\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+    "name = \"app\"\n\n" &
     "[[remote]]\nname = \"app-origin\"\nfetch = \"file:///nonexistent/app.git\"\n\n" &
     "includes = [\n  \"repos/app.toml\",\n]\n")
   writeFile(ws / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"app\"\n" &
-    "path = \"app\"\nremote = \"app-origin\"\nrevision = \"main\"\n")
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"app\"\n" &
+    "path = \"app\"\nremote = \"app-origin\"\nmainline = \"main\"\n")
   let app = ws / "app"
   createDir(app)
   writeFile(app / "flake.nix", "{\n  inputs.nixpkgs.url = " &

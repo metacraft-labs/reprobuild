@@ -66,7 +66,14 @@ type
 # ---------------------------------------------------------------------------
 
 proc detectLineEnding(raw: string): string =
-  if raw.contains("\r\n"): "\r\n" else: "\n"
+  ## The document's line ending is decided by its FIRST line only. A value
+  ## may legitimately hold the other ending (a CRLF `caches.conf` in an LF
+  ## profile, or the reverse), and deciding from anywhere in the file made
+  ## `lines` split on an ending that occurs inside a value, so the editor's
+  ## line numbers no longer matched the parser's and an edit spliced the
+  ## wrong lines (or indexed past the end).
+  let nl = raw.find('\n')
+  if nl > 0 and raw[nl - 1] == '\r': "\r\n" else: "\n"
 
 proc loadSystemIntent*(path: string): SystemIntentDoc =
   ## Load `system.nim` into the editor document. Raises
@@ -130,37 +137,18 @@ proc stanzaSpans*(doc: SystemIntentDoc): seq[StanzaSpan] =
   ## (the parser's `realWorldIdentity` default, or an explicit
   ## `address = "..."` field). A structurally-invalid file raises
   ## `ESystemProfileInvalid` via `parseSystemProfile`.
-  let profile = parseSystemProfile(serialize(doc))
-  # Re-walk the lines for brace bounds; pair each `{` head with the
-  # parsed resource at the same ordinal.
-  var resIdx = 0
-  var i = 0
-  while i < doc.lines.len:
-    let stripped = doc.lines[i].strip()
-    if stripped.len == 0 or stripped.startsWith("#"):
-      inc i
-      continue
-    # A stanza head is `<kindTag> {` (the `{` may be on a later line).
-    # Find the head: the line that introduces the kind tag.
-    let headLine = i
-    # Locate the `{` — on this line or a following one.
-    var braceLine = i
-    var foundBrace = false
-    while braceLine < doc.lines.len:
-      if doc.lines[braceLine].contains('{'):
-        foundBrace = true
-        break
-      inc braceLine
-    if not foundBrace:
-      break
-    # Locate the matching `}`.
-    var closeLine = braceLine
-    while closeLine < doc.lines.len:
-      if doc.lines[closeLine].contains('}'):
-        break
-      inc closeLine
-    if closeLine >= doc.lines.len:
-      break
+  let text = serialize(doc)
+  let profile = parseSystemProfile(text)
+  # Stanza bounds come from the parser's own quote-aware brace walk. A
+  # line-by-line search for `{` / `}` (what this used to do) ended a
+  # stanza at the first `}` of a multi-line value, such as a unit file or
+  # a polkit rule, and then removed or spliced the wrong lines.
+  # Lines are counted by the DOCUMENT's ending, the one `lines` was split
+  # on, so an ending of the other kind inside a value is value text to both.
+  let spans = systemProfileStanzaLineSpans(text, doc.lineEnding)
+  for resIdx, span in spans:
+    let headLine = span.startLine
+    let closeLine = span.endLine
     # Count the leading blank/comment lines that belong to this stanza
     # (contiguous run directly above the head).
     var lead = 0
@@ -175,8 +163,6 @@ proc stanzaSpans*(doc: SystemIntentDoc): seq[StanzaSpan] =
         startLine: headLine,
         endLine: closeLine,
         leadingBlankComments: lead))
-    inc resIdx
-    i = closeLine + 1
 
 proc findStanza*(doc: SystemIntentDoc; address: string):
     int =
@@ -196,20 +182,13 @@ proc findStanza*(doc: SystemIntentDoc; address: string):
 
 proc renderScalar(value: string): string =
   ## Render a scalar field value. A bool literal passes through
-  ## unquoted; everything else is double-quoted VERBATIM — the Phase-A
-  ## `system.nim` parser's `unquote` only strips the surrounding
-  ## quotes (it does not decode `\`-escapes), so a Windows path like
-  ## `HKLM\SOFTWARE\...` must be written with single backslashes, not
-  ## escaped. A value that itself contains a `"` cannot be represented
-  ## in this quote-stripping format — the editor rejects it rather
-  ## than emit an unparseable file.
+  ## unquoted; everything else goes through the format's one encoder,
+  ## `profile.quoteSystemValue`: verbatim between double quotes, with a
+  ## `"` written as `""` and nothing else escaped (a Windows path like
+  ## `HKLM\SOFTWARE\...` keeps its single backslashes).
   case value.toLowerAscii()
   of "true", "false": value
-  else:
-    if value.contains('"'):
-      raiseSystemProfileInvalid("a system-resource field value may not " &
-        "contain a double-quote character: '" & value & "'")
-    "\"" & value & "\""
+  else: quoteSystemValue(value)
 
 proc renderList(items: seq[string]): string =
   ## Render a `[a, b]` list literal. Each element is quoted.
@@ -336,6 +315,22 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  content = " & renderScalar(r.suContent))
     if not r.suEnabled:
       result.add("  enabled = false")
+    if r.suAptClosureLock.len > 0:
+      result.add("  aptClosureLock = " & renderScalar(r.suAptClosureLock))
+    if r.suRestartHeld:
+      result.add("  restartIfChanged = false")
+    if r.suCollision.len > 0:
+      result.add("  collision = " & renderScalar(r.suCollision))
+    if r.suDropInName.len > 0:
+      result.add("  dropInName = " & renderScalar(r.suDropInName))
+    if r.suStopHeld:
+      result.add("  stopOnRemoval = false")
+    if r.suReloadIfChanged:
+      result.add("  reloadIfChanged = true")
+    if r.suExclusive:
+      result.add("  exclusive = true")
+    if r.suHealthCheck.len > 0:
+      result.add("  healthCheck = " & renderScalar(r.suHealthCheck))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))
@@ -354,6 +349,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  sha256 = " & renderScalar(r.sfSha256))
     if r.sfSourceLocal.len > 0:
       result.add("  sourceLocal = " & renderScalar(r.sfSourceLocal))
+    if r.sfCollision.len > 0:
+      result.add("  collision = " & renderScalar(r.sfCollision))
   of srkFsSystemDirectory:
     result.add("  path = " & renderScalar(r.dirPath))
     if r.dirAclPresent:
@@ -416,7 +413,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  content = " & renderScalar(r.stContent))
     if not r.stEnabled:
       result.add("  enabled = false")
-    result.add("  state = " & (if r.stRunning: "Running" else: "Stopped"))
+    result.add("  state = " &
+      renderScalar(if r.stRunning: "Running" else: "Stopped"))
   of srkLinuxFirewallRule:
     result.add("  chain = " & renderScalar(r.lfwChain))
     result.add("  name = " & renderScalar(r.lfwName))
@@ -432,6 +430,36 @@ proc renderStanza*(r: SystemResource): seq[string] =
   of srkMacosDarwinSystemModule:
     result.add("  name = " & renderScalar(r.darwinModuleName))
     result.add("  content = " & renderScalar(r.darwinModuleContent))
+  of srkLinuxDpkgDiversion:
+    result.add("  path = " & renderScalar(r.ddPath))
+  of srkSystemdUnitState:
+    result.add("  name = " & renderScalar(r.usName))
+    if not r.usEnabled:
+      result.add("  enabled = false")
+    result.add("  state = " &
+      renderScalar(if r.usRunning: "Running" else: "Stopped"))
+  of srkLinuxAddOnTool:
+    result.add("  command = " & renderScalar(r.atCommand))
+    result.add("  aptClosureLock = " & renderScalar(r.atAptClosureLock))
+    result.add("  program = " & renderScalar(r.atProgram))
+  of srkSystemdSystemDropIn:
+    result.add("  unit = " & renderScalar(r.diUnit))
+    result.add("  name = " & renderScalar(r.diName))
+    result.add("  content = " & renderScalar(r.diContent))
+    if r.diRestartHeld:
+      result.add("  restartIfChanged = false")
+  of srkLinuxSysusersEntry:
+    result.add("  name = " & renderScalar(r.seName))
+    if r.seKind.len > 0 and r.seKind != "user":
+      result.add("  kind = " & renderScalar(r.seKind))
+    if r.seId.len > 0:
+      result.add("  id = " & renderScalar(r.seId))
+    if r.seDescription.len > 0:
+      result.add("  description = " & renderScalar(r.seDescription))
+    if r.seHome.len > 0:
+      result.add("  home = " & renderScalar(r.seHome))
+    if r.seShell.len > 0:
+      result.add("  shell = " & renderScalar(r.seShell))
   of srkLinuxFhsSandbox:
     result.add("  binPath = " & renderScalar(r.fsbBinPath))
     result.add("  fhsTrees = " & renderList(r.fsbFhsTreeRoots))
@@ -447,7 +475,36 @@ proc renderStanza*(r: SystemResource): seq[string] =
     for dep in r.dependsOn:
       deps.add(dep.kind & ":" & dep.name)
     result.add("  depends_on = " & renderList(deps))
+  # An explicit address (one that is not the kind's default identity) is
+  # part of the resource: the ledger and `depends_on` edges name it, so a
+  # rendering that dropped it would change what the text means.
+  if r.address.len > 0 and r.address != realWorldIdentity(r):
+    result.add("  address = " & renderScalar(r.address))
   result.add("}")
+
+proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
+  ## The profile-wide `addOn { ... }` stanza (ReproOS-Add-On-Mode §4.4),
+  ## or nothing when the profile declares none.
+  if not settings.declared:
+    return @[]
+  result.add(AddOnStanzaTag & " {")
+  result.add("  managedEtcPrefixes = " & renderList(settings.managedEtcPrefixes))
+  if settings.confirmTimeoutSec > 0:
+    result.add("  confirmTimeout = " & $settings.confirmTimeoutSec)
+  result.add("}")
+
+proc renderProfileText*(p: SystemProfile): string =
+  ## A whole profile as canonical text: the `addOn` stanza first, then
+  ## every resource in apply order. `parseSystemProfile(renderProfileText(p))`
+  ## yields `p` again; the add-on composes the profile it applies this way
+  ## rather than by concatenating text.
+  var blocks: seq[string]
+  let addOn = renderAddOnStanza(p.addOn)
+  if addOn.len > 0:
+    blocks.add(addOn.join("\n"))
+  for r in p.resources:
+    blocks.add(renderStanza(r).join("\n"))
+  blocks.join("\n\n") & "\n"
 
 # ---------------------------------------------------------------------------
 # addResource / removeResource.
@@ -466,20 +523,31 @@ proc addResource*(doc: var SystemIntentDoc; r: SystemResource) =
   if findStanza(doc, r.address) >= 0:
     raiseSystemProfileInvalid("a system resource with address '" &
       r.address & "' already exists; use `repro system remove` first")
-  let rendered = renderStanza(r)
+  # `doc.lines` holds one physical line per element: a multi-line value
+  # (a unit file, a udev rule) is rendered as one `key = "..."` element
+  # carrying newlines, so split it here, or the editor's line numbers and
+  # the serialized file's disagree and the next `stanzaSpans` indexes past
+  # the end.
+  # Split on the document's own ending: a value holding the other kind of
+  # ending keeps it inside one element, and `serialize` writes it back
+  # byte for byte.
+  var rendered: seq[string]
+  for piece in renderStanza(r):
+    for ln in piece.split(doc.lineEnding):
+      rendered.add(ln)
   # Insert position: after the last non-blank/non-comment line.
   var lastReal = -1
   for i in 0 ..< doc.lines.len:
     if not lineIsBlankOrComment(doc.lines[i]):
       lastReal = i
-  var insertAt = lastReal + 1
-  # If there is real content above, separate with one blank line —
-  # but only if the line just above the insertion point is not
-  # already blank.
+  # A file with no stanza yet (a comment-only header) takes the new stanza
+  # at its END, after the header, not in front of it.
+  var insertAt = if lastReal >= 0: lastReal + 1 else: doc.lines.len
+  # If there is content above, separate with one blank line — but only if
+  # the line just above the insertion point is not already blank.
   var prefix: seq[string]
-  if lastReal >= 0:
-    if insertAt > 0 and doc.lines[insertAt - 1].strip().len != 0:
-      prefix.add("")
+  if insertAt > 0 and doc.lines[insertAt - 1].strip().len != 0:
+    prefix.add("")
   var newLines = prefix & rendered
   # Splice.
   var rebuilt: seq[string]
@@ -518,5 +586,10 @@ proc removeResource*(doc: var SystemIntentDoc; address: string): bool =
     if i >= removeFrom and i <= removeTo:
       continue
     rebuilt.add(doc.lines[i])
+  # Removing the FIRST stanza leaves the blank line that separated it from
+  # its successor at the top of the file; a file does not start with one.
+  if removeFrom == 0:
+    while rebuilt.len > 0 and rebuilt[0].strip().len == 0:
+      rebuilt.delete(0)
   doc.lines = rebuilt
   return true

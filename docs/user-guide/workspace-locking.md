@@ -120,7 +120,7 @@ Configuration composes from layers, in increasing precedence:
    on Windows).
 3. **User dotfiles** — `~/.config/reprobuild/config.toml` (override with
    `REPROBUILD_USER_CONFIG`).
-4. **Parent workspace repo** — a `.repro-workspace.toml` `[locking]`
+4. **Parent workspace repo** — a `repro-workspace.toml` `[locking]`
    table in a shared `repro-workspace` repo.
 5. **VCS-private local metadata** — `<git-common-dir>/repro/config.toml`
    (override with `REPROBUILD_VCS_PRIVATE_CONFIG`). Never tracked, never
@@ -161,10 +161,11 @@ fits how your team already works.
 ### Form A — a parent `repro-workspace` repo
 
 If your team already shares a workspace repo (the star topology),
-declare the team routes in its `.repro-workspace.toml` (layer 4):
+declare the team routes in its `repro-workspace.toml` (layer 4):
 
 ```toml
-# .repro-workspace.toml (committed in the shared repro-workspace repo)
+# repro-workspace.toml (committed in the shared repro-workspace repo)
+schema = "reprobuild.workspace.settings.v1"
 [locking]
 route = [
   { visibility = "team", backend = "git-checkout", path = ".repo/manifests-team", repos = ["acme-internal", "acme-shared"] },
@@ -265,7 +266,7 @@ backend, and **which configuration layer declared it** — run:
 $ repro locking explain
 repro locking explain — resolved (tier, backend) per repo:
   acme-app (apps/acme-app): tier=public backend=committed-lock layer=built-in default
-  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [.repro-workspace.toml]
+  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [repro-workspace.toml]
   my-scratch-fork (vendor/my-scratch-fork): tier=personal backend=git-checkout layer=dotfiles [~/dotfiles/reprobuild/personal-routes.toml]
 ```
 
@@ -953,8 +954,8 @@ personal fork. The public repo needs no config. The team route lives in
 the shared workspace repo; the personal route comes from your dotfiles.
 
 ```toml
-# .repro-workspace.toml (committed in the shared repro-workspace repo)
-schema = "reprobuild.config.v1"
+# repro-workspace.toml (committed in the shared repro-workspace repo)
+schema = "reprobuild.workspace.settings.v1"
 [locking]
 route = [
   { visibility = "team", backend = "git-checkout", path = ".repo/manifests-team", repos = ["acme-internal"] },
@@ -983,7 +984,7 @@ route = [
 $ repro locking explain
 repro locking explain — resolved (tier, backend) per repo:
   acme-app (apps/acme-app): tier=public backend=committed-lock layer=built-in default
-  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [.repro-workspace.toml]
+  acme-internal (libs/acme-internal): tier=team backend=git-checkout layer=parent-workspace-repo [repro-workspace.toml]
   my-scratch-fork (vendor/my-scratch-fork): tier=personal backend=git-checkout layer=dotfiles [~/dotfiles/reprobuild/personal-routes.toml]
 ```
 

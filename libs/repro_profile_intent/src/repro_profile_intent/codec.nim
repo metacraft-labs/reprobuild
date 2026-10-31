@@ -21,6 +21,7 @@ import std/[algorithm, tables]
 
 import cbor
 import repro_profile/types
+from repro_profile/host_system import hostSystemDeclProblem
 
 import ./envelope
 import ./errors
@@ -64,13 +65,30 @@ const
     ## a block-form `hosts:` entry's `applies:`). Optional; omitted when no
     ## host declares, so a profile without a declaration encodes exactly as
     ## before. Envelope schema 7.
-  KeySystemManagedElsewhere = "systemManagedElsewhere"
-    ## GM10: the hosts whose system scope is managed elsewhere
-    ## (`ProfileIntent.systemManagedElsewhere`): a map host -> map, the inner
-    ## map carrying `"managedBy"` (text) only when the entry names a manager.
-    ## Optional; omitted when no host says so, so a profile without the
-    ## attribute encodes exactly as before. Envelope schema 9.
+  KeyHostSystems  = "hostSystems"
+    ## GM10 + add-on mode: the hosts whose `hosts:` entry has a `system:` key
+    ## (`ProfileIntent.hostSystems`): a map host -> map carrying `"mode"`
+    ## (text: `managedElsewhere`, `addOn` or `full`), `"managedBy"` (text)
+    ## only when the entry names a manager, and `"activities"` (array of
+    ## text) only when an `addOn` / `full` entry selects system activities. Optional; omitted when
+    ## no host entry has the key, so a profile without the attribute encodes
+    ## exactly as before. Envelope schema 13 (11 replaced schema 9's
+    ## `"systemManagedElsewhere"` map, which could not say `addOn`; 13 added
+    ## the `full` mode).
+  KeyMode         = "mode"
   KeyManagedBy    = "managedBy"
+  KeySystemActivities = "activities"
+  KeyAddOn        = "addOn"
+    ## ReproOS add-on mode: the profile-wide `addOn:` section
+    ## (`ProfileIntent.addOn`), a map with `"managedEtcPrefixes"` (an array
+    ## of text). Optional; omitted when the profile declares none, so a
+    ## profile without the section encodes exactly as before. Envelope
+    ## schema 12.
+  KeyManagedEtcPrefixes = "managedEtcPrefixes"
+  KeyConfirmTimeout = "confirmTimeout"
+    ## Inside the `addOn` map: the add-on switch's `confirmTimeout` in
+    ## seconds (ReproOS-Add-On Mode §7.5), as an unsigned integer. Optional;
+    ## omitted when not declared, so a section without it encodes as before.
   KeyStowScopes   = "stowScopes"
     ## GM11: the activities' stow claims (`ProfileIntent.stowScopes`): an
     ## array of maps with `"package"` and `"activity"` (text) and, under a
@@ -87,6 +105,8 @@ const
   KeyToolIdentityRefs = "toolIdentityRefs"
   KeyRequiresElevation = "requiresElevation"
   KeyCacheable    = "cacheable"
+  KeySubstituteOnly = "substituteOnly"
+  KeyExpectedOutputDigest = "expectedOutputDigest"
   KeyId           = "id"
   KeyBody         = "body"
   KeyPredicate    = "predicate"
@@ -294,7 +314,9 @@ proc encodeBuildAction(b: ProfileBuildAction): DynamicValue =
     entry(KeyCommandStatsId, cborText(b.commandStatsId)),
     entry(KeyToolIdentityRefs, encodeStringArray(b.toolIdentityRefs)),
     entry(KeyRequiresElevation, cborBool(b.requiresElevation)),
-    entry(KeyCacheable, cborBool(b.cacheable))])
+    entry(KeyCacheable, cborBool(b.cacheable)),
+    entry(KeySubstituteOnly, cborBool(b.substituteOnly)),
+    entry(KeyExpectedOutputDigest, cborText(b.expectedOutputDigest))])
 
 proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var acts: seq[DynamicValue] = @[]
@@ -321,17 +343,26 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
     entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
   if p.catalogImports.len > 0:
     entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
+  if p.addOn.declared:
+    var ao = @[entry(KeyManagedEtcPrefixes,
+      encodeStringArray(p.addOn.managedEtcPrefixes))]
+    if p.addOn.confirmTimeoutSec > 0:
+      ao.add entry(KeyConfirmTimeout, cborUInt(uint64(p.addOn.confirmTimeoutSec)))
+    entries.add entry(KeyAddOn, cborMap(ao))
   if p.hostApplies.len > 0:
     entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
-  if p.systemManagedElsewhere.len > 0:
+  if p.hostSystems.len > 0:
     var hostEntries: seq[DynamicMapEntry] = @[]
-    for host, pointer in p.systemManagedElsewhere:
-      var inner: seq[DynamicMapEntry] = @[]
-      if pointer.len > 0:
-        inner.add entry(KeyManagedBy, cborText(pointer))
+    for host, decl in p.hostSystems:
+      var inner = @[entry(KeyMode, cborText($decl.mode))]
+      if decl.managedBy.len > 0:
+        inner.add entry(KeyManagedBy, cborText(decl.managedBy))
+      if decl.activities.len > 0:
+        inner.add entry(KeySystemActivities,
+          encodeStringArray(decl.activities))
       hostEntries.add entry(host, cborMap(inner))
     hostEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
-    entries.add entry(KeySystemManagedElsewhere, cborMap(hostEntries))
+    entries.add entry(KeyHostSystems, cborMap(hostEntries))
   if p.stowScopes.len > 0:
     # Declaration order is kept (an array): it is the order diagnostics
     # name the claims in.
@@ -582,6 +613,16 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
           KeyRequiresElevation),
         cacheable: expectBool(lookup(bEntries, KeyCacheable,
           "ProfileBuildAction"), KeyCacheable))
+      # Optional on decode: a cached envelope written before the
+      # substitute-only edge existed carries neither key and is an
+      # ordinary buildable edge, which is what it was.
+      var soFound, eodFound: bool
+      let soNode = lookupOpt(bEntries, KeySubstituteOnly, soFound)
+      if soFound:
+        ba.substituteOnly = expectBool(soNode, KeySubstituteOnly)
+      let eodNode = lookupOpt(bEntries, KeyExpectedOutputDigest, eodFound)
+      if eodFound:
+        ba.expectedOutputDigest = expectText(eodNode, KeyExpectedOutputDigest)
       for it in expectArray(lookup(bEntries, KeyArgv,
           "ProfileBuildAction"), KeyArgv):
         ba.argv.add expectText(it, KeyArgv)
@@ -621,23 +662,65 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   if ciFound:
     for it in expectArray(ciNode, KeyCatalogImports):
       result.catalogImports.add expectText(it, KeyCatalogImports)
+  # ReproOS add-on mode: the `addOn:` section is OPTIONAL on the wire
+  # (absent when the profile declares none). A malformed one is corrupt.
+  var aoFound = false
+  let aoNode = lookupOpt(entries, KeyAddOn, aoFound)
+  if aoFound:
+    let ao = expectMap(aoNode, KeyAddOn)
+    result.addOn.declared = true
+    for it in expectArray(lookup(ao, KeyManagedEtcPrefixes, KeyAddOn),
+                          KeyManagedEtcPrefixes):
+      result.addOn.managedEtcPrefixes.add expectText(it, KeyManagedEtcPrefixes)
+    var ctFound = false
+    let ct = lookupOpt(ao, KeyConfirmTimeout, ctFound)
+    if ctFound:
+      if ct.kind != dvUInt or ct.uintValue == 0 or ct.uintValue > 86400'u64:
+        raiseRbpiCorrupt("body", "addOn.confirmTimeout must be a positive " &
+          "number of seconds")
+      result.addOn.confirmTimeoutSec = int(ct.uintValue)
   # The per-host concern declaration is OPTIONAL on the wire (absent when
   # no host declares one).
   var haFound = false
   let haNode = lookupOpt(entries, KeyHostApplies, haFound)
   if haFound:
     result.hostApplies = decodeHosts(haNode)
-  # GM10: the system-management attribute is OPTIONAL on the wire (absent
-  # when no host's system is managed elsewhere).
-  var smeFound = false
-  let smeNode = lookupOpt(entries, KeySystemManagedElsewhere, smeFound)
-  if smeFound:
-    for e in expectMap(smeNode, KeySystemManagedElsewhere):
-      var pointerFound = false
-      let pointerNode = lookupOpt(expectMap(e.value, KeySystemManagedElsewhere),
-        KeyManagedBy, pointerFound)
-      result.systemManagedElsewhere[e.key] =
-        if pointerFound: expectText(pointerNode, KeyManagedBy) else: ""
+  # GM10 + add-on mode: the system-management attribute is OPTIONAL on the
+  # wire (absent when no host entry has a `system:` key). An entry with an
+  # unknown mode, or one the `profile` macro could not have produced
+  # (`hostSystemDeclProblem`), is refused as corrupt -- never read as
+  # "managed here".
+  var hsFound = false
+  let hsNode = lookupOpt(entries, KeyHostSystems, hsFound)
+  if hsFound:
+    for e in expectMap(hsNode, KeyHostSystems):
+      let inner = expectMap(e.value, KeyHostSystems)
+      var modeFound, pointerFound, actsFound = false
+      let modeNode = lookupOpt(inner, KeyMode, modeFound)
+      if not modeFound:
+        raiseRbpiCorrupt("body", KeyHostSystems & "." & e.key &
+          " has no `" & KeyMode & "`")
+      var decl: HostSystemDecl
+      let modeText = expectText(modeNode, KeyMode)
+      case modeText
+      of $hsmManagedElsewhere: decl.mode = hsmManagedElsewhere
+      of $hsmAddOn: decl.mode = hsmAddOn
+      of $hsmFull: decl.mode = hsmFull
+      else:
+        raiseRbpiCorrupt("body", KeyHostSystems & "." & e.key &
+          " has an unknown mode `" & modeText & "`")
+      let pointerNode = lookupOpt(inner, KeyManagedBy, pointerFound)
+      if pointerFound:
+        decl.managedBy = expectText(pointerNode, KeyManagedBy)
+      let actsNode = lookupOpt(inner, KeySystemActivities, actsFound)
+      if actsFound:
+        for it in expectArray(actsNode, KeySystemActivities):
+          decl.activities.add expectText(it, KeySystemActivities)
+      let problem = hostSystemDeclProblem(decl)
+      if problem.len > 0:
+        raiseRbpiCorrupt("body", KeyHostSystems & "." & e.key & ": " &
+          problem)
+      result.hostSystems[e.key] = decl
   # GM11: the stow claims are OPTIONAL on the wire (absent when no activity
   # claims a stow package). A malformed claim is refused as corrupt.
   var ssFound = false

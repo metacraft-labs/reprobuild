@@ -126,19 +126,18 @@ proc projectToml(coreUrl, teamUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"team-origin\"\nfetch = \"" & teamUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n  \"repos/team-lib.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc depInline(name, path, url, sha: string): string =
   "{ name = \"" & name & "\", path = \"" & path &
@@ -206,8 +205,8 @@ suite "DS-8: --lock-store supplies the private route a CI checkout lacks":
       discard requireGit(q(gitBin) & " clone " & q(fileUrl(teamOrigin)) &
         " " & q(ws / "team-lib"))
       createDir(ws / ".repro")
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\n" &
         "project = \"mix\"\n" &
         "branch = \"main\"\n")
@@ -216,9 +215,9 @@ suite "DS-8: --lock-store supplies the private route a CI checkout lacks":
         committedLock(depInline("core", "core", fileUrl(coreOrigin),
           coreShas.second)))
       # NO `[locking]` table anywhere — the CI shape.
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n")
 
       # The PRIVATE stores, off to the side — exactly what `$RUNNER_TEMP` would

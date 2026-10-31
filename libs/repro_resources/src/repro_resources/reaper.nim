@@ -66,7 +66,7 @@
 ## `inProcessTransport()` because no provider artifact was known, and at the
 ## time NOTHING in the shipped tree could make one known
 ## (reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md).
-## Its `vm_harness.nic` record had neither a linked driver nor a linked codec
+## Its `gosti.nic` record had neither a linked driver nor a linked codec
 ## there, so it was unreapable by that process by ANY route, and strict
 ## reconstruction remains correct for it. What this split fixes is the second,
 ## independent defect that would have produced the identical symptom in a
@@ -890,7 +890,7 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   ## this process can perfectly well reap — are never reached, so the sweep
   ## reaps nothing at all and does so again on every subsequent tick, forever.
   ## That is not hypothetical: the daemon's wall-clock tick failed on its first
-  ## record (a `vm_harness.nic` with no linked marshaller) on every one of
+  ## record (a `gosti.nic` with no linked marshaller) on every one of
   ## 141,895 consecutive attempts over 60 days and reaped nothing, ever.
   ##
   ## So each record is attempted independently and a failure is RECORDED in

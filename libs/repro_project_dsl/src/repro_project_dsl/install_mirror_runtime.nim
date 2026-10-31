@@ -177,12 +177,16 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("if [ -z \"$line\" ]; then continue; fi; ")
     if recipesRoot.len > 0:
       let escapedRecipesRoot = recipesRoot.replace("\"", "\\\"")
-      script.add("case \"$line\" in */.repro/output/install/*) ")
-      script.add("m9r14f_old_recipe=${line%%/.repro/output/install/*}; ")
+      # The mirror of the build being staged: ``install@<triple>`` under
+      # ``--target``, so a cross build remaps to the target mirror and
+      # never to the native one beside it.
+      let mirror = "/" & installMirrorSubpath().replace("\\", "/") & "/"
+      script.add("case \"$line\" in *" & mirror & "*) ")
+      script.add("m9r14f_old_recipe=${line%%" & mirror & "*}; ")
       script.add("m9r14f_dep=${m9r14f_old_recipe##*/}; ")
-      script.add("m9r14f_rel=${line#*/.repro/output/install/}; ")
+      script.add("m9r14f_rel=${line#*" & mirror & "}; ")
       script.add("m9r14f_active=\"" & escapedRecipesRoot &
-        "/$m9r14f_dep/.repro/output/install/$m9r14f_rel\"; ")
+        "/$m9r14f_dep" & mirror & "$m9r14f_rel\"; ")
       script.add("if [ -d \"$m9r14f_active\" ]; then line=$m9r14f_active; fi;; ")
       script.add("esac; ")
     script.add("if ! [ -d \"$line\" ]; then continue; fi; ")

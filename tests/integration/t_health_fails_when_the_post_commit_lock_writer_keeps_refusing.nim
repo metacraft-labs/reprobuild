@@ -116,16 +116,16 @@ proc seedGitOrigin(gitBin, originPath, workPath: string) =
 
 proc projectToml(libAUrl, libBUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"lib-a\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"lib-a\"\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n"
 
 proc fragmentToml(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"" & name &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" & name &
     "\"\npath = \"" & name & "\"\nremote = \"" & name &
-    "-origin\"\nrevision = \"main\"\n"
+    "-origin\"\nmainline = \"main\"\n"
 
 type
   Fixture = object

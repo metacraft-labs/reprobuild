@@ -181,9 +181,9 @@ proc writeFragment*(fx: RenameFixture; fragment, name, path: string;
   ## One `repos/<fragment>.toml`. `previously` is the raw inline-table-array
   ## body, so a test can write a malformed one on purpose.
   var body =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"" & name & "\"\npath = \"" & path & "\"\n" &
-    "url_prefix = \"local\"\nbranch = \"" & branch & "\"\n" & extra
+    "url_prefix = \"local\"\nmainline = \"" & branch & "\"\n" & extra
   if previously.len > 0:
     body.add("\n[extensions]\npreviously = " & previously & "\n")
   writeFile(fx.workspaceRoot / "repos" / (fragment & ".toml"), body)
@@ -199,8 +199,7 @@ proc writeProject*(fx: RenameFixture; members: openArray[string];
   writeFile(fx.workspaceRoot / "projects" / (projectName & ".toml"),
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "member_repos = [" & quoted.join(", ") & "]\n\n" &
-    "[project]\nname = \"" & projectName & "\"\n" &
-    "default_revision = \"" & branch & "\"\ntrunk = \"" & branch & "\"\n")
+    "[project]\nname = \"" & projectName & "\"\n")
 
 proc invokeSync*(fx: RenameFixture;
                  extraArgs: openArray[string] = [];

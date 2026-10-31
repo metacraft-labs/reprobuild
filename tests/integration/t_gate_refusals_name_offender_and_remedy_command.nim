@@ -130,19 +130,18 @@ proc projectTomlSingle(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 # A two-repo project used by the sync-unreadable case: lib-b is declared with
@@ -151,20 +150,19 @@ proc projectTomlTwo(libAUrl, libBUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n"
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 # ---- fixture --------------------------------------------------------------
@@ -202,13 +200,13 @@ proc baseFixture(gitBin, slug: string): Fixture =
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
 const wsRootFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "ws-root"
 path = "."
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc projectTomlWithWorkspaceRoot(libAUrl: string): string =
@@ -219,19 +217,18 @@ proc projectTomlWithWorkspaceRoot(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/ws-root.toml\",\n  \"repos/lib-a.toml\",\n]\n"
 
 const libADependsOnRootToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 depends = ["ws-root"]
 """
 
@@ -299,9 +296,9 @@ proc seedManifestGitLayer(gitBin: string; fx: var Fixture) =
   # `[manifest] publish_locks = true` in the host bootstrap config. The config
   # lives at the workspace root (not inside the manifest checkout); the gate
   # reads it from disk, so it need not be tracked by any repo.
-  writeFile(fx.workspaceRoot / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(fx.workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"" & fileUrl(fx.manifestBare) & "\"\n" &
     "branch = \"main\"\n" &
     "publish_locks = true\n")

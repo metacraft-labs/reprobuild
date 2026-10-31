@@ -11,11 +11,11 @@
 ## This module verifies the AUTHENTICITY of a checked-out manifest source
 ## before the resolver is allowed to trust it:
 ##
-## - **Signed manifest commits/tags.** When the host bootstrap config sets
+## - **Signed manifest commits/tags.** When the settings file sets
 ##   `[verify] require_signature = true`, the manifest source's HEAD commit
-##   (or the pinned `[manifest] revision` tag/commit) must carry a VALID
+##   (or the pinned revision tag/commit) must carry a VALID
 ##   signature from a key in the configured allowed-signers set.
-## - **Pinned manifest revision.** When `[manifest] revision` is set, the
+## - **Pinned manifest revision.** When a layer's `revision` is set, the
 ##   manifest checkout's HEAD must resolve to exactly that commit/tag, so a
 ##   moved branch can't silently swap the manifest out.
 ## - **Fail closed when required.** Any failure (unsigned, wrong key, tampered,
@@ -45,7 +45,7 @@ type
 
   ManifestVerifySpec* = object
     ## The resolved trust anchor for one verification run, distilled from the
-    ## host bootstrap config (`[manifest] revision` + `[verify]`). Resolved
+    ## settings file's `[verify]` table, and a layer's `revision` pin. Resolved
     ## once (paths made absolute against the config dir) so the verifier never
     ## reaches back into config-relative state.
     requireSignature*: bool
@@ -67,12 +67,14 @@ proc isVerificationActive*(spec: ManifestVerifySpec): bool =
   ## it entirely — this is the "not configured → unchanged behavior" gate.
   spec.requireSignature or spec.pinnedRevision.len > 0
 
-proc resolveVerifySpec*(cfg: WorkspaceBootstrap; configDir: string):
+proc resolveVerifySpec*(cfg: WorkspaceSettings; configDir: string):
     ManifestVerifySpec =
-  ## Build a `ManifestVerifySpec` from a parsed bootstrap config. `configDir`
-  ## is the directory the `.repro-workspace.toml` lives in, used to resolve a
-  ## relative `allowed_signers` path. A wildcard signer identity is chosen
-  ## when the config does not name one.
+  ## Build a `ManifestVerifySpec` from the settings file's `[verify]` table.
+  ## `configDir` is the directory the settings file lives in, used to resolve
+  ## a relative `allowed_signers` path. A wildcard signer identity is chosen
+  ## when the table does not name one. No revision pin comes from here: a
+  ## settings file pins per `[[manifest]]` layer (`pinnedRevisionSpec`,
+  ## Workspace-Settings-Files.md §3).
   result.requireSignature = cfg.verify.require_signature
   result.inlineKeys = cfg.verify.allowed_keys
   result.signerIdentity =
@@ -88,18 +90,6 @@ proc resolveVerifySpec*(cfg: WorkspaceBootstrap; configDir: string):
       if isAbsolute(raw): raw
       elif configDir.len > 0: absolutePath(configDir / raw)
       else: absolutePath(raw)
-  if cfg.manifest.revision.isSome and cfg.manifest.revision.get().len > 0:
-    result.pinnedRevision = cfg.manifest.revision.get()
-
-proc resolveVerifySpec*(cfg: WorkspaceSettings; configDir: string):
-    ManifestVerifySpec =
-  ## `resolveVerifySpec` for the workspace settings record, whichever file it
-  ## was read from. `[verify]` is the same table in both schemas; the RA-17
-  ## pin is the old file's `[manifest] revision` (a `settings.v1` file pins
-  ## per layer instead, Workspace-Settings-Files.md §3).
-  var legacy = WorkspaceBootstrap(verify: cfg.verify)
-  legacy.manifest.revision = cfg.manifestRevision
-  resolveVerifySpec(legacy, configDir)
 
 proc pinnedRevisionSpec*(revision: string): ManifestVerifySpec =
   ## A spec that checks only a revision pin — what a settings-file layer's

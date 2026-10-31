@@ -222,3 +222,51 @@ suite "TC-8g — the pre-commit gate judges the index being committed":
       check res.code == 0
       check fx.head != before
       check fx.gateLogLines("covered") == 1
+
+  test "an incomplete store search is reported apart from none found":
+    # Transport §2.1/§5, Tooling §2 (find exit 3 vs 1): when a store root
+    # could not be read, finding nothing is not "no certificate": the gate
+    # says the search was INCOMPLETE and refuses as UNVERIFIABLE, whose
+    # remedy is not "run 'repro certify'". The control — the same commit
+    # with every root readable — reports the completed empty search.
+    if toolsMissing():
+      skip("git or ssh-keygen not on PATH; this test signs certificates " &
+        "and commits in real repositories")
+    elif defined(windows):
+      skip("POSIX permission bits are what make the system root unreadable")
+    else:
+      let fx = setupStoreFixture(
+        requiredPolicy(@["t-unit"], @[currentPlatformTag()]), "tc8g-partial")
+      defer: removeDir(fx.scratch)
+      fx.ensureHooks()
+      writeFile(fx.libAPath / "a.txt", "uncovered\n")
+      discard fx.mustGit("add", "a.txt")
+      # Control: every root readable, nothing stored.
+      let complete = fx.commit("-m", "uncovered, complete search")
+      checkpoint("complete search:\n" & complete.output)
+      check complete.code != 0
+      check "no certificate found in the local store" in complete.output
+      check "search INCOMPLETE" notin complete.output
+      # The system root exists and cannot be read.
+      createDir(fx.systemRoot / "v1")
+      setFilePermissions(fx.systemRoot, {})
+      defer: setFilePermissions(fx.systemRoot,
+        {fpUserRead, fpUserWrite, fpUserExec})
+      var readable = true
+      try:
+        for _ in walkDir(fx.systemRoot, checkDir = true): discard
+      except OSError:
+        readable = false
+      if readable:
+        skip("this process can list a mode-000 directory (it runs as " &
+          "root), so an unreadable system root cannot be constructed here")
+      else:
+        let before = fx.head
+        let partial = fx.commit("-m", "uncovered, incomplete search")
+        checkpoint("incomplete search:\n" & partial.output)
+        check partial.code != 0
+        check fx.head == before
+        check "search INCOMPLETE" in partial.output
+        check "could not be established" in partial.output
+        check "no certificate found in the local store" notin partial.output
+        check fx.gateLogLines("refused unverifiable") == 1

@@ -609,7 +609,7 @@ if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
   chmod 0700 "$XDG_RUNTIME_DIR"
 fi
 
-# Headless mode for DE-K2 vm-harness boot under Hyper-V.
+# Headless mode for DE-K2 gosti boot under Hyper-V.
 if [ "${REPRO_HEADLESS:-0}" = "1" ]; then
   export QT_QPA_PLATFORM=offscreen
   export KWIN_COMPOSE=O2
@@ -844,7 +844,7 @@ Planted config:
   /var/lib/sddm/                                                        (sddm stateful dir)
 
 Next step:
-  DE-K2 : vm-harness Hyper-V Plasma boot test (boots ISO, autologin,
+  DE-K2 : gosti Hyper-V Plasma boot test (boots ISO, autologin,
           exec repro-start-plasma.sh, assert kwin_wayland + plasmashell up).
 EOF
 

@@ -26,7 +26,7 @@
 #
 # Costs (measured on repro-darling-test): ~5 s per cold-init + ~0.5 s
 # per payload copy. With 3 tools (fzf/jq/ripgrep) total ~17 s on first
-# boot, well within the VM-harness 120 s CmdTimeout budget.
+# boot, well within the gosti 120 s CmdTimeout budget.
 #
 # Subsequent boots: skipped via the /var/lib/reproos-darling-coldinit-
 # done sentinel + the systemd unit's ConditionPathExists guard.

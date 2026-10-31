@@ -98,18 +98,18 @@ proc treeSnapshot(root: string): seq[string] =
   result.sort()
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\nname = \"lib-a\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+  "[project]\nname = \"lib-a\"\n\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
@@ -214,9 +214,9 @@ suite "workspace lock — a public-only run reports that it recorded nothing":
       # document is written and the renderer takes the SAME arm — but this time
       # a per-repo record really is recorded, and saying so is correct.
       let store = ws / "committed-store"
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"public\", backend = \"committed-file\", " &

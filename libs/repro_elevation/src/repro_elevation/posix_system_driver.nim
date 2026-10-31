@@ -45,18 +45,23 @@
 ##     genuinely differs.
 ##   * `passwd.user`          wholly new — no home-scope analogue.
 
-import std/[strutils]
+import std/[os, strutils]
 
 import blake3
 
+import repro_dsl_stdlib/packages/apt_closure
+
 import ./errors
 import ./fixture_driver
+import ./nofollow_write
 import ./operations
 import ./os_system_parse
 import ./posix_system_parse
+import ./store_view
 
 when defined(linux) or defined(macosx):
   import std/[os, osproc, streams]
+  from std/posix import geteuid
 elif defined(windows):
   import std/[os, osproc]
   # Windows-System-Resources Phase D: re-observe the live NTFS ACL
@@ -148,6 +153,153 @@ proc hostUsesSystemd*(): bool =
 proc desiredStateOf(op: PrivilegedOperation): PasswdUserDesired =
   PasswdUserDesired(name: op.puName, homeDir: op.puHome,
     shell: op.puShell, groups: op.puGroups)
+
+# ===========================================================================
+# systemd.unitState and linux.addOnTool — pure parts (ReproOS Add-On Mode
+# §4.1). Defined ahead of the digest table because the desired digest of
+# both kinds is computed from them, and kept free of I/O so the decisions
+# are unit-tested without systemd or root.
+# ===========================================================================
+
+proc unitStateDigestText*(enabled, active: bool): string =
+  ## The canonical bytes of a unit's enablement + activity, the only two
+  ## facts `systemd.unitState` converges.
+  "enabled=" & $enabled & "\nactive=" & $active & "\n"
+
+const UnitStateShowProperties* =
+  "LoadState,ActiveState,UnitFileState,Type,RemainAfterExit"
+  ## What `systemd.unitState` asks `systemctl show -p` for.
+
+proc parseUnitStateShow*(output: string):
+    tuple[loaded, enabled, active, fixedEnablement, transientOneshot: bool] =
+  ## Read `systemctl show -p UnitStateShowProperties <unit>`.
+  ## `loaded` is false for `not-found` and `masked` (nothing the add-on may
+  ## enable). `enabled` is true for every `UnitFileState` that is enabled
+  ## or cannot be toggled (`static`, `alias`, `indirect`, `generated`,
+  ## `transient`): the requirement "this unit must be enabled" is met by
+  ## all of them, and `systemctl enable` on a static unit only prints a
+  ## warning. `fixedEnablement` names that second group, which cannot be
+  ## DISABLED either, so `enabled = false` on one is refused rather than
+  ## converged by a `systemctl disable` that changes nothing.
+  ## `active` is `ActiveState=active` only. `transientOneshot` is a
+  ## `Type=oneshot` service without `RemainAfterExit=yes`: it is never
+  ## `active` for longer than its run, so `state = Running` on it would be
+  ## started on every apply and still observed inactive; refused.
+  # Collect every property first, decide after: `transientOneshot` depends
+  # on two of them, and `systemctl show` makes no promise about the order
+  # it prints them in.
+  var loadState, unitFileState, activeState, unitType, remainAfterExit: string
+  for line in output.splitLines():
+    let eq = line.find('=')
+    if eq < 0: continue
+    let key = line[0 ..< eq].strip()
+    let value = line[eq + 1 .. ^1].strip()
+    case key
+    of "LoadState": loadState = value
+    of "UnitFileState": unitFileState = value
+    of "ActiveState": activeState = value
+    of "Type": unitType = value
+    of "RemainAfterExit": remainAfterExit = value
+    else: discard
+  result.loaded = loadState == "loaded"
+  result.fixedEnablement = unitFileState in ["static", "alias", "indirect",
+    "generated", "transient"]
+  result.enabled = result.fixedEnablement or
+    unitFileState in ["enabled", "enabled-runtime"]
+  result.active = activeState == "active"
+  result.transientOneshot = unitType == "oneshot" and remainAfterExit != "yes"
+
+const
+  AddOnToolDir* = "/etc/repro/bin"
+    ## Where `linux.addOnTool` wrappers live: under the add-on's own `/etc`
+    ## prefix (always a managed prefix, §4.4), put on `PATH` by
+    ## `/etc/profile.d/repro-addon-tools.sh` (`addOnToolPath()` in the DSL).
+  AddOnToolLauncherName* = "reprobuild-sandbox-launcher"
+  AddOnToolLauncherLink* = AddOnToolDir & "/." & AddOnToolLauncherName
+    ## The wrapper execs the launcher through THIS link, which the apply
+    ## (root, the broker) points at the launcher installed beside the engine
+    ## it runs from. The link is converged on every apply and is NOT part of
+    ## the desired digest, so the plan, computed by whichever `repro` the
+    ## operator runs, never disagrees with the broker over an install path.
+
+proc addOnToolWrapperPath*(command: string): string =
+  AddOnToolDir & "/" & command
+
+proc addOnToolManifestPath*(command: string): string =
+  AddOnToolDir & "/" & command & ".launcher.manifest"
+
+proc addOnToolLauncherPath*(): string =
+  ## The launcher as installed beside the running image (the broker, at
+  ## apply time). It is plain C, built by
+  ## `apps/reprobuild-sandbox-launcher/build.sh`, which `scripts/build_apps.sh`
+  ## runs on Linux, so `just build` leaves it beside `repro` and the Nix package
+  ## (which installs every build/bin/* file) does too; the cross build (`scripts/cross/build_linux_cross.sh`) does
+  ## the same for the armhf bundle. Used only to point
+  ## `AddOnToolLauncherLink`; never baked into a wrapper or a digest.
+  getAppDir() / AddOnToolLauncherName
+
+proc renderAddOnToolManifest*(closurePrefix, program: string): string =
+  ## The launcher manifest (apps/reprobuild-sandbox-launcher/
+  ## MANIFEST-FORMAT.md): the closure's `/usr` over `/usr`, read-only — the
+  ## same view `BindReadOnlyPaths=` gives a service (§8.3 item 5) — and the
+  ## program by its FHS path inside that view.
+  "# reprobuild linux.addOnTool: " & program & " from " & closurePrefix &
+    "\n" &
+  "# The closure's /usr replaces the host's inside the launcher's mount " &
+    "namespace.\n" &
+  closurePrefix & "/usr:/usr:rbind,ro\n" &
+  "exec=" & program & "\n"
+
+proc renderAddOnToolWrapper*(manifestPath: string): string =
+  ## The `/etc/repro/bin/<command>` script. It execs the launcher through
+  ## `AddOnToolLauncherLink`, so the wrapper's bytes depend on nothing but
+  ## the command name. Single-quoted paths: both are fixed by this module
+  ## and a checked command name, neither comes from the operator's argv,
+  ## which is forwarded after `--` untouched.
+  "#!/bin/sh\n" &
+  "# Written by reprobuild (linux.addOnTool); the next apply rewrites it.\n" &
+  "exec '" & AddOnToolLauncherLink & "' --manifest='" & manifestPath &
+    "' -- \"$@\"\n"
+
+proc addOnToolDigestText*(wrapper, manifest: string): string =
+  ## Both files in one digest, so a hand-edited wrapper, a changed closure
+  ## (a different prefix in the manifest) or a moved launcher is drift.
+  wrapper & "\n--\n" & manifest
+
+proc addOnToolObservedDigestText*(wrapper, manifest: string;
+                                  closureRealised, launcherLinkValid: bool):
+    string =
+  ## What `observeLinuxAddOnTool` digests. The desired text is
+  ## `addOnToolDigestText`; two host facts the files alone do not show are
+  ## prefixed as sentinels so the plan carries an update that repairs them:
+  ## a closure not realised in the store, and a launcher link
+  ## (`AddOnToolLauncherLink`) that is missing or points at nothing. The
+  ## link is converged by every `linux.addOnTool` apply, so without the
+  ## sentinel a tool whose files are already right would be a no-op while
+  ## its wrapper fails on first use. Both sentinels are path-free, so the
+  ## plan's digest does not depend on which install computed it.
+  result = ""
+  if not launcherLinkValid:
+    result.add("launcher-link-dangling\n")
+  if not closureRealised:
+    result.add("apt-closure-absent\n")
+  result.add(addOnToolDigestText(wrapper, manifest))
+
+proc addOnToolLauncherLinkValid*(): bool =
+  ## The link exists and names an existing file.
+  when defined(linux):
+    symlinkExists(AddOnToolLauncherLink) and
+      fileExists(expandSymlink(AddOnToolLauncherLink))
+  else:
+    false
+
+proc addOnToolDesiredDigestText*(op: PrivilegedOperation): string =
+  doAssert op.kind == pokLinuxAddOnTool
+  let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot,
+    parseAptClosureLock(op.atAptClosureLock))
+  addOnToolDigestText(
+    renderAddOnToolWrapper(addOnToolManifestPath(op.atCommand)),
+    renderAddOnToolManifest(prefix, op.atProgram))
 
 proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
   ## Canonical desired-state digest for a Phase-C system-scope
@@ -242,6 +394,12 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       # breaking the top-down resolution order; the formula is short
       # enough to repeat.
       posixDigestHexOfText(op.sysctlKey & " = " & op.sysctlValue & "\n")
+  of pokLinuxDpkgDiversion:
+    if op.ddDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText("divert " & op.ddPath & " to " & op.ddPath &
+        ".distrib by :")
   of pokLinuxUdevRule:
     if op.udevDestroy:
       ZeroDigestHex
@@ -257,6 +415,16 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.tmpfilesContent)
+  of pokSystemdSystemDropIn:
+    if op.diDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.diContent)
+  of pokLinuxSysusersEntry:
+    if op.seDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.seContent)
   of pokLinuxSudoersRule:
     if op.sudoersDestroy:
       ZeroDigestHex
@@ -310,6 +478,16 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.darwinModuleContent)
+  of pokSystemdUnitState:
+    if op.usDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(unitStateDigestText(op.usEnabled, op.usRunning))
+  of pokLinuxAddOnTool:
+    if op.atDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(addOnToolDesiredDigestText(op))
   of pokLinuxFhsSandbox:
     if op.fsbDestroy:
       ZeroDigestHex
@@ -440,8 +618,149 @@ proc applyMacosSystemDefault*(op: PrivilegedOperation):
     raiseNotImplementedPlatform("macos.systemDefault apply")
 
 # ===========================================================================
+# Managed objects under /etc: how every Linux driver below reads and writes
+# a file it owns.
+#
+# WRITES NEVER FOLLOW A LINK (ReproOS Add-On Mode threat model T34, G29).
+# A path-based `open(fmWrite)` resolves every symlink on the way, so a
+# link planted on a managed path between the plan and the write redirects
+# root's bytes anywhere. Every writer here goes through
+# `nofollow_write`: the directory is walked with `openat(O_NOFOLLOW)`,
+# the new inode is created beside the leaf and renamed over it.
+#
+# LINK OR COPY. On an add-on host the switch decides per operation whether
+# the object is a symlink into the generation's static tree or a regular
+# file (`FixtureContext.addOn`, spec §7.2 steps 4 and 5); outside add-on
+# mode every object is a copy, as before.
+#
+# A DANGLING LINK IS PRESENT. `fileExists` says no for a symlink whose
+# target is gone -- exactly what a link-form object of a previous
+# generation looks like after the static tree was flipped to one that no
+# longer carries it. Reporting it absent would make the destroy a no-op
+# and leave the dangling link behind, so the observers below report it
+# present with a digest no desired state has.
+# ===========================================================================
+
+proc danglingLinkDigestHex(path: string): string =
+  ## The digest observed for a symlink at `path` whose target is gone:
+  ## distinct from every content digest and from `ZeroDigestHex`.
+  posixDigestHexOfText("dangling-link:" & expandSymlink(path) & "\n")
+
+proc observeManagedFile(path: string): ObservedOperationState =
+  ## Observe a managed file through its link (the content is what the
+  ## consumer sees), a dangling link as present (see above), anything
+  ## else as absent.
+  if fileExists(path):
+    result.present = true
+    result.digestHex = posixDigestHexOfText(readFile(path))
+  elif symlinkExists(path):
+    result.present = true
+    result.digestHex = danglingLinkDigestHex(path)
+  else:
+    result.present = false
+    result.digestHex = ZeroDigestHex
+
+const DriverMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation build switch
+  ## (`repro_addon/mutations.nim`); read here because the mutation
+  ## `path-based-write-follows-links` is a property of this writer. A
+  ## build without the define has none of that code.
+
+proc managedCopyMode*(existing: LeafKind; existingMode, defaultMode: int): int =
+  ## The mode a managed copy is written with: the permission bits of the
+  ## regular file it replaces (an operator's `chmod 0600` survives an
+  ## update), else `defaultMode`; never the setuid, setgid or sticky bit
+  ## of whatever was there (see `writeManagedFile`).
+  let kept = existingMode and 0o777
+  if existing == lkFile and kept != 0: kept else: defaultMode and 0o777
+
+proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
+                      defaultMode: int; what: string) =
+  ## Put `content` at `path` as the add-on asked: a link to
+  ## `m.linkTarget` when set, else a copy owned by root (`0:0`, the
+  ## owner every kind written here declares) with the permission bits an
+  ## existing regular file at the path already has (an operator's
+  ## `chmod 0600` on a managed configuration file survives an update) or
+  ## `defaultMode`. The setuid, setgid and sticky bits are never carried
+  ## over -- none of these kinds declares them, and keeping a setuid bit
+  ## someone put on the path would make the add-on's root-owned bytes a
+  ## setuid program -- and neither is the previous owner: the bytes are
+  ## the add-on's, written as root. Atomic and never through a link; a
+  ## link on the path is `EProtocol` naming it.
+  when DriverMutation == "path-based-write-follows-links":
+    # The falsifying mutation: the pre-A4 writer, a path-based
+    # `open(fmWrite)` that resolves every link on the path.
+    if m.linkTarget.len == 0:
+      createDir(parentDir(path))
+      var f: File
+      if not open(f, path, fmWrite):
+        raiseProtocol(what & " cannot open " & path)
+      try:
+        if content.len > 0:
+          discard f.writeBuffer(unsafeAddr content[0], content.len)
+      finally:
+        close(f)
+      return
+  try:
+    if m.linkTarget.len > 0:
+      replaceWithLinkNoFollow(path, m.linkTarget)
+    else:
+      let (kind, mode) = leafNoFollow(path)
+      let finalMode = managedCopyMode(kind, mode, defaultMode)
+      # Root: owned by 0:0 explicitly (a process's group need not be 0).
+      # Anyone else (the unprivileged unit tests) owns what it creates.
+      let owner = if geteuid() == 0: 0 else: -1
+      writeFileNoFollow(path, content, finalMode, uid = owner, gid = owner)
+  except SymlinkOnPath as e:
+    raiseProtocol(what & " refuses to write through a symbolic link: " &
+      e.link & " (threat model G29)")
+  except NoFollowError as e:
+    raiseProtocol(what & " cannot write " & path & ": " & e.msg)
+
+proc removeManagedFile(path, what: string): bool =
+  ## Remove the file or link (dangling included) at `path` without
+  ## following anything; false when there was nothing there.
+  try:
+    removeLeafNoFollow(path)
+  except SymlinkOnPath as e:
+    raiseProtocol(what & " refuses to remove through a symbolic link: " &
+      e.link & " (threat model G29)")
+  except NoFollowError as e:
+    raiseProtocol(what & " cannot remove " & path & ": " & e.msg)
+
+proc createManagedDirs(path, what: string) =
+  ## `mkdir -p` that refuses a link on the way.
+  when DriverMutation == "path-based-write-follows-links":
+    createDir(path)
+    return
+  try:
+    createDirsNoFollow(path)
+  except SymlinkOnPath as e:
+    raiseProtocol(what & " refuses to create a directory through a " &
+      "symbolic link: " & e.link & " (threat model G29)")
+  except NoFollowError as e:
+    raiseProtocol(what & " cannot create " & path & ": " & e.msg)
+
+proc systemctlDaemonReload(what: string) =
+  let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
+  if reloadCode != 0:
+    raiseProtocol(what & " daemon-reload failed: " & reloadOut.strip())
+
+# ===========================================================================
 # systemd.systemUnit — unit file under /etc/systemd/system/, `systemctl`.
 # ===========================================================================
+
+proc realiseAddOnAptClosure*(lock: AptClosureLock;
+    storeRoot = AddOnSystemStoreRoot; cacheDir = AddOnAptDebCacheDir;
+    fetch: AptDebFetcher = httpDebFetcher()): string =
+  ## Realise ``lock`` into the add-on's system store. The store is a
+  ## read-only bind mount on a bootstrapped host (spec §10.2), so the
+  ## write happens from this thread's private writable view; every other
+  ## process keeps seeing it read-only. ``storeRoot``, ``cacheDir`` and
+  ## ``fetch`` are parameters only so the store-view behaviour can be
+  ## tested against a scratch mount.
+  enterWritableStoreView(storeRoot)
+  realiseAptClosure(lock, storeRoot, cacheDir, fetch)
 
 proc observeSystemdSystemUnit*(op: PrivilegedOperation):
     ObservedOperationState =
@@ -451,13 +770,18 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
   ## the lifecycle compares).
   when defined(linux):
     let path = systemUnitPath(op.suName)
-    if not fileExists(path):
-      result.present = false
-      result.digestHex = ZeroDigestHex
+    result = observeManagedFile(path)
+    if not result.present or not fileExists(path):
       return
-    let content = readFile(path)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(content)
+    # A unit whose `package(apt)` closure is missing from the store is not
+    # in its desired state even when the file bytes match: report a digest
+    # no desired state has, so the plan carries an update that realises it.
+    if op.suAptClosureLock.len > 0 and not op.suDestroy:
+      let lock = parseAptClosureLock(op.suAptClosureLock)
+      if not aptClosureRealised(AddOnSystemStoreRoot, lock):
+        result.digestHex = posixDigestHexOfText("apt-closure-absent:" &
+          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" &
+          readFile(path))
     # `systemctl show` is queried for completeness; the exit code is
     # not an error (a disabled / inactive unit is a valid state).
     discard execCmdEx("systemctl show " & quoteShell(op.suName) &
@@ -465,11 +789,58 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
   else:
     raiseNotImplementedPlatform("systemd.systemUnit observe")
 
-proc applySystemdSystemUnit*(op: PrivilegedOperation):
+type
+  SystemdUnitTransition* = enum
+    ## What happens to a RUNNING unit after its file is written (ReproOS
+    ## Add-On Mode spec §7.3, the two restart rows).
+    sutNone = "none"                    ## nothing changed, or the unit is
+                                        ## not active: the file write is all
+    sutRestart = "restart"              ## the running instance picks up the
+                                        ## change now
+    sutPendingRestart = "pending-restart" ## changed, but `restartIfChanged
+                                        ## = false`: left running on the old
+                                        ## file, reported
+
+proc systemdUnitTransition*(wasActive, fileChanged, dependencyChanged,
+                            restartHeld: bool): SystemdUnitTransition =
+  ## The §7.3 decision, kept pure so it is testable without systemd:
+  ## a unit is restarted only when it is active AND something it runs from
+  ## changed (its file or closure, or a resource it `depends_on` in this
+  ## apply), unless the profile holds the restart. An inactive unit is never
+  ## started by a change (`enabled = true` starts it through `enable --now`,
+  ## as before), so a timer-driven oneshot is not run by an apply.
+  if not wasActive or not (fileChanged or dependencyChanged):
+    sutNone
+  elif restartHeld:
+    sutPendingRestart
+  else:
+    sutRestart
+
+proc systemdUnitIsActive*(name: string): bool =
+  ## `systemctl is-active` exits 0 only for `active` (`activating` and
+  ## `reloading` exit non-zero), which is the state a restart is for.
+  when defined(linux):
+    execCmd("systemctl is-active --quiet " & quoteShell(name)) == 0
+  else:
+    false
+
+proc applySystemdSystemUnit*(ctx: FixtureContext;
+                             op: PrivilegedOperation):
     ObservedOperationState =
   ## Write the unit file, `systemctl daemon-reload`, then optionally
-  ## `systemctl enable --now` (NO `--user` — this is a system unit).
-  ## The destroy direction `disable --now`s and removes the file.
+  ## `systemctl enable --now` (NO `--user` — this is a system unit), then
+  ## the §7.3 transition: a unit that was active and whose file, closure or
+  ## dependency changed is restarted (`systemdUnitTransition`). The
+  ## destroy direction `disable --now`s and removes the file.
+  ##
+  ## ON AN ADD-ON HOST (`ctx.addOn`, ReproOS Add-On Mode §7.2) the file
+  ## may be a link into the generation's static tree, and when the switch
+  ## orchestrates the transitions this driver only writes, reloads and
+  ## converges enablement (`enable` / `disable` without `--now`): the
+  ## switch stopped what had to stop before the files changed (step 2)
+  ## and starts, restarts or reloads in dependency order afterwards
+  ## (step 7). The destroy direction then removes the file (the switch
+  ## disabled and stopped the unit in step 2) and reloads.
   ##
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
   ## plan-time-baseline drift gate is removed (per
@@ -505,15 +876,15 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
         "(staging another agent's install), declare the resource as " &
         "`fs.systemFile` so the carve-out doesn't apply.")
     let path = systemUnitPath(op.suName)
+    let m = ctx.materialisationOf(op)
     if op.suDestroy:
-      discard execCmd("systemctl disable --now " & quoteShell(op.suName))
-      if fileExists(path):
-        try: removeFile(path)
-        except OSError: discard
+      if not m.orchestrated:
+        discard execCmd("systemctl disable --now " & quoteShell(op.suName))
+      discard removeManagedFile(path, "systemd.systemUnit")
       discard execCmd("systemctl daemon-reload")
       # Post-apply re-probe: a destroy is "done" when the unit file
       # no longer exists.
-      if fileExists(path):
+      if fileExists(path) or symlinkExists(path):
         raiseProtocol("systemd.systemUnit destroy of '" & op.suName &
           "' post-apply observation disagrees with desired state: " &
           "unit file " & path & " still exists after `disable --now` " &
@@ -521,31 +892,65 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
-    createDir(SystemdSystemUnitDir)
-    # Binary-mode write so the bytes on disk equal the operator's
-    # `suContent` verbatim — drift detection compares BLAKE3 digests,
-    # so any CRLF translation would be constant false-positive drift.
-    block:
-      var f: File
-      if not open(f, path, fmWrite):
-        raiseProtocol("systemd.systemUnit cannot open " & path)
+    # What is running, and from which bytes, BEFORE anything is written:
+    # the transition below compares against this. `before.digestHex` is the
+    # closure-absent sentinel when the closure is not realised yet, so a
+    # unit whose file is unchanged but whose closure was missing counts as
+    # changed and is restarted onto the realised closure.
+    let before = observeSystemdSystemUnit(op)
+    let wasActive = systemdUnitIsActive(op.suName)
+    let fileChanged = not before.present or
+      before.digestHex != posixDigestHexOfText(op.suContent)
+    if op.suAptClosureLock.len > 0:
+      # Realise the closure the unit binds BEFORE the unit can start: a
+      # unit naming a missing `BindReadOnlyPaths=` source fails to start.
+      # `validateOperation` has already checked that `suContent` binds
+      # exactly this prefix. A destroy leaves the prefix to store GC
+      # (Add-On spec §5.2): the previous generation may still need it.
       try:
-        if op.suContent.len > 0:
-          discard f.writeBuffer(unsafeAddr op.suContent[0], op.suContent.len)
-      finally:
-        close(f)
-    let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
-    if reloadCode != 0:
-      raiseProtocol("systemd.systemUnit daemon-reload failed: " &
-        reloadOut.strip())
+        discard realiseAddOnAptClosure(parseAptClosureLock(op.suAptClosureLock))
+      except CatchableError as ex:
+        raiseProtocol("systemd.systemUnit '" & op.suName &
+          "': realising its package(apt) closure failed: " & ex.msg)
+    createManagedDirs(SystemdSystemUnitDir, "systemd.systemUnit")
+    # The bytes on disk equal the operator's `suContent` verbatim — drift
+    # detection compares BLAKE3 digests, so any translation would be
+    # constant false-positive drift. Written beside the leaf and renamed
+    # over it, never through a link.
+    writeManagedFile(m, path, op.suContent, 0o644, "systemd.systemUnit")
+    systemctlDaemonReload("systemd.systemUnit")
     if op.suEnabled:
+      # Orchestrated: `enable` only converges the [Install] links; the
+      # switch starts the unit in its own step.
+      let verb = if m.orchestrated: "enable" else: "enable --now"
       let (enOut, enCode) = execCmdEx(
-        "systemctl enable --now " & quoteShell(op.suName))
+        "systemctl " & verb & " " & quoteShell(op.suName))
       if enCode != 0:
-        raiseProtocol("systemd.systemUnit enable --now of '" &
+        raiseProtocol("systemd.systemUnit " & verb & " of '" &
           op.suName & "' failed: " & enOut.strip())
+    # §7.3: a running unit picks up a changed file, closure or dependency
+    # now. `enable --now` above does not restart an already-running unit,
+    # and before this step the new configuration waited for whatever
+    # restarted the daemon next (Bring-Up-Plan.md §6 item 4 of the rpi2
+    # profile). An orchestrated apply leaves this to the switch's
+    # transition list.
+    var restartPending = false
+    if not m.orchestrated:
+      case systemdUnitTransition(wasActive, fileChanged,
+          op.suRestartRequested, op.suRestartHeld)
+      of sutRestart:
+        let (rsOut, rsCode) = execCmdEx(
+          "systemctl restart " & quoteShell(op.suName))
+        if rsCode != 0:
+          raiseProtocol("systemd.systemUnit restart of '" & op.suName &
+            "' after its change failed: " & rsOut.strip())
+      of sutPendingRestart:
+        restartPending = true
+      of sutNone:
+        discard
     # Post-apply re-probe — see the contract comment above.
-    let post = observeSystemdSystemUnit(op)
+    var post = observeSystemdSystemUnit(op)
+    post.serviceRestartPending = restartPending
     let desiredHex = posixDigestHexOfText(op.suContent)
     if not post.present or post.digestHex != desiredHex:
       raiseProtocol("systemd.systemUnit '" & op.suName &
@@ -561,6 +966,198 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("systemd.systemUnit apply")
+
+# ===========================================================================
+# systemd.unitState — enable/disable + start/stop of a unit the add-on does
+# not own (ReproOS Add-On Mode §4.1, `unitState` class).
+# ===========================================================================
+
+proc observeSystemdUnitState*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## `present` is "the unit is loaded" (`not-found` and `masked` are
+  ## absent: there is nothing the add-on may enable); the digest covers the
+  ## two converged facts only, never the unit's bytes, which are not ours.
+  when defined(linux):
+    let (output, _) = execCmdEx("systemctl show " & quoteShell(op.usName) &
+      " --property=" & UnitStateShowProperties)
+    let st = parseUnitStateShow(output)
+    if not st.loaded:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    result.present = true
+    result.digestHex = posixDigestHexOfText(
+      unitStateDigestText(st.enabled, st.active))
+  else:
+    raiseNotImplementedPlatform("systemd.unitState observe")
+
+proc applySystemdUnitState*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## `systemctl enable|disable` then `start|stop`, each only when the
+  ## observed flag differs. A missing or masked unit is refused: the add-on
+  ## does not install distribution units (§2.3), so the profile is wrong
+  ## about this host. The destroy direction changes NOTHING: the add-on
+  ## never wrote the unit, so leaving the resource only forgets the
+  ## requirement (§4.1; the §4.3 ledger rule for adopted objects).
+  when defined(linux):
+    if op.usDestroy:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    if not hostUsesSystemd():
+      raiseProtocol("systemd.unitState '" & op.usName &
+        "' refused on a non-systemd host")
+    let (output, _) = execCmdEx("systemctl show " & quoteShell(op.usName) &
+      " --property=" & UnitStateShowProperties)
+    let st = parseUnitStateShow(output)
+    if not st.loaded:
+      raiseProtocol("systemd.unitState '" & op.usName & "' is not loaded " &
+        "on this host (" & output.strip().replace("\n", ", ") & "). The " &
+        "add-on does not install distribution units (Add-On spec §2.3): " &
+        "install the package that provides it, or drop the resource.")
+    # Two requirements no `systemctl` verb can meet, refused with the
+    # reason rather than converged forever (Add-On spec §4.1, catalog entry
+    # for `systemd.unitState`).
+    if not op.usEnabled and st.fixedEnablement:
+      raiseProtocol("systemd.unitState '" & op.usName & "': enabled = " &
+        "false, but the unit's enablement is fixed by systemd (" &
+        output.strip().replace("\n", ", ") & "): a static, alias, " &
+        "indirect, generated or transient unit cannot be disabled. Drop " &
+        "`enabled = false` (keep `state = Stopped` if only its activity " &
+        "matters), or mask the unit outside the add-on.")
+    if op.usRunning and st.transientOneshot:
+      raiseProtocol("systemd.unitState '" & op.usName & "': state = " &
+        "Running, but the unit is a Type=oneshot service without " &
+        "RemainAfterExit=yes: it is active only while it runs, so the " &
+        "requirement would start it on every apply and never observe it " &
+        "met. Declare `state = Stopped` with `enabled = true` for a " &
+        "oneshot a timer or a target runs, or require the timer instead.")
+    if st.enabled != op.usEnabled:
+      let verb = if op.usEnabled: "enable" else: "disable"
+      let (out1, code1) = execCmdEx("systemctl " & verb & " " &
+        quoteShell(op.usName))
+      if code1 != 0:
+        raiseProtocol("systemd.unitState " & verb & " of '" & op.usName &
+          "' failed: " & out1.strip())
+    if st.active != op.usRunning:
+      let verb = if op.usRunning: "start" else: "stop"
+      let (out2, code2) = execCmdEx("systemctl " & verb & " " &
+        quoteShell(op.usName))
+      if code2 != 0:
+        raiseProtocol("systemd.unitState " & verb & " of '" & op.usName &
+          "' failed: " & out2.strip())
+    # Post-apply re-probe (M82 Phase A contract).
+    let post = observeSystemdUnitState(op)
+    let desiredHex = posixDigestHexOfText(
+      unitStateDigestText(op.usEnabled, op.usRunning))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("systemd.unitState '" & op.usName &
+        "' post-apply observation disagrees with desired state " &
+        "(enabled=" & $op.usEnabled & ", active=" & $op.usRunning &
+        "): systemctl reported success but the unit is not in that " &
+        "state. The driver fails closed rather than reporting a " &
+        "spurious success.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("systemd.unitState apply")
+
+# ===========================================================================
+# linux.addOnTool — an operator command from a package(apt) closure, under
+# /etc/repro/bin (ReproOS Add-On Mode §4.1).
+# ===========================================================================
+
+proc observeLinuxAddOnTool*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Present when the wrapper exists; the digest covers the wrapper and the
+  ## manifest, and, as for `systemd.systemUnit`, carries a sentinel when the
+  ## closure the manifest names is not realised, so the plan repairs it.
+  when defined(linux):
+    let wrapperPath = addOnToolWrapperPath(op.atCommand)
+    if not fileExists(wrapperPath):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let manifestPath = addOnToolManifestPath(op.atCommand)
+    let wrapper = readFile(wrapperPath)
+    let manifest = if fileExists(manifestPath): readFile(manifestPath) else: ""
+    result.present = true
+    var closureRealised = true
+    if not op.atDestroy:
+      closureRealised = aptClosureRealised(AddOnSystemStoreRoot,
+        parseAptClosureLock(op.atAptClosureLock))
+    result.digestHex = posixDigestHexOfText(addOnToolObservedDigestText(
+      wrapper, manifest, closureRealised,
+      launcherLinkValid = op.atDestroy or addOnToolLauncherLinkValid()))
+  else:
+    raiseNotImplementedPlatform("linux.addOnTool observe")
+
+proc applyLinuxAddOnTool*(op: PrivilegedOperation): ObservedOperationState =
+  ## Realise the closure, then write the manifest and the wrapper (0755).
+  ## The launcher must exist where the wrapper will look for it: a wrapper
+  ## that would fail on first use is refused here, naming the path. Destroy
+  ## removes both files; the closure is left to store GC (§5.2).
+  when defined(linux):
+    let wrapperPath = addOnToolWrapperPath(op.atCommand)
+    let manifestPath = addOnToolManifestPath(op.atCommand)
+    if op.atDestroy:
+      for p in [wrapperPath, manifestPath]:
+        if fileExists(p):
+          try: removeFile(p)
+          except OSError: discard
+      if fileExists(wrapperPath):
+        raiseProtocol("linux.addOnTool destroy of '" & op.atCommand &
+          "': " & wrapperPath & " still exists after removeFile")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let launcher = addOnToolLauncherPath()
+    if not fileExists(launcher):
+      raiseProtocol("linux.addOnTool '" & op.atCommand & "': the sandbox " &
+        "launcher is not installed at " & launcher & " (it is built " &
+        "beside the engine; install the reprobuild bundle that carries " &
+        "both). Refusing to write a wrapper that would fail on first use.")
+    createDir(AddOnToolDir)
+    # Point the shared link at THIS install's launcher. Converged on every
+    # apply, outside the digest (see `AddOnToolLauncherLink`).
+    if symlinkExists(AddOnToolLauncherLink):
+      if expandSymlink(AddOnToolLauncherLink) != launcher:
+        removeFile(AddOnToolLauncherLink)
+        createSymlink(launcher, AddOnToolLauncherLink)
+    elif fileExists(AddOnToolLauncherLink):
+      raiseProtocol("linux.addOnTool: " & AddOnToolLauncherLink &
+        " exists and is not a symlink; refusing to replace a file the " &
+        "add-on did not write")
+    else:
+      createSymlink(launcher, AddOnToolLauncherLink)
+    let lock = parseAptClosureLock(op.atAptClosureLock)
+    try:
+      discard realiseAddOnAptClosure(lock)
+    except CatchableError as ex:
+      raiseProtocol("linux.addOnTool '" & op.atCommand &
+        "': realising its package(apt) closure failed: " & ex.msg)
+    createDir(AddOnToolDir)
+    setFilePermissions(AddOnToolDir, {fpUserExec, fpUserWrite, fpUserRead,
+      fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+    let manifest = renderAddOnToolManifest(
+      aptClosurePrefixPath(AddOnSystemStoreRoot, lock), op.atProgram)
+    let wrapper = renderAddOnToolWrapper(manifestPath)
+    writeFile(manifestPath, manifest)
+    setFilePermissions(manifestPath, {fpUserWrite, fpUserRead, fpGroupRead,
+      fpOthersRead})
+    writeFile(wrapperPath, wrapper)
+    setFilePermissions(wrapperPath, {fpUserExec, fpUserWrite, fpUserRead,
+      fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
+    let post = observeLinuxAddOnTool(op)
+    let desiredHex = posixDigestHexOfText(addOnToolDigestText(wrapper,
+      manifest))
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.addOnTool '" & op.atCommand &
+        "' post-apply observation disagrees with desired state: the " &
+        "files were written but a re-read shows different bytes (or the " &
+        "closure is not realised). The driver fails closed.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.addOnTool apply")
 
 # ===========================================================================
 # launchd.systemDaemon — plist under /Library/LaunchDaemons/, `launchctl`.
@@ -773,21 +1370,18 @@ proc observeFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
     let scopeErr = systemFileScopeError(op.sfPath, programDataRoot())
     if scopeErr.len > 0:
       raiseProtocol(scopeErr)
-    if not fileExists(op.sfPath):
-      result.present = false
-      result.digestHex = ZeroDigestHex
-      return
-    let content = readFile(op.sfPath)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(content)
+    result = observeManagedFile(op.sfPath)
   else:
     raiseNotImplementedPlatform("fs.systemFile observe")
 
-proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
+proc applyFsSystemFile*(ctx: FixtureContext;
+                        op: PrivilegedOperation): ObservedOperationState =
   ## Write (or, for the destroy direction, delete) the managed file.
   ## The path is re-validated against the allowlist before any I/O —
   ## a path outside `/etc/`, `/usr/local/etc/`, `${PROGRAMDATA}` is
-  ## refused with an out-of-scope protocol error.
+  ## refused with an out-of-scope protocol error. The write never follows
+  ## a symbolic link on the path (G29), and on an add-on host the file may
+  ## be a link into the generation's static tree (`ctx.addOn`).
   ##
   ## The bytes written come from `desiredFileContent(op)`, which
   ## dispatches on the external-source fields (`sfSourceUrl`,
@@ -809,12 +1403,15 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
     if scopeErr.len > 0:
       raiseProtocol(scopeErr)
     if op.sfDestroy:
-      if fileExists(op.sfPath):
-        try: removeFile(op.sfPath)
-        except OSError: discard
+      when defined(linux):
+        discard removeManagedFile(op.sfPath, "fs.systemFile")
+      else:
+        if fileExists(op.sfPath):
+          try: removeFile(op.sfPath)
+          except OSError: discard
       # Post-apply re-probe: a destroy is "done" when the file no
       # longer exists.
-      if fileExists(op.sfPath):
+      if fileExists(op.sfPath) or symlinkExists(op.sfPath):
         raiseProtocol("fs.systemFile destroy of " & op.sfPath &
           " post-apply observation disagrees with desired state: " &
           "the file still exists after `removeFile`.")
@@ -827,17 +1424,23 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
     # the target with empty bytes when the source is bad.
     let desired = desiredFileContent(op)
     let parent = parentDir(op.sfPath)
-    if parent.len > 0:
-      createDir(parent)
-    block:
-      var f: File
-      if not open(f, op.sfPath, fmWrite):
-        raiseProtocol("fs.systemFile cannot open " & op.sfPath)
-      try:
-        if desired.len > 0:
-          discard f.writeBuffer(unsafeAddr desired[0], desired.len)
-      finally:
-        close(f)
+    when defined(linux):
+      if parent.len > 0:
+        createManagedDirs(parent, "fs.systemFile")
+      writeManagedFile(ctx.materialisationOf(op), op.sfPath, desired, 0o644,
+                       "fs.systemFile")
+    else:
+      if parent.len > 0:
+        createDir(parent)
+      block:
+        var f: File
+        if not open(f, op.sfPath, fmWrite):
+          raiseProtocol("fs.systemFile cannot open " & op.sfPath)
+        try:
+          if desired.len > 0:
+            discard f.writeBuffer(unsafeAddr desired[0], desired.len)
+        finally:
+          close(f)
     # Post-apply re-probe — see the contract comment above.
     let post = observeFsSystemFile(op)
     let desiredHex = posixDigestHexOfText(desired)
@@ -1200,18 +1803,11 @@ proc applyEnvSystemVariable*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
-    createDir(SystemEnvProfileDir)
+    createManagedDirs(SystemEnvProfileDir, "env.systemVariable")
     let content = systemEnvFragmentContent(
       op.evName, op.evContribution, op.evIsPathList)
-    block:
-      var f: File
-      if not open(f, path, fmWrite):
-        raiseProtocol("env.systemVariable cannot open " & path)
-      try:
-        if content.len > 0:
-          discard f.writeBuffer(unsafeAddr content[0], content.len)
-      finally:
-        close(f)
+    writeManagedFile(AddOnMaterialisation(), path, content, 0o644,
+                     "env.systemVariable")
     # Post-apply re-probe — see the contract comment above.
     let post = observeEnvSystemVariable(op)
     let desiredHex = posixDigestHexOfText(op.evContribution.join("\n"))
@@ -1234,12 +1830,25 @@ proc applyEnvSystemVariable*(op: PrivilegedOperation):
 # passwd.user — useradd / usermod / userdel (Linux) or the macOS equiv.
 # ===========================================================================
 
+type
+  PasswdArgvRunner* = proc (exe: string; args: seq[string]):
+    tuple[output: string; code: int] {.closure, gcsafe.}
+
+var passwdArgvRunner*: PasswdArgvRunner = nil
+  ## Test seam for the passwd.user / passwd.group drivers: when set, every
+  ## account command (`getent`, `id`, `useradd`, `usermod`, `userdel`, ...)
+  ## goes to it instead of the host, so the driver's decisions -- which
+  ## argv it builds, what it refuses -- are tested without root and without
+  ## touching the host's accounts. Nil in production.
+
 when defined(linux) or defined(macosx):
   proc runArgv(exe: string; args: openArray[string]):
       tuple[output: string; code: int] =
     ## Run a typed argv. The argument LIST is built by the pure
     ## `build*Args` helpers from typed operation fields — no operator
     ## string is interpolated into a shell command.
+    if passwdArgvRunner != nil:
+      return passwdArgvRunner(exe, @args)
     var cmd = quoteShell(exe)
     for a in args:
       cmd.add(" ")
@@ -1353,7 +1962,15 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
     let before = observePasswdUserRaw(op.puName)
     if not before.present:
       when defined(linux):
-        let (addOut, addCode) = runArgv("useradd", buildUseraddArgs(desired))
+        let (groupOut, groupCode) = runArgv("getent", @["group", op.puName])
+        let sameNameGroupExists = groupCode == 0 and groupOut.strip().len > 0
+        var addArgs: seq[string]
+        try:
+          addArgs = buildUseraddArgs(desired, sameNameGroupExists)
+        except EUseraddGroupCollision as ex:
+          raiseProtocol("passwd.user useradd of '" & op.puName &
+            "' refused: " & ex.msg)
+        let (addOut, addCode) = runArgv("useradd", addArgs)
         if addCode != 0:
           raiseProtocol("passwd.user useradd of '" & op.puName &
             "' failed: " & addOut.strip())
@@ -1673,17 +2290,20 @@ proc readSysctlDropInValue*(content, key: string): tuple[present: bool;
 # ---------------------------------------------------------------------------
 
 when defined(linux):
-  proc writeLinuxDropInFile(path, content: string; modeOctal: int) =
-    var f: File
-    if not open(f, path, fmWrite):
-      raiseProtocol("linux drop-in driver cannot open " & path)
+  proc writeLinuxDropInFile(path, content: string; modeOctal: int;
+                            m = AddOnMaterialisation()) =
+    ## A copy with exactly `modeOctal` (or, on an add-on host, the link
+    ## the switch asked for), never written through a link on the path.
     try:
-      if content.len > 0:
-        discard f.writeBuffer(unsafeAddr content[0], content.len)
-    finally:
-      close(f)
-    let modeStr = toOct(modeOctal, 4)
-    discard execCmd("chmod " & modeStr & " " & quoteShell(path))
+      if m.linkTarget.len > 0:
+        replaceWithLinkNoFollow(path, m.linkTarget)
+      else:
+        writeFileNoFollow(path, content, modeOctal)
+    except SymlinkOnPath as e:
+      raiseProtocol("linux drop-in driver refuses to write through a " &
+        "symbolic link: " & e.link & " (threat model G29)")
+    except NoFollowError as e:
+      raiseProtocol("linux drop-in driver cannot write " & path & ": " & e.msg)
 
 proc observeLinuxSysctl*(op: PrivilegedOperation):
     ObservedOperationState =
@@ -1697,8 +2317,7 @@ proc observeLinuxSysctl*(op: PrivilegedOperation):
   when defined(linux):
     let path = sysctlDropInPath(op)
     if not fileExists(path):
-      result.present = false
-      result.digestHex = ZeroDigestHex
+      result = observeManagedFile(path)
       return
     let content = readFile(path)
     let observed = readSysctlDropInValue(content, op.sysctlKey)
@@ -1729,10 +2348,8 @@ proc destroyLinuxSysctl*(op: PrivilegedOperation):
   ## Post-apply re-probe asserts the file is gone.
   when defined(linux):
     let path = sysctlDropInPath(op)
-    if fileExists(path):
-      try: removeFile(path)
-      except OSError: discard
-    if fileExists(path):
+    discard removeManagedFile(path, "linux.sysctl")
+    if fileExists(path) or symlinkExists(path):
       raiseProtocol("linux.sysctl destroy of " & path &
         " post-apply observation disagrees with desired state: " &
         "the drop-in file still exists after `removeFile`.")
@@ -1741,11 +2358,19 @@ proc destroyLinuxSysctl*(op: PrivilegedOperation):
   else:
     raiseNotImplementedPlatform("linux.sysctl destroy")
 
-proc applyLinuxSysctl*(op: PrivilegedOperation):
-    ObservedOperationState =
+proc applyLinuxSysctl*(ctx: FixtureContext;
+                       op: PrivilegedOperation): ObservedOperationState =
   ## Write the drop-in file, then `sysctl -p <path>` to load it into
   ## the live kernel. Idempotent: a re-apply with unchanged content
   ## still re-runs `sysctl -p`, which is itself idempotent.
+  ##
+  ## ON AN ADD-ON HOST the switch applies sysctl fragments itself by
+  ## restarting the host's `systemd-sysctl.service` and observes the
+  ## values from the host namespaces (ReproOS Add-On Mode §7.2 step 6,
+  ## threat model G35): a `net.*` key written from inside the apply
+  ## unit's `PrivateNetwork=yes` would land in a throwaway namespace. So
+  ## an orchestrated apply writes the fragment (a link or a copy) and
+  ## runs nothing here.
   ##
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): the per-driver post-
   ## apply re-probe is the integrity check. After the write +
@@ -1756,16 +2381,18 @@ proc applyLinuxSysctl*(op: PrivilegedOperation):
     if op.sysctlDestroy:
       return destroyLinuxSysctl(op)
     let path = sysctlDropInPath(op)
-    createDir(LinuxSysctlDir)
+    createManagedDirs(LinuxSysctlDir, "linux.sysctl")
     let content = sysctlDropInContent(op.sysctlKey, op.sysctlValue)
-    writeLinuxDropInFile(path, content, 0o644)
-    # `sysctl -p <path>` loads only this file's keys; `quoteShell` on
-    # the path is defence in depth (the basename charset already blocks
-    # shell metacharacters).
-    let (loadOut, loadCode) = execCmdEx("sysctl -p " & quoteShell(path))
-    if loadCode != 0:
-      raiseProtocol("linux.sysctl `sysctl -p " & path & "` failed: " &
-        loadOut.strip())
+    let m = ctx.materialisationOf(op)
+    writeLinuxDropInFile(path, content, 0o644, m)
+    if not m.orchestrated:
+      # `sysctl -p <path>` loads only this file's keys; `quoteShell` on
+      # the path is defence in depth (the basename charset already blocks
+      # shell metacharacters).
+      let (loadOut, loadCode) = execCmdEx("sysctl -p " & quoteShell(path))
+      if loadCode != 0:
+        raiseProtocol("linux.sysctl `sysctl -p " & path & "` failed: " &
+          loadOut.strip())
     # Post-apply re-probe — see the contract comment above.
     let post = observeLinuxSysctl(op)
     let desiredHex = posixDigestHexOfText(content)
@@ -1783,6 +2410,128 @@ proc applyLinuxSysctl*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.sysctl apply")
+
+# ===========================================================================
+# systemd.systemDropIn — a drop-in of a unit the profile does not own
+# (ReproOS Add-On Mode §4.1, `dropIn` class):
+# /etc/systemd/system/<unit>.d/50-repro-<name>.conf + daemon-reload.
+# ===========================================================================
+
+proc systemDropInOpPath*(op: PrivilegedOperation): string =
+  systemDropInPath(op.diUnit, op.diName)
+
+proc observeSystemdSystemDropIn*(op: PrivilegedOperation):
+    ObservedOperationState =
+  when defined(linux):
+    observeManagedFile(systemDropInOpPath(op))
+  else:
+    raiseNotImplementedPlatform("systemd.systemDropIn observe")
+
+proc applySystemdSystemDropIn*(ctx: FixtureContext;
+                               op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the drop-in (a link or a copy, never through a link on the
+  ## path) and reload systemd so the unit's definition picks it up. The
+  ## destroy direction removes it, the `.d` directory when that leaves
+  ## it empty, and reloads. The unit itself is NOT restarted here: on an
+  ## add-on host the switch's transition list does that (§7.3), and
+  ## nowhere else is this kind reachable.
+  when defined(linux):
+    if not hostUsesSystemd():
+      raiseProtocol("systemd.systemDropIn for '" & op.diUnit &
+        "' refused on a non-systemd host")
+    let path = systemDropInOpPath(op)
+    if op.diDestroy:
+      discard removeManagedFile(path, "systemd.systemDropIn")
+      discard removeEmptyDirNoFollow(parentDir(path))
+      systemctlDaemonReload("systemd.systemDropIn")
+      if fileExists(path) or symlinkExists(path):
+        raiseProtocol("systemd.systemDropIn destroy of " & path &
+          " post-apply observation disagrees with desired state: the " &
+          "drop-in still exists")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    createManagedDirs(parentDir(path), "systemd.systemDropIn")
+    writeManagedFile(ctx.materialisationOf(op), path, op.diContent, 0o644,
+                     "systemd.systemDropIn")
+    systemctlDaemonReload("systemd.systemDropIn")
+    let post = observeSystemdSystemDropIn(op)
+    let desiredHex = posixDigestHexOfText(op.diContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("systemd.systemDropIn " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present & " digest " &
+        (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+         else: post.digestHex) & ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex))
+    result = post
+  else:
+    raiseNotImplementedPlatform("systemd.systemDropIn apply")
+
+# ===========================================================================
+# linux.sysusersEntry — one sysusers.d(5) fragment, applied with
+# `systemd-sysusers <file>` (ReproOS Add-On Mode §4.1, `sysusers` class).
+# The account it creates is never deleted: a reused UID would hand the
+# files the old account owns to a new owner (spec §6.4).
+# ===========================================================================
+
+proc sysusersEntryOpPath*(op: PrivilegedOperation): string =
+  sysusersFragmentPath(op.seName)
+
+proc observeLinuxSysusersEntry*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## The digest covers the fragment's bytes; whether the account exists
+  ## is checked after the apply, not folded into the digest (an account
+  ## that exists already is exactly what a re-apply finds).
+  when defined(linux):
+    observeManagedFile(sysusersEntryOpPath(op))
+  else:
+    raiseNotImplementedPlatform("linux.sysusersEntry observe")
+
+proc sysusersAccountExists*(name, kind: string): bool =
+  ## `getent passwd|group <name>` exits 0 when the account exists.
+  when defined(linux):
+    let db = if kind == "group": "group" else: "passwd"
+    execCmd("getent " & db & " " & quoteShell(name) & " >/dev/null 2>&1") == 0
+  else:
+    false
+
+proc applyLinuxSysusersEntry*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the fragment as a copy (it must stay readable when the store
+  ## is not, §7.2 step 5), then `systemd-sysusers <file>` creates the
+  ## account or group if it is missing, then the account's existence is
+  ## verified. The destroy direction removes the fragment only.
+  when defined(linux):
+    let path = sysusersEntryOpPath(op)
+    if op.seDestroy:
+      discard removeManagedFile(path, "linux.sysusersEntry")
+      if fileExists(path) or symlinkExists(path):
+        raiseProtocol("linux.sysusersEntry destroy of " & path &
+          " post-apply observation disagrees with desired state: the " &
+          "fragment still exists")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    createManagedDirs(SystemdSysusersDir, "linux.sysusersEntry")
+    writeLinuxDropInFile(path, op.seContent, 0o644)
+    let (toolOut, toolCode) = execCmdEx("systemd-sysusers " & quoteShell(path))
+    if toolCode != 0:
+      raiseProtocol("linux.sysusersEntry `systemd-sysusers " & path &
+        "` failed: " & toolOut.strip())
+    let kind = if op.seContent.startsWith("g "): "group" else: "user"
+    if not sysusersAccountExists(op.seName, kind):
+      raiseProtocol("linux.sysusersEntry '" & op.seName & "': systemd-" &
+        "sysusers ran but the " & kind & " does not exist afterwards")
+    let post = observeLinuxSysusersEntry(op)
+    let desiredHex = posixDigestHexOfText(op.seContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.sysusersEntry " & path &
+        " post-apply observation disagrees with desired state")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.sysusersEntry apply")
 
 # ===========================================================================
 # linux.udevRule — write /etc/udev/rules.d/<name> + reload rules.
@@ -1967,14 +2716,7 @@ proc tmpfilesRulePath*(name: string): string =
 proc observeLinuxTmpfilesRule*(op: PrivilegedOperation):
     ObservedOperationState =
   when defined(linux):
-    let path = tmpfilesRulePath(op.tmpfilesName)
-    if not fileExists(path):
-      result.present = false
-      result.digestHex = ZeroDigestHex
-      return
-    let content = readFile(path)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(content)
+    result = observeManagedFile(tmpfilesRulePath(op.tmpfilesName))
   else:
     raiseNotImplementedPlatform("linux.tmpfilesRule observe")
 
@@ -1987,10 +2729,8 @@ proc destroyLinuxTmpfilesRule*(op: PrivilegedOperation):
   ## re-running. Post-apply re-probe asserts the file is gone.
   when defined(linux):
     let path = tmpfilesRulePath(op.tmpfilesName)
-    if fileExists(path):
-      try: removeFile(path)
-      except OSError: discard
-    if fileExists(path):
+    discard removeManagedFile(path, "linux.tmpfilesRule")
+    if fileExists(path) or symlinkExists(path):
       raiseProtocol("linux.tmpfilesRule destroy of " & path &
         " post-apply observation disagrees with desired state: " &
         "the rule file still exists after `removeFile`.")
@@ -2008,7 +2748,7 @@ proc applyLinuxTmpfilesRule*(op: PrivilegedOperation):
     if op.tmpfilesDestroy:
       return destroyLinuxTmpfilesRule(op)
     let path = tmpfilesRulePath(op.tmpfilesName)
-    createDir(LinuxTmpfilesDir)
+    createManagedDirs(LinuxTmpfilesDir, "linux.tmpfilesRule")
     writeLinuxDropInFile(path, op.tmpfilesContent, 0o644)
     if op.tmpfilesApplyNow:
       # `systemd-tmpfiles --create <path>` processes ONLY this file's
@@ -2774,19 +3514,12 @@ proc applySystemdSystemTimer*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
-    createDir(SystemdSystemUnitDir)
-    # Binary-mode write so the bytes on disk equal the operator's
-    # `stContent` verbatim — drift detection compares BLAKE3 digests,
-    # so any CRLF translation would be constant false-positive drift.
-    block:
-      var f: File
-      if not open(f, path, fmWrite):
-        raiseProtocol("systemd.systemTimer cannot open " & path)
-      try:
-        if op.stContent.len > 0:
-          discard f.writeBuffer(unsafeAddr op.stContent[0], op.stContent.len)
-      finally:
-        close(f)
+    createManagedDirs(SystemdSystemUnitDir, "systemd.systemTimer")
+    # The bytes on disk equal the operator's `stContent` verbatim — drift
+    # detection compares BLAKE3 digests, so any translation would be
+    # constant false-positive drift. Never written through a link.
+    writeManagedFile(AddOnMaterialisation(), path, op.stContent, 0o644,
+                     "systemd.systemTimer")
     let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
     if reloadCode != 0:
       raiseProtocol("systemd.systemTimer daemon-reload failed: " &
@@ -3422,3 +4155,121 @@ proc applyLinuxFhsSandbox*(op: PrivilegedOperation):
     result.digestHex = posixSystemDesiredDigestHex(op)
   else:
     raiseNotImplementedPlatform("linux.fhsSandbox apply")
+
+# ===========================================================================
+# linux.dpkgDiversion — a local dpkg diversion of a package-owned path.
+#
+# `dpkg-divert --local --rename --divert <path>.distrib --add <path>` moves
+# the package's copy aside and records the diversion in
+# `/var/lib/dpkg/diversions`, so every later unpack of that package writes
+# its version to `<path>.distrib` instead. The removal moves it back. The
+# observation is read from dpkg's own database rather than inferred from
+# which files exist: a diversion is dpkg state, not a file. See
+# dpkg-divert(1).
+# ===========================================================================
+
+const DpkgDiversionsDb* = "/var/lib/dpkg/diversions"
+  ## dpkg's diversion database: line triples of path, diverted-to path and
+  ## the diverting package (`:` for a local diversion).
+
+proc dpkgDiversionTarget*(path: string): string =
+  ## Where a `linux.dpkgDiversion` sends the package's copy.
+  path & ".distrib"
+
+proc readDpkgDiversion*(dbText, path: string):
+    tuple[present: bool; divertTo, package: string] =
+  ## The diversion of `path` recorded in `dbText` (the database's
+  ## contents), if any. A database whose line count is not a multiple of
+  ## three is corrupt and raises rather than being half-read.
+  var lines: seq[string]
+  for l in dbText.splitLines():
+    if l.len > 0: lines.add(l)
+  if lines.len mod 3 != 0:
+    raiseProtocol("linux.dpkgDiversion: " & DpkgDiversionsDb &
+      " is malformed (" & $lines.len & " lines, not a multiple of 3)")
+  var i = 0
+  while i < lines.len:
+    if lines[i] == path:
+      return (true, lines[i + 1], lines[i + 2])
+    i += 3
+  (false, "", "")
+
+proc removeLocalDpkgDiversion*(path: string) =
+  ## ``dpkg-divert --local --rename --remove <path>``, which moves the
+  ## package's copy back from ``<path>.distrib``. The path must be free:
+  ## dpkg refuses to rename over a file, so the caller removes the
+  ## add-on's copy first. Shared by the driver's destroy and the add-on's
+  ## uninstall. (A ucf-managed path is never diverted: the add-on refuses
+  ## that at plan time, so no ucf state needs handing back here.)
+  when defined(linux):
+    let (o, c) = execCmdEx("/usr/bin/dpkg-divert --local --rename " &
+      "--remove " & quoteShell(path))
+    if c != 0:
+      raiseProtocol("linux.dpkgDiversion remove of " & path &
+        " failed: " & o.strip())
+  else:
+    raiseNotImplementedPlatform("linux.dpkgDiversion remove")
+
+proc observeLinuxDpkgDiversion*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Present when dpkg records a diversion of `ddPath`. The digest covers
+  ## the recorded target and diverting package, so a diversion by someone
+  ## else (another target or a package) never digests equal to ours.
+  when defined(linux):
+    let db = if fileExists(DpkgDiversionsDb): readFile(DpkgDiversionsDb)
+             else: ""
+    let d = readDpkgDiversion(db, op.ddPath)
+    if not d.present:
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    result.present = true
+    result.digestHex = posixDigestHexOfText("divert " & op.ddPath & " to " &
+      d.divertTo & " by " & d.package)
+  else:
+    raiseNotImplementedPlatform("linux.dpkgDiversion observe")
+
+proc applyLinuxDpkgDiversion*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Add (or, for the destroy direction, remove) the local diversion.
+  ## Refuses a host without dpkg, and never replaces a diversion it did
+  ## not make: `dpkg-divert --add` itself refuses a path already diverted
+  ## elsewhere, and that refusal is surfaced as the apply's error.
+  when defined(linux):
+    let scopeErr = operationValidationError(op)
+    if scopeErr.len > 0:
+      raiseProtocol(scopeErr)
+    if not fileExists("/usr/bin/dpkg-divert"):
+      raiseProtocol("linux.dpkgDiversion of " & op.ddPath &
+        " refused: /usr/bin/dpkg-divert is absent (not a dpkg host)")
+    let target = dpkgDiversionTarget(op.ddPath)
+    if op.ddDestroy:
+      let before = observeLinuxDpkgDiversion(op)
+      if before.present:
+        # `--rename` moves `<path>.distrib` back to `<path>`; dpkg refuses
+        # when `<path>` still exists, so the file the profile put there must
+        # already have been removed (the caller orders that first).
+        removeLocalDpkgDiversion(op.ddPath)
+      let post = observeLinuxDpkgDiversion(op)
+      if post.present:
+        raiseProtocol("linux.dpkgDiversion remove of " & op.ddPath &
+          " left the diversion recorded")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    let current = observeLinuxDpkgDiversion(op)
+    if not current.present:
+      let (o, c) = execCmdEx("/usr/bin/dpkg-divert --local --rename " &
+        "--divert " & quoteShell(target) & " --add " & quoteShell(op.ddPath))
+      if c != 0:
+        raiseProtocol("linux.dpkgDiversion of " & op.ddPath & " failed: " &
+          o.strip())
+    let post = observeLinuxDpkgDiversion(op)
+    let desiredHex = posixSystemDesiredDigestHex(op)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.dpkgDiversion " & op.ddPath &
+        " post-apply observation disagrees with desired state: the " &
+        "diversion dpkg records is not a local one to " & target)
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.dpkgDiversion apply")

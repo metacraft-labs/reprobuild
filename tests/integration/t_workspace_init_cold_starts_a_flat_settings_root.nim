@@ -88,8 +88,8 @@ proc legacySettings(rootUrl: string): string =
   ## The old file's shape in a flat-layout root: `[manifest]` names the root
   ## repository itself (the metacraft root carried exactly this), which a
   ## root that already holds `projects/` never clones.
-  "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\nurl = \"" & rootUrl & "\"\nbranch = \"dev\"\n" &
+  "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\nurl = \"" & rootUrl & "\"\nbranch = \"dev\"\n" &
     "publish_locks = false\n\n" &
     "[projects]\ndefault = [\"alpha\"]\n"
 
@@ -144,7 +144,7 @@ suite "workspace init cold-starts a flat-layout settings root":
       # ---- leg 2: the old bootstrap.v1 file --------------------------------
       let rootLegacyPath = scratch / "remotes" / "root-legacy.git"
       let rootLegacy = seedBare(scratch, "root-legacy", "dev",
-        rootFiles(".repro-workspace.toml",
+        rootFiles("repro-workspace.toml",
           legacySettings(fileUrl(rootLegacyPath)), libA, libB))
       check rootLegacy == rootLegacyPath
       let legacyDest = scratch / "run" / "joined-legacy"

@@ -5,6 +5,7 @@ when defined(posix):
 
 import repro_dev_env_artifacts
 import repro_provider_runtime
+import repro_platform
 
 type
   DevEnvPrintFormat* = enum
@@ -331,6 +332,35 @@ proc applyShellOp*(env: StringTableRef; op: DevEnvShellOp;
       workingDirectory = op.value
       env["PWD"] = op.value
 
+proc declaresMsvcConsumer(artifact: DevEnvArtifact): bool =
+  for profile in artifact.toolProfiles:
+    if profile.activityRequirements.allIt(it in artifact.selectedActivities) and
+        isMsvcConsumerTool(profile.logicalName):
+      return true
+
+proc mergeDevEnvWithMsvcEnv*(artifact: DevEnvArtifact;
+                            environment: StringTableRef;
+                            platformEnv: MsvcDevEnv;
+                            hostCpu: string): StringTableRef =
+  ## Merge an existing host facility below caller and recipe overrides. Keep
+  ## this Windows-semantic merge pure so its precedence and architecture
+  ## boundary can be checked on hosts without Visual Studio installed.
+  ## The existing platform locator activates x64 only; this does not extend
+  ## that locator to native ARM or attach MSVC to a MinGW-only environment.
+  result = newStringTable(modeCaseInsensitive)
+  for key, value in environment.pairs:
+    result[key] = value
+  if hostCpu notin ["amd64", "x86_64"] or
+      not artifact.declaresMsvcConsumer():
+    return
+  var entries: seq[string] = @[]
+  for key, value in environment.pairs:
+    entries.add(key & "=" & value)
+  for entry in mergeActionEnvWithMsvcEnv(platformEnv, entries):
+    let eq = entry.find('=')
+    if eq > 0:
+      result[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+
 proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
                            defaultWorkingDirectory = "";
                            extraOps: openArray[DevEnvShellOp] = [];
@@ -344,6 +374,13 @@ proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
       artifact.projectRoot
   for op in activationOps(artifact, artifactPath, extraOps, preOps):
     result.env.applyShellOp(op, result.workingDirectory)
+  when defined(windows) and defined(amd64):
+    if artifact.declaresMsvcConsumer():
+      # Merge the final recipe environment: ordinary explicit values win,
+      # while replaced search lists retain the MSVC-owned tool directories.
+      # This activates an existing facility, not DSL/package provisioning.
+      result.env = mergeDevEnvWithMsvcEnv(artifact, result.env,
+        activateMsvcDevEnv(), hostCPU)
 
 proc containsPathSeparator(value: string): bool =
   value.contains(DirSep) or value.contains(AltSep)

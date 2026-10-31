@@ -20,7 +20,7 @@ import std/[options, os, strutils, tempfiles, unittest]
 
 import repro_workspace_manifests
 
-const handAuthoredFragment = """schema = "reprobuild.workspace.repo.v1"
+const handAuthoredFragment = """schema = "reprobuild.workspace.repo.v2"
 
 # Vendored compiler fork. Do not move without telling the CI owners.
 [repo]
@@ -31,7 +31,7 @@ name = "llvm-project"
 url_prefix = "github"
 url_suffix = "llvm/llvm-project"
 
-branch = "dev"  # the branch completed work lands on
+mainline = "dev"  # the branch completed work lands on
 tags = ["references", "hcr"]
 """
 
@@ -44,18 +44,18 @@ suite "manifest editor preserves unrelated text":
     writeFile(path, handAuthoredFragment)
 
     var doc = loadManifestDoc(path)
-    check doc.setKey("repo", "branch", tomlStr("main"))
+    check doc.setKey("repo", "mainline", tomlStr("main"))
     doc.saveManifestDoc()
 
     # PRIMARY: every byte other than the edited value is unchanged — the
     # comments, the hand-chosen `path`-before-`name` order, the blank lines and
     # the trailing comment on the edited line itself.
     let expected = handAuthoredFragment.replace(
-      "branch = \"dev\"  # the branch", "branch = \"main\"  # the branch")
+      "mainline = \"dev\"  # the branch", "mainline = \"main\"  # the branch")
     check readFile(path) == expected
 
     let parsed = readRepoFragment(path)
-    check parsed.repo.branch == some("main")
+    check parsed.repo.mainline == some("main")
     check parsed.repo.name == "llvm-project"
     check parsed.repo.tags == @["references", "hcr"]
 
@@ -89,7 +89,7 @@ suite "manifest editor preserves unrelated text":
     writeFile(path, handAuthoredFragment)
     var doc = loadManifestDoc(path)
     check doc.setKey("repo", "revision",
-      tomlStr("07f6bc4883b2a0ee1f7f999b25774003b75f9bc1"), after = ["branch"])
+      tomlStr("07f6bc4883b2a0ee1f7f999b25774003b75f9bc1"), after = ["mainline"])
     doc.saveManifestDoc()
     check readFile(path) == handAuthoredFragment.replace(
       "the branch completed work lands on\n",
@@ -103,10 +103,10 @@ suite "manifest editor preserves unrelated text":
     let crlf = handAuthoredFragment.replace("\n", "\r\n")
     writeFile(path, crlf)
     var doc = loadManifestDoc(path)
-    check doc.setKey("repo", "branch", tomlStr("main"))
+    check doc.setKey("repo", "mainline", tomlStr("main"))
     check doc.addArrayMember("repo", "tags", "llvm")
     doc.saveManifestDoc()
     check readFile(path) == crlf
-      .replace("branch = \"dev\"", "branch = \"main\"")
+      .replace("mainline = \"dev\"", "mainline = \"main\"")
       .replace("[\"references\", \"hcr\"]", "[\"references\", \"hcr\", \"llvm\"]")
     check readRepoFragment(path).repo.tags == @["references", "hcr", "llvm"]

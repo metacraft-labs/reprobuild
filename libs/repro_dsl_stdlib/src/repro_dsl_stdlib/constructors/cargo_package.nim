@@ -37,6 +37,40 @@
 ## missed must fail here rather than be quietly downloaded. `--locked` is
 ## the companion — it refuses to update `Cargo.lock`, so the build cannot
 ## silently resolve something other than what was pinned.
+##
+## ## Cross-compiling, and workspace members
+##
+## The target comes from the active build context: `repro build
+## --target=<triple>` resolves the `targetTriple` variant, the context's
+## `crossTarget` slot is filled by the adapter that claims the triple
+## (`active_context.resolveCrossTarget`), and this constructor reads it
+## (`activeCrossTarget()`). Both cargo steps then carry `--target`, and when
+## the adapter is `adapters/cross_zig`'s, zig is the target's C toolchain and
+## linker: a wrapper-writing edge is emitted and the cargo edges get the
+## `CC_<triple>` / `CARGO_TARGET_<TRIPLE>_*` environment that points at it.
+## The recipe spells none of this, so the same recipe builds natively and
+## for every listed target.
+##
+## `target` and `zigCross` remain as EXPLICIT overrides for a recipe that is
+## only ever a cross build (a service for one appliance) or that brings its
+## own C toolchain in `extraEnv`. An explicit `target` that contradicts the
+## active cross target is refused: the two would otherwise produce an
+## artefact for one platform under a cache identity stamped for another.
+## The target's standard library has to be in rustc's sysroot
+## (`lib/rustlib/<triple>/`), and the catalog's `rustc` carries only the
+## host's: for a cross target this constructor emits the two edges of
+## `adapters/rust_target_sysroot` -- a fetch of the catalog's `rust-std`
+## component for the triple and a merge of it into a copy of the host
+## `rustc` prefix -- and points the cargo edges at the result with `RUSTC`.
+## A recipe that sets `RUSTC` in `extraEnv` brings its own sysroot and the
+## edges are not emitted; a target the catalog has no component for is
+## refused by name.
+##
+## `package` selects one member of a virtual workspace (`cargo build -p`),
+## and `installPath` is that member's directory within the source tree
+## (`cargo install --path <src>/<installPath>`): a workspace root has no
+## `[package]`, so `cargo install --path <src>` on it fails.
+## Language-Conventions/Rust.md §"Cross-compiling".
 
 import std/[options, os, strutils]
 
@@ -45,6 +79,9 @@ import repro_project_dsl/cargo_vendor
 
 import ../types/package_result
 import ../packages/cargo as cargo_module
+import ../adapters/cross_zig
+import ../adapters/rust_target_sysroot
+import ../active_context
 
 const
   FetchScratchSubdir = ".repro/fetch"
@@ -101,9 +138,15 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     resolvedUrl = "file://" &
       (projectRoot / resolvedUrl[5 .. ^1]).replace("\\", "/")
   let hashTools = @[sourceFetchHashTool(spec.hashAlg)]
-  let fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
+  var fetchToolRefs = shellFetchToolIdentityRefs(hashTools,
     copiesDataFile = spec.kind == dfkDataFile,
     archiveUrl = resolvedUrl)
+  if spec.kind == dfkGitArchive:
+    # `ssh` as well as `git`: a private repository is reached over ssh (an
+    # https remote would need a credential helper, which is not a tool the
+    # edge can declare), and git execs `ssh` from the edge's PATH.
+    fetchToolRefs.add("git")
+    fetchToolRefs.add("ssh")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
@@ -112,7 +155,16 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
-  script.appendCurlDownload(tarball, resolvedUrl)
+  case spec.kind
+  of dfkGitArchive:
+    # A repository source (a private one has no archive URL): acquired as
+    # `git archive` of the pinned revision, by the shared script, and
+    # verified like any tarball below.
+    script.add(gitArchiveFetchScript(
+      resolvedUrl.replace("\"", "\\\""), spec.gitRevision.replace("\"", "\\\""),
+      escapedTarball))
+  else:
+    script.appendCurlDownload(tarball, resolvedUrl)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
@@ -143,7 +195,11 @@ proc cargo_package*(srcDir = "src";
                     profile = "release";
                     features: seq[string] = @[];
                     noDefaultFeatures = false;
-                    extraEnv: seq[(string, string)] = @[]):
+                    extraEnv: seq[(string, string)] = @[];
+                    target = "";
+                    zigCross = false;
+                    package = "";
+                    installPath = ""):
     CargoPackageResult =
   ## Fetch → vendor → build → install, for an upstream crate.
   ##
@@ -156,6 +212,24 @@ proc cargo_package*(srcDir = "src";
   ## through for a recipe that has defined its own profile.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
+
+  # The target: the active cross target's triple unless the recipe named
+  # one, and the two must agree when both are present (see the header).
+  # `zigCross` follows the adapter that filled the slot; a recipe may still
+  # say `zigCross = true` with an explicit `target` and no active one.
+  let active = peekActiveCrossTarget()
+  let activeTriple = active.tripleOrEmpty()
+  var target = target
+  var zigCross = zigCross
+  if activeTriple.len > 0:
+    if target.len > 0 and target != activeTriple:
+      raise newException(ValueError,
+        "cargo_package: the recipe names target '" & target &
+        "' but the build's targetTriple is '" & activeTriple &
+        "'; drop the recipe's target or build with --target=" & target)
+    target = activeTriple
+    if isZigCrossTarget(active):
+      zigCross = true
 
   let extractedRel = block:
     let raw = registeredFetchSpec(pkgName).extractedRoot
@@ -191,6 +265,40 @@ proc cargo_package*(srcDir = "src";
   let featureList = features.join(",")
   let releaseProfile = profile == "release"
 
+  # The cross C toolchain. Its wrappers are written by their own edge, and
+  # the environment below is what makes cargo, rustc and the `cc` crate use
+  # them; `zigCross` without a `target` is a contradiction and is refused.
+  if zigCross and target.len == 0:
+    raise newException(ValueError,
+      "cargo_package: zigCross = true needs a target triple")
+  var env = extraEnv
+  var compileAfter: seq[BuildActionDef] = @[]
+  if vendorEdge.id.len > 0:
+    compileAfter.add(vendorEdge)
+  if zigCross:
+    let wrapperDir = zigCrossWrapperDir(
+      (if projectRoot.len > 0: projectRoot else: "."), target)
+    env.add(zigCrossCargoEnv(target, wrapperDir, remapRoot = projectRoot))
+    if projectRoot.len > 0:
+      compileAfter.add(emitZigCrossWrappersAction(projectRoot, pkgName,
+        target))
+
+  # The target's standard library (see the header). A `RUSTC` the recipe
+  # set itself is its own sysroot and wins; otherwise the catalog must have
+  # the component, and the merged prefix is what cargo drives.
+  if target.len > 0:
+    var recipeRustc = false
+    for (k, _) in env:
+      if k == "RUSTC": recipeRustc = true
+    if not recipeRustc:
+      discard rustStdComponent(target)   # refuses an uncatalogued target
+      let root = if projectRoot.len > 0: projectRoot else: "."
+      env.add(("RUSTC", rustTargetRustcPath(root, target)))
+      if projectRoot.len > 0:
+        let fetch = emitRustStdFetchAction(projectRoot, pkgName, target)
+        compileAfter.add(emitRustTargetSysrootAction(projectRoot, pkgName,
+          target, fetch))
+
   var compileEdge = cargo_module.cargo.build(
     locked = true,
     release = releaseProfile,
@@ -199,8 +307,10 @@ proc cargo_package*(srcDir = "src";
     features = featureList,
     manifestPath = manifestPath,
     targetDir = targetDir,
-    after = (if vendorEdge.id.len > 0: @[vendorEdge] else: @[]),
-    extraEnv = extraEnv)
+    package = package,
+    target = target,
+    after = compileAfter,
+    extraEnv = env)
 
   # The source tree is an INPUT, not a write target: cargo writes into
   # `--target-dir`, and a recipe whose build mutated the extracted source
@@ -224,13 +334,18 @@ proc cargo_package*(srcDir = "src";
     # about a directory this build owns outright, and it makes the staged
     # tree differ between a first run and a re-run.
     noTrack = true,
+    # The root is this build's own staging tree, so a binary already there
+    # is the previous run's; cargo must replace it, not refuse it.
+    force = true,
     noDefaultFeatures = noDefaultFeatures,
     features = featureList,
-    path = extractedRel,
+    path = (if installPath.len > 0: extractedRel / installPath
+            else: extractedRel),
     root = installRoot,
     targetDir = targetDir,
+    target = target,
     after = @[compileEdge],
-    extraEnv = extraEnv)
+    extraEnv = env)
   if projectRoot.len > 0:
     setRegisteredActionDeclaredOutputs(installEdge.id, @[effectiveDestdir])
     setRegisteredActionReadOnlyRoots(installEdge.id,

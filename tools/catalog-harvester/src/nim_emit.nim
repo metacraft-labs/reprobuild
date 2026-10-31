@@ -76,9 +76,12 @@ proc cpuToken(cpu: PlatformCpu): string =
   of pcAny: ""
   of pcX86_64: "x86_64"
   of pcAArch64: "aarch64"
+  # The schema's own spelling (`PlatformCpu`'s string value), which
+  # `parsePlatformCpuToken` reads back: the emitted statement round-trips.
+  of pcArmv7: "armv7"
   of pcX86:
     raise newException(EmitError, "a 32-bit x86 arm cannot be expressed " &
-      "as a tarball realization (cpu must be any, x86_64 or aarch64)")
+      "as a tarball realization (cpu must be any, x86_64, aarch64 or armv7)")
 
 proc osToken(os: PlatformOs): string =
   case os

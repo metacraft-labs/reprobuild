@@ -1,6 +1,6 @@
 ## Cross-process file exclusion shared by publication and cache owners.
 ## One owned, noninheritable OS handle; acquisition errors never grant access.
-import std/os
+import std/[os, strutils, times]
 from ./paths import extendedPath
 
 when defined(windows):
@@ -40,6 +40,8 @@ else:
 
   proc providerLockFlock(fd: cint; operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
+  var ProviderLockOpenDirectory {.importc: "O_DIRECTORY",
+                                  header: "<fcntl.h>".}: cint
 
 type ReproFileLock* = object
   held: bool
@@ -143,3 +145,95 @@ proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
       lock.fd = -1
   lock.held = false
 
+
+# ---------------------------------------------------------------------------
+# Deadline-bounded acquisition that names the holder (POSIX).
+# ---------------------------------------------------------------------------
+
+type
+  ELockTimeout* = object of IOError
+    ## The lock was still held by another process at the deadline.
+    lockPath*: string
+    holderPids*: seq[int]   ## from /proc/locks; empty when not knowable
+
+  LockBusyHook* = proc () {.closure, gcsafe.}
+    ## Called once, the first time an acquisition finds the lock held.
+
+when not defined(windows):
+  proc flockHolderPids*(fd: cint): seq[int] =
+    ## The PIDs /proc/locks names as holding a granted FLOCK on the file
+    ## open at ``fd``, excluding this process. Empty where /proc/locks is
+    ## unavailable (non-Linux) or names nobody.
+    var st: Stat
+    if fstat(fd, st) != 0: return
+    let ino = $uint64(st.st_ino)
+    let dev = uint64(st.st_dev)
+    let major = ((dev shr 8) and 0xfff'u64) or ((dev shr 32) and not 0xfff'u64)
+    let minor = (dev and 0xff'u64) or ((dev shr 12) and not 0xff'u64)
+    let devIno = toHex(major, 2).toLowerAscii() & ":" &
+      toHex(minor, 2).toLowerAscii() & ":" & ino
+    let me = getCurrentProcessId()
+    var text = ""
+    try: text = readFile("/proc/locks")
+    except IOError, OSError: return
+    for line in text.splitLines():
+      let f = line.splitWhitespace()
+      # "N: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<ino> <start> <end>";
+      # a blocked waiter's line carries "->" after the ordinal.
+      if f.len < 6 or f[1] != "FLOCK": continue
+      if f[5] != devIno and not f[5].endsWith(":" & ino): continue
+      try:
+        let pid = parseInt(f[4])
+        if pid != me and pid notin result: result.add(pid)
+      except ValueError: discard
+
+  proc describeHolders(pids: seq[int]): string =
+    if pids.len == 0: "a process /proc/locks does not name"
+    else: "pid " & pids.join(", pid ")
+
+proc acquireExclusiveLockWithin*(lockPath: string; deadlineMs: int;
+                                 directory = false;
+                                 onBusy: LockBusyHook = nil): ReproFileLock =
+  ## Take an exclusive ``flock`` on ``lockPath`` (a lock file created
+  ## 0600, or with ``directory`` the directory itself, so no file is
+  ## added to it), retrying non-blocking until ``deadlineMs`` has passed.
+  ## A lock still held then raises ``ELockTimeout`` naming the holder's
+  ## PID, rather than waiting on a holder that may never let go.
+  ## ``onBusy`` runs once, at the first refusal.
+  when defined(windows):
+    discard deadlineMs; discard directory; discard onBusy
+    return acquireExclusiveFileLock(lockPath)
+  else:
+    if not directory:
+      createDir(extendedPath(parentDir(lockPath)))
+    let flags = if directory: O_RDONLY or O_CLOEXEC or ProviderLockOpenDirectory
+                else: O_RDWR or O_CREAT or O_CLOEXEC
+    let fd = posix.open(lockPath.cstring, flags, Mode(0o600))
+    if fd < 0:
+      raise newException(IOError,
+        "open(" & lockPath & ") to lock it failed, errno=" & $errno)
+    let start = epochTime()
+    var told = false
+    while true:
+      if providerLockFlock(fd, ProviderLockExclusive or
+          ProviderLockNonBlocking) == 0:
+        return ReproFileLock(held: true, fd: fd)
+      let err = errno
+      if err == EINTR: continue
+      if err != EWOULDBLOCK and err != EAGAIN:
+        discard posix.close(fd)
+        raise newException(IOError,
+          "flock(" & lockPath & ") failed, errno=" & $err)
+      if not told:
+        told = true
+        if onBusy != nil: onBusy()
+      if int((epochTime() - start) * 1000) >= deadlineMs:
+        let holders = flockHolderPids(fd)
+        discard posix.close(fd)
+        var e = newException(ELockTimeout, lockPath & " is still locked " &
+          "by " & describeHolders(holders) & " after " & $deadlineMs &
+          " ms; refusing to wait longer")
+        e.lockPath = lockPath
+        e.holderPids = holders
+        raise e
+      sleep(100)

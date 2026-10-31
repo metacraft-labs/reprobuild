@@ -156,6 +156,7 @@ import repro_hcr_agent
 import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
+import repro_cli_support/cross_target_flag
 import repro_cli_support/dev_session
 from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
@@ -178,6 +179,19 @@ import repro_cli_support/content_id
 # local certificate store (test-certificates Transport §2).
 import repro_cli_support/certificate_store
 export certificate_store
+# The reference ``test_certificates`` library (test-certificates-tools),
+# linked for what the standard fixes byte for byte and reprobuild has no
+# reason to own: the strict TOML reader certificates are parsed with, note
+# framing and the two-note union merge (Transport §3.1), the notes-ref push
+# with its fetch-merge-retry, and declared-scope ``HEAD`` protection for
+# pruning (Transport §2.5). Imported QUALIFIED ONLY: its names overlap this
+# engine's (``parseContentId``, ``isSigned``, ``Certificate``…), and an
+# unqualified import would let overload resolution quietly pick the wrong
+# one.
+from test_certificates/toml as tctoml import nil
+from test_certificates/note_framing as tcnotes import nil
+from test_certificates/notes as tcnotesref import nil
+from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -407,7 +421,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--target=TRIPLE] [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -492,6 +506,8 @@ proc renderUsage*(programName: string): string =
       " system {add | remove | list | why | sync | history | rollback | audit} ...\n       " &
           programName &
       " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n       " &
+          programName &
+      " deploy-agent keygen --secrets-key <FILE>\n       " &
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
@@ -7444,6 +7460,19 @@ proc writeKeyedInspection(path: string; identity: PathOnlyBuildIdentity) =
   replaceFile(path, proc (staged: string) =
     writeInspectionJson(staged, identity))
 
+proc ensureCompleteToolInspection(path: string; identity: PathOnlyBuildIdentity) =
+  ## Diagnostics may have been replaced by a partial fallback without changing
+  ## this valid complete cache. Restore only the inspection of the identity
+  ## actually being returned; diagnostic IO must not invalidate that cache.
+  try:
+    let expected = inspectionJson(identity)
+    if fileExists(extendedPath(path)) and readFile(extendedPath(path)) == expected:
+      return
+    writeKeyedInspection(path, identity)
+  except CatchableError as err:
+    stderr.writeLine("repro: warning: could not refresh complete tool inspection at " &
+      path & " (" & err.msg & "); an earlier inspection may be stale.")
+
 proc writeKeyedToolIdentity(outDir: string; key: string;
                             identity: PathOnlyBuildIdentity) =
   let keyed = keyedToolIdentityPaths(outDir, key)
@@ -7525,7 +7554,6 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
     let alreadyCurrent =
       fileExists(extendedPath(stableKeyPath)) and
         fileExists(extendedPath(stableIdentityPath)) and
-        fileExists(extendedPath(stableInspectionPath)) and
         readFile(extendedPath(stableKeyPath)).strip() == key
     if alreadyCurrent and served.refreshed:
       # The stable copy names this key, so it is this identity: give it the
@@ -7534,11 +7562,9 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
       rewriteRefreshedIdentity([stableIdentityPath], identity)
     if not alreadyCurrent:
       writePathOnlyBuildIdentity(stableIdentityPath, identity)
-      createDir(extendedPath(parentDir(stableInspectionPath)))
-      copyFile(extendedPath(keyed.inspectionPath),
-        extendedPath(stableInspectionPath))
       createDir(extendedPath(cacheDir))
       writeFile(extendedPath(stableKeyPath), key & "\n")
+    ensureCompleteToolInspection(stableInspectionPath, identity)
     return (hit: true, identity: identity)
   except CatchableError:
     return (hit: false, identity: PathOnlyBuildIdentity())
@@ -8018,6 +8044,7 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
           warm.identityEvidence = durableFileEvidence(warm.identityPath)
         if warm.populatedByPid != getCurrentProcessId():
           inc warmBuildCacheCounters.inheritedWarmHits
+        ensureCompleteToolInspection(warm.inspectionPath, warm.identity)
         return (identity: warm.identity, identityPath: warm.identityPath,
           inspectionPath: warm.inspectionPath)
   inc warmBuildCacheCounters.toolIdentityResolves
@@ -9946,6 +9973,21 @@ proc recordActionStarts(config: var BuildEngineConfig;
     if inner != nil:
       inner(event)
 
+proc actionKeyCoversObservedReads*(action: BuildAction): bool =
+  ## Whether ``action``'s cache key covers every input the monitor observed
+  ## it reading, which is what lets a cache record of it stand for an
+  ## execution over THESE inputs (test-certificates Standard §6.2.1, "the
+  ## record covers the inputs"; TC-8e). Only a cacheable process action whose
+  ## dependency policy is MONITORED and elides no input prefix qualifies:
+  ## ``cacheInputPaths`` keys the observed reads, and the only other elision
+  ## — content-addressed tool roots — is in the weak fingerprint. A declared
+  ## or recognised-format policy keys what was declared or reported, not what
+  ## was read, so a record of such an action is refused by
+  ## ``reusedResultRefusal``.
+  action.cacheable and action.kind == bakProcess and
+    action.dependencyPolicy.kind in MonitorPolicyKinds and
+    action.dependencyPolicy.ignoredInputPrefixes.len == 0
+
 proc executedActionRecords(actions: openArray[BuildAction];
                            run: BuildRunResult;
                            started: seq[string]): seq[ExecutedActionRecord] =
@@ -9971,10 +10013,7 @@ proc executedActionRecords(actions: openArray[BuildAction];
       let action = actions[byId[item.id]]
       record.kind = action.kind
       record.argv = action.argv
-      record.keyCoversObservedReads = action.cacheable and
-        action.kind == bakProcess and
-        action.dependencyPolicy.kind in MonitorPolicyKinds and
-        action.dependencyPolicy.ignoredInputPrefixes.len == 0
+      record.keyCoversObservedReads = actionKeyCoversObservedReads(action)
     result.add(record)
 
 proc emitFailedActionSummaries(buildResult: BuildRunResult;
@@ -14540,7 +14579,7 @@ proc consumeReportFlag*(arg: string; spec: var ReportSpec): bool =
 proc workspaceReportDir*(workspaceRoot: string): string =
   ## Conventional home for workspace-wide report artifacts. Reports are
   ## derived output, so they live under the WORKSPACE ROOT's disposable
-  ## ``.repro/build/`` tree rather than beside the ``.repro/workspace.toml``
+  ## ``.repro/build/`` tree rather than beside the ``.repro/workspace-state.toml``
   ## metadata. Note this is deliberately the workspace root's build dir and
   ## NOT ``<workspaceRoot>/<repo>/.repro/build/`` — the per-project build dir
   ## that resolves relative to a module path. Nesting disambiguates; no path
@@ -15584,6 +15623,31 @@ proc emitDevEnvProducerNotices(pins: openArray[DevEnvProducerPin];
     except IOError:
       discard
 
+proc writePartialToolInspection(artifact: ProjectInterfaceArtifact;
+                                mode: ToolProvisioningMode; outDir: string;
+                                identity: PathOnlyBuildIdentity;
+                                unresolved: JsonNode; batchFailure: string) =
+  ## The fallback's observations are diagnostics, never a complete identity.
+  ## Reuse the full profile serializer, including failed probe results, but
+  ## touch none of the binary/keyed identity or current-key publication paths.
+  let path = identityPaths(outDir, mode).inspectionPath
+  try:
+    let doc = parseJson(inspectionJson(identity))
+    doc["partial"] = %true
+    var requested = newJArray()
+    for useDef in artifact.projectInterface.toolUses:
+      requested.add(%(if useDef.rawConstraint.len > 0: useDef.rawConstraint
+                     else: useDef.packageSelector))
+    doc["requestedToolUses"] = requested
+    doc["unresolvedToolUses"] = unresolved
+    doc["batchFailure"] = %batchFailure
+    replaceFile(path, proc (staged: string) =
+      writeFile(extendedPath(staged), doc.pretty()))
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env: warning: could not write partial tool " &
+      "inspection at " & path & " (" & err.msg &
+      "); an earlier inspection may be stale.")
+
 proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
                             selection: DevEnvCliSelection): seq[DevEnvShellOp] =
   ## The PATH contribution that makes a dev-env activation PROVIDE the
@@ -15732,6 +15796,10 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
     # evaluated first. The cost is paid only when something is already wrong.
     var failures: seq[string] = @[]
     var absentInPathMode = 0
+    var partial = PathOnlyBuildIdentity(
+      projectName: interfaceArtifact.projectInterface.projectName,
+      interfaceFingerprint: interfaceArtifact.interfaceFingerprint)
+    var unresolved = newJArray()
     for useDef in interfaceArtifact.projectInterface.toolUses:
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
@@ -15739,15 +15807,22 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
         # The SAME pins as the batch: a single-tool artifact keeps every
         # contribution record, so a pin for another package is accepted and
         # stamped nowhere, and this package stays pinned.
-        let singleIdentity = contributed(toolBuildIdentity(single, mode,
-          storeRoot = storeRoot, pins = provisioningPins))
-        for dir in binDirsForDevelop(singleIdentity, storeRoot = storeRoot):
+        let singleIdentity = toolBuildIdentity(single, mode,
+          storeRoot = storeRoot, pins = provisioningPins)
+        # PATH-only filtering is an activation decision. Keep the unfiltered
+        # profiles in inspection, including tools already supplied by PATH.
+        partial.profiles.add(singleIdentity.profiles)
+        partial.actionIdentities.add(singleIdentity.actionIdentities)
+        let pathIdentity = contributed(singleIdentity)
+        for dir in binDirsForDevelop(pathIdentity, storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
-        for op in prefixEnvOpsForDevelop(singleIdentity):
+        for op in prefixEnvOpsForDevelop(pathIdentity):
           if not prefixOps.anyIt(it.name == op.name):
             prefixOps.add(op)
       except CatchableError as toolErr:
+        unresolved.add(%*{"packageSelector": useDef.packageSelector,
+          "rawConstraint": useDef.rawConstraint, "reason": toolErr.msg})
         # In path mode a tool that is neither on the caller's PATH nor
         # realizable is merely absent -- that mode's ordinary state, and what
         # it reported before it provided anything at all. Only a tool the
@@ -15756,6 +15831,8 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
           inc absentInPathMode
           continue
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
+    writePartialToolInspection(interfaceArtifact, mode, selection.outDir,
+      partial, unresolved, batchErr.msg)
     if failures.len == 0 and absentInPathMode == 0:
       # The per-tool pass found nothing wrong, so the failure was in the
       # batch path itself rather than in any one package. Report the original.
@@ -16313,7 +16390,7 @@ proc buildStateGroupDesired*(lease: RunEdgeLease;
 proc anyMemberUnlinked(desired: seq[ResourceInstance]): bool =
   ## True when ANY member of the desired group's graph has a ``typeId`` whose
   ## driver is NOT registered in this process — i.e. an OUT-OF-TREE resource
-  ## (a vm-harness Incus type the ``repro`` CLI does not link). The synthetic
+  ## (a gosti Incus type the ``repro`` CLI does not link). The synthetic
   ## run-edge-consumer type is always linked, so a group whose real members are
   ## all in-tree returns false and keeps the in-process fast path.
   for inst in desired:
@@ -16356,7 +16433,7 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ##   * ALL members linked (an in-tree ``stateGroup`` / the N2 hermitic mock)
   ##     — the IN-PROCESS ``reconcileResources(store)`` fast path, byte-identical
   ##     to N2.
-  ##   * ANY member OUT-OF-TREE (a vm-harness Incus type the ``repro`` CLI does
+  ##   * ANY member OUT-OF-TREE (a gosti Incus type the ``repro`` CLI does
   ##     not link) — the PROVIDER-SESSION path
   ##     ``reconcileResourcesViaSession(store)``, the same artifact-backed
   ##     resolver the L5 daemon reaper uses via ``buildLeaseReapTransport``. The
@@ -23433,12 +23510,12 @@ proc enumerateParticipatingReposStrict(workspaceRoot: string):
   let explicitGitRoot = gitTopLevel(workspaceRoot)
   let rootIsItsOwnRepo = explicitGitRoot.len > 0 and
     sameFile(explicitGitRoot, workspaceRoot)
-  # DECLARES a workspace — i.e. carries ``.repro/workspace.toml``, whether
+  # DECLARES a workspace — i.e. carries ``.repro/workspace-state.toml``, whether
   # that file lists ``[[manifest]]`` layers or only records the active
   # project. This, and NOT "the directory happens to hold ``projects/`` and
   # ``repos/``", is what separates a workspace root from the manifest lock
   # backend, which has the manifest-shaped directories and no
-  # ``.repro/workspace.toml``.
+  # ``.repro/workspace-state.toml``.
   #
   # The distinction is load-bearing. A single guard — "an explicitly targeted
   # Git worktree is a single-repo hook target" — used to run FIRST, ahead of
@@ -25121,6 +25198,9 @@ const
     "REPROBUILD_RUNTIME_LIBRARY_PATH",
     "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC",
     "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
+    # The `test_certificates` library (test-certificates-tools) the engine
+    # links for the certificate store, note framing and notes merge.
+    "TEST_CERTIFICATES_TOOLS_SRC",
     # Both spellings of "where the incremental-test seam comes from", and they
     # are not interchangeable: CODETRACER_SRC is the user's override and is
     # usually unset, CODETRACER_PINNED_SRC is the flake pin the daemon must
@@ -27290,9 +27370,11 @@ proc resolveProducerBinding*(selector: string;
       contentIdentity: resolved.binding.contentIdentity,
       overrideBinding: resolved.binding)
 
-  # 2. lock-pinned mode — no override matched; consult the committed lock.
+  # 2. lock-pinned mode — consult sibling pins, not the consumer's own record.
+  # The self row is bookkeeping and can name an earlier containing revision.
+  # It does not turn a same-named archive or host tool into a source producer.
   for dep in lock.deps:
-    if dep.name == selector:
+    if dep.name == selector and not isSelfLockedDep(dep):
       return ProducerBinding(
         selector: selector,
         kind: pbkLockPinned,
@@ -27307,6 +27389,15 @@ proc resolveProducerBinding*(selector: string;
   block onDiskSibling:
     let sibling = findSiblingProjectFile(selector, workspaceRoot)
     if sibling.len > 0:
+      let consumerRoot =
+        if workspaceRoot.len > 0: workspaceRoot
+        else: getCurrentDir()
+      # ../nim/repro.nim from a consumer named nim is its own recipe. Compare
+      # directory identity so aliases and case differences cannot claim it as
+      # a sibling after the self row has been excluded above.
+      if dirExists(extendedPath(consumerRoot)) and
+          sameFile(extendedPath(parentDir(sibling)), extendedPath(consumerRoot)):
+        return ProducerBinding(selector: selector, kind: pbkNotProducer)
       return ProducerBinding(
         selector: selector,
         kind: pbkOnDiskSibling,
@@ -27658,7 +27749,7 @@ proc resolveProducerTypedContract*(selector: string;
       # re-running the lift edge (replaces the RP5a re-extract-per-consumer path).
       # The stub is written to the scratch tree (the extract runner emits it) but
       # the typed-contract projection reads only the artifact.
-      # TI2 (separate-module producer — the RP5c2 vm-harness shape): if the
+      # TI2 (separate-module producer — the RP5c2 gosti shape): if the
       # producer's ``repro.nim`` NAMES a separate resource module via a
       # ``resourceModule "<path>": path "<dir>" …`` surface entry, thread that
       # module + its extra ``--path``s into the lift so the cached artifact's
@@ -27780,7 +27871,7 @@ proc resourceAttrsTypeName*(typeId: string): string =
 
 proc resourceWrapperProcName*(typeId: string): string =
   ## The synthesised consumer-side typed wrapper proc name — the LAST dotted
-  ## segment of the ``typeId`` (e.g. ``vm_harness.container`` → ``container``),
+  ## segment of the ``typeId`` (e.g. ``gosti.container`` → ``container``),
   ## dash-sanitised. This is the ``producer.<wrapper>(address, attrs…)`` verb a
   ## consumer binds. Derived from the ``typeId`` (part of the exported
   ## contract) so it stays stable across the interface boundary without adding
@@ -27910,7 +28001,7 @@ proc gotoDefinitionInProducerContract*(contract: ProducerTypedContract;
   ## RP8 go-to-definition over an ALREADY-RESOLVED producer typed contract.
   ## Given a public ``symbol`` reference — a resource-type wrapper name (the
   ## last dotted ``typeId`` segment, e.g. ``container`` for
-  ## ``vm_harness.container``) or the full ``typeId`` itself; a resource
+  ## ``gosti.container``) or the full ``typeId`` itself; a resource
   ## attribute name (e.g. ``cpus``); or a public executable / command name —
   ## return the producer's DEFINITION ``SourceLocation`` (file + line) read from
   ## the interface artifact's preserved location. The producer's driver/impl is
@@ -28201,9 +28292,7 @@ type
       ## The enclosing workspace, normalised; "" when there is none.
     rootPreference: seq[string]
       ## The preference of the workspace ROOT repository, from the settings
-      ## file (§3.4): ``[workspace]`` of a ``settings.v1`` file, or the
-      ## mainline the old ``.repro-workspace.toml`` declares for a root that
-      ## is its own record store.
+      ## file's ``[workspace]`` (§3.4).
     membershipResolved: bool
       ## Whether ``project`` holds a DECLARED membership (a manifest checkout
       ## or a compositional workspace state file). A committed-lock-only
@@ -29511,10 +29600,13 @@ proc committedLockDerivedProject(workspaceRoot: string):
         if n notin repos[rootIdx].depends:
           repos[rootIdx].depends.add(n)
     if rootName.len == 0: rootName = "workspace"
+    # A committed-lock-only workspace has no settings file to declare the
+    # root's mainline, so the project's default workspace branch is the ref
+    # its own committed lock records for the root (else ``HEAD``) — what the
+    # lock says, not an inference from a remote.
     return some(ResolvedProject(
       projectName: rootName,
-      defaultRevision: rootRevision,
-      trunk: (if rootRef.len > 0: rootRef else: "HEAD"),
+      workspaceMainline: (if rootRef.len > 0: rootRef else: "HEAD"),
       repos: repos,
       projectFile: lockP))
 
@@ -29546,8 +29638,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
     depends: dependsOn)
   some(ResolvedProject(
     projectName: repoName,
-    defaultRevision: revision,
-    trunk: trunk,
+    workspaceMainline: trunk,
     repos: @[repo] & nestedDeps,
     projectFile: committedLockPath(root)))
 
@@ -29962,6 +30053,27 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       strategyGiven = true
     elif arg == "--print-solved-graph":
       printSolvedGraph = true
+    elif arg == "--target" or arg.startsWith("--target="):
+      # ReproOS-Add-On-Mode A15: ``--target=<triple>`` is ``--variant
+      # targetTriple=<triple>`` with the spelling canonicalised
+      # (``cross_target_flag``: a short ``armv7-linux`` names the catalog's
+      # appliance triple; ``native`` assigns nothing). It lands in the same
+      # ``REPRO_VARIANTS`` assignment the ``--variant`` arm below writes, so
+      # the provider hop, the lowered-graph cache key
+      # (``canonicalVariantAssignments``) and the stdlib's one variant read
+      # site all see one value.
+      let spelling = valueFromFlag(args, i, "--target")
+      let triple =
+        try: canonicalTargetTriple(spelling)
+        except ValueError as e:
+          stderr.writeLine("repro build: " & e.msg)
+          return 2
+      if triple.len > 0:
+        var existing = getEnv("REPRO_VARIANTS")
+        if existing.len > 0:
+          existing.add(',')
+        existing.add(TargetTripleVariantName & "=" & triple)
+        putEnv("REPRO_VARIANTS", existing)
     elif arg == "--variant" or arg.startsWith("--variant="):
       # Spec-Implementation M1 — ``--variant name=value`` registers a
       # ``prSet`` contribution against the named solver-participating
@@ -35937,7 +36049,7 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
 proc resolveDevelopWorkspacePrimary(
     workspaceRoot: string): ResolvedProject =
   ## M22 reuses the M9/M10 dispatch rule. Composer wins when
-  ## ``.repro/workspace.toml`` declares layers; otherwise we look up the
+  ## ``.repro/workspace-state.toml`` declares layers; otherwise we look up the
   ## single recorded project name (via the M13 metadata-only
   ## workspace.toml) or fall back to a single ``projects/*.toml`` if
   ## exactly one exists. A workspace with no resolvable project surfaces
@@ -35976,8 +36088,7 @@ proc resolveDevelopWorkspacePrimary(
       return resolveProject(candidates[0])
   raise newException(ValueError,
     "`repro develop` could not resolve a project from workspace root '" &
-      workspaceRoot & "' (no .repro/workspace-state.toml or older " &
-      ".repro/workspace.toml, and no single " &
+      workspaceRoot & "' (no .repro/workspace-state.toml, and no single " &
       "projects/*.toml at the workspace root)")
 
 proc resolveDevelopWorkspaceProject(
@@ -41120,10 +41231,8 @@ proc gitRemoteOriginUrl(identity: GitToolIdentity; repoPath: string): string =
   else:
     ""
 
-const stateFileWording = "`.repro/workspace-state.toml` (or the older " &
-    "`.repro/workspace.toml`)"
-  ## How diagnostics name the per-checkout state file while both names are
-  ## read (Workspace-Settings-Files.md §8 step 1).
+const stateFileWording = "`.repro/workspace-state.toml`"
+  ## How diagnostics name the per-checkout state file.
 
 type
   NoActiveProjectSetError* = object of ValueError
@@ -41195,11 +41304,9 @@ proc noProjectSetError*(workspaceRoot, opLabel: string;
 
 proc findBootstrapConfigPath(workspaceRoot: string): string =
   ## Locate the workspace settings file: ``REPRO_WORKSPACE_CONFIG`` when set,
-  ## else ``repro-workspace.toml`` — or, until the old name is retired, the
-  ## old host bootstrap config ``.repro-workspace.toml`` — in
-  ## ``workspaceRoot`` or the nearest ancestor that has one, the new name
-  ## winning within one directory (Workspace-Settings-Files.md §6). Returns
-  ## the empty string when there is none. The one implementation is
+  ## else ``repro-workspace.toml`` in ``workspaceRoot`` or the nearest
+  ## ancestor that has one (Workspace-Settings-Files.md §6). Returns the
+  ## empty string when there is none. The one implementation is
   ## ``findWorkspaceSettingsPath``; this name is kept for the many call sites.
   findWorkspaceSettingsPath(workspaceRoot)
 
@@ -41210,8 +41317,7 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ## Resolution order for the manifest URL/branch:
   ##   1. explicit ``--manifest-url`` / ``--manifest-branch`` (RA-11 flags);
   ##   2. the workspace settings file's record store (``repro-workspace.toml``
-  ##      ``[records] url`` / ``branch``, or the old ``.repro-workspace.toml``
-  ##      ``[manifest] url`` / ``branch`` it maps from), found through
+  ##      ``[records] url`` / ``branch``), found through
   ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo;
   ##   3. the host repo's own ``remote.origin.url``.
   ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
@@ -41243,11 +41349,9 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
         args.manifestUrl = cfg.records.url.get("")
         if cfg.records.branch.isSome and args.manifestBranch.len == 0:
           args.manifestBranch = cfg.records.branch.get()
-      if args.privateManifestUrl.len == 0 and cfg.privateManifestUrl.isSome:
-        args.privateManifestUrl = cfg.privateManifestUrl.get()
       # RA-17 — resolve the manifest-provenance trust anchor from the config's
-      # ``[manifest] revision`` + ``[verify]`` table. Paths in
-      # ``allowed_signers`` are resolved relative to the config's directory.
+      # ``[verify]`` table. Paths in ``allowed_signers`` are resolved relative
+      # to the config's directory.
       # The resulting spec is a no-op unless the config opts into
       # verification. (A flat-layout root clones no manifest repository, so
       # there is nothing for it to verify.)
@@ -41649,7 +41753,7 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
   ## thing an arriving agent reads.
   ##
   ## The content is derived from exactly two sources, and from no disk
-  ## evidence: the ACTIVE SET recorded in ``.repro/workspace.toml`` (what this
+  ## evidence: the ACTIVE SET recorded in ``.repro/workspace-state.toml`` (what this
   ## workspace is for), and the manifests that define those entries (what they
   ## contain). Checkout state is deliberately NOT consulted — a project can be
   ## enabled before its repos are cloned and a stale checkout can outlive a
@@ -42036,7 +42140,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # checkout already exists.
   resolveBootstrapConfig(args)
   let manifestsDir = manifestsRoot(args.workspaceRoot) / "projects"
-  # A compositional ``.repro/workspace.toml`` (one or more ``[[manifest]]``
+  # A compositional ``.repro/workspace-state.toml`` (one or more ``[[manifest]]``
   # layers, M8/M25 semantics) IS the manifest configuration: the composer
   # (``resolveWorkspaceInitProject`` → ``composeManifestLayersFromFile*``)
   # clones each layer URL itself, so such a workspace has no on-disk
@@ -42203,9 +42307,9 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # M13: record the active workspace branch in .repo/workspace.toml so
   # downstream commands (``repro workspace status``, M14 ``repro branch``,
   # M15 ``repro switch``) can read it back as a single source of truth.
-  # The branch value is the declared workspace default (explicit project
-  # trunk, otherwise the root repository's mainline); when neither exists,
-  # retain the historical fallback to ``defaultRevision``. We only write when
+  # The branch value is the declared workspace default: the root repository's
+  # resolved mainline (Workspace-Branch-Roles.md §3.4). With none declared,
+  # nothing is recorded. We only write when
   # we have a meaningful value AND no clone failures (writing on a half-broken init would record a
   # branch the workspace cannot honor). The write is idempotent — if the
   # composer mode already produced a workspace.toml with a branch, this
@@ -42217,13 +42321,11 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     # IT. "This directory is an initialized workspace" is not a fact about
     # branches, and the branch write below is the only thing that used to
     # write the file — so an init that had no branch value left a fully
-    # working workspace with no ``.repro/workspace.toml`` at all.
+    # working workspace with no ``.repro/workspace-state.toml`` at all.
     #
-    # That is reachable rather than theoretical: ``trunk`` and
-    # ``default_revision`` are both ``Option`` fields of ``[project]``, so a
-    # manifest whose repo fragments each pin their own ``revision`` needs
-    # neither. Measured against the previous engine with exactly such a
-    # manifest — both repos cloned, exit 0, ``.repro/`` created, ``repro
+    # That is reachable rather than theoretical: a workspace whose settings
+    # declare no root mainline has no workspace branch to record. Measured
+    # against an earlier engine with exactly such a manifest — both repos cloned, exit 0, ``.repro/`` created, ``repro
     # hooks ensure`` then installing ten hooks across two repos, and no
     # ``workspace.toml`` anywhere. Every predicate that asks for the marker
     # answered "not a workspace" for a workspace that plainly was one, which
@@ -42257,10 +42359,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       except WorkspaceManifestParseError as e:
         stderr.writeLine(
           "workspace init: could not record the workspace marker: " & e.msg)
-    let branchValue =
-      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
-      elif resolved.defaultRevision.len > 0: resolved.defaultRevision
-      else: ""
+    let branchValue = resolved.defaultWorkspaceBranch
     if branchValue.len > 0:
       try:
         writeWorkspaceBranch(args.workspaceRoot,
@@ -42477,8 +42576,8 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
   ##      name) — ALWAYS a new NAMED directory, NEVER cwd or an ancestor;
   ##   3. clone the root repo into that directory;
   ##   4. run the existing ``executeWorkspaceInit`` rooted in that directory,
-  ##      which reads the cloned ``.repro-workspace.toml`` host bootstrap
-  ##      config, bootstraps the manifest cache (RA-11), verifies provenance
+  ##      which reads the cloned ``repro-workspace.toml`` settings file,
+  ##      bootstraps the manifest cache (RA-11), verifies provenance
   ##      (RA-17), and syncs the member repos.
   ## Ends by pointing the user at ``repro health``.
   let parsed = parseColdStartInitArgs(args)
@@ -42533,7 +42632,7 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
     return 1
 
   # (4) Run the existing in-workspace init rooted in the cloned directory. It
-  # reads the cloned ``.repro-workspace.toml`` (host bootstrap config), clones
+  # reads the cloned ``repro-workspace.toml`` (the settings file), clones
   # the manifest into the bootstrap cache, verifies provenance if configured,
   # and syncs the declared member repos — we DO NOT duplicate that logic.
   var innerArgs = @["--workspace-root=" & destAbs]
@@ -43119,9 +43218,21 @@ type
       ## The role (`mainline`, `unstable`, a custom role); "" when none.
     flag: string
       ## The spelling the operator typed (`--unstable`, `--to=unstable`,
-      ## `--from-mainlines`), for diagnostics about the command line itself.
+      ## `--from=unstable`), for diagnostics about the command line itself.
       ## Reports never carry it: a shorthand and its `--to=` spelling must
       ## produce byte-identical reports (§4.1), so they name `role` only.
+
+proc retiredFlagHint(arg: string): string =
+  ## The suffix an "unsupported flag" error carries when ``arg`` is a RETIRED
+  ## spelling, naming what replaced it; "" for any other flag. The flag still
+  ## fails as unknown — this only saves the operator a search for the new
+  ## name.
+  let name = if '=' in arg: arg[0 ..< arg.find('=')] else: arg
+  case name
+  of "--from-mainlines":
+    " (a retired spelling; use `--from=mainline`, or its shorthand " &
+      "`--mainline`)"
+  else: ""
 
 proc branchRolesUsage(msg: string) =
   raise newException(BranchRolesUsageError, msg)
@@ -43178,6 +43289,28 @@ proc requireDeclaredRole(workspaceRoot, role, roleFlag: string) =
       (if roleSettings.path.len > 0: roleSettings.path
        else: "repro-workspace.toml, which this workspace does not have") &
       ")")
+
+proc requireRoleDeclaringWorkspace(workspaceRoot, role, roleFlag: string) =
+  ## Refuse a role in a workspace whose repos can declare none: one that
+  ## resolves its membership from its committed lock alone (no manifests, no
+  ## settings layers), whose repos therefore carry no branch roles at all
+  ## (Workspace-Branch-Roles.md §3.3: roles are declared in fragments and
+  ## profiles). A usage error (exit 2) before anything is fetched, like an
+  ## undeclared role: nothing in this workspace declares the role asked for,
+  ## and inferring a branch for it is what the roles model forbids. Mirrors
+  ## the order of ``resolveWorkspaceProjectShared``: a workspace whose
+  ## settings compose layers, or that carries manifests, resolves from them.
+  if role.len == 0:
+    return
+  if isCompositionalWorkspaceToml(workspaceRoot) or
+      hasResolvedManifestCheckout(workspaceRoot) or
+      not hasCommittedLockWorkspaceMarker(workspaceRoot):
+    return
+  branchRolesUsage(roleFlag & "=" & role & " needs branch roles, and this " &
+    "workspace declares none: it resolves from its committed lock (" &
+    committedLockPath(workspaceRoot) & ") without manifests, so no repo " &
+    "has a declared mainline for '" & role & "' to resolve to. Name a " &
+    "branch instead of a role")
 
 proc roleFallbackText(r: ResolvedRole): string =
   ## §4.4's text annotation of a role reconcile/switch/cut: the branch
@@ -43329,7 +43462,7 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   ## before Reprobuild's native-layout cutover. That migration recorded the
   ## active project set in ``.repo/workspace.toml`` and its completion marker
   ## in ``.repo/.repro-migration-complete``; the later native layout moved
-  ## canonical metadata to ``.repro/workspace.toml`` and membership to the
+  ## canonical metadata to ``.repro/workspace-state.toml`` and membership to the
   ## workspace root.
   ##
   ## Keep native layout authoritative. This helper supplies ONLY the primary
@@ -43337,7 +43470,8 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   ##   * native root-level membership is present;
   ##   * both legacy artifacts are regular, non-symlink files;
   ##   * the completion marker has the exact producer-written body;
-  ##   * the legacy metadata passes the strict WorkspaceLocal reader; and
+  ##   * the legacy metadata passes the strict state reader in its migration
+  ##     form (``readStateFileForMigration``: that tool wrote ``local.v1``); and
   ##   * that project exists in native root-level membership.
   ##
   ## It never composes or resolves content from ``.repo/manifests``. A stray
@@ -43356,8 +43490,11 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
       return ""
     if getFileInfo(metadata, followSymlink = false).kind != pcFile:
       return ""
+    # repo-workspaces v2.10 wrote this file in the state file's earliest
+    # schema (`local.v1`), which only the migration reader still accepts; it
+    # is read here for its project name and nothing else.
     let recorded =
-      readWorkspaceLocal(absolutePath(metadata)).workspace.project
+      readStateFileForMigration(absolutePath(metadata)).workspace.project
     if recorded.len == 0:
       return ""
     let projectFile = nativeProjects / (recorded & ".toml")
@@ -43387,7 +43524,7 @@ proc noNameableProjectError(workspaceRoot, opLabel: string;
   ## default) both diagnostics are byte-identical to what they were.
   ##
   ## WHAT WAS WRONG WITH THE ONE MESSAGE. It named the two things that were
-  ## ABSENT -- "requires either `.repro/workspace.toml` or a <project>
+  ## ABSENT -- "requires either `.repro/workspace-state.toml` or a <project>
   ## argument; neither was present at <root>" -- and said nothing about the
   ## thing that was PRESENT and decisive: membership manifest data at that very
   ## root. For the repository that reaches this most often BOTH remedies it
@@ -43555,7 +43692,7 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs;
     command: string): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
   ## (collapsed from the former per-op copies). Same dispatch rule as M9:
-  ## prefer ``.repro/workspace.toml`` when it
+  ## prefer ``.repro/workspace-state.toml`` when it
   ## declares at least one ``[[manifest]]`` layer (composer mode),
   ## otherwise look up the named project / variant under
   ## ``projects/``. A metadata-only workspace.toml (M13 — only
@@ -45576,7 +45713,7 @@ proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
 #   1. built-in default  — a bare public repo ⇒ the in-repo committed lock.
 #   2. system config     — IT-maintained (REPROBUILD_SYSTEM_CONFIG / /etc/…).
 #   3. user dotfiles     — REPROBUILD_USER_CONFIG / ~/.config/reprobuild/.
-#   4. parent workspace  — the ``.repro-workspace.toml`` ``[locking]`` table.
+#   4. parent workspace  — the ``repro-workspace.toml`` ``[locking]`` table.
 #   5. VCS-private dir   — ``<git-common-dir>/repro/config.toml`` (never pushed).
 #
 # Each non-built-in layer is a ``reprobuild.config.v1`` file that may carry
@@ -45737,8 +45874,7 @@ proc composeForeignEnvAutoLoad*(projectRoot: string; gitBin = ""):
   for path in [systemConfigPath(), userConfigPath()]:
     if path.len > 0 and fileExists(extendedPath(path)):
       foldForeignEnvLayer(readReprobuildConfig(path).foreign_env, result)
-  # Layer 4 — the parent workspace's settings file (`repro-workspace.toml`,
-  # or the old `.repro-workspace.toml`).
+  # Layer 4 — the parent workspace's settings file (`repro-workspace.toml`).
   let bootstrapPath = findBootstrapConfigPath(root)
   if bootstrapPath.len > 0:
     foldForeignEnvLayer(readWorkspaceSettings(bootstrapPath).foreign_env,
@@ -45810,7 +45946,7 @@ proc composeLockingRouting*(workspaceRoot: string; gitBin = ""):
     ComposedRouting =
   ## HL-1 — fold the configuration layers (§4.1) into one composed routing
   ## table, in INCREASING precedence order. The parent-workspace layer (4) is
-  ## the existing single-file ``.repro-workspace.toml`` ``[locking]`` read, so
+  ## the existing single-file ``repro-workspace.toml`` ``[locking]`` read, so
   ## a workspace with only that table composes to exactly those routes and
   ## resolves identically to the pre-HL-1 behavior.
   result = ComposedRouting(routes: @[])
@@ -45819,7 +45955,7 @@ proc composeLockingRouting*(workspaceRoot: string; gitBin = ""):
   readConfigLayerRoutes(systemConfigPath(), clkSystem, root, result.routes)
   # Layer 3 — user dotfiles.
   readConfigLayerRoutes(userConfigPath(), clkUserDotfiles, root, result.routes)
-  # Layer 4 — parent ``.repro-workspace.toml`` ``[locking]`` table.
+  # Layer 4 — parent ``repro-workspace.toml`` ``[locking]`` table.
   let bootstrap = loadLockingRouting(root)
   if bootstrap.route.len > 0:
     let bootstrapSource = findBootstrapConfigPath(root)
@@ -46077,7 +46213,7 @@ proc recordRoutedParticipation*(workspaceRoot: string;
   ## system → dotfiles → parent workspace → VCS-private) resolves each repo to
   ## its ``(tier, backend)`` and records participation; an unrouted private
   ## repo raises ``StoreRoutingError``. A workspace whose only routes are the
-  ## ``.repro-workspace.toml`` ``[locking]`` table composes to exactly those
+  ## ``repro-workspace.toml`` ``[locking]`` table composes to exactly those
   ## routes, so its result is byte-identical to the pre-HL-1 single-table read.
   let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
   if not composed.hasExplicitRoutes: return @[]
@@ -49382,7 +49518,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
           "' but could not re-key .repro/develop-overrides.toml (" & err.msg &
           "); any develop override naming the old path is now stale")
     #
-    #    `.repro/workspace.toml`'s local state is keyed by PROJECT, not by
+    #    `.repro/workspace-state.toml`'s local state is keyed by PROJECT, not by
     #    checkout path, so a rename does not strand it. The sibling ignore set
     #    needs no special handling either: its managed block names the old
     #    path and `refreshWorkspaceSiblingIgnoresBestEffort` is already wired
@@ -50539,17 +50675,11 @@ type
     repos*: seq[MainlineSyncEntry]
     exitCode*: int
 
-proc roleBranchOf(e: MainlineSyncEntry): string =
-  if e.resolvedRole.isSome: e.resolvedRole.get().branch else: ""
-
 proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   result = newJObject()
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["role"] = %report.role
-  # Pre-role marker of this report kind, kept beside `role` until the old
-  # spellings are retired: true exactly when the role is the mainline.
-  result["mainline"] = %(report.role == "mainline")
   result["dryRun"] = %report.dryRun
   result["flavor"] = %report.flavor
   var repos = newJArray()
@@ -50561,10 +50691,6 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
     obj["path"] = %e.path
     obj["branch"] = %e.branch
     obj.addRoleFields(e.resolvedRole, report.role)
-    # The pre-role name of `roleBranch` (Workspace-Branch-Roles.md §4.4),
-    # carried with the same value until the old spellings are retired so a
-    # consumer written against `--mainline` keeps reading it.
-    obj["mainlineBranch"] = %e.roleBranchOf()
     obj["outcome"] = %e.outcome
     obj["action"] = %e.action
     obj["headBefore"] = %e.headBefore
@@ -50724,8 +50850,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     var obs: MainlineSyncObservation
     # The role was resolved when the manifest loaded, from declarations only
     # (`ResolvedRepo.roles`, `roles.nim`); nothing below re-resolves it from
-    # what the remote has. A repo that resolves no role (a legacy fragment
-    # pinning only a `revision`) keeps an empty branch and is refused.
+    # what the remote has. Every repo resolves one: a workspace whose repos
+    # declare no roles was refused before this point
+    # (`requireRoleDeclaringWorkspace`).
     obs.role = args.role
     let roleResolved = repo.roles.findRole(args.role)
     if roleResolved.isSome:
@@ -51105,6 +51232,7 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
     # §4.4: a role this workspace does not declare is a usage error, decided
     # before anything is fetched.
     requireDeclaredRole(parsed.workspaceRoot, parsed.role, "--to")
+    requireRoleDeclaringWorkspace(parsed.workspaceRoot, parsed.role, "--to")
   except BranchRolesUsageError as err:
     stderr.writeLine("repro sync: " & err.msg)
     return 2
@@ -51207,8 +51335,8 @@ type
     profile*: string
     roles*: seq[ResolvedRole]
       ## Every role, or only the requested one. Empty when the repo resolves
-      ## no mainline (a legacy `repo.v1` fragment pinning only `revision`);
-      ## `diagnostic` then says so.
+      ## no roles at all — a workspace resolved from its committed lock
+      ## declares none; `diagnostic` then says so.
     diagnostic*: string
 
   BranchRolesReport* = object
@@ -51220,7 +51348,7 @@ type
       ## The roles printed, in resolution order.
     hasRoot*: bool
       ## Whether `root` is reported: only with no selector, and only when a
-      ## `settings.v1` file can declare the root's roles (§3.4).
+      ## settings file can declare the root's roles (§3.4).
     root*: BranchRolesEntry
     repos*: seq[BranchRolesEntry]
 
@@ -51276,18 +51404,13 @@ proc pickRoles(roles: seq[ResolvedRole]; role: string): seq[ResolvedRole] =
 proc workspaceRootRolesEntry(workspaceRoot, role: string):
     tuple[present: bool; entry: BranchRolesEntry] =
   ## The workspace ROOT repository's roles (§3.4), from the settings file's
-  ## `[workspace]`. Only a `settings.v1` file can declare them; the old
-  ## `.repro-workspace.toml`, or no settings file, yields no entry. A
-  ## `settings.v1` file that declares no root mainline is reported on the
-  ## entry, not raised: the member repos still resolve, and a query should
-  ## show what it can.
+  ## `[workspace]`. No settings file yields no entry. A settings file that
+  ## declares no root mainline is reported on the entry, not raised: the
+  ## member repos still resolve, and a query should show what it can.
   let path = findWorkspaceSettingsPath(workspaceRoot)
-  if path.len == 0 or not fileExists(path) or
-      extractFilename(path) == legacySettingsFileName:
+  if path.len == 0 or not fileExists(path):
     return
   let settings = readWorkspaceSettings(path)
-  if settings.isLegacySettings:
-    return
   result.present = true
   result.entry.name = "(root)"
   result.entry.path = "."
@@ -51329,9 +51452,9 @@ proc executeWorkspaceBranchRoles(parsed: WorkspaceBranchRolesArgs):
     var entry = BranchRolesEntry(name: repo.name, path: repo.path,
       profile: repo.profile, roles: pickRoles(repo.roles, parsed.role))
     if repo.roles.len == 0:
-      entry.diagnostic = "no mainline declared (" & repo.fragmentPath &
-        " is a repo.v1 fragment that pins only a revision), so no role " &
-        "resolves"
+      entry.diagnostic = "no roles declared: this workspace resolves from " &
+        "its committed lock (" & resolved.projectFile & "), which declares " &
+        "no branch roles"
     result.repos.add(entry)
 
 proc toJsonNode(r: ResolvedRole): JsonNode =
@@ -52121,10 +52244,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     report.exitCode = 0
     # On full success, record the converged branch in workspace metadata
     # so downstream commands read a coherent active branch (mirrors init).
-    let branchValue =
-      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
-      elif resolved.defaultRevision.len > 0: resolved.defaultRevision
-      else: ""
+    let branchValue = resolved.defaultWorkspaceBranch
     if branchValue.len > 0:
       try:
         writeWorkspaceBranch(args.workspaceRoot,
@@ -52675,7 +52795,7 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
   ##   1. The explicit ``--record-store-root`` flag (M16 callers,
   ##      multi-tier setups).
   ##   2. The first ``[[manifest]]`` layer in
-  ##      ``.repro/workspace.toml`` (composer mode). For ``local_path``
+  ##      ``.repro/workspace-state.toml`` (composer mode). For ``local_path``
   ##      layers the path is taken verbatim (relative to the
   ##      workspace root); for ``url`` layers it's the on-disk
   ##      checkout the composer materialised at
@@ -56074,7 +56194,7 @@ proc enclosingWorkspaceRoot*(startPath: string;
   ## repo to ITSELF and never reaches the workspace above it. The strict lock
   ## writer then refuses the directory it was handed —
   ##
-  ##   `repro workspace lock` requires either `.repro/workspace.toml` or a
+  ##   `repro workspace lock` requires either `.repro/workspace-state.toml` or a
   ##   <project> argument; neither was present at <repo>
   ##
   ## — and because post-commit is non-blocking by design that refusal is
@@ -56082,7 +56202,7 @@ proc enclosingWorkspaceRoot*(startPath: string;
   ## report naming the failure is filed under the REPO's own ``.repro/`` where
   ## nothing looks for it.
   ##
-  ## So the nearest ancestor carrying ``.repro/workspace.toml`` or a resolved
+  ## So the nearest ancestor carrying ``.repro/workspace-state.toml`` or a resolved
   ## manifest checkout wins. Only when there is no such ancestor does the
   ## manifest-optional marker (MO-2, a committed ``repro.lock``) decide, and
   ## then the nearest one wins — a standalone committed-lock repo really is its
@@ -56095,7 +56215,7 @@ proc enclosingWorkspaceRoot*(startPath: string;
   ## one carries ``projects/`` and so, taken alone, looks like "a resolved
   ## manifest checkout". Accepting it made a push of a declared layer resolve
   ## the layer as its own workspace, and the gate refused with the
-  ## "requires either `.repro/workspace.toml`" error instead of running the
+  ## "requires either `.repro/workspace-state.toml`" error instead of running the
   ## layer checks (the public-lock visibility stage) that exist for exactly
   ## that push. Such a candidate is skipped, so the walk reaches the
   ## workspace that owns the ``.repro/`` it sits in.
@@ -56151,7 +56271,7 @@ proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string 
 #   ``<workspace>/.repro/workspace/<verb>-report.json``
 #     -> ``<workspace>/.repro/build/reports/<verb>-report.json``
 #   "A report is derived output, so it belongs in the disposable
-#    ``.repro/build/`` tree rather than beside the ``.repro/workspace.toml``
+#    ``.repro/build/`` tree rather than beside the ``.repro/workspace-state.toml``
 #    marker."
 #
 # NOT TIDINESS. ``.repro/workspace/`` is where the DURABLE state lives — the
@@ -57615,7 +57735,7 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   # ``projects/``/``repos/`` and is not a workspace). We use the canonical
   # ``isInitializedWorkspace`` marker (resolved manifest checkout OR a
   # ``workspace.toml``) rather than a bare
-  # ``fileExists(.repro/workspace.toml)`` so a workspace that resolves
+  # ``fileExists(.repro/workspace-state.toml)`` so a workspace that resolves
   # from a single ``projects/*.toml`` (no metadata-only workspace.toml
   # yet) still runs, while a genuine non-workspace skips silently. A
   # commit must never be blocked by hook failure, so this always exits 0.
@@ -60506,6 +60626,83 @@ proc commitTimeConsistencyRefusalLines*(repoRoot: string;
     for line in renderConsistencyRefusal(outcome.inconsistencies):
       result.add(line)
 
+proc lockDiffersFromIndex(repoRoot, lockPath: string):
+    tuple[differs: bool; problem: string] =
+  ## Whether the TRACKED lock at ``lockPath`` carries working-tree changes the
+  ## repository's index does not have (``git diff --quiet``: exit 1). An
+  ## untracked lock is not in the content a certificate covers (Content-Id
+  ## §4.1 updates tracked paths only), so it never "differs" here.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    return (false, "git is not resolvable (" & err.msg & ")")
+  let env = scrubbedGitRepositoryEnv()
+  let prefix = quoteShell(identity.binaryPath) & " -C " & quoteShell(repoRoot)
+  try:
+    let tracked = execCmdEx(prefix & " ls-files --error-unmatch -- " &
+      quoteShell(lockPath), options = {poStdErrToStdOut, poUsePath}, env = env)
+    if tracked.exitCode != 0:
+      return (false, "")
+    let diff = execCmdEx(prefix & " diff --quiet -- " & quoteShell(lockPath),
+      options = {poStdErrToStdOut, poUsePath}, env = env)
+    case diff.exitCode
+    of 0: (false, "")
+    of 1: (true, "")
+    else: (false, "`git diff --quiet -- " & lockPath & "` failed (exit " &
+      $diff.exitCode & "): " & diff.output.strip())
+  except CatchableError as err:
+    (false, "`git diff -- " & lockPath & "` could not be run: " & err.msg)
+
+proc stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp: string;
+    hasReproLock, hasFlake: bool; outcome: var CommitTimeWritersOutcome) =
+  ## The lock-update node's last step (HL-10, Test-Certificates "It writes
+  ## the working tree and stages what it wrote"): a lock the writers did not
+  ## rewrite THIS run, because it is already current, but whose working-tree
+  ## state the index lacks is staged now. That is the lock an EARLIER run
+  ## rewrote and could not stage (its run withheld the certificate and said
+  ## `git add` it): without this step the next run finds nothing to write,
+  ## issues a certificate for a working tree whose refreshed lock a plain
+  ## `git commit` would still leave behind — exactly the "one tested file
+  ## the commit forgot" the staging rule exists to prevent. A lock that
+  ## cannot be staged is ``notStaged``, which withholds the certificate as
+  ## for a lock written this run. Nothing but the two managed locks is ever
+  ## staged. Never raises.
+  let label = commitTimeWriterLabel(ctwsLockUpdateNode)
+  var locks: seq[string]
+  if hasReproLock: locks.add(committedLockPath(repoRoot))
+  if hasFlake: locks.add(repoRoot / "flake.lock")
+  var written: seq[string]
+  for w in outcome.written:
+    written.add(os.normalizedPath(absolutePath(w)))
+  for lockPath in locks:
+    if os.normalizedPath(absolutePath(lockPath)) in written:
+      continue                      # staged (or reported) by its writer
+    let state = lockDiffersFromIndex(repoRoot, lockPath)
+    if state.problem.len > 0:
+      outcome.failures.add("lock-stage check: " & state.problem)
+      appendCommitTimeWriterLog(ctwsLockUpdateNode, workspaceRoot,
+        timestamp & " lock-stage check failed: " & state.problem)
+      continue
+    if not state.differs:
+      continue
+    let staged = stageRefreshedFlakeLock(repoRoot, lockPath,
+      useHookIndex = false)
+    var line = timestamp & " lock-stage " & lockPath &
+      " was current but not staged"
+    if staged.ok:
+      line.add("; staged")
+      stderr.writeLine(label & ": " & lockPath & " is current but was not " &
+        "staged (an earlier run refreshed it); staged it")
+    else:
+      line.add("; NOT STAGED: " & staged.diagnostic)
+      outcome.notStaged.add(lockPath & ": " & staged.diagnostic)
+      stderr.writeLine(label & ": " & lockPath & " is current but not " &
+        "staged, and could NOT be staged: " & staged.diagnostic)
+      stderr.writeLine(label & ": remedy: `git add " & lockPath &
+        "`, then run the tests again")
+    appendCommitTimeWriterLog(ctwsLockUpdateNode, workspaceRoot, line)
+
 proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
     workspaceRoot, repoRoot: string; toolProvisioning: ToolProvisioningMode;
     timestamp: string; allowance: PinRegressionAllowance;
@@ -60647,6 +60844,12 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
       hasReproLock and not refused:
     applyCertificatePolicySnapshot(site, workspaceRoot, repoRoot, timestamp,
       certificatePolicy, result)
+  # HL-10: a lock that is already current but was never staged (an earlier
+  # run rewrote it and could not stage it) is staged now, so the content a
+  # plain `git commit` records is the content the tests ran on.
+  if site == ctwsLockUpdateNode and not refused:
+    stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp,
+      hasReproLock, hasFlake, result)
   if not refused:
     # A repository moved in neither lock is a sibling left unrecorded; said
     # on both channels, like every other withheld pin.
@@ -61088,8 +61291,8 @@ proc runManifestRefreshHookCommand*(hookName: string;
     # initialised .repro): nothing to refresh. Log once so the operator
     # can correlate; never raise.
     appendManifestRefreshLog(timestamp & " " & hookName &
-      " skipped: no workspace state file (.repro/workspace-state.toml or " &
-      "the older .repro/workspace.toml) at " & workspaceRoot)
+      " skipped: no workspace state file (.repro/workspace-state.toml) at " &
+      workspaceRoot)
     reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
@@ -61701,8 +61904,9 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
 
 type
   ManifestLayerLocation* = object
-    ## One entry per ``[[manifest]]`` layer declared in
-    ## ``.repo/workspace.toml``. ``absPath`` is the on-disk directory
+    ## One entry per manifest layer the workspace composes — the root
+    ## repository's base layer, then the settings files' ``[[manifest]]``
+    ## layers. ``absPath`` is the on-disk directory
     ## that owns the layer's project files and (for the first layer)
     ## the lock files. ``visibility`` is the tier declared on the
     ## ``[[manifest]]`` entry. ``provenance`` is the URL or local-path
@@ -62318,402 +62522,35 @@ proc parseTomlStringArray(rhs: string): seq[string] =
 #
 # A received certificate may differ from canonical form in whitespace, key
 # order, table order, key quoting and string form while parsing to identical
-# values (Canonical-Payload §5), so the reader is a real (small) TOML parser
-# rather than a line matcher. It builds a tree first and maps the tree onto a
-# record second, so every way of spelling the same table — ``[certificate.vcs]``
-# or ``vcs = { … }`` inside ``[certificate]``; ``[[certificate.command]]`` or
+# values (Canonical-Payload §5), so the reader is a real TOML parser rather
+# than a line matcher. It builds a tree first and maps the tree onto a record
+# second, so every way of spelling the same table — ``[certificate.vcs]`` or
+# ``vcs = { … }`` inside ``[certificate]``; ``[[certificate.command]]`` or
 # ``command = [ { argv = … } ]``; a sub-table before its parent; quoted keys;
 # literal, multi-line and ``\uXXXX``-escaped strings; CRLF — reads alike.
 #
-# What it will NOT do is repair. A value it cannot represent canonically, a
-# key defined twice, a table header repeated, a known field of the wrong TOML
-# type: each makes the record malformed rather than something to normalise.
+# THE PARSER IS THE REFERENCE LIBRARY'S (``test_certificates/toml``), linked
+# rather than kept as a second copy: a strict TOML 1.0 reader (duplicate keys
+# and tables, malformed UTF-8, raw control characters, undefined escapes and
+# surrogate ``\u`` escapes are errors) that reads every physical newline in a
+# multi-line string as LF while leaving an ESCAPED ``\r`` alone, exactly as
+# Canonical-Payload §5 now requires (``payload/crlf-multiline``). reprobuild
+# kept its own until the library existed; the two had to be held to the same
+# vectors anyway, and one parser cannot disagree with itself. Why neither is
+# ``toml_serialization``: measured 2026-10-11, its ``TomlValueRef`` decoder
+# refuses ``[certificate]`` defined AFTER ``[certificate.signature]`` (``store/
+# signed-non-canonical``, ``payload/escapes/received.toml``) as a duplicate
+# table, and a verifier that cannot read a cosmetically reordered certificate
+# fails it against its own valid signature.
 #
-# Why not ``toml_serialization`` (vendored, and reachable here through
-# ``repro_workspace_manifests``): measured 2026-10-11, its ``TomlValueRef``
-# decoder refuses valid TOML the conformance suite requires a reader to accept
-# — ``store/signed-non-canonical`` and ``payload/escapes/received.toml`` define
-# ``[certificate]`` AFTER ``[certificate.signature]`` / ``[[certificate.command]]``
-# and are rejected as "duplicate table key not allowed: 'certificate'". A
-# verifier that cannot read a cosmetically reordered certificate fails it
-# against its own valid signature (Canonical-Payload §5). Re-test and switch if
-# the library is fixed; the record mapping below is independent of the parser.
-
-type
-  CertTomlKind = enum
-    ctkString, ctkBool, ctkArray, ctkTable, ctkOther
-
-  CertTomlNode = ref object
-    case kind: CertTomlKind
-    of ctkString:
-      str: string
-    of ctkBool:
-      flag: bool
-    of ctkArray:
-      items: seq[CertTomlNode]
-      ofTables: bool       ## created by ``[[header]]``; extendable by one
-    of ctkTable:
-      fields: Table[string, CertTomlNode]
-      defined: bool        ## an explicit ``[header]`` or a key/value made it
-      sealed: bool         ## an inline table: closed to every later addition
-    of ctkOther:
-      raw: string          ## a number, date or time — no certificate field
-                           ## is one, so it is kept only to be ignored
-
-proc newCertTomlTable(): CertTomlNode =
-  CertTomlNode(kind: ctkTable, fields: initTable[string, CertTomlNode]())
+# What the mapping below will NOT do is repair. A key defined twice, a known
+# field of the wrong TOML type, and — Standard §3.4 — ANY key or table the
+# schema does not define at its location (the root, ``[certificate]``, its
+# ``vcs``, each command entry, the signature block), empty tables included,
+# make the record malformed rather than something to normalise.
 
 proc certTomlFail(msg: string) {.noreturn.} =
   raise newException(TestCertificateParseError, msg)
-
-proc appendUtf8(dest: var string; codePoint: int) =
-  ## Encode one code point as UTF-8. Hand-rolled rather than pulled from
-  ## ``std/unicode`` so this module's import surface does not grow a
-  ## name-clashing dependency for four lines of arithmetic.
-  if codePoint < 0x80:
-    dest.add(chr(codePoint))
-  elif codePoint < 0x800:
-    dest.add(chr(0xC0 or (codePoint shr 6)))
-    dest.add(chr(0x80 or (codePoint and 0x3F)))
-  elif codePoint < 0x10000:
-    dest.add(chr(0xE0 or (codePoint shr 12)))
-    dest.add(chr(0x80 or ((codePoint shr 6) and 0x3F)))
-    dest.add(chr(0x80 or (codePoint and 0x3F)))
-  else:
-    dest.add(chr(0xF0 or (codePoint shr 18)))
-    dest.add(chr(0x80 or ((codePoint shr 12) and 0x3F)))
-    dest.add(chr(0x80 or ((codePoint shr 6) and 0x3F)))
-    dest.add(chr(0x80 or (codePoint and 0x3F)))
-
-proc hexDigitValue(ch: char): int =
-  case ch
-  of '0'..'9': ord(ch) - ord('0')
-  of 'a'..'f': ord(ch) - ord('a') + 10
-  of 'A'..'F': ord(ch) - ord('A') + 10
-  else: -1
-
-proc skipCertTomlBlanks(s: string; i: var int) =
-  ## Spaces and tabs only — never a newline, so a key with no value on its
-  ## own line cannot silently borrow the next line's.
-  while i < s.len and s[i] in {' ', '\t'}: inc i
-
-proc skipCertTomlTrivia(s: string; i: var int) =
-  ## Whitespace (including newlines) and comments.
-  while i < s.len:
-    case s[i]
-    of ' ', '\t', '\r', '\n': inc i
-    of '#':
-      while i < s.len and s[i] != '\n': inc i
-    else: return
-
-proc expectCertTomlLineEnd(s: string; i: var int; what: string) =
-  ## After a header or a key/value pair only blanks and a comment may follow
-  ## on the same line. ``a = "x" b = "y"`` is not two assignments.
-  skipCertTomlBlanks(s, i)
-  if i < s.len and s[i] == '#':
-    while i < s.len and s[i] != '\n': inc i
-  if i < s.len and s[i] == '\r' and i + 1 < s.len and s[i + 1] == '\n':
-    inc i
-  if i < s.len and s[i] != '\n':
-    certTomlFail("unexpected '" & $s[i] & "' after " & what)
-
-proc isRawControl(ch: char): bool =
-  ## TOML strings cannot carry a raw control character other than TAB.
-  (ord(ch) < 0x20 and ch != '\t') or ord(ch) == 0x7F
-
-proc parseCertTomlEscape(s: string; i: var int; dest: var string) =
-  ## One escape sequence; ``s[i]`` is the character after the backslash.
-  ## ``\uXXXX`` / ``\UXXXXXXXX`` are accepted on INPUT for interoperability
-  ## and never produced when re-serializing (Canonical-Payload §4).
-  if i >= s.len: certTomlFail("trailing backslash")
-  case s[i]
-  of '\\': dest.add('\\'); inc i
-  of '"': dest.add('"'); inc i
-  of 'n': dest.add('\n'); inc i
-  of 'r': dest.add('\r'); inc i
-  of 't': dest.add('\t'); inc i
-  of 'b': dest.add('\b'); inc i
-  of 'f': dest.add('\f'); inc i
-  of 'u', 'U':
-    let width = if s[i] == 'u': 4 else: 8
-    inc i
-    if i + width > s.len: certTomlFail("truncated unicode escape")
-    var codePoint = 0
-    for k in 0 ..< width:
-      let digit = hexDigitValue(s[i + k])
-      if digit < 0: certTomlFail("invalid unicode escape")
-      codePoint = codePoint * 16 + digit
-    if codePoint > 0x10FFFF or (codePoint >= 0xD800 and codePoint <= 0xDFFF):
-      certTomlFail("unicode escape names no Unicode scalar value")
-    i += width
-    appendUtf8(dest, codePoint)
-  else:
-    certTomlFail("unknown escape '\\" & $s[i] & "'")
-
-proc parseCertTomlString(s: string; i: var int): string =
-  ## One TOML string in any of its four forms. Escapes are processed in the
-  ## two basic forms only; a literal string keeps every character as written.
-  if i >= s.len: certTomlFail("expected a string")
-  let quote = s[i]
-  if quote notin {'"', '\''}:
-    certTomlFail("expected a quoted string, found '" & $s[i] & "'")
-  let multiLine = i + 2 < s.len and s[i + 1] == quote and s[i + 2] == quote
-  if multiLine:
-    i += 3
-    # A newline immediately after the opening delimiter is trimmed.
-    if i < s.len and s[i] == '\n': inc i
-    elif i + 1 < s.len and s[i] == '\r' and s[i + 1] == '\n': i += 2
-    result = newStringOfCap(32)
-    while true:
-      if i >= s.len: certTomlFail("unterminated multi-line string")
-      if s[i] == quote and i + 2 < s.len and s[i + 1] == quote and
-          s[i + 2] == quote:
-        # Up to two quotes may sit directly before the closing delimiter.
-        var run = 3
-        while i + run < s.len and s[i + run] == quote and run < 5: inc run
-        for _ in 0 ..< run - 3: result.add(quote)
-        i += run
-        return
-      let ch = s[i]
-      if quote == '"' and ch == '\\':
-        inc i
-        # A line-ending backslash trims the newline and the whitespace that
-        # follows it.
-        var j = i
-        while j < s.len and s[j] in {' ', '\t'}: inc j
-        if j < s.len and (s[j] == '\n' or
-            (s[j] == '\r' and j + 1 < s.len and s[j + 1] == '\n')):
-          i = j
-          while i < s.len and s[i] in {' ', '\t', '\r', '\n'}: inc i
-        else:
-          parseCertTomlEscape(s, i, result)
-        continue
-      if ch == '\r' and i + 1 < s.len and s[i + 1] == '\n':
-        result.add('\n')
-        i += 2
-        continue
-      if ch != '\n' and isRawControl(ch):
-        certTomlFail("raw control character in a string")
-      result.add(ch)
-      inc i
-  inc i
-  result = newStringOfCap(32)
-  while true:
-    if i >= s.len or s[i] == '\n':
-      certTomlFail("unterminated string")
-    let ch = s[i]
-    if ch == quote:
-      inc i
-      return
-    if quote == '"' and ch == '\\':
-      inc i
-      parseCertTomlEscape(s, i, result)
-      continue
-    if isRawControl(ch):
-      certTomlFail("raw control character in a string")
-    result.add(ch)
-    inc i
-
-proc parseCertTomlKey(s: string; i: var int): seq[string] =
-  ## A possibly dotted key: bare segments (``A-Za-z0-9_-``) or quoted ones,
-  ## with blanks allowed around each ``.``.
-  while true:
-    skipCertTomlBlanks(s, i)
-    if i >= s.len: certTomlFail("expected a key")
-    if s[i] in {'"', '\''}:
-      if i + 2 < s.len and s[i + 1] == s[i] and s[i + 2] == s[i]:
-        certTomlFail("a multi-line string cannot be a key")
-      result.add(parseCertTomlString(s, i))
-    else:
-      let start = i
-      while i < s.len and s[i] in {'A'..'Z', 'a'..'z', '0'..'9', '_', '-'}:
-        inc i
-      if i == start:
-        certTomlFail("expected a key, found '" & $s[i] & "'")
-      result.add(s[start ..< i])
-    skipCertTomlBlanks(s, i)
-    if i < s.len and s[i] == '.':
-      inc i
-      continue
-    return
-
-proc parseCertTomlValue(s: string; i: var int): CertTomlNode
-
-proc parseCertTomlArray(s: string; i: var int): CertTomlNode =
-  ## ``[ v, v, ]`` — newlines, comments and a trailing comma allowed.
-  inc i  # '['
-  result = CertTomlNode(kind: ctkArray)
-  while true:
-    skipCertTomlTrivia(s, i)
-    if i >= s.len: certTomlFail("unterminated array")
-    if s[i] == ']':
-      inc i
-      return
-    result.items.add(parseCertTomlValue(s, i))
-    skipCertTomlTrivia(s, i)
-    if i < s.len and s[i] == ',':
-      inc i
-    elif i < s.len and s[i] == ']':
-      inc i
-      return
-    else:
-      certTomlFail("expected ',' or ']' in an array")
-
-proc certTomlDescend(table: CertTomlNode; key: string;
-                     what: string): CertTomlNode =
-  ## The table ``key`` names inside ``table``, created implicitly when absent.
-  ## An array of tables yields its LAST element, as TOML specifies.
-  if table.sealed:
-    certTomlFail("'" & what & "' extends an inline table")
-  if key notin table.fields:
-    let created = newCertTomlTable()
-    table.fields[key] = created
-    return created
-  let node = table.fields[key]
-  case node.kind
-  of ctkTable:
-    if node.sealed:
-      certTomlFail("'" & what & "' extends an inline table")
-    node
-  of ctkArray:
-    if not node.ofTables or node.items.len == 0:
-      certTomlFail("'" & what & "' is not a table")
-    node.items[^1]
-  else:
-    certTomlFail("'" & what & "' is not a table")
-
-proc certTomlAssign(table: CertTomlNode; key: seq[string];
-                    value: CertTomlNode) =
-  var at = table
-  for k in 0 ..< key.high:
-    at = certTomlDescend(at, key[k], key[0 .. k].join("."))
-    at.defined = true
-  if at.sealed:
-    certTomlFail("'" & key.join(".") & "' extends an inline table")
-  if key[^1] in at.fields:
-    certTomlFail("key '" & key.join(".") & "' is defined twice")
-  at.fields[key[^1]] = value
-
-proc parseCertTomlInlineTable(s: string; i: var int): CertTomlNode =
-  ## ``{ k = v, k = v }`` — on one line, as TOML 1.0 requires; sealed once
-  ## parsed.
-  inc i  # '{'
-  result = newCertTomlTable()
-  result.defined = true
-  skipCertTomlBlanks(s, i)
-  if i < s.len and s[i] == '}':
-    inc i
-    result.sealed = true
-    return
-  while true:
-    let key = parseCertTomlKey(s, i)
-    if i >= s.len or s[i] != '=':
-      certTomlFail("expected '=' after key '" & key.join(".") & "'")
-    inc i
-    skipCertTomlBlanks(s, i)
-    certTomlAssign(result, key, parseCertTomlValue(s, i))
-    skipCertTomlBlanks(s, i)
-    if i < s.len and s[i] == ',':
-      inc i
-      continue
-    if i < s.len and s[i] == '}':
-      inc i
-      result.sealed = true
-      return
-    certTomlFail("expected ',' or '}' in an inline table")
-
-proc parseCertTomlValue(s: string; i: var int): CertTomlNode =
-  if i >= s.len: certTomlFail("missing value")
-  case s[i]
-  of '"', '\'':
-    CertTomlNode(kind: ctkString, str: parseCertTomlString(s, i))
-  of '[':
-    parseCertTomlArray(s, i)
-  of '{':
-    parseCertTomlInlineTable(s, i)
-  else:
-    let start = i
-    while i < s.len and s[i] notin {' ', '\t', '\r', '\n', ',', ']', '}', '#'}:
-      inc i
-    let word = s[start ..< i]
-    if word.len == 0:
-      certTomlFail("missing value")
-    case word
-    of "true": CertTomlNode(kind: ctkBool, flag: true)
-    of "false": CertTomlNode(kind: ctkBool, flag: false)
-    else:
-      # A number, date or time. TOML has them; no certificate field is one.
-      # Kept so an unknown key carrying one is ignored, and a KNOWN key
-      # carrying one is a type error below — never coerced to a string.
-      # Only the characters TOML numbers, dates and times are spelled with,
-      # starting as one of them does; ``inf`` / ``nan`` are the only words.
-      # Anything else is not TOML and is refused, not kept as a value.
-      let special = word in ["inf", "+inf", "-inf", "nan", "+nan", "-nan"]
-      if not special and (word[0] notin {'0'..'9', '+', '-'} or
-          not word.allCharsInSet({'0'..'9', 'A'..'Z', 'a'..'z', '+', '-',
-            '.', ':', '_'})):
-        certTomlFail("unexpected bare value '" & word & "'")
-      CertTomlNode(kind: ctkOther, raw: word)
-
-proc parseCertTomlDocument(content: string): CertTomlNode =
-  ## The whole document as a tree. Raises ``TestCertificateParseError``.
-  result = newCertTomlTable()
-  result.defined = true
-  var current = result
-  var i = 0
-  while true:
-    skipCertTomlTrivia(content, i)
-    if i >= content.len: break
-    if content[i] == '[':
-      let arrayOfTables = i + 1 < content.len and content[i + 1] == '['
-      i += (if arrayOfTables: 2 else: 1)
-      let key = parseCertTomlKey(content, i)
-      let closing = if arrayOfTables: "]]" else: "]"
-      if not content.continuesWith(closing, i):
-        certTomlFail("unterminated table header '" & key.join(".") & "'")
-      i += closing.len
-      expectCertTomlLineEnd(content, i, "table header")
-      var parent = result
-      for k in 0 ..< key.high:
-        parent = certTomlDescend(parent, key[k], key[0 .. k].join("."))
-      let name = key.join(".")
-      let last = key[^1]
-      if arrayOfTables:
-        if parent.sealed:
-          certTomlFail("'" & name & "' extends an inline table")
-        if last notin parent.fields:
-          parent.fields[last] = CertTomlNode(kind: ctkArray, ofTables: true)
-        let arr = parent.fields[last]
-        if arr.kind != ctkArray or not arr.ofTables:
-          certTomlFail("'" & name & "' is not an array of tables")
-        let element = newCertTomlTable()
-        element.defined = true
-        arr.items.add(element)
-        current = element
-      else:
-        if last in parent.fields:
-          let existing = parent.fields[last]
-          if existing.kind != ctkTable or existing.defined or existing.sealed:
-            certTomlFail("table '" & name & "' is defined twice")
-          existing.defined = true
-          current = existing
-        else:
-          if parent.sealed:
-            certTomlFail("'" & name & "' extends an inline table")
-          let created = newCertTomlTable()
-          created.defined = true
-          parent.fields[last] = created
-          current = created
-      continue
-    let key = parseCertTomlKey(content, i)
-    if i >= content.len or content[i] != '=':
-      certTomlFail("expected '=' after key '" & key.join(".") & "'")
-    inc i
-    skipCertTomlBlanks(content, i)
-    if i >= content.len or content[i] in {'\r', '\n', '#'}:
-      certTomlFail("missing value for key '" & key.join(".") & "'")
-    certTomlAssign(current, key, parseCertTomlValue(content, i))
-    expectCertTomlLineEnd(content, i, "the value of '" & key.join(".") & "'")
 
 type
   CertificateReadStatus* = enum
@@ -62759,47 +62596,74 @@ proc certificateStructuralDefect*(cert: TestCertificate): string =
 type
   CertificateFieldPresence = object
     ## What the tree carried that a ``TestCertificate`` cannot remember.
-    result, untracked, content: bool
+    schema, result, untracked, content: bool
     earlierDraftKeys: seq[string]   ## ``commit`` / ``clean`` / ``worktree``
+    unknownKeys: seq[string]
+      ## Every key or table the v1 schema does not define where it appears,
+      ## as a dotted path (Standard §3.4). Collected rather than raised so
+      ## that the CLASSIFICATIONS that outrank "malformed" — a retired or
+      ## unimplemented schema, an earlier-draft record that must be
+      ## re-issued — are still reported as what they are.
 
-proc certTomlString(table: CertTomlNode; key, path: string;
+const
+  certificateRootKeys = ["schema", "certificate"]
+  certificateTableKeys = ["framework", "project", "platform", "targets",
+    "result", "issued_at", "issuer", "key_id", "vcs", "command", "signature"]
+  certificateVcsKeys = ["repo", "paths", "content", "untracked", "base"]
+  certificateCommandKeys = ["argv"]
+  certificateSignatureKeys = ["algorithm", "value"]
+    ## Standard §3.1–§3.3 and §6: the ONLY keys each table may carry. A
+    ## record is closed to extensions (§3.4); a new field is a new schema.
+
+proc noteUnknownCertKeys(table: tctoml.TomlNode; allowed: openArray[string];
+                         prefix: string;
+                         presence: var CertificateFieldPresence) =
+  for key in table.keys:
+    if key notin allowed:
+      presence.unknownKeys.add(prefix & key)
+
+proc certTomlString(table: tctoml.TomlNode; key, path: string;
                     present: var bool): string =
   if table == nil or key notin table.fields: return ""
   let node = table.fields[key]
-  if node.kind != ctkString:
+  if node.kind != tctoml.tkString:
     certTomlFail("'" & path & "' must be a string")
   present = true
   node.str
 
-proc certTomlString(table: CertTomlNode; key, path: string): string =
+proc certTomlString(table: tctoml.TomlNode; key, path: string): string =
   var ignored = false
   certTomlString(table, key, path, ignored)
 
-proc certTomlStrings(table: CertTomlNode; key, path: string): seq[string] =
+proc certTomlStrings(table: tctoml.TomlNode; key, path: string): seq[string] =
   if table == nil or key notin table.fields: return @[]
   let node = table.fields[key]
-  if node.kind != ctkArray or node.ofTables:
+  if node.kind != tctoml.tkArray:
     certTomlFail("'" & path & "' must be an array of strings")
   for item in node.items:
-    if item.kind != ctkString:
+    if item.kind != tctoml.tkString:
       certTomlFail("'" & path & "' must be an array of strings")
     result.add(item.str)
 
-proc certTomlTable(table: CertTomlNode; key, path: string): CertTomlNode =
+proc certTomlTable(table: tctoml.TomlNode; key, path: string): tctoml.TomlNode =
   if table == nil or key notin table.fields: return nil
   let node = table.fields[key]
-  if node.kind != ctkTable:
+  if node.kind != tctoml.tkTable:
     certTomlFail("'" & path & "' must be a table")
   node
 
-proc certificateFromTomlTree(root: CertTomlNode;
+proc certificateFromTomlTree(root: tctoml.TomlNode;
     presence: var CertificateFieldPresence): TestCertificate =
-  ## Map the tree onto the record. Unknown keys are ignored (a later revision
-  ## may add optional fields); a KNOWN key of the wrong type is malformed.
-  result.schema = certTomlString(root, "schema", "schema")
+  ## Map the tree onto the record. A KNOWN key of the wrong type is
+  ## malformed at once; an UNKNOWN key or table is recorded in ``presence``
+  ## and rejected by ``readCertificateRecord`` once the record has been
+  ## classified.
+  noteUnknownCertKeys(root, certificateRootKeys, "", presence)
+  result.schema = certTomlString(root, "schema", "schema", presence.schema)
   let c = certTomlTable(root, "certificate", "certificate")
   if c == nil:
     return
+  noteUnknownCertKeys(c, certificateTableKeys, "certificate.", presence)
   result.framework = certTomlString(c, "framework", "certificate.framework")
   result.project = certTomlString(c, "project", "certificate.project")
   result.platform = certTomlString(c, "platform", "certificate.platform")
@@ -62816,16 +62680,17 @@ proc certificateFromTomlTree(root: CertTomlNode;
   result.keyId = certTomlString(c, "key_id", "certificate.key_id")
   let v = certTomlTable(c, "vcs", "certificate.vcs")
   if v != nil:
+    noteUnknownCertKeys(v, certificateVcsKeys, "certificate.vcs.", presence)
     result.vcs.repo = certTomlString(v, "repo", "certificate.vcs.repo")
     result.vcs.paths = certTomlStrings(v, "paths", "certificate.vcs.paths")
     result.vcs.content = certTomlString(v, "content",
       "certificate.vcs.content", presence.content)
     if "untracked" in v.fields:
       let node = v.fields["untracked"]
-      if node.kind != ctkBool:
+      if node.kind != tctoml.tkBool:
         certTomlFail("'certificate.vcs.untracked' must be a boolean")
       presence.untracked = true
-      result.vcs.untracked = node.flag
+      result.vcs.untracked = node.boolean
     var basePresent = false
     result.vcs.base = certTomlString(v, "base", "certificate.vcs.base",
       basePresent)
@@ -62838,15 +62703,21 @@ proc certificateFromTomlTree(root: CertTomlNode;
         presence.earlierDraftKeys.add(key)
   if "command" in c.fields:
     let commands = c.fields["command"]
-    if commands.kind != ctkArray:
+    if commands.kind != tctoml.tkArray:
       certTomlFail("'certificate.command' must be an array of tables")
     for entry in commands.items:
-      if entry.kind != ctkTable:
+      if entry.kind != tctoml.tkTable:
         certTomlFail("'certificate.command' must be an array of tables")
+      noteUnknownCertKeys(entry, certificateCommandKeys,
+        "certificate.command.", presence)
       result.commands.add(TestCertificateCommand(
         argv: certTomlStrings(entry, "argv", "certificate.command.argv")))
   let s = certTomlTable(c, "signature", "certificate.signature")
   if s != nil:
+    # Excluding the block from the payload does not exempt it from the
+    # schema (Canonical-Payload §5).
+    noteUnknownCertKeys(s, certificateSignatureKeys,
+      "certificate.signature.", presence)
     result.signature.algorithm = certTomlString(s, "algorithm",
       "certificate.signature.algorithm")
     result.signature.value = certTomlString(s, "value",
@@ -62874,18 +62745,37 @@ proc readCertificateRecord*(content: string): CertificateReadResult =
   ##   * ``crsUnknownSchema`` — a schema version this build does not
   ##     implement. It may be a perfectly good certificate this consumer
   ##     simply cannot read, so it is reported UNVERIFIABLE, not invalid.
-  ##   * ``crsMalformed`` — unparseable, missing a required v1 field, or
-  ##     carrying a value with no canonical form. The consumer asked the
-  ##     question and got an answer: not evidence.
+  ##   * ``crsMalformed`` — unparseable, missing a required v1 field,
+  ##     carrying a key or table the v1 schema does not define (Standard
+  ##     §3.4), or carrying a value with no canonical form. The consumer
+  ##     asked the question and got an answer: not evidence.
+  ##
+  ## The ORDER of the checks is part of the contract: a retired or
+  ## unimplemented schema, and then the earlier-draft shape, are recognised
+  ## BEFORE unknown keys are rejected. An earlier-draft record carries
+  ## ``vcs.commit`` and ``vcs.clean``, which the current schema does not
+  ## define, and reporting it as merely "unknown keys" would lose the
+  ## re-issue remedy its owner needs.
   var presence: CertificateFieldPresence
   try:
-    result.cert = certificateFromTomlTree(parseCertTomlDocument(content),
+    result.cert = certificateFromTomlTree(tctoml.parseToml(content),
       presence)
   except TestCertificateParseError as err:
     result.status = crsMalformed
     result.detail = err.msg
     return
+  except tctoml.TomlError as err:
+    result.status = crsMalformed
+    result.detail = "not valid TOML: " & err.msg
+    return
   result.schemaSeen = result.cert.schema
+  if not presence.schema:
+    # No ``schema`` at all is not "a schema this build does not implement":
+    # nothing claims to be a certificate of any version, so there is nothing
+    # a newer verifier could read either. Malformed, not unverifiable.
+    result.status = crsMalformed
+    result.detail = "certificate is missing a required field: schema"
+    return
   if result.cert.schema == retiredReprobuildCertificateSchema:
     result.status = crsRetiredSchema
     result.detail = "certificate uses the retired '" &
@@ -62908,6 +62798,14 @@ proc readCertificateRecord*(content: string): CertificateReadResult =
       "invalid and is not translated, because a content id derived from " &
       "its commit would sign a payload no run produced — run 'repro test' " &
       "/ 'repro certify' to re-issue it"
+    return
+  if presence.unknownKeys.len > 0:
+    result.status = crsMalformed
+    result.detail = "malformed: unknown key or table " &
+      presence.unknownKeys.mapIt("'" & it & "'").join(", ") &
+      ": a test-certificate.v1 record is closed to extensions " &
+      "(Standard §3.4), so it is rejected rather than read with the field " &
+      "dropped, which would name a claim different from the one received"
     return
   var defect = certificateStructuralDefect(result.cert)
   if defect.len == 0 and not presence.result: defect = "result"
@@ -63456,71 +63354,42 @@ proc parseRegisteredKeyStoreStrict*(content: string): RegisteredKeyStore =
   ## damaged configuration file that re-running tests cannot fix. The two
   ## answers have to stay apart (Verification §3.1), and they can only stay
   ## apart if the reader can say "I could not read this".
-  var i = 0
-  var table = ""
-  var cur: RegisteredKey
-  var inKey = false
-  template flush() =
-    if inKey and cur.keyId.len > 0:
+  ##
+  ## The document is read with the same strict TOML 1.0 reader certificates
+  ## are (the reference library's ``test_certificates/toml``): a duplicate
+  ## key, an unterminated string or header, or malformed UTF-8 is an error.
+  ## Every ``[[key]]`` entry's ``key_id``, ``public_key`` and ``status`` must
+  ## be strings; other keys are ignored, as they always were.
+  var doc: tctoml.TomlNode
+  try:
+    doc = tctoml.parseToml(content)
+  except tctoml.TomlError as err:
+    raise newException(ValueError, "registered-key store: " & err.msg)
+  if "key" notin doc.fields:
+    return
+  let entries = doc.fields["key"]
+  if entries.kind != tctoml.tkArray:
+    raise newException(ValueError,
+      "registered-key store: 'key' must be an array of tables ([[key]])")
+  for entry in entries.items:
+    if entry.kind != tctoml.tkTable:
+      raise newException(ValueError,
+        "registered-key store: 'key' must be an array of tables ([[key]])")
+    var cur = RegisteredKey(status: rksActive)
+    for key in ["key_id", "public_key", "status"]:
+      if key notin entry.fields:
+        continue
+      let node = entry.fields[key]
+      if node.kind != tctoml.tkString:
+        raise newException(ValueError,
+          "registered-key store: '" & key & "' must be a string")
+      case key
+      of "key_id": cur.keyId = node.str
+      of "public_key": cur.publicKey = node.str
+      else:
+        cur.status = if node.str == $rksRevoked: rksRevoked else: rksActive
+    if cur.keyId.len > 0:
       result.keys.add(cur)
-    cur = RegisteredKey(status: rksActive)
-    inKey = false
-  while true:
-    skipCertTomlTrivia(content, i)
-    if i >= content.len: break
-    if content[i] == '[':
-      var doubled = false
-      inc i
-      if i < content.len and content[i] == '[':
-        doubled = true
-        inc i
-      let start = i
-      while i < content.len and content[i] != ']': inc i
-      if i >= content.len:
-        raise newException(ValueError,
-          "registered-key store: unterminated table header")
-      table = content[start ..< i].strip()
-      inc i
-      if doubled:
-        if i >= content.len or content[i] != ']':
-          raise newException(ValueError,
-            "registered-key store: unterminated array-of-tables header")
-        inc i
-        if table == "key":
-          flush()
-          inKey = true
-      continue
-    let keyStart = i
-    while i < content.len and content[i] notin {'=', ' ', '\t', '\r', '\n'}:
-      inc i
-    let key = content[keyStart ..< i]
-    if key.len == 0:
-      raise newException(ValueError,
-        "registered-key store: expected a key at offset " & $keyStart)
-    skipCertTomlBlanks(content, i)
-    if i >= content.len or content[i] != '=':
-      raise newException(ValueError,
-        "registered-key store: expected '=' after key '" & key & "'")
-    inc i
-    skipCertTomlBlanks(content, i)
-    if i >= content.len:
-      raise newException(ValueError,
-        "registered-key store: missing value for key '" & key & "'")
-    let value =
-      try:
-        parseCertTomlString(content, i)
-      except TestCertificateParseError as err:
-        raise newException(ValueError,
-          "registered-key store: " & err.msg & " (key '" & key & "')")
-    if not inKey:
-      continue
-    case key
-    of "key_id": cur.keyId = value
-    of "public_key": cur.publicKey = value
-    of "status":
-      cur.status = if value == $rksRevoked: rksRevoked else: rksActive
-    else: discard
-  flush()
 
 type
   KeyStoreAvailability* = enum
@@ -64404,15 +64273,47 @@ type
       ## Reported, never silently dropped: an unreadable root, directory or
       ## file, a record filed under another content, a root that could not
       ## be resolved, a state whose content id could not be computed.
+    notSearched*: seq[string]
+      ## The roots the search could NOT cover, each with why: unresolved
+      ## (Transport §2.1 — no usable absolute value) or unreadable on the way
+      ## to or at the content directory. Non-empty makes the search
+      ## INCOMPLETE (``searchIncomplete``): an empty result then does not
+      ## mean "none found", only "none found where it could look" — the
+      ## distinction Tooling §2's ``find`` draws between exit 3 and exit 1.
     userRootUnreadable*: bool
       ## The user root exists and could not be read: the search could not
       ## look where reprobuild itself delivers.
     searchFailed*: bool
-      ## The search could not look: the state's content id could not be
-      ## computed, or the user root could not be read. A consumer that finds
-      ## no coverage then reports UNVERIFIABLE, not "run the tests"
-      ## (Verification §7). A state that HAS no content id is not this: no
-      ## certificate can describe it, which is simply not covered.
+      ## The search could not look everywhere it must: the state's content
+      ## id could not be computed, or a root (the system root included) was
+      ## unresolved or unreadable. A consumer that finds no coverage then
+      ## reports UNVERIFIABLE, not "run the tests" (Verification §7). A state
+      ## that HAS no content id is not this: no certificate can describe it,
+      ## which is simply not covered.
+
+proc searchIncomplete*(lookup: LocalStoreLookup): bool =
+  ## Some root could not be searched (``notSearched``), so an empty result is
+  ## not a completed empty search.
+  lookup.notSearched.len > 0
+
+proc describeLocalStoreSearch*(lookup: LocalStoreLookup): string =
+  ## How a gate states what the store search established when it found no
+  ## candidate — "search incomplete" and "none found" are different findings
+  ## with different remedies, and are never worded alike.
+  if lookup.contentIds.len == 0:
+    return ""
+  if lookup.searchIncomplete:
+    "local certificate store search INCOMPLETE: " &
+      lookup.notSearched.join("; ") &
+      " — no certificate was found under " & lookup.contentIds.join(", ") &
+      " in what could be searched" &
+      (if lookup.searched.len > 0: " (" & lookup.searched.join(", ") & ")"
+       else: "") &
+      ", which does not establish that none exists"
+  else:
+    "no certificate found in the local store under " &
+      lookup.contentIds.join(", ") & "; searched " &
+      lookup.searched.join(", ")
 
 proc certificates*(lookup: LocalStoreLookup): seq[TestCertificate] =
   ## The candidates that read as ``test-certificate.v1`` records.
@@ -64461,6 +64362,12 @@ proc findCertificatesInLocalStore*(state: CertificateState;
   ## ``v1/<algorithm>/<digest>/`` for the state's content id in BOTH roots and
   ## read every record there. Nothing is decided about the records here; the
   ## caller evaluates them.
+  ##
+  ## Completeness (Transport §2.1, §5; Tooling §2): an UNRESOLVED root
+  ## contributes no candidates and the other root is still searched, and an
+  ## unreadable root likewise; either makes the search incomplete
+  ## (``notSearched``, ``searchFailed``) instead of reading as an empty
+  ## store. The system root counts as much as the user root.
   for p in roots.problems:
     result.problems.add("local certificate store: " & p)
   let (ids, idProblems, idFailed) = localStoreContentIds(state)
@@ -64468,17 +64375,28 @@ proc findCertificatesInLocalStore*(state: CertificateState;
   result.searchFailed = idFailed
   for p in idProblems:
     result.problems.add(p)
+  var dirs: seq[tuple[id, relative: string]]
   for id in ids:
     let dir = storeContentDir(id)
     if not dir.ok:
       result.problems.add(dir.problem)
       continue
-    var seen: seq[string]
+    dirs.add((id, dir.relative))
+  if dirs.len == 0:
+    return
+  for (label, root) in [("user", roots.user), ("system", roots.system)]:
+    if root.len == 0:
+      result.notSearched.add("the " & label & " root is unresolved" &
+        (if roots.problems.len > 0: " (" & roots.problems.join("; ") & ")"
+         else: ""))
+      result.searchFailed = true
+  var seen: seq[string]
+  for (id, relative) in dirs:
     for (label, root) in [("user", roots.user), ("system", roots.system)]:
       if root.len == 0:
         continue
-      let listing = listStoreContentDir(root, dir.relative)
-      result.searched.add(root / dir.relative.replace('/', DirSep))
+      let listing = listStoreContentDir(root, relative)
+      result.searched.add(root / relative.replace('/', DirSep))
       case listing.status
       of slsAbsent:
         discard
@@ -64486,10 +64404,15 @@ proc findCertificatesInLocalStore*(state: CertificateState;
         result.problems.add("the local certificate store's " & label &
           " root '" & root & "' could not be read (" &
           listing.problems.join("; ") & ")" &
-          (if label == "user": "" else: "; the user root was still searched"))
+          (if label == "user": "; the system root was still searched"
+           else: "; the user root was still searched"))
+        let unread = "the " & label & " root '" & root &
+          "' could not be read"
+        if unread notin result.notSearched:
+          result.notSearched.add(unread)
+        result.searchFailed = true
         if label == "user":
           result.userRootUnreadable = true
-          result.searchFailed = true
         continue
       of slsListed:
         discard
@@ -64584,14 +64507,46 @@ proc headContentDir*(repository: string): string =
   let dir = storeContentDir(head.id)
   if dir.ok: dir.relative else: ""
 
+proc headPruneProtection*(repository: string):
+    tuple[ok: bool; dirs: seq[string]; problem: string] =
+  ## The store directories a prune of a root must keep for ``repository``
+  ## (Transport §2.5): ``HEAD``'s content in the repository's native
+  ## ``git-tree-*`` algorithm AND ``manifest-v1-sha256``, unscoped and in
+  ## every scope the repository DECLARES (Tooling §3.1,
+  ## ``[testCertificatesScope "<name>"] path = …``), all from one frozen
+  ## ``HEAD`` tree — computed by the reference library's ``pruneProtection``.
+  ##
+  ## ``ok`` with no ``dirs``: there is nothing to protect — no repository
+  ## (``repository`` is "" or not inside one) or an unborn branch. ``ok =
+  ## false``: ``HEAD`` exists and one of its ids could not be computed, or
+  ## the scope declaration is invalid; the caller MUST then not prune at all
+  ## — not even the leftovers of an interrupted prune — since pruning
+  ## without that protection could delete the certificates of the very
+  ## content checked out.
+  if repository.len == 0:
+    return (true, @[], "")
+  let protection = tcscopes.pruneProtection(repository)
+  if not protection.ok:
+    return (false, @[], protection.problem)
+  result.ok = true
+  for id in protection.ids:
+    let dir = storeContentDir(id)
+    if not dir.ok:
+      return (false, @[], "HEAD content id '" & id & "' names no store " &
+        "directory: " & dir.problem)
+    if dir.relative notin result.dirs:
+      result.dirs.add(dir.relative)
+
 proc publishCertificateToLocalStore*(cert: TestCertificate;
     repository: string; roots = nativeCertificateStoreRoots();
     keep = -1; signatureMade = false): LocalStorePublishOutcome =
   ## Deliver one issued certificate to the USER root and prune that root
   ## (Transport §2.3, §2.5). ``repository`` is the checkout the tests ran in:
   ## the root must not lie inside it (a certificate never belongs in the
-  ## working tree it attests), and its ``HEAD^{tree}`` directory survives the
-  ## prune. ``keep < 0`` reads the user-level retention setting.
+  ## working tree it attests), and its ``HEAD`` content directories — every
+  ## id ``headPruneProtection`` computes, declared scopes included — survive
+  ## the prune, which does not run at all when they cannot be computed.
+  ## ``keep < 0`` reads the user-level retention setting.
   if roots.user.len == 0:
     result.error = "the local certificate store's user root could not be " &
       "resolved" &
@@ -64625,10 +64580,19 @@ proc publishCertificateToLocalStore*(cert: TestCertificate;
       proc(name: string): string = getEnv(name))
     count = setting.keep
     result.retentionProblem = setting.problem
+  let protection = headPruneProtection(repository)
+  if not protection.ok:
+    # Transport §2.5: a failure computing a required id for an existing
+    # HEAD aborts pruning before anything is removed. The certificate was
+    # still delivered; only the bounding of the store waits for a run that
+    # can compute what to keep.
+    result.pruned.errors.add("the local certificate store was not pruned: " &
+      protection.problem)
+    return
   var protected = @[relative[0 ..< relative.rfind('/')]]
-  let head = headContentDir(repository)
-  if head.len > 0:
-    protected.add(head)
+  for dir in protection.dirs:
+    if dir notin protected:
+      protected.add(dir)
   result.pruned = pruneStoreRoot(roots.user, count, protected)
 
 # ---- one three-valued verdict for every consumer ---------------------------
@@ -64989,7 +64953,7 @@ const
     ## reference tool and ``ct test`` (D10). Notes are NOT pushed/fetched by
     ## default; the push path pushes this ref explicitly and verifiers fetch
     ## it.
-  certificateNoteDelimiter* = "# --- test-certificate ---"
+  certificateNoteDelimiter* = tcnotes.NoteDelimiter
     ## The line that PRECEDES every record in a note (Transport §3.1). A
     ## line, not a substring: a value holding the text with escaped newlines
     ## around it is part of its record.
@@ -65082,7 +65046,10 @@ type
       ## some other way, or not framed at all. Never parsed as a record, even
       ## when it would parse.
     text*: string
-      ## The piece's exact bytes, without the delimiter line before it.
+      ## The piece's exact bytes, without the delimiter line before it. An
+      ## exact delimiter line at the very end of the blob, without its LF,
+      ## is still a delimiter line, and the piece after it is EMPTY: it is
+      ## yielded, reported and skipped like any piece that does not parse.
 
   CertificateNoteEntry* = object
     ## What a reader yields for one piece, in blob order.
@@ -65092,34 +65059,25 @@ type
       ## is never parsed: it reads ``crsMalformed`` with ``detail`` saying
       ## why it was skipped.
 
+# THE FRAMING IS THE REFERENCE LIBRARY'S (``test_certificates/note_framing``):
+# splitting on whole delimiter lines (a final line without LF is a line too),
+# the relay writer rule, the LF repair an append makes after an unterminated
+# piece, and the two-note union merge. What stays here is reprobuild's glue:
+# READING each piece through ``readCertificateRecord``, whose classification
+# (retired schema, earlier draft, unimplemented schema, malformed) the
+# library deliberately does not make, and the SIGNING-writer replacement,
+# which the library — a relay by definition (Tooling §1) — has no use for.
+
 proc splitCertificateNote*(note: string): seq[CertificateNotePiece] =
   ## Split a note blob on lines EQUAL to ``certificateNoteDelimiter`` — never
-  ## on occurrences of its text. Lines end at LF and a CR belongs to its line,
-  ## so a blob written with CRLF line endings has no delimiter line and all of
-  ## it is one leading piece. The empty piece before the first delimiter of a
-  ## conforming note is dropped; a non-empty one is returned with ``leading``.
-  var pieceStart = 0
-  var sawDelimiter = false
-  var lineStart = 0
-  template closePiece(pieceEnd: int) =
-    if sawDelimiter:
-      result.add(CertificateNotePiece(leading: false,
-        text: note[pieceStart ..< pieceEnd]))
-    elif pieceEnd > 0:
-      result.add(CertificateNotePiece(leading: true,
-        text: note[0 ..< pieceEnd]))
-  while lineStart < note.len:
-    var lineEnd = note.find('\n', lineStart)
-    let nextLine = if lineEnd < 0: note.len else: lineEnd + 1
-    if lineEnd < 0: lineEnd = note.len
-    if lineEnd < note.len and lineEnd - lineStart ==
-        certificateNoteDelimiter.len and
-        note.continuesWith(certificateNoteDelimiter, lineStart):
-      closePiece(lineStart)
-      sawDelimiter = true
-      pieceStart = nextLine
-    lineStart = nextLine
-  closePiece(note.len)
+  ## on occurrences of its text. Lines end at LF, a final line without one is
+  ## a line too, and a CR belongs to its line, so a blob written with CRLF
+  ## line endings has no delimiter line and all of it is one leading piece.
+  ## The empty piece before the first delimiter of a conforming note is
+  ## dropped; a non-empty one is returned with ``leading``.
+  for p in tcnotes.splitNote(note):
+    result.add(CertificateNotePiece(leading: p.kind == tcnotes.pkLeading,
+      text: p.body))
 
 proc describeLeadingNoteText(text: string): string =
   var firstLine = text
@@ -65145,6 +65103,12 @@ proc readCertificateNote*(note: string): seq[CertificateNoteEntry] =
       result.add(CertificateNoteEntry(piece: piece,
         read: CertificateReadResult(status: crsMalformed,
           detail: describeLeadingNoteText(piece.text))))
+    elif piece.text.len == 0:
+      result.add(CertificateNoteEntry(piece: piece,
+        read: CertificateReadResult(status: crsMalformed,
+          detail: "an empty piece after a delimiter line (a delimiter at " &
+            "the end of the note, or two in a row) holds no record and was " &
+            "skipped (Transport §3.1)")))
     else:
       result.add(CertificateNoteEntry(piece: piece,
         read: readCertificateRecord(piece.text)))
@@ -65154,49 +65118,103 @@ proc addCertificateToNote*(note: string; cert: TestCertificate;
     tuple[note: string; changed: bool] =
   ## Add ``cert`` to a note blob as Transport §3.1 requires a writer to:
   ##
-  ##   * a piece whose payload — rebuilt from its parsed fields — equals
-  ##     ``cert``'s is the same claim. A signed relay upgrades an unsigned
-  ##     piece and preserves a signed one. Only ``signatureMade = true``
-  ##     permits replacing a signed piece; an unsigned copy never replaces;
+  ##   * a parsed record whose canonical payload equals ``cert``'s is the
+  ##     same claim, and no second copy is ever added;
+  ##   * as a RELAY (the default): a signed copy replaces the first unsigned
+  ##     record with that payload, but only when no signed copy is present
+  ##     anywhere — a relay cannot tell a valid signature from an invalid
+  ##     one, so it keeps the first signed copy; an unsigned copy never
+  ##     replaces anything;
+  ##   * as the SIGNING writer (``signatureMade``: this caller just made the
+  ##     signature, so it knows it verifies): a signed copy replaces the FIRST
+  ##     matching record, signed or not;
   ##   * otherwise the record goes after the last piece, behind its own
-  ##     delimiter line;
-  ##   * every other piece — a record not touched, one that does not parse,
-  ##     text before the first delimiter — is kept byte for byte.
+  ##     delimiter line — after exactly one LF is added if the blob does not
+  ##     end in one (an unterminated record, corrupt piece, foreign text or a
+  ##     delimiter at EOF), the only change §3.1 permits to existing bytes;
+  ##   * every other piece is kept byte for byte, and a note that is not
+  ##     appended to gets no LF repair.
   ##
-  ## When several pieces carry the payload (a note no conforming writer
-  ## produced; the standard leaves which one a signed write replaces open)
-  ## the FIRST is replaced and the rest are kept.
-  let payload = canonicalCertificatePayload(cert)
+  ## Raises ``CertificateSerializationError`` when ``cert`` has no canonical
+  ## record form.
   let record = certificateNoteRecord(cert)
-  let pieces = splitCertificateNote(note)
-  var match = -1
-  var existingSigned = false
-  for i, piece in pieces:
-    if piece.leading: continue
-    let read = readCertificateRecord(piece.text)
-    if read.status == crsOk and
-        canonicalCertificatePayload(read.cert) == payload:
-      if match < 0: match = i
-      existingSigned = existingSigned or read.cert.isSigned
-  if match >= 0 and (not cert.isSigned or
-      (not signatureMade and existingSigned)):
+  let incoming = tcnotes.recordPiece(record)
+  if incoming.kind != tcnotes.pkRecord:
+    raise newException(CertificateSerializationError,
+      "the certificate's note record does not read back as a " &
+      "test-certificate.v1 record: " & incoming.problem)
+  var pieces = tcnotes.splitNote(note)
+  if signatureMade and cert.isSigned:
+    for i, piece in pieces:
+      if piece.kind == tcnotes.pkRecord and
+          piece.payloadSha256 == incoming.payloadSha256:
+        if piece.body == incoming.body:
+          return (note, false)
+        # The replacement ends in LF (canonical records do), so a delimiter
+        # after it stays on its own line.
+        pieces[i] = incoming
+        let updated = tcnotes.renderNote(pieces)
+        return (updated, updated != note)
+  let outcome = tcnotes.addRecord(pieces, incoming)
+  if outcome == tcnotes.aoPresent:
     return (note, false)
-  if match < 0:
-    var updated = note
-    if updated.len > 0 and not updated.endsWith("\n"):
-      # A delimiter is a whole line; a final piece without its LF would
-      # swallow it.
-      updated.add("\n")
-    updated.add(certificateNoteDelimiter & "\n" & record)
-    return (updated, true)
-  var updated = ""
-  for i, piece in pieces:
-    if piece.leading:
-      updated.add(piece.text)
-    else:
-      updated.add(certificateNoteDelimiter & "\n")
-      updated.add(if i == match: record else: piece.text)
+  let updated = tcnotes.renderNote(pieces)
   (updated, updated != note)
+
+type
+  NoteMergeReportKind* = enum
+    ## The report categories Transport §3.1 requires of a merge (the
+    ## ``expected.json`` categories of the ``notes/merge-*`` vectors).
+    nmrSignedConflict = "signed-conflict"
+      ## Both sides carry differently signed copies of one payload; the
+      ## published (base) copy was kept.
+    nmrLeadingJoined = "leading-joined"
+      ## Both sides carry different text before the first delimiter; the
+      ## incoming block was joined after the published one.
+    nmrLfRepair = "lf-repair"
+      ## One LF was supplied so that a following delimiter stays on its own
+      ## line (an append after an unterminated piece, an inserted leading
+      ## block or a replacement before a delimiter).
+    nmrOther = "other"
+      ## A remark the pinned library makes that maps to none of the above.
+
+  NoteMergeReport* = object
+    kind*: NoteMergeReportKind
+    message*: string
+
+  CertificateNoteMerge* = object
+    ## The union of two note blobs for the same object.
+    note*: string          ## the merged blob
+    changed*: bool         ## ``note`` differs from the published blob
+    added*: int            ## pieces of the incoming blob appended
+    replaced*: int         ## unsigned published records replaced in place
+    reports*: seq[NoteMergeReport]
+
+proc noteMergeReportKind*(remark: string): NoteMergeReportKind =
+  ## The §3.1 category of one of the library's merge remarks. Matched on the
+  ## remark's wording, which the PINNED library fixes; the conformance walker
+  ## asserts every ``merge-*`` vector's categories through this function, so
+  ## a library bump that rewords a remark fails there instead of silently
+  ## dropping a report.
+  if "published copy was kept" in remark: nmrSignedConflict
+  elif "text before the first delimiter" in remark: nmrLeadingJoined
+  elif "LF" in remark: nmrLfRepair
+  else: nmrOther
+
+proc mergeCertificateNotes*(published, incoming: string): CertificateNoteMerge =
+  ## Transport §3.1 "Merging two notes": ``published`` (the already
+  ## published side, the merge's base) with every piece of ``incoming`` it
+  ## lacks, in incoming order. Deterministic for the ordered inputs; neither
+  ## side is a signing writer, so a signed copy upgrades an unsigned one but
+  ## never replaces a signed one (that tie is reported). Repeating the merge
+  ## with the same ``incoming`` changes nothing. The merge itself is the
+  ## reference library's ``mergeNotes``; this adds the report categories.
+  let merged = tcnotes.mergeNotes(published, incoming)
+  result = CertificateNoteMerge(note: merged.blob, changed: merged.changed,
+    added: merged.added, replaced: merged.replaced)
+  for remark in merged.remarks:
+    result.reports.add(NoteMergeReport(kind: noteMergeReportKind(remark),
+      message: remark))
 
 proc certificateNoteKey*(content: string): tuple[ok: bool; oid, problem: string] =
   ## The object a certificate's note is attached to: the tree its content id
@@ -65539,25 +65557,55 @@ proc readAttachedCertificates*(gitBin, repoPath, commit: string):
   readAttachedCertificatesFromRef(gitBin, repoPath, commit, certificateNotesRef)
 
 proc pushCertificateNotes*(gitBin, repoPath, remote: string):
-    tuple[ok: bool; pushed: bool; diagnostic: string] =
+    tuple[ok: bool; pushed: bool; diagnostic: string; remarks: seq[string]] =
   ## Carry the certificate notes ref to ``remote`` (TC-2: the push path pushes
   ## ``certificateNotesRef`` explicitly, since notes are not pushed by
-  ## default). Every noted certificate travels in the single ref. ``pushed=false`` with ``ok=true`` means there were no
-  ## certificate notes to carry (benign — nothing attached).
+  ## default). Every noted certificate travels in the single ref.
+  ## ``pushed=false`` with ``ok=true`` means there were no certificate notes
+  ## to carry (benign — nothing attached).
+  ##
+  ## The push is the reference library's ``pushNotes`` (Tooling §3 ``notes
+  ## push``): when the remote ref has moved, it fetches it, merges the two
+  ## sides as a UNION (Transport §3.1 — never one side's, the published side
+  ## as the base) and retries with backoff, instead of failing on the first
+  ## non-fast-forward the way a bare ``git push`` did. What the merges
+  ## decided — a signed tie kept, leading text joined, an LF supplied after
+  ## an unterminated piece — comes back in ``remarks``. Hooks run as for any
+  ## push the user asked for (``repro push`` is not itself a hook).
+  ##
+  ## Every git command, the library's included (``PushOptions.gitExe``),
+  ## runs ``gitBin``: the git this push resolved, never another one that
+  ## happens to be first on ``PATH``.
   let probe = gitNoteRun(gitBin,
     ["-C", repoPath, "rev-parse", "--verify", "--quiet",
      certificateNotesRef])
+  if probe.code == 1:
+    # `--verify --quiet` exits 1 exactly when the ref does not exist locally
+    # → nothing attached, nothing to push.
+    return (ok: true, pushed: false, diagnostic: "no certificate notes",
+      remarks: newSeq[string]())
   if probe.code != 0:
-    # The notes ref does not exist locally → nothing attached, nothing to push.
-    return (ok: true, pushed: false, diagnostic: "no certificate notes")
-  let res = gitNoteRun(gitBin,
-    ["-C", repoPath, "push", remote,
-     certificateNotesRef & ":" & certificateNotesRef])
-  if res.code != 0:
+    # Any other status is git failing to answer (not runnable, not a
+    # repository): that is not "nothing to push", and saying so would let a
+    # broken git hide every certificate this push should have carried.
+    return (ok: false, pushed: false, diagnostic: "could not read " &
+      certificateNotesRef & " with '" & gitBin & "' (exit " &
+      $probe.code & "): " & probe.output.strip(),
+      remarks: newSeq[string]())
+  var options = tcnotesref.defaultPushOptions()
+  options.gitExe = gitBin
+  let sync = tcnotesref.pushNotes(repoPath, remote, certificateNotesRef,
+    options)
+  if not sync.ok:
     return (ok: false, pushed: false,
       diagnostic: "git push " & certificateNotesRef & " failed: " &
-        res.output.strip())
-  (ok: true, pushed: true, diagnostic: "")
+        sync.problems.join("; "), remarks: sync.remarks)
+  case sync.outcome
+  of tcnotesref.soNoLocalNotes:
+    (ok: true, pushed: false, diagnostic: "no certificate notes",
+     remarks: sync.remarks)
+  else:
+    (ok: true, pushed: true, diagnostic: "", remarks: sync.remarks)
 
 type
   PushedRefJudgement* = object
@@ -65695,11 +65743,11 @@ proc certificateGate(report: var CheckReport;
     let verdict = evaluateRequirementCoverage(lookup.found, evaluated,
       requirement.requires, keys, lockSource,
       (if lookup.searchFailed: lookup.problems else: @[]))
+    # "Search incomplete" and "none found" are different findings: the
+    # first does not establish absence (Tooling §2, find exit 3 vs 1).
     let searched =
       if lookup.found.len == 0 and lookup.contentIds.len > 0:
-        " (no certificate found in the local store under " &
-          lookup.contentIds.join(", ") & "; searched " &
-          lookup.searched.join(", ") & ")"
+        " (" & describeLocalStoreSearch(lookup) & ")"
       else: ""
     case verdict.outcome
     of voCovered:
@@ -65731,7 +65779,7 @@ proc certificateGate(report: var CheckReport;
       # Under ``required`` the push is still refused, but the diagnostic
       # names WHY the certificates could not be judged — re-running tests
       # changes nothing.
-      let detail = describeCoverageVerdict(verdict)
+      let detail = describeCoverageVerdict(verdict) & searched
       if requirement.mode == cgmAdvisory:
         report.notices.add("certificate advisory: coverage UNVERIFIABLE — " &
           detail & " (" & applied & "; advisory mode does not block this " &
@@ -66033,14 +66081,15 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     stderr.writeLine(prefix & "coverage of the content being committed (" &
       content & ") could not be established: " &
       describeCoverageVerdict(verdict))
+    if lookup.found.len == 0 and lookup.searchIncomplete:
+      stderr.writeLine(prefix & describeLocalStoreSearch(lookup))
     stderr.writeLine(prefix & "fix what is named (an unreadable key store " &
       "or certificate store, an algorithm this reprobuild cannot compute); " &
       "re-running the tests changes nothing")
   else:
     let searched =
-      if lookup.found.len == 0 and lookup.searched.len > 0:
-        " (no certificate in the local store; searched " &
-          lookup.searched.join(", ") & ")"
+      if lookup.found.len == 0 and lookup.contentIds.len > 0:
+        " (" & describeLocalStoreSearch(lookup) & ")"
       else: ""
     stderr.writeLine(prefix & "no trusted certificate covers the content " &
       "being committed (" & content & "): " &
@@ -67632,8 +67681,8 @@ const
 
 proc workspaceDeclaresGatewayOff(workspaceRoot: string): bool =
   ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` at the top level of
-  ## the workspace settings file (``repro-workspace.toml``, or the old
-  ## ``.repro-workspace.toml``), read through the typed settings reader — the
+  ## the workspace settings file (``repro-workspace.toml``), read through the
+  ## typed settings reader — the
   ## one source of truth for that file, which also refuses any value §7.4
   ## does not define, naming the file and the key.
   ##
@@ -68515,10 +68564,11 @@ proc looksLikeCommitOid(value: string): bool =
 
 proc declaredMainlineBranch(resolved: ResolvedProject;
     repoName: string): string =
-  ## The branch the MANIFEST declares this repo's mainline to be: the repo
-  ## fragment's ``branch``, else its ``revision`` when that names a branch
-  ## rather than a pin, else the declared workspace default (explicit project
-  ## trunk, otherwise the root's mainline). Returns "" when the
+  ## The branch the MANIFEST declares this repo's mainline to be: the repo's
+  ## resolved ``mainline`` (a fragment always resolves one), else — for a repo
+  ## of a committed-lock-only workspace, which resolves no roles — its
+  ## ``revision`` when that names a branch rather than a pin, else the
+  ## project's default workspace branch. Returns "" when the
   ## manifest declares nothing — the caller must not infer one, because a
   ## blanket refusal justified by an inference is exactly the shape that
   ## teaches operators to reach for ``--no-verify``.
@@ -68570,44 +68620,19 @@ proc declaredRoleBranches(resolved: ResolvedProject;
     result.addDirectlyDeclaredRoles(repo.roles)
     break
 
-proc legacyRecordStoreIsRoot(settings: WorkspaceSettings;
-    rootOriginUrl: string): bool =
-  ## Whether the record store an old ``.repro-workspace.toml`` names in
-  ## ``[manifest]`` is the workspace ROOT repository itself — the only case in
-  ## which that table's ``branch`` is the root's mainline (``rootMainline``).
-  ## An absent ``[manifest] url`` names the root. A declared URL is compared
-  ## with the root's ``origin`` by repository identity
-  ## (``canonicalRemoteIdentity``), not by spelling: ``https://h/o/r.git`` and
-  ## ``git@h:o/r`` are one repository. A root with no ``origin`` URL cannot be
-  ## shown to BE the store, so a declared store URL then counts as separate.
-  if settings.records.url.isNone:
-    return true
-  let origin = rootOriginUrl.strip()
-  origin.len > 0 and canonicalRemoteIdentity(origin) ==
-    canonicalRemoteIdentity(settings.records.url.get())
-
-proc rootDeclaredRoleBranches(settings: WorkspaceSettings;
-    rootOriginUrl: string): seq[tuple[role, branch: string]] =
+proc rootDeclaredRoleBranches(settings: WorkspaceSettings):
+    seq[tuple[role, branch: string]] =
   ## Every branch a DECLARED role of the workspace ROOT repository names
   ## (Workspace-Branch-Roles.md §3.4), mainline first, in the shape of
-  ## ``declaredRoleBranches``. Under ``settings.v1``: the mainline and every
-  ## other role ``[workspace]``, the profile it names or the default profile
-  ## declares directly (``resolveRootRoles``). Under the old
-  ## ``.repro-workspace.toml``, which can declare nothing but a mainline: its
-  ## ``[manifest] branch`` when the record store it names is the root itself
-  ## (``rootMainline``, ``legacyRecordStoreIsRoot``).
+  ## ``declaredRoleBranches``: the mainline and every other role
+  ## ``[workspace]``, the profile it names or the default profile declares
+  ## directly (``resolveRootRoles``).
   ##
-  ## Empty when nothing is declared — including a ``settings.v1`` file whose
+  ## Empty when nothing is declared — including a settings file whose
   ## ``[workspace]`` names no mainline, which ``resolveRootRoles`` reports as
   ## an error to the commands that need one. The root's ``origin/HEAD`` is
   ## never read: a refusal justified by an inference is the shape that
   ## teaches operators to reach for ``--no-verify``.
-  if settings.isLegacySettings:
-    let declared = rootMainline(settings,
-      legacyRecordStoreIsRoot(settings, rootOriginUrl))
-    if declared.isSome and declared.get().strip().len > 0:
-      result.add((role: "mainline", branch: declared.get().strip()))
-    return
   var roles: seq[ResolvedRole]
   try:
     roles = resolveRootRoles(settings)
@@ -68628,10 +68653,11 @@ proc refPreferenceFrom(unstable, mainline: string): seq[string] =
 proc rolePreferenceOf(resolved: ResolvedProject;
     repo: ResolvedRepo): seq[string] =
   ## A member repo's ``ref`` preference: its resolved ``unstable`` branch,
-  ## then its resolved ``mainline`` branch. A legacy ``repo.v1`` fragment that
-  ## resolves no roles of its own still has the mainline every other consumer
-  ## reads for it (``declaredMainlineBranch``: a branch-shaped ``revision``,
-  ## else the project's ``trunk``), and its ``unstable`` falls back to that.
+  ## then its resolved ``mainline`` branch. A repo of a committed-lock-only
+  ## workspace resolves no roles; it still has the mainline every other
+  ## consumer reads for it (``declaredMainlineBranch``: a branch-shaped
+  ## ``revision``, else the ref the committed lock records for the root), and
+  ## its ``unstable`` falls back to that.
   if repo.roles.len > 0:
     let unstable = repo.roles.findRole("unstable")
     let mainline = repo.roles.findRole("mainline")
@@ -68641,13 +68667,10 @@ proc rolePreferenceOf(resolved: ResolvedProject;
   refPreferenceFrom("", declaredMainlineBranch(resolved, repo.name))
 
 proc rootRolePreference(workspaceRoot: string): seq[string] =
-  ## The workspace ROOT repository's ``ref`` preference (§3.4): under a
-  ## ``settings.v1`` file, ``[workspace]``'s resolved ``unstable`` then
-  ## ``mainline`` (``resolveRootRoles``); under the old
-  ## ``.repro-workspace.toml``, which can declare nothing but a mainline, that
-  ## mainline (``rootMainline``) when its record store is the root itself.
-  ## Empty with no settings file, or one that declares no root roles. The
-  ## root's ``origin/HEAD`` is never read as its mainline.
+  ## The workspace ROOT repository's ``ref`` preference (§3.4):
+  ## ``[workspace]``'s resolved ``unstable`` then ``mainline``
+  ## (``resolveRootRoles``). Empty with no settings file, or one that declares
+  ## no root roles. The root's ``origin/HEAD`` is never read as its mainline.
   ##
   ## ``ref`` is advisory, so a settings file that cannot be read contributes
   ## no preference here rather than failing the lock write; every command
@@ -68658,19 +68681,6 @@ proc rootRolePreference(workspaceRoot: string): seq[string] =
     return
   try:
     let settings = readWorkspaceSettings(path)
-    if settings.isLegacySettings:
-      var originUrl = ""
-      let gitBin = findExe("git")
-      if gitBin.len > 0:
-        let r = execCmdEx(quoteShell(gitBin) & " -C " &
-          quoteShell(workspaceRoot) & " remote get-url origin",
-          options = {poUsePath}, env = scrubbedGitRepositoryEnv())
-        if r.exitCode == 0: originUrl = r.output.strip()
-      let mainline = rootMainline(settings,
-        legacyRecordStoreIsRoot(settings, originUrl))
-      if mainline.isSome:
-        result = refPreferenceFrom("", mainline.get().strip())
-      return
     let roles = resolveRootRoles(settings)
     let unstable = roles.findRole("unstable")
     let mainline = roles.findRole("mainline")
@@ -69901,28 +69911,18 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # root's mainline from it), and only this one clause is applied — the root
   # gets no wider rewrite policy than a member's.
   #
-  # The old `.repro-workspace.toml` is read only when it parses: resolving a
-  # manifest has never depended on that file (`workspaceRoleSettings`), and a
-  # root push must not start failing on it. A `settings.v1` file is read in
-  # full by membership resolution already, so a read failure here refuses.
+  # The settings file is read in full by membership resolution already, so a
+  # read failure here refuses.
   if currentIsWorkspaceFrameworkRepo and currentRepoName.len == 0 and
       parsed.pushedRefsPath.len > 0:
     let settingsPath = findWorkspaceSettingsPath(parsed.workspaceRoot)
     if settingsPath.len > 0 and fileExists(settingsPath):
-      let isLegacyFile =
-        extractFilename(settingsPath) == legacySettingsFileName
-      var settingsRead = false
-      var settings: WorkspaceSettings
-      try:
-        settings = readWorkspaceSettings(settingsPath)
-        settingsRead = true
-      except CatchableError:
-        if not isLegacyFile: raise
-      if settingsRead:
+      let settings = readWorkspaceSettings(settingsPath)
+      block:
         let origin = gitRunPlain(identity,
           ["-C", parsed.currentRepo, "remote", "get-url", "origin"])
         let originUrl = if origin.code == 0: origin.output.strip() else: ""
-        let rootRoles = rootDeclaredRoleBranches(settings, originUrl)
+        let rootRoles = rootDeclaredRoleBranches(settings)
         if rootRoles.len > 0 and originUrl.len > 0:
           let rootOutgoing = evaluateOutgoingCurrent(identity.binaryPath,
             parsed.currentRepo, parsed.pushedRefsPath, parsed.hookRemoteName,
@@ -70877,7 +70877,14 @@ proc executeCheckPrePush(parsed: CheckArgs;
         let tierLabel =
           if tiers.len > 0: visibilitySetLabel(tiers)
           else: "<undeclared>"
-        let layerProv = currentLayer.get().provenance
+        # A url layer is named by its url; a local layer by its absolute
+        # directory, because the path it was declared with is relative to the
+        # workspace root (the root's own base layer is literally ".").
+        let layerProv =
+          if currentLayer.get().sourceUrl.len > 0 or
+              currentLayer.get().absPath.len == 0:
+            currentLayer.get().provenance
+          else: currentLayer.get().absPath
         result.failures.add(CheckFailure(
           repo: lockedRepo.path,
           property: "lock_references_private_repo",
@@ -71000,8 +71007,7 @@ proc perBackendPublishTargets(parsed: CheckArgs; recordStoreRoot: string;
 proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## MO-14 — central lock PUBLICATION is OPT-IN. Return true ONLY when the host
   ## settings file explicitly sets `[records] publish_locks = true`
-  ## (`repro-workspace.toml`; the old `.repro-workspace.toml` spelled it
-  ## `[manifest] publish_locks`). Absent config file, absent key, or an
+  ## (`repro-workspace.toml`). Absent config file, absent key, or an
   ## explicit `false` all mean COMMITTED-LOCK-ONLY: the pre-push gate still
   ## writes/refreshes and passes, but must NOT publish to the central manifest
   ## repo. Any read/parse error is treated as "not enabled" (fail closed toward
@@ -71013,8 +71019,7 @@ proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## step, which sits outside the gate's error translation.
   # Resolve the config the SAME way ``loadLockingRouting`` resolves the
   # ``[locking]`` table (``findBootstrapConfigPath``: ``REPRO_WORKSPACE_CONFIG``
-  # override → ``<workspaceRoot>/repro-workspace.toml`` (or the old
-  # ``.repro-workspace.toml``) → ancestors), since
+  # override → ``<workspaceRoot>/repro-workspace.toml`` → ancestors), since
   # ``publish_locks`` lives in that very file.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0: return false
@@ -71611,6 +71616,10 @@ type
       ## TC-2: repo paths whose attached certificate notes
       ## (``certificateNotesRef``) were carried to the upstream.
     certNotesDiagnostic: string ## TC-2: a non-fatal note-push diagnostic.
+    certNotesRemarks: seq[string]
+      ## What the notes push decided while merging a moved remote notes ref
+      ## (Transport §3.1): a signed tie kept, leading text joined, an LF
+      ## supplied after an unterminated piece. Informational.
     lockPublished: bool
     lockDiagnostic: string
     stoppedRepo: string
@@ -72855,6 +72864,8 @@ proc executePush(args: PushArgs): PushReport =
   proc carryCertNotes(report: var PushReport;
                       gitBin, repoAbs, repoPath, remoteName: string) =
     let notePush = pushCertificateNotes(gitBin, repoAbs, remoteName)
+    for remark in notePush.remarks:
+      report.certNotesRemarks.add(repoPath & ": " & remark)
     if notePush.pushed:
       report.certNotesPushed.add(repoPath)
     elif not notePush.ok:
@@ -73388,6 +73399,8 @@ proc renderPushTextLines(report: PushReport): seq[string] =
   if report.certNotesDiagnostic.len > 0:
     result.add("repro push: certificate-notes carry warning — " &
       report.certNotesDiagnostic)
+  for remark in report.certNotesRemarks:
+    result.add("repro push: certificate notes: " & remark)
   if report.lockDiagnostic.len > 0:
     result.add("repro push: " & report.lockDiagnostic)
   if report.stoppedStage.len > 0:
@@ -73740,7 +73753,7 @@ type
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
   ## ``repro workspace status`` argv parser. The single optional
   ## positional is the project name (only required when no
-  ## ``.repro/workspace.toml`` is present — same dispatch rule as
+  ## ``.repro/workspace-state.toml`` is present — same dispatch rule as
   ## M10's sync and M11's lock commands). Optional flags:
   ##   ``--workspace-root=PATH``
   ##   ``--tool-provisioning=path|nix|tarball|scoop``
@@ -74138,8 +74151,6 @@ type
     project*: string
     workspaceRoot*: string
     projectFile*: string
-    defaultRevision*: string
-    trunk*: string
     repos*: seq[WorkspaceListRepoEntry]
     exitCode*: int
 
@@ -74148,8 +74159,6 @@ proc toJsonNode*(report: WorkspaceListReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["projectFile"] = %report.projectFile
-  result["defaultRevision"] = %report.defaultRevision
-  result["trunk"] = %report.trunk
   var repos = newJArray()
   for entry in report.repos:
     var obj = newJObject()
@@ -74168,8 +74177,7 @@ proc toJsonNode*(report: WorkspaceListReport): JsonNode =
   result["exitCode"] = %report.exitCode
 
 proc renderListTextLines*(report: WorkspaceListReport): seq[string] =
-  result.add("workspace list: project=" & report.project &
-    (if report.trunk.len > 0: " trunk=" & report.trunk else: ""))
+  result.add("workspace list: project=" & report.project)
   for entry in report.repos:
     var line = "workspace list: " & entry.path & " name=" & entry.name &
       " remote=" & entry.remote & " revision=" & entry.revision
@@ -74263,8 +74271,6 @@ proc executeWorkspaceList(args: WorkspaceListArgs): WorkspaceListReport =
   let resolved = resolveWorkspaceListProject(args)
   report.project = resolved.projectName
   report.projectFile = resolved.projectFile
-  report.defaultRevision = resolved.defaultRevision
-  report.trunk = resolved.trunk
   for repo in resolved.repos:
     report.repos.add(WorkspaceListRepoEntry(
       name: repo.name,
@@ -74930,6 +74936,46 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   ctx.workspaceRoot = parsed.workspaceRoot
   var checks: seq[HealthCheck]
   let self = reproSelfPath()
+
+  # 0. Stale auto-generated binary-cache producer keys. Until reprobuild
+  #    1c2752eef9 the apply-time substitute path minted an ECDSA-P256
+  #    producer keypair under the per-OS config dir on every host that ran
+  #    an apply without one configured, and published under it. The path no
+  #    longer mints or uses such a key, and no cache allowlists one, so a
+  #    keypair at that location is inert -- but it is still a private key on
+  #    disk that nothing created on purpose, and it reads as "this host is a
+  #    publisher" to anyone who finds it. Reported with the remedy; never
+  #    auto-removed, because the same directory is where the developer-side
+  #    `repro build` publisher keeps a key it DID mean to mint.
+  block staleProducerKey:
+    let credDir = defaultAutoCredentialDir()
+    let keyFile = credDir / "producer.key.pem"
+    let certFile = credDir / "producer.cert.pem"
+    let present = fileExists(keyFile) or fileExists(certFile)
+    let configured = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "").len > 0 and
+      getEnv("REPRO_BINARY_CACHE_CERT_PATH", "").len > 0
+    if present and not configured:
+      checks.add(HealthCheck(
+        name: "binary-cache-producer-key",
+        status: hsWarn,
+        detail: "an auto-generated binary-cache producer keypair sits at " &
+          credDir & " and no publisher is configured " &
+          "(REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH unset). Nothing uses " &
+          "it: the apply path stopped minting and publishing under such " &
+          "keys at reprobuild 1c2752eef9, and no cache allowlists it",
+        remedy: "rm -r " & quoteShell(credDir) &
+          "   # unless `repro build` publishing on this host relies on it; " &
+          "then point REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH at it",
+        fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "binary-cache-producer-key",
+        status: hsOk,
+        detail: (if present: "auto-generated producer keypair present and " &
+                   "a publisher is configured"
+                 elif configured: "publisher keypair configured by the operator"
+                 else: "no auto-generated producer keypair on this host"),
+        remedy: "", fixKind: hfNone))
 
   # 1. reprobuild install & version. The binary that is running answers
   #    this affirmatively by construction; we still surface the version
@@ -76151,8 +76197,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # 12b. The state file and the local settings file
   #      (Workspace-Settings-Files.md §4, §5, §8 step 2).
   #
-  #      ``workspace-state-file``: the old ``.repro/workspace.toml`` still in
-  #      use or left over, or ``[[manifest]]`` layers in
+  #      ``workspace-state-file``: the state file still under its retired
+  #      name, or left over beside the current one, or ``[[manifest]]`` layers in
   #      ``.repro/workspace-state.toml`` (every other verb refuses that file).
   #      ``--fix`` moves the file and the layers — and it runs BEFORE the
   #      diagnosis (``runHealthCommand``), because a state file carrying
@@ -76193,7 +76239,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy:
           (if skew:
              "inspect " & workspaceStatePath(parsed.workspaceRoot) & " and " &
-               legacyWorkspaceStatePath(parsed.workspaceRoot) & ", keep the " &
+               retiredWorkspaceStatePath(parsed.workspaceRoot) & ", keep the " &
                "right content in the first, remove the second, then `" &
                self & " health --fix`"
            else: self & " health --fix"),
@@ -76956,7 +77002,7 @@ proc renderManifestsTextLines*(report: WorkspaceManifestsReport):
         report.workspaceTomlPath)
     else:
       result.add("workspace manifests: no workspace metadata " &
-        "(no .repro/workspace-state.toml or older .repro/workspace.toml at " &
+        "(no .repro/workspace-state.toml at " &
         report.workspaceRoot & ")")
     return
   result.add("workspace manifests: project=" & report.project &
@@ -77982,16 +78028,15 @@ type
       ## Fork form only: ``source_head`` when the source checkout supplied the
       ## branch point, ``declared_checkout`` when the repo was absent there and
       ## the target's normally-materialized checkout supplied it,
-      ## ``mainline_head`` under ``--from=<role>`` / ``--from-mainlines`` (the
-      ## tip of the branch the requested role resolved to supplied it, whichever
-      ## of the two the repo is).
+      ## ``mainline_head`` under ``--from=<role>`` or a shorthand (the tip of
+      ## the branch the requested role resolved to supplied it, whichever of
+      ## the two the repo is).
     roleBranch*: string
       ## Fork form under ``--from=<role>`` only: the branch the
       ## ``mainline_head`` baseline was read from — ``dev`` in one repo and
       ## ``latest`` in the next, since roles resolve per repo. Empty when the
       ## baseline came from elsewhere, so a report never asserts a role branch
-      ## nothing consulted. Reported as ``roleBranch`` and, until the old
-      ## spellings are retired, also as ``mainlineBranch``.
+      ## nothing consulted. Reported as ``roleBranch``.
     resolvedRole*: Option[ResolvedRole]
       ## The requested role's resolution for this repo (§4.4's
       ## ``resolvedRole`` / ``fallbackPath``); ``none`` when no role was
@@ -78022,8 +78067,8 @@ type
     form*: string
     branch*: string
     role*: string
-      ## Fork form under ``--from=<role>`` (or a shorthand, or
-      ## ``--from-mainlines``): the role every repo was cut from. "" otherwise.
+      ## Fork form under ``--from=<role>`` (or a shorthand): the role every
+      ## repo was cut from. "" otherwise.
     recordedBranch*: string
     repos*: seq[BranchRepoEntry]
     exitCode*: int
@@ -78077,9 +78122,6 @@ proc toJsonNode*(report: BranchReport): JsonNode =
       # for when there was one.
       obj.addRoleFields(entry.resolvedRole, report.role)
       obj["roleBranch"] = %entry.roleBranch
-    # The pre-role name of `roleBranch`, kept with the same value until the
-    # old spellings are retired.
-    obj["mainlineBranch"] = %entry.roleBranch
     obj["publication"] = %entry.publication
     obj["sourceBranch"] = %entry.sourceBranch
     repos.add(obj)
@@ -78230,9 +78272,8 @@ type
       ## inherited set, which is how a developer forks a narrower (or wider)
       ## slice than they currently have checked out.
     fromRole: RoleChoice
-      ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2), a shorthand, or
-      ## WV-7 ``--from-mainlines`` (``--from=mainline``, kept as an alias until
-      ## the old spellings are retired) — take the repo SET from this
+      ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2) or a shorthand —
+      ## take the repo SET from this
       ## workspace and every repo's STARTING COMMIT from the branch that role
       ## resolves to in that repo, rather than from its source checkout's
       ## HEAD. The two are separable, and a fork that wants "the repos I have,
@@ -78241,7 +78282,7 @@ type
       ## WV-7 ``--fetch`` (the default) / ``--no-fetch`` — whether the declared
       ## mainlines are refreshed before they are read. Default-on for the same
       ## reason as on ``repro switch``: "branch off trunk" means the trunk that
-      ## exists now. Only consulted under ``--from-mainlines``; giving it
+      ## exists now. Only consulted under ``--from=<role>``; giving it
       ## without that flag is a usage error rather than a silent no-op.
     preflightRefusal: string
       ## WV-6 / WV-7 — a guard that fired during parsing (an unusable
@@ -78288,7 +78329,7 @@ proc resolveInvokedWorkspaceRoot(explicit: string): string =
   ## `repro switch` work from inside a member repo — which is where a developer
   ## actually stands. Taking the cwd verbatim made them the only workspace-wide
   ## verbs that had to be run from the root, and the failure was obscure: the
-  ## member repo has no `.repro/workspace.toml`, so the error talked about
+  ## member repo has no `.repro/workspace-state.toml`, so the error talked about
   ## missing metadata rather than about where you were.
   ##
   ## Falls back to the cwd when no ancestor is a workspace, preserving the
@@ -78300,8 +78341,8 @@ proc resolveInvokedWorkspaceRoot(explicit: string): string =
   if ascended.len > 0: ascended else: absolutePath(here)
 
 proc cutsFromRole(parsed: BranchArgs): bool =
-  ## Whether the fork cuts every repo from a branch ROLE (``--from=<role>``,
-  ## a shorthand, ``--from-mainlines``) rather than from the source HEADs.
+  ## Whether the fork cuts every repo from a branch ROLE (``--from=<role>``
+  ## or a shorthand) rather than from the source HEADs.
   parsed.fromRole.role.len > 0
 
 proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
@@ -78349,15 +78390,6 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       explicitBranch = valueFromFlag(args, i, "--branch")
     elif arg == "--existing-branch":
       result.existingBranch = true
-    elif arg == "--from-mainlines":
-      # The pre-role spelling of ``--from=mainline``: the same role, so it
-      # conflicts with a different role exactly as a shorthand would.
-      var j = 0
-      let alias = ["--from=mainline"]
-      discard consumeBranchRoleFlag(alias, j, result.fromRole, verb,
-        roleFlag = "--from")
-      if result.fromRole.role == "mainline":
-        result.fromRole.flag = "--from-mainlines"
     elif consumeBranchRoleFlag(args, i, result.fromRole, verb,
         roleFlag = "--from"):
       # ``--from=<role>`` or a shorthand (§4.2).
@@ -78396,7 +78428,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
-        "unsupported `" & verb & "` flag: " & arg)
+        "unsupported `" & verb & "` flag: " & arg & retiredFlagHint(arg))
     elif result.forkPath.len == 0:
       result.forkPath = arg
     else:
@@ -78420,7 +78452,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
           "`--unpublished` / `--projects` / `--from=<role>` (or a " &
-          "shorthand, or `--from-mainlines`) / `--fetch` require a " &
+          "shorthand) / `--fetch` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
     return
@@ -78431,8 +78463,8 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   if fetchGiven and not result.cutsFromRole:
     raise newException(ValueError,
       "`" & (if result.fetch: "--fetch" else: "--no-fetch") &
-        "` needs `--from=<role>` (or a shorthand such as `--mainline`, or " &
-        "`--from-mainlines`): it decides whether the role branches are " &
+        "` needs `--from=<role>` (or a shorthand such as `--mainline`): " &
+        "it decides whether the role branches are " &
         "refreshed before the new branch is cut from them, and a fork that " &
         "cuts from the source workspace's own HEADs fetches nothing to " &
         "decide about")
@@ -78444,7 +78476,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   # likely to be typed by accident. Failing loudly beats producing a nested
   # workspace that only misbehaves later.
   # WV-7 — ``--existing-branch`` fixes the branch point at a branch that already
-  # exists, so there is no starting commit left for ``--from-mainlines`` to
+  # exists, so there is no starting commit left for ``--from=<role>`` to
   # choose. This is a contradiction rather than a precedence question; letting
   # either win silently would materialize a workspace somewhere the operator did
   # not ask for.
@@ -78911,7 +78943,7 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
     echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
       "[--include-changes] [--unpublished=refuse|carry|declared] " &
       "[--projects=A,B] [--from=<role> | --mainline | --unstable | " &
-      "--staging | --stable | --production | --lts | --from-mainlines] " &
+      "--staging | --stable | --production | --lts] " &
       "[--fetch|--no-fetch] " &
       "[--workspace-root=PATH] [--json] [--write-report[=PATH]]"
     echo "  (no argument)     print the current workspace branch"
@@ -78934,7 +78966,6 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
     echo "                    toward the mainline"
     echo "  --mainline, --unstable, --staging, --stable, --production, --lts"
     echo "                    shorthands for --from=<role>"
-    echo "  --from-mainlines  the older spelling of --from=mainline"
     echo "  --fetch           refresh those role branches first (the default);"
     echo "  --no-fetch        cut from the role refs already on disk"
     echo ""
@@ -79131,10 +79162,6 @@ type
     croDivergedRefused    ## Target branch and its upstream both moved.
                           ## `switch` never repoints a branch, so this is a
                           ## refusal, not a reset.
-    croNoMainlineRefused  ## A role was requested but the fragment resolves
-                          ## no role at all: a legacy ``repo.v1`` fragment
-                          ## pinning only a ``revision``. Retired with
-                          ## ``repo.v1`` reading.
     croNoRoleRef          ## The branch the requested role resolved to is
                           ## absent locally AND on the remote. A refusal,
                           ## never a fallback to another branch
@@ -79198,7 +79225,6 @@ proc switchOutcomeTag(outcome: SwitchRepoOutcome): string =
   of croAlreadyOnBranch: "already_on_branch"
   of croFastForwarded: "fast_forwarded"
   of croDivergedRefused: "diverged_refused"
-  of croNoMainlineRefused: "no_mainline_branch_refused"
   of croNoRoleRef: "no_role_ref"
   of croDirtyRefused: "dirty_refused"
   of croBranchMissingRefused: "branch_missing_refused"
@@ -79465,8 +79491,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   type
     RepoStateKind = enum
       rsReadyLocal, rsReadyFetchAndTrack, rsAlreadyOnBranch,
-      rsBranchMissing, rsDirty, rsProbeFailed, rsDiverged, rsNoMainlineBranch,
-      rsNoRoleRef
+      rsBranchMissing, rsDirty, rsProbeFailed, rsDiverged, rsNoRoleRef
     RepoState = object
       kind: RepoStateKind
       repo: ResolvedRepo
@@ -79539,26 +79564,17 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     state.repoPath = parsed.workspaceRoot / repo.path
     # ``--to=<role>``: the target is the branch the role resolved to for this
     # repo when the manifest loaded — from declarations only, never from what
-    # the remote has (Workspace-Branch-Roles.md §2.2). A legacy fragment that
-    # declares only a ``revision`` pin resolves no role, so it has no branch to
-    # aim at; that is an operator-fixable manifest gap, named rather than
-    # skipped (CLI/switch.md §"--mainline").
+    # the remote has (Workspace-Branch-Roles.md §2.2). Every repo resolves
+    # one: a workspace whose repos declare no roles was refused before this
+    # point (``requireRoleDeclaringWorkspace``).
     if byRole:
       state.resolvedRole = repo.roles.findRole(parsed.role.role)
+      doAssert state.resolvedRole.isSome,
+        "switch: repo '" & repo.path & "' resolved no '" & parsed.role.role &
+          "' role"
     state.target =
       if not byRole: parsed.branchName
-      elif state.resolvedRole.isSome: state.resolvedRole.get().branch
-      else: ""
-    if byRole and state.target.len == 0:
-      state.kind = rsNoMainlineBranch
-      state.reason = "repo '" & repo.path &
-        "' declares no `branch` in its manifest fragment" &
-        (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
-        " — every role falls back to that mainline, so `--to=" &
-        parsed.role.role & "` has no branch to target. Add a `branch` to " &
-        "the fragment, or name a branch explicitly instead of a role."
-      states.add(state)
-      continue
+      else: state.resolvedRole.get().branch
     if not dirExists(state.repoPath / ".git"):
       state.kind = rsProbeFailed
       state.reason = "no on-disk checkout at '" & state.repoPath &
@@ -79711,18 +79727,16 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   var missingCount = 0
   var probeFailures = 0
   var divergedCount = 0
-  var noMainlineCount = 0
   for state in states:
     case state.kind
     of rsDirty: inc dirtyCount
     of rsBranchMissing, rsNoRoleRef: inc missingCount
     of rsProbeFailed: inc probeFailures
     of rsDiverged: inc divergedCount
-    of rsNoMainlineBranch: inc noMainlineCount
     else: discard
 
   if probeFailures > 0 or dirtyCount > 0 or missingCount > 0 or
-      divergedCount > 0 or noMainlineCount > 0:
+      divergedCount > 0:
     # Refuse-and-report path: mutate nothing, surface the per-repo
     # classification. ``rsReadyLocal`` / ``rsReadyFetchAndTrack`` repos
     # report ``ready_*`` (the work was scheduled-then-cancelled by the
@@ -79759,10 +79773,6 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         entry.newBranch = state.previousBranch
       of rsDiverged:
         entry.outcome = switchOutcomeTag(croDivergedRefused)
-        entry.diagnostic = state.reason
-        entry.newBranch = state.previousBranch
-      of rsNoMainlineBranch:
-        entry.outcome = switchOutcomeTag(croNoMainlineRefused)
         entry.diagnostic = state.reason
         entry.newBranch = state.previousBranch
       of rsReadyLocal:
@@ -80219,6 +80229,8 @@ proc runSwitchCommand*(args: openArray[string]): int =
     # §4.4: a role this workspace does not declare is a usage error, decided
     # before anything is fetched.
     requireDeclaredRole(parsed.workspaceRoot, parsed.role.role, "--to")
+    requireRoleDeclaringWorkspace(parsed.workspaceRoot, parsed.role.role,
+      "--to")
   except BranchRolesUsageError as err:
     stderr.writeLine("repro switch: " & err.msg)
     return 2
@@ -80420,7 +80432,7 @@ proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
   ## everything else (and the case of no config / empty list) defaults to
   ## binary. The config is located with the same ``findBootstrapConfigPath``
   ## resolution ``init`` uses (``REPRO_WORKSPACE_CONFIG`` or an ancestor
-  ## ``.repro-workspace.toml``).
+  ## ``repro-workspace.toml``).
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return false
@@ -80429,6 +80441,17 @@ proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
     if prefix.len > 0 and remoteUrl.startsWith(prefix):
       return true
   false
+
+proc defaultProfileMainline(rs: RoleSettings): string =
+  ## The mainline the workspace's default profile declares (§3.2), or "" when
+  ## there is no default profile or it declares none. A fragment naming no
+  ## profile and no mainline of its own resolves its mainline from here.
+  if rs.defaultProfile.isNone:
+    return ""
+  for (name, decls) in rs.profiles:
+    if name == rs.defaultProfile.get():
+      return decls.mainline.get("")
+  ""
 
 proc cloneAddSibling(workspaceRoot, repoPath, fetchUrl, revision: string;
                      identity: GitToolIdentity):
@@ -80486,10 +80509,24 @@ proc executeAdd(parsed: AddArgs): AddReport =
   if mode == amPolicy:
     mode = if policyDevelop: amDevelop else: amBinary
 
+  # The branch a new fragment follows is its `mainline`
+  # (Workspace-Branch-Roles.md §3.1): `--revision` when it names a branch;
+  # else the workspace default profile's mainline, which the fragment then
+  # inherits without restating it; else `main`, the long-standing default of
+  # this verb. A `--revision` that is a commit id is a pin BESIDE that
+  # mainline, never a mainline itself.
+  let revisionIsPin =
+    parsed.revision.len > 0 and looksLikeCommitOid(parsed.revision)
+  let profileMainline =
+    defaultProfileMainline(workspaceRoleSettings(parsed.workspaceRoot))
+  let fragmentMainline =
+    if parsed.revision.len > 0 and not revisionIsPin: parsed.revision
+    elif profileMainline.len > 0: ""
+    else: "main"
   let revision =
     if parsed.revision.len > 0: parsed.revision
-    elif resolved.defaultRevision.len > 0: resolved.defaultRevision
-    else: "main"
+    elif fragmentMainline.len > 0: fragmentMainline
+    else: profileMainline
 
   case mode
   of amPolicy:
@@ -80597,20 +80634,17 @@ proc executeAdd(parsed: AddArgs): AddReport =
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
     let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
-    # Omit `revision` when the fragment would inherit exactly the same value
-    # from the project's `default_revision`; a redundant pin freezes the repo
-    # on the day it was added and silently stops tracking the project's
-    # branch. The key is written only when the caller asked for a specific
-    # revision (`--revision` is an explicit pin, even if it happens to name
-    # the current default) or when there is no `default_revision` to inherit
-    # and `revision` therefore has to be stated.
-    let pinRevision =
-      parsed.revision.len > 0 or resolved.defaultRevision.len == 0
+    # `revision` is written only for a commit pin: a branch is the
+    # fragment's `mainline`, and a redundant pin would freeze the repo on the
+    # day it was added and silently stop it tracking that branch.
     if not fileExists(fragmentAbs):
       writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
         repo: RepoBody(name: parsed.target, path: repoPath,
           remote: some(remoteName),
-          revision: (if pinRevision: some(revision) else: none(string))))))
+          mainline: (if fragmentMainline.len > 0: some(fragmentMainline)
+                     else: none(string)),
+          revision: (if revisionIsPin: some(parsed.revision)
+                     else: none(string))))))
     result.declarationChanged = projectDoc.appendInclude(fragmentRel)
     projectDoc.saveManifestDoc()
     # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
@@ -81360,12 +81394,11 @@ proc forkRoleFor(resolved: ResolvedProject; repo: ResolvedRepo; role: string;
   ## repo resolved when the manifest loaded (``ResolvedRepo.roles``, from
   ## declarations only — the one resolver in ``roles.nim``).
   ##
-  ## A legacy ``repo.v1`` fragment that resolves no mainline of its own still
-  ## has the mainline ``repro branch`` has always read for it — a
-  ## branch-shaped ``revision``, else the project's ``trunk``
-  ## (``declaredMainlineBranch``, CLI/branch.md §"--from-mainlines") — and
-  ## every role falls back to that, through the same resolver. ``none`` when
-  ## there is no mainline at all.
+  ## A repo of a committed-lock-only workspace resolves no roles; it still has
+  ## the mainline ``repro branch`` reads for it — a branch-shaped
+  ## ``revision``, else the ref the committed lock records for the root
+  ## (``declaredMainlineBranch``) — and every role falls back to that,
+  ## through the same resolver. ``none`` when there is no mainline at all.
   if repo.roles.len > 0:
     return repo.roles.findRole(role)
   resolveRoleFromMainline(roleSettings,
@@ -81411,7 +81444,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## replaces that set outright for the new workspace only; the source's
   ## membership is never edited either way.
   ##
-  ## WV-7 ``--from-mainlines`` separates the two things a fork takes from the
+  ## WV-7 ``--from=<role>`` separates the two things a fork takes from the
   ## workspace it runs in: it keeps the repo SET and replaces every baseline
   ## with that repo's manifest-declared mainline tip, so the new workspace is a
   ## fresh deviation from trunk holding exactly the repos you have here.
@@ -81597,18 +81630,17 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       else:
         state.mainlineUndeclared = true
         state.mainlineDiagnostic = "no mainline is declared for '" &
-          repo.path & "': its manifest fragment" &
-          (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
-          " sets no `branch`, its `revision` is a pin rather than a branch, " &
-          "and the project declares no `trunk`. `--from=" &
-          parsed.fromRole.role & "` reads the manifest, and every role falls " &
-          "back to the mainline — declare `branch` in the fragment, or drop " &
-          "the flag to branch from this workspace's own HEADs"
+          repo.path & "': it declares no branch roles, its `revision` is a " &
+          "pin rather than a branch, and the workspace declares no root " &
+          "mainline. `--from=" & parsed.fromRole.role & "` reads the " &
+          "declarations, and every role falls back to the mainline — " &
+          "declare one, or drop the flag to branch from this workspace's " &
+          "own HEADs"
     if not dirExists(state.srcPath / ".git"):
       state.sourcePresent = false
       if not parsed.existingBranch:
         # The baseline comes from the TARGET checkout either way; under
-        # ``--from-mainlines`` it is that checkout's mainline ref rather than
+        # ``--from=<role>`` it is that checkout's role branch ref rather than
         # the revision the manifest/lock materialized.
         state.baselineSource =
           if parsed.cutsFromRole: "mainline_head" else: "declared_checkout"
@@ -81644,7 +81676,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     #
     # Skipped under ``--existing-branch``: there the branch point comes from a
     # branch that already exists on a remote, so there is no source HEAD being
-    # propagated and nothing to judge. WV-7 ``--from-mainlines`` skips it for
+    # propagated and nothing to judge. WV-7 ``--from=<role>`` skips it for
     # the same reason — the branch point is a mainline tip, which is a commit
     # that is on a remote by construction. Leaving ``publicationAsked`` false
     # keeps the report's ``publication`` field EMPTY rather than asserting a
@@ -81719,81 +81751,33 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # The ROOT repo carries the membership manifests, so cutting it from a stale
     # local state while every member repo starts at trunk would hand back a
     # workspace whose bill of materials disagrees with its contents. Its
-    # mainline is a declaration too (Workspace-Branch-Roles.md §3.4):
-    #
-    #   * ``repro-workspace.toml`` (``settings.v1``): resolved from
-    #     ``[workspace]`` — its ``mainline``, else its profile's, else the
-    #     default profile's — and NOTHING else. A settings file that declares
-    #     no root mainline is refused naming the file and
-    #     ``workspace.mainline``; the root repo's ``origin/HEAD`` is never
-    #     consulted, because inferring a mainline from it is the inference the
-    #     roles model forbids for every repo, the root included.
-    #   * the old ``.repro-workspace.toml`` (``bootstrap.v1``), or no settings
-    #     file at all: unchanged — ``[manifest] branch`` when ``[manifest]
-    #     url`` is absent or names the root repo itself, else ``origin/HEAD``.
-    #     Neither can declare ``[workspace]``, so §3.4's rule has nothing to
-    #     read there; it takes over when the workspace migrates to the new
-    #     file, and the fallback goes when the old name is retired.
-    #
-    # The requested role then resolves from that: under ``settings.v1`` by
-    # the ordinary procedure over ``[workspace]`` (``resolveRootRoles``); under
-    # the old file, which can declare nothing but a mainline, every role
-    # falls back to that mainline (``resolveRoleFromMainline``).
+    # mainline is a declaration too (Workspace-Branch-Roles.md §3.4),
+    # resolved from ``repro-workspace.toml``'s ``[workspace]`` — its
+    # ``mainline``, else its profile's, else the default profile's — and
+    # NOTHING else. A settings file that declares no root mainline is refused
+    # naming the file and ``workspace.mainline``, and so is a workspace with
+    # no settings file: the root repo's ``origin/HEAD`` is never consulted,
+    # because inferring a mainline from it is the inference the roles model
+    # forbids for every repo, the root included. The requested role then
+    # resolves from ``[workspace]`` by the ordinary procedure
+    # (``resolveRootRoles``).
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
-    var rootDeclaresRoles = false
     if bootstrapPath.len > 0:
       # A settings file that exists but does not parse raises the strict
-      # reader's diagnostic: falling through to ``origin/HEAD`` would cut the
-      # root from a branch other than the one the file declares.
+      # reader's diagnostic.
       let settings = readWorkspaceSettings(bootstrapPath)
-      # ``[manifest]`` in an old file names the RECORD STORE. Its branch is
-      # the root's mainline only when that store is the root repo; when it is
-      # a separate repository (the split Workspace-Manifests.md requires), the
-      # branch belongs to the store and the root has none of that name.
-      # Compared by repository identity (``canonicalRemoteIdentity``), not by
-      # spelling: ``https://h/o/r.git`` and ``git@h:o/r`` are one repository.
-      # A root without an ``origin`` URL cannot be shown to BE the store, so a
-      # declared store URL then counts as separate.
-      var legacyStoreIsRoot = settings.records.url.isNone
-      if settings.isLegacySettings and not legacyStoreIsRoot:
-        let originUrl = gitRunPlain(identity,
-          ["-C", parsed.workspaceRoot, "remote", "get-url", "origin"])
-        legacyStoreIsRoot = legacyRecordStoreIsRoot(settings,
-          if originUrl.code == 0: originUrl.output else: "")
-      if settings.isLegacySettings:
-        let declared = rootMainline(settings, legacyStoreIsRoot)
-        if declared.isSome:
-          rootRoleBranch = declared.get().strip()
-      else:
-        rootDeclaresRoles = true
-        try:
-          rootRole = resolveRootRoles(settings).findRole(parsed.fromRole.role)
-          if rootRole.isSome:
-            rootRoleBranch = rootRole.get().branch
-        except WorkspaceManifestParseError as err:
-          rootRoleRefusal = err.msg
-    if rootRoleBranch.len == 0 and not rootDeclaresRoles:
-      let headRef = gitRunPlain(identity,
-        ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
-         "refs/remotes/origin/HEAD"])
-      if headRef.code == 0:
-        let value = headRef.output.strip()
-        rootRoleBranch =
-          if value.startsWith("origin/"): value["origin/".len .. ^1]
-          else: value
-    if not rootDeclaresRoles and rootRoleBranch.len > 0:
-      rootRole = resolveRoleFromMainline(sourceRoleSettings, rootRoleBranch,
-        parsed.fromRole.role)
-      if rootRole.isSome:
-        rootRoleBranch = rootRole.get().branch
+      try:
+        rootRole = resolveRootRoles(settings).findRole(parsed.fromRole.role)
+        if rootRole.isSome:
+          rootRoleBranch = rootRole.get().branch
+      except WorkspaceManifestParseError as err:
+        rootRoleRefusal = err.msg
     if rootRoleBranch.len == 0 and rootRoleRefusal.len == 0:
       rootRoleRefusal = "the workspace root '" & parsed.workspaceRoot &
         "' declares no mainline: it has no `" & settingsFileName & "` to " &
-        "declare `[workspace] mainline` in, the old `.repro-workspace.toml` " &
-        "(if any) sets no `[manifest] branch` for a record store that is the " &
-        "root repo itself, and the root repo has no `origin/HEAD` to read one " &
-        "from. Declare `[workspace] mainline` in `" & settingsFileName &
-        "`, or drop `--from=" & parsed.fromRole.role & "`"
+        "declare `[workspace] mainline` in, and the root repo's mainline is " &
+        "never inferred from its remote. Declare `[workspace] mainline` in `" &
+        settingsFileName & "`, or drop `--from=" & parsed.fromRole.role & "`"
 
   if parsed.cutsFromRole and parsed.fetch:
     var fetchActions: seq[BuildAction]
@@ -82136,7 +82120,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     result.exitCode = if anyProbeFailed: 1 else: 2
     return
 
-  # Helper for WV-7 --from-mainlines target repo matching
+  # Helper for WV-7 --from=<role> target repo matching
   proc matchSourceState(targetRepo: ResolvedRepo;
                         states: openArray[ForkSourceState];
                         used: var HashSet[int]): int =
@@ -82272,8 +82256,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       if ts.roleBranch.len == 0:
         ts.probeFailed = true
         ts.probeReason = "no mainline is declared for '" & targetRepo.path & "': " &
-          "its manifest fragment sets no `branch`, its `revision` is a pin rather than a branch, " &
-          "and the project declares no `trunk`"
+          "it declares no branch roles, its `revision` is a pin rather than a branch, " &
+          "and the workspace declares no root mainline"
         targetBaselineProbeFailed = true
         targetStates.add(ts)
         continue
@@ -82389,7 +82373,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         gitForkBranchAction(rootActionId, identity,
           branchName = parsed.branchName,
           sourceRepoPath = parsed.workspaceRoot,
-          # WV-7 — under ``--from-mainlines`` the root repo is cut from its own
+          # WV-7 — under ``--from=<role>`` the root repo is cut from its own
           # declared mainline, so the membership manifests do not lag the
           # members they declare.
           targetSha =
@@ -82629,7 +82613,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # The fork is a WORKSPACE ROOT, and the first thing anything arriving in it
   # reads is the index its `AGENTS.md` / `CLAUDE.md` `@import`s. Without this
   # the forked directory carries its parent's project set in
-  # `.repro/workspace.toml` and no index at all, so every agent entering the
+  # `.repro/workspace-state.toml` and no index at all, so every agent entering the
   # fork is told the workspace is uninitialized. Placed after the metadata
   # writers because it reads what they just recorded.
   refreshWorkspaceProjectsIndexBestEffort(parsed.forkPath, "repro branch")
@@ -86054,7 +86038,7 @@ type
       ## executions read, from ``recordedSources`` records.
     recordedSources: int
 
-proc reusedResultRefusal(record: ExecutedActionRecord): string =
+proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   ## Why a test command the action cache answered may NOT be attested, or
   ## ``""`` when it may (test-certificates Standard §6.2.1, decision D16 of
   ## Test-Certificates.milestones.org). All three of the standard's
@@ -87667,6 +87651,13 @@ proc runCiPlanCommand(args: openArray[string]): int =
     let stored = findCertificatesInLocalStore(evaluated)
     for problem in stored.problems:
       plan.problems.add(problem)
+    if stored.searchIncomplete:
+      # Reported as its own finding: an incomplete search is not "no
+      # certificate in the store" (Tooling §2, find exit 3 vs 1).
+      let incomplete = "certificate-store-search-incomplete: " &
+        stored.notSearched.join("; ")
+      plan.problems.add(incomplete)
+      couldNotLook.add(incomplete)
     if stored.searchFailed:
       for problem in stored.problems:
         couldNotLook.add(problem)
@@ -91093,7 +91084,7 @@ proc readPromptState(workspaceRoot: string): PromptState =
   ## defensive: a missing or malformed cache degrades to a partial segment
   ## rather than raising (the prompt must never break the user's shell).
   result.inWorkspace = true
-  # Active branch — from ``.repro/workspace.toml`` (filesystem read, no git).
+  # Active branch — from ``.repro/workspace-state.toml`` (filesystem read, no git).
   try:
     let branchOpt = readWorkspaceBranch(workspaceRoot)
     if branchOpt.isSome:
@@ -91239,6 +91230,17 @@ proc parsePromptArgs(args: openArray[string]): PromptArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
+proc promptRootIsInitialized(root: string): bool =
+  ## ``isInitializedWorkspace`` for the prompt, which must never raise. A root
+  ## whose state cannot be read — a malformed state file, or one still under
+  ## its retired name, which every OTHER verb refuses with its remedy — IS an
+  ## initialized workspace: the segment degrades to ``[ws]`` rather than
+  ## breaking the shell (CLI/prompt.md: "each read is defensive").
+  try:
+    isInitializedWorkspace(root)
+  except WorkspaceManifestParseError:
+    true
+
 proc runPromptCommand*(args: openArray[string]): int =
   ## ``repro prompt`` — print a compact ambient workspace-state segment for
   ## a shell prompt / statusline. Reads ONLY cheap cached state (no
@@ -91246,7 +91248,7 @@ proc runPromptCommand*(args: openArray[string]): int =
   ## safe to drop into any prompt unconditionally. Read-only: no side
   ## effects, never blocks on the network.
   ##
-  ## Workspace notices (state-file skew, skipped settings layers) are
+  ## Workspace notices (skipped settings layers) are
   ## suppressed for the whole render (``withoutWorkspaceNotices``): they are
   ## stderr output the prompt did not ask for, printed on EVERY render, and
   ## computing them reads and decodes the settings files — neither fits a
@@ -91264,12 +91266,12 @@ proc runPromptCommand*(args: openArray[string]): int =
   withoutWorkspaceNotices:
     let root =
       if parsed.explicitWorkspaceRoot:
-        if isInitializedWorkspace(parsed.workspaceRoot):
+        if promptRootIsInitialized(parsed.workspaceRoot):
           parsed.workspaceRoot
         else: ""
       else:
         let found = ascendToWorkspaceRoot(parsed.workspaceRoot)
-        if found.len > 0 and isInitializedWorkspace(found): found else: ""
+        if found.len > 0 and promptRootIsInitialized(found): found else: ""
     if root.len == 0:
       # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
       # requirement — safe to call unconditionally with no shell guards).
@@ -93122,7 +93124,7 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## NOT ``resolveInvokedWorkspaceRoot`` on its own, and the difference is
   ## load-bearing rather than cosmetic. That helper stops at the nearest
   ## ancestor satisfying ``isInitializedWorkspace``, which is true of a
-  ## directory carrying **either** a workspace shell (``.repro/workspace.toml``)
+  ## directory carrying **either** a workspace shell (``.repro/workspace-state.toml``)
   ## **or**, by MO-2, a committed ``repro.lock`` of its own. A participating
   ## repo of a multi-repo workspace normally has both a committed lock and
   ## siblings one level up — so the generic ascent stops at the REPO, resolves
@@ -93137,7 +93139,7 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## inert knob, arrived at from a different direction.
   ##
   ## So the workspace SHELL wins when there is one: walk up looking for
-  ## ``.repro/workspace.toml`` first, and only fall back to the generic marker
+  ## ``.repro/workspace-state.toml`` first, and only fall back to the generic marker
   ## when no ancestor carries one (the manifest-optional, single-repo case that
   ## MO-2 marker exists for).
   ## The ascent itself now lives in ``workspaceShellFirstRoot``, which
@@ -99739,7 +99741,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     except WorkspaceProjectSetConflictError as exc:
       status = "conflict"
       # The INNER message, not `msg`: `msg` carries a "[<file>] at key ..."
-      # prefix written for `enable`, which names `.repro/workspace.toml` /
+      # prefix written for `enable`, which names `.repro/workspace-state.toml` /
       # `workspace.projects` — the active-set record. `resolve` never consults
       # that record, so the prefix would misattribute the conflict. The inner
       # message already names the path, both sources and the differing facts.
@@ -99889,8 +99891,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     var templateSource = "--template"
     if templateName.len == 0 and not noTemplate:
       templateName = readDefaultTemplateFromHostConfig(workspaceRoot)
-      # Name the file the default actually came from — `repro-workspace.toml`,
-      # or the old `.repro-workspace.toml` still read during the rename.
+      # Name the file the default actually came from.
       let configName = extractFilename(findBootstrapConfigPath(workspaceRoot))
       templateSource =
         (if configName.len > 0: configName else: settingsFileName) &
@@ -99929,12 +99930,10 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     # would invite the next entry into whichever happened to be there.
     #
     # A new repo-set carries only a name and its membership — no
-    # `default_revision` / `default_remote`, which would make a member resolve
-    # differently depending on who referenced it. A new project carries no
-    # remotes and no `default_revision` either: revision is lock territory, and
-    # a stub that kept emitting it would re-seed the field every manifest
-    # conversion deletes. `trunk` stays: it is live data with no other
-    # declaration site (`repro branch`, `repro switch`, `workspace init`).
+    # `default_remote`, which would make a member resolve differently
+    # depending on who referenced it. A new project carries no remotes and
+    # names no branch: each repo's branch is its own `mainline`, and the
+    # workspace branch is the root repository's (repro-workspace.toml).
     writeWorkspaceManifestFile(fileAbs,
       if addDir == "repo-sets":
         repoSetText(RepoSetManifest(schema: schemaRepoSetV1,
@@ -99942,7 +99941,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
           member_sets: seed.memberSets, member_repos: seed.memberRepos))
       else:
         projectManifestText(ProjectManifest(schema: schemaProjectManifestV1,
-          project: ProjectBody(name: name, trunk: some("main")),
+          project: ProjectBody(name: name),
           member_sets: seed.memberSets, member_repos: seed.memberRepos)))
     var paths = @[fileRel]
     if desc.len > 0:
@@ -100227,7 +100226,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # a half-converted manifest repo shows what is there rather than a
         # blank column for every converted fragment.
         remote = m.repo.url_prefix.get(m.repo.remote.get(""))
-        revision = m.repo.revision.get(m.repo.mainlineBranch.get(""))
+        revision = m.repo.revision.get(m.repo.mainline.get(""))
       except CatchableError as err:
         # Still listed — this listing is the remedy other diagnostics point
         # at for a fragment the reader refuses (an escaping checkout path) —
@@ -100380,8 +100379,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       if revision.len > 0 and existing.repo.revision.get("") != revision:
         conflicts.add("revision (" & existing.repo.revision.get("(inherited)") &
           " vs " & revision & ")")
-      if branch.len > 0 and existing.repo.mainlineBranch.get("") != branch:
-        conflicts.add("mainline (" & existing.repo.mainlineBranch.get("(none)") &
+      if branch.len > 0 and existing.repo.mainline.get("") != branch:
+        conflicts.add("mainline (" & existing.repo.mainline.get("(none)") &
           " vs " & branch & ")")
       if conflicts.len > 0:
         stderr.writeLine("repro workspace repos add: '" & repo &
@@ -100390,17 +100389,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           " directly if the declaration itself should change")
         return 1
 
-    # Workspace-Membership-Model.md — "every repo fragment declares its own
-    # branch … written once per repo, by hand, when the repo is added". A NEW
-    # fragment with neither `--branch` nor `--revision` would declare neither
-    # key, and this is where that has to be caught.
-    #
-    # It used to resolve anyway, by inheriting the project's
-    # `default_revision` — which is precisely the collection-level default the
-    # model removes, and the reason a fragment declaring nothing was writable
-    # in the first place. With that field gone from the stub, the same input
-    # writes a fragment that resolves to an empty revision: an invalid state,
-    # authored silently, discovered by whoever syncs next.
+    # Workspace-Branch-Roles.md §3.3 — every repo resolves a `mainline`: its
+    # fragment's own, or the one the workspace default profile supplies. A NEW
+    # fragment without `--branch` (written as `mainline`) in a workspace whose
+    # default profile supplies none would not load, and this is where that
+    # has to be caught. `--revision` alone does not fill it: a commit pin sits
+    # BESIDE a mainline, it is not one.
     #
     # The branch is NOT inferred to fill the gap. Deriving it from the remote's
     # default was considered and rejected: measured across this workspace the
@@ -100412,26 +100406,31 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     # Placed before the first write of ANY file — ahead of the url-prefix
     # minting in the loop below — so a refused `add` leaves nothing behind, and
     # ahead of the remote probe so it costs no network round trip.
-    if not fragmentExisted and branch.len == 0 and revision.len == 0:
+    if not fragmentExisted and branch.len == 0 and
+        defaultProfileMainline(workspaceRoleSettings(workspaceRoot)).len == 0:
       stderr.writeLine("repro workspace repos add: " & repo &
         ": --branch is required when declaring a new repo")
-      stderr.writeLine("  Every repo fragment declares the branch it tracks. " &
-        "There is no workspace default and none is inferred, so a fragment " &
-        "that names no branch has no checkout to resolve to.")
+      stderr.writeLine("  Every repo fragment declares the branch it tracks " &
+        "as its `mainline`, unless the workspace's `[workspace] " &
+        "default_profile` supplies one, which this workspace's does not. " &
+        "None is inferred, so a fragment that names no branch has no " &
+        "checkout to resolve to.")
       stderr.writeLine("  Add the branch this repo's mainline lives on, e.g.:")
       stderr.writeLine("    repro workspace repos add " & repo &
         " --remote=" & remote & " --branch=dev")
-      stderr.writeLine("  Use --revision=<commit> INSTEAD only to pin a " &
-        "vendored source tree to an exact commit, or alongside --branch to " &
+      stderr.writeLine("  Add --revision=<commit> alongside --branch to " &
         "say \"tracks <branch>, sits at <commit>\".")
       stderr.writeLine("  Nothing was written.")
       return 2
 
-    # `--branch` is validated the same way `--revision` always was, and for the
-    # same reason: a manifest naming a branch that does not exist authors fine
-    # and fails at sync time on everyone else's machine.
-    let requestedRef = if branch.len > 0: branch else: revision
-    if requestedRef.len > 0 and not fragmentExisted:
+    # `--branch` and `--revision` are each validated against the remote, for
+    # the same reason: a manifest naming a branch or a pin that does not exist
+    # authors fine and fails at sync time on everyone else's machine. Both are
+    # checked when both are given — "tracks <branch>, sits at <commit>" is the
+    # pinned form now that a pin always sits beside a mainline.
+    for requestedRef in [branch, revision]:
+      if requestedRef.len == 0 or fragmentExisted:
+        continue
       let check = remoteRevisionState(gitBin, remote, requestedRef)
       if check.state == rrsMissing:
         stderr.writeLine("repro workspace repos add: '" & requestedRef &
@@ -100468,12 +100467,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            # `--branch` is the mainline. The writer picks the schema: v1
-            # (`branch`) unless the fragment needs v2 (Branch-Roles §6), so a
-            # `repro` that predates v2 keeps reading the workspace.
+            # `--branch` is the mainline (Branch-Roles §3.1).
             repo: RepoBody(name: repo, path: effectivePath,
               mainline: (if branch.len > 0: some(branch) else: none(string)),
-              revision: (if branch.len == 0 and revision.len > 0: some(revision)
+              # A pin sits beside the mainline: written whenever given, as
+              # the project path below writes it.
+              revision: (if revision.len > 0: some(revision)
                          else: none(string)),
               url_prefix: some(plan.prefixName),
               # `url_suffix` is written only when it differs from `name` — the

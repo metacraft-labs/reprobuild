@@ -50,7 +50,7 @@ for d in nimcrypto nim-faststreams/src nim-stew/src nim-serialization/src \
   [[ -d "$libs/$d" ]] && paths+=("--path:$libs/$d")
 done
 # Source-only inputs, as the runtime resolver adds them from the seeded roots.
-for d in reprobuild-test-adapters/src io-mon/src nim-stackable-hooks/src \
+for d in reprobuild-test-adapters/src test-certificates-tools/src io-mon/src nim-stackable-hooks/src \
          nim-shm-gset/src nim-shm-queue/src bearssl; do
   [[ -d "$src/$d" ]] && paths+=("--path:$src/$d")
 done

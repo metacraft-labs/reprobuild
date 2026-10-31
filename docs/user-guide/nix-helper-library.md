@@ -129,10 +129,11 @@ so an export never carries one.
 
 - the document is not a `repro home export` document, or its `schemaVersion`
   is one this library does not know (regenerate it with the `repro` the
-  flake pins; this library reads schema 4, which added who manages each
-  host's system, `intent.systemManagedElsewhere`);
-- `intent.systemManagedElsewhere` is malformed or names a host the registry
-  does not declare;
+  flake pins; this library reads schema 5, which says how each host's
+  system is managed -- elsewhere, in full, or in add-on mode --
+  `intent.hostSystems`);
+- `intent.hostSystems` is malformed or names a host the registry does not
+  declare;
 - a resource belongs to an activity the profile does not declare;
 - the export cannot describe the target: its `platforms` entry for `system`
   is `differs` or `unevaluated` — typically a `when defined(macosx)` in the
@@ -158,18 +159,29 @@ reprobuild.lib.hostSystemManagement {
   host = "build-server";
   snapshot = ./home-export.json;     # or: document = <an already-read export>;
 }
-# => { host = "build-server"; managed = "elsewhere"; managedBy = "example-org/infra"; }
-# => { host = "home-pc"; managed = "here"; managedBy = null; }
+# => { host = "build-server"; managed = "elsewhere"; managedBy = "example-org/infra";
+#      mode = "managedElsewhere"; activities = [ ]; }
+# => { host = "home-pc"; managed = "here"; managedBy = null; mode = "full";
+#      activities = [ "default" ]; }
+# => { host = "rpi"; managed = "here"; managedBy = null; mode = "addOn";
+#      activities = [ "default" "monitoring" ]; }
+# => { host = "reproos-box"; managed = "here"; managedBy = null; mode = "full";
+#      activities = [ "default" "host_baseline" ]; }
 ```
 
 Reads the host's `system:` attribute
-([home-export.md](./home-export.md#hosts-whose-system-is-managed-elsewhere))
+([home-export.md](./home-export.md#how-a-hosts-system-is-managed))
 from an export without evaluating a target system -- what a script that
 switches a machine's NixOS or nix-darwin configuration asks before taking
-the machine over. `managedBy` is the pointer the profile gives, or `null`.
-It refuses (throws) what `readIntent` refuses about the document and the
-host: another format, a `schemaVersion` other than 4, a host the registry
-does not declare, and a malformed `systemManagedElsewhere`. `readIntent`'s
+the machine over. Such a script must switch only a host whose `mode` is
+`"full"`: an add-on host (`mode = "addOn"`) is managed "here", but its base
+system belongs to its distribution, and Reprobuild applies its declared
+objects with `repro infra apply`. `managedBy` is the pointer the profile
+gives, or `null`; `activities` is the system-activity selection (`default`
+first), empty for a host managed elsewhere. It refuses (throws) what
+`readIntent` refuses about the document and the host: another format, a
+`schemaVersion` other than 5, a host the registry does not declare, and a
+malformed `hostSystems`. `readIntent`'s
 `evaluation.system` carries the same answer.
 
 ## `nixRealizationOf` — canonical name to nixpkgs attribute

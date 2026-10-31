@@ -100,6 +100,7 @@ required_sources=(
   source/libs/blake3/src/blake3/vendor/blake3.c
   source/libs/xxh3/src/xxh3/vendor/xxhash.c
   src/reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim
+  src/test-certificates-tools/src/test_certificates.nim
   src/reprobuild-ct-test-runner/libs/ct_incremental_adapter/src/ct_incremental_adapter.nim
   src/io-mon/src/io_mon.nim
   src/nim-stackable-hooks/src/stackable_hooks.nim

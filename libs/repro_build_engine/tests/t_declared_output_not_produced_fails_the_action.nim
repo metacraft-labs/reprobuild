@@ -327,8 +327,20 @@ suite "a declared output the action did not produce":
       let root = newTree("repro-optional-root-alias-")
       defer: removeDir(root)
       createSymlink("/", root / "root-link")
+      # A symlink to `/` deep in a scratch tree, walked back up to `/`. The
+      # location must be resolved through the link, not collapsed lexically
+      # (which would name the scratch tree's parent, as deep as TMPDIR, and
+      # pass the guard): this case was red under the suite's TMPDIR and
+      # green only under a shallow one until the resolution was fixed.
       unsafe.optionalOutputs = @[root & "/root-link/tmp/../.."]
       check "too close to a filesystem root" in unsafe.removeBeforeRunProblem()
+      unsafe.optionalOutputs = @[root & "/root-link/tmp/../x.txt"]
+      check "too close to a filesystem root" in unsafe.removeBeforeRunProblem()
+      # Control: a parent walk through an ordinary directory stays where it
+      # is, and a location as deep as the tree is not flagged.
+      createDir(root / "sub")
+      unsafe.optionalOutputs = @[root & "/sub/../out.txt"]
+      check unsafe.removeBeforeRunProblem() == ""
 
   test "only the absent outputs are named":
     let sh = findExe("sh")

@@ -45,6 +45,7 @@ import std/[options, os, strutils, tables]
 from std/unicode import Rune, toUTF8
 
 import types
+import retired_names
 
 type
   ManifestEditError* = object of ValueError
@@ -365,29 +366,10 @@ proc customRoleBlock(header: string;
   if e.len > 0:
     result.add(RenderBlock(header: header, entries: e))
 
-proc needsRepoFragmentV2*(body: RepoBody): bool =
-  ## Whether ``body`` declares something only ``reprobuild.workspace.repo.v2``
-  ## can say: a role other than the mainline (a branch name or ``false``),
-  ## a ``profile``, or a custom role. The mainline alone does not count —
-  ## v1 says it as ``branch``.
-  body.profile.isSome or body.`branch-roles`.entries.len > 0 or
-    body.unstable.isDeclared or body.staging.isDeclared or
-    body.stable.isDeclared or body.production.isDeclared or
-    body.lts.isDeclared
-
 proc repoFragmentText*(fragment: RepoFragment): string =
-  ## ``repos/<repo>.toml`` from a typed value, in the OLDEST schema that can
-  ## say it (Workspace-Branch-Roles.md §6): ``reprobuild.workspace.repo.v1``,
-  ## with the mainline as ``branch``, unless the fragment declares something
-  ## only v2 can say (``needsRepoFragmentV2``) — then ``repo.v2``, with the
-  ## mainline as ``mainline``. The mainline is taken from ``mainline`` or from
-  ## a v1-style ``branch`` on the record, whichever is set; the record's own
-  ## ``schema`` is ignored.
-  ##
-  ## Why not always v2: a ``repro`` that predates v2 refuses the WHOLE
-  ## workspace on the first v2 fragment it reads, so one new fragment written
-  ## by a newer ``repro`` would break every pre-push gate run by a host still
-  ## on the older pin. A v1 fragment is read identically by both.
+  ## ``repos/<repo>.toml`` from a typed value, as
+  ## ``reprobuild.workspace.repo.v2`` (the record's own ``schema`` is
+  ## ignored).
   ##
   ## Keys under ``[repo]`` are written in a fixed order — identity (``name``,
   ## ``path``), where it comes from (``remote``), what it follows
@@ -395,16 +377,12 @@ proc repoFragmentText*(fragment: RepoFragment): string =
   ## optional key — so two fragments written by two verbs read alike. Custom
   ## roles go in a ``[repo.branch-roles]`` block after ``[repo]``.
   let r = fragment.repo
-  let v2 = r.needsRepoFragmentV2
   var e: seq[RenderEntry]
   e.add(entry("name", tomlStr(r.name)))
   e.add(entry("path", tomlStr(r.path)))
   e.addOpt("remote", r.remote)
   e.addOpt("profile", r.profile)
-  if v2:
-    for re in roleEntries(r.roleDecls): e.add(re)
-  else:
-    e.addOpt("branch", r.mainlineBranch)
+  for re in roleEntries(r.roleDecls): e.add(re)
   e.addOpt("revision", r.revision)
   e.addOpt("url_prefix", r.url_prefix)
   e.addOpt("url_suffix", r.url_suffix)
@@ -426,7 +404,7 @@ proc repoFragmentText*(fragment: RepoFragment): string =
   e.addNonEmpty("depends", r.depends)
   var blocks = @[RenderBlock(header: "[repo]", entries: e)]
   blocks.add(customRoleBlock("[repo.branch-roles]", r.`branch-roles`.entries))
-  assemble(if v2: schemaRepoFragmentV2 else: schemaRepoFragmentV1, @[], blocks,
+  assemble(schemaRepoFragmentV2, @[], blocks,
     extensionsBlock(fragment.extensions))
 
 proc repoSetText*(manifest: RepoSetManifest): string =
@@ -465,9 +443,7 @@ proc projectManifestText*(manifest: ProjectManifest): string =
     root.add(entry("binary_dependency", tomlInlineTables(rows), alMultiLine))
   var project: seq[RenderEntry]
   project.add(entry("name", tomlStr(manifest.project.name)))
-  project.addOpt("default_revision", manifest.project.default_revision)
   project.addOpt("default_remote", manifest.project.default_remote)
-  project.addOpt("trunk", manifest.project.trunk)
   var blocks = @[RenderBlock(header: "[project]", entries: project)]
   for r in manifest.remote:
     blocks.add(RenderBlock(header: "[[remote]]",
@@ -507,15 +483,6 @@ proc workspaceSettingsText*(cfg: WorkspaceSettings): string =
   ## The shared settings file ``repro-workspace.toml``
   ## (``reprobuild.workspace.settings.v1``, Workspace-Settings-Files.md §3)
   ## from a typed value. A table is written only when it carries something.
-  ## Always ``settings.v1``: a record mapped from an old ``bootstrap.v1`` file
-  ## is written in the new shape (its record store under ``[records]``), never
-  ## the old one. ``privateManifestUrl`` and ``manifestRevision`` have no
-  ## ``settings.v1`` spelling and are refused rather than dropped.
-  if cfg.privateManifestUrl.isSome or cfg.manifestRevision.isSome:
-    raise editError(cfg.path, "manifest",
-      "a bootstrap.v1 `[manifest] private_url` / `revision` has no " &
-        "settings.v1 spelling: declare a named `[[manifest]]` layer (its url " &
-        "supplied by repro-workspace.local.toml) with its own `revision`")
   var blocks: seq[RenderBlock]
   var w: seq[RenderEntry]
   w.addOpt("profile", cfg.workspace.profile)
@@ -1278,64 +1245,19 @@ proc renameKey*(doc: var ManifestDoc; table, oldKey, newKey: string): bool =
   doc.replaceLines(e.first, e.first, newLines)
   true
 
-proc repoFragmentSchema(doc: ManifestDoc): string =
-  ## The fragment schema the document declares, or "" when it is not a repo
-  ## fragment.
+proc guardFragmentSchema(doc: ManifestDoc; table, key: string) =
+  ## Refuse an edit that would put a retired spelling into a repo fragment,
+  ## or edit a fragment that still declares the retired schema (the reader
+  ## refuses that file, so an edit would only produce a file that still does
+  ## not load). Enforced HERE rather than by callers, so no verb can write
+  ## either.
   let schema = doc.stringValue("", "schema").get("")
-  if schema in [schemaRepoFragmentV1, schemaRepoFragmentV2]: schema else: ""
-
-proc upgradeRepoFragmentToV2*(doc: var ManifestDoc): bool =
-  ## Rewrite a ``repo.v1`` fragment as ``repo.v2`` — the schema line and the
-  ## ``branch`` key renamed ``mainline`` — in one in-memory edit, so the file
-  ## that is saved is wholly one schema or the other, never a mix. Returns
-  ## false when the document is not a v1 fragment. Comments, key order and
-  ## the value of the renamed key survive.
-  if doc.repoFragmentSchema != schemaRepoFragmentV1:
-    return false
-  let s = doc.scan
-  let idx = doc.findEntry(s, "", "schema")
-  doc.replaceValue(s.entries[idx].value, @[tomlQuote(schemaRepoFragmentV2)])
-  discard doc.renameKey("repo", "branch", "mainline")
-  true
-
-proc guardFragmentSchema(doc: var ManifestDoc; table, key: string): string =
-  ## The one-schema rule for repo fragments, enforced HERE rather than by
-  ## callers (Workspace-Branch-Roles.md §3.6, §6; the reader refuses a mixed
-  ## fragment). Returns the key to write, which differs from ``key`` only
-  ## when a v1 file spells it differently:
-  ##
-  ## * writing ``mainline`` into a v1 fragment writes ``branch`` — the same
-  ##   meaning in the v1 spelling — and leaves the file v1;
-  ## * writing a key only ``repo.v2`` can say (a role other than the
-  ##   mainline, ``profile``, a custom role) into a v1 fragment first upgrades
-  ##   the WHOLE file to v2;
-  ## * writing ``branch`` into a v2 fragment is refused.
-  ##
-  ## Why an edit of a key both schemas share (``depends``, ``tags`` …) does
-  ## NOT upgrade a v1 file: the schema bump is what makes a pre-BR1 ``repro``
-  ## refuse the file ("unknown major schema version"). Upgrading every
-  ## fragment a verb happens to touch would turn an unrelated ``repro add``
-  ## into an outage for every machine still on an older pin; a workspace's
-  ## fragments move to v2 when it migrates, deliberately and all at once. The
-  ## same reason keeps ``mainline`` in the v1 spelling: a v1 file can say it.
-  result = key
-  let schema = doc.repoFragmentSchema
-  if schema.len == 0:
-    return
-  if schema == schemaRepoFragmentV1 and table == "repo" and key == "mainline":
-    return "branch"
-  let v2Only =
-    (table == "repo" and key in ["unstable", "staging", "stable",
-                                 "production", "lts", "profile",
-                                 "branch-roles"]) or
-    table == "repo.branch-roles"
-  if v2Only and schema == schemaRepoFragmentV1:
-    discard doc.upgradeRepoFragmentToV2()
-  elif table == "repo" and key == "branch" and schema == schemaRepoFragmentV2:
-    raise editError(doc.path, "repo.branch",
-      "a " & schemaRepoFragmentV2 & " fragment names its mainline " &
-        "`mainline`; `branch` is the " & schemaRepoFragmentV1 & " spelling")
-
+  if schema == retiredRepoFragmentSchema:
+    raise editError(doc.path, "schema", retiredRepoFragmentSchemaMessage())
+  if schema == schemaRepoFragmentV2 and table == "repo" and
+      key == retiredRepoBranchKey:
+    raise editError(doc.path, "repo." & retiredRepoBranchKey,
+      retiredRepoBranchKeyMessage())
 
 proc setKey*(doc: var ManifestDoc; table, key: string; value: TomlEditValue;
              layout = alInline; after: openArray[string] = []): bool =
@@ -1351,10 +1273,10 @@ proc setKey*(doc: var ManifestDoc; table, key: string; value: TomlEditValue;
   ##   (first in the table when none is present), or after the table's last
   ##   key when ``after`` is empty. A new top-level key goes above the first
   ##   table header. A missing table is appended to the file.
-  ## * In a repo fragment, ``mainline`` is written as ``branch`` in a v1 file,
-  ##   a key only ``repo.v2`` can say upgrades a v1 file first, and ``branch``
-  ##   is refused in a v2 file (``guardFragmentSchema``).
-  let key = doc.guardFragmentSchema(table, key)
+  ## * In a repo fragment, the retired ``branch`` key is refused, and so is
+  ##   any edit of a fragment declaring the retired schema
+  ##   (``guardFragmentSchema``).
+  doc.guardFragmentSchema(table, key)
   let s = doc.scan
   let idx = doc.findEntry(s, table, key)
   if idx >= 0:
@@ -1470,7 +1392,9 @@ proc addArrayMember*(doc: var ManifestDoc; table, key, member: string;
   ## Add ``member`` to the array NAMED ``key`` in ``table`` — never to another
   ## array, whatever its position. Returns false when it is already there
   ## (idempotent). A missing array is created with ``layout``; a top-level
-  ## one above the first table header.
+  ## one above the first table header. A retired repo fragment is refused
+  ## (``guardFragmentSchema``).
+  doc.guardFragmentSchema(table, key)
   let s = doc.scan
   let idx = doc.findEntry(s, table, key)
   if idx < 0:
@@ -1489,7 +1413,9 @@ proc removeArrayMember*(doc: var ManifestDoc; table, key, member: string): bool 
   ## Drop every occurrence of ``member`` from the array NAMED ``key``.
   ## Returns false when it was not there (idempotent). The array itself stays,
   ## empty if need be: an empty membership array still says which namespace
-  ## the next entry belongs in.
+  ## the next entry belongs in. A retired repo fragment is refused
+  ## (``guardFragmentSchema``).
+  doc.guardFragmentSchema(table, key)
   let s = doc.scan
   let idx = doc.findEntry(s, table, key)
   if idx < 0:

@@ -57,9 +57,9 @@ proc writeSet(root, name: string; members: openArray[string]) =
 
 proc fragmentBody(name, path: string; previously = ""): string =
   result =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"" & name & "\"\npath = \"" & path & "\"\n" &
-    "url_prefix = \"local\"\nbranch = \"latest\"\n"
+    "url_prefix = \"local\"\nmainline = \"latest\"\n"
   if previously.len > 0:
     result.add("\n[extensions]\npreviously = " & previously & "\n")
 
@@ -115,9 +115,9 @@ suite "declared rename — the manifest plane":
     defer: removeDir(root)
 
     writeRepo(root, "widget-pm",
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
       "[repo]\nname = \"widget-pm\"\npath = \"widget-pm\"\n" &
-      "url_prefix = \"local\"\nbranch = \"latest\"\n" &
+      "url_prefix = \"local\"\nmainline = \"latest\"\n" &
       "previously = [{ name = \"widget-specs\" }]\n")
     writeSet(root, "everything", ["widget-pm"])
 

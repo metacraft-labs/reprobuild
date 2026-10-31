@@ -399,6 +399,9 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   if dirExists(dd / "reprobuild-test-adapters" / "src"):
     if unsetInChild("REPRO_TEST_ADAPTERS_SRC"):
       env["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"
+  if fileExists(dd / "test-certificates-tools" / "src" / "test_certificates.nim"):
+    if unsetInChild("TEST_CERTIFICATES_TOOLS_SRC"):
+      env["TEST_CERTIFICATES_TOOLS_SRC"] = dd / "test-certificates-tools" / "src"
   env
 
 # ---------------------------------------------------------------------------

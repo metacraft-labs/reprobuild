@@ -106,9 +106,9 @@ proc headSha(gitBin, checkout: string): string =
 
 proc writeFragment(root, name, remote, branch: string) =
   writeFile(root / "repos" / (name & ".toml"),
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & remote & "\"\nbranch = \"" & branch & "\"\n")
+    "remote = \"" & remote & "\"\nmainline = \"" & branch & "\"\n")
 
 proc writeWorkspace(root: string; remotes, includes: openArray[string]) =
   ## A single-project manifest repo laid out flat at the workspace root, plus
@@ -123,8 +123,8 @@ proc writeWorkspace(root: string; remotes, includes: openArray[string]) =
     project.add("  \"" & inc & "\",\n")
   project.add("]\n")
   writeFile(root / "projects" / "demo.toml", project)
-  writeFile(root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
 proc remoteBlock(name, fetch: string): string =
@@ -296,21 +296,21 @@ suite "workspace migrate reconciles local git state with the manifest":
         "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n" &
         "[url-prefix]\nname = \"kitware\"\nurl = \"" & kitwarePrefix & "\"\n")
       writeFile(root / "repos" / "reprobuild-cmake.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"reprobuild-cmake\"\npath = \"reprobuild-cmake\"\n" &
-        "branch = \"reprobuild\"\nurl_prefix = \"metacraft-labs\"\n" &
+        "mainline = \"reprobuild\"\nurl_prefix = \"metacraft-labs\"\n" &
         "remotes = [{ name = \"upstream\", url_prefix = \"kitware\", " &
           "url_suffix = \"CMake\" }]\n")
       writeFile(root / "repos" / "already-fine.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"already-fine\"\npath = \"already-fine\"\n" &
-        "branch = \"dev\"\nurl_prefix = \"metacraft-labs\"\n")
+        "mainline = \"dev\"\nurl_prefix = \"metacraft-labs\"\n")
       writeFile(root / "repo-sets" / "demo.toml",
         "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
         "[repo-set]\nname = \"demo\"\n\n" &
         "member_repos = [\"reprobuild-cmake\", \"already-fine\"]\n")
-      writeFile(root / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(root / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
       let fork = root / "reprobuild-cmake"

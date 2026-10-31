@@ -113,8 +113,7 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"dev\"\n" &
-    "trunk = \"dev\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
     "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
     "[[remote]]\nname = \"c-origin\"\nfetch = \"" & cUrl & "\"\n\n" &
@@ -127,43 +126,43 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "a-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "b-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libCFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
 remote = "c-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libDFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-d"
 path = "lib-d"
 remote = "d-origin"
-branch = "main"
+mainline = "main"
 """
 
 type
@@ -323,8 +322,8 @@ suite "RA-23 — sync clones newly-declared dependencies":
 
       # Record a workspace feature branch in .repro/workspace.toml
       createDir(fx.workspaceRoot / ".repro")
-      writeFile(fx.workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\nproject = \"myproject\"\nbranch = \"feature-test\"\n")
+      writeFile(fx.workspaceRoot / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\nproject = \"myproject\"\nbranch = \"feature-test\"\n")
 
       # Only lib-a is checked out
       cloneInto(gitBin, fx.aOrigin, fx.workspaceRoot / "lib-a")

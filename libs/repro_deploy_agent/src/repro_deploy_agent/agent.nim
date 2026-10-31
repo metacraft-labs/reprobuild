@@ -32,7 +32,8 @@
 ## ``runInfraApply``. This mirrors the Linux agent's ``DeployAgentDependencies``
 ## seam (fetch/run/query process runners injected for tests).
 
-import std/[algorithm, httpclient, os, strutils, uri]
+import std/[algorithm, asyncdispatch, asyncfutures, httpclient, monotimes, os,
+            strutils, times, uri]
 
 when defined(ssl):
   import std/net
@@ -215,38 +216,122 @@ proc fileUrlToPath(source: string): string =
     if result.len >= 3 and result[0] == '/' and result[2] == ':':
       result = result[1 .. ^1]
 
-proc defaultHttpGet(url: string; timeoutMs: int):
+proc fetchDeadlineMs*(timeoutMs: int): int =
+  ## The whole-fetch deadline: four per-step timeouts, and never under a
+  ## minute, so a slow but honest source on a congested LAN still completes
+  ## a 32 MiB manifest at a few hundred KiB/s while a trickle does not.
+  max(timeoutMs * 4, 60_000)
+
+template awaitWithin(fut: untyped; timeoutMs: int; what: string): untyped =
+  ## `waitFor` with the agent's fetch timeout applied to ONE step: the
+  ## headers, then each body chunk. A source that stalls mid-body is an
+  ## error, not a hang.
+  block:
+    let f = fut
+    if timeoutMs > 0 and not waitFor withTimeout(f, timeoutMs):
+      raise newException(IOError, what & " timed out after " &
+        $timeoutMs & " ms")
+    waitFor f
+
+proc httpGetBounded*(url: string; timeoutMs, deadlineMs: int):
     tuple[ok: bool; missing: bool; body: seq[byte]; error: string] {.gcsafe.} =
-  let isHttps = url.toLowerAscii().startsWith("https://")
-  when defined(ssl):
-    var client =
+  ## Fetch a manifest source over HTTP(S) with the body bounded by
+  ## ``MaxDeployManifestBytes`` WHILE it arrives (Deploy-Agent.md
+  ## §Strictness). The synchronous ``HttpClient`` cannot do that: its
+  ## ``request`` has parsed the whole body into memory before it returns, so
+  ## a cap checked afterwards bounds nothing. The async client hands back
+  ## the response after the headers and streams the body through
+  ## ``bodyStream`` as this proc polls for it; stopping at the cap and
+  ## closing the client closes the connection, so what is ever held is the
+  ## cap plus the chunks already in flight. ``Content-Length``, when sent,
+  ## refuses an oversized body before a byte of it is read, and sizes the
+  ## buffer once (`min(Content-Length, cap)`) so a body under the cap is not
+  ## copied through a growing seq.
+  ##
+  ## Two clocks bound the time. `timeoutMs` applies to each step (the
+  ## headers, every chunk), so a source that stops talking is an error. A
+  ## whole-fetch deadline, `fetchDeadlineMs(timeoutMs)`, applies from the
+  ## request to the last byte, so a source that keeps talking but trickles
+  ## (one byte per half-second never trips a per-chunk timeout; at that
+  ## rate the cap is a year away) is an error too. Both raise the same
+  ## `IOError`, which the tick records as a source error and retries next
+  ## tick.
+  {.cast(gcsafe).}:
+    let isHttps = url.toLowerAscii().startsWith("https://")
+    when defined(ssl):
+      var client =
+        if isHttps: newAsyncHttpClient(sslContext = agentTlsContext())
+        else: newAsyncHttpClient()
+    else:
       if isHttps:
-        newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1),
-                      sslContext = agentTlsContext())
-      else:
-        newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
-  else:
-    if isHttps:
-      return (ok: false, missing: false, body: @[],
-              error: "https:// manifest source requires a build with -d:ssl; " &
-                     "this binary is HTTP-only")
-    var client = newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
-  try:
-    let resp = client.get(url)
-    if resp.code == Http404:
-      return (ok: false, missing: true, body: @[], error: "404")
-    if not resp.code.is2xx:
-      return (ok: false, missing: false, body: @[],
-              error: "HTTP " & $resp.code)
-    let bodyStr = resp.body
-    var bytes = newSeq[byte](bodyStr.len)
-    for i, ch in bodyStr:
-      bytes[i] = byte(ch)
-    return (ok: true, missing: false, body: bytes, error: "")
-  except CatchableError as e:
-    return (ok: false, missing: false, body: @[], error: e.msg)
-  finally:
-    try: client.close() except CatchableError: discard
+        return (ok: false, missing: false, body: @[],
+                error: "https:// manifest source requires a build with -d:ssl; " &
+                       "this binary is HTTP-only")
+      var client = newAsyncHttpClient()
+    let deadline = getMonoTime() + initDuration(milliseconds = deadlineMs)
+    try:
+      let resp = awaitWithin(client.request(url, HttpGet), timeoutMs,
+        "fetching " & url)
+      if resp.code == Http404:
+        return (ok: false, missing: true, body: @[], error: "404")
+      if not resp.code.is2xx:
+        return (ok: false, missing: false, body: @[],
+                error: "HTTP " & $resp.code)
+      var declared = 0
+      if resp.headers.hasKey("Content-Length"):
+        try:
+          declared = parseInt(resp.headers["Content-Length"])
+        except ValueError:
+          return (ok: false, missing: false, body: @[],
+                  error: "unparseable Content-Length header")
+        if declared > MaxDeployManifestBytes:
+          return (ok: false, missing: false, body: @[],
+                  error: "manifest body of " & $declared & " bytes exceeds " &
+                    "the " & $MaxDeployManifestBytes & "-byte cap")
+      var bytes = newSeqOfCap[byte](
+        if declared > 0: min(declared, MaxDeployManifestBytes) else: 0)
+      while true:
+        let left = deadline - getMonoTime()
+        if left <= DurationZero:
+          raise newException(IOError, "reading the manifest body from " & url &
+            " exceeded the " & $deadlineMs & " ms deadline " &
+            "for the whole fetch (" & $bytes.len & " bytes received)")
+        # The per-chunk wait is clamped to what is left of the deadline, and
+        # a wait that ends because the deadline did is reported as the
+        # deadline, not as a chunk timeout.
+        let leftMs = int(left.inMilliseconds) + 1
+        let stepMs = if timeoutMs > 0: min(timeoutMs, leftMs) else: leftMs
+        let (more, chunk) =
+          try:
+            awaitWithin(resp.bodyStream.read(), stepMs,
+              "reading the manifest body from " & url)
+          except IOError as e:
+            if stepMs == leftMs:
+              raise newException(IOError, "reading the manifest body from " &
+                url & " exceeded the " & $deadlineMs & " ms deadline for " &
+                "the whole fetch (" & $bytes.len & " bytes received)")
+            raise e
+        if not more: break
+        if bytes.len + chunk.len > MaxDeployManifestBytes:
+          return (ok: false, missing: false, body: @[],
+                  error: "manifest body exceeds the " &
+                    $MaxDeployManifestBytes & "-byte cap")
+        let at = bytes.len
+        bytes.setLen(at + chunk.len)
+        for i, ch in chunk:
+          bytes[at + i] = byte(ch)
+      return (ok: true, missing: false, body: bytes, error: "")
+    except CatchableError as e:
+      return (ok: false, missing: false, body: @[], error: e.msg)
+    finally:
+      try: client.close() except CatchableError: discard
+
+proc defaultHttpGet*(url: string; timeoutMs: int):
+    tuple[ok: bool; missing: bool; body: seq[byte]; error: string] {.gcsafe.} =
+  ## The production fetch: `httpGetBounded` under the agent's whole-fetch
+  ## deadline. The deadline is a parameter of the bounded form so a test
+  ## can measure a trickling source in seconds rather than a minute.
+  httpGetBounded(url, timeoutMs, fetchDeadlineMs(timeoutMs))
 
 proc readSource(cfg: AgentConfig; deps: AgentDeps; source: string):
     tuple[ok: bool; missing: bool; body: seq[byte]; error: string] =
