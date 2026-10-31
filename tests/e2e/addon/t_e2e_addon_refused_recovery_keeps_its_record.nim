@@ -58,10 +58,15 @@ const
   Script = "/usr/local/libexec/repro-fixture-stubborn"
   GenFile = "/etc/repro-fixture/gen.conf"
   # An instance ignores SIGTERM while the control file names its
-  # generation; the `sleep` child dies, the shell stays.
+  # generation; the `sleep` child dies, the shell stays. The trap reads the
+  # file with shell builtins only: systemd sends SIGTERM to every process
+  # in the unit's group, and a `grep` the trap had just spawned could be
+  # among them, fail, and make the shell exit -- measured on Debian 13,
+  # where a boot-started instance died at the stop timeout that way.
   ScriptBody = "#!/bin/sh\n" &
-    "trap 'if grep -qx \"$GEN\" " & Stubborn & " 2>/dev/null; then :; " &
-    "else exit 0; fi' TERM\n" &
+    "trap 'keep=0; if [ -f " & Stubborn & " ]; then " &
+    "while read -r l; do [ \"$l\" = \"$GEN\" ] && keep=1; done < " & Stubborn &
+    "; fi; [ $keep = 1 ] || exit 0' TERM\n" &
     "while :; do sleep 1 & wait $!; done\n"
 
 proc unitText(gen: string): string =
