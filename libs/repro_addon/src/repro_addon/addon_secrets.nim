@@ -687,8 +687,15 @@ proc encodeLocked*(l: SecretsLayout;
                                           data: pointer; len: int]]): LockedBytes =
   ## The canonical payload of ``parts`` built in a locked buffer, each
   ## part's bytes copied from where they lie (another locked buffer).
+  ## Refuses -- before anything is built, sealed or written -- a payload
+  ## larger than ``MaxPlaintextBytes``: ``openEnvelope`` would refuse to
+  ## open it, so sealing it would leave an envelope no boot could read.
   var total = 4
   for p in parts: total += 12 + p.path.len + p.len
+  if total > MaxPlaintextBytes:
+    fail("the secrets would take " & $total & " bytes sealed together, " &
+      "more than the " & $MaxPlaintextBytes & " the add-on locks in RAM " &
+      "at once; nothing was written")
   result = lockedBuffer(l, total)
   var pos = 0
   template put32(v: uint32) =

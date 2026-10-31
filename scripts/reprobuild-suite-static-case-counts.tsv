@@ -38,7 +38,7 @@ libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
-libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	11
+libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	32
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	26
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8

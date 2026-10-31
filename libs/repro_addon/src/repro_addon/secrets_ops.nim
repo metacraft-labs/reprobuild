@@ -155,7 +155,7 @@ proc planConsumers(stateDir: string; services: seq[string]): ConsumerPlan =
     elif exclusive: result.exclusive.add(r.suName)
     else: result.restart.add(r.suName)
 
-proc addEntry(l: SecretsLayout; path, entry: string; content: LockedBytes;
+proc addEntry*(l: SecretsLayout; path, entry: string; content: LockedBytes;
               target: string; createIfAbsent: bool): string =
   ## Re-seal the envelope at ``path`` with ``entry`` added or replaced, to
   ## the key that opens it (the current key when there is no envelope and
@@ -197,14 +197,19 @@ proc addEntry(l: SecretsLayout; path, entry: string; content: LockedBytes;
 
 proc readLockedFd*(l: SecretsLayout; fd: cint; what: string): LockedBytes =
   ## Everything readable from ``fd`` (stdin) into a buffer locked in RAM,
-  ## never through a string; at most ``MaxPlaintextBytes``.
+  ## never through a string; at most ``MaxPlaintextBytes`` (exactly that
+  ## many is accepted: the buffer grows one byte past the cap, so the read
+  ## that finds EOF has room, and only a byte beyond the cap refuses).
+  ## The envelope the secret goes into is bounded separately, as a whole
+  ## (``encodeLocked``).
+  const limit = MaxPlaintextBytes + 1
   result = newLockedBytes(0, requireLock = l.lockPlaintext)
   while true:
+    if result.len > MaxPlaintextBytes:
+      raise newException(AddonSecretsFailed, what & " is larger than " &
+        $MaxPlaintextBytes & " bytes")
     if result.len == result.capacity:
-      if result.len >= MaxPlaintextBytes:
-        raise newException(AddonSecretsFailed, what & " is larger than " &
-          $MaxPlaintextBytes & " bytes")
-      grow(result, min(MaxPlaintextBytes, 2 * result.capacity), l.lockPlaintext)
+      grow(result, min(limit, 2 * result.capacity), l.lockPlaintext)
     let n = posix.read(fd, addr result.data[result.len],
                        result.capacity - result.len)
     if n < 0:

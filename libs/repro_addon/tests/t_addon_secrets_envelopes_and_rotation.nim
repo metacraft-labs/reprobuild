@@ -16,7 +16,12 @@
 ## - the planner turns a credential change into a confirmed stop-start for
 ##   an exclusive unit, a restart otherwise, and a pending ``leave`` when
 ##   the unit holds its restarts -- never a reload;
-## - ``rawCredentialDirective`` finds ``LoadCredential=`` and its kin.
+## - ``rawCredentialDirective`` finds ``LoadCredential=`` and its kin;
+## - the plaintext bound is one bound: a payload of exactly
+##   ``MaxPlaintextBytes`` is built and one byte more is refused before
+##   anything is sealed or written (a put cannot leave an envelope that
+##   ``openEnvelope`` refuses), and ``readLockedFd`` accepts a secret of
+##   exactly ``MaxPlaintextBytes`` and refuses one byte more.
 ##
 ## *Mocking.* None: real files, the real codec, keys and planner. The
 ## layout points at a scratch directory, owned by the test user, with no
@@ -269,3 +274,52 @@ suite "envelopes and rotation":
     expect AddonSecretsFailed:
       discard openEnvelope(l, RetainedEnvelope(target: "t",
         sealed: SealedSecrets(ciphertext: big)))
+
+  test "a put that would outgrow the plaintext bound writes nothing":
+    let b = newBed("bound")
+    defer: removeDir(b.root)
+    let pub = b.pubOf(recipientKeyPath(b.layout))
+    # The payload framing: 4 bytes of count, 12 per entry plus its path;
+    # room is left for one byte of "web/b".
+    let firstLen = MaxPlaintextBytes - 4 - 12 - "web/a".len - 12 - "web/b".len - 1
+    var first = newSeq[byte](firstLen)
+    for i in 0 ..< first.len: first[i] = byte(i and 0xff)
+    let path = latestEnvelopePath(b.layout)
+    writeEnvelopeFile(b.layout, path, RetainedEnvelope(target: "t",
+      sealed: sealSecrets(pub, "t",
+        @[SecretFile(path: "web/a", mode: 0o400, content: first)])))
+    let before = readFile(path)
+    # One byte that brings the payload to exactly the bound is accepted ...
+    var one = newLockedBytes(1, requireLock = false)
+    one.len = 1
+    one.data[0] = 7
+    var exact = encodeLocked(b.layout, [("web/a", 0o400'u32,
+      pointer(addr first[0]), first.len), ("web/b", 0o400'u32, one.toPtr, 1)])
+    check exact.len == MaxPlaintextBytes
+    # ... and the put of two bytes is refused, the envelope untouched.
+    var two = newLockedBytes(2, requireLock = false)
+    two.len = 2
+    expect AddonSecretsFailed:
+      discard addEntry(b.layout, path, "web/b", two, "t", createIfAbsent = false)
+    check readFile(path) == before
+    check openEnvelope(b.layout, readEnvelopeFile(b.layout, path)[1]).entries.len == 1
+
+  test "a secret of exactly the bound is read; one byte more is refused":
+    let b = newBed("stdin")
+    defer: removeDir(b.root)
+    proc readN(n: int): bool =
+      let f = b.root / "in"
+      var s = newString(n)
+      writeFile(f, s)
+      let fd = posix.open(cstring(f), O_RDONLY)
+      doAssert fd >= 0
+      defer: discard posix.close(fd)
+      try:
+        let got = readLockedFd(b.layout, fd, "the secret")
+        doAssert got.len == n
+        true
+      except AddonSecretsFailed:
+        false
+    check readN(MaxPlaintextBytes)
+    check not readN(MaxPlaintextBytes + 1)
+    check readN(0)

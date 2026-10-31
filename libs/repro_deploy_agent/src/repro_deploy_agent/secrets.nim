@@ -283,6 +283,11 @@ proc deriveKeyAndNonce(shared: array[SharedSecretLen, byte];
     result.key[i] = stream[i]
   for i in 0 ..< GcmNonceLen:
     result.nonce[i] = stream[AesKeyLen + i]
+  # The stack copies of the key material are wiped before they are
+  # released; the returned key is the caller's to wipe.
+  zeroMem(addr stream[0], stream.len)
+  zeroMem(addr ikm[0], ikm.len)
+  zeroMem(addr hc, sizeof(hc))
 
 proc gcmTransformPtr(key: array[AesKeyLen, byte];
                      nonce: array[GcmNonceLen, byte];
@@ -313,7 +318,11 @@ proc gcmTransformPtr(key: array[AesKeyLen, byte];
     result = true
   else:
     result = bsslAead.gcmCheckTag(gc, addr tag[0]) == 1'u32
+  # Wipe the key, its AES schedule and the GCM state (which holds the
+  # GHASH key) before the stack frame is released.
   zeroMem(addr keyCopy[0], AesKeyLen)
+  zeroMem(addr bc, sizeof(bc))
+  zeroMem(addr gc, sizeof(gc))
 
 proc gcmTransform(key: array[AesKeyLen, byte];
                   nonce: array[GcmNonceLen, byte];
@@ -732,14 +741,16 @@ proc openSecretsInPlace*(recipientPrivKey: peerAuth.PrivateKeyBytes;
       $dstLen & " bytes for a ciphertext of " & $sealed.ciphertext.len)
   let recipientPub = peerAuth.derivePublicKey(recipientPrivKey)
   var shared = ecdhSharedX(recipientPrivKey, sealed.ephemeralPubKey)
-  let derived = deriveKeyAndNonce(shared, target, sealed.ephemeralPubKey,
+  var derived = deriveKeyAndNonce(shared, target, sealed.ephemeralPubKey,
                                   recipientPub)
   zeroMem(addr shared[0], shared.len)
   if dstLen > 0:
     copyMem(dst, unsafeAddr sealed.ciphertext[0], dstLen)
   var tag = sealed.tag
-  if not gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
-                         dst, dstLen, encrypt = false, tag = tag):
+  let opened = gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
+                               dst, dstLen, encrypt = false, tag = tag)
+  zeroMem(addr derived.key[0], AesKeyLen)
+  if not opened:
     if dstLen > 0: zeroMem(dst, dstLen)
     raise newException(SecretsError,
       "sealed secrets failed authentication for target '" & target &
@@ -753,12 +764,13 @@ proc sealSecretsInPlace*(recipientPubKey: peerAuth.PublicKeyBytes;
   ## holds ciphertext only.
   let ephemeral = peerAuth.generateKeypair()
   var shared = ecdhSharedX(ephemeral.privateKey, recipientPubKey)
-  let derived = deriveKeyAndNonce(shared, target, ephemeral.publicKey,
+  var derived = deriveKeyAndNonce(shared, target, ephemeral.publicKey,
                                   recipientPubKey)
   zeroMem(addr shared[0], shared.len)
   var tag: array[GcmTagLen, byte]
   discard gcmTransformPtr(derived.key, derived.nonce, AadPrefix & target,
                           payload, payloadLen, encrypt = true, tag = tag)
+  zeroMem(addr derived.key[0], AesKeyLen)
   result.ephemeralPubKey = ephemeral.publicKey
   result.nonce = derived.nonce
   result.tag = tag
