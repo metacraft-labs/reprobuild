@@ -20,6 +20,14 @@
 ## the apply unit compiles the source itself (the reused single-process
 ## hook's resolver) and a compiler shows up as UID 0 in the apply unit: red.
 ##
+## On an armhf base (``ubuntu-24.04-armhf``, under TCG) the guest's compiler
+## is a prefix cross-built from the same commit
+## (``REPRO_ADDON_ENGINE_PREFIX_ARMHF``), the way rpi2's engine is installed,
+## while the producer compiles on the x86_64 test host with ``arch = arm32``:
+## the compile is a cross-EVALUATION (facts injected, native compiler on
+## each side), and the guest reproducing the pin is the proof that the two
+## machines emit the same bytes.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_ADDON_ENGINE_CLOSURE``
 ## (a store path holding ``bin/reprobuild`` built from this tree).
 ##
@@ -40,7 +48,33 @@ const
 
 let engine = getEnv("REPRO_ADDON_ENGINE_CLOSURE")
 
-proc installEngine(g: Guest) = g.installEngineClosure(engine)
+let enginePrefixTar = getEnv("REPRO_ADDON_ENGINE_PREFIX_ARMHF")
+  ## An armhf guest's compiler: a reprobuild prefix cross-built from the
+  ## same commit (``scripts/cross/build_linux_cross.sh``), as a tar of its
+  ## output directory, unpacked at /usr/local/repro -- how rpi2's engine is
+  ## installed. The producer still compiles on this (x86_64) machine with
+  ## the Nix engine, for the guest's facts.
+const Compiler = "/usr/local/bin/a8-profile-compiler"
+  ## One path on every base, so the bootstrap's --profile-compiler is too.
+
+proc factArch(debArch: string): string =
+  case debArch
+  of "amd64": "x86_64"
+  of "arm64": "arm64"
+  of "armhf": "arm32"
+  else: raise newException(ValueError, "no arch fact for " & debArch)
+
+proc installEngine(g: Guest) =
+  if g.base.debArch == "amd64":
+    g.installEngineClosure(engine)
+    discard g.run("ln -sfn " & engine & "/bin/reprobuild " & Compiler)
+  else:
+    doAssert g.base.debArch == "armhf" and enginePrefixTar.len > 0,
+      "an " & g.base.debArch & " base needs REPRO_ADDON_ENGINE_PREFIX_ARMHF"
+    g.copyTo(enginePrefixTar, "/root/engine-prefix.tar")
+    discard g.run("mkdir -p /usr/local/repro && tar -xf /root/engine-prefix.tar " &
+      "-C /usr/local/repro && rm /root/engine-prefix.tar && ln -sfn " &
+      "/usr/local/repro/bin/reprobuild " & Compiler, timeoutSec = 1800)
 
 const Watcher = """
 while true; do
@@ -62,7 +96,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # The producer compiles the same source with the same engine on this
   # machine and pins the digest (B1): the guest's compile reproducing it is
   # the cross-host determinism check (x86_64 producer, Debian/Ubuntu guest).
-  let pin = producerCompile(engine, Source)
+  # On armhf this is the cross-evaluation check: the x86_64 producer's
+  # compile with arm32 facts against the armhf guest's own compile.
+  let pin = producerCompile(engine, Source, arch = factArch(g.base.debArch))
+  record["guestCompiler"] = %g.run(Compiler & " --version 2>&1 | head -1").strip()
   record["compiledProfilePin"] = %pin.digest
   record["compilerRevision"] = %pin.compilerRevision
   discard producer.publish(PublishSpec(sequence: 1, profileText: Source,
@@ -106,5 +143,5 @@ suite Gate:
       check false
     else:
       check gateMain(Gate, body, diskGiB = 20,
-        extraFlags = " --profile-compiler " & engine & "/bin/reprobuild",
+        extraFlags = " --profile-compiler " & Compiler,
         beforeBootstrap = installEngine).len == 0
