@@ -125,6 +125,9 @@ e2e_addon_exclusive_never_overlaps:
 e2e_addon_gc_keeps_current_and_previous:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_gc_keeps_current_and_previous
 
+e2e_addon_hostile_deb_cannot_escape_its_prefix:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_hostile_deb_cannot_escape_its_prefix
+
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
 

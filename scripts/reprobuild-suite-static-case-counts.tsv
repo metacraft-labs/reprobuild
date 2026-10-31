@@ -1090,6 +1090,7 @@ tests/e2e/addon/t_e2e_addon_exclusive_never_overlaps.nim	nim	1
 tests/e2e/addon/t_e2e_addon_gc_keeps_current_and_previous.nim	nim	1
 tests/e2e/addon/t_e2e_addon_hard_reset_at_every_step.nim	nim	1
 tests/e2e/addon/t_e2e_addon_hook_reports_new_file_on_ledger_path.nim	nim	1
+tests/e2e/addon/t_e2e_addon_hostile_deb_cannot_escape_its_prefix.nim	nim	1
 tests/e2e/addon/t_e2e_addon_net_sysctl_applies_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_no_plaintext_secret_on_disk.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
