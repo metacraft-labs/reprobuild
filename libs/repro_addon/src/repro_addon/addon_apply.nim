@@ -3463,8 +3463,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
   ## - ``current`` no longer names the generation the switch began from;
   ## - the write-ahead record is unusable AND the switch may have written
   ##   (it had passed step 2) without the ledger recording it: no revert
-  ##   can tell its writes apart. (Awaiting the owner's confirmation as a
-  ##   case of its own; see §7.2.)
+  ##   can tell its writes apart. (This case and the two before it are
+  ##   approved exceptions to always reverting; see the spec, §7.2.)
   ##
   ## A revert that is attempted and fails raises, with its own marker
   ## kept (the first case, at the next recovery).
