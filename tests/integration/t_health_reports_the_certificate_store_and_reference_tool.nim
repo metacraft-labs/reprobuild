@@ -102,6 +102,20 @@ suite "repro health's certificate line":
     let detail = certificateRow(fx, fx.libAPath)["detail"].getStr()
     check "from not-in-the-lock, which repro.lock does not pin" in detail
 
+  test "a malformed policy is reported and warned about":
+    let fx = setupStoreFixture(everyBranchSnapshot(pmRequired, ["t-unit"],
+      ["*"], name = "team-default", package = "lib-a"), "cert-line-malformed",
+      committedLock = true)
+    defer: removeDir(fx.scratch)
+    let lock = fx.libAPath / "repro.lock"
+    writeFile(lock, readFile(lock).replace("gate_mode = \"required\"",
+      "gate_mode = \"sometimes\""))
+    let row = certificateRow(fx, fx.libAPath)
+    check row["status"].getStr() == "warn"
+    check "policy unreadable" in row["detail"].getStr()
+    check "sometimes" in row["detail"].getStr()
+    check row["data"]["current_repository"]["policy_malformed"].getBool() == true
+
   test "a working directory outside the workspace judges no repository":
     # The same stale workspace as above is not this row's business when health
     # is asked about it from elsewhere; the workspace-wide snapshot row reports

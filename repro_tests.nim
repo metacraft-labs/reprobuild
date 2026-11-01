@@ -18120,6 +18120,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let thisDir = currentSourcePath().parentDir"),
   TestSpec(
+    source: "tests/integration/t_docs_test_certificates_describe_the_content_binding.nim",
+    binary: "build/test-bin/t_docs_test_certificates_describe_the_content_binding",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let guidePath = currentSourcePath().parentDir.parentDir.pare..."),
+  TestSpec(
     source: "tests/integration/t_dry_run_plans_without_a_reachable_runquotad.nim",
     binary: "build/test-bin/t_dry_run_plans_without_a_reachable_runquotad",
     defines: @[],
@@ -18978,6 +18989,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/integration/t_health_reports_the_certificate_store_and_reference_tool.nim",
+    binary: "build/test-bin/t_health_reports_the_certificate_store_and_reference_tool",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g05",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_health_vcs_hooks_digest_output.nim",
     binary: "build/test-bin/t_health_vcs_hooks_digest_output",
     defines: @[],
@@ -19162,7 +19184,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_import_of_a_moved_stdlib_module_names_the_new_home.nim",
@@ -19877,7 +19899,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",
@@ -20482,7 +20504,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_update_node_refreshes_the_flake_lock_through_repro_test.nim",
@@ -21153,7 +21175,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_nf4_foreign_env_contract.nim",
@@ -21824,7 +21846,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim",
