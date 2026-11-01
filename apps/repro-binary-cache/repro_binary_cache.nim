@@ -220,8 +220,10 @@ proc main(asService = false) {.async.} =
     srv.tlsKeyFile = opts.tlsKey
   await srv.start(opts.listen)
   let scheme = if srv.tlsEnabled(): "https" else: "http"
-  stderr.writeLine("repro-binary-cache listening on " & opts.listen &
-                   " (" & scheme & ")")
+  # The address actually bound: with port 0 the kernel chose it, and a
+  # caller that asked for one reads it from this line.
+  stderr.writeLine("repro-binary-cache listening on " & srv.listenHost &
+                   ":" & $int(srv.listenPort) & " (" & scheme & ")")
   stderr.writeLine("repro-binary-cache root          = " & opts.root)
   stderr.writeLine("repro-binary-cache storeDir adv  = " & state.info.storeDir)
   stderr.flushFile()
