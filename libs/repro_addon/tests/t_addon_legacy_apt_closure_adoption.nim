@@ -24,7 +24,13 @@
 ##   give its directory's hash, a union whose members do not give its
 ##   identity, a marker that is a symbolic link -- is left exactly as found,
 ##   with no receipt and no row;
-## * adoption is idempotent.
+## * adoption is idempotent;
+## * a closure no static tree binds but a hand-back record names -- the
+##   bytes a switch preserved when it relocated a unit or a launcher
+##   manifest from it to the store-published prefix (§9 "Migration") -- is
+##   held by ``HandBackRootId``, so neither ``gc`` nor ``recover`` takes it
+##   from under the service still running from it, and is released (and
+##   collected) once no record names it.
 ##
 ## And the vacuity control: without the migration, the store's ``recover``
 ## quarantines the same v2 prefixes -- the failure this migration prevents.
@@ -151,6 +157,53 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
     check again.refused.len == 0
     check again.adopted.len == 2
     check readFile(union / ReceiptFileName) == receiptBefore
+
+  test "a relocated-from closure is held while a hand-back record names it":
+    # rpi2 after the migration: the unit now binds the store-published
+    # prefix (a generation's static tree), the bytes it had -- bound to the
+    # v2 prefix the service still runs from -- are a preserved record.
+    let member = v2Member(store, "node-exporter", "1.9.0-1", shaOf('a'))
+    let union = v2Union(store, "node-exporter", "1.9.0-1", "armhf",
+                        @[("node-exporter", shaOf('a'))])
+    let manifestMember = v2Member(store, "ipmitool", "1.8.19-9", shaOf('b'))
+    let manifestUnion = v2Union(store, "ipmitool", "1.8.19-9", "armhf",
+                                @[("ipmitool", shaOf('b'))])
+    var s = openStore(store)
+    s.generationBinding(store, "8", store / "prefixes" / "apt-closure-x" /
+                        "1.0-0000000000000000")
+    s.close()
+    let preserved = store / "state" / "addon" / "preserved"
+    createDir(preserved)
+    let unitRecord = preserved / "unit"
+    writeFile(unitRecord, "[Service]\n" &
+      aptClosureUnitDirectives(union).join("\n") & "\n")
+    let manifestRecord = preserved / "manifest"
+    writeFile(manifestRecord, "# reprobuild linux.addOnTool\n" &
+      manifestUnion & "/usr:/usr:rbind,ro\nexec=/usr/bin/ipmitool\n")
+
+    let a = migrateLegacyAptClosures(store, handBack = @[preserved])
+    check a.refused.len == 0
+    s = openStore(store)
+    discard s.gc(graceSeconds = 0)
+    for d in [union, member, manifestUnion, manifestMember]:
+      check dirExists(d)
+    let rec = s.recover()
+    check rec.quarantinedPrefixes.len == 0
+    discard s.gc(graceSeconds = 0)
+    check fileExists(union / "usr/share/node-exporter/ok.txt")
+    check fileExists(manifestUnion / "usr/share/ipmitool/ok.txt")
+    s.close()
+
+    # The unit's record is gone (nothing names that prefix any more): the
+    # next adoption releases it and gc collects it; the manifest's stays.
+    removeFile(unitRecord)
+    discard migrateLegacyAptClosures(store, handBack = @[preserved])
+    s = openStore(store)
+    discard s.gc(graceSeconds = 0)
+    check not dirExists(union)
+    check not dirExists(member)
+    check dirExists(manifestUnion) and dirExists(manifestMember)
+    s.close()
 
   test "prefixes that do not verify are left as found":
     # The member's marker names another digest than its directory's hash.

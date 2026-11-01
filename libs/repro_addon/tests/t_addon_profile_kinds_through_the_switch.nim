@@ -94,6 +94,19 @@ suite "a tool is ledgered through the two files it writes":
     for x in c: check addOnToolCarrierOf(x) == "addOnTool:ipmitool"
     check addOnToolCarrierOf(SystemResource(kind: srkFsSystemFile,
       address: "systemFile:/etc/x")) == ""
+    # A tool the profile names (rpi2's `ipmitool`, not the text default
+    # `addOnTool:ipmitool`): its carriers are recognised all the same. At
+    # 7d7313432b they were taken for ordinary files.
+    var named = SystemResource(kind: srkLinuxAddOnTool, address: "ipmitool",
+      atCommand: "ipmitool", atProgram: "/usr/bin/ipmitool",
+      atAptClosureLock: Lock)
+    for x in addOnToolCarriers(named): check addOnToolCarrierOf(x) == "ipmitool"
+    # A file of that address shape elsewhere, or a wrapper-named manifest,
+    # is not a carrier.
+    check addOnToolCarrierOf(SystemResource(kind: srkFsSystemFile,
+      address: "x#wrapper", sfPath: "/etc/x")) == ""
+    check addOnToolCarrierOf(SystemResource(kind: srkFsSystemFile,
+      address: "x#wrapper", sfPath: addOnToolManifestPath("x"))) == ""
 
 suite "an account is decided as its driver compares it":
   test "absent creates; as declared adopts, or is the ledger's no-op":
@@ -297,3 +310,38 @@ suite "a unit an older closure realiser bound is relocated, not refused":
     check not relocatesClosure(r, tmp / "x.service")
     writeFile(tmp / "x.service", rendered)
     check not relocatesClosure(r, tmp / "x.service")
+
+  test "a tool's launcher manifest bound to the older prefix is relocated too":
+    # At 7d7313432b rpi2's /etc/repro/bin/ipmitool.launcher.manifest, as its
+    # agent wrote it (realiser 2's prefix), was EDrift: only units were
+    # recognised. The wrapper names no prefix and has no older rendering.
+    let tool = SystemResource(kind: srkLinuxAddOnTool,
+      address: "ipmitool", atCommand: "ipmitool",
+      atProgram: "/usr/bin/ipmitool", atAptClosureLock: Lock)
+    let carriers = addOnToolCarriers(tool)
+    let wrapper = carriers[0]
+    let manifest = carriers[1]
+    check manifest.address == "ipmitool#manifest"   # rpi2's naming
+    let lock = parseAptClosureLock(Lock)
+    let current = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+    let legacy = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock)[0]
+    let old = legacyClosureBytes(manifest, tool)
+    check old == @[renderAddOnToolManifest(legacy, "/usr/bin/ipmitool")]
+    check old[0] == manifest.sfContent.replace(current, legacy)
+    check legacyClosureBytes(wrapper, tool).len == 0
+    # Another tool's manifest is not this one's older rendering.
+    var other = tool
+    other.address = "wakeonlan"
+    other.atCommand = "wakeonlan"
+    check legacyClosureBytes(manifest, other).len == 0
+    let tmp = createTempDir("addon-manifest-reloc-", "")
+    defer: removeDir(tmp)
+    let path = tmp / "ipmitool.launcher.manifest"
+    writeFile(path, old[0])
+    check relocatesClosure(manifest, path, tool)
+    check not relocatesClosure(manifest, path)
+    writeFile(path, old[0].replace("exec=/usr/bin/ipmitool",
+                                   "exec=/usr/bin/sh"))
+    check not relocatesClosure(manifest, path, tool)
+    writeFile(path, manifest.sfContent)
+    check not relocatesClosure(manifest, path, tool)

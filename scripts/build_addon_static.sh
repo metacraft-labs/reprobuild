@@ -6,7 +6,9 @@
 # ARCH is one of x86_64 / amd64, aarch64 / arm64, armv7l / armhf. Each
 # artefact lands at <out>/<debian-arch>/repro (default out: build/addon),
 # with <out>/<debian-arch>/repro.sha256 and one SHA256SUMS for every
-# artefact the run built. Those digest files are what "published SHA-256"
+# artefact the run built. Beside each `repro` is a static
+# `reprobuild-sandbox-launcher`, the launcher a `linux.addOnTool` wrapper
+# execs (listed in SHA256SUMS too). Those digest files are what "published SHA-256"
 # means for the add-on's bootstrap binary: the release workflow attaches the
 # artefacts together with SHA256SUMS, and an operator pins the digest on the
 # command line that fetches and runs the binary (`sha256sum -c` before the
@@ -200,6 +202,27 @@ for raw in "${arches[@]}"; do
   mv "$dest/repro.sha256.tmp.$$" "$dest/repro.sha256"
   echo "$digest  $arch/repro" >> "$sums.tmp"
   echo "build_addon_static: $arch/repro $digest ($desc)"
+  # The sandbox launcher a `linux.addOnTool` wrapper execs. The tool's
+  # driver resolves it beside the running binary and refuses to write a
+  # wrapper without it (posix_system_driver.addOnToolLauncherPath), so the
+  # add-on carries a static one of its own, as the full bundle carries a
+  # dynamic one beside the engine. Plain C, no libraries.
+  ltmp="$dest/reprobuild-sandbox-launcher.tmp.$$"
+  if ! "$cc" -O2 -Wall -std=c11 -static -s -o "$ltmp" \
+      apps/reprobuild-sandbox-launcher/launcher.c; then
+    echo "build_addon_static: $arch sandbox launcher build failed" >&2
+    rm -f "$ltmp"; exit 1
+  fi
+  ldesc="$(file -b "$ltmp")"
+  case "$ldesc" in
+    *"statically linked"*"$(elf_machine_word "$arch")"*|*"$(elf_machine_word "$arch")"*"statically linked"*) ;;
+    *) echo "build_addon_static: $arch sandbox launcher is not a static $arch ELF: $ldesc" >&2
+       rm -f "$ltmp"; exit 1 ;;
+  esac
+  ldigest="$(sha256sum "$ltmp" | cut -d' ' -f1)"
+  mv "$ltmp" "$dest/reprobuild-sandbox-launcher"
+  echo "$ldigest  $arch/reprobuild-sandbox-launcher" >> "$sums.tmp"
+  echo "build_addon_static: $arch/reprobuild-sandbox-launcher $ldigest"
 done
 # Keep entries for architectures this run did not rebuild.
 if [ -f "$sums" ]; then

@@ -8452,7 +8452,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8508,7 +8508,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim",
       "sourceSuiteCount": 11,
-      "staticCaseCount": 16,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -39291,7 +39291,8 @@ proc runStoreCommand*(args: seq[string]): int =
             dirExists(AddOnSystemStoreRoot / "prefixes"):
           var addonLock = acquireHostApplyLock("repro store recover")
           defer: addonLock.release()
-          let legacy = addon_static_tree.migrateLegacyAptClosures()
+          let legacy = addon_static_tree.migrateLegacyAptClosures(
+            handBack = @[addon_static_tree.preservedDir()])
           echo "legacy apt prefixes adopted: " & $legacy.adopted.len
           for r in legacy.refused:
             echo "  - not adopted: " & r.path & ": " & r.reason
