@@ -188,18 +188,20 @@ suite "agent split: the apply unit's refusals":
     check managementPathRefusal(plain, noNames) == ""
 
   test "a template instance is matched by its template":
-    let instance = SystemProfile(resources: @[SystemResource(
-      kind: srkSystemdSystemDropIn, address: "dropIn:ssh@", diUnit: "ssh@x.service",
-      diName: "10-x.conf")])
-    check "ssh@x.service" in managementPathRefusal(instance, noNames)
-    # The console and serial gettys' instances.
-    for unit in ["getty@tty1.service", "serial-getty@ttyS0.service",
-                 "container-getty@1.service"]:
+    # Unit states (masking or stopping an instance): a drop-in for an
+    # instance is refused by the drop-in lookup as well (the suite "a
+    # drop-in is judged by the units systemd applies it to"), which would
+    # hide this rule's falsifier, agent-management-path-ignores-templates.
+    for unit in ["ssh@x.service", "getty@tty1.service",
+                 "serial-getty@ttyS0.service", "container-getty@1.service"]:
       checkpoint unit
-      let getty = SystemProfile(resources: @[SystemResource(
+      let state = SystemProfile(resources: @[SystemResource(
+        kind: srkSystemdUnitState, address: "unitState:" & unit, usName: unit)])
+      check unit in managementPathRefusal(state, noNames)
+      let dropIn = SystemProfile(resources: @[SystemResource(
         kind: srkSystemdSystemDropIn, address: "dropIn:" & unit, diUnit: unit,
         diName: "10-x.conf")])
-      check unit in managementPathRefusal(getty, noNames)
+      check unit in managementPathRefusal(dropIn, noNames)
     let other = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdSystemDropIn, address: "dropIn:app@", diUnit: "app@x.service",
       diName: "10-x.conf")])

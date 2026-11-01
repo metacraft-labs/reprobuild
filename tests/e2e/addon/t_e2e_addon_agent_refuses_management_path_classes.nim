@@ -202,10 +202,14 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
     predicted.add((u, dirs))
     for d in dirs:
       if d notin candidates: candidates.add(d)
-  for d in candidates:
+  # One file name per directory: systemd merges drop-ins by file name, the
+  # most specific directory's file hiding the others' (systemd.unit(5)), so
+  # probes sharing a name would report only the first directory.
+  proc probeFile(i: int): string = "zz-a8probe-" & $i & ".conf"
+  for i, d in candidates:
     discard g.run("mkdir -p /etc/systemd/system/" & quoteShell(d & ".d") &
       " && printf '[Unit]\\nX-A8-Probe=yes\\n' > /etc/systemd/system/" &
-      quoteShell(d & ".d/zz-a8probe.conf"))
+      quoteShell(d & ".d/" & probeFile(i)))
   discard g.run("systemctl daemon-reload")
   var report = newJObject()
   var unsound: seq[string]
@@ -213,7 +217,7 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
     var applied: seq[string]
     for p in g.exec("systemctl show -P DropInPaths -- " & quoteShell(u)).stdout.
         splitWhitespace():
-      if p.endsWith(".d/zz-a8probe.conf"):
+      if p.splitPath.tail.startsWith("zz-a8probe-"):
         applied.add(p.splitPath.head.splitPath.tail[0 ..< ^2])
     var extra, unused: seq[string]
     for a in applied:
@@ -224,10 +228,9 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
                    "appliedNotDerived": extra, "derivedNotApplied": unused}
     if extra.len > 0: unsound.add(u & ": " & extra.join(", "))
   record["dropInProbe"] = report
-  for d in candidates:
-    discard g.run("rm -rf /etc/systemd/system/" & quoteShell(d & ".d") &
-      "/zz-a8probe.conf; rmdir /etc/systemd/system/" & quoteShell(d & ".d") &
-      " 2>/dev/null; true")
+  for i, d in candidates:
+    discard g.run("rm -f /etc/systemd/system/" & quoteShell(d & ".d/" & probeFile(i)) &
+      "; rmdir /etc/systemd/system/" & quoteShell(d & ".d") & " 2>/dev/null; true")
   discard g.run("systemctl disable a8q-net.service; rm -f " &
     "/etc/systemd/system/a8p-gw-x@.service /etc/systemd/system/a8q-net.service " &
     "/etc/systemd/system/a8s-1000.slice; systemctl daemon-reload")
