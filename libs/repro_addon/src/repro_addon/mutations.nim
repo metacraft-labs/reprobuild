@@ -342,6 +342,10 @@
 ## ``apt-closure-adopts-unverified``          a realiser-v2 closure prefix is
 ##                                            adopted without verifying its
 ##                                            v2 hash or identity
+## ``agent-management-path-ignores-dropin-prefixes``  a drop-in is judged by
+##                                            its own unit name only, not by
+##                                            the units systemd applies it to
+##                                            (dash prefixes, template, type)
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -474,6 +478,8 @@ const
                           # Read by repro_dsl_stdlib's apt_closure.nim: the
                           # legacy adoption without its verification.
                           "apt-closure-adopts-unverified",
+                          # A8 round 3: drop-ins judged by exact name only.
+                          "agent-management-path-ignores-dropin-prefixes",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",

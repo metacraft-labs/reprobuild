@@ -73,16 +73,14 @@ const ManagementPathPrefixes* = [
   "/etc/security/namespace.d/",
   "/etc/nftables.d/", "/etc/iptables/", "/etc/ufw/", "/etc/firewalld/",
   "/etc/systemd/network/", "/etc/systemd/networkd.conf.d/", "/etc/netplan/",
-  "/etc/network/interfaces.d/", "/etc/NetworkManager/",
-  # The console gettys' unit files and drop-in directories as files (the
-  # unit names below catch a drop-in object; these catch a plain file
-  # written there): `getty@` and `serial-getty@` cover the templates, their
-  # instances (`getty@tty1.service`) and every `.d/` directory of either.
-  "/etc/systemd/system/getty@", "/etc/systemd/system/serial-getty@",
-  "/etc/systemd/system/container-getty@",
-  "/etc/systemd/system/console-getty.service"]
+  "/etc/network/interfaces.d/", "/etc/NetworkManager/"]
   ## Path prefixes of the same classes (a directory, or a name stem such as
-  ## the host keys ``/etc/ssh/ssh_host_*``).
+  ## the host keys ``/etc/ssh/ssh_host_*``). Nothing under
+  ## ``/etc/systemd/system`` is listed: a plain file there is refused
+  ## before this check (``checkScope``: the unit class's own directory), so
+  ## units and drop-ins reach it only as unit and drop-in objects, which
+  ## ``managementPathRefusal`` judges by the unit names systemd applies
+  ## them to.
 const ManagementPathUnits* = [
   "ssh.service", "sshd.service", "ssh.socket", "sshd.socket", "ssh@.service",
   "sshd@.service", "nftables.service", "netfilter-persistent.service",
@@ -94,7 +92,12 @@ const ManagementPathUnits* = [
   # line is the way back in (spec §9.1, "what can lock sshd's or the
   # console's users out"). Templates match their instances (templateOf).
   "getty@.service", "serial-getty@.service", "console-getty.service",
-  "container-getty@.service"]
+  "container-getty@.service",
+  # `autovt@.service` is `getty@.service` under the name logind starts it
+  # by on a virtual terminal (an alias symlink), so drop-ins under its name
+  # apply to the console getty too; `getty.target` pulls the gettys in, and
+  # masking or stopping it -- or a drop-in on it -- cuts the console login.
+  "autovt@.service", "getty.target"]
   ## Units of the management path. A unit or drop-in is matched by every
   ## name systemd knows it under (its id and aliases), and by the aliases
   ## its own ``[Install]`` section would create, never by the text alone.
@@ -126,6 +129,46 @@ proc managementUnitHit(names: openArray[string]): string =
     # An instance (``ssh@x.service``) is the template's unit.
     when not mutated("agent-management-path-ignores-templates"):
       if templateOf(n) in ManagementPathUnits: return n
+  ""
+
+proc dropInDirUnits*(unit: string): seq[string] =
+  ## Every unit name whose ``<name>.d/`` drop-in directory systemd applies
+  ## to ``unit`` (systemd.unit(5), "Description", and the drop-in search
+  ## rules: https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html):
+  ## the unit itself; for an instance (``getty@tty1.service``) its template
+  ## (``getty@.service``); for a name with dashes, every dash-truncated
+  ## prefix of the part before ``@``/the type (``serial-getty@.service`` ->
+  ## ``serial-.service``; ``systemd-networkd.service`` ->
+  ## ``systemd-.service``); and the bare type (``service`` -> ``service.d/``,
+  ## which applies to every service). A template's own list covers every
+  ## instance of it, since the instance part never adds a directory.
+  result = @[unit]
+  let dot = unit.rfind('.')
+  if dot <= 0: return
+  let typ = unit[dot + 1 .. ^1]
+  let stem = unit[0 ..< dot]
+  let at = stem.find('@')
+  let base = if at >= 0: stem[0 ..< at] else: stem
+  if at >= 0:
+    let tmpl = stem[0 .. at] & "." & typ
+    if tmpl notin result: result.add(tmpl)
+  for i, c in base:
+    if c == '-':
+      let prefix = base[0 .. i] & "." & typ
+      if prefix notin result: result.add(prefix)
+  if typ notin result: result.add(typ)
+
+proc managementDropInHit(names: openArray[string]): string =
+  ## The management unit a drop-in directory named after any of ``names``
+  ## would be applied to by systemd, or "" (``dropInDirUnits``): a drop-in
+  ## in ``serial-.service.d`` reaches ``serial-getty@.service`` as surely as
+  ## one in ``serial-getty@.service.d``.
+  when mutated("agent-management-path-ignores-dropin-prefixes"):
+    return ""
+  for m in ManagementPathUnits:
+    let dirs = dropInDirUnits(m)
+    for n in names:
+      if n in dirs: return m
   ""
 
 proc managementPathFile(path: string): bool =
@@ -175,6 +218,14 @@ proc managementPathRefusal*(p: SystemProfile;
       if hit.len > 0:
         return r.address & " is " & (if hit == unit: "" else: "known as ") &
           hit & ", a unit of the management path"
+      # A drop-in directory systemd applies to a management unit by its
+      # lookup rules -- a dash-truncated prefix, the template, the bare type
+      # -- is that unit's drop-in, whatever it is named.
+      if r.kind == srkSystemdSystemDropIn:
+        let applied = managementDropInHit(names)
+        if applied.len > 0:
+          return r.address & " is a drop-in in " & unit & ".d/, which " &
+            "systemd applies to " & applied & ", a unit of the management path"
     of srkLinuxFirewallRule:
       return r.address & " is of the firewall class"
     else:

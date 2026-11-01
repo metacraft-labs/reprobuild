@@ -116,15 +116,11 @@ suite "agent split: the apply unit's refusals":
                  "/etc/firewalld/zones/public.xml", "/etc/systemd/networkd.conf",
                  "/etc/systemd/networkd.conf.d/x.conf", "/etc/hosts.deny",
                  "/etc/iptables/rules.v4", "/etc/systemd/network/10-a.link",
-                 "/etc/nsswitch.conf",
-                 # The console gettys' unit files and drop-in directories.
-                 "/etc/systemd/system/getty@.service",
-                 "/etc/systemd/system/getty@.service.d/autologin.conf",
-                 "/etc/systemd/system/getty@tty1.service.d/x.conf",
-                 "/etc/systemd/system/serial-getty@ttyS0.service.d/x.conf",
-                 "/etc/systemd/system/console-getty.service",
-                 "/etc/systemd/system/console-getty.service.d/x.conf",
-                 "/etc/systemd/system/container-getty@.service.d/x.conf"]:
+                 "/etc/nsswitch.conf"]:
+      # (A plain file under /etc/systemd/system never reaches this check:
+      # checkScope refuses it as the unit class's directory. The gettys'
+      # units and drop-in directories are judged as unit and drop-in
+      # objects below.)
       checkpoint path
       let p = SystemProfile(resources: @[SystemResource(kind: srkFsSystemFile,
         address: "systemFile:" & path, sfPath: path)])
@@ -286,3 +282,33 @@ suite "agent split: the staging hand-off":
     check getFilePermissions(copy) == {fpUserRead, fpUserWrite, fpUserExec}
 
 removeDir(root)
+
+suite "a drop-in is judged by the units systemd applies it to":
+  # systemd.unit(5): a drop-in directory applies to a unit when it is named
+  # after the unit, its template, a dash-truncated prefix of its name, or
+  # its bare type. Falsifier: agent-management-path-ignores-dropin-prefixes
+  # (exact names only) turns the first case red.
+  let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
+  proc dropIn(unit: string): SystemProfile =
+    SystemProfile(resources: @[SystemResource(kind: srkSystemdSystemDropIn,
+      address: "dropIn:" & unit, diUnit: unit, diName: "10-x.conf")])
+  test "dash prefixes, templates, template aliases and types of management units are refused":
+    for unit in ["serial-.service", "console-.service", "container-.service",
+                 "systemd-.service", "autovt@.service", "autovt@tty2.service",
+                 "getty.target", "service", "socket", "target"]:
+      checkpoint unit
+      check "management path" in managementPathRefusal(dropIn(unit), noNames)
+  test "drop-ins that reach no management unit are not refused":
+    for unit in ["app-.service", "app@.service", "web-api.service"]:
+      checkpoint unit
+      check managementPathRefusal(dropIn(unit), noNames) == ""
+  test "the lookup names are systemd's":
+    check dropInDirUnits("serial-getty@ttyS0.service") ==
+      @["serial-getty@ttyS0.service", "serial-getty@.service",
+        "serial-.service", "service"]
+    check dropInDirUnits("systemd-networkd.service") ==
+      @["systemd-networkd.service", "systemd-.service", "service"]
+  test "masking or stopping getty.target is refused":
+    let state = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdUnitState, address: "unitState:getty", usName: "getty.target")])
+    check "getty.target" in managementPathRefusal(state, noNames)

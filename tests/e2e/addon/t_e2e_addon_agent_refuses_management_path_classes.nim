@@ -75,6 +75,43 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     step(what & ": nothing was written", g.exec("test -e " & path).exitCode != 0, "")
     let id = identityReport(f0, g.takeFingerprint(repro))
     step(what & ": the fingerprint is unchanged", id.ok, id.text)
+  # The console login and the name service (spec §9.1, A8 re-review item
+  # 4), and drop-ins systemd applies to a management unit by its lookup
+  # rules rather than by their own name (round 3, item 2): a dash-truncated
+  # prefix (serial-.service.d reaches serial-getty@.service), the getty
+  # template, and getty.target. /etc/nsswitch.conf exists on every base, so
+  # "not written" is its digest unchanged; for a drop-in, its file absent.
+  let nsBefore = g.exec("sha256sum /etc/nsswitch.conf").stdout
+  let consoleCases = @[
+    ("/etc/nsswitch.conf", withPrefixes(@["/etc/nsswitch.conf"],
+       canonicalFile("/etc/nsswitch.conf", "passwd: files\n")), ""),
+    ("a drop-in in serial-.service.d", "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
+       "systemd.systemDropIn {\n  unit = \"serial-.service\"\n  name = \"a8\"\n" &
+       "  content = \"[Service]\nExecStart=\n\"\n}\n",
+     "/etc/systemd/system/serial-.service.d/a8.conf"),
+    ("a drop-in for getty@.service", "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
+       "systemd.systemDropIn {\n  unit = \"getty@.service\"\n  name = \"a8\"\n" &
+       "  content = \"[Service]\nExecStart=\n\"\n}\n",
+     "/etc/systemd/system/getty@.service.d/a8.conf"),
+    ("a drop-in for getty.target", "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
+       "systemd.systemDropIn {\n  unit = \"getty.target\"\n  name = \"a8\"\n" &
+       "  content = \"[Unit]\nRefuseManualStart=yes\n\"\n}\n",
+     "/etc/systemd/system/getty.target.d/a8.conf")]
+  for (what, prof, path) in consoleCases:
+    let f0 = g.takeFingerprint(repro)
+    discard producer.publish(PublishSpec(sequence: sequence, profileText: prof))
+    inc sequence
+    let t = g.tickUnits()
+    discard g.exec("systemctl reset-failed repro-agent-apply.service")
+    step("the agent refuses " & what, t.outcome == "aoApplyFailed" and
+         "EAddOnManagementPath" in t.message, $t & t.applyLog)
+    if path.len == 0:
+      step(what & ": not written", g.exec("sha256sum /etc/nsswitch.conf").stdout ==
+           nsBefore, "")
+    else:
+      step(what & ": not written", g.exec("test -e " & path).exitCode != 0, "")
+    let id = identityReport(f0, g.takeFingerprint(repro))
+    step(what & ": the fingerprint is unchanged", id.ok, id.text)
   # The operator path over SSH (an open session) applies all three.
   var bodyText = ""
   var prefixes: seq[string]
