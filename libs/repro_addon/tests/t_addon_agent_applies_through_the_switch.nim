@@ -49,6 +49,8 @@ import repro_addon/agent_switch
 import repro_addon/collision
 import repro_addon/ledger
 import repro_addon/verified_compile
+from repro_addon/generation0 import agentCompileBounds, agentFetchUnit,
+  AgentUnitsInputs
 
 type Recorder = ref object
   calls: seq[AddonApplyOptions]
@@ -256,6 +258,11 @@ suite "the agent's apply goes through the add-on switch":
     check "--property=Nice=" & $UnprivilegedCompileNice in limits
     check "--property=CPUWeight=" & $UnprivilegedCompileWeight in limits
     check "--property=IOWeight=" & $UnprivilegedCompileWeight in limits
+    # A share of the host's memory, which systemd resolves per host (a
+    # fixed 512M was most of a 1 GB Pi), and the same bounds on the fetch
+    # unit, which compiles too (review of d14cd72e9f).
+    check UnprivilegedCompileMemoryMax.endsWith("%")
+    check agentCompileBounds() in agentFetchUnit("/x/repro", AgentUnitsInputs())
 
   test "the management path and an unpinned action are refused before the switch":
     let r = Recorder()

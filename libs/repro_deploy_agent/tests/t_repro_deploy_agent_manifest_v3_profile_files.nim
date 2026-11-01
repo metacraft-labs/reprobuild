@@ -210,3 +210,31 @@ suite "RDMF v3: build actions keep their later fields (flags bit 3)":
     expect DeployManifestCodecError:
       signManifest(kp, noBlock)
       discard encodeManifest(noBlock)
+
+  test "an expectedOutputDigest that is not a closure digest is refused both ways":
+    # Review of d14cd72e9f: the decoder took any text.
+    let good = "blake3:" & repeat('a', 64)
+    var m = DeployManifest(target: "rpi2", sequence: 9'u64,
+      deploymentId: "d-9", profileText: "x", issuedAt: 1'u64,
+      maxAgeSeconds: 600'u64,
+      closureDigests: @[ClosureDigest(actionId: "a", digest: good)],
+      buildActions: @[ProfileBuildAction(id: "a", substituteOnly: true,
+        expectedOutputDigest: good)])
+    let kp = peerAuth.generateKeypair()
+    signManifest(kp, m)
+    var bytes = encodeManifest(m)
+    # The same envelope with the action's digest in upper case.
+    let needle = cast[seq[byte]]("blake3:" & repeat('a', 64))
+    var at = -1
+    for i in countdown(bytes.len - needle.len, 0):
+      if bytes[i ..< i + needle.len] == needle:
+        at = i
+        break
+    check at > 0
+    for i in at + 7 ..< at + needle.len: bytes[i] = byte('A')
+    expect DeployManifestCodecError:
+      discard decodeManifest(bytes)
+    var bad = m
+    bad.buildActions[0].expectedOutputDigest = "sha256:" & repeat('a', 64)
+    expect DeployManifestCodecError:
+      discard encodeManifest(bad)

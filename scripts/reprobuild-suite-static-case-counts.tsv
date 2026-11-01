@@ -42,7 +42,7 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
-libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	7
+libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	9
 libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	3
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	17
@@ -314,7 +314,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifes
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_freshness_and_state.nim	nim	5
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
-libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	8
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	9
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim	nim	5
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_profile_file_paths_corpus.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_recipient_keygen.nim	nim	11

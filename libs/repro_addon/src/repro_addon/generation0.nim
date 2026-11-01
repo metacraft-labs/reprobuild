@@ -476,6 +476,31 @@ const ResolverSocketsHidden* =
   ## to PID 1 over it, and the fetch unit's profile compiler may use it
   ## locally.
 
+const
+  AgentCompileMemoryMax* = "40%"
+    ## The ``MemoryMax=`` of every unit that compiles a profile (the fetch
+    ## unit, and the engine agent's transient compile unit): a share of the
+    ## host's physical memory, which systemd resolves on each host
+    ## (systemd.resource-control(5): "a percentage ... of the total
+    ## physical memory"), so one unit text bounds a 1 GB Raspberry Pi 2 at
+    ## about 400 MB and a larger host proportionally. Past it the kernel
+    ## kills the compile in its own control group and the tick reports
+    ## it, instead of the host's own services meeting the global OOM
+    ## killer. https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html#MemoryMax=bytes
+  AgentCompileNice* = 10
+    ## The compile yields the CPU to the host's own services, and its
+    ## ``CPUWeight=`` / ``IOWeight=`` (``AgentCompileWeight``) to every
+    ## default-weight (100) unit.
+  AgentCompileWeight* = 20
+
+proc agentCompileBounds*(): string =
+  ## The resource lines of a unit that compiles a profile.
+  "MemoryMax=" & AgentCompileMemoryMax & "\n" &
+  "MemorySwapMax=0\n" &
+  "Nice=" & $AgentCompileNice & "\n" &
+  "CPUWeight=" & $AgentCompileWeight & "\n" &
+  "IOWeight=" & $AgentCompileWeight & "\n"
+
 proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   ## ``repro-agent-fetch.service`` (spec §9.1): a dynamic user with no
   ## capabilities, a read-only system, no access to the add-on's state
@@ -517,6 +542,8 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   "DynamicUser=yes\n" &
   "StateDirectory=" & AgentFetchStateName & "\n" &
   "TimeoutStartSec=30min\n" &
+  # It compiles a source profile (when the manifest ships one).
+  agentCompileBounds() &
   "CapabilityBoundingSet=\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &

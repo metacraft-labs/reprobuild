@@ -286,33 +286,51 @@ proc closureBindings(treeRoot: string): seq[string] =
         if src.endsWith("/usr"):
           result.add(src[0 ..< src.len - "/usr".len])
 
-const LiveReferenceDirs* = @["/etc/systemd/system", "/etc/repro/bin"]
+const LiveReferenceDirs* = @["/etc/systemd/system", "/run/systemd/system",
+                             "/etc/repro/bin"]
   ## Where the files are that name store prefixes the host runs from right
   ## now, whatever wrote them: unit files (`BindReadOnlyPaths=`, or an
   ## `ExecStart=` of a store binary such as generation 0's
-  ## `repro-addon-reassert.service`) and launcher manifests.
+  ## `repro-addon-reassert.service`), their drop-ins (`<unit>.d/*.conf`),
+  ## transient and runtime units, and launcher manifests.
 
-proc referenceText(dirs: seq[string]): tuple[text: string; unreadable: bool] =
-  ## The regular files directly in ``dirs``, concatenated. ``unreadable``
-  ## when one of them could not be read: the caller then holds every prefix
-  ## it would otherwise judge (holding one too long costs space; releasing
-  ## one a service runs from costs the service).
+proc referenceText(dirs: seq[string]): string =
+  ## What the files in ``dirs`` say, concatenated: every regular file
+  ## directly in each directory and in its ``*.d`` drop-in directories, and
+  ## for each symbolic link there (a unit file linked from elsewhere, maybe
+  ## from the store) the path it resolves to as well as the file's text.
+  ## Raises ``StaticTreeError`` when one cannot be read: then nothing can
+  ## say what it binds, and a collection that went ahead could take a
+  ## prefix a unit runs from.
+  proc addFile(f: string; acc: var string) =
+    try:
+      if symlinkExists(f):
+        acc.add(expandFilename(f) & "\n")
+      if fileExists(f):
+        acc.add(readFile(f))
+        acc.add("\n")
+    except IOError, OSError:
+      let e = getCurrentException()
+      raise newException(StaticTreeError, "cannot read " & f & " (" &
+        e.msg & "), so what it binds in the store cannot be held; " &
+        "nothing was collected or recovered")
   for d in dirs:
     if not dirExists(d): continue
     for kind, f in walkDir(d):
-      if kind != pcFile: continue
-      try:
-        result.text.add(readFile(f))
-        result.text.add("\n")
-      except IOError, OSError:
-        result.unreadable = true
+      case kind
+      of pcFile, pcLinkToFile: addFile(f, result)
+      of pcDir:
+        if f.endsWith(".d"):
+          for k2, g in walkDir(f):
+            if k2 in {pcFile, pcLinkToFile}: addFile(g, result)
+      else: discard
 
 proc names(text, path: string): bool =
-  ## Whether ``text`` names the prefix ``path``: as ``<path>/`` (a bind of
-  ## its ``usr``, a binary in its ``bin``) or as the whole path.
-  let p = path & "/"
-  p in text or (path & "\n") in text or (path & " ") in text or
-    (path & ":") in text
+  ## Whether ``text`` names the prefix ``path``: followed by `/` (a bind of
+  ## its `usr`, a binary in its `bin`) or by an end of the path (a line
+  ## end, a space, a `:`, a quote).
+  for sep in ["/", "\n", " ", ":", "\"", "'", "\t"]:
+    if (path & sep) in text: return true
 
 proc migrateLegacyAptClosures*(storeRoot = StoreRoot;
                                handBack: seq[string] = @[];
@@ -336,8 +354,10 @@ proc migrateLegacyAptClosures*(storeRoot = StoreRoot;
   ##   until it restarts, and a rollback or a removal writes the older
   ##   binding back.
   ##
-  ## An older realiser's directory that does not verify but that a file
-  ## names is adopted unverified (``adoptUnverifiedPrefix``) and held, and
+  ## A file under those directories that cannot be read raises
+  ## ``StaticTreeError`` before anything is adopted or released (the caller
+  ## refuses its collection or recovery). An older realiser's directory
+  ## that does not verify but that a file names is adopted unverified (``adoptUnverifiedPrefix``) and held, and
   ## reported (``heldUnverified``): recovery would otherwise quarantine it
   ## under the unit. The hand-back hold is recomputed from scratch on each
   ## run, so a prefix no file names any more is released and collected by
@@ -349,12 +369,12 @@ proc migrateLegacyAptClosures*(storeRoot = StoreRoot;
   if storeRoot == StoreRoot: enterWritableStoreView()
   var s = openStore(storeRoot)
   defer: s.close()
-  result = adoptLegacyAptClosurePrefixes(s, storeRoot)
   let refs = referenceText(handBack & live)
+  result = adoptLegacyAptClosurePrefixes(s, storeRoot)
   # Directories that did not verify but that a file names: held anyway.
   var stillRefused: seq[tuple[path, reason: string]]
   for r in result.refused:
-    if refs.unreadable or names(refs.text, r.path):
+    if names(refs, r.path):
       try:
         discard adoptUnverifiedPrefix(s, storeRoot, r.path)
         result.heldUnverified.add(r)
@@ -379,7 +399,7 @@ proc migrateLegacyAptClosures*(storeRoot = StoreRoot;
   for row in s.listPrefixes():
     let path = storeRoot / row.realizedPath
     let legacy = path in byPath
-    if not (names(refs.text, path) or (refs.unreadable and legacy)):
+    if not names(refs, path):
       continue
     if not held:
       s.registerRoot(HandBackRootId, rkProfile)
@@ -575,6 +595,25 @@ proc readAddonStateDirPointer*(path = AddonStateDirPointer;
     stderr.writeLine("repro-addon: ignoring the add-on state-directory " &
       "pointer: " & r.why)
   r.dir
+
+proc hostHandBackDirs*(pointer = AddonStateDirPointer; owner = 0):
+    seq[string] =
+  ## The hand-back record directory of the add-on's real state directory:
+  ## the one bootstrap recorded in its trusted pointer
+  ## (``readAddonStateDirPointerChecked``), else the default. What a
+  ## collection or a recovery of the store must hold is named there; a
+  ## `store gc` that read the default directory of a host bootstrapped
+  ## with another one rebuilt the hold without those records, and collected
+  ## the older prefixes relocated services still run from. A pointer that
+  ## is not trusted cannot say where they are: raises ``StaticTreeError``,
+  ## and nothing is collected or recovered.
+  let r = readAddonStateDirPointerChecked(pointer, owner)
+  if r.why.len > 0:
+    raise newException(StaticTreeError, "the add-on's state-directory " &
+      "pointer is not trusted (" & r.why & "), so the hand-back records " &
+      "the store must keep cannot be found; nothing was collected or " &
+      "recovered")
+  @[preservedDir(if r.dir.len > 0: r.dir else: SystemStateDir)]
 
 proc markerOwnerLive*(m: PendingMarker): bool =
   ## True when the process that owns the switch is still running it: the

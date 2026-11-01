@@ -39217,6 +39217,13 @@ proc runStoreCommand*(args: seq[string]): int =
 
   let root = resolveStoreRoot(storeRootOverride)
   when defined(linux):
+    proc isAddonSystemStore(r: string): bool =
+      ## Whether ``r`` is the add-on's system store however it is spelled:
+      ## the same directory as /repro/store (a symbolic link, a bind mount,
+      ## `..` in the path), not merely the same string.
+      if not dirExists(AddOnSystemStoreRoot / "prefixes"): return false
+      try: sameFile(r, AddOnSystemStoreRoot)
+      except OSError: false
     # The add-on's system store is written under the host apply lock by
     # every add-on writer, and holds what no generation's root does but a
     # unit, a launcher manifest or a preserved hand-back record names (the
@@ -39225,12 +39232,16 @@ proc runStoreCommand*(args: seq[string]): int =
     # own `repro store gc` and `recover` do.
     var addonLock: HostApplyLock
     defer: addonLock.release()
-    if sub == "gc" and not dryRun and
-        os.normalizedPath(absolutePath(root)) == AddOnSystemStoreRoot and
-        dirExists(AddOnSystemStoreRoot / "prefixes"):
+    if sub == "gc" and not dryRun and isAddonSystemStore(root):
       addonLock = acquireHostApplyLock("repro store gc")
+      var handBack: seq[string]
+      try:
+        handBack = addon_static_tree.hostHandBackDirs()
+      except CatchableError as e:
+        stderr.writeLine("repro store gc: " & e.msg)
+        return 1
       let legacy = addon_static_tree.migrateLegacyAptClosures(
-        handBack = @[addon_static_tree.preservedDir()])
+        handBack = handBack)
       for r in legacy.refused:
         stderr.writeLine("repro store gc: legacy apt prefix not adopted: " &
           r.path & ": " & r.reason)
@@ -39309,12 +39320,11 @@ proc runStoreCommand*(args: seq[string]): int =
         # before version 3 wrote with no receipt; recovery would quarantine
         # them under the units that bind them. Adopt and root them first,
         # under the add-on's host apply lock like every add-on store writer.
-        if os.normalizedPath(absolutePath(root)) == AddOnSystemStoreRoot and
-            dirExists(AddOnSystemStoreRoot / "prefixes"):
+        if isAddonSystemStore(root):
           var addonLock = acquireHostApplyLock("repro store recover")
           defer: addonLock.release()
           let legacy = addon_static_tree.migrateLegacyAptClosures(
-            handBack = @[addon_static_tree.preservedDir()])
+            handBack = addon_static_tree.hostHandBackDirs())
           echo "legacy apt prefixes adopted: " & $legacy.adopted.len
           for r in legacy.refused:
             echo "  - not adopted: " & r.path & ": " & r.reason

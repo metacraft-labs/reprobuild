@@ -608,7 +608,7 @@ proc runAddonStoreCli*(args: seq[string]): int =
       # preserved record names by the hand-back hold
       # (``migrateLegacyAptClosures``).
       let legacy = migrateLegacyAptClosures(
-        handBack = @[preservedDir(DefaultStateDir)])
+        handBack = hostHandBackDirs())
       for r in legacy.refused:
         stderr.write("repro store " & args[0] &
           ": legacy apt prefix not adopted: " &

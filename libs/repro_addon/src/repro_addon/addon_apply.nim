@@ -2117,8 +2117,14 @@ type
                             ## ``reuse|cached|download <name> <version>
                             ## <older prefix or URL>``
 
-  DebProbe* = proc (url: string): string {.closure.}
-    ## "" when ``url`` is served, otherwise why not.
+  DebServed* = enum
+    dsServed      ## the archive serves it (2xx)
+    dsUnserved    ## the archive says it does not (404, 410)
+    dsUnknown     ## anything else: a refusing mirror, no TLS, no network,
+                  ## the deadline -- inconclusive, which refuses
+  DebProbe* = proc (url: string): tuple[verdict: DebServed; detail: string]
+    {.closure.}
+    ## Whether the archive serves ``url``, and how it answered.
 
 proc treeBytes(dir: string): int64 =
   ## The bytes the regular files under ``dir`` occupy (allocated blocks,
@@ -2150,16 +2156,19 @@ proc closureSpace*(locks: seq[AptClosureLock];
                    probe: DebProbe = nil): ClosureSpace =
   ## What realising ``locks`` will need: every closure not yet realised at
   ## its store-published prefix, and every member of one not yet published
-  ## there, counted once. A member an older realiser's verified prefix
-  ## holds (``reusableLegacyMember``) is published from it with shared
-  ## files, so it costs neither bytes nor a fetch; one whose archive is
-  ## cached costs its unpacked tree; any other is fetched. An unpacked
-  ## tree is measured from an older realiser's prefix where one exists
-  ## (it does not verify, or it would be reused), else estimated at
-  ## ``ClosureUnpackFactor`` times the archive. A union is hard links of
-  ## its members' files and costs no file bytes of its own. With ``probe``
-  ## (the migration plan; the switch runs without network), every archive
-  ## to fetch is asked for, and each one not served is ``unavailable``.
+  ## there, counted once, each listed in ``sources`` as ``cached``,
+  ## ``download`` or ``reuse-because-unserved``. The archive is always the
+  ## source when it is cached or served; an older realiser's verified
+  ## prefix (``reusableLegacyMember``) stands in only when the archive
+  ## answers that it does not serve the member (404/410), and then costs
+  ## neither bytes nor a fetch. A member not served with no such prefix,
+  ## or one whose probe is inconclusive, is ``unavailable`` (a refusal).
+  ## An unpacked tree is measured from an older realiser's prefix where
+  ## one exists, else estimated at ``ClosureUnpackFactor`` times the
+  ## archive. A union is hard links of its members' files and costs no
+  ## file bytes of its own. Without ``probe`` (the switch, which has no
+  ## network) every member not cached counts as a download: the most it
+  ## could take.
   var seen = initHashSet[string]()
   for lock in locks:
     if aptClosureRealised(storeRoot, lock): continue
@@ -2171,24 +2180,40 @@ proc closureSpace*(locks: seq[AptClosureLock];
         continue
       inc result.members
       let cached = fileExists(cacheDir / (d.sha256 & ".deb"))
-      let reusable = if cached: "" else: reusableLegacyMember(storeRoot, d)
-      if reusable.len > 0:
-        inc result.reusedMembers
-        result.sources.add("reuse\t" & d.name & " " & d.version & "\t" &
-          reusable)
-        continue
-      result.sources.add((if cached: "cached\t" else: "download\t") &
-        d.name & " " & d.version & "\t" &
-        (if cached: cacheDir / (d.sha256 & ".deb") else: debUrl(lock, d)))
-      if not cached:
-        result.downloadBytes += d.size
-        result.largestDebBytes = max(result.largestDebBytes, d.size)
-        if probe != nil:
-          let url = debUrl(lock, d)
-          let why = probe(url)
-          if why.len > 0:
-            result.unavailable.add(d.name & " " & d.version & ": " & url &
-              " (" & why & ")")
+      if cached:
+        result.sources.add("cached\t" & d.name & " " & d.version & "\t" &
+          cacheDir / (d.sha256 & ".deb"))
+      else:
+        let url = debUrl(lock, d)
+        var verdict = dsServed
+        var detail = ""
+        if probe != nil: (verdict, detail) = probe(url)
+        case verdict
+        of dsServed:
+          result.sources.add("download\t" & d.name & " " & d.version & "\t" &
+            url)
+          result.downloadBytes += d.size
+          result.largestDebBytes = max(result.largestDebBytes, d.size)
+        of dsUnserved:
+          # The one case an older realiser's prefix stands in for the
+          # archive (threat model C20, approved by Zahary Karadjov,
+          # 2026-11-01): it costs no bytes and no fetch.
+          let reusable = reusableLegacyMember(storeRoot, d)
+          if reusable.len > 0:
+            inc result.reusedMembers
+            result.sources.add("reuse-because-unserved\t" & d.name & " " &
+              d.version & "\t" & reusable & " (" & url & ": " & detail & ")")
+            continue
+          result.unavailable.add(d.name & " " & d.version & ": " & url &
+            " is not served (" & detail & ") and no older realiser's " &
+            "prefix of it verifies")
+          continue
+        of dsUnknown:
+          result.unavailable.add(d.name & " " & d.version & ": " & url &
+            " could not be probed (" & detail & "); whether the archive " &
+            "serves it is unknown, and only an archive that does not may " &
+            "be stood in for")
+          continue
       let legacy = legacyAptDebPrefixPath(storeRoot, d)
       if dirExists(legacy):
         result.unpackBytes += treeBytes(legacy)
@@ -2198,18 +2223,39 @@ proc closureSpace*(locks: seq[AptClosureLock];
   result.freeBytes = availableBytes(storeRoot)
   result.reserveBytes = max(StoreSpaceReserveBytes, neededBytes(result) div 4)
 
-proc httpDebProbe*(timeoutMs = 15_000): DebProbe =
+proc probeVerdict*(code: int): DebServed =
+  ## An archive's answer, as ``httpDebProbe`` reads it.
+  if code >= 200 and code < 300: dsServed
+  elif code in [404, 410]: dsUnserved
+  else: dsUnknown
+
+proc httpDebProbe*(timeoutMs = 10_000; deadlineMs = 300_000): DebProbe =
   ## The migration plan's probe: an HTTP ``HEAD`` of the archive URL,
-  ## following redirects. Nothing is downloaded. "" for a 2xx answer,
-  ## otherwise the status or the error.
-  result = proc (url: string): string =
+  ## following redirects; a mirror that refuses ``HEAD`` (403, 405, 501) is
+  ## asked for the first byte instead (``GET`` with ``Range: bytes=0-0``).
+  ## Nothing more is downloaded. 404 and 410 are ``dsUnserved``; any other
+  ## answer, an error (no TLS in this build, no network) or a probe begun
+  ## after ``deadlineMs`` since the first is ``dsUnknown``: a plan of a
+  ## host with hundreds of members ends in bounded time.
+  var started = -1.0
+  result = proc (url: string): tuple[verdict: DebServed; detail: string] =
+    let now = epochTime()
+    if started < 0: started = now
+    if (now - started) * 1000 > float(deadlineMs):
+      return (dsUnknown, "the plan's probe deadline of " &
+        $(deadlineMs div 1000) & " s had passed")
     try:
       let c = newHttpClient(timeout = timeoutMs, maxRedirects = 5)
       defer: c.close()
-      let r = c.request(url, httpMethod = HttpHead)
-      if r.code.is2xx: "" else: $r.code
+      var code = c.request(url, httpMethod = HttpHead).code.int
+      var how = "HEAD"
+      if code in [403, 405, 501]:
+        c.headers = newHttpHeaders({"Range": "bytes=0-0"})
+        code = c.request(url, httpMethod = HttpGet).code.int
+        how = "GET bytes=0-0"
+      (probeVerdict(code), how & " " & $code)
     except CatchableError as e:
-      e.msg
+      (dsUnknown, e.msg)
 
 proc spaceIsShort*(c: ClosureSpace): bool =
   ## Whether the realisation would leave less than the reserve free. An
@@ -2951,9 +2997,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       result.closureSources = space.sources
       for u in space.unavailable:
         refusals.add(newException(AddonStoreSpaceError, "refusing the " &
-          "switch: an apt closure member is neither cached, nor held by an " &
-          "older realiser's prefix of the same archive, nor served by the " &
-          "archive: " & u))
+          "switch: an apt closure member cannot be realised: " & u))
       if spaceIsShort(space):
         refusals.add(newException(AddonStoreSpaceError, "refusing the " &
           "switch: realising its apt closures needs more of " &

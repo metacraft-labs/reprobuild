@@ -88,6 +88,9 @@ const
     ## names the cause of a mismatch, the digest decides).
   StagedOutputsDir* = "outputs"
   StagedDebsDir* = "debs"
+  StagedUnservedName* = "unserved"
+    ## In ``StagedDebsDir``: the staged names of the archives the archive
+    ## answered 404/410 for, one per line.
   StagedNotesName* = "notes"
   ApplyCopyDirName* = "apply"
   MaxStagedBytes* = 8'i64 * 1024 * 1024 * 1024
@@ -249,10 +252,26 @@ proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];
     if not r.hit:
       notes.add("action " & a.id & ": not staged: " & r.reason)
 
-proc stageDebs(canonical: string; dir: string; notes: var seq[string]) =
-  ## Download every ``.deb`` an apt closure lock in ``canonical`` names
-  ## into ``dir/debs``, verified against the lock (the apply unit verifies
-  ## its copy again: these bytes are untrusted to it).
+proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
+                      storeRoot = StoreRoot): bool =
+  ## Whether the apply unit will need ``d``'s archive: not when its
+  ## closure is realised, nor when the member is already published at its
+  ## store path. (An older realiser's prefix of it does not count: the
+  ## archive is the source whenever it is served, threat model C20.) The
+  ## store is world-readable, so the fetch unit's dynamic user decides this
+  ## itself.
+  not aptClosureRealised(storeRoot, lock) and
+    not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
+
+proc stageDebs(canonical: string; dir: string; notes: var seq[string];
+               storeRoot = StoreRoot) =
+  ## Download each ``.deb`` an apt closure lock in ``canonical`` names that
+  ## the apply unit will need (``debNeedsStaging``) into ``dir/debs``,
+  ## verified against the lock (the apply unit verifies its copy again:
+  ## these bytes are untrusted to it). Before, every member of every lock
+  ## was downloaded on every tick, realised or not -- on rpi2 its 185
+  ## archives every five minutes, twice copied, on the filesystem its own
+  ## services write to.
   var prof: SystemProfile
   try: prof = parseSystemProfile(canonical)
   except CatchableError: return
@@ -267,6 +286,7 @@ proc stageDebs(canonical: string; dir: string; notes: var seq[string]) =
     if lockText.len == 0: continue
     let lock = parseAptClosureLock(lockText)
     for d in lock.debs:
+      if not debNeedsStaging(lock, d, storeRoot): continue
       let url = debUrl(lock, d)
       let dest = dir / StagedDebsDir / stagedDebName(url)
       if fileExists(dest): continue
@@ -276,6 +296,14 @@ proc stageDebs(canonical: string; dir: string; notes: var seq[string]) =
         if sha256Hex(readFile(dest)) != d.sha256:
           removeFile(dest)
           notes.add(d.name & ": the download does not match the lock")
+      except EAptDebUnserved as e:
+        # The archive's own answer that it does not serve it: the one case
+        # the apply may stand an older realiser's prefix in (C20).
+        try: removeFile(dest) except CatchableError: discard
+        let f = dir / StagedDebsDir / StagedUnservedName
+        writeFile(f, (if fileExists(f): readFile(f) else: "") &
+          stagedDebName(url) & "\n")
+        notes.add(d.name & ": " & e.msg)
       except CatchableError as e:
         try: removeFile(dest) except CatchableError: discard
         notes.add(d.name & ": " & e.msg)
@@ -285,6 +313,11 @@ proc runAgentFetch*(conf: AgentConf; anchors: TrustAnchors;
                     fetchTimeoutMs = 30_000): FetchReport =
   ## One fetch: select, stage and publish (see the module header).
   createDir(stagingRoot)
+  # One fetch runs at a time (one unit); a build directory another one left
+  # (killed mid-download) is garbage, and holds downloaded archives.
+  for kind, p in walkDir(stagingRoot):
+    if kind == pcDir and extractFilename(p).startsWith(".build-"):
+      try: removeDir(p) except CatchableError: discard
   let dir = stagingRoot / (".build-" & $getCurrentProcessId())
   if dirExists(dir): removeDir(dir)
   createDir(dir)
@@ -542,6 +575,11 @@ proc stagedAptFetcher(copyDir: string): AptDebFetcher =
   result = proc (url: string; dest: string; expectedSize: int64) =
     let src = copyDir / StagedDebsDir / stagedDebName(url)
     if not fileExists(src):
+      let unserved = copyDir / StagedDebsDir / StagedUnservedName
+      if fileExists(unserved) and
+          stagedDebName(url) in readFile(unserved).splitLines():
+        raise newException(EAptDebUnserved, url & " is not served by the " &
+          "archive (the fetch unit's answer)")
       raise newException(IOError, url & " was not staged by the fetch " &
         "unit, and the apply unit has no network")
     if getFileSize(src) > expectedSize:
@@ -842,6 +880,10 @@ proc runAgentApplyCli*(args: seq[string]): int =
     anchors: peerAuth.loadTrustAnchors(DeploySignersPath),
     stateDir: AgentStateDir, floorDir: floorDir)
   let t = runAddonAgentTick(cfg, ctx, "repro system addon agent-apply")
+  # The copy has served this apply (its archives are realised or refused);
+  # keeping it would hold a second copy of every staged archive until the
+  # next tick.
+  try: removeDir(ctx.copyDir) except CatchableError: discard
   when mutated("agent-floor-in-fetch-state"):
     # The floor belongs to the fetch unit there, as anything in its state
     # directory does.

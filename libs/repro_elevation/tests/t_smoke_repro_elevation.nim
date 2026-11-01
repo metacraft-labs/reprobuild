@@ -3776,9 +3776,24 @@ suite "repro_elevation: systemd.systemTimer pure surface":
                                  "n/a") != fileDigest
     check timerObservedDigestHex(content, true, true, "enabled", "inactive",
                                  "") != fileDigest
-    # Elapsed after triggering once: running as declared.
+    # A repeating timer that fired once and then stopped is not running
+    # (review of d14cd72e9f: LastTriggerUSec made it look converged).
     check timerObservedDigestHex(content, true, true, "enabled", "inactive",
-      "Sun 2026-11-01 12:25:09 EET") == fileDigest
+      "Sun 2026-11-01 12:25:09 EET") != fileDigest
+    # A timer that fires once per activation, inactive after triggering:
+    # running as declared (starting it again would run its service again).
+    let oneShot = "[Timer]\nOnBootSec=3min\n"
+    check not timerRepeats(oneShot) and timerRepeats(content)
+    check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
+      "Sun 2026-11-01 12:25:09 EET") == posixDigestHexOfText(oneShot)
+    check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
+      "n/a") != posixDigestHexOfText(oneShot)
+    # Linked, aliased, indirect or generated timers are not re-enabled.
+    for st in ["linked", "alias", "indirect", "generated", "static"]:
+      check timerObservedDigestHex(content, true, true, st, "active",
+                                   "n/a") == fileDigest
+    check timerObservedDigestHex(content, false, false, "linked",
+                                 "inactive", "n/a") == fileDigest
     # Running but not enabled, and the stopped direction.
     check timerObservedDigestHex(content, true, true, "disabled", "active",
                                  "n/a") != fileDigest

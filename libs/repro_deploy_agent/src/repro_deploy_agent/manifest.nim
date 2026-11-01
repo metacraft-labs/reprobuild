@@ -387,7 +387,15 @@ proc hasActionFields(a: reproProfile.ProfileBuildAction): bool =
   a.substituteOnly or a.expectedOutputDigest.len > 0 or a.activity.len > 0 or
     a.rebootRequired
 
+proc closureDigestError*(d: ClosureDigest): string
+
 proc encodeActionFields(buf: var seq[byte]; a: reproProfile.ProfileBuildAction) =
+  if a.expectedOutputDigest.len > 0:
+    let why = closureDigestError(ClosureDigest(actionId: a.id,
+      digest: a.expectedOutputDigest))
+    if why.len > 0:
+      raise newException(DeployManifestCodecError, "build action " & a.id &
+        " expectedOutputDigest: " & why)
   writeU8(buf, if a.substituteOnly: 1'u8 else: 0'u8)
   writeString(buf, a.expectedOutputDigest)
   writeString(buf, a.activity)
@@ -399,6 +407,14 @@ proc decodeActionFields(buf: openArray[byte]; pos: var int;
                         a: var reproProfile.ProfileBuildAction) =
   a.substituteOnly = decodeBool(buf, pos, "substituteOnly")
   a.expectedOutputDigest = readString(buf, pos)
+  # "" or a closure digest's one spelling: anything else is a pin no
+  # substitute could ever match, refused as malformed before the signature.
+  if a.expectedOutputDigest.len > 0:
+    let why = closureDigestError(ClosureDigest(actionId: a.id,
+      digest: a.expectedOutputDigest))
+    if why.len > 0:
+      raise newException(DeployManifestCodecError, "build action " & a.id &
+        " expectedOutputDigest: " & why)
   a.activity = readString(buf, pos)
   a.rebootRequired = decodeBool(buf, pos, "rebootRequired")
 

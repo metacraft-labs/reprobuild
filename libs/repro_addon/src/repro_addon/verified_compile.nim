@@ -30,6 +30,8 @@ import repro_deploy_agent/manifest
 import repro_deploy_agent/agent_mutations
 
 import ./host_exec
+from ./generation0 import AgentCompileMemoryMax, AgentCompileNice,
+  AgentCompileWeight
 
 const
   CompiledProfileStdioMarker* = "REPRO-COMPILED-PROFILE "
@@ -68,17 +70,11 @@ proc launcherOf*(exe: string): string =
   exe
 
 const
-  UnprivilegedCompileMemoryMax* = "512M"
-    ## The compile unit's ``MemoryMax=``: the apply unit's ceiling
-    ## (``AgentApplyMemoryMax``), sized for the smallest supported host (a
-    ## 1 GB Raspberry Pi 2) that also runs its own services. Past it the
-    ## kernel kills the compile inside its own control group and the tick
-    ## reports the failed compile, instead of the host swapping or its
-    ## global OOM killer choosing a victim.
-  UnprivilegedCompileNice* = 10
-    ## The compile yields the CPU to the host's own services (and its
-    ## ``CPUWeight=`` / ``IOWeight=`` below to every default-weight unit).
-  UnprivilegedCompileWeight* = 20
+  UnprivilegedCompileMemoryMax* = AgentCompileMemoryMax
+  UnprivilegedCompileNice* = AgentCompileNice
+  UnprivilegedCompileWeight* = AgentCompileWeight
+    ## The fetch unit's bounds (``generation0.agentCompileBounds``): one
+    ## compile, one budget, whichever unit runs it.
 
 proc unprivilegedCompileLimits*(): seq[string] =
   ## The compile unit's resource properties (``systemd-run --property``).

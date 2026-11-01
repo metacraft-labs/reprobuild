@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 34,
     "nimTestBinaries": 2584,
     "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 720,
+    "pureUnitTests": 719,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
     "testEntries": 2624
   },
@@ -1505,8 +1505,8 @@
       "graph-fixture": 18,
       "integration": 1431,
       "platform/destructive": 161,
-      "pure unit": 720,
-      "unclassified": 294
+      "pure unit": 719,
+      "unclassified": 295
     },
     "graphOwnedTestArtifacts": [
       {
@@ -8456,8 +8456,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_legacy_apt_closure_adoption",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -8469,7 +8469,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13593,7 +13593,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

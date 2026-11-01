@@ -467,10 +467,13 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
       localFetcher(urls, count), hostMachine = "armv7l") == prefix
     check count[] == before
 
-  test "a member an older realiser unpacked is published from it, not fetched":
+  test "a member is fetched when served; an older realiser's prefix only when it is not":
     # rpi2 (2026-11-01): the archive no longer serves libnss3 +deb13u4, the
     # download cache is empty, and realiser 2's prefix of exactly that
-    # archive is on disk. At 0e84765db0 the realiser could only fetch.
+    # archive is on disk. At 0e84765db0 the realiser could only fetch. The
+    # operator's decision of 2026-11-01 ("strict, reuse as fallback"): the
+    # archive whenever it is served; the older prefix only on a 404/410;
+    # anything inconclusive refuses (threat model C20).
     let root = scratch("reuse")
     let (lock, urls) = buildDebs(root, @[
       fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
@@ -478,37 +481,65 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
     discard realiseAptClosure(lock, root / "first", root / "cache",
       localFetcher(urls, count), hostMachine = "armv7l")
     let d = lock.debs[0]
-    # Realiser 2's member of the same archive: the same tree, its marker,
-    # no receipt, at that realiser's path.
+    proc withLegacy(store: string): string =
+      ## Realiser 2's member of the same archive: the same tree, its marker,
+      ## no receipt, at that realiser's path.
+      result = legacyAptDebPrefixPath(store, d)
+      createDir(parentDir(result))
+      copyDirWithPermissions(aptDebPrefixPath(root / "first", d), result)
+      removeFile(result / ReceiptFileName)
+    proc answering(kind: string; count: ref int): AptDebFetcher =
+      result = proc (url: string; dest: string; expectedSize: int64) =
+        inc count[]
+        case kind
+        of "unserved": raise newException(EAptDebUnserved, "HTTP 404 for " & url)
+        of "down": raise newException(IOError, "connection refused")
+        else: copyFile(urls[url], dest)
+    # Served: fetched and unpacked, the older prefix not used.
+    let served = root / "served"
+    let servedLegacy = withLegacy(served)
+    count[] = 0
+    discard realiseAptClosure(lock, served, root / "c1",
+      answering("served", count), hostMachine = "armv7l")
+    check count[] == 1
+    check not sameFile(aptDebPrefixPath(served, d) / "usr/bin/svc",
+                       servedLegacy / "usr/bin/svc")
+    check readReceiptFile(aptDebPrefixPath(served, d) / ReceiptFileName).
+      provenanceChecksum == "sha256:" & d.sha256
+    # Not served (404/410): published from the older prefix, sharing its
+    # files, and its receipt says so instead of claiming the archive.
     let store = root / "store"
-    let legacy = legacyAptDebPrefixPath(store, d)
-    createDir(parentDir(legacy))
-    copyDirWithPermissions(aptDebPrefixPath(root / "first", d), legacy)
-    removeFile(legacy / ReceiptFileName)
-    check readFile(legacy / ".repro-apt-deb") == d.sha256 & "\n"
+    let legacy = withLegacy(store)
     check reusableLegacyMember(store, d) == legacy
     count[] = 0
-    let prefix = realiseAptClosure(lock, store, root / "empty-cache",
-      localFetcher(initTable[string, string](), count), hostMachine = "armv7l")
-    check count[] == 0
+    let prefix = realiseAptClosure(lock, store, root / "c2",
+      answering("unserved", count), hostMachine = "armv7l")
+    check count[] == 1
     check readFile(prefix / "usr/bin/svc") == "svc-binary"
-    # Published at the store's path for the member, sharing the files.
     check sameFile(aptDebPrefixPath(store, d) / "usr/bin/svc",
                    legacy / "usr/bin/svc")
-    check fileExists(aptDebPrefixPath(store, d) / ReceiptFileName)
-    # A prefix whose marker names other bytes is not that member: fetched.
+    let rec = readReceiptFile(aptDebPrefixPath(store, d) / ReceiptFileName)
+    check rec.provenanceUrl.startsWith(ReusedLegacyProvenance & legacy &
+      "#marker-sha256=" & d.sha256 & "#unserved=")
+    check rec.provenanceUrl.endsWith("#contents-not-reverified-against-the-deb")
+    check rec.provenanceChecksum == ""
+    check rec.materializationMechanism == "reused-realiser-2-prefix"
+    # Inconclusive (the network is down): refused, even with the prefix.
+    let down = root / "down"
+    discard withLegacy(down)
+    expect IOError:
+      discard realiseAptClosure(lock, down, root / "c3",
+        answering("down", count), hostMachine = "armv7l")
+    check not dirExists(aptDebPrefixPath(down, d))
+    # Not served and no prefix that verifies (its marker names other
+    # bytes): refused.
     let other = root / "other"
-    let otherLegacy = legacyAptDebPrefixPath(other, d)
-    createDir(parentDir(otherLegacy))
-    copyDirWithPermissions(legacy, otherLegacy)
+    let otherLegacy = withLegacy(other)
     writeFile(otherLegacy / ".repro-apt-deb", repeat('f', 64) & "\n")
     check reusableLegacyMember(other, d) == ""
-    count[] = 0
-    expect IOError:
-      discard realiseAptClosure(lock, other, root / "empty-cache-2",
-        localFetcher(initTable[string, string](), count),
-        hostMachine = "armv7l")
-    check count[] == 1
+    expect EAptDebUnserved:
+      discard realiseAptClosure(lock, other, root / "c4",
+        answering("unserved", count), hostMachine = "armv7l")
 
   test "retainDebCache keeps the verified archives":
     let root = scratch("retain")

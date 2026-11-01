@@ -62,7 +62,9 @@
 ## nothing. The plan also names every refusal at once (a plan over two
 ## hand-written files names both; at 7d7313432b, the first only). Before
 ## the migration, too, `store recover` and `store gc` keep what the units
-## and manifest on disk bind (at 0e84765db0 they adopted and collected it).
+## and manifest on disk bind (at 0e84765db0 they adopted and collected it),
+## and the hold reads the hand-back records of the state directory
+## bootstrap's pointer names (at d14cd72e9f, the default one's).
 ##
 ## At reprobuild 3a1068e25b, before the change, step 1 committed no add-on
 ## generation (the tick reported aoConverged and did nothing), step 2's
@@ -421,6 +423,35 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # The restart above started a new instance: the migration's
       # no-restart checks compare against it.
       closure0 = g.unitState("repro-fx-closure")
+    # The hold is rebuilt from the hand-back records of the add-on's REAL
+    # state directory, the one bootstrap's pointer names (review of
+    # d14cd72e9f: `store gc` read the default directory's). An older
+    # closure only a record in another state directory names is held while
+    # the pointer names that directory, and released once it does not.
+    block:
+      let thirdDeb = g.runDir / "repro-fx-third.deb"
+      writeDeb(thirdDeb, @[dir("./"), dir("./usr/"), dir("./usr/bin/"),
+        (name: "./usr/bin/repro-fx-third", typeflag: '0', mode: 0o755,
+         content: "#!/bin/sh\n", linkName: "")])
+      let thirdLock = fixtureLock("repro-fx-third", thirdDeb)
+      g.fakeV2Closure(thirdLock, "/var/tmp/repro-fx-tool",
+                      "/usr/bin/repro-fx-third")
+      let third = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot,
+                                              thirdLock)[0]
+      const FxState = "/var/lib/repro/fx-state"
+      discard g.run("mkdir -p " & FxState & "/addon/preserved && printf " &
+        "'[Service]\\nBindReadOnlyPaths=%s/usr:/usr\\n' " & third & " > " &
+        FxState & "/addon/preserved/record && printf '%s\\n' " & FxState &
+        " > /var/lib/repro/addon-state-dir && chmod 0644 " &
+        "/var/lib/repro/addon-state-dir")
+      let held = g.exec(repro & " store gc --grace-seconds 0")
+      let heldThere = g.exec("test -d " & third).exitCode == 0
+      discard g.run("rm -rf " & FxState & " /var/lib/repro/addon-state-dir")
+      let released = g.exec(repro & " store gc --grace-seconds 0")
+      step("store gc holds what the pointer's state directory's records name, and releases it after",
+           held.exitCode == 0 and heldThere and released.exitCode == 0 and
+           g.exec("test ! -e " & third).exitCode == 0,
+           held.stdout & held.stderr & released.stdout & released.stderr)
     # 0. The migration's plan, read-only, against copies of both state
     # directories (what the operator runs before installing the binary).
     var r = g.exec("rm -rf /var/tmp/plan-copy && mkdir -p /var/tmp/plan-copy && " &

@@ -3473,6 +3473,28 @@ proc applyLinuxNixDaemonSetting*(op: PrivilegedOperation):
 # The destroy direction `stop`s + `disable`s + removes the unit file.
 # ===========================================================================
 
+const
+  TimerEnabledStates = ["enabled", "enabled-runtime", "linked",
+    "linked-runtime", "alias", "indirect", "generated", "static",
+    "transient"]
+    ## `UnitFileState` values under which a timer is armed or pulled in
+    ## without `systemctl enable` making a difference: re-enabling one on
+    ## every apply would be churn (systemctl(1), "is-enabled" output).
+    ## https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#is-enabled%20UNIT%E2%80%A6
+  TimerRepeatingKeys = ["OnUnitActiveSec", "OnUnitInactiveSec", "OnCalendar"]
+    ## `[Timer]` settings that make a timer fire again and again; a timer
+    ## with only `OnBootSec=`, `OnStartupSec=` or `OnActiveSec=` fires once
+    ## per activation. https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
+
+proc timerRepeats*(content: string): bool =
+  ## Whether the timer unit ``content`` fires repeatedly.
+  for raw in content.splitLines():
+    let line = raw.strip()
+    let eq = line.find('=')
+    if eq > 0 and line[0 ..< eq].strip() in TimerRepeatingKeys and
+        line[eq + 1 .. ^1].strip().len > 0:
+      return true
+
 proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
                              unitFileState, activeState,
                              lastTrigger: string): string =
@@ -3485,19 +3507,25 @@ proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
   ## at 76f0f4f7a9 and never active) planned as a no-op on every apply, and
   ## was never started.
   ##
-  ## A timer counts as running when systemd has it active (waiting for its
-  ## next elapse) or activating, and also when it is inactive after having
-  ## triggered (`LastTriggerUSec` set): a timer whose only trigger is in
-  ## the past elapses once and goes inactive, and starting it again would
-  ## run its service again. A state systemd did not report (an empty
-  ## `unitFileState` or `activeState`) is not judged.
-  let enabled = unitFileState.startsWith("enabled")
+  ## Enabled means any of ``TimerEnabledStates`` (a linked, aliased,
+  ## indirect or generated timer is not re-enabled); disabled means not
+  ## `enabled`/`enabled-runtime`. A repeating timer (``timerRepeats``) is
+  ## running only while systemd has it active or activating: one that fired
+  ## and then stopped is not. A timer that fires once per activation also
+  ## counts as running when it is inactive after having triggered
+  ## (`LastTriggerUSec` set): it elapsed, and starting it again would run
+  ## its service again. A state systemd did not report is not judged.
+  let enabled = unitFileState in TimerEnabledStates
+  let explicitlyEnabled = unitFileState in ["enabled", "enabled-runtime"]
   let active = activeState in ["active", "activating", "reloading"]
   let triggered = lastTrigger.len > 0 and lastTrigger != "n/a" and
     lastTrigger != "0"
-  let enabledOk = unitFileState.len == 0 or enabled == wantEnabled
+  let enabledOk = unitFileState.len == 0 or
+    (if wantEnabled: enabled else: not explicitlyEnabled)
   let runningOk = activeState.len == 0 or
-    (if wantRunning: active or triggered else: not active)
+    (if not wantRunning: not active
+     elif timerRepeats(content): active
+     else: active or triggered)
   if enabledOk and runningOk:
     posixDigestHexOfText(content)
   else:

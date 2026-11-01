@@ -121,6 +121,13 @@ type
   EAptClosureUnit* = object of CatchableError
     ## The unit cannot carry a closure binding (spec §8.3 item 5).
 
+  EAptDebUnserved* = object of IOError
+    ## The archive answered that it does not serve this ``.deb`` (HTTP 404
+    ## or 410), or the apply unit's fetch unit recorded that answer. Only
+    ## this, never an inconclusive failure, lets ``realiseDeb`` fall back to
+    ## an older realiser's prefix of the member (the operator's decision of
+    ## 2026-11-01, threat model C20).
+
   EAptClosureHost* = object of CatchableError
     ## The lock's architecture does not run on this host.
     lockArchitecture*: string
@@ -642,6 +649,10 @@ proc downloadBounded*(url, dest: string; maxBytes: int64;
       current = $combine(parseUri(current), parseUri(resp.location))
       removeFile(dest)
       continue
+    if resp.statusCode in [404, 410]:
+      removeFile(dest)
+      raise newException(EAptDebUnserved, "HTTP " & $resp.statusCode &
+        " for " & current)
     if resp.statusCode < 200 or resp.statusCode >= 300:
       removeFile(dest)
       raise newException(IOError, "HTTP " & $resp.statusCode & " for " &
@@ -696,6 +707,10 @@ proc ensureVerifiedDeb(lock: AptClosureLock; d: AptLockedDeb;
   let part = result & ".part-" & $getCurrentProcessId()
   try:
     fetch(debUrl(lock, d), part, d.size)
+  except EAptDebUnserved as ex:
+    if fileExists(part): removeFile(part)
+    raise newException(EAptDebUnserved, "fetching " & debUrl(lock, d) &
+      " failed: " & ex.msg)
   except CatchableError as ex:
     if fileExists(part): removeFile(part)
     raise newException(IOError, "fetching " & debUrl(lock, d) &
@@ -1112,8 +1127,15 @@ proc ensureIndexed(st: var Store; final: string;
     receiptDigest: receiptDigest(rec), createdAtUnix: rec.createdAtUnix))
   true
 
+const ReusedLegacyProvenance* = "reused-from-realiser-2:"
+  ## The ``provenanceUrl`` scheme of a member published from an older
+  ## realiser's prefix (``realiseDeb``): the prefix's path, then the
+  ## marker's SHA-256 it was matched by. Such a receipt carries no
+  ## ``provenanceChecksum``: no archive was verified for it.
+
 proc publishThroughStore(st: var Store; tmp, final: string;
-                         prefixId: PrefixIdBytes; hint: StoreReceiptHint) =
+                         prefixId: PrefixIdBytes; hint: StoreReceiptHint;
+                         mechanism = "apt-unpack") =
   ## Hand the filled, verified scratch directory ``tmp`` to the store: it
   ## becomes the store's staging directory, the store seals its receipt,
   ## renames it to ``final`` and inserts the index row (the store's
@@ -1132,10 +1154,10 @@ proc publishThroughStore(st: var Store; tmp, final: string;
   if dirExists(final) and not ensureIndexed(st, final, prefixId):
     removeDir(final)
   let res = st.realizePrefix(prefixId, hint,
-    proc (stage: string; mechanism: var string) =
+    proc (stage: string; mech: var string) =
       removeDir(stage)
       moveDir(tmp, stage)
-      mechanism = "apt-unpack")
+      mech = mechanism)
   if dirExists(tmp): removeDir(tmp)
   if res.absolutePath != final:
     raise newException(IOError, "apt closure: the store placed " &
@@ -1170,13 +1192,19 @@ proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
   ## An older realiser's prefix of exactly this member, "" when there is
   ## none that verifies: at ``legacyAptDebPrefixPath``, its marker naming
   ## the lock's SHA-256 (and its directory name that realiser's hash of
-  ## it), its tree within the store's policy (``legacyDebPrefix``). Realiser
-  ## 2 unpacked a member exactly as this one does (version 3 changed where
-  ## and how prefixes are published, not their bytes), so its tree is the
-  ## member's unpacked archive; the marker is that realiser's own record,
-  ## written as root into the root-owned store, of the archive it unpacked
-  ## -- the same record the store's adoption of it (``lockIdentity``)
-  ## rests on.
+  ## it), its tree within the store's policy (``legacyDebPrefix``), and an
+  ## adopted receipt, when there is one, recording the same digest at the
+  ## same path.
+  ##
+  ## What this does NOT establish: that the tree is the archive's complete
+  ## and exact content. The marker is realiser 2's own record, written as
+  ## root into the root-owned store, of the archive it verified and
+  ## unpacked; nothing re-reads the archive. And realiser 2's unpacker was
+  ## not this one throughout: a2054740ae (refusing a pax record with a NUL,
+  ## and a file over an already-extracted one) landed after the realiser
+  ## became version 2 (dba543f5d9), so a tree from that window was unpacked
+  ## by the weaker one. A member published from it says so in its receipt
+  ## (``realiseDeb``) instead of claiming the archive's digest.
   let dir = legacyAptDebPrefixPath(storeRoot, d)
   if not dirExists(dir): return ""
   let v = legacyDebPrefix(dir)
@@ -1205,12 +1233,24 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
       (AptClosureMutation == "apt-closure-unrecorded" or
        ensureIndexed(st, result, aptDebPrefixId(d))):
     return
-  # No archive cached, but an older realiser's prefix of the same archive
-  # bytes: the member is published from it, sharing its files, and nothing
-  # is fetched (a host upgraded from realiser 2 whose archive no longer
-  # serves the locked version; rpi2's libnss3 +deb13u4, 2026-11-01).
-  let legacy = if fileExists(cacheDir / (d.sha256 & ".deb")): ""
-               else: reusableLegacyMember(storeRoot, d)
+  # The archive, verified against the lock, whenever it is cached or the
+  # archive serves it. Only when the archive answers that it no longer
+  # serves it (404/410; rpi2's libnss3 +deb13u4, 2026-11-01) is the member
+  # published from an older realiser's prefix recorded as the same archive,
+  # sharing its files -- the one exception to "realised only from a .deb
+  # whose SHA-256 is the lock's" (threat model C20, approved by Zahary
+  # Karadjov, 2026-11-01). An inconclusive fetch refuses. The receipt of
+  # such a member names where it came from and the marker it rests on, not
+  # the archive's digest, which nothing re-checked.
+  var deb = ""
+  var legacy = ""
+  try:
+    deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
+  except EAptDebUnserved as e:
+    legacy = reusableLegacyMember(storeRoot, d)
+    if legacy.len == 0:
+      raise newException(EAptDebUnserved, e.msg & "; and no older " &
+        "realiser's prefix of " & d.name & " " & d.version & " verifies")
   if legacy.len > 0:
     createDir(parentDir(result))
     reclaimStaleScratch(parentDir(result))
@@ -1223,13 +1263,15 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
       publishThroughStore(st, tmp, result, aptDebPrefixId(d),
         StoreReceiptHint(adapter: AptDebStoreAdapter,
           packageName: debStorePackage(d), version: d.version,
-          lockIdentity: d.sha256, provenanceUrl: "file://" & legacy,
-          provenanceChecksum: "sha256:" & d.sha256))
+          lockIdentity: d.sha256,
+          provenanceUrl: ReusedLegacyProvenance & legacy &
+            "#marker-sha256=" & d.sha256 & "#unserved=" & debUrl(lock, d) &
+            "#contents-not-reverified-against-the-deb"),
+        mechanism = "reused-realiser-2-prefix")
     except CatchableError:
       if dirExists(tmp): removeDir(tmp)
       raise
     return
-  let deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
   createDir(parentDir(result))
   reclaimStaleScratch(parentDir(result))
   let tmp = tempSibling(result, "apt-deb")

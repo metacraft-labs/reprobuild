@@ -40,13 +40,17 @@
 ## the way realiser v2 wrote them.
 
 import std/[algorithm, os, strutils, tables, unittest]
+when defined(posix):
+  import std/posix
 
 import repro_local_store
 import repro_dsl_stdlib/packages/apt_closure
 from repro_dsl_stdlib/packages/apt_jammy import sha256OfString
 import repro_addon/static_tree
 from repro_addon/store_root import RootIdPrefix
-from repro_addon/addon_apply import closureSpace, DebProbe
+from repro_addon/addon_apply import closureSpace, DebProbe, DebServed,
+  dsServed, dsUnserved, dsUnknown,
+  probeVerdict
 
 proc v2DebHash(sha: string): string =
   sha256OfString("repro.apt-deb\x00" & "2" & "\x00" & sha)[0 ..< 16]
@@ -257,12 +261,14 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
     check not dirExists(unbound)
     s.close()
 
-  test "the plan reuses a verified older member, and refuses an unserved archive":
-    # rpi2 (2026-11-01): the mirror 404s libnss3 +deb13u4, the cache is
-    # empty, and realiser 2's member of exactly that archive is on disk.
-    # At 0e84765db0 the plan counted it as a download and found nothing
-    # wrong; the switch failed at step 1 on every tick.
+  test "the plan downloads what is served, reuses only what is not, refuses the unknown":
+    # rpi2 (2026-11-01): the mirror 404s libnss3 +deb13u4 and realiser 2's
+    # member of exactly that archive is on disk. The operator's decision
+    # ("strict, reuse as fallback"): download what is served, stand an
+    # older prefix in only for what is not, refuse what cannot be probed.
+    # At 0e84765db0 the plan counted every member as a download.
     discard v2Member(store, "libnss3", "3.110-1", shaOf('a'))
+    discard v2Member(store, "nut", "2.8.1", shaOf('b'))
     let lock = AptClosureLock(archive: "http://mirror.invalid/raspbian",
       suite: "trixie", components: @["main"], architecture: "armhf",
       inReleaseSha256: shaOf('e'), roots: @["libnss3"],
@@ -271,25 +277,98 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
                 size: 100, sha256: shaOf('a')),
               AptLockedDeb(name: "nut", version: "2.8.1",
                 architecture: "armhf", filename: "pool/main/nut.deb",
-                size: 200, sha256: shaOf('b'))])
-    var asked: seq[string]
-    let probe: DebProbe = proc (url: string): string =
-      asked.add(url)
-      "404 Not Found"
-    let space = closureSpace(@[lock], store, store / "cache", probe)
-    check space.closures == 1 and space.members == 2
-    check space.reusedMembers == 1
-    check asked == @["http://mirror.invalid/raspbian/pool/main/nut.deb"]
-    check space.unavailable.len == 1 and "nut 2.8.1" in space.unavailable[0]
-    check space.sources.len == 2
-    check space.sources[0].startsWith("reuse\tlibnss3 3.110-1\t")
+                size: 200, sha256: shaOf('b')),
+              AptLockedDeb(name: "zz", version: "1",
+                architecture: "armhf", filename: "pool/main/zz.deb",
+                size: 300, sha256: shaOf('c'))])
+    var answers = initTable[string, DebServed]()
+    answers["http://mirror.invalid/raspbian/pool/main/libnss3.deb"] = dsUnserved
+    answers["http://mirror.invalid/raspbian/pool/main/nut.deb"] = dsServed
+    answers["http://mirror.invalid/raspbian/pool/main/zz.deb"] = dsServed
+    let probe: DebProbe = proc (url: string):
+        tuple[verdict: DebServed; detail: string] =
+      (answers[url], "fixture")
+    var space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.closures == 1 and space.members == 3
+    check space.reusedMembers == 1 and space.unavailable.len == 0
+    check space.sources.len == 3
+    check space.sources[0].startsWith("reuse-because-unserved\tlibnss3 ")
+    # Served: downloaded, although an older prefix of it exists.
     check space.sources[1].startsWith("download\tnut 2.8.1\t")
-    # A marker naming other bytes is not that member: it is a download.
-    writeFile(store / "prefixes" / "apt-deb-libnss3" /
-      ("3.110-1-" & v2DebHash(shaOf('a'))) / ".repro-apt-deb",
-      shaOf('c') & "\n")
-    check closureSpace(@[lock], store, store / "cache", probe).
-      reusedMembers == 0
+    check space.downloadBytes == 500
+    # Not served and no older prefix: refused.
+    answers["http://mirror.invalid/raspbian/pool/main/zz.deb"] = dsUnserved
+    space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.unavailable.len == 1 and "zz 1" in space.unavailable[0]
+    # Inconclusive: refused, even with an older prefix.
+    answers["http://mirror.invalid/raspbian/pool/main/zz.deb"] = dsServed
+    answers["http://mirror.invalid/raspbian/pool/main/libnss3.deb"] = dsUnknown
+    space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.unavailable.len == 1 and "libnss3" in space.unavailable[0] and
+      "could not be probed" in space.unavailable[0]
+    check probeVerdict(200) == dsServed and probeVerdict(206) == dsServed
+    check probeVerdict(404) == dsUnserved and probeVerdict(410) == dsUnserved
+    check probeVerdict(403) == dsUnknown and probeVerdict(500) == dsUnknown
+
+  test "a drop-in, a linked unit or a runtime unit holds what it names; an unreadable one refuses":
+    # Review of d14cd72e9f: only regular files directly in the two
+    # directories were read, and an unreadable file degraded to holding the
+    # older prefixes alone.
+    let a = v2Union(store, "a", "1.0", "armhf", @[("a", shaOf('a'))])
+    discard v2Member(store, "a", "1.0", shaOf('a'))
+    let b = v2Union(store, "b", "1.0", "armhf", @[("b", shaOf('b'))])
+    discard v2Member(store, "b", "1.0", shaOf('b'))
+    let c = v2Union(store, "c", "1.0", "armhf", @[("c", shaOf('c'))])
+    discard v2Member(store, "c", "1.0", shaOf('c'))
+    let etc = store / "etc-units"
+    let run = store / "run-units"
+    createDir(etc / "x.service.d")
+    createDir(run)
+    writeFile(etc / "x.service.d" / "10-bind.conf", "[Service]\n" &
+      "BindReadOnlyPaths=\"" & a & "/usr:/usr\"\n")
+    # A unit file that is a link into the store: the link's target holds.
+    createDir(c / "lib")
+    writeFile(c / "lib" / "y.service", "[Service]\nExecStart=/bin/true\n")
+    createSymlink(c / "lib" / "y.service", etc / "y.service")
+    writeFile(run / "z.service", "[Service]\nExecStart='" & b &
+      "/usr/bin/z'\n")
+    discard migrateLegacyAptClosures(store, live = @[etc, run])
+    var s = openStore(store)
+    discard s.gc(graceSeconds = 0)
+    s.close()
+    check dirExists(a) and dirExists(b) and dirExists(c)
+    # An unreadable file: nothing is decided, nothing collected.
+    when defined(posix):
+      if getuid() != 0:
+        writeFile(etc / "secret.service", "x")
+        setFilePermissions(etc / "secret.service", {})
+        removeFile(etc / "x.service.d" / "10-bind.conf")
+        expect StaticTreeError:
+          discard migrateLegacyAptClosures(store, live = @[etc, run])
+        s = openStore(store)
+        discard s.gc(graceSeconds = 0)
+        s.close()
+        check dirExists(a)
+
+  test "the hand-back records are the add-on's real state directory's":
+    # Review of d14cd72e9f: `store gc` and `store recover` read the default
+    # state directory's records, not those of a host bootstrapped with
+    # another; the hold was then rebuilt without them.
+    let other = store / "custom-state"
+    createDir(other)
+    let pointer = store / "addon-state-dir"
+    writeFile(pointer, other & "\n")
+    setFilePermissions(pointer, {fpUserRead, fpUserWrite, fpGroupRead,
+                                 fpOthersRead})
+    when defined(posix):
+      check hostHandBackDirs(pointer, owner = int(getuid())) ==
+        @[other / "addon" / "preserved"]
+      check hostHandBackDirs(store / "absent", owner = int(getuid())) ==
+        @[preservedDir()]
+      setFilePermissions(pointer, {fpUserRead, fpUserWrite, fpGroupWrite,
+                                   fpOthersRead})
+      expect StaticTreeError:
+        discard hostHandBackDirs(pointer, owner = int(getuid()))
 
   test "prefixes that do not verify are left as found":
     # The member's marker names another digest than its directory's hash.
