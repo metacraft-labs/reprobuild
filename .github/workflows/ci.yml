@@ -832,6 +832,54 @@ jobs:
           siblings_root="$(cd "$ct_root/.." && pwd)"
           ( cd "$ct_root" && export GIT_CONFIG_GLOBAL="$git_auth_config" && \
             "$repro_bin" develop --all --reset --into="$siblings_root" )
+          # `develop --all` SKIPS a sibling that a recipe pins. Run
+          # 41269671590 logged exactly that -- "skipped
+          # codetracer-trace-format-nim -- pinned by recipe" -- while it DID
+          # reset the drifted native-backend and native-recorder checkouts.
+          # So --reset never reconciles that one and nothing else does, and
+          # the ct build refuses two steps later with
+          #   cross-repo producer "codetracer-trace-format-nim" source
+          #   revision mismatch: consumer lock expects <A>, actual checkout
+          #   HEAD is <B>
+          # clone-siblings pre-clones it at its `=dev` tip, and CodeTracer's
+          # lock names a revision on that repository's `agents` line, so the
+          # two can never agree on their own. Provision it from the lock --
+          # what this step exists to do -- rather than pinning a revision
+          # here that would need moving by hand whenever `codetracer=dev`
+          # advances.
+          cat > "$RUNNER_TEMP/locked-revision.py" <<'LOCKED_REV_EOS'
+          import re
+          import sys
+
+          lock, want = sys.argv[1], sys.argv[2]
+          text = open(lock, encoding="utf-8").read()
+          for entry in re.finditer(r"\{[^{}]*\}", text):
+              body = entry.group(0)
+              if '"%s"' % want not in body or "coord_kind" not in body:
+                  continue
+              found = re.search(r'revision = "([0-9a-f]{40})"', body)
+              if found:
+                  sys.stdout.write(found.group(1))
+                  break
+          LOCKED_REV_EOS
+          tf_dir="$siblings_root/codetracer-trace-format-nim"
+          if [ -d "$tf_dir/.git" ]; then
+            tf_rev="$(python3 "$RUNNER_TEMP/locked-revision.py" \
+              "$ct_root/repro.lock" codetracer-trace-format-nim)"
+            if [ -z "$tf_rev" ]; then
+              echo "reconcile: $ct_root/repro.lock names no revision for" \
+                "codetracer-trace-format-nim" >&2
+              exit 1
+            fi
+            if [ "$(git -C "$tf_dir" rev-parse HEAD)" != "$tf_rev" ]; then
+              echo "reconcile: codetracer-trace-format-nim -> locked $tf_rev"
+              git -C "$tf_dir" fetch --quiet origin "$tf_rev" \
+                || git -C "$tf_dir" fetch --quiet --tags origin
+              git -C "$tf_dir" checkout --quiet --detach "$tf_rev"
+            fi
+            echo "reconcile: codetracer-trace-format-nim at" \
+              "$(git -C "$tf_dir" rev-parse HEAD)"
+          fi
 
       # CodeTracer's Nix graph reads native-recorder, while its submodule graph
       # also reads tree-sitter-nim. Mint exactly that repository set immediately
