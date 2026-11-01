@@ -222,20 +222,66 @@ def render(text):
 EXPOSURE_LINE = re.compile(r"Overall exposure level for \S+: (\d+)\.(\d)\b")
 
 
-def check_conf4(text):
+# CONF-4's ceiling is only comparable against the host class it was measured
+# on: the same unit and the same analyzer report 2.6 on bare metal and 3.1
+# inside the ephemeral runners, because some of systemd-analyze's checks cannot
+# be verified from within a container or VM. Both runner kinds register with
+# the identical labels (`self-hosted,linux,x64`), so no `runs-on` can route
+# this check to one class -- it has to detect the class it is on and compare
+# against that class's measured number.
+VIRT_ENV = "REPRO_SYSTEMD_DETECT_VIRT"
+
+
+def committed_thresholds():
+    """Host class -> ceiling in tenths, from the committed file."""
+    values = {}
     with open(THRESHOLD) as f:
-        # The file records where the number was measured; a committed
-        # exposure ceiling is only comparable against the same host class.
-        threshold = ''
         for line in f:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                threshold = line
-                break
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if "=" not in line:
+                raise Failure("CONF-4: %s: %r is not `<host-class> = <tenths>`. The "
+                              "ceiling is recorded per host class because the same "
+                              "unit measures differently on each."
+                              % (THRESHOLD, line))
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    if not values:
+        raise Failure("CONF-4: %s records no ceiling at all" % THRESHOLD)
+    return values
+
+
+def host_class(analyze):
+    """``("none"|"virtualized", raw)`` -- the class, and what detect-virt said."""
+    override = os.environ.get(VIRT_ENV)
+    detect = override or os.path.join(os.path.dirname(analyze), "systemd-detect-virt")
+    if not (os.path.isfile(detect) and os.access(detect, os.X_OK)):
+        raise Failure("CONF-4: %s is not an executable, so the host class cannot be "
+                      "determined, and this ceiling is only comparable against the "
+                      "class it was measured on%s"
+                      % (detect, "" if override
+                         else " (set %s to name one)" % VIRT_ENV))
+    out = subprocess.run([detect], capture_output=True, text=True)
+    # detect-virt exits non-zero when it finds no virtualization, which is not
+    # an error here: "none" is precisely the answer bare metal gives.
+    raw = (out.stdout + out.stderr).strip() or "none"
+    return ("none" if raw == "none" else "virtualized"), raw
+
+
+def check_conf4(text):
     try:
         analyze = systemd_analyze()
     except SystemdAnalyzeUnavailable as err:
         raise Failure("CONF-4: " + str(err))
+    thresholds = committed_thresholds()
+    klass, virt = host_class(analyze)
+    if klass not in thresholds:
+        raise Failure("CONF-4: %s records no ceiling for host class %r (detect-virt "
+                      "said %r); it records %s. Measure this class and record it "
+                      "rather than comparing it against another class's number."
+                      % (THRESHOLD, klass, virt, ", ".join(sorted(thresholds))))
+    threshold = thresholds[klass]
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "repro-daemon-worker.service")
         with open(path, "w") as f:
@@ -257,9 +303,11 @@ def check_conf4(text):
     if exposure > int(threshold):
         sys.stderr.write("\n".join(output.splitlines()[-25:]) + "\n")
         raise Failure("CONF-4: exposure of repro-daemon-worker.service, %d.%d, exceeds the "
-                      "committed threshold %d.%d (%s)"
+                      "committed threshold %d.%d for host class %s (detect-virt said "
+                      "%s) (%s)"
                       % (exposure // 10, exposure % 10,
-                         int(threshold) // 10, int(threshold) % 10, analyze))
+                         int(threshold) // 10, int(threshold) % 10,
+                         klass, virt, analyze))
     if out.returncode != 0:
         # `--threshold` makes systemd-analyze fail only above it; failing at
         # or below it is some other error, and is reported as one.

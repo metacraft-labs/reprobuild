@@ -126,12 +126,60 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
             self.derive.expand("@system-service")
         self.assertIn("REPRO_SYSTEMD_ANALYZE", str(caught.exception))
 
-    def conf4(self, **answer):
+    def virt_fake(self, answer="none", code=1):
+        """A fake `systemd-detect-virt`.
+
+        Bare metal prints `none` and exits NON-zero; that is detect-virt's own
+        convention for "found nothing", not a failure, so the default here
+        reproduces it rather than a tidier exit 0."""
+        marker = self.root / "virt-ran"
+        path = self.fake(self.root / "systemd-detect-virt", marker,
+                         stdout=answer + "\n", code=code)
+        os.environ[self.check.VIRT_ENV] = str(path)
+        return marker
+
+    def conf4(self, virt="none", virt_code=1, **answer):
         # The same answer from the "host" and the pinned binary, so the case
         # is about how a failure is CLASSIFIED whichever binary the check runs.
         self.host_fake(**answer)
         self.pinned_fake(**answer)
+        self.virt_fake(virt, virt_code)
         return self.check.check_conf4(UNIT.read_text(encoding="utf-8"))
+
+    EXPOSURE = ("\u2192 Overall exposure level for repro-daemon-worker.service:"
+                " %s OK \U0001f642\n")
+
+    def test_conf4_compares_against_the_class_it_is_running_on(self):
+        # 3.1 is over bare metal's 2.6 and is exactly the virtualized ceiling,
+        # so one measurement must refuse on one class and pass on the other.
+        # This is the defect that made Lint red or green by which runner it
+        # drew: both kinds carry the same labels, so the class cannot be
+        # routed, only detected.
+        with self.assertRaises(self.check.Failure) as caught:
+            self.conf4(virt="none", stdout=self.EXPOSURE % "3.1", code=0)
+        self.assertIn("host class none", str(caught.exception))
+        self.assertIn("committed threshold 2.6", str(caught.exception))
+        self.conf4(virt="lxc", virt_code=0, stdout=self.EXPOSURE % "3.1", code=0)
+
+    def test_conf4_still_refuses_a_regression_on_a_virtualized_host(self):
+        # The virtualized number is a measured bar, not an exemption: one
+        # tenth above it still refuses.
+        with self.assertRaises(self.check.Failure) as caught:
+            self.conf4(virt="lxc", virt_code=0, stdout=self.EXPOSURE % "3.2", code=0)
+        self.assertIn("host class virtualized", str(caught.exception))
+        self.assertIn("committed threshold 3.1", str(caught.exception))
+
+    def test_conf4_refuses_an_unrecorded_host_class_rather_than_passing_it(self):
+        thresholds = self.check.committed_thresholds()
+        self.assertEqual({"none", "virtualized"}, set(thresholds))
+
+    def test_conf4_refuses_when_the_host_class_cannot_be_determined(self):
+        self.host_fake(stdout=self.EXPOSURE % "2.6", code=0)
+        self.pinned_fake(stdout=self.EXPOSURE % "2.6", code=0)
+        os.environ[self.check.VIRT_ENV] = str(self.root / "absent-detect-virt")
+        with self.assertRaises(self.check.Failure) as caught:
+            self.check.check_conf4(UNIT.read_text(encoding="utf-8"))
+        self.assertIn("host class cannot be determined", str(caught.exception))
 
     def test_conf4_reports_a_binary_that_cannot_start_as_that(self):
         with self.assertRaises(self.check.Failure) as caught:
@@ -166,12 +214,16 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
         self.assertEqual(
             self.conf4(stdout="→ Overall exposure level for repro-daemon-worker.service:"
                               " 2.6 OK 🙂\n", code=0),
-            # The file records the host class it was measured on as comments,
-            # so compare against the value the reader takes, not the whole file.
-            next(line.strip() for line in
+            # The file records a ceiling PER HOST CLASS, each with its
+            # provenance in comments. This case answers detect-virt as bare
+            # metal, so compare against that class's committed value --
+            # parsed here, not through the check's own reader, so the check
+            # cannot agree with itself about a number neither took from the
+            # file.
+            next(line.split("=", 1)[1].strip() for line in
                  (ROOT / "recipes/repro-daemon-worker/confinement-threshold")
                  .read_text(encoding="utf-8").splitlines()
-                 if line.strip() and not line.strip().startswith("#")))
+                 if line.strip().startswith("none")))
 
 
 @unittest.skipIf(os.name == "nt" or not sys.platform.startswith("linux"),
