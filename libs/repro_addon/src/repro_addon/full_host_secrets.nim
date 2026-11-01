@@ -34,9 +34,11 @@
 ##       verb is `repro system addon secret put`, and this one hands over to
 ##       it.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, sequtils, strutils]
 
+import repro_core/host_apply_lock
 import repro_infra
+import repro_infra/apply_lock
 
 import repro_deploy_agent/secrets as agentSecrets
 import repro_peer_cache/auth as peerAuth
@@ -46,6 +48,7 @@ from ./generation0 import NoSwapLine, SecretsUnitTimeoutSec
 import ./switch
 import ./host_exec
 import ./addon_secrets
+import ./mutations
 import ./locked_buffer
 import ./secrets_ops
 
@@ -181,6 +184,58 @@ proc fullHostSecretsUnit*(reproExe: string): string =
     "\n[Install]\n" &
     "WantedBy=multi-user.target\n"
 
+const FullHostPendingRestartsPath* =
+    "/var/lib/repro/agent/full-host-secrets.restart-pending"
+  ## The units whose secrets an apply materialised and that no successful
+  ## apply has restarted yet, one per line (0600 root). An apply
+  ## materialises before it applies, and may then stop early (a stale plan,
+  ## an apply error, drift); the units are restarted only by an apply that
+  ## succeeds, so they are recorded here first and kept until then (spec
+  ## §10.3, *Secrets on a host realised in full*). Without the record a
+  ## later apply would find the secrets already current, change nothing and
+  ## restart nothing, and the service would run on the old secret.
+
+proc isPendingUnitName(u: string): bool =
+  ## A systemd unit name as `consumersOf` returns them: no path, no space.
+  u.len > 0 and u.len <= 256 and
+    allCharsInSet(u, {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '@', '.', '_',
+                      ':', '-', '\\'})
+
+proc readPendingRestarts*(path = FullHostPendingRestartsPath): seq[string] =
+  ## The recorded units, sorted; a line that is not a unit name raises.
+  if not fileExists(path): return
+  for line in readFile(path).splitLines():
+    let u = line.strip()
+    if u.len == 0: continue
+    if not isPendingUnitName(u):
+      raise newException(AddonSecretsFailed, path & ": not a unit name: " & u)
+    result.add(u)
+  result.sort()
+  result = result.deduplicate(isSorted = true)
+
+proc writePendingRestarts*(units: openArray[string];
+                           path = FullHostPendingRestartsPath) =
+  ## Replace the record with ``units`` (atomically, 0600); none removes it.
+  var us = @units
+  us.sort()
+  us = us.deduplicate(isSorted = true)
+  for u in us:
+    if not isPendingUnitName(u):
+      raise newException(AddonSecretsFailed, "not a unit name: " & u)
+  if us.len == 0:
+    if fileExists(path): removeFile(path)
+    return
+  createDir(parentDir(path))
+  writeFile(path & ".tmp", us.join("\n") & "\n")
+  setFilePermissions(path & ".tmp", {fpUserRead, fpUserWrite})
+  moveFile(path & ".tmp", path)
+
+proc addPendingRestarts*(units: openArray[string];
+                         path = FullHostPendingRestartsPath) =
+  ## Record ``units`` beside those already pending.
+  if units.len == 0: return
+  writePendingRestarts(readPendingRestarts(path) & @units, path)
+
 proc renderDecls*(decls: openArray[SecretFileDecl]): string =
   for d in decls: result.add(secretEntryPath(d.service, d.name) & "\n")
 
@@ -226,9 +281,43 @@ proc recordFullHostSecrets*(decls: openArray[SecretFileDecl];
     result.add("installed " & unitPath)
 
 proc bootFullHostSecrets*(l = defaultSecretsLayout();
-                          declsPath = FullHostDeclsPath): string =
+                          declsPath = FullHostDeclsPath;
+                          stateDir = DefaultStateDir): string =
   ## The boot unit's work: re-materialise the recorded declarations from
   ## the latest envelope. Never raises: it reports.
+  ##
+  ## Like every write of secrets (spec §10.3, *Locks*) it holds the
+  ## host-wide apply lock and the state directory's apply lock, in that
+  ## order, and like the add-on's boot step (``secrets_ops.reassertSecrets``)
+  ## it takes them without waiting: an apply or a ``secret put`` that holds
+  ## one materialises the secrets itself, so this run defers to it rather
+  ## than delay the boot of every unit that loads credentials.
+  when not mutated("full-host-boot-secrets-unlocked"):
+    var hostLock: HostApplyLock
+    var holder = ""
+    try:
+      (hostLock, holder, _) = tryAcquireHostApplyLock(
+        "re-materialising a full host's secrets at boot")
+    except CatchableError as e:
+      return "repro secrets: degraded: the host apply lock: " & e.msg
+    # An unprivileged process takes no host lock (``held`` false, no
+    # holder); only a holder means another process is changing the host.
+    if holder.len > 0:
+      return "repro secrets: deferred: an apply holds the host apply lock (" &
+        holder & "); it materialises the secrets itself"
+    defer: hostLock.release()
+    var ownLock = false
+    try:
+      if applyLockOwner(stateDir) != getCurrentProcessId():
+        let acq = tryAcquireApplyLock(stateDir)
+        if not acq.acquired:
+          return "repro secrets: deferred: an apply holds " & stateDir &
+            "'s lock; it materialises the secrets itself"
+        ownLock = true
+    except CatchableError as e:
+      return "repro secrets: degraded: " & stateDir & "'s apply lock: " & e.msg
+    defer:
+      if ownLock: releaseApplyLock(stateDir)
   try:
     let decls = if fileExists(declsPath): parseDecls(readFile(declsPath))
                 else: @[]

@@ -561,6 +561,8 @@ proc renderAddonSections*(r: AddonApplyResult): string =
         " (" & describeBase(r.previousBase) & "):\n")
       for c in r.baseChanges: result.add("  " & c & "\n")
     result.add(renderReleaseUpgradeChecklist(r.baseIdentity))
+  if r.storeSpace.len > 0:
+    result.add("store space: " & r.storeSpace & "\n")
   if r.planId.len > 0:
     result.add("add-on plan-id: " & r.planId & "\n")
   if r.staticTree.len > 0:
@@ -571,34 +573,60 @@ proc renderAddonSections*(r: AddonApplyResult): string =
       result.add("  " & k & "\t" & v & "\n")
 
 proc runAddonStoreCli*(args: seq[string]): int =
-  ## ``repro store gc | roots | list`` on the add-on's system-scope store:
-  ## the same ``repro_local_store`` collector the full engine's ``repro
-  ## store gc`` runs (the engine's extra, re-deriving pin roots from
-  ## project locks, has nothing to re-derive here: an add-on host has no
-  ## project locks). Roots decide what survives; the retention policy
-  ## keeps the current and the previous generation's roots whatever is
-  ## asked (spec §5.2).
+  ## ``repro store gc | recover | roots | list`` on the add-on's
+  ## system-scope store: the same ``repro_local_store`` collector and
+  ## recovery the full engine's ``repro store gc`` and ``repro store
+  ## recover`` run (the engine's extra, re-deriving pin roots from project
+  ## locks, has nothing to re-derive here: an add-on host has no project
+  ## locks). Roots decide what survives; the retention policy keeps the
+  ## current and the previous generation's roots whatever is asked, and the
+  ## hand-back hold keeps what a preserved record names (spec §5.2, §9).
   if args.len == 0 or args[0] in ["-h", "--help"]:
-    stdout.write("usage: repro store gc [--grace-seconds N] | roots | list\n")
+    stdout.write("usage: repro store gc [--grace-seconds N] | recover | " &
+      "roots | list\n")
     return (if args.len == 0: 2 else: 0)
   try:
     # `gc` deletes prefixes no root holds; an apply realising a closure
     # holds no root on it until it commits, so a collection during an apply
     # could delete what that apply is about to bind. `gc` therefore runs
     # under the host-wide apply lock, like every other store writer.
+    # `recover` quarantines every prefix without a receipt, so it adopts
+    # first, under the same lock, as `gc` does.
+    let writes = args[0] in ["gc", "recover"]
     var hostLock: HostApplyLock
-    if args[0] == "gc":
-      hostLock = acquireHostApplyLock("repro store gc")
+    if writes:
+      hostLock = acquireHostApplyLock("repro store " & args[0])
     defer: hostLock.release()
-    if args[0] == "gc":
+    if writes:
       # Adopt and root any closure prefix an older realiser left without a
-      # receipt before collecting, so a closure a retained generation binds
-      # is held by that generation's root (``migrateLegacyAptClosures``).
-      let legacy = migrateLegacyAptClosures()
+      # receipt before collecting or recovering, so a closure a retained
+      # generation binds is held by that generation's root, and one a
+      # preserved record names by the hand-back hold
+      # (``migrateLegacyAptClosures``).
+      let legacy = migrateLegacyAptClosures(
+        handBack = @[preservedDir(DefaultStateDir)])
       for r in legacy.refused:
-        stderr.write("repro store gc: legacy apt prefix not adopted: " &
+        stderr.write("repro store " & args[0] &
+          ": legacy apt prefix not adopted: " &
           r.path & ": " & r.reason & "\n")
     enterWritableStoreView()
+    if args[0] == "recover":
+      # The store's own recovery (the engine's ``repro store recover``):
+      # the staging area swept, every prefix directory reconciled with the
+      # index from its receipt, an unreadable index rebuilt.
+      if args.len > 1:
+        raise newException(ValueError, "unknown option " & args[1])
+      let report = recoverStoreRoot(StoreRoot)
+      stdout.write("repro store recover: store-root=" & StoreRoot & "\n")
+      stdout.write("index rebuilt: " &
+        (if report.indexRebuilt: "yes" else: "no") & "\n")
+      stdout.write("reinserted: " & $report.reinsertedPrefixes.len & "\n")
+      for path in report.reinsertedPrefixes:
+        stdout.write("  - " & path & "\n")
+      stdout.write("quarantined: " & $report.quarantinedPrefixes.len & "\n")
+      for path in report.quarantinedPrefixes:
+        stdout.write("  - " & path & "\n")
+      return 0
     var s = openStore(StoreRoot)
     defer: s.close()
     case args[0]

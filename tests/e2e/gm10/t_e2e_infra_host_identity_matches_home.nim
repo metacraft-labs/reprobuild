@@ -133,7 +133,7 @@ proc newFixture(label: string): Fixture =
   # The registry declares hosts without `system:`; since ReproOS add-on mode
   # a distribution base would refuse them (EAddOnModeMismatch), so the base
   # is pinned to ReproOS, whatever machine runs the gate.
-  result.baseEnv.add ("REPRO_OS_RELEASE_PATH", ProjectRoot / "tests" /
+  result.baseEnv.add (TestbedOsReleaseKey, ProjectRoot / "tests" /
     "fixtures" / "os-release" / "reproos")
 
 proc hostnameEnv(mixedCase: string): seq[(string, string)] =

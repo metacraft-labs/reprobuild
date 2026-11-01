@@ -19,13 +19,15 @@
 ##   this gate does not claim to cover.
 ##
 ## *Re-identification is test-bed only.* The guest's ``/etc/os-release``
-## is left as the distribution wrote it. The full engine is told the base
-## is ReproOS only through ``REPRO_OS_RELEASE_PATH`` pointing at a file the
-## test bed writes (``/etc/repro-testbed/os-release-reproos``), on the
-## command lines of this gate. The gate checks both halves: the real
-## ``os-release`` still names the distribution, and the same apply
-## WITHOUT the override is refused with ``EAddOnModeMismatch`` before
-## anything is written (negative control).
+## is left as the distribution wrote it. The full engine is shown a ReproOS
+## base only on this gate's command lines, each run in its own mount
+## namespace (``unshare --mount``) where the file the test bed writes
+## (``/etc/repro-testbed/os-release-reproos``) is bound over
+## ``/etc/os-release``; no engine reads a variable for its base (A12 review
+## finding 5). The gate checks both halves: the real ``os-release`` still
+## names the distribution, and the same apply outside the namespace is
+## refused with ``EAddOnModeMismatch`` before anything is written
+## (negative control).
 ##
 ## *What is compared.* For every resource both realisations applied, the
 ## file it renders, read as a service reads it: units under
@@ -39,12 +41,17 @@
 ## for the chain the beacon node's head moving past genesis. Then the full
 ## guest is rebooted: its secrets ramfs is empty, and the boot secrets
 ## unit its apply installed must re-materialise the admin token (same
-## bytes, mode 0400) so that vaultwarden comes up healthy with no apply. A difference
+## bytes, mode 0400) so that vaultwarden comes up healthy with no apply.
+## Then a new admin token is put, an apply with a stale plan id stops early
+## after materialising it, and the next good apply must still restart
+## vaultwarden onto the new token (A12 review finding 1; falsifying build
+## of the engine ``full-host-restart-forgets-pending``). A difference
 ## fails the gate unless the ``add-on-debian`` realisation profile lists it
 ## as ignored with a reason (``addOnDebianProfile().realisationDifferences``);
 ## the record lists each difference with the entry that excused it.
 ## Vacuity guards: at least one file of every compared kind, every
-## compared file non-empty on both sides, and every unit active on both.
+## compared file present with a non-zero size on both sides, and every unit
+## active on both.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=addon-unit-renders-differently``,
 ## a build of the add-on artefact whose switch appends one comment line to
@@ -76,7 +83,12 @@ import ./reference_services
 const
   Gate = "e2e_addon_reproos_service_parity"
   ReidentifiedOsRelease = "/etc/repro-testbed/os-release-reproos"
-  OsReleaseOverride = "REPRO_OS_RELEASE_PATH"
+  ReidentifyPrefix = "unshare --mount -- sh -c 'mount --bind " &
+    ReidentifiedOsRelease & " /etc/os-release && exec \"$@\"' sh "
+    ## Runs the command after it in its own mount namespace, where the test
+    ## bed's ReproOS ``os-release`` is bound over ``/etc/os-release``. Only
+    ## that process tree sees it; no engine reads a variable for its base
+    ## (A12 review finding 5).
   RefDir = "/root/reference-services"
 
 proc hexKey(k: openArray[byte]): string =
@@ -85,7 +97,7 @@ proc hexKey(k: openArray[byte]): string =
 proc enginePath(engine: string): string = engine / "bin" / "reprobuild"
 
 type Observed = object
-  path, pathKind, sha256, mode, owner: string
+  path, pathKind, sha256, mode, owner, size: string
 
 proc observe(g: Guest; paths: seq[string]): Table[string, Observed] =
   ## Each path as a reader sees it: the path's own kind (`stat` without
@@ -96,12 +108,13 @@ proc observe(g: Guest; paths: seq[string]): Table[string, Observed] =
       "elif [ -f \"$p\" ]; then k=file; else k=missing; fi; " &
       "if [ -e \"$p\" ]; then s=$(sha256sum < \"$p\" | cut -c1-64); " &
       "m=$(stat -L -c %a \"$p\"); o=$(stat -L -c %U:%G \"$p\"); " &
-      "else s=-; m=-; o=-; fi; echo \"$p|$k|$s|$m|$o\"\n")
+      "z=$(stat -L -c %s \"$p\"); " &
+      "else s=-; m=-; o=-; z=-; fi; echo \"$p|$k|$s|$m|$o|$z\"\n")
   for line in g.run(script).splitLines():
     let f = line.split('|')
-    if f.len == 5:
+    if f.len == 6:
       result[f[0]] = Observed(path: f[0], pathKind: f[1], sha256: f[2],
-                              mode: f[3], owner: f[4])
+                              mode: f[3], owner: f[4], size: f[5])
 
 proc renderedPaths(sp: SystemProfile): seq[(string, string)] =
   ## (kind, path) for every file the profile's resources render, at the
@@ -151,7 +164,7 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
   let realOsRelease = full.run(". /etc/os-release; echo $ID").strip()
   step("the full guest's own os-release still names the distribution",
        realOsRelease in ["debian", "ubuntu"], realOsRelease)
-  let env = OsReleaseOverride & "=" & ReidentifiedOsRelease & " "
+  let env = ReidentifyPrefix
   let eng = enginePath(engine)
   # --- the shared inputs: one network, one set of pins, one compile.
   let net = makeTestnet(pk, work)
@@ -233,7 +246,9 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
     let y = f.getOrDefault(p)
     step("present and non-empty on both: " & p,
          x.pathKind != "missing" and y.pathKind != "missing" and
-         x.sha256 != "-" and y.sha256 != "-", $x & " / " & $y)
+         x.sha256 != "-" and y.sha256 != "-" and
+         x.size notin ["", "-", "0"] and y.size notin ["", "-", "0"],
+         $x & " / " & $y)
     for (aspect, av, fv) in [("bytes", x.sha256, y.sha256),
                              ("mode", x.mode, y.mode),
                              ("owner", x.owner, y.owner),
@@ -297,6 +312,39 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
   step("after a reboot vaultwarden is healthy with its credential",
        healthy and full.exec("systemctl is-active vaultwarden.service").exitCode == 0,
        full.serviceJournal(["vaultwarden.service", SecretsBootUnit]))
+  # --- A put, then an apply that stops early, then a good apply (A12
+  # review finding 1, spec §10.3): the early apply materialises the new
+  # token but must not be the last word -- the next good apply finds the
+  # secret already current and must still restart its consumer. Falsifying
+  # build `full-host-restart-forgets-pending`.
+  let tokenPath = SecretsRunRoot & "/vaultwarden/admin-token"
+  let credPath = "/run/credentials/vaultwarden.service/admin-token"
+  proc shaOf(path: string): string =
+    full.exec("sha256sum " & path & " 2>/dev/null").stdout.split(' ')[0]
+  proc startedOf(): string =
+    full.exec("systemctl show -P ActiveEnterTimestampMonotonic " &
+      "vaultwarden.service").stdout.strip()
+  let rotated = "a12-admin-" & jwtHex()[0 ..< 24]
+  let put2 = full.putSecret(env & eng & " system secret put", "vaultwarden",
+                            "admin-token", rotated)
+  step("a new admin token is put on the full guest", put2.exitCode == 0,
+       put2.stdout & put2.stderr)
+  let started0 = startedOf()
+  let stale = full.exec(env & eng & " infra apply --profile " & RefDir &
+    "/system.nim --host " & AgentTarget & " --plan a12-stale-plan",
+    timeoutSec = 1800)
+  step("an apply with a stale plan stops early, after materialising the " &
+       "new token and without restarting vaultwarden",
+       stale.exitCode != 0 and shaOf(tokenPath) != tokenBefore and
+       startedOf() == started0 and shaOf(credPath) == tokenBefore,
+       stale.stdout & stale.stderr & "\nrun " & shaOf(tokenPath) &
+       " cred " & shaOf(credPath) & " started " & started0 & " -> " & startedOf())
+  let good = full.exec(env & applyCmd, timeoutSec = 3600)
+  step("the next good apply restarts vaultwarden, which then holds the new token",
+       good.exitCode == 0 and startedOf() != started0 and
+       shaOf(credPath) == shaOf(tokenPath) and shaOf(credPath) != tokenBefore,
+       good.stdout & good.stderr & "\ncred " & shaOf(credPath) & " run " &
+       shaOf(tokenPath) & " started " & started0 & " -> " & startedOf())
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var add, full: Guest

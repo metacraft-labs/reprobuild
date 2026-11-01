@@ -149,10 +149,14 @@ proc pinned(m: var DeployManifest; canonical, actionsJson: string) =
   ## The producer's side of the compiled-profile pin.
   m.issuedAt = 1
   m.maxAgeSeconds = 1
-  m.compiledProfile = CompiledProfilePin(
-    digest: compiledProfileDigest(canonical, actionsJson),
-    compilerRevision: "rev-1",
-    platform: "linux", arch: "x86_64", host: "h")
+  # The add-on default selection (mode addOn, no activity): an add-on agent
+  # applies only a pin compiled for the add-on projection
+  # (``addonPinSelectionRefusal``), and the digest frames the selection.
+  var pin = CompiledProfilePin(compilerRevision: "rev-1",
+    platform: "linux", arch: "x86_64", host: "h", systemMode: "addOn")
+  pin.digest = compiledProfileDigest(canonical, actionsJson,
+                                     systemSelectionText(pin))
+  m.compiledProfile = pin
   # The compile emits one action; the block pins its closure too.
   m.closureDigests = @[ClosureDigest(actionId: "searxng",
     digest: "blake3:" & repeat('0', 64))]

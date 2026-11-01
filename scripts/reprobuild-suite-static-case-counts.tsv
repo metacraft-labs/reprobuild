@@ -28,6 +28,7 @@ libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim	nim	11
 libs/repro_addon/tests/t_addon_agent_install_staged_outputs.nim	nim	4
+libs/repro_addon/tests/t_addon_agent_refuses_a_pin_not_for_addon.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	14
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
@@ -41,10 +42,10 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
-libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	4
+libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	5
 libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	3
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
-libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	16
+libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	17
 libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
@@ -54,9 +55,9 @@ libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
-libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	7
+libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
-libs/repro_addon/tests/t_system_activity_selects_its_store_packages.nim	nim	3
+libs/repro_addon/tests/t_system_activity_selects_its_store_packages.nim	nim	4
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7
 libs/repro_agent_backend/tests/t_agent_preview_strategy.nim	nim	3
 libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim	nim	21
@@ -304,10 +305,10 @@ libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	21
 libs/repro_daemon_core/tests/t_ipc_endpoint_is_bounded_to_the_socket_address_limit.nim	nim	4
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	19
 libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim	nim	6
-libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	4
+libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	6
 libs/repro_deploy_agent/tests/t_deploy_agent_records_the_resolved_host.nim	nim	3
 libs/repro_deploy_agent/tests/t_deploy_agent_secret_files_are_private_and_never_follow_links.nim	nim	3
-libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim	nim	17
+libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim	nim	18
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_freshness_and_state.nim	nim	5
@@ -345,7 +346,7 @@ libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_declares_a_version.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_is_enrolled_for_conformance.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_expand_archive_zip_extraction_cost.nim	nim	6
-libs/repro_dsl_stdlib/tests/t_go_package_extra_binaries_and_static_cgo.nim	nim	10
+libs/repro_dsl_stdlib/tests/t_go_package_extra_binaries_and_static_cgo.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim	nim	3
@@ -411,7 +412,7 @@ libs/repro_elevation/tests/t_addon_apt_closure_ro_store_view.nim	nim	3
 libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21
 libs/repro_elevation/tests/t_passwd_user_driver_group_collision.nim	nim	5
 libs/repro_elevation/tests/t_sandbox_m1_fhssandbox_driver.nim	nim	37
-libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	398
+libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	399
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
 libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	35
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	13
@@ -1102,8 +1103,8 @@ tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
 tests/bundles/bundle_repro_solver_pure_unit.nim	nim	82
-tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	1
-tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	1
+tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	0
+tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	0
 tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim	nim	1
@@ -1157,8 +1158,8 @@ tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
-tests/e2e/addon/t_system_profile_host_selection.nim	nim	1
-tests/e2e/addon/t_validator_safety_checks.nim	nim	7
+tests/e2e/addon/t_system_profile_host_selection.nim	nim	0
+tests/e2e/addon/t_validator_safety_checks.nim	nim	10
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
 tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim	nim	3
 tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim	nim	7

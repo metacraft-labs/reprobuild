@@ -73,10 +73,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     g.compromise(evil)
     discard producer.publish(PublishSpec(sequence: sequence,
       profileText: "import repro_profile\n# the profile, as source (" & $sequence & ")\n",
+      # Pinned for the add-on mode, as a producer pins an add-on host
+      # (an add-on agent refuses any other selection before it looks at
+      # the compiled set; this gate is about the set's scope).
       compiledProfile: CompiledProfilePin(
-        digest: compiledProfileDigest(evil, "[]"),
+        digest: compiledProfileDigest(evil, "[]", "addOn\n"),
         compilerRevision: StandInRevision, platform: "linux",
-        arch: "x86_64", host: CompileHost)))
+        arch: "x86_64", host: CompileHost, systemMode: "addOn")))
     inc sequence
     let t = g.tickUnits()
     discard g.exec("systemctl reset-failed repro-agent-apply.service")

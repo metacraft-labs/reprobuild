@@ -72,6 +72,58 @@ suite "validator_safety":
     check overlaps(parseLifetimes("seen 10 1.0\nseen 11 9.0\n")).len == 1
     expect ValueError: discard parseLifetimes("seen 10\n")
 
+  test "cgroups: a restart's successor a few ms later is not an overlap":
+    # The A12 review's false positive (finding 3): the successor's /proc
+    # start (10 ms ticks) falls before the predecessor's polled exit, but
+    # the kernel removed the old incarnation before it created the new one.
+    let log = "cg eth-validator.service create 100\n" &
+      "seen 10 1.000 eth-validator.service 100\n" &
+      "cg eth-validator.service delete\n" &
+      "cg eth-validator.service create 101\n" &
+      "seen 11 5.000 eth-validator.service 101\n" &
+      "gone 10 5.000 5.008\n"
+    check overlaps(parseLifetimes(log)).len == 1   # the clock check's verdict
+    check cgroupOverlaps(log).len == 0             # the kernel order's
+
+  test "cgroups: a rename handed over in order passes, started early is caught":
+    let clean = "cg eth-validator.service create 100\n" &
+      "seen 10 1.0 eth-validator.service 100\n" &
+      "cg eth-validator.service delete\n" &
+      "cg eth-validator-b.service create 200\n" &
+      "seen 11 2.0 eth-validator-b.service 200\n"
+    check cgroupOverlaps(clean).len == 0
+    # The successor's unit created (and running) before the old one's
+    # cgroup was removed: the exclusive-as-plain-restart shape.
+    let early = "cg eth-validator.service create 100\n" &
+      "seen 10 1.0 eth-validator.service 100\n" &
+      "cg eth-validator-b.service create 200\n" &
+      "seen 11 2.0 eth-validator-b.service 200\n" &
+      "cg eth-validator.service delete\n"
+    check cgroupOverlaps(early).len == 1
+    # Never removed while the other ran: open spans intersect.
+    let open = "cg eth-validator.service create 100\n" &
+      "seen 10 1.0 eth-validator.service 100\n" &
+      "cg eth-validator-b.service create 200\n" &
+      "seen 11 2.0 eth-validator-b.service 200\n"
+    check cgroupOverlaps(open).len == 1
+    # An incarnation that held no validator never counts.
+    let empty = "cg eth-validator-b.service create 200\n" &
+      "cg eth-validator.service create 100\n" &
+      "seen 10 1.0 eth-validator.service 100\n" &
+      "cg eth-validator-b.service delete\n"
+    check cgroupOverlaps(empty).len == 0
+
+  test "cgroups: two instances in one incarnation, an unseen incarnation, a stray":
+    check cgroupOverlaps("cg u.service create 1\nseen 10 1.0 u.service 1\n" &
+                         "seen 11 2.0 u.service 1\n").len == 1
+    check cgroupOverlaps("seen 10 1.0 u.service 9\n").len == 1
+    # A process outside the units is held to the clock check: overlapping a
+    # unit's instance in time, it is reported.
+    let stray = "cg u.service create 1\nseen 10 1.0 u.service 1\n" &
+      "seen 11 2.0 - -\n"
+    check cgroupOverlaps(stray).len == 1
+    expect ValueError: discard cgroupOverlaps("cg u.service frozen\n")
+
   test "databasesHeld: distinct databases, and db lines do not disturb lifetimes":
     let log = "seen 10 1.0\ndb 10 2049:77 /var/lib/x/validator.db\n" &
       "gone 10 5.0 5.005\nseen 11 6.0\ndb 11 2049:77 /var/lib/x/validator.db\n" &

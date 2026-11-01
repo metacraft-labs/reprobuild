@@ -17,7 +17,9 @@
 ## 2. A host the registry declares WITHOUT `system:` on a Debian base is
 ##    refused the same way by all four commands, the diagnostic asking for `addOn` or
 ##    `managedElsewhere`; so is a spelled `system: {mode: full, ...}` entry
-##    (decision 17). Negative controls: the same host on a ReproOS base
+##    (decision 17). The retired `REPRO_OS_RELEASE_PATH` pointed at the
+##    ReproOS fixture changes nothing: the Debian refusal stands (A12
+##    review finding 5). Negative controls: the same host on a ReproOS base
 ##    plans, and the `full` block form plans its activities there; a host the registry does not declare plans on Debian as before,
 ##    and the report says it is not declared.
 ## 3. `system: addOn` on Ubuntu 24.04 and on Raspberry Pi OS 13 (`ID_LIKE=
@@ -97,7 +99,7 @@ proc stateFingerprint(stateDir: string): seq[string] =
 
 suite "ReproOS add-on mode: mode mismatch and out-of-scope refusals":
 
-  test "t_addon_mode_mismatch_is_refused":
+  linuxOnlyTest "t_addon_mode_mismatch_is_refused":
     let sb = newProfileSandbox("a6mm", HomeProfile)
     defer: sb.dispose()
     sb.writeProfileFile("system.nim", SystemProfile)
@@ -159,6 +161,20 @@ suite "ReproOS add-on mode: mode mismatch and out-of-scope refusals":
       let r = run(["infra", "plan"], "mm-fullblock", "reproos")
       check r.exitCode == 0
       check "system  : activities default, fw; realised full" in r.stdout
+    # The retired os-release variable redirects nothing (A12 review
+    # finding 5): on a Debian base, pointing REPRO_OS_RELEASE_PATH at the
+    # ReproOS fixture still gets the Debian refusal, writing nothing.
+    block:
+      let before = stateFingerprint(stateDir)
+      let r = sb.runRepro(["infra", "plan", "--state-dir", stateDir,
+                           "--profile", systemPath, "--host", "mm-full"],
+        host = "", extraEnv = [baseEnv("debian-13"),
+          ("REPRO_OS_RELEASE_PATH", OsReleaseFixtures / "reproos"),
+          ("REPROBUILD_ACTION_CACHE_ROOT", sb.root / "action-cache")])
+      checkpoint r.stdout & r.stderr
+      check r.exitCode == 1
+      check "EAddOnModeMismatch: host mm-full runs debian 13" in r.stderr
+      check stateFingerprint(stateDir) == before
     let undeclared = run(["infra", "plan"], "mm-undeclared", "debian-13")
     check undeclared.exitCode == 0
     check "host mm-undeclared not declared; system managed here" in

@@ -34,6 +34,13 @@
 ##                                      own state directory as its
 ##                                      ``--state-dir``, applies with the
 ##                                      plain hook instead of refusing
+## ``compile-pin-drops-selection``      the pin's system selection is bound
+##                                      into no digest and not passed to
+##                                      the agent's compile
+## ``engine-agent-ignores-pin``         the full engine's agent off an
+##                                      add-on host compiles a pinned
+##                                      source profile for ``default`` and
+##                                      never compares the pinned digest
 ## ===================================  ====================================
 
 const AgentMutation {.strdefine: "reproAddonMutation".} = ""
@@ -46,7 +53,8 @@ const KnownAgentMutations* = ["rdmf-ignores-revoked-keys",
                               "agent-skips-compile-digest",
                               "engine-agent-skips-a8",
                               "engine-agent-shares-addon-state",
-                              "compile-pin-drops-selection"]
+                              "compile-pin-drops-selection",
+                              "engine-agent-ignores-pin"]
 
 template agentMutated*(name: static string): bool =
   ## True only in the build compiled with ``-d:reproAddonMutation=<name>``.

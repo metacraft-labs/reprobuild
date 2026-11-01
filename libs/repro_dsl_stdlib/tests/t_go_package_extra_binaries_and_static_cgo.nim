@@ -10,7 +10,9 @@
 ## static executable.
 ##
 ## THE CONSTRAINT. Both options default to off, and with both off the
-## emitted build edge is exactly the literal pinned in the first suite: its
+## emitted build edge is exactly the literal pinned in the first suite (a
+## recipe's own `-extldflags` is merged with the static ones, never
+## overridden: decision 35): its
 ## script is part of the action fingerprint, so any drift rebuilds every Go
 ## recipe in the catalog. The options did not change it; the assembler
 ## path rewrite (last suite) did, deliberately, because without it the
@@ -168,6 +170,31 @@ suite "go_package: staticCgo":
       check s.count("-ldflags \"-X main.v=1 -buildid= -linkmode external " &
         "-extldflags '-static -Wl,--strip-debug'\"") == 2
       check s.count("CC=\"") == 2
+
+  test "a recipe's own -extldflags is merged, not overridden (decision 35)":
+    # The linker keeps the last -extldflags; appending a second one dropped
+    # the recipe's flags.
+    check goMergedLdflags("-X v=1 -extldflags '-L/opt/lib -lfoo'", true) ==
+      "-X v=1 -extldflags '-L/opt/lib -lfoo -static -Wl,--strip-debug' " &
+      "-buildid= -linkmode external"
+    check goMergedLdflags("-extldflags=-lm -s", true) ==
+      "-extldflags '-lm -static -Wl,--strip-debug' -s -buildid= " &
+      "-linkmode external"
+    check goMergedLdflags("-extldflags \"-lz\"", true) ==
+      "-extldflags '-lz -static -Wl,--strip-debug' -buildid= -linkmode external"
+    # Already-present compatible flags are not repeated.
+    check goMergedLdflags("-linkmode external -buildid=", true) ==
+      "-linkmode external -buildid= -extldflags '-static -Wl,--strip-debug'"
+    # -extldflagsX is not -extldflags.
+    check "-extldflags '-static" in goMergedLdflags("-extldflagsX=1", true)
+
+  test "a contradicting -linkmode or -buildid is refused":
+    expect ValueError: discard goMergedLdflags("-linkmode internal", true)
+    expect ValueError: discard goMergedLdflags("-buildid=abc", true)
+    expect ValueError: discard goMergedLdflags("-extldflags \"-l'x\"", true)
+    expect ValueError: discard goMergedLdflags("-extldflags '-lfoo", true)
+    # Without static cgo nothing is checked or changed.
+    check goMergedLdflags("-linkmode internal", false) == "-linkmode internal"
 
   test "the merge helpers are identities when static cgo is off":
     check goMergedTags(@["x"], false) == @["x"]

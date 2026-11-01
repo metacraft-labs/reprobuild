@@ -166,7 +166,7 @@ proc expectedSystem(host: string): JsonNode =
 when defined(linux) or defined(macosx):
   suite "ReproOS add-on mode: the registry mode round-trips":
 
-    test "t_addon_registry_mode_round_trip":
+    linuxOnlyTest "t_addon_registry_mode_round_trip":
       let sb = newProfileSandbox("a6rt", homeProfile(Registry))
       defer: sb.dispose()
 

@@ -19,7 +19,7 @@
 ## `repro system add/remove/list/...` profile-editing family is
 ## deferred to a later phase.
 
-import std/[options, os, strutils, times]
+import std/[algorithm, options, os, sequtils, sets, strutils, times]
 
 import repro_core/file_lock
 import repro_core/host_apply_lock
@@ -44,6 +44,7 @@ when defined(linux):
   import repro_addon/addon_secrets as addon_secrets
   import repro_addon/full_host_secrets
   import repro_addon/locked_buffer
+  import repro_addon/mutations as addon_mutations
   import repro_addon/secrets_ops as addon_secrets_ops
   import repro_addon/switch as addon_switch
 import repro_infra/host_base
@@ -140,14 +141,23 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
   except CatchableError as err:
     result.compileError = err.msg
     return
+  var adapted: SystemAdaptation
   try:
-    let adapted = adaptSystemProfile(intent, target)
+    adapted = adaptSystemProfile(intent, target)
     result.text = renderSystemProfileToText(adapted.profile)
     result.projection = adapted.projection
   except CatchableError as err:
     result.adaptError = err.msg
     return
   result.buildActions = selectedBuildActions(intent.buildActions, target)
+  # A unit that runs from a package its host does not realise is refused
+  # here, at plan time, not when the unit fails to start (§8.2).
+  let unrealised = unitPrefixRefusal(adapted.profile, intent.buildActions,
+                                     result.buildActions)
+  if unrealised.len > 0:
+    result.adaptError = unrealised
+    result.buildActions = @[]
+    return
   result.compiled = true
 
 proc resolveSystemProfileText*(profilePath: string;
@@ -1002,7 +1012,11 @@ proc runInfraApply(args: openArray[string]): int =
   # envelope, through the add-on's secrets library, before any unit the
   # apply starts loads them, refusing before anything is applied when one
   # cannot be served. The units whose secrets changed are restarted after
-  # the apply if it did not restart them already.
+  # the apply if it did not restart them already -- and only after an apply
+  # that succeeds, so they are recorded as pending first
+  # (`FullHostPendingRestartsPath`): an apply that stops early (a stale
+  # plan, an apply error, drift) leaves them for the next one, which finds
+  # the secrets already current and would otherwise restart nothing.
   var secretConsumers: seq[string]
   when defined(linux):
     let fullProfile = parseSystemProfile(profileText)
@@ -1024,6 +1038,13 @@ proc runInfraApply(args: openArray[string]): int =
       secretConsumers = consumersOf(units, changed)
       if changed.len > 0:
         echo "  secrets      : materialised for " & changed.join(", ")
+      when not addon_mutations.mutated("full-host-restart-forgets-pending"):
+        try:
+          addPendingRestarts(secretConsumers)
+        except CatchableError as e:
+          stderr.writeLine("repro infra apply: secrets: recording the " &
+            "units to restart failed: " & e.msg)
+          return 1
       # What the boot unit re-materialises after a reboot, and the boot
       # unit itself (the one every credential-loading unit is after).
       try:
@@ -1098,16 +1119,45 @@ proc runInfraApply(args: openArray[string]): int =
   if applyResult.driftCount > 0 or applyResult.errorCount > 0:
     return 1
   # A unit whose secrets changed reads them only at start: restart it if
-  # it runs (`try-restart` leaves a stopped unit stopped).
+  # it runs (`try-restart` leaves a stopped unit stopped). This apply's
+  # consumers and every one an earlier, unsuccessful apply left pending; a
+  # pending unit the profile no longer declares is dropped (it is not
+  # running this profile's secrets any more). What is restarted leaves the
+  # record; what fails stays in it for the next apply.
   when defined(linux):
-    for unit in secretConsumers:
+    var pending = secretConsumers
+    try:
+      pending = readPendingRestarts() & secretConsumers
+    except CatchableError as e:
+      stderr.writeLine("repro infra apply: secrets: " & e.msg)
+      return 1
+    pending.sort()
+    pending = pending.deduplicate(isSorted = true)
+    var declared: HashSet[string]
+    for r in parseSystemProfile(profileText).resources:
+      if r.kind == srkSystemdSystemUnit: declared.incl r.suName
+    var left: seq[string]
+    var failed = ""
+    for unit in pending:
+      if unit notin declared: continue
+      if failed.len > 0:
+        left.add(unit)
+        continue
       try:
         addon_switch.tryRestartUnit(unit)
+        echo "  restarted    : " & unit & " (its secrets changed)"
       except CatchableError as e:
-        stderr.writeLine("repro infra apply: restarting " & unit &
-          " for its changed secrets failed: " & e.msg)
-        return 1
-      echo "  restarted    : " & unit & " (its secrets changed)"
+        failed = "restarting " & unit & " for its changed secrets failed: " &
+          e.msg
+        left.add(unit)
+    try:
+      writePendingRestarts(left)
+    except CatchableError as e:
+      stderr.writeLine("repro infra apply: secrets: " & e.msg)
+      return 1
+    if failed.len > 0:
+      stderr.writeLine("repro infra apply: " & failed)
+      return 1
   if applyResult.skippedCount > 0:
     # Partial success — the non-privileged subset applied, the
     # privileged ones were skipped.

@@ -61,12 +61,13 @@
 ## build-action half — the half this seam feeds — takes the in-process
 ## broker fast path and mutates nothing outside its temp cwd.
 
-import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_deploy_agent
 import repro_test_support/reasoned_skip
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_profile
+from repro_profile_compile/binary_cache_build_actions import localOutputsDigest
 
 const Target = "deploy-agent-resolver-target"
 
@@ -84,6 +85,21 @@ profile "deployAgentManifestProfile":
       requiresElevation = true,
       address = "writeFromProfile",
       commandStatsId = "m5.resolver.profile.write")
+"""
+
+const ActivityEdgeProfileTemplate = """
+import repro_profile
+
+profile "deployAgentPinnedProfile":
+  activity extra:
+    resources:
+      inlineExecCall(
+        argv = @["/bin/sh", "-c", "@CMD@"],
+        cwd = "@CWD@",
+        outputs = @["@OUT@"],
+        requiresElevation = true,
+        address = "writeFromExtra",
+        commandStatsId = "m5.resolver.pin.extra")
 """
 
 proc reproBinary(): string =
@@ -110,6 +126,40 @@ proc actionEdgeProfileText(cwd, outDir, outRel, payload: string): string =
     "' > '" & outRel & "'"
   ActionEdgeProfileTemplate.multiReplace(
     ("@CMD@", cmd), ("@CWD@", cwd), ("@OUT@", outRel))
+
+proc activityEdgeProfileText(cwd, outDir, outRel, payload: string): string =
+  ## Like ``actionEdgeProfileText``, but the edge belongs to the activity
+  ## ``extra``: only a compile for a selection that names ``extra`` emits it.
+  let cmd = "mkdir -p " & outDir & "; printf '%s' '" & payload &
+    "' > '" & outRel & "'"
+  ActivityEdgeProfileTemplate.multiReplace(
+    ("@CMD@", cmd), ("@CWD@", cwd), ("@OUT@", outRel))
+
+proc producerPin(work, profileText, mode, activities: string):
+    CompiledProfilePin =
+  ## What a producer pins: the real ``compile-profile`` of the profile for
+  ## the given facts and selection, its digest and its compiler revision.
+  createDir(work)
+  let module = stageProfileSources(work / "src", profileText, @[])
+  var env = newStringTable(modeCaseSensitive)
+  for k, v in envPairs(): env[k] = v
+  env["REPROBUILD_REPO_ROOT"] = RepoRoot
+  var args = @["deploy-agent", "compile-profile", "--staged", module,
+    "--canonical-out", work / "c", "--actions-out", work / "a",
+    "--digest-out", work / "d", "--revision-out", work / "r",
+    "--state-dir", work / "state", "--host", "pinned-host",
+    "--platform", "linux", "--arch", "x86_64"]
+  if mode.len > 0:
+    args.add(["--system-mode", mode, "--system-activities", activities])
+  var p = startProcess(reproBinary(), args = args, env = env,
+    options = {poStdErrToStdOut})
+  let output = p.outputStream.readAll()
+  let code = p.waitForExit()
+  p.close()
+  doAssert code == 0, "compile-profile failed: " & output
+  CompiledProfilePin(digest: readFile(work / "d").strip(),
+    compilerRevision: readFile(work / "r").strip(), platform: "linux",
+    arch: "x86_64", host: "pinned-host")
 
 proc writeManifestFile(path: string; m: DeployManifest) =
   let bytes = encodeManifest(m)
@@ -291,6 +341,70 @@ suite "M5 — deploy agent CLI compiles a manifest's profile":
       # The compiled profile's OWN action edge ran.
       check fileExists(applyCwd / OutRel)
       check readIfExists(applyCwd / OutRel) == Payload
+
+  test "a pinned source profile is compiled for the pinned selection on a host that is not add-on":
+    # Deploy-Agent.md §"The compiled-profile pin", decision 34(a): the engine
+    # agent compiles a pinned profile for exactly the pinned facts and system
+    # selection on every host, and applies it only when the compile
+    # reproduces the pin. Falsifying build: `engine-agent-ignores-pin`.
+    when not (defined(linux) or defined(macosx)):
+      skip("the deploy agent's profile compile and its /bin/sh action edge need Linux or macOS")
+    else:
+      const OutRel = "bin/from-extra.txt"
+      const Payload = "the-pinned-selection-was-compiled"
+      let profileText = activityEdgeProfileText(applyCwd, "bin", OutRel, Payload)
+      var pin = producerPin(tmpRoot / "producer", profileText, "full", "extra")
+      pin.systemMode = "full"
+      pin.systemActivities = @["extra"]
+      # The v3 block binds every action to its output's digest: the
+      # producer's, computed here the way the agent hashes it, over the same
+      # output written in a scratch tree.
+      let scratch = tmpRoot / "expected-output"
+      createDir(scratch / "bin")
+      writeFile(scratch / OutRel, Payload)
+      let outDigest = localOutputsDigest(ProfileBuildAction(cwd: scratch,
+        outputs: @[OutRel]))
+      require outDigest.len > 0
+      var m = DeployManifest(target: Target, sequence: 20'u64,
+        deploymentId: "deploy-pinned-selection", profileText: profileText,
+        issuedAt: uint64(getTime().toUnix()), maxAgeSeconds: 3600'u64,
+        closureDigests: @[ClosureDigest(actionId: "writeFromExtra",
+                                        digest: outDigest)],
+        compiledProfile: pin)
+      signManifest(signer, m)
+      writeManifestFile(manifestPath, m)
+
+      let run = runDeployAgent(stateDir, cacheRoot, manifestPath, signersPath)
+      checkpoint run.output
+      check run.exitCode == 0
+      check "outcome      : aoApplied" in run.output
+      # The edge exists only in a compile for a selection naming `extra`.
+      check fileExists(applyCwd / OutRel)
+      check readIfExists(applyCwd / OutRel) == Payload
+
+  test "a pin whose selection does not reproduce its digest is refused, nothing applied":
+    when not (defined(linux) or defined(macosx)):
+      skip("the deploy agent's profile compile and its /bin/sh action edge need Linux or macOS")
+    else:
+      const OutRel = "bin/from-extra.txt"
+      let profileText = activityEdgeProfileText(applyCwd, "bin", OutRel, "x")
+      # The digest of the `extra` compile, signed under a pin that names no
+      # selection: the agent compiles for `default` in full, emits other
+      # bytes, and must refuse rather than apply them.
+      let pin = producerPin(tmpRoot / "producer", profileText, "full", "extra")
+      var m = DeployManifest(target: Target, sequence: 21'u64,
+        deploymentId: "deploy-mismatched-selection", profileText: profileText,
+        issuedAt: uint64(getTime().toUnix()), maxAgeSeconds: 3600'u64,
+        compiledProfile: pin)
+      signManifest(signer, m)
+      writeManifestFile(manifestPath, m)
+
+      let run = runDeployAgent(stateDir, cacheRoot, manifestPath, signersPath)
+      checkpoint run.output
+      check run.exitCode != 0
+      check "compiled profile refused" in run.output
+      check "digest mismatch" in run.output
+      check not fileExists(applyCwd / OutRel)
 
   test "a profile that prints no intent is named as such, not as bad JSON":
     when not (defined(linux) or defined(macosx)):

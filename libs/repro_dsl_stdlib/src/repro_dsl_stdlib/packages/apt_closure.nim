@@ -1445,6 +1445,13 @@ proc legacyClosureIdentity(architecture: string; shas: seq[string]): string =
   sha256OfString("repro.apt-closure\x00" & LegacyAptRealiserVersion &
     "\x00" & architecture & "\x00" & sorted.join("\x00"))[0 ..< 16]
 
+proc legacyAptDebPrefixPath*(storeRoot: string; d: AptLockedDeb): string =
+  ## Where realiser v2 put this member's prefix: the same archive bytes as
+  ## the store-published member (``aptDebPrefixPath``), at that realiser's
+  ## own path.
+  storeRoot / "prefixes" / debStorePackage(d) /
+    (pathSafeVersion(d.version) & "-" & legacyDebPrefixHash(d.sha256))
+
 proc adoptedAptDebPrefixId*(name, versionSegment, sha256: string):
     PrefixIdBytes =
   ## The realization hash an adopted v2 member prefix is indexed under: a

@@ -61,6 +61,7 @@
 ## ledger diff, the collision report, and the service transition list.
 
 import std/[algorithm, json, options, os, sets, strutils, tables, times]
+from std/posix import Statvfs, statvfs
 
 import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
@@ -108,6 +109,10 @@ type
     ## when the switch did not commit, its pending marker stays (a recovery
     ## finishes it forward, never reverts it) and ``floor-hold`` records why.
   AddonRolledBack* = object of AddonApplyError
+  AddonStoreSpaceError* = object of AddonApplyError
+    ## The profile's apt closures would not fit on the store's filesystem
+    ## with ``StoreSpaceReserveBytes`` (or a quarter of what they need)
+    ## left free: refused before step 1 writes anything (spec §9).
   AddonRecordedOnly* = object of AddonApplyError
     ## A record-only replay finished: it recorded the failed switch's
     ## writes and, by design, committed nothing. Any other error out of a
@@ -248,6 +253,9 @@ type
     ledgerDiff*: seq[string]       ## ``<verb>\t<path>\t<address>`` lines
     transitions*: seq[Transition]  ## the service transition list (§7.1, §7.3)
     drift*: seq[string]            ## left in place as actionable drift
+    storeSpace*: string            ## what realising the closures needs of
+                                   ## the store's filesystem (``closureSpace``);
+                                   ## "" when every closure is realised
     restored*: seq[string]         ## paths restored from preserved bytes
     unlisted*: seq[string]         ## resources that left the profile but
                                    ## had no ledger entry; never removed
@@ -270,7 +278,7 @@ type
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
 
 const
-  DefaultStateDir* = "/var/lib/repro/system"
+  DefaultStateDir* = SystemStateDir
   AddonManagedKinds* = {srkFsSystemFile, srkSystemdSystemUnit,
                         srkLinuxDpkgDiversion, srkSystemdSystemDropIn,
                         srkLinuxSysusersEntry, srkLinuxTmpfilesRule,
@@ -308,7 +316,6 @@ proc addonDir*(stateDir: string): string = stateDir / "addon"
 proc ledgerCopyPath*(stateDir: string): string = stateDir / "addon-ledger"
 proc ownProfilePath*(stateDir: string): string = addonDir(stateDir) / "own.profile"
 proc userProfilePath*(stateDir: string): string = addonDir(stateDir) / "user.profile"
-proc preservedDir*(stateDir: string): string = addonDir(stateDir) / "preserved"
 proc generationLedgerPath*(stateDir, generationId: string): string =
   stateDir / "generations" / generationId / "addon-ledger"
 
@@ -1305,10 +1312,19 @@ const AddOnToolCarrierSuffixes = ["#wrapper", "#manifest"]
 proc addOnToolCarrierOf*(r: SystemResource): string =
   ## The ``linux.addOnTool`` address whose wrapper or launcher manifest
   ## ``r`` stands for in the composition (``reshape``), "" for any other.
-  if r.kind != srkFsSystemFile or not r.address.startsWith("addOnTool:"):
+  ## Recognised by shape, not by an address prefix: a tool's address is
+  ## whatever the profile names it (rpi2's are ``ipmitool`` and
+  ## ``wakeonlan``; a text profile's default is ``addOnTool:<command>``),
+  ## so a carrier is ``<tool address>#wrapper`` at a wrapper path, or
+  ## ``<tool address>#manifest`` at a launcher manifest path, under
+  ## ``AddOnToolDir``.
+  if r.kind != srkFsSystemFile or parentDir(r.sfPath) != AddOnToolDir:
     return ""
+  let isManifest = r.sfPath.endsWith(".launcher.manifest")
   for sfx in AddOnToolCarrierSuffixes:
-    if r.address.endsWith(sfx): return r.address[0 ..< r.address.len - sfx.len]
+    if r.address.len > sfx.len and r.address.endsWith(sfx) and
+        isManifest == (sfx == "#manifest"):
+      return r.address[0 ..< r.address.len - sfx.len]
   ""
 
 proc addOnToolCarriers*(r: SystemResource): seq[SystemResource] =
@@ -2041,14 +2057,127 @@ proc ledgerRecordsAttempt(stateDir, fromGeneration: string): bool =
   try: readLedger(lp).generation != fromGeneration
   except CatchableError: false
 
-proc relocatesClosure*(r: SystemResource; path: string): bool =
-  ## Whether the unit file at ``path`` is ``r`` as an older closure
-  ## realiser bound it (``legacyClosureRenderings``): same unit, same
-  ## package bytes, an older prefix path.
-  if r.kind != srkSystemdSystemUnit or r.suAptClosureLock.len == 0: return
+proc legacyClosureBytes*(r: SystemResource;
+                         tool = SystemResource()): seq[string] =
+  ## The bytes ``r`` had when an older closure realiser bound its closure:
+  ## a unit's (``legacyClosureRenderings``), or a ``linux.addOnTool``'s
+  ## launcher manifest (``tool``, the carrier's tool), which names the
+  ## closure prefix the launcher binds over ``/usr``. The wrapper names no
+  ## prefix, so it has no older rendering. Empty for anything else.
+  if r.kind == srkSystemdSystemUnit: return legacyClosureRenderings(r)
+  if tool.kind != srkLinuxAddOnTool or
+      addOnToolCarrierOf(r) != tool.address or
+      r.sfPath != addOnToolManifestPath(tool.atCommand):
+    return
+  let lock = parseAptClosureLock(tool.atAptClosureLock)
+  let current = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+  for legacy in legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock):
+    if legacy != current:
+      result.add(renderAddOnToolManifest(legacy, tool.atProgram))
+
+const
+  ClosureUnpackFactor = 4'i64
+    ## A ``.deb``'s unpacked size over its archive size, for a member no
+    ## older realiser unpacked on this host (xz-compressed data members
+    ## unpack to about 3x; rounded up).
+  StoreSpaceReserveBytes = 1'i64 shl 30
+    ## Free space the realisation must leave on the store's filesystem at
+    ## the least: on an add-on host it is usually the root filesystem, which
+    ## the host's own services (a time-series database, the journal) keep
+    ## writing to.
+
+type
+  ClosureSpace* = object
+    ## What realising a profile's apt closures will take from the store's
+    ## filesystem (ReproOS Add-On Mode §9 "Migration", §8.3).
+    closures*: int          ## closures not realised at their store prefix
+    members*: int           ## members to unpack (each once)
+    downloadBytes*: int64   ## ``.deb`` archives not in the download cache
+    unpackBytes*: int64     ## the members' unpacked trees (estimated)
+    measuredMembers*: int   ## members whose size an older realiser's
+                            ## prefix of the same bytes gave exactly
+    largestDebBytes*: int64 ## the largest archive: it sits beside its
+                            ## unpacked tree until the member is published
+    freeBytes*: int64       ## available to this process on that filesystem
+    reserveBytes*: int64    ## left free at the least
+
+proc treeBytes(dir: string): int64 =
+  ## The bytes of the regular files under ``dir`` (links not followed).
+  for f in walkDirRec(dir, yieldFilter = {pcFile}, followFilter = {pcDir}):
+    try: result += getFileInfo(f, followSymlink = false).size
+    except OSError: discard
+
+proc availableBytes(path: string): int64 =
+  ## Free bytes an unprivileged writer may use on the filesystem holding
+  ## ``path`` (its nearest existing ancestor); -1 when it cannot be read.
+  var p = path
+  while p.len > 1 and not dirExists(p): p = parentDir(p)
+  var st: Statvfs
+  if statvfs(p.cstring, st) != 0: return -1
+  int64(st.f_bavail) * int64(st.f_frsize)
+
+proc neededBytes*(c: ClosureSpace): int64 =
+  c.unpackBytes + c.largestDebBytes
+
+proc closureSpace*(locks: seq[AptClosureLock];
+                   storeRoot = AddOnSystemStoreRoot;
+                   cacheDir = AddOnAptDebCacheDir): ClosureSpace =
+  ## What realising ``locks`` will need: every closure not yet realised at
+  ## its store-published prefix, and every member of one not yet unpacked
+  ## there, counted once. An older realiser's prefix of the same archive
+  ## bytes gives a member's unpacked size exactly; the realiser does not
+  ## reuse that prefix (it unpacks the verified archive), so it is counted
+  ## all the same. A union is hard links of its members' files and costs
+  ## no file bytes of its own.
+  var seen = initHashSet[string]()
+  for lock in locks:
+    if aptClosureRealised(storeRoot, lock): continue
+    inc result.closures
+    for d in lock.debs:
+      if d.sha256 in seen: continue
+      seen.incl(d.sha256)
+      if fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb"):
+        continue
+      inc result.members
+      if not fileExists(cacheDir / (d.sha256 & ".deb")):
+        result.downloadBytes += d.size
+      result.largestDebBytes = max(result.largestDebBytes, d.size)
+      let legacy = legacyAptDebPrefixPath(storeRoot, d)
+      if dirExists(legacy):
+        result.unpackBytes += treeBytes(legacy)
+        inc result.measuredMembers
+      else:
+        result.unpackBytes += d.size * ClosureUnpackFactor
+  result.freeBytes = availableBytes(storeRoot)
+  result.reserveBytes = max(StoreSpaceReserveBytes, neededBytes(result) div 4)
+
+proc spaceIsShort*(c: ClosureSpace): bool =
+  ## Whether the realisation would leave less than the reserve free. An
+  ## unreadable filesystem (``freeBytes`` -1) is short: the switch cannot
+  ## show it is not.
+  c.closures > 0 and c.freeBytes < neededBytes(c) + c.reserveBytes
+
+proc mib(b: int64): string = $((b + (1'i64 shl 20) - 1) shr 20) & " MiB"
+
+proc describe*(c: ClosureSpace): string =
+  $c.closures & " closure(s) to realise, " & $c.members & " member(s) to " &
+    "unpack: about " & mib(neededBytes(c)) & " of store space (" &
+    mib(c.unpackBytes) & " unpacked, " & $c.measuredMembers & " of " &
+    $c.members & " measured from an older realiser's prefix; the largest " &
+    "archive " & mib(c.largestDebBytes) & "), " & mib(c.downloadBytes) &
+    " to download; " & (if c.freeBytes < 0: "free space unreadable"
+                        else: mib(c.freeBytes) & " free") &
+    ", " & mib(c.reserveBytes) & " to be left free"
+
+proc relocatesClosure*(r: SystemResource; path: string;
+                       tool = SystemResource()): bool =
+  ## Whether the file at ``path`` is ``r`` as an older closure realiser
+  ## bound it (``legacyClosureBytes``): the same unit or launcher
+  ## manifest, the same package bytes, an older prefix path. ``tool`` is
+  ## the ``linux.addOnTool`` a manifest carrier writes for.
   if not fileExists(path) or symlinkExists(path): return
   let current = readFile(path)
-  try: current in legacyClosureRenderings(r)
+  try: current in legacyClosureBytes(r, tool)
   except CatchableError: false
 
 proc revertMayKeep*(purpose: string; ledgerOwns, regularFile: bool;
@@ -2459,262 +2588,308 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if r.kind == srkSystemdSystemUnit: declaredUnits.incl(r.suName)
   for r in userResources:
     if r.kind == srkSystemdSystemUnit: declaredUnits.incl(r.suName)
+  # The tool each ``linux.addOnTool`` carrier writes for: its launcher
+  # manifest binds the tool's closure (``relocatesClosure``).
+  var addOnTools = initTable[string, SystemResource]()
+  for r in userResources:
+    if r.kind == srkLinuxAddOnTool: addOnTools[r.address] = r
+  var refusals: seq[ref Exception]
   for i in 0 ..< userResources.len:
-    var r = userResources[i]
-    var p = ResourcePlan(r: r)
-    preObserve(p, driver)
-    let saved = if replaying: replayPlan.savedPlanFor(r.address)
-                else: (found: false, plan: SavedPlan())
-    if saved.found: overlaySaved(p, saved.plan)
-    if r.kind == srkSystemdSystemDropIn and not saved.found and
-        r.diUnit notin declaredUnits:
-      # The unit a drop-in modifies must be provided by something; the
-      # unit rows decide that (a package unit, or a hand-written one), the
-      # file rows the drop-in file itself.
-      # The unit's decision is kept for the guard too: a unit masked, or
-      # given a transient or /etc fragment, between the plan and the
-      # drop-in's write refuses the write.
-      let unitInp = DecisionInputs(address: r.address, kind: tkUnit,
-        unit: r.diUnit, collision: "dropIn",
-        ledgerOwnsDiversion: ("diversion:" & unitPath(r.diUnit)) in prevOwned)
-      let (unitDec, unitObs) = decide(driver, unitInp, unitPath(r.diUnit))
-      targets.add(plannedTarget(r.address, unitInp, unitPath(r.diUnit),
-                                unitDec, unitObs))
-    if r.kind == srkSystemdUnitState:
-      # Nothing of the add-on's on the host: no target, no collision row.
-      # A missing or masked unit is refused by its driver.
-      p.form = "copy"
-      p.verdict = $cvNoOp
-      verdictByAddress[r.address] = cvNoOp
-      plans.add(p)
-      continue
-    if r.kind in {srkPasswdUser, srkPasswdGroup}:
-      # An account: no file, so no write-time target; its driver converges
-      # it. The ledger owns it when the previous ledger lists it under
-      # this resource (``decideAccount``).
-      var ledgerValue = ""
-      var owns = false
-      for e in previous.entries:
-        if e.class == lcAccount and e.path == p.accountKey and
-            e.resource == r.address:
-          owns = true
-          ledgerValue = e.value
-      let dec =
-        if saved.found: savedDecision(saved.plan, fileBacked = false)
-        else: decideAccount(r, ledgerValue, owns, reconcileDrift,
-                            r.address in adoptAddresses)
+    try:
+      var r = userResources[i]
+      var p = ResourcePlan(r: r)
+      preObserve(p, driver)
+      let saved = if replaying: replayPlan.savedPlanFor(r.address)
+                  else: (found: false, plan: SavedPlan())
+      if saved.found: overlaySaved(p, saved.plan)
+      if r.kind == srkSystemdSystemDropIn and not saved.found and
+          r.diUnit notin declaredUnits:
+        # The unit a drop-in modifies must be provided by something; the
+        # unit rows decide that (a package unit, or a hand-written one), the
+        # file rows the drop-in file itself.
+        # The unit's decision is kept for the guard too: a unit masked, or
+        # given a transient or /etc fragment, between the plan and the
+        # drop-in's write refuses the write.
+        let unitInp = DecisionInputs(address: r.address, kind: tkUnit,
+          unit: r.diUnit, collision: "dropIn",
+          ledgerOwnsDiversion: ("diversion:" & unitPath(r.diUnit)) in prevOwned)
+        let (unitDec, unitObs) = decide(driver, unitInp, unitPath(r.diUnit))
+        targets.add(plannedTarget(r.address, unitInp, unitPath(r.diUnit),
+                                  unitDec, unitObs))
+      if r.kind == srkSystemdUnitState:
+        # Nothing of the add-on's on the host: no target, no collision row.
+        # A missing or masked unit is refused by its driver.
+        p.form = "copy"
+        p.verdict = $cvNoOp
+        verdictByAddress[r.address] = cvNoOp
+        plans.add(p)
+        continue
+      if r.kind in {srkPasswdUser, srkPasswdGroup}:
+        # An account: no file, so no write-time target; its driver converges
+        # it. The ledger owns it when the previous ledger lists it under
+        # this resource (``decideAccount``).
+        var ledgerValue = ""
+        var owns = false
+        for e in previous.entries:
+          if e.class == lcAccount and e.path == p.accountKey and
+              e.resource == r.address:
+            owns = true
+            ledgerValue = e.value
+        let dec =
+          if saved.found: savedDecision(saved.plan, fileBacked = false)
+          else: decideAccount(r, ledgerValue, owns, reconcileDrift,
+                              r.address in adoptAddresses)
+        decisions[r.address] = dec
+        accountChecks.add((r: r, ledgerValue: ledgerValue, owns: owns,
+                           verdict: dec.verdict))
+        p.form = "copy"
+        p.observation = dec.observation
+        p.verdict = $dec.verdict
+        if dec.verdict == cvAdopt:
+          # As it is: nothing for the driver to do. No `adopt` collision
+          # mark -- that names preserved file bytes, which an account has
+          # none of; uninstall keeps every account anyway (§6.4).
+          p.skipInfra = true
+        verdictByAddress[r.address] = dec.verdict
+        if dec.acceptedOutOfBand:
+          acceptedOutOfBand.add((p.accountKey, r.address))
+        result.collisions.add(CollisionLine(address: r.address,
+          target: p.accountKey, observation: dec.observation,
+          verdict: $dec.verdict, reason: dec.reason))
+        if dec.verdict != cvNoOp:
+          result.ledgerDiff.add($dec.verdict & "\t" & p.accountKey & "\t" &
+            r.address)
+        if dec.verdict in {cvUpdate, cvReconcile}:
+          # `usermod --groups` sets exactly the declared set: what it drops
+          # is reported, never dropped silently.
+          let dropped = droppedSupplementaryGroups(r)
+          if dropped.len > 0:
+            result.ledgerDiff.add("drop-groups\t" & p.accountKey & "\t" &
+              dropped.join(",") & " (" & r.address & " declares " &
+              (if r.puGroups.len > 0: r.puGroups.join(",") else: "none") & ")")
+        plans.add(p)
+        continue
+      if r.kind == srkLinuxAddOnTool:
+        # Its driver writes the two files the carriers before it decided
+        # (``addOnToolCarriers``): the tool changes when either does.
+        var v = cvNoOp
+        for c in AddOnToolCarrierSuffixes:
+          let cv = verdictByAddress.getOrDefault(r.address & c, cvNoOp)
+          if cv notin {cvNoOp, cvAdopt}: v = cvUpdate
+          elif cv == cvAdopt and v == cvNoOp: v = cvAdopt
+        p.form = "copy"
+        p.verdict = $v
+        verdictByAddress[r.address] = v
+        plans.add(p)
+        continue
+      var inp = DecisionInputs(address: r.address,
+        reconcileDrift: reconcileDrift,
+        adopt: r.address in adoptAddresses)
+      var path = p.targetPath
+      case r.kind
+      of srkFsSystemFile:
+        inp.kind = tkFile
+        inp.collision = r.sfCollision
+        inp.divertedByProfile = hasDiversionFor(userResources, r.sfPath)
+        if r.sfSourceLocal.len > 0:
+          inp.desiredContent = readFile(r.sfSourceLocal)
+        else:
+          inp.desiredContent = r.sfContent
+      of srkSystemdSystemUnit:
+        inp.kind = tkUnit
+        inp.unit = r.suName
+        inp.collision = r.suCollision
+        inp.desiredContent = renderedSystemUnitContent(r)
+      of srkLinuxDpkgDiversion:
+        inp.kind = tkDiversion
+      of srkSystemdSystemDropIn, srkLinuxSysctl, srkLinuxTmpfilesRule,
+         srkLinuxSysusersEntry:
+        # Fragments and drop-ins are files of the add-on's own naming
+        # (spec §4.1): the file rows of the decision table apply to them.
+        inp.kind = tkFile
+        inp.desiredContent = desiredBytes(r)
+      else:
+        discard
+      inp.desiredSha256 = sha256Hex(inp.desiredContent)
+      inp.ledgerOwns = (if r.kind == srkLinuxDpkgDiversion:
+                          ("diversion:" & path) in prevOwned
+                        else: path in prevOwned)
+      inp.ledgerOwnsDiversion = ("diversion:" & path) in prevOwned
+      inp.ledgerSha256 = prevSha.getOrDefault(path)
+      inp.ledgerObservation = prevObs.getOrDefault(path)
+      var dec: CollisionDecision
+      var obs: TargetObservation
+      if saved.found: dec = savedDecision(saved.plan)
+      else:
+        try: (dec, obs) = decide(driver, inp, path)
+        except AddonDriftError as e:
+          if relocatesClosure(r, path,
+              addOnTools.getOrDefault(addOnToolCarrierOf(r))):
+            # §9 "Migration": the unit or launcher manifest an older
+            # realiser's agent wrote, bound to its prefix of the same closure.
+            # Rewritten at the current prefix, its bytes kept for hand-back,
+            # never refused as drift.
+            let o = observeTarget(driver, path, inp.unit)
+            dec = CollisionDecision(verdict: cvReconcile,
+              observation: observationText(o, inp.kind),
+              observedSha256: o.sha256, preWriteBytes: readFile(path),
+              reason: "bound to an older closure realiser's prefix (the same " &
+                "package bytes): rewritten at the store-published prefix, " &
+                "not restarted")
+            obs = o
+            p.closureRelocated = true
+          else:
+            (dec, obs) = revertHeld(r, p, inp, e)
+            userResources[i] = r
+      if not p.closureRelocated and dec.verdict == cvUpdate and
+          relocatesClosure(r, path,
+            addOnTools.getOrDefault(addOnToolCarrierOf(r))):
+        p.closureRelocated = true      # the ledger already holds those bytes
       decisions[r.address] = dec
-      accountChecks.add((r: r, ledgerValue: ledgerValue, owns: owns,
-                         verdict: dec.verdict))
-      p.form = "copy"
+      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+        var ownedLinks = initHashSet[string]()
+        for e in previous.entries:
+          if e.resource == r.address and e.class == lcInstallLink:
+            ownedLinks.incl(e.path)
+        decideInstall(driver, r, ownedLinks, enabledUnits, targets)
+      if r.kind == srkLinuxSysusersEntry and p.accountBefore.len > 0 and
+          not inp.ledgerOwns:
+        # Spec §4.1: an existing account of the same name with a different
+        # UID, GID or shell is a collision; one that matches (or that the
+        # entry does not pin) is adopted as it is.
+        let fields = p.accountBefore.split(':')
+        let liveId = if fields.len > 0: fields[0] else: ""
+        let liveShell = if r.seKind != "group" and fields.len >= 5: fields[4]
+                        else: ""
+        if (r.seId.len > 0 and r.seId != liveId) or
+            (r.seShell.len > 0 and r.seShell != liveShell):
+          raise newException(AddonCollisionError, "refusing " & r.address &
+            ": " & r.seKind & " " & r.seName & " already exists with id " &
+            liveId & (if liveShell.len > 0: " and shell " & liveShell else: "") &
+            ", which differs from the entry (id " &
+            (if r.seId.len > 0: r.seId else: "unpinned") &
+            (if r.seShell.len > 0: ", shell " & r.seShell else: "") &
+            "); an existing account of the same name with a different UID, " &
+            "GID or shell has no opt-in (spec §4.1)")
       p.observation = dec.observation
       p.verdict = $dec.verdict
-      if dec.verdict == cvAdopt:
-        # As it is: nothing for the driver to do. No `adopt` collision
-        # mark -- that names preserved file bytes, which an account has
-        # none of; uninstall keeps every account anyway (§6.4).
-        p.skipInfra = true
+      p.content = inp.desiredContent
       verdictByAddress[r.address] = dec.verdict
       if dec.acceptedOutOfBand:
-        acceptedOutOfBand.add((p.accountKey, r.address))
-      result.collisions.add(CollisionLine(address: r.address,
-        target: p.accountKey, observation: dec.observation,
-        verdict: $dec.verdict, reason: dec.reason))
-      if dec.verdict != cvNoOp:
-        result.ledgerDiff.add($dec.verdict & "\t" & p.accountKey & "\t" &
-          r.address)
-      if dec.verdict in {cvUpdate, cvReconcile}:
-        # `usermod --groups` sets exactly the declared set: what it drops
-        # is reported, never dropped silently.
-        let dropped = droppedSupplementaryGroups(r)
-        if dropped.len > 0:
-          result.ledgerDiff.add("drop-groups\t" & p.accountKey & "\t" &
-            dropped.join(",") & " (" & r.address & " declares " &
-            (if r.puGroups.len > 0: r.puGroups.join(",") else: "none") & ")")
+        acceptedOutOfBand.add((p.targetPath, r.address))
+      # `repro system adopt` changes the addressed resource only. Every other
+      # resource is the current generation's; one the ledger owns with bytes
+      # that differ from what its declaration renders (an earlier adoption
+      # of a hand-written object, not converged since) would be an update,
+      # i.e. a write the operator did not ask for. It is held at the bytes
+      # it has instead.
+      # (A unit with an apt closure is rendered from its lock, so it cannot
+      # be pinned to other bytes and is not held.)
+      let held = opts.adoptAddresses.len > 0 and
+        r.address notin opts.adoptAddresses and dec.verdict == cvUpdate and
+        not (r.kind == srkSystemdSystemUnit and r.suAptClosureLock.len > 0)
+      if held:
+        let current = readFile(path)
+        pinToBytes(r, p, current, deferPreserve(current), opts.planOnly)
+        p.verdict = $cvNoOp
+        verdictByAddress[r.address] = cvNoOp
+        userResources[i] = r
+        p.r = r
+      case (if held: cvNoOp else: dec.verdict)
+      of cvAdopt:
+        p.collision = "adopt"
+        p.preserved = deferPreserve(dec.preWriteBytes)
+        # Ask the apply for exactly the bytes that are there: nothing is
+        # written, and the ledger owns them.
+        pinToBytes(r, p, dec.preWriteBytes, p.preserved, opts.planOnly)
+        userResources[i] = r
+        p.r = r
+      of cvReconcile:
+        p.collision = (if p.closureRelocated: "closure-relocate"
+                       else: "reconcile")
+        p.preserved = deferPreserve(dec.preWriteBytes)
+      of cvDivert:
+        p.collision = "divert"
+      of cvReplace:
+        p.collision = "replace"
+      of cvDropIn, cvCreate, cvUpdate, cvNoOp:
+        if r.address in dropIns:
+          p.collision = "dropIn"
+      # The materialisation form (spec §7.2 steps 4 and 5): a link for the
+      # link-form kinds, except an object adopted as it is (nothing is
+      # written to it) -- a copy until its content changes -- and a file
+      # taken over from a package by a diversion. The package's own tooling
+      # reads the diverted path and resolves the link: ucf, run by the
+      # package's postinst, wrote its `.ucf-dist` beside the store copy and
+      # the upgrade failed on the read-only store (measured 2026-10-30,
+      # Debian 13 and Ubuntu 24.04). Unit files are copies by kind, above.
+      # A profile's copy of a generation-0 object stays a copy, as
+      # generation 0's was: taking it over with the same bytes writes nothing.
+      p.form = if held: prevForm.getOrDefault(path, "copy")
+               elif r.address in supersedingUser: "copy"
+               elif p.keepLedgerSha.len > 0: prevForm.getOrDefault(path, "copy")
+               elif addOnToolCarrierOf(r).len > 0: "copy"
+               elif r.kind in LinkFormKinds and
+                  dec.verdict notin {cvAdopt, cvDivert}: "link"
+               else: "copy"
+      result.collisions.add(CollisionLine(address: r.address, target: path,
+        observation: dec.observation,
+        verdict: (if held: $cvNoOp else: $dec.verdict),
+        reason: (if held: "held at its current bytes: `repro system adopt` " &
+                          "changes only the resource it names"
+                 else: dec.reason)))
+      if dec.verdict != cvNoOp and not held:
+        result.ledgerDiff.add((if p.closureRelocated: "relocate-closure"
+                               else: $dec.verdict) & "\t" & path & "\t" &
+                              r.address)
+      targets.add(targetFor(r.address, inp, path, dec, obs, saved))
+      if addOnToolCarrierOf(r).len > 0:
+        # The tool's own operation writes this file: the write-time re-check
+        # of the file's decision is the tool's too.
+        targets.add(targetFor(addOnToolCarrierOf(r), inp, path, dec, obs, saved))
+      if r.address in supersedingUser and p.collision.len == 0:
+        p.collision = "supersede"
+      if addOnToolCarrierOf(r).len > 0:
+        # The tool's driver writes this file (with the wrapper's mode); the
+        # carrier only decides and ledgers it.
+        p.skipInfra = true
       plans.add(p)
-      continue
-    if r.kind == srkLinuxAddOnTool:
-      # Its driver writes the two files the carriers before it decided
-      # (``addOnToolCarriers``): the tool changes when either does.
-      var v = cvNoOp
-      for c in AddOnToolCarrierSuffixes:
-        let cv = verdictByAddress.getOrDefault(r.address & c, cvNoOp)
-        if cv notin {cvNoOp, cvAdopt}: v = cvUpdate
-        elif cv == cvAdopt and v == cvNoOp: v = cvAdopt
-      p.form = "copy"
-      p.verdict = $v
-      verdictByAddress[r.address] = v
-      plans.add(p)
-      continue
-    var inp = DecisionInputs(address: r.address,
-      reconcileDrift: reconcileDrift,
-      adopt: r.address in adoptAddresses)
-    var path = p.targetPath
-    case r.kind
-    of srkFsSystemFile:
-      inp.kind = tkFile
-      inp.collision = r.sfCollision
-      inp.divertedByProfile = hasDiversionFor(userResources, r.sfPath)
-      if r.sfSourceLocal.len > 0:
-        inp.desiredContent = readFile(r.sfSourceLocal)
-      else:
-        inp.desiredContent = r.sfContent
-    of srkSystemdSystemUnit:
-      inp.kind = tkUnit
-      inp.unit = r.suName
-      inp.collision = r.suCollision
-      inp.desiredContent = renderedSystemUnitContent(r)
-    of srkLinuxDpkgDiversion:
-      inp.kind = tkDiversion
-    of srkSystemdSystemDropIn, srkLinuxSysctl, srkLinuxTmpfilesRule,
-       srkLinuxSysusersEntry:
-      # Fragments and drop-ins are files of the add-on's own naming
-      # (spec §4.1): the file rows of the decision table apply to them.
-      inp.kind = tkFile
-      inp.desiredContent = desiredBytes(r)
-    else:
-      discard
-    inp.desiredSha256 = sha256Hex(inp.desiredContent)
-    inp.ledgerOwns = (if r.kind == srkLinuxDpkgDiversion:
-                        ("diversion:" & path) in prevOwned
-                      else: path in prevOwned)
-    inp.ledgerOwnsDiversion = ("diversion:" & path) in prevOwned
-    inp.ledgerSha256 = prevSha.getOrDefault(path)
-    inp.ledgerObservation = prevObs.getOrDefault(path)
-    var dec: CollisionDecision
-    var obs: TargetObservation
-    if saved.found: dec = savedDecision(saved.plan)
-    else:
-      try: (dec, obs) = decide(driver, inp, path)
-      except AddonDriftError as e:
-        if relocatesClosure(r, path):
-          # §9 "Migration": the unit an older realiser's agent wrote, bound
-          # to its prefix of the same closure. Rewritten at the current
-          # prefix, its bytes kept for hand-back, never refused as drift.
-          let o = observeTarget(driver, path, inp.unit)
-          dec = CollisionDecision(verdict: cvReconcile,
-            observation: observationText(o, inp.kind),
-            observedSha256: o.sha256, preWriteBytes: readFile(path),
-            reason: "bound to an older closure realiser's prefix (the same " &
-              "package bytes): rewritten at the store-published prefix, " &
-              "not restarted")
-          obs = o
-          p.closureRelocated = true
-        else:
-          (dec, obs) = revertHeld(r, p, inp, e)
-          userResources[i] = r
-    if not p.closureRelocated and dec.verdict == cvUpdate and
-        relocatesClosure(r, path):
-      p.closureRelocated = true      # the ledger already holds those bytes
-    decisions[r.address] = dec
-    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
-      var ownedLinks = initHashSet[string]()
-      for e in previous.entries:
-        if e.resource == r.address and e.class == lcInstallLink:
-          ownedLinks.incl(e.path)
-      decideInstall(driver, r, ownedLinks, enabledUnits, targets)
-    if r.kind == srkLinuxSysusersEntry and p.accountBefore.len > 0 and
-        not inp.ledgerOwns:
-      # Spec §4.1: an existing account of the same name with a different
-      # UID, GID or shell is a collision; one that matches (or that the
-      # entry does not pin) is adopted as it is.
-      let fields = p.accountBefore.split(':')
-      let liveId = if fields.len > 0: fields[0] else: ""
-      let liveShell = if r.seKind != "group" and fields.len >= 5: fields[4]
-                      else: ""
-      if (r.seId.len > 0 and r.seId != liveId) or
-          (r.seShell.len > 0 and r.seShell != liveShell):
-        raise newException(AddonCollisionError, "refusing " & r.address &
-          ": " & r.seKind & " " & r.seName & " already exists with id " &
-          liveId & (if liveShell.len > 0: " and shell " & liveShell else: "") &
-          ", which differs from the entry (id " &
-          (if r.seId.len > 0: r.seId else: "unpinned") &
-          (if r.seShell.len > 0: ", shell " & r.seShell else: "") &
-          "); an existing account of the same name with a different UID, " &
-          "GID or shell has no opt-in (spec §4.1)")
-    p.observation = dec.observation
-    p.verdict = $dec.verdict
-    p.content = inp.desiredContent
-    verdictByAddress[r.address] = dec.verdict
-    if dec.acceptedOutOfBand:
-      acceptedOutOfBand.add((p.targetPath, r.address))
-    # `repro system adopt` changes the addressed resource only. Every other
-    # resource is the current generation's; one the ledger owns with bytes
-    # that differ from what its declaration renders (an earlier adoption
-    # of a hand-written object, not converged since) would be an update,
-    # i.e. a write the operator did not ask for. It is held at the bytes
-    # it has instead.
-    # (A unit with an apt closure is rendered from its lock, so it cannot
-    # be pinned to other bytes and is not held.)
-    let held = opts.adoptAddresses.len > 0 and
-      r.address notin opts.adoptAddresses and dec.verdict == cvUpdate and
-      not (r.kind == srkSystemdSystemUnit and r.suAptClosureLock.len > 0)
-    if held:
-      let current = readFile(path)
-      pinToBytes(r, p, current, deferPreserve(current), opts.planOnly)
-      p.verdict = $cvNoOp
-      verdictByAddress[r.address] = cvNoOp
-      userResources[i] = r
-      p.r = r
-    case (if held: cvNoOp else: dec.verdict)
-    of cvAdopt:
-      p.collision = "adopt"
-      p.preserved = deferPreserve(dec.preWriteBytes)
-      # Ask the apply for exactly the bytes that are there: nothing is
-      # written, and the ledger owns them.
-      pinToBytes(r, p, dec.preWriteBytes, p.preserved, opts.planOnly)
-      userResources[i] = r
-      p.r = r
-    of cvReconcile:
-      p.collision = (if p.closureRelocated: "closure-relocate"
-                     else: "reconcile")
-      p.preserved = deferPreserve(dec.preWriteBytes)
-    of cvDivert:
-      p.collision = "divert"
-    of cvReplace:
-      p.collision = "replace"
-    of cvDropIn, cvCreate, cvUpdate, cvNoOp:
-      if r.address in dropIns:
-        p.collision = "dropIn"
-    # The materialisation form (spec §7.2 steps 4 and 5): a link for the
-    # link-form kinds, except an object adopted as it is (nothing is
-    # written to it) -- a copy until its content changes -- and a file
-    # taken over from a package by a diversion. The package's own tooling
-    # reads the diverted path and resolves the link: ucf, run by the
-    # package's postinst, wrote its `.ucf-dist` beside the store copy and
-    # the upgrade failed on the read-only store (measured 2026-10-30,
-    # Debian 13 and Ubuntu 24.04). Unit files are copies by kind, above.
-    # A profile's copy of a generation-0 object stays a copy, as
-    # generation 0's was: taking it over with the same bytes writes nothing.
-    p.form = if held: prevForm.getOrDefault(path, "copy")
-             elif r.address in supersedingUser: "copy"
-             elif p.keepLedgerSha.len > 0: prevForm.getOrDefault(path, "copy")
-             elif addOnToolCarrierOf(r).len > 0: "copy"
-             elif r.kind in LinkFormKinds and
-                dec.verdict notin {cvAdopt, cvDivert}: "link"
-             else: "copy"
-    result.collisions.add(CollisionLine(address: r.address, target: path,
-      observation: dec.observation,
-      verdict: (if held: $cvNoOp else: $dec.verdict),
-      reason: (if held: "held at its current bytes: `repro system adopt` " &
-                        "changes only the resource it names"
-               else: dec.reason)))
-    if dec.verdict != cvNoOp and not held:
-      result.ledgerDiff.add((if p.closureRelocated: "relocate-closure"
-                             else: $dec.verdict) & "\t" & path & "\t" &
-                            r.address)
-    targets.add(targetFor(r.address, inp, path, dec, obs, saved))
-    if addOnToolCarrierOf(r).len > 0:
-      # The tool's own operation writes this file: the write-time re-check
-      # of the file's decision is the tool's too.
-      targets.add(targetFor(addOnToolCarrierOf(r), inp, path, dec, obs, saved))
-    if r.address in supersedingUser and p.collision.len == 0:
-      p.collision = "supersede"
-    if addOnToolCarrierOf(r).len > 0:
-      # The tool's driver writes this file (with the wrapper's mode); the
-      # carrier only decides and ledgers it.
-      p.skipInfra = true
-    plans.add(p)
+    except AddonDriftError, AddonCollisionError, EAddOn:
+      # Every refusal is collected before any is raised: nothing has been
+      # written yet (the bytes to preserve wait in ``pendingPreserve``),
+      # and an operator fixing a host -- a migration plan above all --
+      # needs the whole list, not one refusal per run.
+      refusals.add(getCurrentException())
+
+  if refusals.len > 0:
+    # The first refusal keeps its type (its typed diagnostic and exit
+    # status); its message lists every other one after it.
+    let first = refusals[0]
+    if refusals.len > 1:
+      var more = "\n" & $(refusals.len - 1) & " more refusal" &
+        (if refusals.len > 2: "s" else: "") & ":"
+      for e in refusals[1 .. ^1]: more.add("\n  " & e.msg)
+      first.msg.add(more)
+    raise first
+
+  # Realising the closures is step 1's first write to the store's
+  # filesystem: a profile whose closures would not fit, with the reserve
+  # left free, is refused now, before anything is written (§9).
+  block:
+    var locks: seq[AptClosureLock]
+    for r in userResources:
+      if r.kind == srkSystemdSystemUnit and r.suAptClosureLock.len > 0:
+        locks.add(parseAptClosureLock(r.suAptClosureLock))
+      elif r.kind == srkLinuxAddOnTool:
+        locks.add(parseAptClosureLock(r.atAptClosureLock))
+    let space = closureSpace(locks)
+    if space.closures > 0:
+      result.storeSpace = describe(space)
+      if spaceIsShort(space):
+        raise newException(AddonStoreSpaceError, "refusing the switch: " &
+          "realising its apt closures needs more of " & AddOnSystemStoreRoot &
+          "'s filesystem than is free: " & result.storeSpace &
+          "; nothing was written")
 
   # `repro system adopt`: the addressed resource must actually be claimed
   # as it is. Anything else (the target is absent, package-owned, or
@@ -3348,10 +3523,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
 
   # --- Step 1: realise. ---
   # Closure prefixes an older realiser left without a receipt are adopted
-  # and rooted to the generations that bind them before anything this
-  # switch does can lead to a collection (a host upgraded from realiser v2;
+  # and rooted to the generations that bind them, and to the hand-back hold
+  # while a preserved record names them (the bytes just preserved above for
+  # a relocated unit or manifest among them), before anything this switch
+  # does can lead to a collection (a host upgraded from realiser v2;
   # ``migrateLegacyAptClosures``). Idempotent; nothing to do on most hosts.
-  discard migrateLegacyAptClosures()
+  discard migrateLegacyAptClosures(handBack = @[preservedDir(stateDir)])
   # The tree goes into the store and is verified; the units' closures are
   # realised too, so no base path is touched before everything the
   # generation runs from exists. The apply lock is held throughout.

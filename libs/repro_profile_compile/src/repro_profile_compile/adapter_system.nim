@@ -790,6 +790,47 @@ proc selectedBuildActions*(actions: openArray[ProfileBuildAction];
       if a.activity.len == 0 or a.activity in target.activities:
         result.add a
 
+proc unitPrefixRefusal*(profile: SystemProfile;
+                        actions, selected: openArray[ProfileBuildAction]):
+    string =
+  ## Why the selected resources cannot run on this target, or "": a unit
+  ## names the store prefix of an action edge the target does not realise
+  ## (A12 review finding 12, spec ReproOS-Add-On-Mode §8.2). An activity's
+  ## edges are realised only where the activity is selected
+  ## (``selectedBuildActions``), so a unit that runs from another activity's
+  ## package -- an `ExecStart=` or a confinement under that edge's prefix --
+  ## would start without its executable on a host that selects the unit's
+  ## activity but not the package's. Refused at plan time, naming the unit,
+  ## the prefix and the activity that owns it; declare the package in the
+  ## unit's own activity (or at profile level) instead.
+  when AddonMutation == "unit-prefix-unchecked":
+    # FALSIFYING MUTATION (t_system_activity_selects_its_store_packages).
+    return ""
+  var realised: HashSet[string]
+  for a in selected:
+    realised.incl a.id
+  for a in actions:
+    if a.id in realised or a.cwd.len == 0 or not a.cwd.startsWith("/"):
+      continue
+    let prefix = a.cwd.strip(leading = false, chars = {'/'})
+    for r in profile.resources:
+      if r.kind != srkSystemdSystemUnit: continue
+      var i = r.suContent.find(prefix)
+      while i >= 0:
+        let after = i + prefix.len
+        let bounded = (i == 0 or r.suContent[i - 1] in {'=', ' ', '\t', '\n',
+                                                         ':', '"', '\''}) and
+          (after >= r.suContent.len or
+           r.suContent[after] in {'/', ' ', '\t', '\n', ':', '"', '\''})
+        if bounded:
+          return "unit " & r.suName & " runs from the store prefix " & prefix &
+            ", which action edge `" & a.id & "` of activity `" & a.activity &
+            "` produces, and this host does not select that activity, so " &
+            "the prefix would never be realised; declare the package in " &
+            "the unit's own activity or at profile level"
+        i = r.suContent.find(prefix, i + 1)
+  ""
+
 proc defaultSystemPlanTarget*(host = ""): SystemPlanTarget =
   ## The target of a plan that reads no host registry: the running machine
   ## (named `host` when given), the `default` system activity only, realised

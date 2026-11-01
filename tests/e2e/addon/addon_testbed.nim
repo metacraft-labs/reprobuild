@@ -604,6 +604,15 @@ proc installArtefact*(g: Guest; dir = "/root/addon"): tuple[repro, sha: string] 
   discard g.run("cd " & dir & " && echo '" & a.sha256 & "  repro' | " &
                 "sha256sum -c - && chmod 0755 repro && " &
                 "ln -sf repro repro-addon-fingerprint")
+  # The sandbox launcher a `linux.addOnTool` wrapper execs, beside the
+  # binary as the add-on artefact ships it (build_addon_static.sh): the
+  # tool's driver refuses to write a wrapper without it.
+  let launcher = parentDir(a.path) / "reprobuild-sandbox-launcher"
+  if not fileExists(launcher):
+    raise newException(TestBedError, "no sandbox launcher beside " & a.path &
+      "; rebuild it with scripts/build_addon_static.sh")
+  g.copyTo(launcher, dir & "/reprobuild-sandbox-launcher")
+  discard g.run("chmod 0755 " & dir & "/reprobuild-sandbox-launcher")
   (dir & "/repro", a.sha256)
 
 proc takeFingerprint*(g: Guest; repro: string): string =

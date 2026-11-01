@@ -44,11 +44,23 @@
 ## whose live members include one the profile does not name and the
 ## `passwd.user` it does, and a `linux.addOnTool` from a closure seeded into
 ## the deb cache. The migration adopts them as they are: the timer is not
-## restarted, the extra member stays, the tool's files are not rewritten.
+## restarted, the extra member stays, the tool's wrapper is not rewritten.
 ## The final rollback to generation 0 hands the adopted timer and tool
 ## files back as found (§4.2) and keeps both accounts (§6.4). At
 ## 59c075685f the switch refused the timer kind, and the plan and the
 ## migration both failed.
+##
+## rpi2 was upgraded from apt closure realiser 2 (§9 "Migration"): its
+## closure units and its tools' launcher manifests bind that realiser's
+## prefixes (unreceipted directories with v2's markers, laid out here by
+## ``fakeV2Closure``). The migration relocates both to the store-published
+## prefixes without a restart; ``repro store recover`` and ``repro store
+## gc`` then keep the older prefixes, which the running service and the
+## preserved bytes still name; and after the rollback to generation 0 the
+## handed-back unit restarts from its older prefix. At 7d7313432b the plan
+## refused the manifest as EDrift, and the older prefixes were held by
+## nothing. The plan also names every refusal at once (a plan over two
+## hand-written files names both; at 7d7313432b, the first only).
 ##
 ## At reprobuild 3a1068e25b, before the change, step 1 committed no add-on
 ## generation (the tick reported aoConverged and did nothing), step 2's
@@ -65,6 +77,7 @@ import std/[json, os, osproc, strutils, times, unittest]
 
 import repro_deploy_agent
 import repro_dsl_stdlib/packages/apt_closure
+from repro_dsl_stdlib/packages/apt_jammy import sha256OfString
 import repro_elevation/posix_system_driver
 import repro_infra
 import repro_addon/ledger
@@ -204,18 +217,44 @@ proc closureUnit(lockText: string): SystemResource =
     FxClosureUnit, suName: FxClosureUnit, suContent: FxClosureText,
     suEnabled: true, suAptClosureLock: lockText)
 
-proc fakeLegacyClosureUnit(g: Guest; lock: AptClosureLock; lockText: string) =
-  ## What an agent of an older closure realiser left: the unit bound to that
-  ## realiser's prefix of the same closure (an unpublished directory, no
-  ## store receipt), its service running from it. rpi2's 22 closure units.
-  let legacy = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock)[0]
-  g.copyTo(staticBusybox(), "/var/tmp/repro-fx-busybox")
+proc v2MemberPath(d: AptLockedDeb): string =
+  ## Realiser v2's member prefix, from that realiser's formula (written out
+  ## here, independently of the adoption code under test).
+  AddOnSystemStoreRoot / "prefixes" / ("apt-deb-" & d.name) /
+    (d.version.replace(':', '_') & "-" &
+     sha256OfString("repro.apt-deb\x00" & "2" & "\x00" & d.sha256)[0 ..< 16])
+
+proc fakeV2Closure(g: Guest; lock: AptClosureLock; local, program: string) =
+  ## A one-member closure as realiser v2 published it (rpi2's 13
+  ## apt-closure-* and 185 apt-deb-* prefixes): the member and the union,
+  ## each carrying ``program`` (the guest's file ``local``) and v2's marker,
+  ## no store receipt, no index row. The paths and the identity come from
+  ## the lock; the marker format is v2's.
+  let union = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock)[0]
+  let d = lock.debs[0]
+  let member = v2MemberPath(d)
+  let identity = union.extractFilename.rsplit('-', 1)[1]
+  var cmds: seq[string]
+  for (dir, marker, text) in [
+      (member, ".repro-apt-deb", d.sha256 & "\n"),
+      (union, ".repro-apt-closure",
+       "identity " & identity & "\n" & d.name & " " & d.sha256 & "\n")]:
+    cmds.add("mkdir -p " & dir & parentDir(program) & " && cp " & local &
+      " " & dir & program & " && chmod 0755 " & dir & program &
+      " && printf \"" & text.replace("\n", "\\n") & "\" > " & dir & "/" &
+      marker & " && chmod 0644 " & dir & "/" & marker)
   # /repro/store is bound read-only; the older realiser wrote below it, so
   # the fixture writes in a private mount namespace without the bind, as
   # the switch's own writable view does.
-  discard g.run("unshare -m sh -c 'umount /repro/store && mkdir -p " & legacy &
-    "/usr/bin && cp /var/tmp/repro-fx-busybox " & legacy & "/usr/bin/busybox" &
-    " && chmod 0755 " & legacy & "/usr/bin/busybox'")
+  discard g.run("unshare -m sh -c 'umount /repro/store && " &
+    cmds.join(" && ") & "'")
+
+proc fakeLegacyClosureUnit(g: Guest; lock: AptClosureLock; lockText: string) =
+  ## What an agent of an older closure realiser left: the unit bound to that
+  ## realiser's prefix of the same closure (``fakeV2Closure``), its service
+  ## running from it. rpi2's 22 closure units.
+  g.copyTo(staticBusybox(), "/var/tmp/repro-fx-busybox")
+  g.fakeV2Closure(lock, "/var/tmp/repro-fx-busybox", "/usr/bin/busybox")
   writeFile(g.runDir / FxClosureUnit,
             legacyClosureRenderings(closureUnit(lockText))[0])
   g.copyTo(g.runDir / FxClosureUnit, "/etc/systemd/system/" & FxClosureUnit)
@@ -278,12 +317,18 @@ proc fakeLegacyAgent(g: Guest; text, caches: string; lock: AptClosureLock) =
                 "useradd -M -s /usr/sbin/nologin " & FxExtra & " && " &
                 "groupadd " & FxGroup & " && gpasswd -a " & FxUser & " " &
                 FxGroup & " && gpasswd -a " & FxExtra & " " & FxGroup)
-  # The tool's wrapper and launcher manifest, the bytes its driver renders,
+  # The tool's wrapper and launcher manifest, the bytes the older
+  # realiser's driver rendered -- the manifest names that realiser's prefix
+  # of the tool's closure, as rpi2's ipmitool and wakeonlan manifests do --
   # and a launcher link that resolves.
   let manifest = addOnToolManifestPath(FxTool)
+  writeFile(g.runDir / "fx-tool", "#!/bin/sh\necho fixture tool\n")
+  g.copyTo(g.runDir / "fx-tool", "/var/tmp/repro-fx-tool")
+  g.fakeV2Closure(lock, "/var/tmp/repro-fx-tool", "/usr/bin/" & FxTool)
   writeFile(g.runDir / "fx-wrapper", renderAddOnToolWrapper(manifest))
   writeFile(g.runDir / "fx-manifest", renderAddOnToolManifest(
-    aptClosurePrefixPath(AddOnSystemStoreRoot, lock), "/usr/bin/" & FxTool))
+    legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock)[0],
+    "/usr/bin/" & FxTool))
   discard g.run("mkdir -p " & AddOnToolDir)
   g.copyTo(g.runDir / "fx-wrapper", addOnToolWrapperPath(FxTool))
   g.copyTo(g.runDir / "fx-manifest", manifest)
@@ -347,7 +392,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let cred0 = g.unitState("repro-fx-cred")
     let wrapper = addOnToolWrapperPath(FxTool)
     let manifest = addOnToolManifestPath(FxTool)
-    let tool0 = g.statOf(wrapper) & " " & g.statOf(manifest)
+    let wrapperBytes = g.run("cat " & wrapper)
+    let legacyManifestBytes = g.run("cat " & manifest)
+    let svcLegacy = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot,
+                                                fxSvcLock)[0]
+    let toolLegacy = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot,
+                                                 fxLock)[0]
     # 0. The migration's plan, read-only, against copies of both state
     # directories (what the operator runs before installing the binary).
     var r = g.exec("rm -rf /var/tmp/plan-copy && mkdir -p /var/tmp/plan-copy && " &
@@ -360,6 +410,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "supersede\t" & CachesConf in r.stdout and
          "accepted-out-of-band\t" & CachesConf in r.stdout and
          "relocate-closure\t/etc/systemd/system/" & FxClosureUnit in r.stdout and
+         "relocate-closure\t" & manifest in r.stdout and
+         "store space: 2 closure(s) to realise" in r.stdout and
          "nothing was written" in r.stdout and g.currentGeneration() == gen0 and
          "EAddOnOutOfScope" notin r.stdout & r.stderr and
          g.statOf(Anchors) == anchorsStat0 and
@@ -398,13 +450,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          grp.resource == "group:" & FxGroup and usr.resource == "user:" & FxUser,
          members & " | " & $grp & " | " & $usr)
     let wrapperEntry = g.entriesAt(wrapper)
-    step("the tool's wrapper and manifest were ledgered and not rewritten",
-         g.statOf(wrapper) & " " & g.statOf(manifest) == tool0 and
+    let manifestEntry = g.entriesAt(manifest)
+    # rpi2's ipmitool and wakeonlan (§9 "Migration"): the wrapper names no
+    # prefix and was adopted as it is; the manifest bound the older
+    # realiser's prefix and was relocated. At 7d7313432b the plan and the
+    # migration refused the manifest as EDrift.
+    step("the tool's wrapper was adopted, its manifest relocated to the store prefix",
+         g.run("cat " & wrapper) == wrapperBytes and
          wrapperEntry.len == 1 and
          wrapperEntry[0].resource == "addOnTool:" & FxTool & "#wrapper" and
-         g.entriesAt(manifest).len == 1,
-         tool0 & " / " & g.statOf(wrapper) & " " & g.statOf(manifest) & " " &
-         $wrapperEntry)
+         g.run("cat " & manifest) == renderAddOnToolManifest(
+           aptClosurePrefixPath(AddOnSystemStoreRoot, fxLock),
+           "/usr/bin/" & FxTool) and
+         manifestEntry.len == 1 and
+         manifestEntry[0].collision == "closure-relocate",
+         $wrapperEntry & " " & $manifestEntry & "\n" &
+         g.run("cat " & manifest))
     # rpi2's closure units (§9 "Migration"): bound to an older realiser's
     # prefix, rewritten at the store-published one, not restarted. At
     # 4379adfd3b the plan and the migration refused it as EDrift.
@@ -421,6 +482,40 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          closureEntries[0].collision == "closure-relocate",
          closure0 & " / " & g.unitState("repro-fx-closure") & " " &
          $closureEntries)
+    # The relocated service still runs from the older prefix, and a
+    # rollback writes the older bytes back: the store's recovery (which
+    # quarantines a prefix without a receipt) and its collector (which
+    # takes what no root holds) must leave both older prefixes, and their
+    # members, in place. At 7d7313432b nothing held them.
+    let rc = g.exec(repro & " store recover")
+    let gcr = g.exec(repro & " store gc --grace-seconds 0")
+    step("store recover and gc keep the prefixes the relocated objects came from",
+         rc.exitCode == 0 and gcr.exitCode == 0 and
+         g.exec("test -x " & svcLegacy & "/usr/bin/busybox && test -x " &
+                toolLegacy & "/usr/bin/" & FxTool & " && test -d " &
+                v2MemberPath(fxSvcLock.debs[0]) &
+                " && test -d " &
+                v2MemberPath(fxLock.debs[0])).
+           exitCode == 0 and
+         g.unitState("repro-fx-closure") == closure0 and
+         "addon-hand-back" in g.run(repro & " store roots"),
+         rc.stdout & rc.stderr & gcr.stdout & gcr.stderr)
+    # Every refusal in one report (rpi2's migration plan stopped at one
+    # refusal per run): two hand-written files the profile would take over
+    # with other bytes. At 7d7313432b only the first was named.
+    let driftA = parentDir(KeepConf) / "drift-a.conf"
+    let driftB = parentDir(KeepConf) / "drift-b.conf"
+    discard g.run("printf 'hand a\\n' > " & driftA & " && printf 'hand b\\n' > " &
+                  driftB)
+    r = g.planProfile(repro, "drift", prof("v1",
+      extra = fileResource(driftA, "a = 1\n") & fileResource(driftB, "b = 1\n")))
+    step("a plan names every refusal, not only the first",
+         r.exitCode == 2 and ("EDrift: " & driftA) in r.stdout & r.stderr and
+         ("EDrift: " & driftB) in r.stdout & r.stderr and
+         "1 more refusal:" in r.stdout & r.stderr and
+         g.run("cat " & driftA) == "hand a\n",
+         r.stdout & r.stderr)
+    discard g.run("rm -f " & driftA & " " & driftB)
     step("the legacy LoadCredential= unit was adopted, not restarted",
          "systemUnit:repro-fx-cred.service" in g.ledgerOf() and
          g.unitState("repro-fx-cred") == cred0, cred0 & " / " &
@@ -522,6 +617,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.run("cat /etc/systemd/system/" & FxClosureUnit) == legacyClosureBytes,
          keepBefore0 & " / " & g.unitState("keep-svc") & " ; " & cred0 &
          " / " & g.unitState("repro-fx-cred"))
+    # Generation 0's unit binds the older prefix again: it must still be
+    # there when the service next starts (the outage §9 rules out).
+    discard g.exec(repro & " store gc --grace-seconds 0")
+    r = g.exec("systemctl restart " & FxClosureUnit & " && sleep 1 && " &
+               "systemctl is-active " & FxClosureUnit)
+    step("after the rollback the handed-back closure unit restarts from the older prefix",
+         r.exitCode == 0 and r.stdout.strip() == "active" and
+         g.run("cat " & manifest) == legacyManifestBytes,
+         r.stdout & r.stderr & g.exec("journalctl -u " & FxClosureUnit &
+                                      " -n 20 --no-pager").stdout)
     cachesEntries = g.entriesAt(CachesConf)
     step("a rollback to generation 0 restores generation 0's caches.conf",
          r.exitCode == 0 and g.run("cat " & CachesConf) == caches0 and

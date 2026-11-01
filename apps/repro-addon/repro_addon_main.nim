@@ -51,7 +51,7 @@ proc main(): int =
                "repro system adopt <address> --profile <file> | " &
                "repro system rollback [<generation>] | " &
                "repro infra plan|apply --profile <file> | " &
-               "repro store gc|roots|list | repro --version\n\n")
+               "repro store gc|recover|roots|list | repro --version\n\n")
   stderr.write(AddonUsage)
   2
 

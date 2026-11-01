@@ -38,8 +38,14 @@
 # ``mergeRustInstallerComponents`` replays for the ``tarball`` arms); only
 # the three components the ``rustc`` and ``cargo`` packages surface are
 # installed.
+#
+# ``pkgs`` defaults to the stdlib's nixpkgs pin, which is what the engine
+# evaluates (``nix build --file`` calls the function with its defaults). It
+# is a parameter only so that a check can evaluate THIS expression for
+# another platform, for example the same pin with ``crossSystem`` aarch64
+# (decision 35: a realisation and build on aarch64-linux).
+{ pkgs ? import ../nixpkgs.nix }:
 let
-  pkgs = import ../nixpkgs.nix;
   inherit (pkgs) lib stdenv;
   version = "1.94.0";
   archives = {

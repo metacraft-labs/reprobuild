@@ -61,8 +61,10 @@ when defined(linux):
   import repro_addon/addon_apply
   import repro_addon/agent_switch
   import repro_addon/verified_compile
-  import repro_deploy_agent/agent_mutations
   from repro_core/source_root import publicCliImagePath
+# Portable (constants and a template): the engine agent's pin check uses it on
+# every host.
+import repro_deploy_agent/agent_mutations
 import repro_elevation
 import repro_profile_compile
 from repro_profile_compile/compile import CompileFailure,
@@ -472,11 +474,21 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # with an unchanged profile still short-circuits there.
   let capturedStateDir = flags.stateDir
   # The agent reads no host registry: a signed manifest names its target,
-  # and its producer decides what that target applies. The profile is
-  # planned for this host -- its runtime predicates evaluated here, the
-  # `default` system activity selected -- as `repro infra apply` plans a host
-  # the registry does not declare.
+  # and its producer decides what that target applies. A manifest whose
+  # source profile carries a compiled-profile pin is compiled for exactly
+  # the pinned facts and system selection, on every host, and applied only
+  # when the compile reproduces the pinned digest (Deploy-Agent.md §"The
+  # compiled-profile pin", ReproOS Add-On Mode decision 34(a)); the add-on
+  # switch below does the same through its unprivileged compile. A manifest
+  # without a pin is planned for this host -- its runtime predicates
+  # evaluated here, the `default` system activity selected -- as `repro
+  # infra apply` plans a host the registry does not declare.
   let capturedTarget = defaultSystemPlanTarget(host)
+  # The manifest being applied, set by the apply hook below before it calls
+  # the resolver (whose signature carries only the profile), and the refusal
+  # the resolver reports back through it.
+  var pinnedManifest: DeployManifest
+  var pinRefusal = ""
   let resolver: ProfileResolver = proc(profileText: string;
                                        profileFiles: seq[ProfileFile];
                                        outText: var string;
@@ -490,11 +502,34 @@ proc runDeployAgentCommand*(args: seq[string]): int =
       var bundlePaths: seq[string]
       for f in profileFiles:
         bundlePaths.add(scratch / f.path)
+      let pin = pinnedManifest.compiledProfile
+      var target = capturedTarget
+      let pinned = pin.digest.len > 0 and
+        not agentMutated("engine-agent-ignores-pin")
+      if pinned:
+        try:
+          target = compileTargetFor(pin.host, pin.platform, pin.arch,
+            pin.systemMode, pin.systemActivities)
+        except ValueError as e:
+          pinRefusal = "the compiled-profile pin cannot be compiled for: " & e.msg
+          return false
       result = resolveSystemProfileText(profilePath, profileText,
         capturedStateDir, "repro deploy-agent", outText,
         planCommand = "repro infra plan",
-        outBuildActions = addr outBuildActions, target = capturedTarget,
+        outBuildActions = addr outBuildActions, target = target,
         declaredInputs = bundlePaths)
+      if result and pinned:
+        # The same two texts `compile-profile` writes (`--canonical-out`,
+        # `--actions-out`), held to the producer's pin.
+        let why = compiledProfileRefusal(pinnedManifest, outText,
+          $(%outBuildActions), ReprobuildSourceRevision)
+        if why.len > 0:
+          pinRefusal = why
+          stderr.writeLine("repro deploy-agent: the compiled profile is " &
+            "refused, nothing was applied: " & why)
+          outText = ""
+          outBuildActions = @[]
+          return false
 
   # On a ReproOS add-on host every agent apply goes through the add-on
   # switch (spec §9, §9.1): it is ledgered, retained as an add-on generation
@@ -571,10 +606,17 @@ proc runDeployAgentCommand*(args: seq[string]): int =
           legacySecretsDir = flags.secretsDir))
       throughAddonSwitch = true
   if not throughAddonSwitch:
+    let infraApply = mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
+      hostIdentity = host, profileResolver = resolver)
     deps = AgentDeps(
-      apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
-        hostIdentity = host,
-        profileResolver = resolver))
+      apply: proc(m: DeployManifest): tuple[ok: bool; message: string]
+          {.gcsafe.} =
+        {.cast(gcsafe).}:
+          pinnedManifest = m
+          pinRefusal = ""
+          result = infraApply(m)
+          if not result.ok and pinRefusal.len > 0:
+            result.message = "compiled profile refused: " & pinRefusal)
 
   # `runAgentTickRecorded`, not `runAgentTick`: it runs the same tick, resolves
   # the same exit code, and additionally leaves the durable record — including
