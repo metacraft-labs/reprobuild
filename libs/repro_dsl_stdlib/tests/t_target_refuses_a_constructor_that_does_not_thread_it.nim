@@ -374,6 +374,15 @@ suite "a zig target is threaded into the C operations":
         check "zig" in refs
         check "sh" in refs
         check "gcc" notin refs
+        # A second nim.c in the same package (reprobuild's `.#apps` has one
+        # per image) reuses the one wrapper edge: no duplicate graph node.
+        let second = nim.c(source = "src/second.nim",
+          binary = "build/bin/second", nimcache = "build/nimcache/second")
+        var wrapperCount = 0
+        for a in registeredBuildActions():
+          if a.id.startsWith("zig-cross-wrappers-"): inc wrapperCount
+        check wrapperCount == 1
+        check wrappers in second.deps
         # A caller that picks the CPU itself answers for the target: the
         # fail-closed guard applies, as before.
         check refusal(proc() =

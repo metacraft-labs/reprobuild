@@ -807,6 +807,15 @@ package reprobuild:
   # is the right default for this repo.
   defaultToolProvisioning "path"
 
+  nativeBuildDeps:
+    # The C toolchain of a cross build of reprobuild itself (ReproOS-Add-On-
+    # Mode A15, the full prefix for the Raspberry Pi): `nim.c` threads a zig
+    # `--target` through the `cross_zig` wrappers, and a zig target needs
+    # zig declared here. A native build never runs it. Declaring zig also
+    # declares the wrapper edge's `sh` and coreutils
+    # (Reprobuild-Standard-Library.md, `cross_zig`).
+    "zig >=0.13 <0.14"
+
   uses:
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
     # are the PATH-resolvable binaries the reprobuild build needs;
