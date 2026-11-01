@@ -72689,6 +72689,9 @@ proc certifiableHere(verdict: ReprobuildCoverageVerdict): seq[string] =
         unmet.name notin result:
       result.add(unmet.name)
 
+const MaxPushCertifyNotices = 5
+  ## How many uncovered commits an advisory push names one by one.
+
 proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
                            observed: PushPreflightRepo;
                            introduced: seq[string];
@@ -72706,9 +72709,16 @@ proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
   ##   ``certifyNames``. The preflight has established that the checkout is clean,
   ##   so the worktree's content IS ``HEAD``'s tree, and any commit with that tree
   ##   is served by the same run.
-  ## * Uncovered, and it is other content: refused. There is no temporary worktree
-  ##   to test it in: only the developer can say that an intermediate state is
-  ##   meant to work, and rewriting history may be the better answer.
+  ## * Uncovered, and it is other content: under ``required``, refused. There is no
+  ##   temporary worktree to test it in: only the developer can say that an
+  ##   intermediate state is meant to work, and rewriting history may be the better
+  ##   answer. Under ``advisory``, reported: no gate asks for it, so nothing here
+  ##   may stop the push, however long the branch.
+  ##
+  ## An older commit counts only if no remote-tracking ref reaches it. §4.2's
+  ## ``<remote>..<local>`` lists everything a merge of the mainline brought along,
+  ## and the remote already has that: it is other people's content, and nobody
+  ## here is in a position to test it.
   ##
   ## This is stricter than ``certificateGate`` and the gateway, which judge tips:
   ## they are the enforcement point and can answer only for what arrives, while
@@ -72724,10 +72734,16 @@ proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
   if not headTree.ok:
     return PushCertifyDecision(refused: true, diagnostic: headTree.diagnostic,
       remediation: "repair the checkout and retry 'repro push'")
+  let unseen = gitRunPlainQuery(identity, ["-C", repoAbs, "rev-list",
+    observed.headSha, "--not", "--remotes=" & observed.remoteName])
+  let unseenCommits =
+    if unseen.code == 0: unseen.output.splitLines().toHashSet()
+    else: introduced.toHashSet()
   var judged = @[observed.headSha]
   for commit in introduced:
-    if commit != observed.headSha:
+    if commit != observed.headSha and commit in unseenCommits:
       judged.add(commit)
+  var unreportedOlder = 0
   var seenTrees = initHashSet[string]()
   var refusals: seq[string]
   var remedies: seq[string]
@@ -72775,9 +72791,13 @@ proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
           result.certifyNames.add(name)
       if not lacksElsewhere:
         continue
-    if not required and (isWorktree or here.len == 0):
-      result.notices.add("certificates: commit " & short & " lacks " &
-        unmetRemedies(judgement.verdict).join("; ") & " (" & applied & ")")
+    if not required:
+      # One line per commit is useful for a short branch and noise for a long one.
+      if isWorktree or result.notices.len < MaxPushCertifyNotices:
+        result.notices.add("certificates: commit " & short & " lacks " &
+          unmetRemedies(judgement.verdict).join("; ") & " (" & applied & ")")
+      else:
+        inc unreportedOlder
       continue
     let subject = gitRunPlainQuery(identity,
       ["-C", repoAbs, "log", "-1", "--format=%s", commit]).output.strip()
@@ -72793,6 +72813,9 @@ proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
       let names = judgement.verdict.unmet.mapIt(it.name).deduplicate()
       remedies.add("check " & short & " out and run 'repro test' (or 'repro " &
         "certify " & names.join(" ") & "' for exactly what it lacks)")
+  if unreportedOlder > 0:
+    result.notices.add("certificates: and " & $unreportedOlder & " more commit(s) " &
+      "this push introduces are not covered")
   if refusals.len > 0:
     result.refused = true
     result.certifyNames.setLen(0)
@@ -72853,6 +72876,11 @@ proc certifyPushedWorktree(identity: GitToolIdentity; args: PushArgs;
       "' failed with exit code " & $code & " in " & repoAbs &
       ", so this member was not pushed"
     result.remediation = "fix what it reported above, then retry 'repro push'"
+    let tip = judgePushedCommit(repoAbs, observed.headSha,
+      branchRefFromRef(observed.destinationRef), keys, lockSource)
+    if tip.applies and tip.requirement.mode != cgmRequired:
+      result.remediation.add("; the policy here is advisory, so 'repro push " &
+        "--no-certify' pushes without it")
     return
   let dirty = gitRunPlainQuery(identity,
     ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])

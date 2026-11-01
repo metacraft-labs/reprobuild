@@ -9,8 +9,9 @@
 ## push by the policy in the pushed tree. The certificates are signed with the
 ## fixture's registered key. No mocks.
 ##
-## One repository, with a lock that pins no sibling, because the gateway's public
-## lock gate refuses a pin of another repository's revision.
+## Where a gateway is wired there is one repository, with a lock that pins no
+## sibling, because the gateway's public lock gate refuses a pin of another
+## repository's revision. The closure and cycle cases therefore run without one.
 ##
 ## The rule's ``commit_gate`` is ``off``: with the default, the pre-commit gate
 ## refuses an uncovered commit, so the states under test could not be committed
@@ -136,8 +137,9 @@ proc storedFor(fx: PushFixture; tree: string): int =
     [KnownContentId(algorithm: "git-tree-sha1", id: "git-tree-sha1:" & tree)]))
   lookup.found.len
 
-proc setupPush(slug: string; mode: string): PushFixture =
-  result.sf = setupStoreFixture("", slug, recordStore = false)
+proc setupPush(slug: string; mode: string; recordStore = false;
+               gateway = true): PushFixture =
+  result.sf = setupStoreFixture("", slug, recordStore = recordStore)
   result.binDir = result.sf.scratch / "bin"
   createDir(result.binDir)
   writeFile(result.binDir / "cert-tool", certToolScript)
@@ -160,12 +162,82 @@ proc setupPush(slug: string; mode: string): PushFixture =
   discard result.git("add -A")
   discard result.git("commit -q -m project")
   discard result.git("push -q origin main")
-  # A committed-lock project: the gateway reads the lock out of the pushed tree.
-  let wired = wirePushGateway("git", app, result.sf.gatewayBare,
-    fileUrl(result.sf.upstreamBare), GatewayConfig(
-      registeredKeysPath: registeredKeyStorePath(result.sf.workspaceRoot)))
-  doAssert wired.ok, wired.diagnostic
+  if gateway:
+    if recordStore:
+      wireStoreGateway(result.sf)
+    else:
+      # A committed-lock project: the gateway reads the lock out of the pushed
+      # tree.
+      let wired = wirePushGateway("git", app, result.sf.gatewayBare,
+        fileUrl(result.sf.upstreamBare), GatewayConfig(
+          registeredKeysPath: registeredKeyStorePath(result.sf.workspaceRoot)))
+      doAssert wired.ok, wired.diagnostic
   installHooks(result.sf)
+  if recordStore:
+    # A store the gate can publish to, with the hook repro push preflights for.
+    let lockStore = result.sf.workspaceRoot / ".repro" / "manifests"
+    let lockBare = result.sf.scratch / "locks.git"
+    discard gitOut(result.sf.scratch, "init", "-q", "--bare", "-b", "main", lockBare)
+    discard gitOut(lockStore, "remote", "add", "origin", lockBare)
+    discard gitOut(lockStore, "push", "-q", "-u", "origin", "main")
+    writeFile(result.sf.workspaceRoot / "repro-workspace.toml",
+      "schema = \"reprobuild.workspace.settings.v1\"\n\n[records]\nurl = \"" &
+      fileUrl(lockBare) & "\"\npublish_locks = true\n")
+    let hooks = runArgv(@[result.sf.reproBin, "hooks", "ensure", "--vcs", lockStore],
+      env = @[(name: "REPROBUILD_REPRO", value: result.sf.reproBin)])
+    doAssert hooks.code == 0, hooks.output
+
+proc moveUpstream(fx: PushFixture; file, body: string): string =
+  ## Someone else's commit reaching the upstream directly, as if merged there.
+  let other = fx.sf.scratch / ("other-" & $getCurrentProcessId())
+  discard gitOut(fx.sf.scratch, "clone", "-q", fileUrl(fx.sf.upstreamBare), other)
+  discard gitOut(other, "config", "user.email", "other@example.invalid")
+  discard gitOut(other, "config", "user.name", "Someone Else")
+  writeFile(other / file, body)
+  discard gitOut(other, "add", "-A")
+  discard gitOut(other, "commit", "-q", "-m", "their change")
+  result = gitOut(other, "rev-parse", "HEAD")
+  discard gitOut(other, "push", "-q", "origin", "HEAD:main")
+  removeDir(other)
+
+type Sibling = object
+  path, bare: string
+
+proc addSibling(fx: PushFixture; name: string; cycle: bool): Sibling =
+  ## A second repository lib-a depends on, with the same recipe and policy. With
+  ## ``cycle`` it depends on lib-a too. Its own policy, its own bare, no gateway:
+  ## a lock pinning a sibling does not pass one.
+  let ws = fx.sf.workspaceRoot
+  result.bare = fx.sf.scratch / ("upstream-" & name & ".git")
+  result.path = ws / name
+  discard gitOut(fx.sf.scratch, "clone", "-q", "--bare", fx.sf.upstreamBare,
+    result.bare)
+  discard gitOut(fx.sf.scratch, "clone", "-q", fileUrl(result.bare), result.path)
+  discard gitOut(result.path, "config", "user.email", "tester@example.invalid")
+  discard gitOut(result.path, "config", "user.name", "TC8c Tester")
+  writeFile(ws / "repos" / (name & ".toml"),
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" & name &
+    "\"\npath = \"" & name & "\"\nremote = \"" & name & "-origin\"\n" &
+    "mainline = \"main\"\n" &
+    (if cycle: "depends = [\"lib-a\"]\n" else: ""))
+  writeFile(ws / "repos" / "lib-a.toml", storeLibAFragment &
+    "depends = [\"" & name & "\"]\n")
+  writeFile(ws / "projects" / "lib-a.toml",
+    "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\nname = \"lib-a\"\n\n" &
+    "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
+      fileUrl(fx.sf.upstreamBare) & "\"\n\n" &
+    "[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
+      fileUrl(result.bare) & "\"\n\n" &
+    "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/" & name & ".toml\",\n]\n")
+  let hooks = runArgv(@[fx.sf.reproBin, "hooks", "ensure", "--vcs", result.path],
+    env = @[(name: "REPROBUILD_REPRO", value: fx.sf.reproBin)])
+  doAssert hooks.code == 0, hooks.output
+
+proc commitIn(fx: PushFixture; sibling: Sibling; body, message: string): string =
+  writeFile(sibling.path / "src" / "unit.txt", body)
+  discard gitOut(sibling.path, "add", "-A")
+  discard gitOut(sibling.path, "commit", "-q", "-m", message)
+  gitOut(sibling.path, "rev-parse", "HEAD")
 
 template guarded(body: untyped) =
   if findExe("git").len == 0 or findExe("ssh-keygen").len == 0:
@@ -218,7 +290,7 @@ suite "repro push certifies only content that was not tested":
       let failing = fx.commitEdit("FAIL on purpose\n", "breaks the test")
       let refused = fx.push()
       check refused.code == 2
-      check "stage=certify" in refused.output
+      check "stage=certify\n" in (refused.output & "\n")
       check "'repro certify t-unit' failed" in refused.output
       check fx.storedFor(fx.tree(failing)) == 0
       check upstreamTip(fx.sf) == tip
@@ -314,7 +386,7 @@ suite "repro push certifies only content that was not tested":
       discard fx.commitEdit("unit four\n", "changes the policy")
       let moved = fx.push()
       check moved.code == 2
-      check "stage=certify" in moved.output
+      check "stage=certify\n" in (moved.output & "\n")
       check "certifying changed the working tree" in moved.output
       check upstreamTip(fx.sf) == tested
       check fx.runs() == ran + 2
@@ -386,3 +458,290 @@ suite "repro push certifies only content that was not tested":
       check pushed.code == 0
       check gitOut(fx.sf.upstreamBare, "rev-parse", "refs/heads/topic") == commit
       check fx.records(fx.tree(commit)) == 1
+
+  test "advisory: a long branch of uncertified commits is reported, not refused":
+    guarded:
+      let fx = setupPush("push-long-advisory", "advisory")
+      defer: removeDir(fx.sf.scratch)
+      let ran = fx.runs()
+      var older: seq[string]
+      for i in 1 .. 8:
+        older.add(fx.commitEdit("unit step " & $i & "\n", "step " & $i))
+      let tip = fx.commitEdit("unit tip\n", "the tip")
+      let pushed = fx.push()
+      check pushed.code == 0
+      check upstreamTip(fx.sf) == tip
+      # Only the tip is the worktree's content, so only the tip is tested.
+      check fx.runs() == ran + 1
+      check "certified: t-unit" in pushed.output
+      check "stage=certify" notin pushed.output
+      # Newest first, five by name, and the rest counted: no wall of text.
+      check older[^1][0 ..< 12] & " lacks" in pushed.output
+      check older[0][0 ..< 12] & " lacks" notin pushed.output
+      check "and 3 more commit(s) this push introduces are not covered" in
+        pushed.output
+
+  test "advisory: a failing test stops the push and names the way past it":
+    guarded:
+      let fx = setupPush("push-advisory-failing", "advisory")
+      defer: removeDir(fx.sf.scratch)
+      let tip = upstreamTip(fx.sf)
+      let failing = fx.commitEdit("FAIL on purpose\n", "breaks the test")
+      let refused = fx.push()
+      check refused.code == 2
+      check "stage=certify\n" in (refused.output & "\n")
+      check "'repro push --no-certify' pushes without it" in refused.output
+      check upstreamTip(fx.sf) == tip
+      check fx.push(@["--no-certify"]).code == 0
+      check upstreamTip(fx.sf) == failing
+
+  test "required: a name only another platform can produce refuses, running nothing":
+    guarded:
+      let fx = setupPush("push-required-elsewhere", "required")
+      defer: removeDir(fx.sf.scratch)
+      let tip = upstreamTip(fx.sf)
+      let ran = fx.runs()
+      writeFile(fx.app / "policy" / "team_policy.nim",
+        policyModule("required", "linux/second"))
+      let refreshed = fx.repro(@["lock", "refresh"])
+      check refreshed.code == 0
+      discard fx.commitEdit("unit elsewhere\n", "asks for another platform")
+      let refused = fx.push()
+      check refused.code == 2
+      check "stage=certify-preflight" in refused.output
+      check "linux/second" in refused.output
+      check fx.runs() == ran
+      check upstreamTip(fx.sf) == tip
+
+  test "required: what a merge of the mainline brought along is not judged":
+    guarded:
+      let fx = setupPush("push-merge-mainline", "required")
+      defer: removeDir(fx.sf.scratch)
+      # A topic branch the remote already has.
+      fx.certify()
+      discard fx.git("switch -q -c topic")
+      check fx.push(@["--no-certify"]).code == 0
+
+      # The mainline moves on, with an intermediate state no store here covers.
+      discard fx.git("switch -q main")
+      let intermediate = fx.commitEdit("unit mainline one\n", "someone's step")
+      let mainTip = fx.certifyThenCommit("unit mainline two\n", "someone's tip")
+      check fx.push(@["--no-certify"]).code == 0
+      check upstreamTip(fx.sf) == mainTip
+
+      # Catching up by merging it. §4.2 lists the intermediate commit as
+      # introduced to topic, and refusing it would stop every such branch, with a
+      # remedy nobody can act on: test other people's history, one commit at a time.
+      discard fx.git("switch -q topic")
+      discard fx.certifyThenCommit("unit topic\n", "own work")
+      discard fx.git("merge -q --no-edit -X ours main")
+      let merged = fx.git("rev-parse HEAD")
+      let pushed = fx.push()
+      check pushed.code == 0
+      check intermediate[0 ..< 12] notin pushed.output
+      check gitOut(fx.sf.upstreamBare, "rev-parse", "refs/heads/topic") == merged
+
+  test "--sync: a merge it makes is new content, and is certified":
+    guarded:
+      let fx = setupPush("push-sync-merge", "required")
+      defer: removeDir(fx.sf.scratch)
+      let theirs = fx.moveUpstream("other.txt", "their change\n")
+      let mine = fx.certifyThenCommit("unit mine\n", "certified before the sync")
+      let pushed = fx.push(@["--sync", "--merge"])
+      check pushed.code == 0
+      let merged = upstreamTip(fx.sf)
+      check merged == fx.git("rev-parse HEAD")
+      check merged != mine
+      check gitOut(fx.sf.upstreamBare, "merge-base", "--is-ancestor", theirs,
+        merged).len == 0
+      # The merge's tree had no certificate: it gets its own. The test command need
+      # not run again, since the merge left its input alone and the run is incremental.
+      check "certified: t-unit" in pushed.output
+      check fx.records(fx.tree(merged)) == 1
+      check fx.records(fx.tree(mine)) == 1
+
+  test "--sync --rebase: rewritten older commits follow the mode":
+    guarded:
+      # ---- required: each rewritten commit is new content the remote lacks ----
+      let fx = setupPush("push-sync-rebase", "required")
+      defer: removeDir(fx.sf.scratch)
+      let before = upstreamTip(fx.sf)
+      discard fx.certifyThenCommit("unit one\n", "first")
+      discard fx.certifyThenCommit("unit two\n", "second")
+      let theirs = fx.moveUpstream("other.txt", "their change\n")
+      let ran = fx.runs()
+      let refused = fx.push(@["--sync", "--rebase"])
+      check refused.code == 2
+      check "stage=certify-preflight" in refused.output
+      check "(first)" in refused.output
+      check "--no-certify" in refused.output
+      check fx.runs() == ran
+      check upstreamTip(fx.sf) == theirs
+      check before != theirs
+
+      # The exit it names: certify the tip here, and leave the rest to the gates.
+      fx.certify()
+      let landed = fx.push(@["--no-certify"])
+      check landed.code == 0
+      check upstreamTip(fx.sf) == fx.git("rev-parse HEAD")
+
+      # ---- advisory: the same history is reported and pushed ------------------
+      let adv = setupPush("push-sync-rebase-adv", "advisory")
+      defer: removeDir(adv.sf.scratch)
+      discard adv.certifyThenCommit("unit one\n", "first")
+      discard adv.certifyThenCommit("unit two\n", "second")
+      discard adv.moveUpstream("other.txt", "their change\n")
+      let pushed = adv.push(@["--sync", "--rebase"])
+      check pushed.code == 0
+      check "certified: t-unit" in pushed.output
+      check "lacks" in pushed.output
+      check upstreamTip(adv.sf) == adv.git("rev-parse HEAD")
+
+  test "a remote with two push URLs gets the source and the certificate at both":
+    guarded:
+      let fx = setupPush("push-two-urls", "required")
+      defer: removeDir(fx.sf.scratch)
+      # A second destination holding what the first one holds, then pushurls for
+      # both, so each URL gets a hook run of its own.
+      let second = fx.sf.scratch / "second.git"
+      discard gitOut(fx.sf.scratch, "clone", "--bare", fx.sf.upstreamBare, second)
+      discard fx.git("config --unset-all remote.origin.pushurl")
+      discard fx.git("remote set-url --add --push origin " &
+        quoteShell(fileUrl(fx.sf.upstreamBare)))
+      discard fx.git("remote set-url --add --push origin " &
+        quoteShell(fileUrl(second)))
+
+      let commit = fx.certifyThenCommit("unit both\n", "certified")
+      let ran = fx.runs()
+      let pushed = fx.push()
+      check pushed.code == 0
+      check fx.runs() == ran
+      for bare in [fx.sf.upstreamBare, second]:
+        check gitOut(bare, "rev-parse", "refs/heads/main") == commit
+        check noteOnRemote(bare, fx.tree(commit)).count(
+          "# --- test-certificate ---") == 1
+
+      # Published at both: a later certificate is carried to both.
+      check publishCertificateToLocalStore(signedCertFor(fx.sf,
+        "git-tree-sha1:" & fx.tree(commit), commit, platform = "linux/second"),
+        fx.app).written
+      let again = fx.push()
+      check again.code == 0
+      check "already-published" in again.output
+      for bare in [fx.sf.upstreamBare, second]:
+        check noteOnRemote(bare, fx.tree(commit)).count(
+          "# --- test-certificate ---") == 2
+
+  test "a record-store project is judged and certified without its lock in the tree":
+    guarded:
+      let fx = setupPush("push-record-store", "required", recordStore = true)
+      defer: removeDir(fx.sf.scratch)
+      let ran = fx.runs()
+      let covered = fx.certifyThenCommit("unit stored\n", "certified")
+      let afterCertify = fx.runs()
+      check afterCertify == ran + 1
+      let lookup = fx.push()
+      checkpoint(lookup.output)
+      check lookup.code == 0
+      check fx.runs() == afterCertify
+      check upstreamTip(fx.sf) == covered
+      check fx.records(fx.tree(covered)) == 1
+
+      let untested = fx.commitEdit("unit stored two\n", "not tested yet")
+      let certifying = fx.push()
+      checkpoint(certifying.output)
+      check certifying.code == 0
+      check fx.runs() == afterCertify + 1
+      check upstreamTip(fx.sf) == untested
+      check fx.records(fx.tree(untested)) == 1
+
+  test "a failing test stops at its member, with the dependency already published":
+    guarded:
+      let fx = setupPush("push-closure", "required", gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      let dep = fx.addSibling("lib-b", cycle = false)
+      installHooks(fx.sf)
+      let depTip = fx.commitIn(dep, "unit dep\n", "dep, not tested yet")
+      let before = upstreamTip(fx.sf)
+      let failing = fx.commitEdit("FAIL on purpose\n", "breaks the test")
+
+      let stopped = fx.push()
+      check stopped.code == 2
+      check "stage=certify\n" in (stopped.output & "\n")
+      check "stopped repo=lib-a" in stopped.output
+      # Resumable, not atomic: the dependency's refs stay, and are reported.
+      check "(lib-b) → pushed" in stopped.output
+      check "retry: repro push" in stopped.output
+      check gitOut(dep.bare, "rev-parse", "refs/heads/main") == depTip
+      check upstreamTip(fx.sf) == before
+      check fx.storedFor(fx.tree(failing)) == 0
+
+      # A fix on top leaves the broken state in what is pushed, so it is named.
+      discard fx.commitEdit("unit fixed\n", "fixes the test")
+      let onTop = fx.push()
+      check onTop.code == 2
+      check "stage=certify-preflight" in onTop.output
+      check "(breaks the test)" in onTop.output
+
+      # Folded in, the retry finds the dependency published.
+      discard fx.git("reset -q --soft HEAD~2")
+      discard fx.git("commit -q -m fixed")
+      let fixedTip = fx.git("rev-parse HEAD")
+      let retried = fx.push()
+      checkpoint(retried.output)
+      check retried.code == 0
+      check "(lib-b) → already-published" in retried.output
+      check upstreamTip(fx.sf) == fixedTip
+
+  test "a refusal needing no test run publishes no member of the closure":
+    guarded:
+      let fx = setupPush("push-closure-preflight", "required", gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      let dep = fx.addSibling("lib-b", cycle = false)
+      installHooks(fx.sf)
+      let depBefore = gitOut(dep.bare, "rev-parse", "refs/heads/main")
+      discard fx.commitIn(dep, "unit dep\n", "dep, not tested yet")
+      let older = fx.commitEdit("unit older\n", "an intermediate state")
+      discard fx.certifyThenCommit("unit newest\n", "the certified tip")
+      let refused = fx.push()
+      check refused.code == 2
+      check "stage=certify-preflight" in refused.output
+      check older[0 ..< 12] in refused.output
+      check gitOut(dep.bare, "rev-parse", "refs/heads/main") == depBefore
+
+  test "a cycle member with an unpublished peer is stopped by issuance, and says so":
+    guarded:
+      let fx = setupPush("push-cycle", "required", gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      let peer = fx.addSibling("lib-b", cycle = true)
+      installHooks(fx.sf)
+      let peerBefore = gitOut(peer.bare, "rev-parse", "refs/heads/main")
+      let before = upstreamTip(fx.sf)
+      discard fx.commitIn(peer, "unit peer\n", "peer, not tested yet")
+      discard fx.commitEdit("unit cycle\n", "member, not tested yet")
+      let stopped = fx.push()
+      checkpoint(stopped.output)
+      check stopped.code == 2
+      check "dependency has unpushed commits" in stopped.output
+      check "is still not covered" in stopped.output
+      check "stage=certify\n" in (stopped.output & "\n")
+      check gitOut(peer.bare, "rev-parse", "refs/heads/main") == peerBefore
+      check upstreamTip(fx.sf) == before
+
+  test "advisory: the certify step lets a cycle through to the pin rule":
+    guarded:
+      let fx = setupPush("push-cycle-advisory", "advisory", gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      let peer = fx.addSibling("lib-b", cycle = true)
+      installHooks(fx.sf)
+      discard fx.commitIn(peer, "unit peer\n", "peer, not tested yet")
+      discard fx.commitEdit("unit cycle\n", "member, not tested yet")
+      let pushed = fx.push()
+      checkpoint(pushed.output)
+      # Issuance could not run, and under advisory that is a report. What stops
+      # this push is another rule: each commit's lock, refreshed by its hook, pins
+      # the peer's unpublished commit.
+      check "still not covered after certifying" in pushed.output
+      check "stage=certify" notin pushed.output
+      check "stage=source-push" in pushed.output
+      check "source-component-unpublished-pin" in pushed.output
