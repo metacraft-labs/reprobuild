@@ -204,13 +204,86 @@ proc goMergedTags*(tags: seq[string]; staticCgo: bool): seq[string] =
       if t notin result:
         result.add(t)
 
+const
+  GoStaticCgoExtldflags = "-static -Wl,--strip-debug"
+    ## What the external linker is told for a static cgo build (the
+    ## ``-extldflags`` value of ``GoStaticCgoLdflags``).
+
+proc goLdflagValue(ldflags, flag: string): tuple[found: bool; start, stop: int;
+                                               value: string] =
+  ## The value of ``flag`` (``-extldflags``, ``-linkmode``, ``-buildid``) in
+  ## a recipe's ``-ldflags`` string, as ``go tool link`` reads it: after
+  ## ``=`` or a space, quoted with ``'`` or ``"``, or one bare word.
+  ## ``start ..< stop`` spans the flag and its value. The last occurrence
+  ## counts, as it does for the linker (a later flag overrides).
+  var i = 0
+  while i < ldflags.len:
+    let at = ldflags.find(flag, i)
+    if at < 0: break
+    let before = if at == 0: ' ' else: ldflags[at - 1]
+    var j = at + flag.len
+    if before notin {' ', '\t'} or (j < ldflags.len and
+        ldflags[j] notin {'=', ' ', '\t'}):
+      i = at + 1
+      continue
+    if j < ldflags.len and ldflags[j] == '=': inc j
+    else:
+      while j < ldflags.len and ldflags[j] in {' ', '\t'}: inc j
+    var value = ""
+    if j < ldflags.len and ldflags[j] in {'\'', '"'}:
+      let quote = ldflags[j]
+      let close = ldflags.find(quote, j + 1)
+      if close < 0:
+        raise newException(ValueError, "go_package: an unterminated " &
+          "quote in ldflags after " & flag & ": " & ldflags)
+      value = ldflags[j + 1 ..< close]
+      j = close + 1
+    else:
+      let s0 = j
+      while j < ldflags.len and ldflags[j] notin {' ', '\t'}: inc j
+      value = ldflags[s0 ..< j]
+    result = (true, at, j, value)
+    i = j
+
 proc goMergedLdflags*(ldflags: string; staticCgo: bool): string =
-  ## The recipe's ldflags, followed by the static-cgo link flags.
+  ## The recipe's ldflags with what a static cgo link needs merged in:
+  ## ``-linkmode external``, an empty ``-buildid=`` and the static
+  ## ``-extldflags``. A flag the recipe already sets is merged rather than
+  ## appended after it, since the linker keeps only the last occurrence of
+  ## a flag: the static ``-extldflags`` are added to the recipe's own value
+  ## (decision 35: they were appended as a second flag, which silently
+  ## dropped the recipe's), and a recipe ``-linkmode`` other than
+  ## ``external`` or a non-empty ``-buildid`` contradicts a static,
+  ## reproducible link and is refused. Without static cgo the recipe's
+  ## string is returned as it is.
   if not staticCgo:
     return ldflags
-  if ldflags.len == 0:
-    return GoStaticCgoLdflags
-  ldflags & " " & GoStaticCgoLdflags
+  result = ldflags
+  let ext = goLdflagValue(result, "-extldflags")
+  if ext.found:
+    if '\'' in ext.value:
+      raise newException(ValueError, "go_package: staticCgo cannot merge " &
+        "into an -extldflags value that contains a single quote: " & ext.value)
+    let merged = (if ext.value.strip().len > 0: ext.value.strip() & " "
+                  else: "") & GoStaticCgoExtldflags
+    result = result[0 ..< ext.start] & "-extldflags '" & merged & "'" &
+             result[ext.stop .. ^1]
+  let mode = goLdflagValue(result, "-linkmode")
+  if mode.found and mode.value != "external":
+    raise newException(ValueError, "go_package: staticCgo links through " &
+      "the external linker, but the recipe's ldflags say -linkmode " &
+      mode.value)
+  let bid = goLdflagValue(result, "-buildid")
+  if bid.found and bid.value.len > 0:
+    raise newException(ValueError, "go_package: staticCgo empties the build " &
+      "ID (a static link must not depend on the checkout), but the " &
+      "recipe's ldflags set -buildid=" & bid.value)
+  var added: seq[string]
+  if not bid.found: added.add("-buildid=")
+  if not mode.found: added.add("-linkmode external")
+  if not ext.found: added.add("-extldflags '" & GoStaticCgoExtldflags & "'")
+  if added.len > 0:
+    result = (if result.len > 0: result & " " else: "") & added.join(" ")
 
 proc goActionIdPart(packageName: string): string =
   for ch in packageName:
@@ -304,8 +377,13 @@ proc go_package*(binaryName: string;
   ## `extraBinaries` are further `(binaryName, mainPackage)` pairs built by
   ## the same edge into the same `usr/bin`. `staticCgo` builds a static
   ## cgo executable with zig as the C toolchain (see the module header);
-  ## the recipe must declare `zig` in `nativeBuildDeps`. Both default to
-  ## off, and with both off the emitted actions are unchanged.
+  ## the recipe must declare `zig` in `nativeBuildDeps`; flags the recipe's
+  ## `ldflags` already set are merged with the static ones
+  ## (`goMergedLdflags`). Both default to off, and with both off they add
+  ## nothing: the edge is the one `t_go_package_extra_binaries_and_static_cgo`
+  ## pins. That edge did change once for every Go recipe, deliberately: the
+  ## assembler path rewrite (`goAsmTrimpathWrapper`, its `-toolexec` and the
+  ## per-recipe `GOCACHE`) that keeps the checkout's path out of the binary.
   requireCrossTargetConsulted("go_package")
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()

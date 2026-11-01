@@ -836,8 +836,9 @@ divergence the M7 brief asks for.
   alternative for stage-only intent. The closed-set predicate
   `usesSystemdFromOsRelease` lives in
   `libs/repro_elevation/src/repro_elevation/posix_system_parse.nim`
-  (pure parser, cross-platform tests); the host probe with the
-  `REPRO_OS_RELEASE_PATH` test seam lives in
+  (pure parser, cross-platform tests); the host probe and its
+  in-process test seam (`setOsReleasePathForTests`; the former
+  `REPRO_OS_RELEASE_PATH` variable is retired) live in
   `posix_system_driver.nim`. M7's brief is plan-only so the read-only
   observation surface is unchanged.
 - **Timezone driver — Etc/UTC fast-path (CLOSED follow-up)**: every

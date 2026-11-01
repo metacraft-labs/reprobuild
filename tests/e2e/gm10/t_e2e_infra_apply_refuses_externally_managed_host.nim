@@ -140,7 +140,7 @@ suite "GM10: repro infra refuses a host whose system is managed elsewhere":
       # so the base is pinned to ReproOS, whatever machine runs the gate.
       let cacheEnv = [("REPROBUILD_ACTION_CACHE_ROOT",
                        sb.root / "action-cache"),
-                      ("REPRO_OS_RELEASE_PATH", ProjectRoot / "tests" /
+                      (TestbedOsReleaseKey, ProjectRoot / "tests" /
                         "fixtures" / "os-release" / "reproos")]
 
       proc infra(args: openArray[string]; host = ""): ReproRun =

@@ -101,35 +101,33 @@ proc posixDigestHexOfText*(text: string): string =
 # guard is testable cross-platform via the parser.
 # ---------------------------------------------------------------------------
 
-const OsReleaseOverrideEnvVar* = "REPRO_OS_RELEASE_PATH"
-  ## Test seam: when set, the host probe reads this path instead of
-  ## `/etc/os-release`. Lets the regression test exercise the Alpine
-  ## carve-out from a non-Alpine host.
+var osReleasePathForTests = ""
+  ## In-process test seam (A12 review finding 5): the path ``hostOsReleaseId``
+  ## reads instead of ``/etc/os-release``. Set only by test code linked into
+  ## the same binary (``setOsReleasePathForTests``); no environment variable
+  ## or argument reaches it, so a production engine always reads the host's
+  ## own file. (It once honoured ``REPRO_OS_RELEASE_PATH``, which any
+  ## environment reaching the engine could set.)
+
+proc setOsReleasePathForTests*(path: string) =
+  ## Point ``hostOsReleaseId`` at ``path``; "" restores ``/etc/os-release``.
+  osReleasePathForTests = path
 
 proc hostOsReleaseId*(): string =
-  ## Read `/etc/os-release` (or the test-override path) and return the
-  ## `ID=` value. Returns "" when the file is absent / unreadable —
-  ## the caller treats that as "unknown distro", which the
-  ## `usesSystemdFromOsRelease` predicate falls back to "yes".
-  when defined(linux) or defined(macosx):
-    let path = block:
-      let ovr = getEnv(OsReleaseOverrideEnvVar)
-      if ovr.len > 0: ovr
-      else: "/etc/os-release"
-    if not fileExists(path):
-      return ""
-    try:
-      return parseOsReleaseId(readFile(path))
-    except IOError, OSError:
-      return ""
-  else:
-    when defined(windows):
-      let ovr = getEnv(OsReleaseOverrideEnvVar)
-      if ovr.len > 0 and fileExists(ovr):
-        try:
-          return parseOsReleaseId(readFile(ovr))
-        except IOError, OSError:
-          return ""
+  ## Read ``/etc/os-release`` and return the ``ID=`` value. Returns "" when
+  ## the file is absent / unreadable -- the caller treats that as "unknown
+  ## distro", which the ``usesSystemdFromOsRelease`` predicate falls back to
+  ## "yes".
+  let path =
+    if osReleasePathForTests.len > 0: osReleasePathForTests
+    else:
+      when defined(linux) or defined(macosx): "/etc/os-release"
+      else: ""
+  if path.len == 0 or not fileExists(path):
+    return ""
+  try:
+    return parseOsReleaseId(readFile(path))
+  except IOError, OSError:
     return ""
 
 proc hostUsesSystemd*(): bool =

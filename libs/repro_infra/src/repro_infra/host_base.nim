@@ -17,13 +17,15 @@
 import std/[os, strutils, tables]
 
 const
-  OsReleaseOverrideEnvVar* = "REPRO_OS_RELEASE_PATH"
-    ## Test seam, shared with the system drivers' distro probe
-    ## (`repro_elevation/posix_system_driver.OsReleaseOverrideEnvVar`): when
-    ## set, this file is read instead of the host's `os-release`, on any
-    ## platform. It lets a gate observe a Debian or ReproOS base from
-    ## whatever machine runs it. It is not a security boundary: whoever sets
-    ## the environment of `repro infra` already chooses what it applies.
+  RetiredOsReleaseEnvVar* = "REPRO_OS_RELEASE_PATH"
+    ## Retired (A12 review finding 5): an engine once read this file instead
+    ## of the host's `os-release` when the variable was set. Every engine
+    ## honoured it, so any environment that reached a production engine
+    ## could redirect the base it applies for (a distribution read as
+    ## ReproOS, add-on mode bypassed). Nothing reads it now; the name stays
+    ## only so the negative test can set it and show it is ignored. A test
+    ## bed re-identifies a host by giving the engine process its own mount
+    ## namespace with another file bound over `/etc/os-release`.
   OsReleasePaths* = ["/etc/os-release", "/usr/lib/os-release"]
     ## Where `os-release(5)` says to look, in order.
   DebianFamilyIds* = ["debian", "ubuntu", "raspbian"]
@@ -131,24 +133,18 @@ proc describeHostBase*(b: HostBase): string =
       " (" & b.source & ")"
 
 proc observeHostBase*(): HostBase =
-  ## Observe the running host's base: the `REPRO_OS_RELEASE_PATH` file when
-  ## set, else the first readable `os-release`. An unreadable override is
-  ## reported as unknown rather than silently replaced by the real file, so
-  ## a gate that points it somewhere wrong sees the mistake.
+  ## Observe the running host's base: the first readable `os-release` of
+  ## `OsReleasePaths`. Only the real files are read; no variable redirects
+  ## it (`RetiredOsReleaseEnvVar`).
   let isLinux = defined(linux)
-  let override = getEnv(OsReleaseOverrideEnvVar)
   var candidates: seq[string]
-  if override.len > 0:
-    candidates = @[override]
-  elif defined(linux) or defined(macosx):
+  when defined(linux) or defined(macosx):
     for p in OsReleasePaths:
       candidates.add p
   for p in candidates:
     if fileExists(p):
       try:
-        return classifyHostBase(parseOsRelease(readFile(p)), p,
-          isLinux or override.len > 0)
+        return classifyHostBase(parseOsRelease(readFile(p)), p, isLinux)
       except IOError, OSError:
         discard
-  classifyHostBase(initTable[string, string](), "",
-    isLinux or override.len > 0)
+  classifyHostBase(initTable[string, string](), "", isLinux)

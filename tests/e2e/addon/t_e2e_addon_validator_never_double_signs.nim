@@ -20,9 +20,12 @@
 ## validator process's lifetime and the slashing-protection database each
 ## one held open. Green when:
 ##
-## - **no two lifetimes overlap** (an instance that started inside the
-##   polling window counts as overlapping), and there were at least six
-##   instances (one per step, the vacuity guard);
+## - **no two lifetimes overlap**, decided on the kernel's order of the
+##   units' cgroup creations and removals (``validator_safety``, finding 3
+##   of the A12 review: the former clock check counted a plain restart's
+##   successor as overlapping), every instance ran in a validator unit's
+##   cgroup, and there were at least six instances (one per step, the
+##   vacuity guard);
 ## - **every instance held the same database**, the declared state
 ##   directory's ``validator.db`` (one device and inode);
 ## - the database's history, exported at the end as an EIP-3076
@@ -53,7 +56,17 @@
 ##
 ## - ``REPRO_ADDON_MUTATION=exclusive-as-plain-restart`` (a build of the
 ##   add-on whose switch starts an exclusive unit's successor before the
-##   old instance is stopped): steps 2-4 overlap: red.
+##   old instance is stopped): red at the steps that hand the validator
+##   from one unit to another, 4 (the rename) and 5 (the rollback to the
+##   old name). There the successor's unit runs beside the old one (the
+##   lifetimes overlap, or the successor cannot take the database lock or
+##   the port and the health check reverts the generation; measured at
+##   ab69afad80 on all three bases). Steps 1-3 replace the instance inside
+##   one unit, which systemd always does stop-then-start whatever the
+##   switch asks, so no switch mutation can make them overlap; they are
+##   held to the same lifetime check, which would see two instances in one
+##   incarnation of the unit's cgroup. (A12 review finding 10: this header
+##   claimed steps 2-4.)
 ## - ``REPRO_A12_MUTATION=validator-state-follows-unit-name`` (the profile
 ##   puts the validator's database in a directory named after its unit):
 ##   the renamed instance holds a different database: red.
@@ -145,7 +158,8 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
   writeFile(work / "monitor.py", MonitorScript)
   g.copyTo(work / "monitor.py", "/root/validator-monitor.py")
   discard g.run("setsid nohup python3 /root/validator-monitor.py " &
-    LifetimeLog & " >/dev/null 2>&1 < /dev/null &")
+    LifetimeLog & " " & DefaultValidatorUnit & " " & RenamedUnit &
+    " >/dev/null 2>&1 < /dev/null &")
   var sequence = 1'u64
   proc apply(what: string): bool =
     discard publishPins(bs.producer, cache, kp, engine, pk, net, pins, sequence)
@@ -208,7 +222,12 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
       discard publishPins(bs.producer, cache, kp, engine, pk, net, fixedAddress,
                           sequence)
       inc sequence
-      discard g.tickUnits()
+      # The unit's address spelled out (what the next manifest keeps) is
+      # the same unit: it must apply, or the refusal below would prove
+      # nothing about the rename.
+      let t0 = g.tickUnits()
+      step("the unit with its address spelled out applies", t0.outcome ==
+           "aoApplied", $t0 & "\n" & t0.fetchLog & t0.applyLog)
       discard publishPins(bs.producer, cache, kp, engine, pk, net, pins, sequence)
       let t = g.tickUnits()
       inc sequence
@@ -242,8 +261,13 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     let lifeLog = g.run("cat " & LifetimeLog)
     record["lifetimes"] = %lifeLog
     let ls = parseLifetimes(lifeLog)
-    let ov = overlaps(ls)
+    let ov = cgroupOverlaps(lifeLog)
     step("no two validator lifetimes overlap", ov.len == 0, ov.join("\n"))
+    var inUnits = 0
+    for inst in ls:
+      if inst.unit.len > 0: inc inUnits
+    step("every validator instance ran in a validator unit's cgroup",
+         inUnits == ls.len, $inUnits & " of " & $ls.len)
     step("each step started a new instance (at least six)", ls.len >= 6,
          $ls.len)
     let dbs = databasesHeld(lifeLog)

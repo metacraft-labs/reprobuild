@@ -42,10 +42,21 @@ Both activities declare the same kinds of things:
 
 ## Running a validator safely
 
-The validator client is declared `exclusive = true`. When the client
-restarts, is renamed, moves to a new package, or is rolled back, the old
-instance is stopped and confirmed exited before the new one starts. If the
-old instance cannot be confirmed stopped, the switch refuses.
+The validator client is declared `exclusive = true`. On an add-on host,
+when the client restarts, is renamed, moves to a new package, or is rolled
+back, the add-on switch stops the old instance and confirms it has exited
+before the new one starts. If the old instance cannot be confirmed stopped,
+the switch refuses.
+
+This stop-and-confirm, and the refusal of a rename that keeps its address
+(property 3 below), belong to the add-on switch: it plans every change of
+the unit from its ledger. A host realised in full does not run the switch.
+Its apply writes the units in place and leaves restarts to systemd, which
+also never runs two instances of one unit at once. A rename there replaces
+one unit with another without that confirmation. On such a host the
+validator is protected by properties 1 and 2, which hold on both kinds of
+host. When you rename the validator's unit on a host realised in full, stop
+the old unit yourself before you apply.
 
 Three properties of the activity protect the signing keys:
 
@@ -59,9 +70,10 @@ Three properties of the activity protect the signing keys:
    node whether any of its keys signed in the recent epochs, ignoring what
    its own database recorded. If they did, it exits. This catches the same
    keys running on another host.
-3. **A rename takes a new resource address.** Use the default address, which
-   names the unit. If you keep an explicit address while renaming the unit,
-   the switch refuses; it never leaves the old instance running.
+3. **A rename takes a new resource address** (add-on hosts). Use the default
+   address, which names the unit. If you keep an explicit address while
+   renaming the unit, the add-on switch refuses; it never leaves the old
+   instance running.
 
 ### Keys on two hosts: your responsibility
 

@@ -52,6 +52,8 @@
 
 import std/[algorithm, hashes, os, osproc, streams, strtabs, strutils, tempfiles, times]
 from repro_core/paths import extendedPath
+when defined(linux):
+  from posix import getuid, getgid
 
 import repro_profile
 import repro_profile_intent
@@ -250,6 +252,36 @@ type
       ## `repro home export`'s platform probe: one `nim dump`, one
       ## `nim check` per target platform).
 
+const TestbedOsReleaseKey* = "REPRO_TESTBED_OS_RELEASE"
+  ## Harness-only key in ``runRepro``'s ``extraEnv``, never passed to the
+  ## engine: run the engine with this file as its ``/etc/os-release``. No
+  ## engine reads a variable for that (A12 review finding 5: the
+  ## ``REPRO_OS_RELEASE_PATH`` seam every engine honoured is retired), so the
+  ## harness gives the engine process its own mount namespace, inside an
+  ## unprivileged user namespace that keeps the caller's uid, and binds the
+  ## file over ``/etc/os-release`` there; the host's file is untouched and
+  ## no other process sees the change. Linux only (``unshare(1)``). Elsewhere
+  ## the observed base is "not Linux", which plans a host in full as the
+  ## ``reproos`` fixture does, so that request is dropped; a Debian base
+  ## cannot be shown off Linux (``canReidentifyHostBase``).
+
+proc canReidentifyHostBase*(fixturePath: string): bool =
+  ## Whether ``runRepro`` can make the engine observe ``fixturePath``'s base.
+  defined(linux) or fixturePath.extractFilename == "reproos"
+
+proc reidentified(program: string; args: seq[string]; osRelease: string):
+    tuple[program: string; args: seq[string]] =
+  when defined(linux):
+    ("unshare", @["--user", "--map-user=" & $getuid(),
+      "--map-group=" & $getgid(), "--keep-caps", "--mount", "--",
+      "sh", "-c", "mount --bind \"$1\" /etc/os-release && shift && " &
+      "exec \"$@\"", "sh", osRelease, program] & args)
+  else:
+    doAssert canReidentifyHostBase(osRelease),
+      "the host base is re-identified only on Linux (a mount namespace); " &
+      osRelease & " cannot be shown here"
+    (program, args)
+
 proc runRepro*(sb: ProfileSandbox; args: openArray[string];
                host = DefaultSandboxHost;
                extraEnv: openArray[(string, string)] = []): ReproRun =
@@ -258,13 +290,19 @@ proc runRepro*(sb: ProfileSandbox; args: openArray[string];
   ## diagnostics mixed into it). Both pipes are drained concurrently by
   ## `runProgramSplit`, so a chatty stderr cannot fill its pipe while the
   ## parent is still reading stdout. `extraEnv` adds variables on top of the
-  ## sandbox's isolated environment (e.g. the apply gates' package seams).
+  ## sandbox's isolated environment (e.g. the apply gates' package seams);
+  ## `TestbedOsReleaseKey` in it re-identifies the host's base instead.
   let before = sb.nimSpawnCount()
   let compilesBefore = sb.nimSpawnCount("c")
   let env = sb.sandboxEnv(host)
+  var osRelease = ""
   for (k, v) in extraEnv:
-    env[k] = v
-  let res = runProgramSplit(reproBinary(), args, cwd = sb.root, env = env)
+    if k == TestbedOsReleaseKey: osRelease = v
+    else: env[k] = v
+  var (program, argv) = (reproBinary(), @args)
+  if osRelease.len > 0:
+    (program, argv) = reidentified(program, argv, osRelease)
+  let res = runProgramSplit(program, argv, cwd = sb.root, env = env)
   result.exitCode = res.code
   result.stdout = res.stdout
   result.stderr = res.stderr

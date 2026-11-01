@@ -17,16 +17,35 @@
 ##    look clean but signed different messages for one slot are a
 ##    conflict.
 ## 2. **Lifetimes** of the validator client's processes, from a monitor in
-##    the guest that polls `/proc` (no unit, no hook in the client): it
-##    records each process's start time from `/proc/<pid>/stat` (field 22,
-##    clock ticks since boot) and, when it disappears, the last time it was
-##    seen alive and the first time it was seen gone (both
-##    `CLOCK_BOOTTIME`). A successor overlaps its predecessor when it
-##    started before the predecessor was seen gone: an instance that
-##    started inside the polling window is counted as overlapping, never
-##    as clean, so the coarse clock can only make the check stricter. It
-##    also records, once per instance, the slashing-protection database it
-##    holds open (`db <pid> <device>:<inode> <path>`).
+##    the guest (no unit, no hook in the client), decided on the kernel's
+##    own ordering rather than on clocks (A12 review finding 3). A clock
+##    cannot decide it: `/proc/<pid>/stat` gives a start time in 10 ms
+##    ticks and a polled exit is only bounded by the poll, so a successor a
+##    plain `systemctl restart` starts a few milliseconds after its
+##    predecessor exits fell inside that window and was counted as an
+##    overlap (3 of 12 runs at ab69afad80). Instead, for each validator
+##    unit the monitor follows its control group (cgroup v2) through one
+##    inotify descriptor, which delivers events in the kernel's order:
+##
+##    - `cg create <unit> <inode>`: a new incarnation of the unit's cgroup
+##      (systemd creates it when the unit starts and removes it when the
+##      unit goes inactive);
+##    - `cg delete <unit>`: it was removed. The kernel refuses to remove a
+##      cgroup that has a process in it, so every process of that
+##      incarnation had exited by then;
+##    - `seen <pid> <start> <unit> <inode>`: a validator process and the
+##      incarnation it runs in (the cgroup directory's inode, read and then
+##      confirmed by finding the process still alive: a process that
+##      outlives the read cannot belong to an incarnation removed before
+##      it), or `- -` outside every validator unit.
+##
+##    Two instances overlap when they ran in one incarnation, or in
+##    incarnations of two units whose create-to-delete spans intersect in
+##    that order (`cgroupOverlaps`); a span that never ended counts as open.
+##    An instance outside the units is still held to the clock check
+##    (`overlaps`), which only errs towards an overlap. The monitor also
+##    records, once per instance, the slashing-protection database it holds
+##    open (`db <pid> <device>:<inode> <path>`).
 
 import std/[json, strutils, tables]
 
@@ -41,6 +60,8 @@ type
     start*: float          ## seconds since boot
     lastSeen*: float       ## -1 while alive at the end of the log
     goneAt*: float
+    unit*: string          ## the validator unit it ran in, "" outside them
+    cgroup*: string        ## that incarnation's cgroup inode
 
 proc rootOf(n: JsonNode): string =
   if n.hasKey("signing_root"): n["signing_root"].getStr().toLowerAscii() else: ""
@@ -113,12 +134,17 @@ proc parseLifetimes*(log: string): seq[Instance] =
     let t = line.strip()
     if t.len == 0: continue
     let f = t.splitWhitespace()
-    if f[0] == "db":
-      continue          # the database an instance holds (`databasesHeld`)
-    if f[0] == "seen" and f.len == 3:
+    if f[0] in ["db", "cg"]:
+      continue          # the database (`databasesHeld`), the cgroups
+                        # (`cgroupOverlaps`)
+    if f[0] == "seen" and f.len in [3, 5]:
       open[f[1]] = result.len
-      result.add(Instance(pid: f[1], start: parseFloat(f[2]), lastSeen: -1,
-                          goneAt: -1))
+      var inst = Instance(pid: f[1], start: parseFloat(f[2]), lastSeen: -1,
+                          goneAt: -1)
+      if f.len == 5 and f[3] != "-":
+        inst.unit = f[3]
+        inst.cgroup = f[4]
+      result.add(inst)
     elif f[0] == "gone" and f.len == 4 and f[1] in open:
       let i = open[f[1]]
       result[i].lastSeen = parseFloat(f[2])
@@ -153,19 +179,120 @@ proc overlaps*(ls: seq[Instance]): seq[string] =
           (if a.goneAt < 0: "still alive"
            else: "last seen at " & $a.lastSeen & ", gone by " & $a.goneAt))
 
+proc cgroupOverlaps*(log: string): seq[string] =
+  ## The overlaps the kernel's ordering shows (module header, 2.): two
+  ## instances in one incarnation of a unit's cgroup, or instances in
+  ## incarnations of two units that existed at once. Instances outside the
+  ## validator units are held to ``overlaps`` against every instance. A
+  ## malformed ``cg`` line raises.
+  type Incarnation = object
+    unit: string
+    created, deleted: int          ## log positions; deleted = high(int) open
+    pids: seq[string]
+  var incs: seq[Incarnation]
+  var byKey: Table[string, int]    ## "<unit> <inode>" -> incs index
+  var current: Table[string, int]  ## unit -> its open incarnation
+  var pos = 0
+  for line in log.splitLines():
+    let f = line.strip().splitWhitespace()
+    if f.len == 0: continue
+    inc pos
+    if f[0] != "cg": continue
+    if f.len == 4 and f[2] == "create":
+      byKey[f[1] & " " & f[3]] = incs.len
+      current[f[1]] = incs.len
+      incs.add(Incarnation(unit: f[1], created: pos, deleted: high(int)))
+    elif f.len == 3 and f[2] == "delete":
+      if f[1] in current:
+        incs[current[f[1]]].deleted = pos
+        current.del(f[1])
+    else:
+      raise newException(ValueError, "malformed cgroup line: " & line.strip())
+  let ls = parseLifetimes(log)
+  var outside: seq[Instance]
+  for inst in ls:
+    if inst.unit.len == 0:
+      outside.add(inst)
+      continue
+    let k = inst.unit & " " & inst.cgroup
+    if k notin byKey:
+      result.add("pid " & inst.pid & " ran in an incarnation of " &
+        inst.unit & " (cgroup " & inst.cgroup & ") the monitor never saw " &
+        "created")
+      continue
+    if inst.pid notin incs[byKey[k]].pids:
+      incs[byKey[k]].pids.add(inst.pid)
+  for i, a in incs:
+    if a.pids.len > 1:
+      result.add("pids " & a.pids.join(", ") & " ran in one incarnation of " &
+        a.unit)
+    for j in i + 1 ..< incs.len:
+      let b = incs[j]
+      if a.unit == b.unit or a.pids.len == 0 or b.pids.len == 0: continue
+      if a.created < b.deleted and b.created < a.deleted:
+        result.add(a.unit & " (pid " & a.pids.join(", ") & ") and " & b.unit &
+          " (pid " & b.pids.join(", ") & ") existed at once" &
+          (if a.deleted == high(int) or b.deleted == high(int):
+             " (one never ended)" else: ""))
+  # An instance outside the units: the conservative clock check against
+  # every instance.
+  if outside.len > 0:
+    for o in overlaps(ls):
+      for x in outside:
+        if ("pid " & x.pid & " ") in o:
+          result.add(o)
+          break
+
 const MonitorScript* = """
-import os, sys, time
-# The validator client's processes: an executable named `validator` under
-# the store. Polls /proc every 5 ms; see validator_safety.nim.
+import ctypes, os, struct, sys, time
+# The validator client's processes (an executable named `validator` under
+# the store) and the cgroups of the validator units named in argv[2:], in
+# the kernel's order (one inotify descriptor); see validator_safety.nim.
 tck = os.sysconf('SC_CLK_TCK')
 log = open(sys.argv[1], 'a', buffering=1)
+units = set(sys.argv[2:])
+SLICE = '/sys/fs/cgroup/system.slice'
+IN_CREATE, IN_DELETE = 0x100, 0x200
+libc = ctypes.CDLL(None, use_errno=True)
+ifd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+if ifd < 0 or libc.inotify_add_watch(ifd, SLICE.encode(), IN_CREATE | IN_DELETE) < 0:
+    raise OSError(ctypes.get_errno(), 'inotify on ' + SLICE)
 alive = {}
 dbs = set()
 def now():
     return time.clock_gettime(time.CLOCK_BOOTTIME)
+def created(u):
+    try:
+        log.write('cg %s create %d\n' % (u, os.stat(SLICE + '/' + u).st_ino))
+    except OSError:
+        pass   # already removed again: its delete follows in the queue
+def drain():
+    while True:
+        try:
+            buf = os.read(ifd, 65536)
+        except BlockingIOError:
+            return
+        i = 0
+        while i < len(buf):
+            wd, mask, cookie, ln = struct.unpack_from('iIII', buf, i)
+            name = buf[i + 16:i + 16 + ln].split(b'\0', 1)[0].decode()
+            i += 16 + ln
+            if name in units:
+                if mask & IN_CREATE:
+                    created(name)
+                elif mask & IN_DELETE:
+                    log.write('cg %s delete\n' % name)
+for u in sorted(units):
+    if os.path.isdir(SLICE + '/' + u):
+        created(u)
+def start_of(p):
+    st = open('/proc/%s/stat' % p).read()
+    return int(st[st.rindex(')') + 2:].split()[19]) / tck
 while True:
+    drain()
     t0 = now()
     seen = set()
+    pending = []
     for p in os.listdir('/proc'):
         if not p.isdigit():
             continue
@@ -176,14 +303,29 @@ while True:
         if not (exe.startswith('/repro/store/') and exe.endswith('/bin/validator')):
             continue
         try:
-            st = open('/proc/%s/stat' % p).read()
+            start = start_of(p)
         except OSError:
             continue
-        start = int(st[st.rindex(')') + 2:].split()[19]) / tck
         key = (p, start)
         seen.add(key)
         if key not in alive:
-            log.write('seen %s %.3f\n' % (p, start))
+            unit, ino = '-', '-'
+            try:
+                for line in open('/proc/%s/cgroup' % p):
+                    path = line.strip().split(':', 2)[2]
+                    if path.startswith('/system.slice/') and path[14:] in units:
+                        unit = path[14:]
+                ino = '-'
+                if unit != '-':
+                    ino = str(os.stat(SLICE + '/' + unit).st_ino)
+                    # Alive after the stat: it is in that incarnation (one
+                    # removed before the stat held no process).
+                    if start_of(p) != start:
+                        raise OSError('gone')
+            except (OSError, IndexError):
+                seen.discard(key)
+                continue
+            pending.append('seen %s %.3f %s %s\n' % (p, start, unit, ino))
         alive[key] = t0
         if key not in dbs:
             # The slashing-protection database it holds open, once it has.
@@ -192,11 +334,15 @@ while True:
                     t = os.readlink('/proc/%s/fd/%s' % (p, fd))
                     if t.endswith('/validator.db'):
                         st2 = os.stat(t)
-                        log.write('db %s %d:%d %s\n' % (p, st2.st_dev, st2.st_ino, t))
+                        pending.append('db %s %d:%d %s\n' % (p, st2.st_dev, st2.st_ino, t))
                         dbs.add(key)
                         break
             except OSError:
                 pass
+    # The creations a seen process's cgroup may come from are logged first.
+    drain()
+    for line in pending:
+        log.write(line)
     t1 = now()
     for key in list(alive):
         if key not in seen:

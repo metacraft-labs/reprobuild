@@ -4379,7 +4379,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
     check usesSystemdFromOsRelease("ID=arch\n")
     check usesSystemdFromOsRelease("")  # conservative default
 
-  test "REPRO_OS_RELEASE_PATH override drives hostOsReleaseId":
+  test "the in-process os-release seam drives hostOsReleaseId":
     # The host-probe + override seam is the wire that lets the
     # destructive `applySystemdSystemUnit` carve-out be tested from
     # a non-Alpine host (e.g. this Windows / macOS test machine).
@@ -4390,14 +4390,29 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
     let dir = createTempDir("reprobuild-os-release-", "")
     let fakePath = dir / "os-release-alpine"
     writeFile(fakePath, "ID=alpine\nVERSION_ID=3.21\n")
-    putEnv(OsReleaseOverrideEnvVar, fakePath)
+    setOsReleasePathForTests(fakePath)
     try:
       check hostOsReleaseId() == "alpine"
       check not hostUsesSystemd()
     finally:
-      delEnv(OsReleaseOverrideEnvVar)
+      setOsReleasePathForTests("")
       try: removeFile(fakePath) except OSError: discard
       try: removeDir(dir) except OSError: discard
+
+  test "REPRO_OS_RELEASE_PATH is ignored by hostOsReleaseId":
+    # A12 review finding 5: the variable once redirected every engine's
+    # distro probe; nothing reads it now.
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("reprobuild-os-release-", "")
+      let fakePath = dir / "os-release-ignored"
+      writeFile(fakePath, "ID=reprobuild-ignored-id\n")
+      putEnv("REPRO_OS_RELEASE_PATH", fakePath)
+      try:
+        check hostOsReleaseId() != "reprobuild-ignored-id"
+      finally:
+        delEnv("REPRO_OS_RELEASE_PATH")
+        try: removeFile(fakePath) except OSError: discard
+        try: removeDir(dir) except OSError: discard
 
   test "applySystemdSystemUnit raises EProtocol on Alpine":
     # Wire the override to a fake Alpine `os-release`; on Linux the
@@ -4409,7 +4424,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
       let dir = createTempDir("reprobuild-os-release-", "")
       let fakePath = dir / "os-release-alpine-carveout"
       writeFile(fakePath, "ID=alpine\n")
-      putEnv(OsReleaseOverrideEnvVar, fakePath)
+      setOsReleasePathForTests(fakePath)
       try:
         let op = PrivilegedOperation(kind: pokSystemdSystemUnit,
           address: "m7-hello.service",
@@ -4428,7 +4443,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
           check "openrc" in e.msg.toLowerAscii()
         check caught
       finally:
-        delEnv(OsReleaseOverrideEnvVar)
+        setOsReleasePathForTests("")
         try: removeFile(fakePath) except OSError: discard
         try: removeDir(dir) except OSError: discard
 

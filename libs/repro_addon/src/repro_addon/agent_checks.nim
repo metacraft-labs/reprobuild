@@ -217,11 +217,39 @@ proc recordCompiledProfileRefusal*(m: DeployManifest; why: string) =
     stderr.write("repro-addon: cannot write the compiled-profile evidence " &
       "record: " & e.msg & "\n")
 
+proc addonPinSelectionRefusal*(m: DeployManifest): string =
+  ## Why a pinned source profile must not be applied on an add-on host
+  ## whatever its compile emits, or "". An add-on host realises the add-on
+  ## projection only (spec §8.2): a pin with no system selection was
+  ## compiled for `default` realised in full, and one whose mode is `full`
+  ## for a full host, so neither describes what this host may apply. Since
+  ## a selection has one encoding (Deploy-Agent.md §"The compiled-profile
+  ## pin"), the add-on default is `addOn` with an empty list, never "no
+  ## selection".
+  when mutated("addon-agent-accepts-full-pin"):
+    return ""
+  let pin = m.compiledProfile
+  if pin.digest.len == 0: return ""
+  if not pin.hasSystemSelection:
+    return "the compiled-profile pin names no system selection: it was " &
+      "compiled for `default` realised in full, and an add-on host applies " &
+      "only the add-on projection (a producer pins `system: addOn` alone as " &
+      "mode addOn with no activity)"
+  if pin.systemMode != "addOn":
+    return "the compiled-profile pin's system mode is '" & pin.systemMode &
+      "': it was compiled for a full host, and an add-on host applies only " &
+      "the add-on projection"
+  ""
+
 proc compiledProfileCheck*(m: DeployManifest;
                            canonicalText, actionsJson, revision: string):
     string =
   ## ``compiledProfileRefusal`` in the agent's report form, with an
-  ## evidence-worthy prefix; "" when the compile reproduces the pin.
+  ## evidence-worthy prefix; "" when the compile reproduces the pin and the
+  ## pin selects the add-on mode (``addonPinSelectionRefusal``).
+  let mode = addonPinSelectionRefusal(m)
+  if mode.len > 0:
+    return CompiledProfileRefusal & ": " & mode & "; nothing was written"
   let why = compiledProfileRefusal(m, canonicalText, actionsJson, revision)
   if why.len > 0:
     return CompiledProfileRefusal & ": " & why & "; nothing was written"

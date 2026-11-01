@@ -1,5 +1,6 @@
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/rust_toolchain_pins
 export packages_schema
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,9 @@ package cargo:
     nixPackage "reprobuild-stdlib-rust-1.94.0",
       executablePath = "bin/cargo",
       expressionFile = "nix/rust-1.94.0/default.nix",
-      lockIdentity = "nix-expression:rust@1.94.0:x86_64-linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a"
+      # The archive of THIS platform (decision 35(a)): see
+      # ``rust_toolchain_pins``.
+      lockIdentity = RustNixLockIdentity
     # Windows / non-Nix Linux: cargo ships as part of the Rust toolchain
     # that Scoop's ``rustup-msvc`` installs via ``rustup-init.exe``.
     # The bytes live at ``<scoop-persist>/rustup-msvc/.cargo/bin/cargo.exe``;

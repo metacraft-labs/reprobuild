@@ -89,6 +89,29 @@ package go:
       extractPath = "go",
       cpu = "aarch64",
       os = "linux"
+    # Go 1.25.4 for Linux: the pinned nixpkgs' `go`, as go.dev's release
+    # archives, so a recipe that needs one exact Go (`go ==1.25.4`: geth,
+    # whose binary digest is pinned) builds with the same release in the
+    # Nix and the tarball modes (A12 review finding 12). Digests from
+    # https://go.dev/dl/?mode=json&include=all.
+    tarball url = "https://go.dev/dl/go1.25.4.linux-amd64.tar.gz",
+      sha256 = "9fa5ffeda4170de60f67f3aa0f824e426421ba724c21e133c1e35d6159ca1bec",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.25.4",
+      packageId = "go@1.25.4",
+      extractPath = "go",
+      cpu = "x86_64",
+      os = "linux"
+    tarball url = "https://go.dev/dl/go1.25.4.linux-arm64.tar.gz",
+      sha256 = "a68e86d4b72c2c2fecf7dfed667680b6c2a071221bbdb6913cf83ce3f80d9ff0",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.25.4",
+      packageId = "go@1.25.4",
+      extractPath = "go",
+      cpu = "aarch64",
+      os = "linux"
     tarball url = "https://go.dev/dl/go1.23.4.darwin-amd64.tar.gz",
       sha256 = "6700067389a53a1607d30aa8d6e01d198230397029faa0b109e89bc871ab5a0e",
       archiveType = "tar.gz",

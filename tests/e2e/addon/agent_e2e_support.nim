@@ -152,13 +152,19 @@ const CompileHost* = "a8-testbed"
 proc producerCompile*(engine, source: string; arch = "x86_64";
                       host = CompileHost;
                       files: seq[ProfileFile] = @[];
-                      systemMode = "";
+                      systemMode = "addOn";
                       systemActivities: seq[string] = @[]): CompiledProfilePin =
   ## The producer's side of the compiled-profile pin: compile ``source``
   ## on THIS machine with ``engine`` (a store path holding
   ## ``bin/reprobuild``), for the facts the target's agent will compile
   ## with, and pin the digest and the engine's revision -- what infra's
-  ## renderer does with ``--profile-compiler``.
+  ## renderer does with ``--profile-compiler``. The selection defaults to
+  ## the add-on mode's ``default`` (``addOn`` with no activity), what a
+  ## producer pins for an add-on host whose entry is ``system: addOn``
+  ## alone; an add-on agent refuses a pin with no selection or ``full``.
+  ## It is canonicalised as the producers do (``canonicalSystemSelection``).
+  let (systemMode, systemActivities) =
+    canonicalSystemSelection(systemMode, systemActivities)
   let work = getTempDir() / ("a8-producer-compile-" & $getCurrentProcessId() &
     "-" & $epochTime().int64)
   createDir(work / "src")
@@ -172,20 +178,16 @@ proc producerCompile*(engine, source: string; arch = "x86_64";
     "--canonical-out", work / "c", "--actions-out", work / "a",
     "--digest-out", work / "d", "--revision-out", work / "r",
     "--state-dir", work / "state", "--host", host, "--platform", "linux",
-    "--arch", arch] & (if systemMode.len > 0 or systemActivities.len > 0:
-      @["--system-mode", (if systemMode.len > 0: systemMode else: "full"),
+    "--arch", arch] & (if systemMode.len > 0:
+      @["--system-mode", systemMode,
         "--system-activities", systemActivities.join(",")]
     else: @[]))
   let (o, c) = execCmdEx("env HOME=" & quoteShell(work / "home") & " " & cmd)
   doAssert c == 0, "the producer's compile failed: " & o
-  var selected = systemActivities
-  selected.sort()
   result = CompiledProfilePin(digest: readFile(work / "d").strip(),
     compilerRevision: readFile(work / "r").strip(), platform: "linux",
-    arch: arch, host: host,
-    systemMode: (if systemMode.len > 0 or selected.len > 0:
-                   (if systemMode.len > 0: systemMode else: "full") else: ""),
-    systemActivities: selected)
+    arch: arch, host: host, systemMode: systemMode,
+    systemActivities: systemActivities)
   doAssert result.digest == compiledProfileDigest(readFile(work / "c"),
     readFile(work / "a"), systemSelectionText(result))
 

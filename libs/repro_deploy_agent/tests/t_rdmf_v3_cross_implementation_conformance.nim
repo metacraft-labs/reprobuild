@@ -25,7 +25,8 @@
 ##     `default`, is the add-on mode's `default` only (flags 7, one digest);
 ##     `full` with none is the pin without a selection (flags 3); both
 ##     validators refuse the other spellings, and both decoders refuse
-##     flags 5 (bit 2 without bit 1);
+##     flags 5 (bit 2 without bit 1); both strip a name of Nim's ASCII
+##     whitespace only (`python-strips-unicode-space`);
 ##   * the compiled-profile pin (flags bit 1): Python pins the digest of a
 ##     compile, this library computes the same digest over the same two
 ##     texts and refuses a compile that emitted anything else; and, given a
@@ -129,8 +130,21 @@ proc listsDefaultProducer(src: string): string =
   result = work / "render-deploy-manifest-lists-default.py"
   writeFile(result, text)
 
+proc unicodeStripProducer(src: string): string =
+  ## Falsifying mutation: Python strips a selection with its bare
+  ## ``str.strip()`` (Unicode whitespace), as it did before.
+  var text = readFile(src)
+  for (needle, repl) in [
+      ("names = [a.strip(NIM_ASCII_WHITESPACE) for a in activities]",
+       "names = [a.strip() for a in activities]")]:
+    doAssert needle in text, "the mutation no longer matches the producer: " & needle
+    text = text.replace(needle, repl)
+  result = work / "render-deploy-manifest-unicode-strip.py"
+  writeFile(result, text)
+
 proc producer(): string =
   if mutation == "python-omits-closure-digests": mutatedProducer(producerPath)
+  elif mutation == "python-strips-unicode-space": unicodeStripProducer(producerPath)
   elif mutation == "python-lists-default": listsDefaultProducer(producerPath)
   elif mutation.len > 0:
     raise newException(ValueError, "unknown RDMF_CONFORMANCE_MUTATION " & mutation)
@@ -475,6 +489,51 @@ suite "RDMF v3 cross-implementation conformance":
     let d = py(@["inspect", "--manifest", f5])
     check d.code != 0
     check "flags word is 5" in d.output
+
+  test "both producers strip a selection the same way (Nim's ASCII whitespace only)":
+    # Nim's `strip()` removes " \t\v\r\n\f" only; Python's bare `strip()`
+    # also removes U+00A0 and the other Unicode spaces. An activity written
+    # with a no-break space must be the same (refused) name on both sides,
+    # never "web" on one and "web\u00a0" on the other.
+    let nbsp = "web\xC2\xA0"
+    let (_, acts) = canonicalSystemSelection("addOn", [" \t" & nbsp & "\f"])
+    check acts == @[nbsp]
+    var pin = CompiledProfilePin(digest: "sha256:" & repeat("ab", 32),
+      compilerRevision: "r", platform: "linux", arch: "x86_64", host: "h",
+      systemMode: "addOn", systemActivities: acts)
+    check "outside [A-Za-z0-9_]" in compiledProfilePinError(pin)
+    let canon = work / "strip.canonical"
+    let actsFile = work / "strip.actions"
+    writeFile(canon, readFile(profile))
+    writeFile(actsFile, "[]")
+    let r = py(@["render", "--target", Target, "--profile", profile,
+      "--signing-key", signerKey, "--state-dir", work / "state-strip",
+      "--output", work / "strip.rdm", "--producer", "conformance",
+      "--max-age-seconds", "3600", "--sequence", "30",
+      "--compiled-canonical", canon, "--compiled-actions", actsFile,
+      "--compile-platform", "linux", "--compile-arch", "x86_64",
+      "--compile-host", "h", "--compiler-revision", "abc123",
+      "--compile-system-mode", "addOn",
+      "--compile-system-activities", " \t" & nbsp & "\f"])
+    checkpoint r.output
+    check r.code != 0
+    check "outside [A-Za-z0-9_]" in r.output
+    # And ASCII whitespace is stripped alike: the same pin as plain "web".
+    let ok = py(@["render", "--target", Target, "--profile", profile,
+      "--signing-key", signerKey, "--state-dir", work / "state-strip-ok",
+      "--output", work / "strip-ok.rdm", "--producer", "conformance",
+      "--max-age-seconds", "3600", "--sequence", "31",
+      "--compiled-canonical", canon, "--compiled-actions", actsFile,
+      "--compile-platform", "linux", "--compile-arch", "x86_64",
+      "--compile-host", "h", "--compiler-revision", "abc123",
+      "--compile-system-mode", "addOn",
+      "--compile-system-activities", "\v web\r\n"])
+    check ok.code == 0
+    if ok.code == 0:
+      let m = decodeManifest(cast[seq[byte]](readFile(work / "strip-ok.rdm")))
+      check m.compiledProfile.systemActivities == @["web"]
+      check canonicalSystemSelection("addOn", ["\v web\r\n"]).activities ==
+        @["web"]
 
   test "a real compiler: Python's pin is reproduced by a second compile here":
     let compiler = getEnv("RDMF_PROFILE_COMPILER")

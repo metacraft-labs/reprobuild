@@ -340,6 +340,21 @@
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
 ##                                            the old addresses
+## ``addon-agent-accepts-full-pin``           an add-on agent applies a
+##                                            source profile pinned for no
+##                                            system selection or for mode
+##                                            ``full``
+## ``full-host-restart-forgets-pending``      a full host's apply records no
+##                                            pending restart, so a consumer
+##                                            whose secret an early-returning
+##                                            apply materialised is never
+##                                            restarted
+## ``full-host-boot-secrets-unlocked``        a full host's boot secrets step
+##                                            writes without the host and
+##                                            state apply locks
+## ``unit-prefix-unchecked``                  a unit that runs from the
+##                                            prefix of an activity edge its
+##                                            host does not select is planned
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -446,7 +461,19 @@ const
                           # §7.9: the cross prefix's glibc check.
                           "cross-prefix-glibc-unchecked",
                           # A8 review M5: agent-repin's falsifier.
-                          "agent-repin-keeps-allow-list"]
+                          "agent-repin-keeps-allow-list",
+                          # A12 review finding 12: an add-on agent applies
+                          # a pin compiled for no selection or for `full`.
+                          "addon-agent-accepts-full-pin",
+                          # A12 review finding 1: a full host's apply
+                          # restarts only what this run materialised.
+                          "full-host-restart-forgets-pending",
+                          # A12 review finding 6: the full host's boot
+                          # secrets step writes without the locks.
+                          "full-host-boot-secrets-unlocked",
+                          # A12 review finding 12: a unit may run from a
+                          # prefix its host does not realise.
+                          "unit-prefix-unchecked"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

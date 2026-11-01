@@ -96,7 +96,7 @@ const
 
 suite "ReproOS add-on mode: system-scope host selection":
 
-  test "t_system_profile_host_selection":
+  linuxOnlyTest "t_system_profile_host_selection":
     let sb = newProfileSandbox("a6sel", HomeProfile)
     defer: sb.dispose()
     sb.writeProfileFile("system.nim", SystemProfile)
