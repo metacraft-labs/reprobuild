@@ -356,7 +356,12 @@ suite "a zig target is threaded into the C operations":
         let args = argStrings(configure).join("\n")
         checkpoint(args)
         check "CMAKE_TOOLCHAIN_FILE=" in args
-        check "toolchain.cmake" in args))
+        check "toolchain.cmake" in args
+        # zig's driver (lld) refuses binutils' --copy-dt-needed-entries, so
+        # a zig configure does not carry it (a native one still does: the
+        # KF6 transitive-NEEDED fix in cmake_package).
+        check "copy-dt-needed-entries" notin args))
+
 
   test "autotools_package configures with the zig toolchain and --host":
     withTarget(ZigTriple, proc() =

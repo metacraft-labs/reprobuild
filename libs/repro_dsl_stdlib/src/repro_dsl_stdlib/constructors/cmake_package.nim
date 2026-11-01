@@ -493,10 +493,20 @@ proc cmake_package*(srcDir: string;
     # across re-configures. Recipes that need different link flags can
     # still override via their own cacheVars entries — CMake honours
     # the LAST -D<var>=<value> wins.
-    var transitiveLinkerFlags = "-Wl,--copy-dt-needed-entries"
-    for libDir in linkLibraryDirs:
-      transitiveLinkerFlags.add(" -Wl,-rpath-link," & libDir)
+    #
+    # Not under a zig target: zig's driver links with lld, refuses
+    # ``--copy-dt-needed-entries`` outright ("unsupported linker arg"), and
+    # -- like any lld link -- resolves a library's own DT_NEEDED symbols
+    # without needing them copied or found through ``-rpath-link``. The
+    # flag set is empty there, so nothing is appended.
+    var transitiveLinkerFlags = ""
+    if zigTarget == nil:
+      transitiveLinkerFlags = "-Wl,--copy-dt-needed-entries"
+      for libDir in linkLibraryDirs:
+        transitiveLinkerFlags.add(" -Wl,-rpath-link," & libDir)
     proc appendLinkerFlags(cacheKey: string) =
+      if transitiveLinkerFlags.len == 0:
+        return
       var lastMatch = -1
       for i, value in effectiveCacheVars:
         if value.startsWith(cacheKey & "="):
