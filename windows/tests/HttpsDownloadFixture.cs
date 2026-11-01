@@ -92,6 +92,12 @@ namespace VerifiedDownloadTests
         public int TcpConnections, Handshakes, Requests, Headers, BodyChunks, BodyBytes, Redirects;
         public volatile string RequestedPath = "";
         public volatile string Failure = "";
+        // The refusals below are EXPECTED by the certificate controls, so they
+        // must not become `Failure` -- but discarding them leaves a handshake
+        // that died before certificate validation indistinguishable from one
+        // the client refused on trust, which are opposite outcomes. Recorded
+        // separately so a control can say which it got.
+        public volatile string HandshakeRefusal = "";
         private long firstBody, lastBody;
         public Evidence(string id, string mode) { Id = id; Mode = mode; }
         public void Body(int count)
@@ -232,8 +238,11 @@ namespace VerifiedDownloadTests
                     }
                 }
             }
-            catch (IOException) { /* Expected when a real client cancels or rejects TLS. */ }
-            catch (AuthenticationException) { /* Certificate refusal controls. */ }
+            // Still swallowed -- a client that cancels or refuses TLS is the
+            // controls' intended behaviour, not a fixture fault -- but the
+            // reason is kept now instead of dropped.
+            catch (IOException ex) { transaction.HandshakeRefusal = "IOException: " + ex.ToString(); }
+            catch (AuthenticationException ex) { transaction.HandshakeRefusal = "AuthenticationException: " + ex.ToString(); }
             catch (Exception ex) { transaction.Failure = ex.ToString(); }
             finally
             {
