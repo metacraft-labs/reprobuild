@@ -847,25 +847,27 @@ jobs:
           # what this step exists to do -- rather than pinning a revision
           # here that would need moving by hand whenever `codetracer=dev`
           # advances.
-          cat > "$RUNNER_TEMP/locked-revision.py" <<'LOCKED_REV_EOS'
-          import re
-          import sys
-
-          lock, want = sys.argv[1], sys.argv[2]
-          text = open(lock, encoding="utf-8").read()
-          for entry in re.finditer(r"\{[^{}]*\}", text):
-              body = entry.group(0)
-              if '"%s"' % want not in body or "coord_kind" not in body:
-                  continue
-              found = re.search(r'revision = "([0-9a-f]{40})"', body)
-              if found:
-                  sys.stdout.write(found.group(1))
-                  break
-          LOCKED_REV_EOS
           tf_dir="$siblings_root/codetracer-trace-format-nim"
           if [ -d "$tf_dir/.git" ]; then
-            tf_rev="$(python3 "$RUNNER_TEMP/locked-revision.py" \
-              "$ct_root/repro.lock" codetracer-trace-format-nim)"
+            # grep, not python3: python3 reaches this step only through
+            # `dev-exec` (as the credential helper above uses it); a bare
+            # python3 is not on PATH here, and run 41280384161 died at this
+            # line with "python3: command not found", exit 127. Reading one
+            # field needs no interpreter. The lock keeps its
+            # entries as brace groups on very long lines, so match the groups
+            # first, then the one that both names this dependency IN QUOTES
+            # and carries a coord_kind -- the quotes exclude the consumer's
+            # own `depends = "...,codetracer-trace-format-nim,..."` list, and
+            # coord_kind excludes its `packages` entry, leaving exactly one.
+            tf_rev="$(grep -o '{[^{}]*}' "$ct_root/repro.lock" \
+              | grep '"codetracer-trace-format-nim"' \
+              | grep 'coord_kind' \
+              | grep -oE 'revision = "[0-9a-f]{40}"' \
+              | head -1 | grep -oE '[0-9a-f]{40}' || true)"
+            # `|| true` above is load-bearing under `set -euo pipefail`:
+            # without it a lock that does not name this dependency aborts the
+            # step AT THE ASSIGNMENT, printing nothing, so the refusal below
+            # would never run and the step would fail with no reason given.
             if [ -z "$tf_rev" ]; then
               echo "reconcile: $ct_root/repro.lock names no revision for" \
                 "codetracer-trace-format-nim" >&2
