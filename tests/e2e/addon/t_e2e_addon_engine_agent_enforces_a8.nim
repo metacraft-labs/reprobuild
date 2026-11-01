@@ -119,6 +119,11 @@ proc manifestOf(sequence: uint64; text: string; withBlock = true): DeployManifes
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
+  # Which engine this verdict is about: the store path of the closure the
+  # guest ran (REPRO_ADDON_ENGINE_CLOSURE), so a red run under a mutated
+  # engine and a green run under the tree's own are told apart by their
+  # records alone.
+  record["engineClosure"] = %engine
   g.installEngineClosure(engine)
   let (ok, anchors) = g.bootstrapAddonWithAnchors(repro, step)
   if not ok: return

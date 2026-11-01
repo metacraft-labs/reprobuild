@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 34,
     "nimTestBinaries": 2584,
     "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 721,
+    "pureUnitTests": 720,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
     "testEntries": 2624
   },
@@ -36,7 +36,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 2,
       "defines": [],
       "dependencyShape": [
         "repro_addon"
@@ -44,7 +44,6 @@
       "owner": "libs/repro_addon",
       "sources": [
         "libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim",
-        "libs/repro_addon/tests/t_addon_engine_agent_route.nim",
         "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim"
       ],
       "targetOs": "soAny"
@@ -1506,8 +1505,8 @@
       "graph-fixture": 18,
       "integration": 1431,
       "platform/destructive": 161,
-      "pure unit": 721,
-      "unclassified": 293
+      "pure unit": 720,
+      "unclassified": 294
     },
     "graphOwnedTestArtifacts": [
       {
@@ -8344,8 +8343,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_engine_agent_route",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -8354,8 +8353,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_engine_agent_route.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
