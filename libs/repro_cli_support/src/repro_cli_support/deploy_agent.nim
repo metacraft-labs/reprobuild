@@ -552,7 +552,10 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   when defined(linux):
     let (addonState, pointerUntrusted) = hostAddonStateDirChecked()
     let route = engineAgentRoute(addonState, flags.stateDir, pointerUntrusted)
-    if route == earRefuseUntrustedPointer:
+    # The falsifying build (engine-agent-pointer-refusal-unwired) does not
+    # act on the route here, so the tick falls through to the plain apply.
+    if route == earRefuseUntrustedPointer and
+        not agentMutated("engine-agent-pointer-refusal-unwired"):
       # Spec §9, decision 29: the pointer says this is an add-on host, and
       # it cannot be trusted to say where the add-on's state is. An A8
       # apply or none: none, until bootstrap's pointer is repaired.

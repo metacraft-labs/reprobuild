@@ -51,6 +51,7 @@ import repro_peer_cache/auth as peerAuth
 
 import ./addon_testbed
 import ./agent_e2e_support
+from repro_addon/addon_apply import DefaultStateDir
 
 const
   Gate = "e2e_addon_engine_agent_enforces_a8"
@@ -218,6 +219,27 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("an older issuedAt than the last accepted is aoStale " &
        "(issued_at_regressed)", t10.errorCode == "issued_at_regressed" and
        notWritten(), $t10)
+
+  # 8. An untrusted add-on state-directory pointer (spec §9, decision 29).
+  # Made writable by its group, as root, the pointer can no longer be
+  # trusted to say where the add-on's state is; the engine's agent must
+  # refuse the tick (exit 2, nothing applied) rather than read it as "no
+  # add-on here" and take the plain apply. The pointer is put back exactly
+  # as it was afterwards. Falsifier: an engine built with
+  # engine-agent-pointer-refusal-unwired, whose CLI no longer acts on the
+  # route, applies the marker.
+  const Pointer = "/var/lib/repro/addon-state-dir"
+  let had = g.exec("test -f " & Pointer).exitCode == 0
+  if not had:
+    discard g.run("printf '%s\n' " & DefaultStateDir & " > " & Pointer &
+                  " && chmod 0644 " & Pointer)
+  discard g.run("chmod g+w " & Pointer)
+  var untrusted = manifestOf(11, marker)
+  let t11 = g.tick(signer, untrusted)
+  discard g.run(if had: "chmod g-w " & Pointer else: "rm -f " & Pointer)
+  step("an untrusted state-directory pointer refuses the engine's tick",
+       t11.exitCode == 2 and "pointer is not trusted" in t11.output and
+       notWritten(), $t11.exitCode & "\n" & t11.output)
 
 suite Gate:
   test "the engine's deploy-agent on an add-on host enforces every A8 rule":
