@@ -307,6 +307,10 @@
 ##                                            gives up, so a failing or
 ##                                            hanging check holds the
 ##                                            switch past its deadline
+## ``cross-prefix-glibc-unchecked``           preflight accepts a profile
+##                                            compiler cross-built against a
+##                                            newer glibc than the host's
+##                                            (§7.9, the glibc exception)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -401,7 +405,9 @@ const
                           "floor-only-on-confirm",
                           # Milestone A5: the confirm-or-revert gate's
                           # timing falsifier.
-                          "confirm-overruns-deadline"]
+                          "confirm-overruns-deadline",
+                          # §7.9: the cross prefix's glibc check.
+                          "cross-prefix-glibc-unchecked"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

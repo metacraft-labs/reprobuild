@@ -289,6 +289,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"repro-addon-recovery-\" & $getCur..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim",
+    binary: "build/test-bin/t_addon_cross_prefix_needs_the_sysroot_glibc",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim",
     binary: "build/test-bin/t_addon_etc_write_never_follows_symlinks",
     defines: @[],
