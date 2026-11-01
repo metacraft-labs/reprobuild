@@ -20,10 +20,8 @@
 
 import std/[os, strutils]
 
-from test_certificates/certificate as tccert import nil
-from test_certificates/find as tcfind import nil
+from test_certificates/git as tcgit import nil
 from test_certificates/hook as tchook import nil
-from test_certificates/note_framing as tcframing import nil
 from test_certificates/notes as tcnotes import nil
 from test_certificates/roots as tcroots import nil
 from test_certificates/scopes as tcscopes import nil
@@ -114,31 +112,61 @@ proc propagateCertificates*(repoRoot, remoteName, remoteLocation,
       discard
   cpNotPropagated
 
-proc storedCertificatesNotInNote*(contentId, note: string): int =
-  ## How many of the local store's certificates for ``contentId`` the note blob
-  ## does not hold, compared as the writer rule does, by payload hash (Transport
-  ## §3.1). A candidate that cannot be read counts for nothing: `notes publish`
-  ## reports those, and this is only a hint to run it. Never raises.
+proc carryCertificatesOfCommit*(repoRoot, remoteName, commit: string;
+                                report: proc (line: string)):
+    CertificatePropagation =
+  ## Get the store's certificates for ``commit`` to ``remoteName`` when no hook
+  ## will: ``prePushHook`` carries what a push introduces (Tooling §4.2), which
+  ## is nothing for a commit the remote already has and for a new branch at a
+  ## commit a remote-tracking ref reaches. The same two library calls, under the
+  ## same switch and the same budget.
+  ##
+  ## With no certificate for the commit it stays off the network, so a closure
+  ## of many published members costs nothing. With one it always pushes, whether
+  ## or not this call added to the note: a note published earlier may be one
+  ## whose push failed, and a push the remote has already seen is one round trip.
+  ## Never raises: what could not be carried is reported with the remedy, and the
+  ## receiving gate decides what that means (§4.3).
   try:
-    var noted: seq[string]
-    for piece in tcframing.splitNote(note):
-      if piece.kind == tcframing.pkRecord:
-        noted.add(piece.payloadSha256)
-    for candidate in tcfind.findById(tcroots.nativeRoots(), contentId).candidates:
-      if not candidate.parsed:
-        continue
-      let parsed = tccert.parseCertificate(readFile(candidate.path))
-      if not parsed.ok:
-        continue
-      let record = tccert.canonicalRecord(parsed.certificate)
-      if not record.ok:
-        continue
-      let piece = tcframing.recordPiece(record.payload)
-      if piece.kind == tcframing.pkRecord and piece.payloadSha256 notin noted:
-        noted.add(piece.payloadSha256)
-        inc result
-  except CatchableError:
-    return 0
+    if switchedOff():
+      report(ReportPrefix & CertificateHookSwitchVariable & "=" &
+        getEnv(CertificateHookSwitchVariable) & ": " & commit &
+        " not carried")
+      return cpOptedOut
+    let options = hookOptions(report)
+    let budget = tcgit.deadlineIn(options.push.timeoutMs)
+    let published = tcnotes.publishNotes(repoRoot, tcroots.nativeRoots(),
+      [commit], deadline = budget, gitExe = options.push.gitExe)
+    var problems = published.problems
+    var appended, certificates = 0
+    for tree in published.trees:
+      appended += tree.appended.len + tree.replaced.len
+      certificates += tree.appended.len + tree.replaced.len + tree.present.len
+      for line in tree.notPublished:
+        problems.add("not published: " & line)
+    if certificates > 0:
+      var pushOptions = options.push
+      pushOptions.timeoutMs = max(tcgit.remainingMs(budget), 1)
+      let pushed = tcnotes.pushNotes(repoRoot, remoteName,
+        options = pushOptions)
+      problems.add(pushed.problems)
+      if pushed.ok and (appended > 0 or pushed.outcome != tcnotes.soUpToDate):
+        report(ReportPrefix & $certificates & " certificate(s) for " & commit &
+          ": " & $pushed.outcome & " to " & remoteName)
+    if problems.len == 0:
+      return cpPropagated
+    for problem in problems:
+      report(ReportPrefix & "warning: " & problem)
+    report(ReportPrefix & "warning: NOT fully propagated. To carry them: " &
+      "test-certificates notes publish " & commit &
+      " && test-certificates notes push " & remoteName)
+  except Exception as err: # Defect included, deliberately (see above)
+    try:
+      report(ReportPrefix & "warning: internal error: " & err.msg &
+        "; not propagated, and the push continues")
+    except Exception:
+      discard
+  cpNotPropagated
 
 proc certificatePropagationEnvironmentFindings*(): seq[string] =
   ## What in this process's environment would stop every push made from it. An

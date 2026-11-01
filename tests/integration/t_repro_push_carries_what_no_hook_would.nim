@@ -1,25 +1,23 @@
-## ``repro push`` has no notes step of its own: its ``git push`` runs the managed
-## ``pre-push`` hook, and that hook is what carries certificates to the remote.
+## ``repro push`` leaves carrying certificates to its ``git push``'s managed
+## ``pre-push`` hook, and carries them itself only where that hook has nothing to
+## do: a push that introduces no commit (Tooling §4.2).
 ##
 ## A certified commit, its certificate in the store and already noted in the
-## clone's local notes ref, so a notes step in ``repro push`` would have something
-## to send. Against a real ``required`` gateway:
+## clone's local notes ref. Against a real ``required`` gateway:
 ##
 ##   * WITH THE HOOK'S PROPAGATION OFF (``TEST_CERTIFICATES_HOOK=off``: the tool is
 ##     a linked library, so there is no process to replace with a stub), no notes
 ##     ref reaches the gateway, it refuses the branch, and ``repro push`` passes on
-##     the gateway's own words, which name the missing note and the remedy. A
-##     notes step in ``repro push`` runs regardless of that variable.
+##     the gateway's own words, which name the missing note and the remedy. So
+##     for a commit the push introduces, ``repro push`` itself sends nothing.
 ##   * THE SAME ``repro push`` with propagation on is accepted, and the note is on
 ##     the upstream under the pushed tree. Removing the hook call reddens this.
-##   * AN ALREADY-PUBLISHED COMMIT pushes nothing (Tooling §4.2: a push that
-##     introduces no commit publishes no note), so a certificate issued after it
-##     was published stays local. A notes step in ``repro push``, which used to
-##     run for exactly this case, reddens this. ``repro push`` says so and gives
-##     the remedy, ``notes publish`` then ``notes push``, and the remedy works.
-##   * A NEW BRANCH at a commit a remote-tracking ref already reaches introduces
-##     nothing either (Tooling §4.2). A ``required`` gateway refuses it, naming
-##     the same remedy, and the retry after that remedy is accepted.
+##   * AN ALREADY-PUBLISHED COMMIT pushes nothing, so no hook runs, and a
+##     certificate issued after it was published is carried by ``repro push``.
+##   * A PLAIN ``git push`` of A NEW BRANCH at a commit a remote-tracking ref
+##     already reaches introduces nothing either, and stays as Tooling §4.2 has
+##     it: a ``required`` gateway refuses it, naming the remedy, and the retry
+##     after that remedy is accepted.
 ##
 ## Real gateway, real hooks, the built ``repro``. No mocks.
 
@@ -49,8 +47,8 @@ proc carryByHand(fx: StoreFixture; commit: string) =
   checkpoint(pushed.problems.join("; "))
   check pushed.ok
 
-suite "repro push carries no notes of its own":
-  test "only the hook carries the note":
+suite "repro push carries what no hook would":
+  test "the hook carries a pushed commit, repro push an already-published one":
     let fx = setupStoreFixture(
       requiredPolicy(@["t-unit"], @[currentPlatformTag()]), "push-no-notes")
     defer: removeDir(fx.scratch)
@@ -103,9 +101,8 @@ suite "repro push carries no notes of its own":
     check noteOnRemote(fx.upstreamBare, tree).count("# --- test-certificate ---") == 1
     check noteOnRemote(fx.upstreamBare, commit) == ""
 
-    # ---- already published: nothing is pushed, so no hook and no note --------
-    # A second platform's certificate for content the remote already has. This
-    # command does not send it, and says what does.
+    # ---- already published: nothing is pushed, so no hook runs ---------------
+    # A second platform's certificate for content the remote already has.
     let later = signedCertFor(fx, "git-tree-sha1:" & tree, commit,
       platform = "linux/second")
     check publishCertificateToLocalStore(later, fx.libAPath).written
@@ -113,19 +110,13 @@ suite "repro push carries no notes of its own":
     checkpoint("already published: " & again.output)
     check again.code == 0
     check "already-published" in again.output
-    check noteOnRemote(fx.upstreamBare, tree).count("# --- test-certificate ---") == 1
-    check "1 stored certificate(s) for this content are not in the local notes" in
-      again.output
-    check ("test-certificates notes publish " & commit) in again.output
-
-    # ---- the remedy it names works ------------------------------------------
-    carryByHand(fx, commit)
     check noteOnRemote(fx.upstreamBare, tree).count("# --- test-certificate ---") == 2
+    check "test-certificates notes publish" notin again.output
     let settled = reproPush(fx)
     check settled.code == 0
-    check "stored certificate(s)" notin settled.output
+    check "certificate(s) for " notin settled.output
 
-  test "a new branch at a commit a remote-tracking ref reaches":
+  test "a plain git push of a new branch at a commit a remote-tracking ref reaches":
     let fx = setupStoreFixture(
       requiredPolicy(@["t-unit"], @[currentPlatformTag()]), "push-new-branch")
     defer: removeDir(fx.scratch)

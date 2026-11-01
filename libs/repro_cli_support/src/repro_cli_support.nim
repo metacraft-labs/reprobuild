@@ -64400,6 +64400,10 @@ type
   ReprobuildLockSourceKind* = enum
     rlsCommittedLock  ## the default: ``repro.lock`` is tracked in the content
     rlsRecordStore    ## opted in: lock records keyed by commit, out of tree
+    rlsRecordPending
+      ## opted in, and judged before this push's own gate writes the record:
+      ## nothing can be read yet, so the certificate decides, and that gate and
+      ## the receiving side check the record afterwards.
 
   ReprobuildLockSource* = object
     ## Where a project's lock lives, which decides where the framework-specific
@@ -64413,6 +64417,9 @@ proc committedLockSource*(): ReprobuildLockSource =
 
 proc recordStoreLockSource*(lockRecordsDir: string): ReprobuildLockSource =
   ReprobuildLockSource(kind: rlsRecordStore, lockRecordsDir: lockRecordsDir)
+
+proc pendingLockRecordSource*(): ReprobuildLockSource =
+  ReprobuildLockSource(kind: rlsRecordPending)
 
 proc reprobuildLockVerdict*(source: ReprobuildLockSource;
                             state: CertificateState):
@@ -64438,6 +64445,8 @@ proc reprobuildLockVerdict*(source: ReprobuildLockSource;
     of lacPresent: (fvValid, "")
     of lacAbsent: (fvInvalid, resolved.detail)
     of lacUnknown: (fvUnverifiable, resolved.detail)
+  of rlsRecordPending:
+    (fvValid, "")
 
 proc reprobuildLockValidity*(source: ReprobuildLockSource):
     FrameworkValidityCheck =
@@ -71502,10 +71511,10 @@ type
       ## resolved to a declared repo NAME to seed the closure.
     syncMode: PushSyncMode
     certify: bool
-      ## ``--certify`` (default true): obtain the test certificate.
-      ## Obtaining it is the TC (test-certificate) campaign's
-      ## job and is NOT wired yet, so this is an honest documented no-op
-      ## (see ``runPushCertifyStub``). ``--no-certify`` skips it entirely.
+      ## ``--certify`` (default true): judge what the push publishes by content
+      ## and certify the worktree when that is what is missing
+      ## (``planPushCertification``). ``--no-certify`` leaves the decision to
+      ## the gates. Neither affects carrying what the store already holds.
     toolProvisioning: ToolProvisioningMode
     json: bool
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
@@ -71527,6 +71536,8 @@ type
     notices: seq[string]
       ## What this member's push said about its certificates, and what it did not
       ## carry. Informational: none of it changes the outcome.
+    certified: seq[string]
+      ## The names this command certified for this member's worktree content.
 
   PushSyncResult = object
     ## One closure member's ``--sync`` reconcile outcome. ``integrated`` is
@@ -71549,7 +71560,6 @@ type
     syncMode: string
     syncResults: seq[PushSyncResult]
     repos: seq[PushRepoResult]
-    certifyDeferred: bool       ## ``--certify`` requested but TC path not wired.
     lockPublished: bool
     lockDiagnostic: string
     stoppedRepo: string
@@ -71929,24 +71939,6 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
       return
     result.action = "rebase"
     result.integrated = true
-
-proc runPushCertifyStub(report: var PushReport; certify: bool) =
-  ## RA-25 certify FLAG + pipeline slot. Obtaining the certificate is the
-  ## TC (test-certificate) campaign's deliverable and is NOT wired here yet:
-  ## this is the HONEST place in the pipeline where certification would run.
-  ## ``--certify`` (default) records that the step is deferred (the push
-  ## relies on whatever certificates are already in the local store);
-  ## ``--no-certify`` skips even that. We NEVER fake running tests or issuing a
-  ## certificate.
-  if certify:
-    report.certifyDeferred = true
-    stderr.writeLine("repro push: certification is not wired yet " &
-      "(deferred to the test-certificate campaign); this push relies on " &
-      "whatever certificates are already in the local store. Use " &
-      "--no-certify to " &
-      "silence this notice.")
-  else:
-    report.certifyDeferred = false
 
 proc configuredPushLocationValues(identity: GitToolIdentity; repoRoot,
     remoteName: string): tuple[ok: bool; values: seq[string];
@@ -72642,27 +72634,295 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
   result.ok = true
   result.verifiedLocalHead = localOid
 
-proc uncarriedCertificateNotice(identity: GitToolIdentity; repoAbs, headSha,
-                                remote: string): string =
-  ## What to say about a member that is already published: it is not pushed, so
-  ## no hook runs for it (Tooling §4.2), and a certificate issued since then is
-  ## still only in the store. Empty when there is nothing to say. Never fails the
-  ## push: a note or tree that cannot be read just yields no notice.
-  let tree = revParse(identity, repoAbs, headSha & "^{tree}")
-  if tree.len == 0:
-    return ""
-  let note = readNoteBlob(identity.binaryPath, repoAbs, tree,
-    certificateNotesRef)
-  if note.status == gorUnreadable:
-    return ""
-  let missing = storedCertificatesNotInNote(formatContentId(
-    if tree.len == 64: caGitTreeSha256 else: caGitTreeSha1, tree), note.body)
-  if missing == 0:
-    return ""
-  $missing & " stored certificate(s) for this content are not in the local " &
-    "notes, and an already-published member runs no hook. To carry them: " &
-    "test-certificates notes publish " & headSha &
-    " && test-certificates notes push " & remote
+proc pushIntroducedCommits(identity: GitToolIdentity; repoAbs: string;
+                           observed: PushPreflightRepo):
+    tuple[ok: bool; commits: seq[string]; problem: string] =
+  ## The commits this member's ``git push <remote> HEAD:<branch>`` introduces, by
+  ## test-certificates Tooling §4.2
+  ## (https://github.com/metacraft-labs/test-certificates-spec/blob/latest/Tooling.md),
+  ## newest first. It has one entry per push URL, so §4.2's "other entries" do not
+  ## arise, and the union over the URLs is the answer. The reference library works
+  ## this out inside its hook and does not export it; the hook itself is what
+  ## this must agree with, and ``t_repro_push_certifies_only_content_that_was_not_tested``
+  ## checks that it does for the rows ``repro push`` can reach.
+  ##
+  ## The remote objects come from the advertisement the preflight verified, not
+  ## from a remote-tracking ref that may be stale.
+  var seen = initHashSet[string]()
+  var bounds: seq[seq[string]]
+  for destination in observed.advertisementFingerprint.splitLines():
+    let fields = destination.split('\t')
+    if fields.len < 3:
+      continue
+    # A branch the remote lacks, or a tip this repository never fetched: the
+    # remote-tracking refs stand in for it (§4.2's second exclusion).
+    let bound =
+      if fields[2] != "<missing>" and gitRunPlainQuery(identity,
+          ["-C", repoAbs, "rev-parse", "--verify", "--quiet",
+           fields[2] & "^{commit}"]).code == 0:
+        @["^" & fields[2]]
+      else:
+        @["--not", "--remotes=" & observed.remoteName]
+    if bound notin bounds:
+      bounds.add(bound)
+  if bounds.len == 0:
+    bounds.add(@["--not", "--remotes=" & observed.remoteName])
+  for bound in bounds:
+    let listed = gitRunPlainQuery(identity,
+      @["-C", repoAbs, "rev-list", observed.headSha] & bound)
+    if listed.code != 0:
+      return (false, @[], "the commits this push introduces could not be " &
+        "listed in " & repoAbs & " (git rev-list exit " & $listed.code & ")")
+    for line in listed.output.splitLines():
+      let commit = line.strip()
+      if commit.len > 0 and not seen.containsOrIncl(commit):
+        result.commits.add(commit)
+  result.ok = true
+
+type
+  PushCertifyDecision = object
+    ## What the certify step of ``repro push`` decided for one member.
+    refused: bool
+    diagnostic: string
+    remediation: string
+    notices: seq[string]
+    certifyNames: seq[string]
+      ## What to run on this host, for the worktree's content.
+
+  PushedCommitJudgement = object
+    ## One pushed commit against the requirement its own ``repro.lock`` records.
+    tree: string
+    applies: bool     ## A requirement is in effect, and it asks for something.
+    malformed: string ## The snapshot does not parse: never reads as no requirement.
+    unread: string    ## The lock could not be read; the receiving side decides.
+    requirement: GateRequirement
+    verdict: ReprobuildCoverageVerdict
+    lookup: LocalStoreLookup
+
+proc judgePushedCommit(repoAbs, commit: string; target: BranchRef;
+                       keys: RegisteredKeyStoreLoad;
+                       lockSource: ReprobuildLockSource):
+    PushedCommitJudgement =
+  ## The client gate's question (``certificateGate``), asked of one commit: the
+  ## requirement from the commit's own snapshot for the destination branch, and
+  ## the local store's candidates under the commit's tree.
+  let evaluated = commitUnderEvaluation(repoAbs, commit)
+  let lock = readContentFile(repoAbs, CommittedLockFileName, evaluated.content)
+  result.requirement = gateRequirementFromLock(lock.status, lock.bytes,
+    lock.reason, target, cgkPush)
+  if result.requirement.error.len > 0:
+    if result.requirement.source == gpsSnapshot:
+      result.malformed = result.requirement.error
+    else:
+      result.unread = result.requirement.error
+    return
+  if result.requirement.noRule.len > 0 or result.requirement.mode == cgmOff or
+      result.requirement.requires.len == 0:
+    return
+  result.applies = true
+  result.lookup = findCertificatesInLocalStore(evaluated)
+  result.verdict = evaluateRequirementCoverage(result.lookup.found, evaluated,
+    result.requirement.requires, keys, lockSource,
+    (if result.lookup.searchFailed: result.lookup.problems else: @[]))
+
+proc certifiableHere(verdict: ReprobuildCoverageVerdict): seq[string] =
+  ## The unmet names a run on this host can produce: `repro certify` issues for
+  ## this host's platform and no other.
+  let here = currentPlatformTag()
+  for unmet in verdict.unmet:
+    if (unmet.platform == here or unmet.platform == anyCertificatePlatform) and
+        unmet.name notin result:
+      result.add(unmet.name)
+
+proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
+                           observed: PushPreflightRepo;
+                           introduced: seq[string];
+                           keys: RegisteredKeyStoreLoad;
+                           lockSource: ReprobuildLockSource):
+    PushCertifyDecision =
+  ## The lookup half of the certify step, for a member about to be published. It
+  ## judges every commit the push introduces, and the tip even when that is
+  ## nothing, since a gateway judges the tip of a new branch all the same. Each
+  ## commit answers to the policy of its own ``repro.lock``, and a tree is judged
+  ## once: certificates, like the lock, follow the content.
+  ##
+  ## * Covered: nothing to do, the normal case after "test, then commit".
+  ## * Uncovered, and the worktree holds that content: the names go to
+  ##   ``certifyNames``. The preflight has established that the checkout is clean,
+  ##   so the worktree's content IS ``HEAD``'s tree, and any commit with that tree
+  ##   is served by the same run.
+  ## * Uncovered, and it is other content: refused. There is no temporary worktree
+  ##   to test it in: only the developer can say that an intermediate state is
+  ##   meant to work, and rewriting history may be the better answer.
+  ##
+  ## This is stricter than ``certificateGate`` and the gateway, which judge tips:
+  ## they are the enforcement point and can answer only for what arrives, while
+  ## this step is the last time anything can still be run. ``--no-certify`` hands
+  ## the push back to them.
+  ##
+  ## A name that only another host can produce cannot be helped from here. Under
+  ## ``required`` it refuses now, since the gate would, and before tests run for
+  ## nothing. Under ``advisory`` it is reported, or a policy naming two platforms
+  ## would refuse every push from either of them.
+  let target = branchRefFromRef(observed.destinationRef)
+  let headTree = commitTreeOid(identity.binaryPath, repoAbs, observed.headSha)
+  if not headTree.ok:
+    return PushCertifyDecision(refused: true, diagnostic: headTree.diagnostic,
+      remediation: "repair the checkout and retry 'repro push'")
+  var judged = @[observed.headSha]
+  for commit in introduced:
+    if commit != observed.headSha:
+      judged.add(commit)
+  var seenTrees = initHashSet[string]()
+  var refusals: seq[string]
+  var remedies: seq[string]
+  var unverifiable = false
+  for commit in judged:
+    let tree = commitTreeOid(identity.binaryPath, repoAbs, commit)
+    if not tree.ok:
+      return PushCertifyDecision(refused: true, diagnostic: tree.diagnostic,
+        remediation: "repair the checkout and retry 'repro push'")
+    if seenTrees.containsOrIncl(tree.tree):
+      continue
+    let short = commit[0 ..< min(12, commit.len)]
+    let judgement = judgePushedCommit(repoAbs, commit, target, keys, lockSource)
+    if judgement.malformed.len > 0:
+      return PushCertifyDecision(refused: true,
+        diagnostic: "commit " & short & ": " & judgement.malformed,
+        remediation: "run 'repro lock refresh', commit it, and retry 'repro push'")
+    if judgement.unread.len > 0:
+      result.notices.add("certificates: commit " & short & " not judged: " &
+        judgement.unread)
+    if not judgement.applies or judgement.verdict.outcome == voCovered:
+      continue
+    let required = judgement.requirement.mode == cgmRequired
+    let detail = describeCoverageVerdict(judgement.verdict)
+    let applied = describeGateRequirement(judgement.requirement)
+    if judgement.verdict.outcome == voUnverifiable:
+      # Verification §7: not the same finding as "not covered", and no test run
+      # changes it.
+      if required:
+        unverifiable = true
+        refusals.add("the certificates for commit " & short &
+          " could not be evaluated: " & detail & " (" & applied & ")")
+      else:
+        result.notices.add("certificates: commit " & short &
+          " could not be evaluated: " & detail & " (" & applied & ")")
+      continue
+    let here = certifiableHere(judgement.verdict)
+    let lacksElsewhere = judgement.verdict.unmet.anyIt(
+      it.platform != currentPlatformTag() and
+      it.platform != anyCertificatePlatform)
+    let isWorktree = tree.tree == headTree.tree
+    if isWorktree:
+      for name in here:
+        if name notin result.certifyNames:
+          result.certifyNames.add(name)
+      if not lacksElsewhere:
+        continue
+    if not required and (isWorktree or here.len == 0):
+      result.notices.add("certificates: commit " & short & " lacks " &
+        unmetRemedies(judgement.verdict).join("; ") & " (" & applied & ")")
+      continue
+    let subject = gitRunPlainQuery(identity,
+      ["-C", repoAbs, "log", "-1", "--format=%s", commit]).output.strip()
+    refusals.add("commit " & short &
+      (if subject.len > 0: " (" & subject & ")" else: "") &
+      (if isWorktree: " is this checkout's content, and is not covered: "
+       else: " is not this checkout's content, and is not covered: ") & detail &
+      " (" & applied & ")")
+    if isWorktree or here.len == 0:
+      for remedy in unmetRemedies(judgement.verdict):
+        if remedy notin remedies: remedies.add(remedy)
+    else:
+      let names = judgement.verdict.unmet.mapIt(it.name).deduplicate()
+      remedies.add("check " & short & " out and run 'repro test' (or 'repro " &
+        "certify " & names.join(" ") & "' for exactly what it lacks)")
+  if refusals.len > 0:
+    result.refused = true
+    result.certifyNames.setLen(0)
+    result.diagnostic = refusals.join("; ")
+    result.remediation =
+      if unverifiable and remedies.len == 0:
+        "fix what is named (an unreadable key store or certificate store, an " &
+          "algorithm this reprobuild cannot compute, a record in a schema it " &
+          "does not implement); re-running the tests changes nothing"
+      else:
+        remedies.join("; ") & ", then retry 'repro push'; 'repro push " &
+          "--no-certify' leaves the decision to the pre-push and receiving gates"
+
+proc runCertifyChild(args: PushArgs; repoAbs: string;
+                     names: seq[string]): int =
+  ## ``repro certify <names>`` in the member's checkout: a child, because the
+  ## build it runs registers process-wide executors and stops the process on its
+  ## own failures. Its report is what the developer needs, and it arrives while
+  ## the tests run. It goes to stderr so ``--json`` keeps stdout to the report.
+  var argv = @["certify"] & names & @[
+    "--tool-provisioning=" & modeName(args.toolProvisioning),
+    "--workspace-root=" & args.workspaceRoot,
+    "--current-repo=" & repoAbs]
+  let child = uncontrolledStartProcess(publicCliImagePath(), workingDir = repoAbs,
+    args = argv, options = {poStdErrToStdOut})
+  defer: child.close()
+  let output = child.outputStream
+  var line = ""
+  while output.readLine(line):
+    stderr.writeLine(line)
+  child.waitForExit()
+
+proc certifyPushedWorktree(identity: GitToolIdentity; args: PushArgs;
+                           repoAbs: string; observed: PushPreflightRepo;
+                           decision: PushCertifyDecision;
+                           keys: RegisteredKeyStoreLoad;
+                           lockSource: ReprobuildLockSource):
+    tuple[ok: bool; names: seq[string]; diagnostic, remediation: string;
+          notices: seq[string]] =
+  ## The running half of the certify step: test the worktree, then ask the gate's
+  ## question again rather than trust the exit code. A run can pass and still
+  ## cover nothing: a refused issuance precondition exits with the build's code,
+  ## and a lock refresh moves the content away from the commit being pushed.
+  stderr.writeLine("repro push: certifying " & decision.certifyNames.join(", ") &
+    " for " & observed.headSha[0 ..< min(12, observed.headSha.len)] & " in " &
+    repoAbs)
+  let code =
+    try:
+      runCertifyChild(args, repoAbs, decision.certifyNames)
+    except OSError, IOError:
+      result.diagnostic = "'repro certify' could not be started in " & repoAbs &
+        ": " & getCurrentExceptionMsg()
+      result.remediation = "run 'repro certify " &
+        decision.certifyNames.join(" ") & "' there, then retry 'repro push'"
+      return
+  if code != 0:
+    result.diagnostic = "'repro certify " & decision.certifyNames.join(" ") &
+      "' failed with exit code " & $code & " in " & repoAbs &
+      ", so this member was not pushed"
+    result.remediation = "fix what it reported above, then retry 'repro push'"
+    return
+  let dirty = gitRunPlainQuery(identity,
+    ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
+  if dirty.code != 0 or dirty.output.strip().len > 0:
+    result.diagnostic = "certifying changed the working tree of " & repoAbs &
+      (if dirty.code == 0: " (" & dirty.output.strip() & ")" else: "") &
+      ", so what it certified is not commit " & observed.headSha
+    result.remediation = "review the change; if it is a lock refresh, commit " &
+      "it, and retry 'repro push'"
+    return
+  let judged = judgePushedCommit(repoAbs, observed.headSha,
+    branchRefFromRef(observed.destinationRef), keys, lockSource)
+  if judged.applies and judged.verdict.outcome != voCovered:
+    let shortfall = describeCoverageVerdict(judged.verdict) & " (" &
+      describeGateRequirement(judged.requirement) & ")"
+    if judged.requirement.mode == cgmRequired:
+      result.diagnostic = "'repro certify' passed and commit " &
+        observed.headSha & " is still not covered: " & shortfall
+      result.remediation = "fix what it reported above about the certificate, " &
+        "then retry 'repro push'"
+      return
+    result.notices.add("certificates: still not covered after certifying: " &
+      shortfall)
+  result.ok = true
+  result.names = decision.certifyNames
 
 proc executePush(args: PushArgs): PushReport =
   result.workspaceRoot = args.workspaceRoot
@@ -73007,7 +73267,55 @@ proc executePush(args: PushArgs): PushReport =
         result.exitCode = 2
         return
 
-  # ---- 3. closure push in topological order ------------------------------
+  # ---- 3. certify by content: the decisions, before anything is published --
+  # Here, after any sync, because a sync's merge or rebase is new content. Every
+  # refusal this step can make without running a test is made now, for the whole
+  # closure, so that one member's uncovered commit does not leave an earlier
+  # dependency published. Running the tests has to wait for the member's turn:
+  # issuance requires its dependencies to be published already, and until then
+  # `repro certify` would refuse for that reason alone.
+  var pushCertification = initTable[string, PushCertifyDecision]()
+  var carryFirst = initHashSet[string]()
+  var certifyKeys: RegisteredKeyStoreLoad
+  let certifyLockSource =
+    if recordStoreRoot.len > 0: pendingLockRecordSource()
+    else: committedLockSource()
+  if args.certify:
+    certifyKeys = readRegisteredKeyStoreChecked(
+      registeredKeyStorePath(args.workspaceRoot))
+  for name in result.order:
+    let observed = preflight[name]
+    if observed.published:
+      continue
+    let repoAbs = args.workspaceRoot / byName[name].path
+    let introduced = pushIntroducedCommits(identity, repoAbs, observed)
+    # The hook carries what a push introduces, and the tip is either among that
+    # or nothing is. With nothing, this command has to carry it (see below).
+    if introduced.ok and observed.headSha notin introduced.commits:
+      carryFirst.incl(name)
+    if not args.certify:
+      continue
+    let decision =
+      if introduced.ok:
+        planPushCertification(identity, repoAbs, observed, introduced.commits,
+          certifyKeys, certifyLockSource)
+      else:
+        PushCertifyDecision(refused: true, diagnostic: introduced.problem,
+          remediation: "repair what git reported in " & byName[name].path &
+            " and retry 'repro push'")
+    if decision.refused:
+      result.repos.add(PushRepoResult(name: name, path: byName[name].path,
+        branch: observed.branch, headSha: observed.headSha,
+        outcome: proFailed, diagnostic: decision.diagnostic,
+        remediation: decision.remediation, notices: decision.notices))
+      result.stoppedRepo = name
+      result.stoppedStage = "certify-preflight"
+      result.retryCommand = "repro push"
+      result.exitCode = 2
+      return
+    pushCertification[name] = decision
+
+  # ---- 4. closure push in topological order ------------------------------
   # Walk dependency-first. A dirty/divergent member STOPS the push with an
   # actionable {offender, remedy} diagnostic (never silently discarded). A
   # member with unpublished commits is pushed; an already-published member
@@ -73018,6 +73326,25 @@ proc executePush(args: PushArgs): PushReport =
     let observed = preflight[name]
     var entry = PushRepoResult(name: repo.name, path: repo.path,
       branch: observed.branch, headSha: observed.headSha)
+    let decision = pushCertification.getOrDefault(name)
+    entry.notices.add(decision.notices)
+    if decision.certifyNames.len > 0:
+      # Before the revalidation below, which then also covers what the tests
+      # did to the checkout.
+      let certified = certifyPushedWorktree(identity, args, repoAbs, observed,
+        decision, certifyKeys, certifyLockSource)
+      entry.notices.add(certified.notices)
+      if not certified.ok:
+        entry.outcome = proFailed
+        entry.diagnostic = certified.diagnostic
+        entry.remediation = certified.remediation
+        result.repos.add(entry)
+        result.stoppedRepo = repo.name
+        result.stoppedStage = "certify"
+        result.retryCommand = "repro push"
+        result.exitCode = 2
+        return
+      entry.certified = certified.names
     # Published? (reuses the gate's publication probe.) Already-published is a
     # benign noop; unpublished commits get pushed.
     let rName = observed.remoteName
@@ -73035,10 +73362,10 @@ proc executePush(args: PushArgs): PushReport =
       return
     if observed.published:
       entry.outcome = proAlreadyPublished
-      let uncarried = uncarriedCertificateNotice(identity, repoAbs, entry.headSha,
-        rName)
-      if uncarried.len > 0:
-        entry.notices.add(uncarried)
+      # Nothing is pushed, so no hook runs (Tooling §4.2), and a certificate
+      # issued since the publication would otherwise stay in the store.
+      discard carryCertificatesOfCommit(repoAbs, rName, entry.headSha,
+        proc (line: string) = entry.notices.add(redactUrlUserinfo(line)))
       result.repos.add(entry)
       continue
     if entry.branch.len == 0:
@@ -73053,6 +73380,12 @@ proc executePush(args: PushArgs): PushReport =
       result.repos.add(entry)
       result.exitCode = 2
       return
+    if name in carryFirst:
+      # This push introduces nothing, so its hook carries nothing, and a
+      # gateway judges the tip of a new branch all the same: the note has to be
+      # there before the source push.
+      discard carryCertificatesOfCommit(repoAbs, rName, entry.headSha,
+        proc (line: string) = entry.notices.add(redactUrlUserinfo(line)))
     var component: seq[string]
     let ownClosure = developSetClosure(resolved.repos, name)
     for peer in result.order:
@@ -73216,9 +73549,6 @@ proc executePush(args: PushArgs): PushReport =
         return
       preflight[name] = refreshed.observed
 
-  # ---- 4. certificate slot (FLAG only; obtaining one is deferred to TC) ---
-  runPushCertifyStub(result, args.certify)
-
   # ---- 5. final lock completion (verify/recover only; never write) -------
   # Each real source pre-push gate has already created and published the record
   # anchored by that member's exact preflight HEAD. The command now proves
@@ -73302,11 +73632,10 @@ proc renderPushTextLines(report: PushReport): seq[string] =
     result.add(line)
     if entry.remediation.len > 0:
       result.add("    remedy: " & entry.remediation)
+    if entry.certified.len > 0:
+      result.add("    certified: " & entry.certified.join(", "))
     for notice in entry.notices:
       result.add("    " & notice)
-  if report.certifyDeferred:
-    result.add("repro push: certification deferred to the " &
-      "test-certificate campaign (not wired yet)")
   if report.lockDiagnostic.len > 0:
     result.add("repro push: " & report.lockDiagnostic)
   if report.stoppedStage.len > 0:
@@ -73353,9 +73682,9 @@ proc toJsonNode(report: PushReport): JsonNode =
     o["diagnostic"] = %entry.diagnostic
     o["remediation"] = %entry.remediation
     o["notices"] = %entry.notices
+    o["certified"] = %entry.certified
     repos.add(o)
   result["repos"] = repos
-  result["certifyDeferred"] = %report.certifyDeferred
   result["lockPublished"] = %report.lockPublished
   result["lockDiagnostic"] = %report.lockDiagnostic
   result["stoppedRepo"] = %report.stoppedRepo
