@@ -65,10 +65,10 @@ import std/[os, strutils, tables]
 import repro_project_dsl
 
 import ../interfaces/cross_target
-# The wrapper edge's `sh`, registered wherever the adapter is. `coreutils`
-# is the catalog's package (reprobuild-packages `packages/interfaces/
-# coreutils`), so the stdlib does not define a second one.
+# The wrapper edge's `sh` and `install-file` (the stdlib's GNU coreutils,
+# for `rm` / `mkdir` / `chmod`), registered wherever the adapter is.
 import ../packages/sh as zig_wrapper_sh
+import ../packages/coreutils_install as zig_wrapper_coreutils
 export cross_target
 
 type
@@ -389,9 +389,10 @@ proc emitZigCrossWrappersAction*(projectRoot, packageName,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "zig-cross.wrappers",
     # The script's tools are the adapter's, not the recipe's: `sh`, and
-    # `coreutils` for `rm` / `mkdir` / `chmod` (`printf` is the shell's
-    # builtin). Declaring `zig` adds both to the recipe's
+    # `install-file` (the stdlib's GNU coreutils, whose directory carries
+    # `rm` / `mkdir` / `chmod`; `printf` is the shell's builtin). Declaring
+    # `zig` adds both to the recipe's
     # `nativeBuildDeps:` (`zigCrossAutoInjectShellTools` in
     # repro_project_dsl), so they resolve, or are refused by name, like any
     # declared tool (Reprobuild-Standard-Library.md, `cross_zig`).
-    toolIdentityRefs = @["sh", "coreutils", "zig"])
+    toolIdentityRefs = @["sh", "install-file", "zig"])

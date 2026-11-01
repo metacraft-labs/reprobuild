@@ -122,8 +122,8 @@ proc listsDefaultProducer(src: string): string =
   ## is signed as a selection of its own.
   var text = readFile(src)
   for (needle, repl) in [
-      ("""a.strip() for a in activities if a.strip() and a.strip() != "default"}""",
-       """a.strip() for a in activities if a.strip()}"""),
+      ("""acts = sorted({a for a in names if a and a != "default"})""",
+       """acts = sorted({a for a in names if a})"""),
       ("""            if not a or a == "default":""", """            if not a:""")]:
     doAssert needle in text, "the mutation no longer matches the producer: " & needle
     text = text.replace(needle, repl)

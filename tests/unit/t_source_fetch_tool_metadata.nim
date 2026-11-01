@@ -16,6 +16,12 @@ package archiveFetchMetadata:
   build:
     raise newException(ValueError, "metadata extraction must not execute build bodies")
 
+package crateFetchMetadata:
+  # A crates.io archive: a gzipped tarball whose name ends in `.crate`.
+  fetch:
+    url: "https://static.crates.io/crates/just/just-1.51.0.crate"
+    sha256: FetchHash
+
 package dataFetchMetadata:
   fetch:
     url: "https://example.invalid/config"
@@ -72,6 +78,21 @@ suite "source fetch metadata":
       check solverUses.len == 1
       if solverUses.len == 1:
         check solverUses[0].depKind == DepKindNative
+
+  test "a crates.io .crate archive declares gzip, which tar execs":
+    # `tar -xf` decompresses by running gzip; without it on the action's
+    # PATH the extraction fails ("gzip: Cannot exec") in every provisioning
+    # mode that builds the PATH from declared tools (reprobuild-pm issue
+    # 2026-11-01-hermetic-tar-extract-of-a-gz-archive-finds-no-gzip).
+    let iface = toProjectInterface(definition("crateFetchMetadata"),
+                                   registeredPackages())
+    let gz = iface.toolUses.filterIt(it.executableName == "gzip")
+    check gz.len == 1
+    if gz.len == 1:
+      check gz[0].nixProvisioning.len > 0
+    check "tar" in iface.toolUses.mapIt(it.executableName)
+    check "gzip" in shellFetchToolIdentityRefs(@["sha256sum"],
+      archiveUrl = "https://static.crates.io/crates/x/x-1.0.0.crate?v=1")
 
   test "data files require copy but not archive extraction tools":
     let iface = toProjectInterface(definition("dataFetchMetadata"),

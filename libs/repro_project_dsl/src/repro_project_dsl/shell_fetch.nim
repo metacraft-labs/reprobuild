@@ -17,7 +17,11 @@ proc archiveDecompressorTool(archiveUrl: string): string =
   if normalized.endsWith(".tar.xz") or normalized.endsWith(".txz") or
       normalized.endsWith(".tar.lzma"):
     return "xz"
-  if normalized.endsWith(".tar.gz") or normalized.endsWith(".tgz"):
+  # A crates.io `.crate` is a gzipped tarball under another name
+  # (https://doc.rust-lang.org/cargo/reference/registry-web-api.html);
+  # without it here the extraction ran with no gzip on PATH.
+  if normalized.endsWith(".tar.gz") or normalized.endsWith(".tgz") or
+      normalized.endsWith(".crate"):
     return "gzip"
   if normalized.endsWith(".tar.bz2") or normalized.endsWith(".tbz2") or
       normalized.endsWith(".tbz"):

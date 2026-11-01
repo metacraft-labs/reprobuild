@@ -33,6 +33,8 @@
 import std/[dynlib, os]
 when defined(posix):
   from std/posix import nil
+when defined(windows):
+  from std/winlean import nil
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types
 import ./dynlib_names
@@ -223,16 +225,28 @@ proc compressFileToFile*(sourcePath, destinationPath: string;
           raise newException(CompressError, "compressFileToFile: writing " &
             destinationPath & " made no progress")
         off += n
-  else:
-    if fileExists(destinationPath) or symlinkExists(destinationPath):
-      raise newException(CompressError, "compressFileToFile: " &
-        destinationPath & " already exists")
-    var destination = open(destinationPath, fmWrite)
-    defer: close(destination)
+  elif defined(windows):
+    # `CREATE_NEW` refuses an existing file or link itself, so there is no
+    # check-then-create window.
+    let destination = winlean.createFileW(newWideCString(destinationPath),
+      winlean.GENERIC_WRITE, 0, nil, winlean.CREATE_NEW,
+      winlean.FILE_ATTRIBUTE_NORMAL, winlean.Handle(0))
+    if destination == winlean.INVALID_HANDLE_VALUE:
+      raise newException(CompressError, "compressFileToFile: cannot create " &
+        destinationPath & " exclusively: " & osErrorMsg(osLastError()))
+    defer: discard winlean.closeHandle(destination)
     proc writeOut(data: pointer; len: int) =
-      if destination.writeBuffer(data, len) != len:
-        raise newException(CompressError, "compressFileToFile: short write " &
-          "to " & destinationPath)
+      var off = 0
+      while off < len:
+        var written = 0'i32
+        if winlean.writeFile(destination,
+            cast[pointer](cast[uint](data) + uint(off)), int32(len - off),
+            addr written, nil) == 0 or written <= 0:
+          raise newException(CompressError, "compressFileToFile: writing " &
+            destinationPath & ": " & osErrorMsg(osLastError()))
+        off += int(written)
+  else:
+    {.error: "compressFileToFile needs a POSIX or Windows writer".}
 
   var written = 0'i64
 

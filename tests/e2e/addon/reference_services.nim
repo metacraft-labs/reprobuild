@@ -115,6 +115,53 @@ proc stageTree(dest: string; sources: openArray[(string, string)]) =
         " (build it: repro build packages/source/<name> in REPRO_A12_PACKAGES)")
     copyFileWithPermissions(src, dest / "bin" / name)
 
+proc recipePinnedSha256s(root, name: string): seq[(string, string)] =
+  ## The binary digests a recipe pins: ``GethBinarySha256`` (one string) or
+  ## ``PrysmBinarySha256`` (``(name, digest)`` pairs), read from the
+  ## recipe's source in ``REPRO_A12_PACKAGES``.
+  let src = readFile(root / "packages" / "source" / name / "repro.nim")
+  let constName = (if name == "geth": "GethBinarySha256"
+                   else: "PrysmBinarySha256")
+  let at = src.find(constName & "* =")
+  if at < 0:
+    raise newException(TestBedError, "recipe " & name & " pins no " & constName)
+  var quoted: seq[string]
+  # The constant's string literals, up to the end of its definition (the
+  # first line that starts a new declaration or a doc comment).
+  for line in src[at .. ^1].splitLines()[1 .. ^1]:
+    let t = line.strip()
+    if t.startsWith("##") or (t.len > 0 and not t.startsWith("\"") and
+        not t.startsWith("(") and not t.startsWith("]") and
+        not t.startsWith(")")):
+      break
+    var j = 0
+    while true:
+      let a = t.find('"', j)
+      if a < 0: break
+      let b = t.find('"', a + 1)
+      if b < 0: break
+      quoted.add(t[a + 1 ..< b])
+      j = b + 1
+  if name == "geth":
+    if quoted.len != 1:
+      raise newException(TestBedError, "cannot read " & constName)
+    return @[("geth", quoted[0])]
+  if quoted.len mod 2 != 0 or quoted.len == 0:
+    raise newException(TestBedError, "cannot read " & constName)
+  for k in countup(0, quoted.len - 2, 2):
+    result.add((quoted[k], quoted[k + 1]))
+
+proc checkPinned(tree, root, name: string) =
+  ## The staged binaries are the bytes the recipe pins (built in any
+  ## provisioning mode, from any checkout); anything else is refused, so a
+  ## gate never runs a package the recipe does not vouch for.
+  for (bin, want) in recipePinnedSha256s(root, name):
+    let got = sha256File(tree / "bin" / bin)
+    if got != want:
+      raise newException(TestBedError, name & "'s " & bin & " is " & got &
+        ", but the recipe pins " & want & " (rebuild it from the recipe in " &
+        "REPRO_A12_PACKAGES)")
+
 proc refPackages*(work: string): RefPackages =
   ## Stage the three packages from ``REPRO_A12_PACKAGES`` under ``work``.
   let root = getEnv("REPRO_A12_PACKAGES")
@@ -132,6 +179,8 @@ proc refPackages*(work: string): RefPackages =
   stageTree(result.prysm, [(p / "beacon-chain", "beacon-chain"),
     (p / "validator", "validator"), (p / "prysmctl", "prysmctl"),
     (p / "prysm-keystores", "prysm-keystores")])
+  checkPinned(result.geth, root, "geth")
+  checkPinned(result.prysm, root, "prysm")
 
 proc packageSha256s*(p: RefPackages): JsonNode =
   ## The binaries' digests, for the gate record.
