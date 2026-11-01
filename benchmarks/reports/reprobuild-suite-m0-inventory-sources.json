@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2566,
+    "nimTestBinaries": 2567,
     "pureUnitConsolidationGroups": 75,
-    "pureUnitTests": 713,
+    "pureUnitTests": 714,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2606
+    "testEntries": 2607
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -214,7 +214,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 33,
+      "count": 34,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -252,6 +252,7 @@
         "libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim",
         "libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim",
         "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim",
+        "libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim",
         "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim",
         "libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim",
         "libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim"
@@ -1491,7 +1492,7 @@
       "graph-fixture": 18,
       "integration": 1424,
       "platform/destructive": 162,
-      "pure unit": 713,
+      "pure unit": 714,
       "unclassified": 289
     },
     "graphOwnedTestArtifacts": [
@@ -1700,9 +1701,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2566,
+    "nimTestBinaryCount": 2567,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2606
+    "testEntryCount": 2607
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14742,6 +14743,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rust_nix_arm_realizes_release_archive",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

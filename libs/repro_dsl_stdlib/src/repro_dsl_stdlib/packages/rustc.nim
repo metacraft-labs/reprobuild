@@ -23,15 +23,22 @@
 ## point at their respective ``<component>/bin/`` paths.
 
 import repro_project_dsl
-import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
 package rustc:
   provisioning:
-    nixPackage "nixpkgs#rustc", executablePath = "bin/rustc",
-      nixpkgsRev = CanonicalNixpkgsRev,
-      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # The Nix channel realizes rust-lang's own 1.94.0 release, the same
+    # archive as the ``tarball`` arms below, with its ELF loader and
+    # RUNPATH pointed into the pinned nixpkgs' glibc. The pinned nixpkgs'
+    # own rustc is 1.91, outside the range the ``tarball`` arms pin, and a
+    # nixpkgs-built rustc cannot load rust-lang's prebuilt ``rust-std`` for
+    # a cross target. See ``nix/rust-1.94.0/default.nix``. ``rustc`` and
+    # ``cargo`` name the same expression, so they realize one prefix.
+    nixPackage "reprobuild-stdlib-rust-1.94.0",
+      executablePath = "bin/rustc",
+      expressionFile = "nix/rust-1.94.0/default.nix",
+      lockIdentity = "nix-expression:rust@1.94.0:x86_64-linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a"
     # Windows / non-Nix Linux: same shape as ``cargo.nim``. rustc.exe is
     # a rustup shim at
     # ``<scoop-persist>/rustup-msvc/.cargo/bin/rustc.exe``; reachable

@@ -1,5 +1,4 @@
 import repro_project_dsl
-import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
@@ -30,9 +29,17 @@ type CargoTestBinary* = object
 
 package cargo:
   provisioning:
-    nixPackage "nixpkgs#cargo", executablePath = "bin/cargo",
-      nixpkgsRev = CanonicalNixpkgsRev,
-      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # The Nix channel realizes rust-lang's own 1.94.0 release, the same
+    # archive as the ``tarball`` arms below, with its ELF loader and
+    # RUNPATH pointed into the pinned nixpkgs' glibc. The pinned nixpkgs'
+    # own cargo is 1.91, outside the range the ``tarball`` arms pin, and a
+    # nixpkgs-built rustc cannot load rust-lang's prebuilt ``rust-std`` for
+    # a cross target. See ``nix/rust-1.94.0/default.nix``. ``rustc`` and
+    # ``cargo`` name the same expression, so they realize one prefix.
+    nixPackage "reprobuild-stdlib-rust-1.94.0",
+      executablePath = "bin/cargo",
+      expressionFile = "nix/rust-1.94.0/default.nix",
+      lockIdentity = "nix-expression:rust@1.94.0:x86_64-linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a"
     # Windows / non-Nix Linux: cargo ships as part of the Rust toolchain
     # that Scoop's ``rustup-msvc`` installs via ``rustup-init.exe``.
     # The bytes live at ``<scoop-persist>/rustup-msvc/.cargo/bin/cargo.exe``;
