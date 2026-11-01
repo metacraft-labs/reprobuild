@@ -536,33 +536,6 @@ proc stagedAptFetcher(copyDir: string): AptDebFetcher =
         "the lock's size")
     copyFile(src, dest)
 
-proc stagedCwdRefusal*(cwd, storeRoot: string): string =
-  ## Why an action may not materialise its outputs under ``cwd``, or "".
-  ## A compiled action's ``cwd`` is the fetch unit's word, so it is held to
-  ## the one shape a store prefix has (spec §8.3): ``<store>/prefixes/
-  ## <name>/<version>``, spelled canonically (no empty, ``.`` or ``..``
-  ## segment, no trailing ``/``), with no symbolic link on any existing
-  ## component below the store root. A string-prefix test alone let
-  ## ``<store>/../../etc/cron.d`` through.
-  when mutated("agent-install-trusts-cwd"):
-    if cwd.startsWith(storeRoot & "/"): return ""
-  let base = storeRoot & "/prefixes/"
-  if not cwd.startsWith(base):
-    return cwd & " is not under " & base
-  let rest = cwd[base.len .. ^1]
-  let segs = rest.split('/')
-  if segs.len != 2:
-    return cwd & " is not " & base & "<name>/<version>"
-  for seg in segs:
-    if seg.len == 0 or seg == "." or seg == ".." or '\0' in seg:
-      return cwd & " is not a canonical store path"
-  var cur = storeRoot
-  for seg in @["prefixes"] & segs:
-    cur = cur / seg
-    if symlinkExists(cur):
-      return cwd & ": " & cur & " is a symbolic link"
-  ""
-
 proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
                            copyDir: string; storeRoot = StoreRoot) =
   ## Verify each action's staged outputs against the digest the signed

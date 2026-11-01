@@ -31,6 +31,7 @@ import ./addon_apply
 import ./agent_checks
 import ./agent_record
 import ./static_tree
+from ./generation0 import StoreRoot
 
 type
   ManifestCompiler* = proc(m: DeployManifest):
@@ -102,7 +103,8 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
                           apply: AddonApplyFn = nil;
                           driftSink: proc(d: string) {.closure, gcsafe.} = nil;
                           unitNames: UnitNamesResolver = systemdUnitNames;
-                          legacySecretsDir = ""):
+                          legacySecretsDir = "";
+                          storeRoot = StoreRoot):
     ApplyHook =
   ## The agent's apply on an add-on host: the manifest's profile through
   ## the add-on switch into ``stateDir``, recording the manifest's
@@ -118,8 +120,11 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
   ## the compile reproduces the signed pin; the compiled profile may not
   ## widen the managed prefixes; no profile may touch the management path;
   ## and every build action is bound to the closure digest the manifest
-  ## pins. Freshness, the sequence floor, quarantine and the pause are the
-  ## tick's (``requireAttestations``).
+  ## pins and may materialise its outputs only in a canonical store prefix
+  ## under ``storeRoot`` (``stagedCwdRefusal``, spec §9.1): its ``cwd`` is
+  ## the compiler's word, and the dispatcher builds there as root.
+  ## Freshness, the sequence floor, quarantine and the pause are the tick's
+  ## (``requireAttestations``).
   ##
   ## ``legacySecretsDir`` is the full engine's `--secrets-dir`: registered
   ## with the add-on, a hand-written `LoadCredential=` from under it is the
@@ -168,6 +173,11 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
           return (false, "closure digests: " & pinned.refusal &
             "; nothing was written")
         actions = pinned.actions
+        for a in actions:
+          let bad = stagedCwdRefusal(a.cwd, storeRoot)
+          if bad.len > 0:
+            return (false, "build action " & a.id & " may not materialise " &
+              "there: " & bad & "; nothing was written")
       try:
         if agentStateDir.len > 0:
           registerAgentState(stateDir, agentStateDir)

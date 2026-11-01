@@ -160,11 +160,13 @@ proc pinned(m: var DeployManifest; canonical, actionsJson: string) =
 suite "the agent's apply goes through the add-on switch":
   test "the switch gets the add-on state, the deployment, the sequence and the actions":
     let r = Recorder()
-    let action = ProfileBuildAction(id: "llm-api-proxy")
     let tmp = createTempDir("addon-agent-hook-", "")
     defer: removeDir(tmp)
+    let action = ProfileBuildAction(id: "llm-api-proxy",
+      cwd: tmp / "store" / "prefixes" / "llm-api-proxy" / "1")
     let hook = addonAgentApplyHook(tmp / "system", "rpi2",
-      agentStateDir = tmp / "agent", apply = recorder(r), unitNames = noUnits)
+      agentStateDir = tmp / "agent", apply = recorder(r), unitNames = noUnits,
+      storeRoot = tmp / "store")
     let res = hook(manifest(4, "hms-4-aa", Canonical, @[action]))
     check res.ok
     check "gen-1" in res.message
@@ -179,7 +181,10 @@ suite "the agent's apply goes through the add-on switch":
 
   test "a source profile is compiled elsewhere and applied only at its signed digest (A8 B1/B3)":
     let r = Recorder()
-    let actionsJson = $(%(@[ProfileBuildAction(id: "searxng")]))
+    let tmp = createTempDir("addon-agent-compile-", "")
+    defer: removeDir(tmp)
+    let actionsJson = $(%(@[ProfileBuildAction(id: "searxng",
+      cwd: tmp / "store" / "prefixes" / "searxng" / "1")]))
     var calls = 0
     var emit = Canonical      # what the (untrusted) compiler emits
     var revision = "rev-1"    # and the revision it says it is
@@ -191,10 +196,8 @@ suite "the agent's apply goes through the add-on switch":
         if "bad" in m.profileText:
           return (false, "", "", "", "it does not compile")
         (true, emit, actionsJson, revision, "")
-    let tmp = createTempDir("addon-agent-compile-", "")
-    defer: removeDir(tmp)
     let hook = addonAgentApplyHook(tmp / "s", "h", compiler = compiler,
-      apply = recorder(r), unitNames = noUnits)
+      apply = recorder(r), unitNames = noUnits, storeRoot = tmp / "store")
     var m5 = manifest(5, "d5", "import repro_profile")
     pinned(m5, Canonical, actionsJson)
     check hook(m5).ok
@@ -247,6 +250,40 @@ suite "the agent's apply goes through the add-on switch":
     let unpinned = hook(m)
     check not unpinned.ok and "closure digests" in unpinned.message
     check r.calls.len == 0
+
+  test "a build action is materialised only in a canonical store prefix (spec §9.1)":
+    # The engine's dispatcher builds an action in its `cwd`, as root; a
+    # compiled action's `cwd` is the (unprivileged, untrusted) compiler's
+    # word. It is held to the shape the add-on agent's apply unit holds it
+    # to (`stagedCwdRefusal`). Falsifier: `agent-install-trusts-cwd`, a
+    # string-prefix test, lets the `..` escape through.
+    let r = Recorder()
+    let tmp = createTempDir("addon-agent-cwd-", "")
+    defer: removeDir(tmp)
+    let store = tmp / "store"
+    let hook = addonAgentApplyHook(tmp / "s", "h", apply = recorder(r),
+      unitNames = noUnits, storeRoot = store)
+    proc withCwd(cwd: string): DeployManifest =
+      result = manifest(3, "d3", Canonical,
+        @[ProfileBuildAction(id: "a", cwd: cwd)])
+      result.issuedAt = 1
+      result.maxAgeSeconds = 1
+      result.closureDigests = @[ClosureDigest(actionId: "a",
+        digest: "blake3:" & repeat('0', 64))]
+    # Out of the store by `..`, by a sibling of `prefixes`, by a deeper
+    # path, and through a symbolic link planted on the prefix's name.
+    for cwd in [store & "/../../etc/cron.d", store & "/state/x/1",
+                store & "/prefixes/a/1/bin", store & "/prefixes/a/./1"]:
+      let res = hook(withCwd(cwd))
+      check not res.ok and "may not materialise" in res.message
+    createDir(store / "prefixes")
+    createSymlink(tmp / "elsewhere", store / "prefixes" / "evil")
+    let linked = hook(withCwd(store / "prefixes" / "evil" / "1"))
+    check not linked.ok and "symbolic link" in linked.message
+    check r.calls.len == 0
+    # A canonical prefix reaches the switch.
+    check hook(withCwd(store / "prefixes" / "a" / "1")).ok
+    check r.calls.len == 1
 
   test "an unsupported base is raised through; any other failure is not ok":
     let r = Recorder(raiseBase: true)
