@@ -100,6 +100,9 @@ proc unprivilegedCompileArgv*(engineExe: string; m: DeployManifest;
       "-/var/run/dbus -/run/nscd -/var/run/nscd -/var/lib/repro " &
       "-/etc/repro/anchors",
     "--property=RuntimeMaxSec=" & $timeoutSec,
+    # The PATH bootstrap's preflight probed (§13 decision 31), named rather
+    # than inherited from the manager, whose block an operator can change.
+    "--setenv=PATH=" & ProfileCompilePath,
     "--", engineExe, "deploy-agent", "compile-profile", "--stdio"]
   for a in compileFactArgs(m): result.add(a)
 

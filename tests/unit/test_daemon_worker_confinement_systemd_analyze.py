@@ -211,9 +211,15 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
         self.assertNotIn("threshold 26", message)
 
     def test_conf4_passes_an_exposure_within_the_threshold(self):
+        ceiling, klass, virt = self.conf4(
+            stdout="→ Overall exposure level for repro-daemon-worker.service:"
+                   " 2.6 OK 🙂\n", code=0)
+        # A pass reports WHICH class it compared against, so a green CONF-4 is
+        # attributable: the same measurement is a pass on one class and a
+        # refusal on the other, and "ok" alone cannot be checked against that.
+        self.assertEqual(("none", "none"), (klass, virt))
         self.assertEqual(
-            self.conf4(stdout="→ Overall exposure level for repro-daemon-worker.service:"
-                              " 2.6 OK 🙂\n", code=0),
+            ceiling,
             # The file records a ceiling PER HOST CLASS, each with its
             # provenance in comments. This case answers detect-virt as bare
             # metal, so compare against that class's committed value --

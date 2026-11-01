@@ -516,8 +516,20 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   var throughAddonSwitch = false
   when defined(linux):
     let addonState = hostAddonStateDir()
-    if isAddonHost(addonState) and
-        absolutePath(addonState) != absolutePath(flags.stateDir):
+    let route = engineAgentRoute(addonState, flags.stateDir)
+    if route == earRefuseSharedState:
+      # Spec §9, decision 29: an agent apply on an add-on host is an A8
+      # apply or none. The add-on's state directory is the switch's; the
+      # agent keeps its floor, quarantine and pause in its own.
+      let msg = "--state-dir " & flags.stateDir & " is the add-on's own " &
+        "state directory (" & addonState & "); on an add-on host the " &
+        "agent keeps its state in a directory of its own. Nothing was " &
+        "applied."
+      # No tick record: it would be written into the add-on's state
+      # directory, the one place this refusal keeps the agent out of.
+      stderr.writeLine("repro deploy-agent: " & msg)
+      return 2
+    if route == earAddonSwitch:
       if needsLegacyMigration(addonState, flags.stateDir):
         let legacyGen = legacyAgentGeneration(flags.stateDir)
         try:

@@ -29,6 +29,11 @@
 ##                                      add-on host accepts a manifest
 ##                                      without the attestation block and
 ##                                      skips the A8 profile checks
+## ``engine-agent-shares-addon-state``  the full engine's agent on an
+##                                      add-on host, given the add-on's
+##                                      own state directory as its
+##                                      ``--state-dir``, applies with the
+##                                      plain hook instead of refusing
 ## ===================================  ====================================
 
 const AgentMutation {.strdefine: "reproAddonMutation".} = ""
@@ -40,6 +45,7 @@ const KnownAgentMutations* = ["rdmf-ignores-revoked-keys",
                               "agent-state-plain-write",
                               "agent-skips-compile-digest",
                               "engine-agent-skips-a8",
+                              "engine-agent-shares-addon-state",
                               "compile-pin-drops-selection"]
 
 template agentMutated*(name: static string): bool =

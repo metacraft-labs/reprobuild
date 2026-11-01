@@ -2,9 +2,10 @@
 ## profile it is about to apply, whichever agent runs it -- the add-on
 ## agent's apply unit (``agent_split``) or the full engine's ``repro
 ## deploy-agent`` (``agent_switch``): the management-path refusal (spec
-## §7.5, §4.5; threat model G27), the managed-prefix widening refusal, and
-## the compiled-profile pin (``verified_compile``). One module, so the two
-## agents cannot drift apart.
+## §7.5, §4.5; threat model G27), the managed-prefix widening refusal, the
+## compiled-profile pin (``verified_compile``), and where a build action may
+## materialise its outputs (``stagedCwdRefusal``, spec §9.1). One module, so
+## the two agents cannot drift apart.
 
 import std/[json, os, strutils]
 
@@ -224,4 +225,31 @@ proc compiledProfileCheck*(m: DeployManifest;
   let why = compiledProfileRefusal(m, canonicalText, actionsJson, revision)
   if why.len > 0:
     return CompiledProfileRefusal & ": " & why & "; nothing was written"
+  ""
+
+proc stagedCwdRefusal*(cwd, storeRoot: string): string =
+  ## Why an action may not materialise its outputs under ``cwd``, or "".
+  ## A compiled action's ``cwd`` is the fetch unit's word, so it is held to
+  ## the one shape a store prefix has (spec §8.3): ``<store>/prefixes/
+  ## <name>/<version>``, spelled canonically (no empty, ``.`` or ``..``
+  ## segment, no trailing ``/``), with no symbolic link on any existing
+  ## component below the store root. A string-prefix test alone let
+  ## ``<store>/../../etc/cron.d`` through.
+  when mutated("agent-install-trusts-cwd"):
+    if cwd.startsWith(storeRoot & "/"): return ""
+  let base = storeRoot & "/prefixes/"
+  if not cwd.startsWith(base):
+    return cwd & " is not under " & base
+  let rest = cwd[base.len .. ^1]
+  let segs = rest.split('/')
+  if segs.len != 2:
+    return cwd & " is not " & base & "<name>/<version>"
+  for seg in segs:
+    if seg.len == 0 or seg == "." or seg == ".." or '\0' in seg:
+      return cwd & " is not a canonical store path"
+  var cur = storeRoot
+  for seg in @["prefixes"] & segs:
+    cur = cur / seg
+    if symlinkExists(cur):
+      return cwd & ": " & cur & " is a symbolic link"
   ""

@@ -199,6 +199,10 @@ const
     ## (an apt closure lock, a long configuration file) and producers had to
     ## inline every such file into the Nim source. Deploy-Agent.md §"The
     ## `RDMF` envelope".
+  MaxIssuedAt* = uint64(high(int64))
+    ## The largest ``issuedAt`` an envelope may carry (2^63 - 1). The wire
+    ## field is a u64, but the agent compares it with the host clock in
+    ## signed arithmetic; anything above is refused as malformed.
   DeployManifestFlagAttestations* = 1'u16
     ## Bit 0 of the u16 after ``formatVersion`` (``flags``, formerly
     ## "reserved"): the v3 envelope carries the attestation block --
@@ -468,10 +472,19 @@ proc validateClosureDigests*(ds: openArray[ClosureDigest]) =
         "closure digests are not strictly ascending by action id: '" &
         ds[i - 1].actionId & "' then '" & d.actionId & "'")
 
+proc hasSystemSelection*(p: CompiledProfilePin): bool =
+  p.systemMode.len > 0 or p.systemActivities.len > 0
+
 proc hasCompiledProfilePin*(m: DeployManifest): bool =
+  ## Whether ``m`` carries a compiled-profile pin. Any field set means it
+  ## does -- a system selection included: a selection with no digest is a
+  ## pin missing its digest, refused by ``compiledProfilePinError`` (as
+  ## infra's producer refuses it), never silently encoded without the
+  ## selection it was asked to sign.
   m.compiledProfile.digest.len > 0 or m.compiledProfile.platform.len > 0 or
     m.compiledProfile.compilerRevision.len > 0 or
-    m.compiledProfile.arch.len > 0 or m.compiledProfile.host.len > 0
+    m.compiledProfile.arch.len > 0 or m.compiledProfile.host.len > 0 or
+    m.compiledProfile.hasSystemSelection
 
 proc hasAttestations*(m: DeployManifest): bool =
   ## Whether ``m`` carries the v3 attestation block. Any of its fields set
@@ -480,8 +493,6 @@ proc hasAttestations*(m: DeployManifest): bool =
   m.issuedAt != 0 or m.maxAgeSeconds != 0 or m.rollbackFloor != 0 or
     m.closureDigests.len > 0 or m.hasCompiledProfilePin
 
-proc hasSystemSelection*(p: CompiledProfilePin): bool =
-  p.systemMode.len > 0 or p.systemActivities.len > 0
 
 proc systemSelectionText*(p: CompiledProfilePin): string =
   ## The selection as the digest frames it and the envelope carries it:
@@ -570,6 +581,14 @@ proc validateAttestations*(m: DeployManifest) =
   if m.issuedAt == 0:
     raise newException(DeployManifestCodecError,
       "attestation block without issuedAt (seconds since the epoch, > 0)")
+  # The agent does signed arithmetic on issuedAt (its age against the
+  # host clock), so a value int64 cannot hold is malformed rather than a
+  # time: refused here, at decode and encode, in both producers, instead
+  # of overflowing in the freshness check.
+  if m.issuedAt > MaxIssuedAt:
+    raise newException(DeployManifestCodecError,
+      "attestation block issuedAt " & $m.issuedAt & " is beyond " &
+      $MaxIssuedAt & " (2^63 - 1, the largest time the agent can compare)")
   if m.maxAgeSeconds == 0:
     raise newException(DeployManifestCodecError,
       "attestation block without a maximum age (seconds, > 0)")

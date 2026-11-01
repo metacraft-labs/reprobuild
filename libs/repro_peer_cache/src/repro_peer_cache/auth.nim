@@ -138,13 +138,18 @@ proc parseHexBuf(hex: string; expectedBytes: int; what: string):
     raise newException(AuthError,
       what & ": expected " & $(expectedBytes * 2) &
       " hex chars (" & $expectedBytes & " bytes), got " & $hex.len)
+  # Strictly ASCII hex digits. ``parseHexInt`` alone also accepts ``_``,
+  # ``#`` and a ``0x`` prefix inside a pair ("_f", "#f" and "f_" all read
+  # as 15), a wider grammar than infra's Python producer reads; both sides
+  # accept exactly ``[0-9A-Fa-f]{2n}`` (t_rdmf_v3_cross_implementation_
+  # conformance holds them together).
+  for i, c in hex:
+    if c notin HexDigits:
+      raise newException(AuthError,
+        what & ": invalid hex digit at position " & $i)
   result = newSeq[byte](expectedBytes)
   for i in 0 ..< expectedBytes:
-    try:
-      result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
-    except ValueError:
-      raise newException(AuthError,
-        what & ": invalid hex digit at position " & $(2 * i))
+    result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
 
 proc isZeroScalar(value: PrivateKeyBytes): bool =
   for b in value:

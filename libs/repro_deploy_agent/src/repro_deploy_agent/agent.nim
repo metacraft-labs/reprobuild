@@ -647,8 +647,20 @@ proc selectManifest*(cfg: AgentConfig; deps: AgentDeps): Selection =
       message: "no desired-state manifest for target " & cfg.target))
 
   # -- SELECT HIGHEST VALID SEQUENCE -------------------------------------
+  # Several sources may serve the same sequence and deployment signed at
+  # different times (a mirror that froze before the producer re-signed).
+  # The latest signature is the one selected, so the verdict -- applied,
+  # aoStale, issued_at_regressed -- never depends on the order the sources
+  # are listed in. Identical (sequence, issuedAt) pairs fall back to the
+  # envelope bytes, which keeps the choice a function of the set alone.
   trusted.sort(proc (a, b: Candidate): int =
-    cmp(a.manifest.sequence, b.manifest.sequence))
+    result = cmp(a.manifest.sequence, b.manifest.sequence)
+    if result == 0: result = cmp(a.manifest.issuedAt, b.manifest.issuedAt)
+    if result == 0:
+      for i in 0 ..< min(a.bytes.len, b.bytes.len):
+        result = cmp(a.bytes[i], b.bytes[i])
+        if result != 0: return
+      result = cmp(a.bytes.len, b.bytes.len))
   let selected = trusted[^1].manifest
   # Ambiguity: another candidate ties the highest sequence with a
   # DIFFERENT deploymentId ⇒ the desired state is not well-defined.

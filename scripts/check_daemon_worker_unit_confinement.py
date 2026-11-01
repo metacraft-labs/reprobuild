@@ -316,7 +316,7 @@ def check_conf4(text):
                       % (analyze, out.returncode, exposure // 10, exposure % 10, threshold,
                          "\n".join(output.splitlines()[-25:])))
     print(verdict.group(0) + " (" + analyze + ")")
-    return threshold
+    return threshold, klass, virt
 
 
 def check(text, linux_checks):
@@ -324,12 +324,12 @@ def check(text, linux_checks):
     check_conf3(eff)
     if not linux_checks:
         return None
-    threshold = check_conf4(text)
+    verdict = check_conf4(text)
     deriver = os.path.join(ROOT, "scripts", "derive_lease_floor_syscalls.py")
     out = subprocess.run([sys.executable, deriver, "--check"], capture_output=True, text=True)
     if out.returncode != 0:
         raise Failure("CONF-3 (lease floor): " + (out.stderr or out.stdout).strip())
-    return threshold
+    return verdict
 
 
 def self_test():
@@ -392,7 +392,7 @@ def main(argv):
     text = open(path).read()
     linux = sys.platform.startswith("linux")
     try:
-        threshold = check(text, linux)
+        verdict = check(text, linux)
     except Failure as err:
         sys.stderr.write("error: %s\n" % err)
         return 1
@@ -400,7 +400,10 @@ def main(argv):
         print("CONF-1/CONF-3 ok; CONF-4 (systemd-analyze security) and the lease floor "
               "derivation run on Linux, not on " + sys.platform)
     else:
-        print("CONF-1/CONF-3/CONF-4 ok (threshold %s)" % threshold)
+        ceiling, klass, virt = verdict
+        print("CONF-1/CONF-3/CONF-4 ok (exposure within the committed %d.%d for "
+              "host class %s; detect-virt said %s)"
+              % (int(ceiling) // 10, int(ceiling) % 10, klass, virt))
     return 0
 
 

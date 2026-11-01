@@ -26,7 +26,7 @@ libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	ni
 libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
-libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim	nim	10
+libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim	nim	11
 libs/repro_addon/tests/t_addon_agent_install_staged_outputs.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	14
@@ -35,13 +35,14 @@ libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_collision.nim	nim	35
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
+libs/repro_addon/tests/t_addon_engine_agent_route.nim	nim	3
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
 libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	4
-libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	1
+libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	3
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	16
 libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
@@ -205,6 +206,7 @@ libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	14
 libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	8
 libs/repro_cli_support/tests/t_data_file_row_selection_fixtures.nim	nim	3
 libs/repro_cli_support/tests/t_deploy_agent_keygen_cli.nim	nim	4
+libs/repro_cli_support/tests/t_deploy_agent_probe_refuses_without_a_c_compiler.nim	nim	4
 libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	18
 libs/repro_cli_support/tests/t_dss10_early_attribute_read_refuses_by_name.nim	nim	8
 libs/repro_cli_support/tests/t_dss72_external_registrar_protocol.nim	nim	20
@@ -305,10 +307,10 @@ libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim	nim	6
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	4
 libs/repro_deploy_agent/tests/t_deploy_agent_records_the_resolved_host.nim	nim	3
 libs/repro_deploy_agent/tests/t_deploy_agent_secret_files_are_private_and_never_follow_links.nim	nim	3
-libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim	nim	13
+libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim	nim	17
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim	nim	2
-libs/repro_deploy_agent/tests/t_repro_deploy_agent_freshness_and_state.nim	nim	4
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_freshness_and_state.nim	nim	5
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	6
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim	nim	5

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2579,
+    "nimTestBinaries": 2581,
     "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 719,
+    "pureUnitTests": 720,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2619
+    "testEntries": 2621
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -36,7 +36,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_addon"
@@ -44,6 +44,7 @@
       "owner": "libs/repro_addon",
       "sources": [
         "libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim",
+        "libs/repro_addon/tests/t_addon_engine_agent_route.nim",
         "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim"
       ],
       "targetOs": "soAny"
@@ -1503,9 +1504,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1428,
+      "integration": 1429,
       "platform/destructive": 161,
-      "pure unit": 719,
+      "pure unit": 720,
       "unclassified": 293
     },
     "graphOwnedTestArtifacts": [
@@ -1714,9 +1715,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2579,
+    "nimTestBinaryCount": 2581,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2619
+    "testEntryCount": 2621
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8172,7 +8173,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8324,6 +8325,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_engine_agent_route",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_engine_agent_route.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_etc_write_never_follows_symlinks",
       "class": "unclassified",
       "classificationReason": "imports `posix`, which grants out-of-process reach",
@@ -8451,7 +8469,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11577,6 +11595,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_deploy_agent_probe_refuses_without_a_c_compiler",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_deploy_agent_probe_refuses_without_a_c_compiler.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_develop_override_records_the_identity_it_replaced",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -13427,7 +13464,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13482,7 +13519,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_freshness_and_state.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18569,6 +18606,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_core",
         "repro_hash",
         "repro_local_store",
         "repro_peer_cache"

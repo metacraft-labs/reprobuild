@@ -341,9 +341,18 @@ proc runProducerNode(ws, cacheRoot, stateDir, readyFile, stopFile: string;
   let res = runBuild(helloGraph(ws), nodeEngineConfig(cacheRoot, ws, hooks))
   let item = res.byId(ActionId)
   if item.status != asSucceeded or hooks.stats.publishes != 1:
+    # The engine withholds a record before the publisher is ever called --
+    # the publication rule refused it, or the action cache skipped it (a
+    # monitor loss, for one) -- and says why only in its trace. Name those
+    # events here, so a withheld publish is not a bare `publishes=0`.
+    var refused = ""
+    for ev in res.trace:
+      if ev.actionId == ActionId and (ev.event == "peer-cache-publish-refused" or
+          ev.event.startsWith("cache-skip")):
+        refused.add(" " & ev.event & "=" & ev.detail)
     stderr.writeLine("node A: build status=" & $item.status & " reason=" &
       item.reason & " publishes=" & $hooks.stats.publishes &
-      " publishSkip=" & hooks.stats.lastPublishReason)
+      " publishSkip=" & hooks.stats.lastPublishReason & refused)
     host.stop()
     return 1
   writeFile(readyFile & ".tmp", $int(host.actualPort) & "\n")

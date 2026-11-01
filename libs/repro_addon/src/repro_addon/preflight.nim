@@ -581,15 +581,19 @@ proc isAddressLiteral(host: string): bool =
   except ValueError:
     false
 
-proc profileCompilerProblem*(compiler: string; timeoutSec = 120): string =
+proc profileCompilerProblem*(compiler: string; timeoutSec = 120;
+                             searchPath = ""): string =
   ## Why ``compiler`` (the configured profile compiler) could not compile a
   ## profile on this host, or "": it is asked which Nim and which C
   ## compiler it would use (``deploy-agent compile-profile
-  ## --probe-c-compiler``), with the host tools' fixed environment, which
-  ## is what the fetch unit's compile sees (§13 decision 31: the C compiler
-  ## is the base's, or the one the engine carries). A compiler that is not
-  ## there yet is not judged: a test bed installs its stand-in after the
-  ## bootstrap, and an operator may install the engine afterwards.
+  ## --probe-c-compiler``), with the ``PATH`` every profile compile on the
+  ## host runs with (``searchPath``; ``ProfileCompilePath`` unless a test
+  ## names another) -- so a C compiler the operator installed under
+  ## ``/usr/local/bin`` is found here exactly when the compile will find it
+  ## (§13 decision 31: the C compiler is the base's, or the one the engine
+  ## carries). A compiler that is not there yet is not judged: a test bed
+  ## installs its stand-in after the bootstrap, and an operator may install
+  ## the engine afterwards.
   if not fileExists(compiler):
     return ""
   # §7.9 (the glibc exception): an engine cross-built for this host runs
@@ -598,12 +602,17 @@ proc profileCompilerProblem*(compiler: string; timeoutSec = 120): string =
   let glibc = crossPrefixGlibcProblem(compiler, hostGlibcVersion())
   if glibc.len > 0:
     return glibc
+  let path = if searchPath.len > 0: searchPath else: ProfileCompilePath
   try:
     let r = runHostTool([compiler, "deploy-agent", "compile-profile",
-                         "--probe-c-compiler"], timeoutSec = timeoutSec)
+                         "--probe-c-compiler"], timeoutSec = timeoutSec,
+                        path = path)
     if r.exitCode != 0:
-      return r.output.strip() & " (a host that compiles profiles needs a " &
-        "C compiler: install one from the distribution, such as gcc)"
+      # The remedy first, the compiler's own words after it, unchanged and
+      # last: callers (and tests) read its final line as what it reported.
+      return "a host that compiles profiles needs a C compiler (install " &
+        "one from the distribution, such as gcc); the profile compiler " &
+        "reported: " & r.output.strip()
   except CatchableError as e:
     return e.msg
   ""

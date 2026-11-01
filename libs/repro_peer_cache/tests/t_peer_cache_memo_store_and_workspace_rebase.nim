@@ -23,6 +23,7 @@
 
 import std/[asyncdispatch, options, os, strutils, tables, tempfiles, unittest]
 
+import repro_core/evidence_source
 import repro_hash
 import repro_local_store
 import repro_peer_cache
@@ -78,7 +79,11 @@ proc entryFor(weak: BlobDigest; seed: byte): MemoEntry =
       @["id-a", "id-" & $seed]),
     recordBytes: encodeActionResultRecord(recordFor(seed)),
     outputDigests: @[digestN(seed + 100)],
-    evidenceLevel: elComplete)
+    # A published-trace entry (RPME v4) states its evidence source; one
+    # without (v1-v3) is refused across hosts as a miss by every consumer
+    # (Edge-Derived-Identities.md §3.1, §3.3; ``memoEntryRefusal``), so an
+    # entry this suite expects to be SERVED must state one.
+    evidenceLevel: elComplete, evidenceSource: MonitoredEvidence)
 
 suite "Distributed-Execution M0: workspace rebasing":
 
@@ -354,7 +359,14 @@ suite "Distributed-Execution M0: memoization plane over loopback TCP":
       let fetched = waitFor client.requestMemoEntryFrom(target, weak,
         entry.strongFingerprint)
       check fetched.isSome
-      check decodeMemoEntry(fetched.get()) == entry
+      # The decoder records the version it read (``formatVersion``, not
+      # itself encoded); an entry built in memory carries 0. The served
+      # entry is the published-trace version, and otherwise byte for byte
+      # the one B wrote.
+      var served = decodeMemoEntry(fetched.get())
+      check served.formatVersion == MemoEntryVersion
+      served.formatVersion = 0
+      check served == entry
       let absent = waitFor client.requestMemoEntryFrom(target, weak, digestN(23))
       check absent.isNone
       # Asking the CONTENT plane for a fingerprint key is a miss — the old
