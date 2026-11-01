@@ -279,6 +279,12 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
       stderr.writeLine("repro deploy-agent compile-profile: unknown option " & a)
       return 2
     i += 2
+  # One spelling of the selection (``canonicalSystemSelection``): the compile
+  # and the digest below both use it, so ``addOn`` alone, ``addOn`` with
+  # ``default`` and ``addOn`` with ``,`` all bind the add-on mode's
+  # ``default`` under one digest, and ``full`` alone binds none.
+  (systemMode, systemActivities) =
+    canonicalSystemSelection(systemMode, systemActivities)
   var profileText = ""
   var workspace = ""
   if stdio:
@@ -348,14 +354,8 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   if digestOut.len > 0:
     # The selection the compile was asked for is bound into the digest
     # (``compiledProfileDigest``), spelled as the pin carries it.
-    var selected = systemActivities
-    selected.sort()
-    selected = selected.deduplicate(isSorted = true)
     let selection = systemSelectionText(CompiledProfilePin(
-      systemMode: (if systemMode.len > 0 or selected.len > 0:
-                     (if systemMode.len > 0: systemMode else: "full")
-                   else: ""),
-      systemActivities: selected))
+      systemMode: systemMode, systemActivities: systemActivities))
     writeFile(digestOut, compiledProfileDigest(text, actionsJson, selection) &
       "\n")
   if revisionOut.len > 0:

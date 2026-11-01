@@ -20,6 +20,12 @@
 ##     the same list file;
 ##   * a key list with UTF-8 comments and a byte-order mark reads as the same
 ##     keys on both sides (the 2026-10-31 producer outage);
+##   * the pin's system selection (flags bit 2) has one encoding per
+##     selection on both sides: `addOn` with no activity, or naming
+##     `default`, is the add-on mode's `default` only (flags 7, one digest);
+##     `full` with none is the pin without a selection (flags 3); both
+##     validators refuse the other spellings, and both decoders refuse
+##     flags 5 (bit 2 without bit 1);
 ##   * the compiled-profile pin (flags bit 1): Python pins the digest of a
 ##     compile, this library computes the same digest over the same two
 ##     texts and refuses a compile that emitted anything else; and, given a
@@ -41,6 +47,10 @@
 ## signed prefix leaves the closure digests out (the transformation is
 ## below, `mutatedProducer`); every manifest it renders must then be refused
 ## by this decoder, so the matching-digest case fails and the test goes red.
+## `python-lists-default` runs a copy whose canonicalisation keeps `default`
+## in the activity list (the spelling the agent once could not be given);
+## its pin for `addOn` + `default` is then not the add-on default's, and the
+## one-encoding case goes red.
 ##
 ## Mocks: none. The apply hook is a recording closure because what is under
 ## test is the agent's verdict on the manifest, not an apply; every byte on
@@ -105,8 +115,23 @@ def _mutated_publish(args, envelope, sequence, digest, deployment_id, pubkey, ma
   result = work / "render-deploy-manifest-mutated.py"
   writeFile(result, text)
 
+proc listsDefaultProducer(src: string): string =
+  ## The second falsifying mutation: Python's canonicalisation keeps
+  ## `default`, and its validator lets it through, so `addOn` + `default`
+  ## is signed as a selection of its own.
+  var text = readFile(src)
+  for (needle, repl) in [
+      ("""a.strip() for a in activities if a.strip() and a.strip() != "default"}""",
+       """a.strip() for a in activities if a.strip()}"""),
+      ("""            if not a or a == "default":""", """            if not a:""")]:
+    doAssert needle in text, "the mutation no longer matches the producer: " & needle
+    text = text.replace(needle, repl)
+  result = work / "render-deploy-manifest-lists-default.py"
+  writeFile(result, text)
+
 proc producer(): string =
   if mutation == "python-omits-closure-digests": mutatedProducer(producerPath)
+  elif mutation == "python-lists-default": listsDefaultProducer(producerPath)
   elif mutation.len > 0:
     raise newException(ValueError, "unknown RDMF_CONFORMANCE_MUTATION " & mutation)
   else: producerPath
@@ -339,6 +364,117 @@ suite "RDMF v3 cross-implementation conformance":
     check compiledProfileRefusal(m, readFile(profile), "[]", "abc123") == ""
     # A pin re-encoded here round-trips to the same bytes Python signed.
     check encodeManifest(m) == cast[seq[byte]](readFile(path))
+
+  test "a selection has one encoding: addOn alone (or naming default) is the add-on default":
+    # This library's canonicalisation, the producer-side half.
+    check canonicalSystemSelection("addOn", []) == ("addOn", newSeq[string]())
+    check canonicalSystemSelection("addOn", ["default"]) ==
+      ("addOn", newSeq[string]())
+    check canonicalSystemSelection("addOn", [" ", "web", "default", "web"]) ==
+      ("addOn", @["web"])
+    check canonicalSystemSelection("full", []) == ("", newSeq[string]())
+    check canonicalSystemSelection("full", ["default"]) == ("", newSeq[string]())
+    check canonicalSystemSelection("", ["b", "a"]) == ("full", @["a", "b"])
+    check canonicalSystemSelection("", []) == ("", newSeq[string]())
+    # Python renders every spelling of the add-on default; each verifies
+    # here and is the same pin: flags 7, addOn with an empty list, and the
+    # digest that frames exactly "addOn\n".
+    let canon = work / "addon-default.canonical"
+    let acts = work / "addon-default.actions"
+    writeFile(canon, readFile(profile))
+    writeFile(acts, "[]")
+    proc renderSelection(name: string; selection: seq[string]): DeployManifest =
+      let path = render(name, @["--max-age-seconds", "3600",
+        "--issued-at", $(now - 10), "--sequence", "13",
+        "--compiled-canonical", canon, "--compiled-actions", acts,
+        "--compile-platform", "linux", "--compile-arch", "x86_64",
+        "--compile-host", "addon-host-1", "--compiler-revision", "abc123"] &
+        selection)
+      result = decodeManifest(cast[seq[byte]](readFile(path)))
+      check verifyTrusted(result, anchors)
+      check encodeManifest(result) == cast[seq[byte]](readFile(path))
+    let addOnDigest = compiledProfileDigest(readFile(profile), "[]", "addOn\n")
+    let noSelection = compiledProfileDigest(readFile(profile), "[]")
+    check addOnDigest != noSelection
+    for (name, selection) in [
+        ("addon-alone", @["--compile-system-mode", "addOn"]),
+        ("addon-default", @["--compile-system-mode", "addOn",
+                            "--compile-system-activities", "default"]),
+        ("addon-blanks", @["--compile-system-mode", "addOn",
+                           "--compile-system-activities", " ,default, "])]:
+      checkpoint name
+      let m = renderSelection(name, selection)
+      check m.wireFlags == 7'u16
+      check m.compiledProfile.systemMode == "addOn"
+      check m.compiledProfile.systemActivities.len == 0
+      check systemSelectionText(m.compiledProfile) == "addOn\n"
+      check m.compiledProfile.digest == addOnDigest
+      check compiledProfileRefusal(m, readFile(profile), "[]", "abc123") == ""
+    # `full` alone, or naming only `default`, is the pin without a selection.
+    for (name, selection) in [
+        ("full-alone", @["--compile-system-mode", "full"]),
+        ("full-default", @["--compile-system-mode", "full",
+                           "--compile-system-activities", "default"])]:
+      checkpoint name
+      let m = renderSelection(name, selection)
+      check m.wireFlags == 3'u16
+      check not m.compiledProfile.hasSystemSelection
+      check m.compiledProfile.digest == noSelection
+
+  test "the other spellings are refused by both validators, and flags 5 by both decoders":
+    var m = DeployManifest(target: Target, sequence: 20'u64,
+      deploymentId: "non-canonical", profileText: "p", issuedAt: uint64(now),
+      maxAgeSeconds: 600'u64)
+    m.compiledProfile = CompiledProfilePin(digest: "sha256:" & repeat("ab", 32),
+      compilerRevision: "r", platform: "linux", arch: "x86_64", host: "h")
+    let probe = work / "pin_error_probe.py"
+    writeFile(probe, "import importlib.util, sys\n" &
+      "spec = importlib.util.spec_from_file_location('rdm', sys.argv[1])\n" &
+      "mod = importlib.util.module_from_spec(spec); sys.modules['rdm'] = mod; spec.loader.exec_module(mod)\n" &
+      "acts = sys.argv[3].split(',') if sys.argv[3] else []\n" &
+      "p = mod.CompiledProfilePin(digest='sha256:' + 'ab' * 32, compilerRevision='r',\n" &
+      "    platform='linux', arch='x86_64', host='h', systemMode=sys.argv[2], systemActivities=acts)\n" &
+      "print(mod.compiled_profile_pin_error(p) or 'OK')\n")
+    proc pyPinError(mode, acts: string): string =
+      let r = execCmdEx(quoteShellCommand(@[python, "-I", probe, producer(), mode, acts]))
+      check r.exitCode == 0
+      r.output.strip()
+    for (mode, acts, ok) in [("addOn", "", true), ("addOn", "web", true),
+                             ("full", "web", true), ("full", "", false),
+                             ("addOn", "default", false),
+                             ("full", "default", false),
+                             ("addOn", "default,web", false)]:
+      checkpoint mode & " / " & acts
+      m.compiledProfile.systemMode = mode
+      m.compiledProfile.systemActivities =
+        (if acts.len > 0: acts.split(',') else: @[])
+      let nimErr = compiledProfilePinError(m.compiledProfile)
+      check (nimErr.len == 0) == ok
+      let pyErr = pyPinError(mode, acts)
+      check (pyErr == "OK") == ok
+      if not ok:
+        check "non-canonical" in nimErr
+        check "non-canonical" in pyErr
+        # This library will neither sign nor encode such a pin.
+        expect DeployManifestCodecError:
+          signManifest(signer, m)
+        expect DeployManifestCodecError:
+          discard encodeManifest(m)
+    # flags 5: the selection bit without the pin bit, which it extends.
+    var plain = DeployManifest(target: Target, sequence: 21'u64,
+      deploymentId: "flags-5", profileText: "p", issuedAt: uint64(now),
+      maxAgeSeconds: 600'u64)
+    signManifest(signer, plain)
+    var bytes = encodeManifest(plain)
+    check bytes[6] == 1'u8 and bytes[7] == 0'u8
+    bytes[6] = 5'u8
+    expect DeployManifestCodecError:
+      discard decodeManifest(bytes)
+    let f5 = work / "flags-5.rdm"
+    writeFile(f5, cast[string](bytes))
+    let d = py(@["inspect", "--manifest", f5])
+    check d.code != 0
+    check "flags word is 5" in d.output
 
   test "a real compiler: Python's pin is reproduced by a second compile here":
     let compiler = getEnv("RDMF_PROFILE_COMPILER")
