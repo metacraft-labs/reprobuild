@@ -125,7 +125,14 @@ for raw in "${arches[@]}"; do
     *) echo "build_addon_static: unsupported architecture $raw" >&2; exit 2 ;;
   esac
   prefix="$(nix_attr_prefix "$arch")"
-  mapfile -t paths < <(nix build --no-link --print-out-paths --inputs-from . \
+  # Rooted (--out-link, in the output directory) rather than --no-link: the
+  # compile and link below take minutes, and a garbage collection in that
+  # window -- nix's automatic one runs whenever the store's disk is short --
+  # deletes unrooted outputs, so the link then fails with `cannot find
+  # -lzstd` although the path was just printed. The roots are replaced on
+  # the next build and removed with the output directory.
+  mapfile -t paths < <(nix build --out-link "$out/.gcroot-$arch" \
+    --print-out-paths --inputs-from . \
     "nixpkgs#${prefix}.stdenv.cc" "nixpkgs#${prefix}.sqlite.out" \
     "nixpkgs#${prefix}.zstd.out")
   # The outputs come back in no particular order (stdenv.cc also has a
