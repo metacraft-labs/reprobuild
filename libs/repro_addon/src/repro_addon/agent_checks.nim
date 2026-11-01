@@ -105,7 +105,15 @@ const ManagementPathUnits* = [
   # (``TasksMax=0``, ``MemoryMax=``, ``CPUQuota=``) caps every login, sshd's
   # included. ``user-<uid>.slice`` is matched as a family (``userSlice``);
   # ``system.slice`` and application slices are not management units.
-  "user.slice", "user-.slice", "-.slice"]
+  # The owner confirmed the reading that these are full management units
+  # (drop-ins, unit files and unit states alike).
+  "user.slice", "user-.slice", "-.slice",
+  # Decision 37, extended (2026-11-01): the units a login runs as. Every
+  # login session is a ``session-<n>.scope`` (a drop-in in
+  # ``session-.scope.d/`` or ``scope.d/`` reaches each one), matched as a
+  # family (``sessionScope``); ``user@<uid>.service`` is each user's
+  # service manager, which ``pam_systemd`` starts on login.
+  "session-.scope", "user@.service"]
   ## Units of the management path. A unit or drop-in is matched by every
   ## name systemd knows it under (its id and aliases), and by the aliases
   ## its own ``[Install]`` section would create, never by the text alone.
@@ -158,16 +166,28 @@ proc userSlice(unit: string): bool =
   unit.startsWith("user-") and unit.endsWith(".slice") and
     unit.len > "user-.slice".len
 
+proc sessionScope(unit: string): bool =
+  ## ``session-<n>.scope``, one login session (decision 37).
+  ## ``session-.scope`` itself is listed.
+  unit.startsWith("session-") and unit.endsWith(".scope") and
+    unit.len > "session-.scope".len
+
+const SessionUnits = ["session-.scope", "user@.service"]
+  ## The decision-37 extension's names, for its falsifier.
+
 proc isManagementUnitName(n: string): bool =
   ## Whether a unit named ``n`` is a management unit or one of their
-  ## aliases, an instance of a management template, or a user slice.
+  ## aliases, an instance of a management template, a user slice or a
+  ## login session.
   when mutated("agent-management-path-allows-login-slices"):
     if n.endsWith(".slice"): return false
+  when mutated("agent-management-path-allows-session-units"):
+    if n.endsWith(".scope") or templateOf(n) == "user@.service": return false
   if n in ManagementPathUnits or n in ManagementPathUnitAliases: return true
   # An instance (``ssh@x.service``) is the template's unit.
   when not mutated("agent-management-path-ignores-templates"):
     if templateOf(n) in ManagementPathUnits: return true
-  userSlice(n)
+  userSlice(n) or sessionScope(n)
 
 proc managementUnitHit(names: openArray[string]): string =
   for n in names:
@@ -239,8 +259,9 @@ proc managementDropInDirs(unitNames: UnitNamesResolver): seq[string] =
   ## ``dropInDirUnits`` over every name of every management unit -- the
   ## listed names and aliases and the ``Names`` systemd knows each by on
   ## this host -- and, for a template, over an instance of it (its
-  ## instance-form prefixes, ``serial-@%i.service``), and for the user
-  ## slices over ``user-%i.slice``. A name holding ``InstanceStandIn``
+  ## instance-form prefixes, ``serial-@%i.service``), for the user
+  ## slices over ``user-%i.slice`` and for login sessions over
+  ## ``session-%i.scope``. A name holding ``InstanceStandIn``
   ## matches any instance (``managementDropInHit``).
   var names: seq[string]
   for m in ManagementPathUnits:
@@ -249,7 +270,7 @@ proc managementDropInDirs(unitNames: UnitNamesResolver): seq[string] =
     if a notin names: names.add(a)
   when not mutated("agent-management-path-dropin-ignores-unit-aliases"):
     for m in ManagementPathUnits:
-      if '@' in m or m.endsWith(".slice"): continue
+      if '@' in m or m.endsWith(".slice") or m.endsWith(".scope"): continue
       for n in unitNames(m):
         if n notin names: names.add(n)
   else:
@@ -268,6 +289,14 @@ proc managementDropInDirs(unitNames: UnitNamesResolver): seq[string] =
     var kept: seq[string]
     for n in forms:
       if n notin ["user.slice", "user-.slice", "-.slice"]: kept.add(n)
+    forms = kept
+  when not mutated("agent-management-path-allows-session-units"):
+    forms.add("session-" & InstanceStandIn & ".scope")
+  else:
+    var kept: seq[string]
+    for n in forms:
+      if n notin SessionUnits and n != "user@" & InstanceStandIn & ".service":
+        kept.add(n)
     forms = kept
   for f in forms:
     for d in dropInDirUnits(f):

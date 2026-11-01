@@ -362,6 +362,13 @@
 ##                                            ``user-<uid>.slice``,
 ##                                            ``-.slice`` and ``slice`` pass
 ##                                            (decision 37)
+## ``agent-management-path-allows-session-units``  login sessions and user
+##                                            managers are not management
+##                                            units: ``session-.scope``,
+##                                            ``session-<n>.scope``,
+##                                            ``user@.service`` and its
+##                                            instances pass (decision 37,
+##                                            extended)
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -508,6 +515,7 @@ const
                           "agent-management-path-dropin-ignores-instance-forms",
                           "agent-management-path-dropin-ignores-unit-aliases",
                           "agent-management-path-allows-login-slices",
+                          "agent-management-path-allows-session-units",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",

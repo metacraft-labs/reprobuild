@@ -336,10 +336,24 @@ suite "a drop-in is judged by the units systemd applies it to":
     let state = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdUnitState, address: "unitState:user", usName: "user-1000.slice")])
     check "management path" in managementPathRefusal(state, noNames)
+  test "login sessions and user managers are refused (decision 37, extended)":
+    # Falsifier: agent-management-path-allows-session-units.
+    for unit in ["session-.scope", "session-5.scope", "user@.service",
+                 "user@1000.service", "scope"]:
+      checkpoint unit
+      check "management path" in managementPathRefusal(dropIn(unit), noNames)
+    for unit in ["session-5.scope", "user@1000.service", "user@.service"]:
+      checkpoint unit
+      let state = SystemProfile(resources: @[SystemResource(
+        kind: srkSystemdUnitState, address: "unitState:" & unit, usName: unit)])
+      check "management path" in managementPathRefusal(state, noNames)
+    check dropInDirUnits("session-5.scope") ==
+      @["session-5.scope", "session-.scope", "scope"]
   test "drop-ins that reach no management unit are not refused":
     for unit in ["app-.service", "app@.service", "web-api.service",
                  "app-@x.service", "system.slice", "app.slice",
-                 "app-web.slice", "web-.slice"]:
+                 "app-web.slice", "web-.slice", "app-1.scope",
+                 "user-runtime-dir@.service"]:
       checkpoint unit
       check managementPathRefusal(dropIn(unit), noNames) == ""
   test "the lookup names are systemd's":

@@ -10,10 +10,12 @@
 ## The same holds for the console login and name service, for drop-ins that
 ## reach a management unit only through systemd's drop-in lookup (a
 ## dash-truncated or instance-form prefix, a template, an alias's prefix),
-## and for the login and root slices (decision 37). A last step checks the
+## for the login and root slices, login session scopes and user managers
+## (decision 37). A last step checks the
 ## lookup model against the guest's own systemd: probe drop-ins in every
-## directory the model derives for three probe units (a template instance,
-## a unit with an enabled alias, a dash-named slice) and in directories it
+## directory the model derives for probe units (a template instance, a
+## unit with an enabled alias, a dash-named slice, the root slice, root's
+## user manager and the gate's SSH session scope) and in directories it
 ## does not, then ``systemctl show -P DropInPaths``; systemd may apply no
 ## directory the model does not derive.
 ##
@@ -130,9 +132,16 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                           ("container-@.service", "Service"),
                           ("dbus-.service", "Service"),
                           ("user.slice", "Slice"), ("user-.slice", "Slice"),
-                          ("user-1000.slice", "Slice"), ("-.slice", "Slice")]:
-    let content = if section == "Slice": "[Slice]\nTasksMax=1\n"
-                  else: "[Service]\nExecStart=\n"
+                          ("user-1000.slice", "Slice"), ("-.slice", "Slice"),
+                          # Decision 37, extended: login sessions and the
+                          # user managers pam_systemd starts.
+                          ("session-.scope", "Scope"), ("session-5.scope", "Scope"),
+                          ("user@.service", "Service"),
+                          ("user@1000.service", "Service")]:
+    let content = case section
+      of "Slice": "[Slice]\nTasksMax=1\n"
+      of "Scope": "[Scope]\nTasksMax=1\n"
+      else: "[Service]\nExecStart=\n"
     consoleCases.add(("a drop-in in " & unit & ".d",
       "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
       "systemd.systemDropIn {\n  unit = \"" & unit & "\"\n  name = \"a8\"\n" &
@@ -174,8 +183,10 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
   ## stand for the management units' shapes: a template instance with a
   ## dashed prefix (serial-getty@ttyS0), a unit with an enabled
   ## ``[Install] Alias=`` (networkd's D-Bus alias), a dashed slice
-  ## (user-1000.slice) and the root slice. The probe drop-ins set only an
-  ## ``X-`` key, which systemd ignores.
+  ## (user-1000.slice), the root slice, root's user manager
+  ## (user@0.service) and the gate's own SSH session scope
+  ## (session-<n>.scope). The probe drop-ins set only an ``X-`` key, which
+  ## systemd ignores.
   let ver = g.exec("systemctl --version | head -1").stdout.strip()
   record["systemdVersion"] = %ver
   const Units = {
@@ -186,8 +197,14 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
   for (name, content) in Units:
     discard g.run("printf '%s' '" & content & "' > /etc/systemd/system/" & name)
   discard g.run("systemctl daemon-reload && systemctl enable a8q-net.service")
-  let probes = ["a8p-gw-x@i1.service", "a8q-net.service", "a8s-1000.slice",
-                "-.slice"]
+  # The guest's own login units too: root's user manager and the gate's
+  # SSH session scope (decision 37, extended).
+  let session = g.exec("systemctl list-units --type=scope --state=active " &
+    "--no-legend --plain 'session-*.scope' | awk 'NR==1 {print $1}'").stdout.strip()
+  var probes = @["a8p-gw-x@i1.service", "a8q-net.service", "a8s-1000.slice",
+                 "-.slice", "user@0.service"]
+  if session.len > 0: probes.add(session)
+  record["dropInProbeSession"] = %session
   var predicted: seq[(string, seq[string])]
   var candidates = @["a8p-gw-@i2.service", "a8p-gw-x@i2.service",
     "a8p-gw.service", "a8p.service", "a8r-org.service", "a8q.service",
@@ -234,6 +251,7 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
   discard g.run("systemctl disable a8q-net.service; rm -f " &
     "/etc/systemd/system/a8p-gw-x@.service /etc/systemd/system/a8q-net.service " &
     "/etc/systemd/system/a8s-1000.slice; systemctl daemon-reload")
+  step("a login session scope was probed", session.len > 0, "")
   step("systemd (" & ver & ") applies no drop-in directory the model does " &
        "not derive", unsound.len == 0, unsound.join("\n") & "\n" & $report)
   # The model's own claim, measured: every derived directory is applied.
