@@ -590,6 +590,14 @@ proc runAddonStoreCli*(args: seq[string]): int =
     if args[0] == "gc":
       hostLock = acquireHostApplyLock("repro store gc")
     defer: hostLock.release()
+    if args[0] == "gc":
+      # Adopt and root any closure prefix an older realiser left without a
+      # receipt before collecting, so a closure a retained generation binds
+      # is held by that generation's root (``migrateLegacyAptClosures``).
+      let legacy = migrateLegacyAptClosures()
+      for r in legacy.refused:
+        stderr.write("repro store gc: legacy apt prefix not adopted: " &
+          r.path & ": " & r.reason & "\n")
     enterWritableStoreView()
     var s = openStore(StoreRoot)
     defer: s.close()

@@ -109,6 +109,13 @@ const AuditExemptions = [
   # stubs that carry provisioning, but do not represent standalone packages.
   "system_tools",
   "kf6_qt6_modules",
+  # ReproOS-Add-On-Mode §2.3 / §8.3: ``apt_closure`` is the library for
+  # ``package(apt, ...)`` closures in system units: the closure-lock codec,
+  # the store realiser and the systemd unit binding. Like ``apt_index``
+  # it declares no package of its own; the members it realises are pinned
+  # by a closure lock that ``repro-harvest-apt --emit-lock`` generates, not
+  # by a provisioning shape in this module.
+  "apt_closure",
 ]
 
 const CanonicalPinExemptions = [

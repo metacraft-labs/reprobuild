@@ -2193,6 +2193,41 @@ proc collectConfigSection(body: NimNode; output: var seq[VariantDecl]) =
     parseVariantDeclaration(stmt, pendingDoc, output)
     pendingDoc = ""
 
+proc zigCrossAutoInjectShellTools(pkg: var PackageDef) =
+  ## A package that declares `zig` in ``nativeBuildDeps:`` builds for a zig
+  ## cross target through `cross_zig`, whose wrapper edge is a shell script
+  ## running ``sh`` and coreutils. Those are the adapter's tools, so they
+  ## are added here rather than asked of every recipe: ``sh`` and
+  ## ``coreutils`` join ``nativeBuildDeps:`` unless already declared there
+  ## (Reprobuild-Standard-Library.md, `cross_zig`, amended 2026-11-01).
+  ##
+  ## Expansion time for the same reason as the Qt6 pass below: tool
+  ## identities are allocated from the dependency lists the macro emits, so
+  ## a use added when the constructor runs would never be resolved. A
+  ## native build realizes only the tools its selected edges name, and no
+  ## native edge names these through this route, so it never resolves them.
+  var hasZig = false
+  var declared: seq[string] = @[]
+  for use in pkg.nativeBuildDeps:
+    declared.add(use.executableName)
+    if use.executableName == "zig":
+      hasZig = true
+  if not hasZig:
+    return
+  for tool in ["sh", "coreutils"]:
+    if tool in declared:
+      continue
+    pkg.nativeBuildDeps.add(PackageUseDef(
+      rawConstraint: tool,
+      packageSelector: tool,
+      executableName: tool,
+      policyPath: @[],
+      sourceFile: pkg.sourceFile,
+      sourceLine: pkg.sourceLine,
+      gateVariant: "",
+      gateValue: "",
+      depKind: DepKindNative))
+
 proc m9r15pAutoInjectQt6Transitive(pkg: var PackageDef) =
   ## DSL-port M9.R.15p.0.1 — auto-inject ``libxkbcommon`` + ``mesa`` as
   ## buildDeps whenever any ``qt6-*`` dep is declared on the package
@@ -2861,6 +2896,9 @@ proc parsePackageDef(name: NimNode; body: NimNode;
   # See ``m9r15pAutoInjectQt6Transitive`` for the architectural
   # rationale + dedup semantics. Inert for non-qt6 recipes.
   m9r15pAutoInjectQt6Transitive(result)
+  # ReproOS-Add-On-Mode A15: `cross_zig`'s wrapper edge runs `sh` and
+  # coreutils; a package that declares `zig` gets them declared too.
+  zigCrossAutoInjectShellTools(result)
   # Windows-dev-env M1: a recipe with a non-empty ``uses:`` toolchain
   # floor but NO explicit ``devEnv:`` block still exposes dev-env
   # introspection (see ``exposesDevEnvIntrospection`` /

@@ -61,7 +61,7 @@
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``. *Mocking.* None: real guests, the
 ## static add-on binary, manifests signed with the deploy agent's own code.
 
-import std/[json, os, strutils, times, unittest]
+import std/[json, os, osproc, strutils, times, unittest]
 
 import repro_deploy_agent
 import repro_dsl_stdlib/packages/apt_closure
@@ -111,6 +111,12 @@ proc fileResource(path, content: string): string =
   "fs.systemFile {\n  path = " & quoteSystemValue(path) & "\n  content = " &
     quoteSystemValue(content) & "\n}\n\n"
 
+const
+  FxClosureUnit = "repro-fx-closure.service"
+  FxClosureText = "[Unit]\nDescription=closure fixture\n\n[Service]\n" &
+    "ExecStart=/usr/bin/busybox sleep infinity\n\n[Install]\n" &
+    "WantedBy=multi-user.target\n"
+
 proc kindMix(lockText: string): string =
   ## A timer and its service, a group and a user, an operator tool.
   "systemd.systemUnit {\n  name = \"" & TickService & "\"\n  content = " &
@@ -127,12 +133,17 @@ proc kindMix(lockText: string): string =
     quoteSystemValue(CredServiceText) & "\n}\n\n"
 
 proc profile(changeMarker, caches, anchors, lockText: string;
-             extra = ""; addOnExtra = ""): string =
+             extra = ""; addOnExtra = ""; closureLockText = ""): string =
   ## keep-svc reads a file of the profile; caches.conf and the anchors are
   ## generation 0's objects, declared as rpi2's profile declares them.
   "addOn {\n  managedEtcPrefixes = [\"" & parentDir(KeepConf) & "/\"]\n" &
     addOnExtra & "}\n\n" &
     kindMix(lockText) & extra &
+    (if closureLockText.len > 0:
+       "systemd.systemUnit {\n  name = \"" & FxClosureUnit & "\"\n  content = " &
+       quoteSystemValue(FxClosureText) & "\n  aptClosureLock = " &
+       quoteSystemValue(closureLockText) & "\n}\n\n"
+     else: "") &
     fileResource(KeepConf, "keep = 1\n") &
     unitResource("keep-svc", "keep",
       "  depends_on = [\"fs.systemFile:" & KeepConf & "\"]\n") &
@@ -166,6 +177,50 @@ proc fxToolLock(g: Guest): tuple[lock: AptClosureLock; text: string] =
                 AddOnAptDebCacheDir)
   g.copyTo(deb, AddOnAptDebCacheDir & "/" & lock.debs[0].sha256 & ".deb")
   (lock, renderAptClosureLock(lock))
+
+proc staticBusybox(): string =
+  ## A static busybox (this flake's nixpkgs), so the closure fixture's
+  ## service runs from the closure's own /usr.
+  let (o, rc) = execCmdEx("nix build --no-link --print-out-paths " &
+    "--inputs-from " & quoteShell(reproRoot()) & " nixpkgs#pkgsStatic.busybox")
+  if rc != 0: raise newException(IOError, "nix build of a static busybox: " & o)
+  o.strip().splitLines()[^1] / "bin" / "busybox"
+
+proc fxClosureLock(g: Guest): tuple[lock: AptClosureLock; text: string] =
+  ## A one-member closure whose /usr carries a static busybox: the package a
+  ## unit runs from, as rpi2's prometheus-node-exporter runs from its own.
+  let deb = g.runDir / "repro-fxsvc.deb"
+  writeDeb(deb, @[dir("./"), dir("./usr/"), dir("./usr/bin/"),
+    (name: "./usr/bin/busybox", typeflag: '0', mode: 0o755,
+     content: readFile(staticBusybox()), linkName: "")])
+  let lock = fixtureLock("repro-fxsvc", deb)
+  discard g.run("mkdir -p " & AddOnAptDebCacheDir & " && chmod 0700 " &
+                AddOnAptDebCacheDir)
+  g.copyTo(deb, AddOnAptDebCacheDir & "/" & lock.debs[0].sha256 & ".deb")
+  (lock, renderAptClosureLock(lock))
+
+proc closureUnit(lockText: string): SystemResource =
+  SystemResource(kind: srkSystemdSystemUnit, address: "systemUnit:" &
+    FxClosureUnit, suName: FxClosureUnit, suContent: FxClosureText,
+    suEnabled: true, suAptClosureLock: lockText)
+
+proc fakeLegacyClosureUnit(g: Guest; lock: AptClosureLock; lockText: string) =
+  ## What an agent of an older closure realiser left: the unit bound to that
+  ## realiser's prefix of the same closure (an unpublished directory, no
+  ## store receipt), its service running from it. rpi2's 22 closure units.
+  let legacy = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock)[0]
+  g.copyTo(staticBusybox(), "/var/tmp/repro-fx-busybox")
+  # /repro/store is bound read-only; the older realiser wrote below it, so
+  # the fixture writes in a private mount namespace without the bind, as
+  # the switch's own writable view does.
+  discard g.run("unshare -m sh -c 'umount /repro/store && mkdir -p " & legacy &
+    "/usr/bin && cp /var/tmp/repro-fx-busybox " & legacy & "/usr/bin/busybox" &
+    " && chmod 0755 " & legacy & "/usr/bin/busybox'")
+  writeFile(g.runDir / FxClosureUnit,
+            legacyClosureRenderings(closureUnit(lockText))[0])
+  g.copyTo(g.runDir / FxClosureUnit, "/etc/systemd/system/" & FxClosureUnit)
+  discard g.run("systemctl daemon-reload && systemctl enable --now " &
+                FxClosureUnit)
 
 proc statOf(g: Guest; path: string): string =
   g.run("stat -c '%i %y' " & path).strip()
@@ -275,11 +330,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let anchorsText = g.run("cat " & Anchors)
     let caches = caches0 & "# written by the deploy agent outside the switch\n"
     let (fxLock, fxLockText) = g.fxToolLock()
+    let (fxSvcLock, fxSvcLockText) = g.fxClosureLock()
     proc prof(marker: string; extra = ""; addOnExtra = "";
               cachesText = caches): string =
-      profile(marker, cachesText, anchorsText, fxLockText, extra, addOnExtra)
+      profile(marker, cachesText, anchorsText, fxLockText, extra, addOnExtra,
+              fxSvcLockText)
     # 1. Migration (c).
     g.fakeLegacyAgent(prof("v1"), caches, fxLock)
+    g.fakeLegacyClosureUnit(fxSvcLock, fxSvcLockText)
+    let closure0 = g.unitState("repro-fx-closure")
+    let legacyClosureBytes = g.run("cat /etc/systemd/system/" & FxClosureUnit)
     let keep0 = g.unitState("keep-svc")
     let change0 = g.unitState("change-svc")
     let anchorsStat0 = g.statOf(Anchors)
@@ -299,6 +359,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.exitCode == 0 and "units stopped or restarted: 0" in r.stdout and
          "supersede\t" & CachesConf in r.stdout and
          "accepted-out-of-band\t" & CachesConf in r.stdout and
+         "relocate-closure\t/etc/systemd/system/" & FxClosureUnit in r.stdout and
          "nothing was written" in r.stdout and g.currentGeneration() == gen0 and
          "EAddOnOutOfScope" notin r.stdout & r.stderr and
          g.statOf(Anchors) == anchorsStat0 and
@@ -344,6 +405,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.entriesAt(manifest).len == 1,
          tool0 & " / " & g.statOf(wrapper) & " " & g.statOf(manifest) & " " &
          $wrapperEntry)
+    # rpi2's closure units (§9 "Migration"): bound to an older realiser's
+    # prefix, rewritten at the store-published one, not restarted. At
+    # 4379adfd3b the plan and the migration refused it as EDrift.
+    let closureEntries = block:
+      var es: seq[LedgerEntry]
+      for e in parseLedger(g.ledgerOf()).entries:
+        if e.class == lcUnit and e.unit == FxClosureUnit: es.add(e)
+      es
+    step("the closure unit is relocated to the store-published prefix, not restarted",
+         g.unitState("repro-fx-closure") == closure0 and
+         aptClosurePrefixPath(AddOnSystemStoreRoot, fxSvcLock) in
+           g.run("cat /etc/systemd/system/" & FxClosureUnit) and
+         closureEntries.len == 1 and
+         closureEntries[0].collision == "closure-relocate",
+         closure0 & " / " & g.unitState("repro-fx-closure") & " " &
+         $closureEntries)
     step("the legacy LoadCredential= unit was adopted, not restarted",
          "systemUnit:repro-fx-cred.service" in g.ledgerOf() and
          g.unitState("repro-fx-cred") == cred0, cred0 & " / " &
@@ -440,7 +517,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     r = g.exec(repro & " system rollback " & gen0, timeoutSec = 1200)
     step("a rollback to generation 0 restarts no handed-back unit",
          r.exitCode == 0 and g.unitState("keep-svc") == keepBefore0 and
-         g.unitState("repro-fx-cred") == cred0,
+         g.unitState("repro-fx-cred") == cred0 and
+         g.unitState("repro-fx-closure") == closure0 and
+         g.run("cat /etc/systemd/system/" & FxClosureUnit) == legacyClosureBytes,
          keepBefore0 & " / " & g.unitState("keep-svc") & " ; " & cred0 &
          " / " & g.unitState("repro-fx-cred"))
     cachesEntries = g.entriesAt(CachesConf)

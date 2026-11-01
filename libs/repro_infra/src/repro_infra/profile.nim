@@ -862,6 +862,21 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
                  "After=" & SecretsOrderingUnit, ""] & outLines
   outLines.join("\n")
 
+
+proc legacyClosureRenderings*(r: SystemResource): seq[string] =
+  ## The bytes `renderedSystemUnitContent` gave this unit when an older
+  ## closure realiser bound it (``legacyAptClosurePrefixPaths``): the same
+  ## unit, the same package bytes, bound at the older prefix path. Empty
+  ## for a unit without a closure. ReproOS-Add-On-Mode §9 "Migration": a
+  ## unit an agent wrote this way is relocated, not refused.
+  if r.kind != srkSystemdSystemUnit or r.suAptClosureLock.len == 0: return
+  let rendered = renderedSystemUnitContent(r)
+  let lock = parseAptClosureLock(r.suAptClosureLock)
+  let current = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+  for legacy in legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock):
+    if legacy != current:
+      result.add(rendered.replace(current & "/", legacy & "/"))
+
 proc checkUnitStateResource*(r: SystemResource) =
   ## The refusals both the text parser and the DSL adapter apply to a
   ## `systemd.unitState` (ReproOS Add-On Mode §4.1): the name must be a

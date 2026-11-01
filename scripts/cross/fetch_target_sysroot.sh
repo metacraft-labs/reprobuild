@@ -168,6 +168,10 @@ mv "${staging}" "${sysroot_abs}"
   echo "# sysroot fetched by scripts/cross/fetch_target_sysroot.sh"
   echo "sysroot_triple=${triple}"
   echo "sysroot_glibc=$(remote 'ldd --version | head -n1')"
+  # The version alone, which an installed engine's preflight compares with
+  # its host's (ReproOS add-on mode §7.9, the glibc exception): a binary
+  # linked here runs only on a glibc at least this one.
+  echo "sysroot_glibc_version=$(remote 'getconf GNU_LIBC_VERSION' | awk '{print $2}')"
   echo "sysroot_dev_packages=$(cat "${dev_packages_record}")"
 } > "${sysroot_abs}/.sysroot-info"
 rm -f "${dev_packages_record}"

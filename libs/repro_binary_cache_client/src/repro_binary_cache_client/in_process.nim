@@ -305,6 +305,32 @@ proc writeArchiveString(writer: var ArchiveFileWriter; data: string) =
   if data.len > 0:
     writer.writeArchiveBytes(unsafeAddr data[0], data.len)
 
+proc zstdFileDecompressesTo*(path: string; expected: Blake3Digest): bool =
+  ## Whether the zstd payload at `path` decompresses, in full, to bytes whose
+  ## BLAKE3 is `expected` -- the raw archive digest a profile pins. Streams
+  ## the file, so a large payload is never held in memory. A decoder error
+  ## answers false, not an exception: the caller's remedy is the same.
+  try:
+    var hasher = initHasher()
+    defer: hasher.close()
+    let decomp = newDecompressor(ckZstd)
+    defer: decomp.close()
+    let sink: ChunkSink = proc(data: openArray[byte]) =
+      if data.len > 0:
+        hasher.update(data)
+    var f = open(path, fmRead)
+    defer: close(f)
+    var buffer = newSeq[byte](ArchiveCopyBufferBytes)
+    while true:
+      let read = f.readBuffer(addr buffer[0], buffer.len)
+      if read <= 0:
+        break
+      decomp.feed(buffer.toOpenArray(0, read - 1), sink)
+    decomp.finish(sink)
+    hasher.finalize() == expected
+  except CatchableError:
+    false
+
 proc hashFileBlake3(path: string): bcsTypes.Blake3Hash =
   ## BLAKE3 of a file's bytes, read in fixed-size chunks.
   ##
@@ -958,11 +984,18 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   if getEnv("REPRO_PUBLISH_NO_COMPRESSION").len == 0 and
       supportsCompressor(bcsTypes.ckZstd):
     try:
+      # Beside the archive, whose name `createTempFile` chose at random;
+      # `compressFileToFile` creates it exclusively and checks every write.
       let candidate = archivePath & ".zst"
       let compressedSize = compressFileToFile(archivePath, candidate,
         bcsTypes.ckZstd)
       compressedPath = candidate
-      if compressedSize > 0 and compressedSize < archivePlan.size:
+      # What is signed must be what was pinned: the compressed payload is
+      # decompressed and its BLAKE3 compared with the raw archive's (already
+      # checked against `expectedRawDigestHex`) before it can be chosen. A
+      # mismatch is a compressor fault; the plain archive is published.
+      if compressedSize > 0 and compressedSize < archivePlan.size and
+          zstdFileDecompressesTo(candidate, rawDigest):
         uploadPath = candidate
         uploadCompression = bcsTypes.ckZstd
         uploadSize = compressedSize

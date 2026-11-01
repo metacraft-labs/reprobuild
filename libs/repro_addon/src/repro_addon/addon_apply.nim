@@ -476,12 +476,14 @@ const RawCredentialDirectives* = ["LoadCredential", "LoadCredentialEncrypted",
 
 proc credentialSourceResolvesUnder*(src, dir: string): bool =
   ## Whether ``src``, as the filesystem resolves it now, is still below
-  ## ``dir``: a symbolic link inside the secrets directory that points out
-  ## of it is refused (spec §10.3, "Legacy delivery"). A source that does
-  ## not exist yet resolves to nothing and is accepted: the directory is
+  ## ``dir``: a source that is itself a symbolic link, dangling or not, is
+  ## refused, and so is one an intermediate link takes out of the
+  ## directory (spec §10.3, "Legacy delivery"). A source that does not
+  ## exist yet resolves to nothing and is accepted: the directory is
   ## root-owned and neither group- nor world-writable
   ## (``legacySecretsDirTrustError``), so only root can put a link there
   ## later, and root can read any file anyway.
+  if lstatLegacy(src).isLink: return false
   var realSrc, realDir: string
   try: realDir = expandFilename(dir)
   except OSError: return false
@@ -529,7 +531,8 @@ proc rawCredentialDirective*(content: string;
   ""
 
 proc checkScope*(user: SystemProfile;
-                 legacySecretsDirs: openArray[string] = []) =
+                 legacySecretsDirs: openArray[string] = [];
+                 legacyRejected: openArray[string] = []) =
   ## Refuse, with ``EAddOnOutOfScope``, what an add-on generation may not
   ## carry: a kind outside the add-on's classes, and an ``/etc`` path
   ## outside the declared managed prefixes or inside a directory a class
@@ -567,7 +570,9 @@ proc checkScope*(user: SystemProfile;
            "; a LoadCredential= is accepted only from under the deploy " &
            "agent's own --secrets-dir (" &
            (if legacySecretsDirs.len > 0: legacySecretsDirs.join(", ")
-            else: "none registered") & ")"
+            else: "none registered") & ")" &
+           (if legacyRejected.len > 0: "; not accepted as one: " &
+              legacyRejected.join("; ") else: "")
          else: ""))
     case r.kind
     of srkLinuxTmpfilesRule:
@@ -675,6 +680,10 @@ type
     accountBefore: string       ## sysusers: the account's fingerprint
                                 ## value before, "" when absent
     groupBefore: string         ## sysusers (user): the same-named group's
+    closureRelocated: bool      ## a unit an older closure realiser bound
+                                ## (``legacyClosureRenderings``): rewritten
+                                ## at the store-published prefix, the same
+                                ## package bytes, so not restarted
     keepLedgerSha: string       ## a revert holding a target changed out of
                                 ## band before the reverted switch: the
                                 ## ledger keeps this digest, so the drift
@@ -1495,7 +1504,11 @@ proc restoreUnitState*(e: LedgerEntry; driver: CollisionDriver;
   # established that restarts.
   let preservedSha = if e.preserved.len > 0 and fileExists(e.preserved):
                        sha256Hex(readFile(e.preserved)) else: ""
-  let quiet = quietHandBack(preservedSha, e.sha256,
+  # A relocated closure unit hands back its older binding: the same
+  # package bytes as the one it runs (§9 "Migration").
+  let quiet = quietHandBack(preservedSha,
+                            (if e.collision == "closure-relocate": preservedSha
+                             else: e.sha256),
                             dropInsChanged = othersChanged,
                             dependenciesChanged = othersChanged)
   if e.baseActiveState == "active" and now.loadState == "loaded":
@@ -2028,6 +2041,16 @@ proc ledgerRecordsAttempt(stateDir, fromGeneration: string): bool =
   try: readLedger(lp).generation != fromGeneration
   except CatchableError: false
 
+proc relocatesClosure*(r: SystemResource; path: string): bool =
+  ## Whether the unit file at ``path`` is ``r`` as an older closure
+  ## realiser bound it (``legacyClosureRenderings``): same unit, same
+  ## package bytes, an older prefix path.
+  if r.kind != srkSystemdSystemUnit or r.suAptClosureLock.len == 0: return
+  if not fileExists(path) or symlinkExists(path): return
+  let current = readFile(path)
+  try: current in legacyClosureRenderings(r)
+  except CatchableError: false
+
 proc revertMayKeep*(purpose: string; ledgerOwns, regularFile: bool;
                     currentSha, plannedSha: string): bool =
   ## Whether a revert keeps a drifted ledger-owned file as found (§7.5, "A
@@ -2165,13 +2188,17 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       if r.kind == srkSystemdSystemUnit:
         r.suContent.add("# rendered by the add-on\n")
   var legacyDirs = registeredLegacySecretsDirs(stateDir)
+  var legacyRejected: seq[string]
   for d in opts.legacySecretsDirs:
-    # This apply's own directory is held to the registry's rules.
+    # This apply's own directory is held to the registry's rules; one that
+    # fails them is named in the refusal of the lines it would have served.
     let why = legacySecretsDirTrustError(d)
     if why.len > 0:
-      result.drift.add("legacy secrets directory not accepted: " & why)
+      legacyRejected.add(d & " (" & why & ")")
+      result.drift.add("legacy secrets directory not accepted: " & d &
+        " (" & why & ")")
     elif d notin legacyDirs: legacyDirs.add(d)
-  checkScope(user, legacyDirs)
+  checkScope(user, legacyDirs, legacyRejected)
   # The envelope this switch's secrets come from (spec §10.3, A7).
   let secretsLayout = defaultSecretsLayout()
   let secretsSource = selectSecretsSource(stateDir, secretsLayout, opts,
@@ -2560,8 +2587,25 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     else:
       try: (dec, obs) = decide(driver, inp, path)
       except AddonDriftError as e:
-        (dec, obs) = revertHeld(r, p, inp, e)
-        userResources[i] = r
+        if relocatesClosure(r, path):
+          # §9 "Migration": the unit an older realiser's agent wrote, bound
+          # to its prefix of the same closure. Rewritten at the current
+          # prefix, its bytes kept for hand-back, never refused as drift.
+          let o = observeTarget(driver, path, inp.unit)
+          dec = CollisionDecision(verdict: cvReconcile,
+            observation: observationText(o, inp.kind),
+            observedSha256: o.sha256, preWriteBytes: readFile(path),
+            reason: "bound to an older closure realiser's prefix (the same " &
+              "package bytes): rewritten at the store-published prefix, " &
+              "not restarted")
+          obs = o
+          p.closureRelocated = true
+        else:
+          (dec, obs) = revertHeld(r, p, inp, e)
+          userResources[i] = r
+    if not p.closureRelocated and dec.verdict == cvUpdate and
+        relocatesClosure(r, path):
+      p.closureRelocated = true      # the ledger already holds those bytes
     decisions[r.address] = dec
     if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
       var ownedLinks = initHashSet[string]()
@@ -2622,7 +2666,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       userResources[i] = r
       p.r = r
     of cvReconcile:
-      p.collision = "reconcile"
+      p.collision = (if p.closureRelocated: "closure-relocate"
+                     else: "reconcile")
       p.preserved = deferPreserve(dec.preWriteBytes)
     of cvDivert:
       p.collision = "divert"
@@ -2655,7 +2700,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                         "changes only the resource it names"
                else: dec.reason)))
     if dec.verdict != cvNoOp and not held:
-      result.ledgerDiff.add($dec.verdict & "\t" & path & "\t" & r.address)
+      result.ledgerDiff.add((if p.closureRelocated: "relocate-closure"
+                             else: $dec.verdict) & "\t" & path & "\t" &
+                            r.address)
     targets.add(targetFor(r.address, inp, path, dec, obs, saved))
     if addOnToolCarrierOf(r).len > 0:
       # The tool's own operation writes this file: the write-time re-check
@@ -3077,7 +3124,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       let closureMissing = r.suAptClosureLock.len > 0 and
         not aptClosureRealised(AddOnSystemStoreRoot,
                                parseAptClosureLock(r.suAptClosureLock))
-      f.fileChanged = unitFileChanged(f.isNew, p.verdict,
+      f.fileChanged = not p.closureRelocated and unitFileChanged(f.isNew,
+        p.verdict,
         (if f.isNew: "" else: prevUnits[r.suName].sha256), sha256Hex(rendered),
         closureMissing,
         loadedStale = f.isNew and p.verdict == $cvAdopt and
@@ -3299,6 +3347,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     discard preserveBytes(stateDir, b)
 
   # --- Step 1: realise. ---
+  # Closure prefixes an older realiser left without a receipt are adopted
+  # and rooted to the generations that bind them before anything this
+  # switch does can lead to a collection (a host upgraded from realiser v2;
+  # ``migrateLegacyAptClosures``). Idempotent; nothing to do on most hosts.
+  discard migrateLegacyAptClosures()
   # The tree goes into the store and is verified; the units' closures are
   # realised too, so no base path is touched before everything the
   # generation runs from exists. The apply lock is held throughout.
@@ -3328,17 +3381,23 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # before recovery -- must not collect what the switch is about to run.
   # Every prefix of each closure is held (the union and its members, all
   # indexed by the realiser); a member the collector already took is not
-  # in the index and is not needed by the realised union.
-  block:
-    var closurePrefixes: seq[PrefixIdBytes]
-    enterWritableStoreView()
-    var st = openStore(StoreRoot)
-    for lock in closureLocks:
-      for id in aptClosurePrefixIds(lock):
-        if st.lookupPrefix(id).found and id notin closurePrefixes:
-          closurePrefixes.add(id)
-    st.close()
-    holdOnPendingRoot(closurePrefixes)
+  # in the index and is not needed by the realised union. The committed
+  # generation's root takes these over from the pending root in step 9
+  # (``promotePendingRoot``): the ledger names only the static tree, so this
+  # block is the closures' only route to a root (gate
+  # ``e2e_addon_closure_prefixes_survive_gc``; falsifier
+  # ``closure-prefixes-unrooted``).
+  when not mutated("closure-prefixes-unrooted"):
+    block:
+      var closurePrefixes: seq[PrefixIdBytes]
+      enterWritableStoreView()
+      var st = openStore(StoreRoot)
+      for lock in closureLocks:
+        for id in aptClosurePrefixIds(lock):
+          if st.lookupPrefix(id).found and id notin closurePrefixes:
+            closurePrefixes.add(id)
+      st.close()
+      holdOnPendingRoot(closurePrefixes)
 
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]

@@ -270,11 +270,11 @@ if n48ChildSpec.len > 0:
   echo "N48-CHILD-TAR=",
     (if banner.output.len > 0: banner.output.splitLines()[0].strip()
      else: "<no output>")
-  let bytes = readFile(extendedPath(parts[1]))
+  # The fixture IS the member: the reader copies it from offset 0.
+  let member = extendedPath(parts[1])
   var childRaised = ""
   try:
-    tarExtractDataMember("n48-fixture.deb", bytes, parts[0], 0, bytes.len,
-      parts[2])
+    tarExtractDataMember(member, parts[0], 0, getFileSize(member), parts[2])
   except CatchableError as err:
     childRaised = err.msg.replace("\n", " ~ ")
   echo "N48-CHILD-RAISED=", childRaised
@@ -346,10 +346,9 @@ proc n48ExtractMember(driverDir, dataTar, outDir: string): string =
     checkpoint("driver spawned: " & run.tarBanner)
     result = run.raised
   else:
-    let bytes = readFile(extendedPath(dataTar))
+    let member = extendedPath(dataTar)
     try:
-      tarExtractDataMember("n48-fixture.deb", bytes, "data.tar", 0,
-        bytes.len, outDir)
+      tarExtractDataMember(member, "data.tar", 0, getFileSize(member), outDir)
     except CatchableError as err:
       result = err.msg
 

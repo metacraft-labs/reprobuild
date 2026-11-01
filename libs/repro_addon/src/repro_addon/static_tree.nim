@@ -19,10 +19,12 @@
 ## rewritten atomically at every step boundary; a host that reboots
 ## mid-switch finds exactly the last step completed.
 
-import std/[algorithm, os, posix, strutils, times]
+import std/[algorithm, os, posix, strutils, tables, times]
 
 import repro_core
 import repro_local_store/store
+from repro_dsl_stdlib/packages/apt_closure import
+  adoptLegacyAptClosurePrefixes, LegacyAptAdoption, LegacyAptPrefix
 from repro_infra/apply_lock import currentBootId, processAlive
 
 import ./etc_write
@@ -247,6 +249,66 @@ proc releasePendingRoot*() =
   var s = openStore(StoreRoot)
   defer: s.close()
   s.deleteRoot(PendingRootId)
+
+proc closureBindings(treeRoot: string): seq[string] =
+  ## The closure prefixes a generation's units bind: the source of every
+  ## ``BindReadOnlyPaths=<prefix>/usr:/usr`` line in a unit file or drop-in
+  ## of its static tree (``<tree>/systemd/system``), as
+  ## ``aptClosureUnitDirectives`` renders them.
+  let units = treeRoot / "systemd" / "system"
+  if not dirExists(units): return
+  for path in walkDirRec(units, yieldFilter = {pcFile},
+                         followFilter = {pcDir}):
+    var text = ""
+    try: text = readFile(path)
+    except IOError: continue
+    for raw in text.splitLines():
+      let line = raw.strip()
+      if not line.startsWith("BindReadOnlyPaths="): continue
+      for entry in line["BindReadOnlyPaths=".len .. ^1].splitWhitespace():
+        let src = entry.strip(trailing = false, chars = {'-', '+'}).split(':')[0]
+        if src.endsWith("/usr"):
+          result.add(src[0 ..< src.len - "/usr".len])
+
+proc migrateLegacyAptClosures*(storeRoot = StoreRoot): LegacyAptAdoption =
+  ## Adopt the apt closure prefixes a realiser before version 3 wrote (no
+  ## receipt, no index row; ``adoptLegacyAptClosurePrefixes``) and root each
+  ## adopted closure -- its union and its members -- to every generation
+  ## root (and the pending root) whose static tree has a unit binding it.
+  ## Before version 3 a switch rooted only its static tree, so without this
+  ## an adopted closure would be indexed but held by nothing, and the next
+  ## ``repro store gc`` would collect what a retained generation's units
+  ## run from; adopted and unbound, a stale one is collected as it should
+  ## be. Runs under the caller's host apply lock (every add-on store writer
+  ## holds it), in one store session, before anything collects.
+  ## Idempotent and cheap when the store holds no v2 prefix. ``storeRoot``
+  ## is the add-on's system store; another root is for tests.
+  if not dirExists(storeRoot / "prefixes"): return
+  if storeRoot == StoreRoot: enterWritableStoreView()
+  var s = openStore(storeRoot)
+  defer: s.close()
+  result = adoptLegacyAptClosurePrefixes(s, storeRoot)
+  var byPath = initTable[string, seq[PrefixIdBytes]]()
+  var debIds = initTable[string, PrefixIdBytes]()
+  for a in result.adopted:
+    if not a.closure: debIds[a.path] = a.prefixId
+  for a in result.adopted:
+    if a.closure:
+      var ids = @[a.prefixId]
+      for m in a.members:
+        if m in debIds: ids.add(debIds[m])
+      byPath[a.path] = ids
+  if byPath.len == 0: return
+  for r in s.listRoots():
+    if not (r.rootId.startsWith(RootIdPrefix) or r.rootId == PendingRootId):
+      continue
+    for held in s.prefixesHeldByRoot(r.rootId):
+      let row = s.lookupPrefix(held)
+      if not row.found or row.row.packageName != StaticTreePackage: continue
+      for bound in closureBindings(storeRoot / row.row.realizedPath):
+        if bound in byPath:
+          for id in byPath[bound]:
+            s.attachPrefixToRoot(r.rootId, id)
 
 proc readStaticTarget*(): string =
   ## What ``/etc/repro/static`` points at now, "" when absent.

@@ -30,7 +30,9 @@
 ## entry is still correct, merely larger. Producer and consumer never need
 ## to agree in advance, because the payload declares its own codec.
 
-import std/dynlib
+import std/[dynlib, os]
+when defined(posix):
+  from std/posix import nil
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types
 import ./dynlib_names
@@ -196,8 +198,41 @@ proc compressFileToFile*(sourcePath, destinationPath: string;
 
   var source = open(sourcePath, fmRead)
   defer: close(source)
-  var destination = open(destinationPath, fmWrite)
-  defer: close(destination)
+  # The destination is created EXCLUSIVELY and every write is checked: it is
+  # a payload that will be signed and uploaded, so a pre-existing file or
+  # link at the path (another writer, a planted symlink) must not be
+  # written through, and a short write (a full disk) must fail the
+  # compression rather than leave a truncated frame to be published.
+  when defined(posix):
+    let destination = posix.open(destinationPath.cstring, posix.O_WRONLY or
+      posix.O_CREAT or posix.O_EXCL or posix.O_CLOEXEC, posix.Mode(0o600))
+    if destination < 0:
+      raise newException(CompressError, "compressFileToFile: cannot create " &
+        destinationPath & " exclusively: " & osErrorMsg(osLastError()))
+    defer: discard posix.close(destination)
+    proc writeOut(data: pointer; len: int) =
+      var off = 0
+      while off < len:
+        let n = posix.write(destination,
+          cast[pointer](cast[uint](data) + uint(off)), len - off)
+        if n < 0:
+          if posix.errno == posix.EINTR: continue
+          raise newException(CompressError, "compressFileToFile: writing " &
+            destinationPath & ": " & osErrorMsg(osLastError()))
+        if n == 0:
+          raise newException(CompressError, "compressFileToFile: writing " &
+            destinationPath & " made no progress")
+        off += n
+  else:
+    if fileExists(destinationPath) or symlinkExists(destinationPath):
+      raise newException(CompressError, "compressFileToFile: " &
+        destinationPath & " already exists")
+    var destination = open(destinationPath, fmWrite)
+    defer: close(destination)
+    proc writeOut(data: pointer; len: int) =
+      if destination.writeBuffer(data, len) != len:
+        raise newException(CompressError, "compressFileToFile: short write " &
+          "to " & destinationPath)
 
   var written = 0'i64
 
@@ -215,7 +250,7 @@ proc compressFileToFile*(sourcePath, destinationPath: string;
         raise newException(CompressError,
           "ZSTD_compressStream2: " & $ZSTD_getErrorName(rc))
       if zout.pos > 0:
-        discard destination.writeBuffer(addr outBuf[0], int(zout.pos))
+        writeOut(addr outBuf[0], int(zout.pos))
         written += int64(zout.pos)
       if endOp == ZstdEndDirectiveEnd:
         if rc == 0:

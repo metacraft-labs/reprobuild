@@ -138,12 +138,28 @@ proc agentStatesToPause*(stateDir: string): seq[string] =
   for d in WellKnownAgentStates:
     if dirExists(d) and d notin result: result.add(d)
 
+const MaxOperatorNameLen = 64
+  ## Longer than any login name a Debian or Ubuntu host accepts (32).
+
+proc isSafeOperatorName(s: string): bool =
+  ## A name that can stand alone as the value of a ``key=value`` line of a
+  ## pause marker or an evidence record: printable ASCII, no space, no
+  ## ``=``, bounded. Anything else is not trusted as a user name.
+  if s.len == 0 or s.len > MaxOperatorNameLen: return false
+  for c in s:
+    if c <= ' ' or c > '~' or c == '=': return false
+  true
+
 proc currentOperator*(): string =
-  ## Who ran the command: the sudo caller when there is one.
+  ## Who ran the command, for the pause marker and the records (spec §9.3):
+  ## the sudo caller when there is one (``SUDO_USER``), then ``LOGNAME``,
+  ## then ``USER``. A value that is not a plain user name (control
+  ## characters, spaces, ``=``, more than 64 bytes) is skipped, and with no
+  ## usable name the real user id is reported as ``uid <n>``.
   for v in ["SUDO_USER", "LOGNAME", "USER"]:
     let s = getEnv(v).strip()
-    if s.len > 0 and '\n' notin s and '=' notin s: return s
-  "uid " & $getCurrentProcessId()
+    if isSafeOperatorName(s): return s
+  "uid " & $getuid()
 
 proc pauseAgents*(stateDir, generation: string;
                   operator = currentOperator()): seq[string] =
@@ -216,17 +232,36 @@ proc legacySecretsTrustError*(isDir, isLink: bool; uid: int; mode: int):
     return "is group- or world-writable (mode " & toOct(mode and 0o7777, 4) & ")"
   ""
 
-proc legacySecretsDirTrustError*(dir: string): string =
-  ## ``legacySecretsDirError`` and ``legacySecretsTrustError`` of the
-  ## directory as it is on the host now.
+type
+  LegacyStat* = tuple[exists, isDir, isLink: bool; uid, mode: int]
+  LegacyStatFn* = proc(path: string): LegacyStat {.gcsafe.}
+
+proc lstatLegacy*(path: string): LegacyStat =
+  ## ``lstat`` of ``path`` as the trust check reads it.
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return (false, false, false, -1, 0)
+  (true, S_ISDIR(st.st_mode), S_ISLNK(st.st_mode), int(st.st_uid),
+   int(st.st_mode))
+
+proc legacySecretsDirTrustError*(dir: string;
+                                 statOf: LegacyStatFn = lstatLegacy): string =
+  ## ``legacySecretsDirError``, then ``legacySecretsTrustError`` of every
+  ## directory from /var/lib/repro down to ``dir`` as it is on the host now
+  ## (``statOf``, ``lstat`` by default): a group-writable /var/lib/repro or
+  ## /var/lib/repro/agent would let someone other than root swap the
+  ## directory under the check.
   result = legacySecretsDirError(dir)
   if result.len > 0: return
-  var st: Stat
-  if lstat(dir.cstring, st) != 0:
-    return dir & " does not exist"
-  let why = legacySecretsTrustError(S_ISDIR(st.st_mode), S_ISLNK(st.st_mode),
-    int(st.st_uid), int(st.st_mode))
-  if why.len > 0: result = dir & " " & why
+  var chain = @[parentDir(LegacySecretsRoot), LegacySecretsRoot]
+  var cur = LegacySecretsRoot
+  for seg in dir[LegacySecretsRoot.len + 1 .. ^1].split('/'):
+    cur = cur & "/" & seg
+    chain.add(cur)
+  for p in chain:
+    let st = statOf(p)
+    if not st.exists: return p & " does not exist"
+    let why = legacySecretsTrustError(st.isDir, st.isLink, st.uid, st.mode)
+    if why.len > 0: return p & " " & why
 
 proc registeredLegacySecretsDirs*(stateDir: string): seq[string] =
   ## The current agent's secrets directory, when it is registered and still

@@ -230,6 +230,14 @@ fi
   echo "build_linux_cross: ${sysroot} is not a fetched sysroot (no .sysroot-info);" >&2
   echo "  run scripts/cross/fetch_target_sysroot.sh or pass --fetch-sysroot-from" >&2
   exit 1; }
+# The glibc the sysroot carries (ReproOS add-on mode §7.9, the glibc
+# exception): what this prefix needs on its host at least.
+sysroot_glibc_version="$(sed -n 's/^sysroot_glibc_version=//p' "${sysroot}/.sysroot-info")"
+[ -n "${sysroot_glibc_version}" ] || sysroot_glibc_version="$(sed -n 's/^sysroot_glibc=.* \([0-9][0-9.]*\)$/\1/p' "${sysroot}/.sysroot-info")"
+[ -n "${sysroot_glibc_version}" ] || {
+  echo "build_linux_cross: ${sysroot}/.sysroot-info records no glibc version" >&2
+  exit 1
+}
 sysroot="$(cd "${sysroot}" && pwd)"
 
 started_at=$(date +%s)
@@ -737,6 +745,11 @@ pkg_name="reprobuild-${version}-linux-${archive_arch}"
   echo "catalog=reprobuild-packages@${catalog_revision:-unknown} (repro.lock)"
   for rec in "${source_records[@]}"; do echo "source ${rec}"; done
   grep -v '^#' "${sysroot}/.sysroot-info"
+  # A sysroot fetched before sysroot_glibc_version was recorded: derive it
+  # from ldd's line (its last word), so every prefix carries the version
+  # its preflight compares with the host's (§7.9, the glibc exception).
+  grep -q '^sysroot_glibc_version=' "${sysroot}/.sysroot-info" ||
+    echo "sysroot_glibc_version=${sysroot_glibc_version}"
 } > "${stage}/share/repro/cross-build-info"
 rm -rf "${out}/prefix"
 mv "${stage}" "${out}/prefix"
@@ -754,6 +767,14 @@ if [ "${install}" = 1 ]; then
   remote_cmd=(ssh)
   [ -n "${ssh_program}" ] && remote_cmd=("${ssh_program}")
   [ -n "${fetch_from}" ] && remote_cmd+=("${fetch_from}")
+  # §7.9, the glibc exception: the prefix runs only on a glibc at least its
+  # sysroot's. Refuse before anything on the target changes.
+  target_glibc="$("${remote_cmd[@]}" 'getconf GNU_LIBC_VERSION' | awk '{print $2}')"
+  if [ -z "${target_glibc}" ] ||
+     [ "$(printf '%s\n%s\n' "${sysroot_glibc_version}" "${target_glibc}" | sort -V | head -n1)" != "${sysroot_glibc_version}" ]; then
+    echo "build_linux_cross: the target's glibc (${target_glibc:-unknown}) is older than the sysroot's (${sysroot_glibc_version}); refusing to install a prefix it cannot run" >&2
+    exit 1
+  fi
   # The new tree is unpacked beside the live prefix and EXCHANGED with it in
   # one renameat2(RENAME_EXCHANGE) (Linux 3.15+, glibc 2.28+; python3 reaches
   # it through ctypes, and a Debian-family target has python3), so there is no

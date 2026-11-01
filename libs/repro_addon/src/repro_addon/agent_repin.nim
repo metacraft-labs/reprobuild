@@ -28,6 +28,7 @@ import ./addon_apply
 import ./agent_split
 import ./fingerprint
 import ./generation0
+import ./mutations
 import ./preflight
 
 type
@@ -93,7 +94,10 @@ proc repinOwnProfile*(own: string; fresh: AgentUnitsInputs;
   let reproExe = execStartExe(oldUnit)
   if reproExe.len == 0:
     raise newException(RepinError, AgentFetchUnit & " names no ExecStart")
-  let newUnit = agentFetchUnit(reproExe, fresh)
+  # The falsifying build re-pins the hosts file only, leaving the fetch
+  # unit's allow-list on the old addresses.
+  let newUnit = when mutated("agent-repin-keeps-allow-list"): oldUnit
+                else: agentFetchUnit(reproExe, fresh)
   # Without its comment lines: a '#' cannot be carried inline in the
   # canonical text, and the hosts file is carried inline from now on.
   let newHosts = hostsLines(renderAgentHosts(fresh))

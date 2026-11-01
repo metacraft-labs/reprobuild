@@ -66,7 +66,7 @@
 ## and reviewers can byte-trace it. The signed payload is everything UP TO
 ## ``signature``.
 
-import std/[algorithm, strutils]
+import std/[algorithm, sequtils, strutils]
 
 import nimcrypto/[hash, sha2]
 
@@ -108,7 +108,11 @@ type
     ## (``compiledProfileDigest``). Both empty: the ``default`` activity
     ## realised in full, the pin's meaning before the selection existed,
     ## and the envelope is then byte-for-byte the earlier one (flags bit 2
-    ## clear).
+    ## clear). ``default`` is implied by every selection and never listed,
+    ## so ``addOn`` with no activity is the add-on mode's ``default`` only,
+    ## and ``full`` with none is spelled as no selection at all: each
+    ## selection has exactly one encoding (``canonicalSystemSelection``), so
+    ## its digest cannot be expressed two ways.
     digest*: string
     compilerRevision*: string
     platform*: string
@@ -485,6 +489,32 @@ proc systemSelectionText*(p: CompiledProfilePin): string =
   if not p.hasSystemSelection: return ""
   p.systemMode & "\n" & p.systemActivities.join(",")
 
+proc canonicalSystemSelection*(mode: string; activities: openArray[string]):
+    tuple[mode: string; activities: seq[string]] =
+  ## The one encoding of a requested system selection, as a pin carries it
+  ## and its digest frames it. A producer (and ``compile-profile
+  ## --digest-out``) canonicalises what it was asked for with this; the
+  ## validator (``compiledProfilePinError``) then refuses every other
+  ## spelling. Blank names are dropped, and so is ``default``, which every
+  ## selection implies (``systemPlanTarget`` adds it). The rest are sorted
+  ## without duplicates. Activities with no mode mean ``full``, as on the
+  ## ``compile-profile`` command line. ``full`` with no activity left is
+  ## exactly the pin without a selection (``default`` realised in full), so
+  ## it becomes ("", @[]) and the envelope keeps flags bit 2 clear;
+  ## ``addOn`` with none stays: it is the add-on mode's ``default`` only.
+  ## A mode other than ``addOn``/``full`` is passed through for the
+  ## validator to name.
+  var acts: seq[string]
+  for a in activities:
+    let n = a.strip()
+    if n.len > 0 and n != "default": acts.add(n)
+  acts.sort()
+  acts = acts.deduplicate(isSorted = true)
+  var m = mode.strip()
+  if m.len == 0 and acts.len > 0: m = "full"
+  if m == "full" and acts.len == 0: m = ""
+  (m, acts)
+
 proc compiledProfilePinError*(p: CompiledProfilePin): string =
   ## Why ``p`` is not a well-formed pin, or "".
   if not p.digest.startsWith(CompiledProfileDigestPrefix) or
@@ -508,13 +538,19 @@ proc compiledProfilePinError*(p: CompiledProfilePin): string =
     if p.systemMode notin ["addOn", "full"]:
       return "the compiled-profile pin's system mode '" & p.systemMode &
         "' is not addOn or full"
-    if p.systemActivities.len == 0:
-      return "the compiled-profile pin names a system mode and no activity"
+    # ``addOn`` with no activity is the add-on mode's ``default`` only, and
+    # valid. ``full`` with none means what no selection means, so it has
+    # that one spelling (``canonicalSystemSelection``) and this one is
+    # refused: otherwise one compile would have two digests.
+    if p.systemMode == "full" and p.systemActivities.len == 0:
+      return "non-canonical compiled-profile pin: system mode full with no " &
+        "activity is the pin without a system selection (flags bit 2 clear)"
     var prev = ""
     for a in p.systemActivities:
       if a.len == 0 or a == "default":
-        return "the compiled-profile pin's activity list names '" & a &
-          "' (an activity is never empty, and `default` is implied)"
+        return "non-canonical compiled-profile pin: its activity list names '" &
+          a & "' (an activity is never empty, and `default` is implied by " &
+          "every selection, so it is never listed)"
       for c in a:
         if c notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}:
           return "the compiled-profile pin's activity '" & a &

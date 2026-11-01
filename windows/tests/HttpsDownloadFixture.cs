@@ -38,7 +38,28 @@ namespace VerifiedDownloadTests
                 uses.Add(new Oid("1.3.6.1.5.5.7.3.1"));
                 request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(uses, true));
                 DateTimeOffset now = DateTimeOffset.UtcNow;
-                return request.CreateSelfSigned(now.AddDays(-2), expired ? now.AddDays(-1) : now.AddDays(1));
+                using (X509Certificate2 ephemeral = request.CreateSelfSigned(
+                    now.AddDays(-2), expired ? now.AddDays(-1) : now.AddDays(1)))
+                {
+                    // Schannel cannot serve a TLS handshake from the key
+                    // CreateSelfSigned leaves on the certificate: it is an
+                    // in-memory key, and the RSA provider above is disposed
+                    // when this block exits. AuthenticateAsServer then fails
+                    // with SEC_E_NO_CREDENTIALS, "No credentials are
+                    // available in the security package", which is what run
+                    // 41269671590 recorded with tcp=2 and handshakes=0 --
+                    // the certificate controls never reached certificate
+                    // validation at all.
+                    //
+                    // A PFX round trip puts the key where Schannel can use
+                    // it. The certificate bytes and the validity dates are
+                    // preserved, so exact leaf pinning and the expired
+                    // control are unaffected by this.
+                    string transfer = Guid.NewGuid().ToString("N");
+                    return new X509Certificate2(
+                        ephemeral.Export(X509ContentType.Pfx, transfer),
+                        transfer, X509KeyStorageFlags.Exportable);
+                }
             }
         }
     }

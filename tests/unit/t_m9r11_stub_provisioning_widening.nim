@@ -18,6 +18,7 @@
 ## nothing and fall through.
 
 import std/[os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_project_dsl
 import repro_interface_artifacts
@@ -427,6 +428,26 @@ suite "tarball mode does not realize the Linux C toolchain":
       check "does not realize the C toolchain on a Linux host" in r
       check "Not the Linux C toolchain" in r
       check "--tool-provisioning=path" in r
+
+  test "the resolver refuses it too, for callers that never build recipes":
+    # Dev-env activation resolves tools without `repro build`'s auto-recurse
+    # pass; before the resolver checked the rule it answered "run `repro
+    # build <the gcc recipe>`", the cycle the rule exists to keep out of.
+    if hostOS != "linux":
+      skip("the Linux C toolchain scope rule applies to Linux hosts only")
+    else:
+      let artifact = ProjectInterfaceArtifact(
+        projectInterface: ProjectInterface(projectName: "tarball_scope_probe",
+          toolUses: @[noTarballUse("gcc")]))
+      var refusal = ""
+      try:
+        discard toolBuildIdentity(artifact, tpmTarball,
+          storeRoot = createTempDir("tarball-scope-", ""))
+      except CatchableError as e:
+        refusal = e.msg
+      checkpoint(refusal)
+      check "Not the Linux C toolchain" in refusal
+      check "repro build" notin refusal
 
   test "another host, or another package, falls through as before":
     check tarballModeHostToolchainRefusal(noTarballUse("gcc"), "macosx") == ""

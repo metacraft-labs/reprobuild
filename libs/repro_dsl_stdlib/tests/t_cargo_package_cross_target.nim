@@ -18,7 +18,7 @@
 ## texts are checked as text: they are what a shell will run, so the filter
 ## they implement is visible in them.
 
-import std/[os, strutils, unittest]
+import std/[os, sequtils, strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/active_context
@@ -60,6 +60,20 @@ proc envValue(act: BuildActionDef; name: string): string =
   for (k, v) in act.env:
     if k == name: return v
   ""
+
+package zigOnlyProbe:
+  nativeBuildDeps:
+    "nim >=2.2"
+    "zig >=0.13 <0.14"
+
+package zigWithShProbe:
+  nativeBuildDeps:
+    "sh"
+    "zig >=0.13 <0.14"
+
+package noZigProbe:
+  nativeBuildDeps:
+    "nim >=2.2"
 
 suite "cargo typed tool: --target":
 
@@ -105,7 +119,9 @@ suite "cross_zig: the target table and the environment":
   test "the glibc armv7 row is the Pi's own C library, linked dynamically":
     check isZigCrossTriple("armv7-unknown-linux-gnueabihf")
     let t = zigCrossTarget("armv7-unknown-linux-gnueabihf")
-    check t.zigTarget == "arm-linux-gnueabihf.2.36"
+    # 2.38: what the trixie armhf libraries the appliance links require
+    # (GLIBC_2.38, `__isoc23_strtol`), measured from their .debs.
+    check t.zigTarget == "arm-linux-gnueabihf.2.38"
     check isZigGlibcTarget(t)
     check not isZigGlibcTarget(zigCrossTarget(Triple))
     # No static-musl flags for glibc; the remap still applies.
@@ -113,6 +129,20 @@ suite "cross_zig: the target table and the environment":
     check zigCrossRustflags("/p", "armv7-unknown-linux-gnueabihf") ==
       "--remap-path-prefix=/p=" & ZigCrossRemapTarget
     check zigCrossRustflags("", Triple) == ZigCrossRustflags
+
+  test "only the musl rows drop -lgcc_s from a Rust link":
+    # zig links compiler-rt in its place for musl, which the measured armv7
+    # musl link relies on. For the glibc row nothing has been measured (the
+    # catalog has no rust-std for it), so the flag stays and a link fails
+    # by name rather than producing an unchecked unwinder.
+    let musl = zigCrossWrapperScript("rust-linker",
+      zigCrossTarget("armv7-unknown-linux-musleabihf"), "/w/lib")
+    let glibc = zigCrossWrapperScript("rust-linker",
+      zigCrossTarget("armv7-unknown-linux-gnueabihf"), "/w/lib")
+    check "-lgcc_s|--target=*) continue;;" in musl
+    check not glibc.splitLines().anyIt(
+      not it.strip().startsWith("#") and "-lgcc_s" in it)
+    check "--target=*) continue;;" in glibc
 
   test "an unknown triple is refused by name, with the known ones":
     expect ValueError:
@@ -183,7 +213,24 @@ suite "cross_zig: the target table and the environment":
     check "zig ar rc '/proj/.repro/build/cross/" & Triple & "/zig/lib/libatomic.a'" in script
     check act.outputs == @["/proj" / ".repro/build/cross" / Triple / "zig"]
     check ("rm -rf '/proj/.repro/build/cross/" & Triple & "'") notin script
-    check "zig" in act.toolIdentityRefs
+    # Exactly the adapter's own tools: `sh`, `coreutils` (whose directory
+    # carries `rm` / `mkdir` / `chmod`) and `zig` -- none a recipe has to
+    # declare beyond `zig`, and nothing that only resolves by sitting beside
+    # some other declared tool.
+    check act.toolIdentityRefs == @["sh", "coreutils", "zig"]
+
+  test "declaring zig declares the wrapper edge's sh and coreutils":
+    # Reprobuild-Standard-Library.md, `cross_zig` (amended 2026-11-01).
+    proc natives(name: string): seq[string] =
+      for pkg in registeredPackages():
+        if pkg.packageName == name:
+          for use in pkg.nativeBuildDeps:
+            result.add(use.executableName)
+    check natives("zigOnlyProbe") == @["nim", "zig", "sh", "coreutils"]
+    # A recipe's own declaration is kept, not doubled.
+    check natives("zigWithShProbe") == @["sh", "zig", "coreutils"]
+    # No zig, nothing added.
+    check natives("noZigProbe") == @["nim"]
 
 suite "cargo_package: target, zig cross toolchain, workspace member":
 

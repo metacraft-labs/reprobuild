@@ -252,6 +252,17 @@
 ##                                            symlink the archive planted,
 ##                                            and the union builder's link
 ##                                            check is off
+## ``closure-prefixes-unrooted``              the switch does not attach its
+##                                            units' apt closure prefixes to
+##                                            the pending root, so the
+##                                            committed generation's root
+##                                            does not hold them and
+##                                            ``repro store gc`` collects a
+##                                            closure a current unit binds
+##                                            (G38)
+## ``apt-deb-reader-reads-whole-file``       the ``.deb`` reader
+##                                            (``apt_jammy``) loads the whole
+##                                            archive into memory
 ## ``floor-ignored``                          a failure after the flip reverts
 ##                                            even below the signed rollback
 ##                                            floor
@@ -288,6 +299,20 @@
 ## ``agent-management-path-names-only``       ssh/firewall/network units
 ##                                            are matched by name only,
 ##                                            aliases not resolved
+## ``agent-management-path-ignores-unit-names`` the management-path
+##                                            refusal does not ask systemd
+##                                            for a unit's ``Id``/``Names``
+## ``agent-management-path-ignores-install-alias`` the refusal ignores the
+##                                            ``Alias=`` a unit's own
+##                                            ``[Install]`` would create
+## ``agent-management-path-ignores-templates`` an instance (``ssh@x``) is
+##                                            not matched by its template
+## ``agent-staging-open-blocks``              the staging copy opens a file
+##                                            without ``O_NONBLOCK`` or a
+##                                            type re-check after the open
+## ``agent-staging-reads-whole-file``         the staging copy reads each
+##                                            file into memory before
+##                                            writing it
 ## ``floor-only-on-confirm``                  the rollback floor bounds only
 ##                                            confirmation failures
 ## ``retargeted-address-accepted``           a resource whose address now
@@ -307,6 +332,14 @@
 ##                                            gives up, so a failing or
 ##                                            hanging check holds the
 ##                                            switch past its deadline
+## ``cross-prefix-glibc-unchecked``           preflight accepts a profile
+##                                            compiler cross-built against a
+##                                            newer glibc than the host's
+##                                            (§7.9, the glibc exception)
+## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
+##                                            hosts file but leaves the fetch
+##                                            unit's ``IPAddressAllow=`` on
+##                                            the old addresses
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -382,6 +415,9 @@ const
                           # build accepts them.
                           "apt-closure-unrecorded",
                           "apt-deb-reader-follows-symlinks",
+                          # G38: the switch roots its units' closures.
+                          "closure-prefixes-unrooted",
+                          "apt-deb-reader-reads-whole-file",
                           # Milestone A8 (``agent_split``, ``generation0``,
                           # ``addon_apply``): each gate's falsifying build.
                           "floor-ignored",
@@ -398,10 +434,19 @@ const
                           "agent-install-trusts-cwd",
                           "agent-dns-via-resolved",
                           "agent-management-path-names-only",
+                          "agent-management-path-ignores-unit-names",
+                          "agent-management-path-ignores-install-alias",
+                          "agent-management-path-ignores-templates",
+                          "agent-staging-open-blocks",
+                          "agent-staging-reads-whole-file",
                           "floor-only-on-confirm",
                           # Milestone A5: the confirm-or-revert gate's
                           # timing falsifier.
-                          "confirm-overruns-deadline"]
+                          "confirm-overruns-deadline",
+                          # §7.9: the cross prefix's glibc check.
+                          "cross-prefix-glibc-unchecked",
+                          # A8 review M5: agent-repin's falsifier.
+                          "agent-repin-keeps-allow-list"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

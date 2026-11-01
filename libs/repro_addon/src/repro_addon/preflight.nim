@@ -30,6 +30,7 @@ import std/[algorithm, json, nativesockets, net, os, posix, strutils, tables, ur
 import repro_core
 import repro_peer_cache/auth as peerAuth
 
+import ./cross_prefix
 import ./fingerprint
 import ./generation0
 import ./host_exec
@@ -591,11 +592,18 @@ proc profileCompilerProblem*(compiler: string; timeoutSec = 120): string =
   ## bootstrap, and an operator may install the engine afterwards.
   if not fileExists(compiler):
     return ""
+  # §7.9 (the glibc exception): an engine cross-built for this host runs
+  # only on a glibc at least its sysroot's. Judged first and by name: on an
+  # older glibc the probe below would only report the loader's refusal.
+  let glibc = crossPrefixGlibcProblem(compiler, hostGlibcVersion())
+  if glibc.len > 0:
+    return glibc
   try:
     let r = runHostTool([compiler, "deploy-agent", "compile-profile",
                          "--probe-c-compiler"], timeoutSec = timeoutSec)
     if r.exitCode != 0:
-      return r.output.strip()
+      return r.output.strip() & " (a host that compiles profiles needs a " &
+        "C compiler: install one from the distribution, such as gcc)"
   except CatchableError as e:
     return e.msg
   ""
@@ -624,8 +632,7 @@ proc resolveAgentInputs*(target: string; sources: seq[string];
     if problem.len > 0:
       raise newException(ValueError, "--profile-compiler " &
         profileCompiler & " cannot compile a profile on this host: " &
-        problem & " (a host that compiles profiles needs a C compiler: " &
-        "install one from the distribution, such as gcc)")
+        problem)
   var origins = sources
   if cacheUrl.len > 0: origins.add(cacheUrl)
   for src in sources:
