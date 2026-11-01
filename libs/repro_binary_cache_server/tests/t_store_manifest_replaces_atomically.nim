@@ -70,3 +70,15 @@ suite "storeManifest":
       check readFile(root / "victim") == "do not touch"
       check not symlinkExists(path)
       check fileExists(path)
+
+  test "a temporary file left by an interrupted store is swept on open":
+    let root = createTempDir("store-manifest-", "")
+    defer: removeDir(root)
+    let s = openBinaryCacheServer(root)
+    let kp = peerAuth.generateKeypair()
+    let path = s.storeManifest(sampleManifest(kp, "3"))
+    let stale = parentDir(path) / ".manifest-crashed.tmp"
+    writeFile(stale, "half a manifest")
+    discard openBinaryCacheServer(root)
+    check not fileExists(stale)
+    check fileExists(path)

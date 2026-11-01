@@ -213,6 +213,14 @@ proc openBinaryCacheServer*(root: string;
   ## disable file-based reload (in-memory pin set still respected).
   createDir(root)
   createDir(root / ManifestsSubdir)
+  # A `storeManifest` interrupted between writing its temporary file and
+  # renaming it leaves `.manifest-*.tmp` beside the manifests. Nothing reads
+  # them; sweep them when the server opens, so a crash leaves no residue.
+  for entry in walkDirRec(root / ManifestsSubdir, yieldFilter = {pcFile}):
+    let name = extractFilename(entry)
+    if name.startsWith(".manifest-") and name.endsWith(".tmp"):
+      try: removeFile(entry)
+      except OSError: discard
   createDir(root / PayloadCasSubdir)
   createDir(root / "index")
   createDir(root / "trust")

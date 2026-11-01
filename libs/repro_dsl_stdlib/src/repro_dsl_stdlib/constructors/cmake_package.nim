@@ -188,6 +188,20 @@ proc cmakeEffectiveGenerator*(generator: string;
   else:
     generator
 
+proc cmakeTransitiveLinkerFlags*(zigTarget: bool;
+                                 linkLibraryDirs: openArray[string]): string =
+  ## The linker flags `cmake_package` appends to `CMAKE_EXE_LINKER_FLAGS` /
+  ## `CMAKE_SHARED_LINKER_FLAGS`: binutils' `--copy-dt-needed-entries` plus
+  ## an `-rpath-link` per sibling library directory, for transitive
+  ## DT_NEEDED resolution (the M9.R.15j.3 note in `cmake_package`). Empty
+  ## under a zig target: zig's driver links with lld, which refuses the
+  ## first and needs neither (Reprobuild-Standard-Library.md, `cross_zig`).
+  if zigTarget:
+    return ""
+  result = "-Wl,--copy-dt-needed-entries"
+  for libDir in linkLibraryDirs:
+    result.add(" -Wl,-rpath-link," & libDir)
+
 proc cmake_package*(srcDir: string;
                     buildDir = "build";
                     destdir = "out";
@@ -499,11 +513,8 @@ proc cmake_package*(srcDir: string;
     # -- like any lld link -- resolves a library's own DT_NEEDED symbols
     # without needing them copied or found through ``-rpath-link``. The
     # flag set is empty there, so nothing is appended.
-    var transitiveLinkerFlags = ""
-    if zigTarget == nil:
-      transitiveLinkerFlags = "-Wl,--copy-dt-needed-entries"
-      for libDir in linkLibraryDirs:
-        transitiveLinkerFlags.add(" -Wl,-rpath-link," & libDir)
+    let transitiveLinkerFlags = cmakeTransitiveLinkerFlags(
+      zigTarget != nil, linkLibraryDirs)
     proc appendLinkerFlags(cacheKey: string) =
       if transitiveLinkerFlags.len == 0:
         return
