@@ -105,8 +105,8 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "3af8a4e937dcf68666d1e47e4191cad496c6d793";
-    hash = "sha256-w2b3D6BdOA5NZthVhIcsAuti1Pz1UxiEDnCwjwkJdM4=";
+    rev = "75334780682e70b1adb58bf813d869e7f5df63f5";
+    hash = "sha256-3RJlICnd6npijpbB0ZnMUmPkYeKQBGFBQoamkuEg8xI=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -129,8 +129,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "e0fe6b4461f0555a7b44d57f42d1dbc6e07d1255";
-    hash = "sha256-OgJJqJG6WS5bjimeCj5labICT2PoxuS9ABOFzq40twI=";
+    rev = "e05beda08343b04b3d53f008ebcd0fe7bd27d8b1";
+    hash = "sha256-GmuldVzusLd3VQB8IFNz1tptxb555r1At2+CCaKDFL8=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -241,8 +241,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "f7903db3c1799562d9de1f5ca99ee31f8519efd8";
-    hash = "sha256-D6rOfOyGnaQCehpBi7bzPEUUVqDuvQ7Ud+w7RW2s10Q=";
+    rev = "9a08d05e6495fc36e5a31ce4b03795284b5ca366";
+    hash = "sha256-ap/t2Snfi4r861DM3m6PHs/s8RImTrfrOOzpy8CUE8g=";
   };
 
   strictDeps = true;
