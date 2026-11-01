@@ -550,10 +550,9 @@ const AgentApplyMemoryMax* = "512M"
   ## control group and the tick fails, instead of pushing the host into
   ## swap or its global OOM killer. The staging copy and the closure-digest
   ## check stream in fixed-size chunks (``copyTreeFd``,
-  ## ``prefixSubsetArchiveDigestHex``), so neither grows with the staged
-  ## bytes. The ``.deb`` realiser does not yet: it reads one archive whole
-  ## (``apt_jammy.extractDebDataMemberToTar``), so a single ``.deb`` of a
-  ## few hundred MB in a closure needs that much of this budget.
+  ## ``prefixSubsetArchiveDigestHex``), and so does the ``.deb`` realiser
+  ## (``apt_jammy``: ar(5) headers by offset, the data member copied in
+  ## chunks), so none of them grows with the staged or archived bytes.
   ## ``LimitMEMLOCK=infinity`` locks plaintext secrets inside it too.
 
 proc agentApplyUnit*(reproExe: string): string =

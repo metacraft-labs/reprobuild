@@ -3479,6 +3479,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "per-file config libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim.cfg"),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim",
+    binary: "build/test-bin/t_apt_deb_reader_streams",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"t_deb_reader_\" & $getCurrentProc..."),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim",
     binary: "build/test-bin/t_c1_dsl_parse",
     defines: @[],

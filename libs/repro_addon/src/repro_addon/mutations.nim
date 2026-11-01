@@ -260,6 +260,9 @@
 ##                                            ``repro store gc`` collects a
 ##                                            closure a current unit binds
 ##                                            (G38)
+## ``apt-deb-reader-reads-whole-file``       the ``.deb`` reader
+##                                            (``apt_jammy``) loads the whole
+##                                            archive into memory
 ## ``floor-ignored``                          a failure after the flip reverts
 ##                                            even below the signed rollback
 ##                                            floor
@@ -414,6 +417,7 @@ const
                           "apt-deb-reader-follows-symlinks",
                           # G38: the switch roots its units' closures.
                           "closure-prefixes-unrooted",
+                          "apt-deb-reader-reads-whole-file",
                           # Milestone A8 (``agent_split``, ``generation0``,
                           # ``addon_apply``): each gate's falsifying build.
                           "floor-ignored",

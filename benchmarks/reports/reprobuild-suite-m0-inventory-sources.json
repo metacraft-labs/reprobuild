@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2578,
+    "nimTestBinaries": 2579,
     "pureUnitConsolidationGroups": 76,
     "pureUnitTests": 719,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2618
+    "testEntries": 2619
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1506,7 +1506,7 @@
       "integration": 1428,
       "platform/destructive": 161,
       "pure unit": 719,
-      "unclassified": 292
+      "unclassified": 293
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1714,9 +1714,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2578,
+    "nimTestBinaryCount": 2579,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2618
+    "testEntryCount": 2619
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13747,6 +13747,23 @@
       "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_apt_deb_reader_streams",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
