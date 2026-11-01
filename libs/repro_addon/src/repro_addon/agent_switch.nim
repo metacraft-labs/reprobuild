@@ -49,6 +49,44 @@ proc hostAddonStateDir*(pointer = AddonStateDirPointer): string =
   let recorded = readAddonStateDirPointer(pointer)
   if recorded.len > 0: recorded else: DefaultStateDir
 
+type EngineAgentRoute* = enum
+  ## How the full engine's `repro deploy-agent` applies on this host.
+  earPlainApply      ## not an add-on host: the ordinary `repro infra apply`
+  earAddonSwitch     ## an add-on host: through the add-on switch, held to
+                     ## every A8 rule (spec §9, §9.1; owner decision B3)
+  earRefuseSharedState
+    ## an add-on host whose agent was given the add-on's own state
+    ## directory as its ``--state-dir``: refused, nothing applied
+
+proc samePath(a, b: string): bool =
+  ## Whether ``a`` and ``b`` name one directory: the same file when both
+  ## exist (a symbolic link or a bind mount spelling it twice), else the
+  ## same normalised absolute path.
+  try:
+    if dirExists(a) and dirExists(b):
+      return sameFile(a, b)
+  except OSError:
+    discard
+  normalizedPath(absolutePath(a)) == normalizedPath(absolutePath(b))
+
+proc engineAgentRoute*(addonState, agentStateDir: string): EngineAgentRoute =
+  ## The route of one engine agent tick (spec §9, decision 29). On an
+  ## add-on host every agent apply is an A8 apply. An agent whose own
+  ## state directory IS the add-on's has no separate state to keep its
+  ## sequence floor, quarantine and pause in, and its records would land
+  ## among the switch's; it used to fall through to the plain apply hook --
+  ## no attestation block, a compile in this root process, no
+  ## management-path, prefix or pin check -- so it is refused instead, and
+  ## never routed around the A8 rules.
+  if not isAddonHost(addonState):
+    return earPlainApply
+  if samePath(addonState, agentStateDir):
+    when agentMutated("engine-agent-shares-addon-state"):
+      return earPlainApply
+    else:
+      return earRefuseSharedState
+  earAddonSwitch
+
 proc agentRecordOf*(m: DeployManifest): AgentRecord =
   AgentRecord(deploymentId: m.deploymentId, sequence: m.sequence)
 
