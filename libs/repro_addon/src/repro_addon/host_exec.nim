@@ -36,14 +36,33 @@ const
   DpkgQueryCandidates* = ["/usr/bin/dpkg-query"]
   SystemdRunCandidates* = ["/usr/bin/systemd-run", "/bin/systemd-run"]
 
-proc fixedToolEnv(): StringTableRef =
+const HostToolPath* = "/usr/sbin:/usr/bin:/sbin:/bin"
+  ## The ``PATH`` a host tool sees by default: the distribution's own
+  ## directories only.
+
+const ProfileCompilePath* =
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  ## The ``PATH`` every profile compile on an add-on host runs with, and
+  ## the one bootstrap's preflight asks the profile compiler about: the
+  ## add-on agent's fetch unit, the full engine's unprivileged compile
+  ## (``verified_compile``) and the preflight probe all name it, so the
+  ## probe finds a C compiler exactly when a compile will (ReproOS Add-On
+  ## Mode §13 decision 31: "gcc or cc on systemd's default PATH"). It is
+  ## systemd's default ``PATH`` for the processes it spawns (``DEFAULT_PATH``
+  ## in systemd's ``src/basic/path-util.h``, with the split-``/usr`` tail,
+  ## which on a merged-``/usr`` base finds nothing the rest does not;
+  ## https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment%20Variables%20in%20Spawned%20Processes),
+  ## so a compiler the operator installed under ``/usr/local/bin`` counts.
+
+proc fixedToolEnv(path = HostToolPath): StringTableRef =
   ## The whole environment a host tool sees. ``PATH`` is set because some
   ## tools (dpkg-divert) exec helpers by name; it lists only the
-  ## distribution's own directories.
+  ## distribution's own directories unless the caller names another one
+  ## (``runHostTool``'s ``path``).
   result = newStringTable(modeCaseSensitive)
   result["LC_ALL"] = "C"
   result["LANG"] = "C"
-  result["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+  result["PATH"] = path
   result["SYSTEMD_PAGER"] = ""
   result["SYSTEMD_COLORS"] = "0"
   result["SYSTEMD_LESS"] = ""
@@ -71,7 +90,8 @@ const BoundedOutputBytes* = 64 * 1024
   ## What a bounded ``runHostTool`` keeps of a tool's output.
 
 proc runHostTool*(argv: openArray[string]; mergeStderr = true;
-                  input = ""; timeoutSec = 0): HostToolResult =
+                  input = ""; timeoutSec = 0;
+                  path = HostToolPath): HostToolResult =
   ## Run ``argv[0]`` (an absolute path) with ``argv[1..]`` and capture its
   ## output. Raises ``HostToolMissing`` when ``argv[0]`` does not exist,
   ## so a caller can tell "the tool said no" from "there is no tool".
@@ -79,7 +99,9 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
   ## deadline and the result has exit code 124 (``timeout(1)``'s), with
   ## whatever it printed. Its output is drained while it runs, so a tool
   ## that prints more than a pipe holds is never blocked writing; only the
-  ## first ``BoundedOutputBytes`` are kept.
+  ## first ``BoundedOutputBytes`` are kept. ``path`` is the tool's
+  ## ``PATH``: a caller that asks a tool what it would find where another
+  ## process runs it names that process's ``PATH`` here.
   if argv.len == 0:
     raise newException(ValueError, "runHostTool: empty argv")
   if not argv[0].isAbsolute:
@@ -91,7 +113,7 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
   if mergeStderr:
     options.incl poStdErrToStdOut
   var p = uncontrolledStartProcess(argv[0], args = argv[1 .. ^1],
-                                   env = fixedToolEnv(), options = options)
+                                   env = fixedToolEnv(path), options = options)
   try:
     if input.len > 0:
       p.inputStream.write(input)

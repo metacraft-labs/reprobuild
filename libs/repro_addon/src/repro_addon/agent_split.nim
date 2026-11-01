@@ -180,6 +180,15 @@ proc publishStaging(root, dir: string): string =
     if kind == pcDir and p != result and not extractFilename(p).startsWith("."):
       try: removeDir(p) except CatchableError: discard
 
+proc runProfileCompiler*(argv: openArray[string];
+                         timeoutSec = CompileTimeoutSec): HostToolResult =
+  ## Run the fetch unit's profile compiler. Its ``PATH`` is the one
+  ## bootstrap's preflight probed (``ProfileCompilePath``, §13 decision 31),
+  ## not the host tools' narrower one: the C compiler Nim runs is found
+  ## through it, so the probe and the compile agree on whether there is
+  ## one.
+  runHostTool(argv, timeoutSec = timeoutSec, path = ProfileCompilePath)
+
 proc compileProfile(conf: AgentConf; m: DeployManifest;
                     dir, workspace: string): string =
   ## Run the configured profile compiler over the staged source as this
@@ -206,7 +215,7 @@ proc compileProfile(conf: AgentConf; m: DeployManifest;
     "--actions-out", dir / StagedActionsName,
     "--state-dir", workspace / "state",
     "--revision-out", dir / StagedCompilerRevisionName] & compileFactArgs(m)
-  let r = runHostTool(argv, timeoutSec = CompileTimeoutSec)
+  let r = runProfileCompiler(argv)
   if r.exitCode != 0:
     return "the profile compiler failed (exit " & $r.exitCode & "): " &
       r.output.strip()
