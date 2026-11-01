@@ -28,6 +28,7 @@ import repro_dsl_stdlib/operations/link
 import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/constructors/c_executable
 import repro_dsl_stdlib/constructors/nim_executable
+import repro_dsl_stdlib/packages/nim as nim_module
 import repro_dsl_stdlib/constructors/nim_library
 import repro_dsl_stdlib/constructors/cmake_package
 import repro_dsl_stdlib/constructors/autotools_package
@@ -92,6 +93,8 @@ suite "--target refuses every constructor that does not thread it":
           discard c_executable("hello", @["src/hello.c"])),
         ("nim_executable", proc() =
           discard nim_executable("hello", "src/hello.nim")),
+        ("nim.c", proc() =
+          discard nim.c(source = "src/hello.nim", binary = "build/bin/hello")),
         ("nim_library", proc() =
           discard nim_library("hello", "src/hello.nim")),
         ("cmake_package", proc() =
@@ -340,6 +343,42 @@ suite "a zig target is threaded into the C operations":
         check wrapperIds[0] in exe.install.deps
         let lib = nim_library("hello", "src/hello.nim")
         check "cpu=arm" in argStrings(lib.install)))
+
+  test "the nim.c shorthand builds for the zig target":
+    # What `repro build --target=<zig triple> .#apps` needs: reprobuild's own
+    # images are `nim.c(...)` edges, not `nim_executable`.
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let act = nim.c(source = "src/shorthand.nim",
+          binary = "build/bin/shorthand", nimcache = "build/nimcache/shorthand")
+        let args = argStrings(act)
+        checkpoint($args)
+        check "cpu=arm" in args
+        check "os=linux" in args
+        check "cc=clang" in args
+        check args.anyIt(it.startsWith("clangExe=") and it.endsWith("/cc"))
+        # Output and nimcache keyed by the target: a native build of the
+        # same edge writes other files.
+        check ("output=build@" & ZigTriple & "/bin/shorthand") in args
+        check args.anyIt(it.startsWith("nimcache=build@" & ZigTriple))
+        var wrappers = ""
+        for a in registeredBuildActions():
+          if a.id.startsWith("zig-cross-wrappers-"): wrappers = a.id
+        check wrappers.len > 0
+        check wrappers in act.deps
+        # The backend is the zig wrapper: the edge's PATH carries zig and
+        # sh, not the host gcc (refs recorded on the registered action).
+        var refs: seq[string]
+        for a in registeredBuildActions():
+          if a.id == act.id: refs = a.toolIdentityRefs
+        check "zig" in refs
+        check "sh" in refs
+        check "gcc" notin refs
+        # A caller that picks the CPU itself answers for the target: the
+        # fail-closed guard applies, as before.
+        check refusal(proc() =
+          discard nim.c(source = "src/hello.nim", binary = "build/bin/h32",
+            cpu = "i386")).len > 0))
 
   test "cmake_package configures with a toolchain file naming the wrappers":
     withTarget(ZigTriple, proc() =
