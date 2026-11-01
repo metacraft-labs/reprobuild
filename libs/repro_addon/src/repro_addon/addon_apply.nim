@@ -3347,6 +3347,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     discard preserveBytes(stateDir, b)
 
   # --- Step 1: realise. ---
+  # Closure prefixes an older realiser left without a receipt are adopted
+  # and rooted to the generations that bind them before anything this
+  # switch does can lead to a collection (a host upgraded from realiser v2;
+  # ``migrateLegacyAptClosures``). Idempotent; nothing to do on most hosts.
+  discard migrateLegacyAptClosures()
   # The tree goes into the store and is verified; the units' closures are
   # realised too, so no base path is touched before everything the
   # generation runs from exists. The apply lock is held throughout.

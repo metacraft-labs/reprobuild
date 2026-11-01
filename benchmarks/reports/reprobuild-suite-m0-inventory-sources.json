@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2577,
+    "nimTestBinaries": 2578,
     "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 718,
+    "pureUnitTests": 719,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2617
+    "testEntries": 2618
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1505,7 +1505,7 @@
       "graph-fixture": 18,
       "integration": 1428,
       "platform/destructive": 161,
-      "pure unit": 718,
+      "pure unit": 719,
       "unclassified": 292
     },
     "graphOwnedTestArtifacts": [
@@ -1714,9 +1714,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2577,
+    "nimTestBinaryCount": 2578,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2617
+    "testEntryCount": 2618
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8416,6 +8416,25 @@
       "source": "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
       "sourceSuiteCount": 18,
       "staticCaseCount": 46,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_legacy_apt_closure_adoption",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_dsl_stdlib",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

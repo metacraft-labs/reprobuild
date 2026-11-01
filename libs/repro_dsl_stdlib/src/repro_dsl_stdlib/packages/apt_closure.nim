@@ -39,7 +39,7 @@
 ## render the unit offline and the host realises exactly the path the unit
 ## names.
 
-import std/[algorithm, os, sequtils, sets, strutils, tables, tempfiles, uri]
+import std/[algorithm, os, sequtils, sets, strutils, tables, tempfiles, times, uri]
 when defined(posix):
   import std/posix
 
@@ -1405,6 +1405,242 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
     except CatchableError:
       if dirExists(tmp): removeDir(tmp)
       raise
+
+# ---------------------------------------------------------------------------
+# Prefixes an older realiser wrote (realiser version 2)
+# ---------------------------------------------------------------------------
+#
+# Before realiser version 3 every prefix was renamed into place with only a
+# marker: no ``.repro-receipt`` and no index row, at a path of its own
+# (``<version>-<hash16>`` with the realiser's own 16-hex hash). A host that
+# ran that realiser still has them, and generations it committed bind them
+# (``BindReadOnlyPaths=<prefix>/usr:/usr``). Left alone they are invisible to
+# ``repro store gc`` (so never collected, whatever expires) and the store's
+# recovery would quarantine every one as an unreceipted directory -- under
+# the units that bind it. ``adoptLegacyAptClosurePrefixes`` makes each one
+# that verifies an ordinary indexed prefix WHERE IT LIES, so a root can hold
+# it and the collector can take it once nothing does.
+
+const
+  LegacyAptRealiserVersion = "2"
+  AdoptedAptDebAdapter* = AdoptedAdapterPrefix & "apt-deb-v2"
+    ## The adapter of an adopted realiser-v2 member prefix.
+  AdoptedAptClosureAdapter* = AdoptedAdapterPrefix & "apt-closure-v2"
+    ## The adapter of an adopted realiser-v2 closure (union) prefix.
+  LegacyClosureArchitectures = ["amd64", "arm64", "armhf", "armel", "i386",
+    "ppc64el", "s390x", "riscv64", "mips64el", "loong64"]
+    ## The Debian architectures a v2 closure identity is tried against: v2
+    ## folded the lock's architecture into the identity but did not write
+    ## it into the marker.
+
+proc legacyDebPrefixHash(sha256: string): string =
+  ## Realiser v2's member prefix hash (the 16 hex after ``<version>-``).
+  sha256OfString("repro.apt-deb\x00" & LegacyAptRealiserVersion & "\x00" &
+    sha256)[0 ..< 16]
+
+proc legacyClosureIdentity(architecture: string; shas: seq[string]): string =
+  ## Realiser v2's closure identity (``aptClosureIdentity`` at version 2).
+  var sorted = shas
+  sorted.sort(cmp)
+  sha256OfString("repro.apt-closure\x00" & LegacyAptRealiserVersion &
+    "\x00" & architecture & "\x00" & sorted.join("\x00"))[0 ..< 16]
+
+proc adoptedAptDebPrefixId*(name, versionSegment, sha256: string):
+    PrefixIdBytes =
+  ## The realization hash an adopted v2 member prefix is indexed under: a
+  ## pure function of what its path and marker state.
+  computeRealizationHash("apt-deb-" & name, versionSegment,
+    AdoptedAptDebAdapter, lockIdentity = sha256, declaredExecutablePath = "",
+    provenanceChecksum = "sha256:" & sha256,
+    extra = [LegacyAptRealiserVersion])
+
+proc adoptedAptClosurePrefixId*(rootName, versionSegment, identity: string):
+    PrefixIdBytes =
+  ## The realization hash an adopted v2 closure prefix is indexed under.
+  computeRealizationHash("apt-closure-" & rootName, versionSegment,
+    AdoptedAptClosureAdapter, lockIdentity = identity,
+    declaredExecutablePath = "", extra = [LegacyAptRealiserVersion])
+
+type
+  LegacyAptPrefix* = object
+    path*: string               ## absolute path of the prefix directory
+    prefixId*: PrefixIdBytes    ## the id it is (or would be) indexed under
+    closure*: bool              ## a union prefix, not a member
+    members*: seq[string]
+      ## For a union: the absolute paths of its members' v2 prefixes that
+      ## are on disk (each adopted too when it verifies).
+  LegacyAptAdoption* = object
+    adopted*: seq[LegacyAptPrefix]
+      ## Every v2 prefix now indexed, including any adopted by an earlier
+      ## run (adoption is idempotent).
+    refused*: seq[tuple[path, reason: string]]
+      ## v2-looking directories that did not verify; left exactly as found
+      ## (they may still be bound), never indexed.
+
+proc splitLegacyLeaf(leaf: string): tuple[version, hash: string] =
+  ## ``<version>-<16 hex>`` -> its two parts; ``("", "")`` otherwise.
+  let dash = leaf.rfind('-')
+  if dash <= 0 or leaf.len - dash - 1 != 16: return ("", "")
+  let h = leaf[dash + 1 .. ^1]
+  for c in h:
+    if c notin HexDigits or c in {'A' .. 'F'}: return ("", "")
+  (leaf[0 ..< dash], h)
+
+proc readMarker(path: string): string =
+  ## A marker's text, "" when it is absent or not a regular file (a planted
+  ## symlink in its place is not a marker).
+  when defined(posix):
+    var st: Stat
+    if lstat(path.cstring, st) != 0 or not S_ISREG(st.st_mode): return ""
+  readFile(path)
+
+proc adoptOne(st: var Store; storeRoot, path: string; prefixId: PrefixIdBytes;
+              adapter, packageName, version, lockIdentity: string) =
+  ## Write the adopted receipt (unless an equal one is there) and the row.
+  let rel = "prefixes/" & path.parentDir.extractFilename & "/" &
+    path.extractFilename
+  let receiptPath = path / ReceiptFileName
+  if not fileExists(receiptPath):
+    let rec = RealizationReceipt(schemaVersion: 1'u16, adapter: adapter,
+      packageName: packageName, version: version, realizationHash: prefixId,
+      realizedPath: rel, lockIdentity: lockIdentity,
+      materializationMechanism: "adopted", createdAtUnix: getTime().toUnix,
+      writerProcessId: int64(getCurrentProcessId()), writerMode: "direct",
+      outputPrefixes: initTable[string, string]())
+    let tmp = path / (ReceiptFileName & ".tmp")
+    writeReceiptFile(tmp, rec)
+    setFilePermissions(tmp, FileMode)
+    moveFile(tmp, receiptPath)
+  let rec = readReceiptFile(receiptPath)
+  if rec.realizationHash != prefixId or rec.realizedPath != rel:
+    raise newException(IOError, "apt closure: " & path & " carries a " &
+      "receipt for another prefix")
+  if not st.lookupPrefix(prefixId).found:
+    discard st.insertPrefixOrIgnore(PrefixRow(prefixId: prefixId,
+      packageName: rec.packageName, version: rec.version, realizedPath: rel,
+      adapter: rec.adapter, receiptDigest: receiptDigest(rec),
+      createdAtUnix: rec.createdAtUnix))
+
+proc legacyDebPrefix(dir: string): tuple[ok: bool; reason, name, version,
+                                          sha: string] =
+  ## Verify a v2 member prefix: its marker names a SHA-256 whose v2 hash is
+  ## the one in its directory name, and its tree meets the store's policy.
+  let pkgDir = dir.parentDir.extractFilename
+  result.name = pkgDir["apt-deb-".len .. ^1]
+  let (version, hash) = splitLegacyLeaf(dir.extractFilename)
+  if version.len == 0: return (false, "not a <version>-<hash> name", "", "", "")
+  result.version = version
+  let marker = readMarker(dir / DebPrefixMarker).strip()
+  if marker.len != 64: return (false, "no member marker", "", "", "")
+  result.sha = marker
+  if legacyDebPrefixHash(marker) != hash:
+    return (false, "the marker's digest does not give the directory's hash",
+            "", "", "")
+  try:
+    verifyHardenedTree(dir, result.name)
+  except CatchableError as e:
+    return (false, e.msg, "", "", "")
+  result.ok = true
+
+proc adoptLegacyAptClosurePrefixes*(st: var Store; storeRoot: string):
+    LegacyAptAdoption =
+  ## Adopt every realiser-v2 prefix under ``storeRoot / "prefixes"`` that
+  ## verifies: write a receipt recording the path it lies at (adapter
+  ## ``adopted:apt-deb-v2`` / ``adopted:apt-closure-v2``) and its index row.
+  ## A member verifies when its marker's SHA-256 gives the directory's v2
+  ## hash; a union when its marker's identity is the v2 identity of the
+  ## members it lists (for one Debian architecture) and the directory's
+  ## hash. Both must also meet the store's tree policy
+  ## (``verifyHardenedTree``). Nothing is moved, rewritten or deleted:
+  ## anything that does not verify is reported and left as it is. Adopted
+  ## prefixes are NOT rooted here; the caller roots the ones a retained
+  ## generation binds, in the same store session, before anything collects.
+  ## Idempotent.
+  let prefixes = storeRoot / "prefixes"
+  if not dirExists(prefixes): return
+  var debByHash = initTable[string, string]()   # sha256 -> member path
+  var unions: seq[string]
+  for pk, pkgDir in walkDir(prefixes):
+    if pk != pcDir: continue
+    let pkg = pkgDir.extractFilename
+    let isDeb = pkg.startsWith("apt-deb-")
+    let isClosure = pkg.startsWith("apt-closure-")
+    if not (isDeb or isClosure): continue
+    for k, dir in walkDir(pkgDir):
+      if k != pcDir or dir.extractFilename.startsWith("."): continue
+      let receipt = dir / ReceiptFileName
+      if fileExists(receipt):
+        # A v3 prefix (the store's own) or one adopted earlier.
+        try:
+          let rec = readReceiptFile(receipt)
+          if rec.adapter == AdoptedAptDebAdapter:
+            let m = readMarker(dir / DebPrefixMarker).strip()
+            debByHash[m] = dir
+            adoptOne(st, storeRoot, dir, rec.realizationHash, rec.adapter,
+                     rec.packageName, rec.version, rec.lockIdentity)
+            result.adopted.add(LegacyAptPrefix(path: dir,
+              prefixId: rec.realizationHash))
+          elif rec.adapter == AdoptedAptClosureAdapter:
+            unions.add(dir)
+        except CatchableError as e:
+          result.refused.add((dir, e.msg))
+        continue
+      if isDeb:
+        if not fileExists(dir / DebPrefixMarker): continue
+        let v = legacyDebPrefix(dir)
+        if not v.ok:
+          result.refused.add((dir, v.reason))
+          continue
+        let id = adoptedAptDebPrefixId(v.name, v.version, v.sha)
+        try:
+          adoptOne(st, storeRoot, dir, id, AdoptedAptDebAdapter,
+                   "apt-deb-" & v.name, v.version, v.sha)
+        except CatchableError as e:
+          result.refused.add((dir, e.msg))
+          continue
+        debByHash[v.sha] = dir
+        result.adopted.add(LegacyAptPrefix(path: dir, prefixId: id))
+      elif fileExists(dir / ClosurePrefixMarker):
+        unions.add(dir)
+  for dir in unions:
+    let (version, hash) = splitLegacyLeaf(dir.extractFilename)
+    let rootName = dir.parentDir.extractFilename["apt-closure-".len .. ^1]
+    let lines = readMarker(dir / ClosurePrefixMarker).strip().splitLines()
+    if version.len == 0 or lines.len < 2 or not lines[0].startsWith("identity "):
+      result.refused.add((dir, "no closure marker"))
+      continue
+    let identity = lines[0]["identity ".len .. ^1].strip()
+    var shas: seq[string]
+    var members: seq[string]
+    var bad = ""
+    for line in lines[1 .. ^1]:
+      let parts = line.splitWhitespace()
+      if parts.len != 2 or parts[1].len != 64:
+        bad = "malformed member line: " & line
+        break
+      shas.add(parts[1])
+      if parts[1] in debByHash: members.add(debByHash[parts[1]])
+    if bad.len > 0:
+      result.refused.add((dir, bad))
+      continue
+    var verified = false
+    for arch in LegacyClosureArchitectures:
+      if legacyClosureIdentity(arch, shas) == identity:
+        verified = true
+        break
+    if not verified or identity != hash:
+      result.refused.add((dir, "the marker's members do not give the " &
+        "directory's closure identity"))
+      continue
+    try:
+      verifyHardenedTree(dir, "apt-closure-" & rootName)
+      let id = adoptedAptClosurePrefixId(rootName, version, identity)
+      adoptOne(st, storeRoot, dir, id, AdoptedAptClosureAdapter,
+               "apt-closure-" & rootName, version, identity)
+      result.adopted.add(LegacyAptPrefix(path: dir, prefixId: id,
+        closure: true, members: members))
+    except CatchableError as e:
+      result.refused.add((dir, e.msg))
 
 # ---------------------------------------------------------------------------
 # The systemd unit binding

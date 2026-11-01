@@ -330,6 +330,25 @@ keep only `[A-Za-z0-9._-]` and write every other character `_` (so an
 epoch's `:`, which separates a `BindReadOnlyPaths=` source from its target,
 never appears, and neither do `+` or `~`).
 
+**Prefixes from an earlier realiser.** Before realiser version 3 each
+prefix was renamed into place with only its completion marker: no receipt,
+no index row, and a `<version>-<hash16>` name of the realiser's own (only
+an epoch's `:` was rewritten, to `_`). A host upgraded from that realiser
+keeps those prefixes, and the generations it committed then still bind
+them. Such a prefix would be invisible to `repro store gc` and quarantined
+by `repro store recover`, so it is adopted where it lies. Before every
+switch, before the add-on's `repro store gc`, and before `repro store
+recover` of `/repro/store`, every version-2 prefix that verifies gets a
+receipt recording its own path (adapter `adopted:apt-deb-v2` or
+`adopted:apt-closure-v2`) and an index row. A member verifies when its
+marker's SHA-256 gives the hash in its directory name, a union when the
+members its marker lists give its closure identity; both must also meet the
+mode and type policy above. Each adopted closure, its union and its
+members, is then held by the root of every generation whose units bind it,
+so the collector keeps it while such a generation is retained and takes it
+afterwards, like any other prefix. A directory that does not verify is
+reported and left exactly as it is: no receipt, no row, nothing moved.
+
 ### How the daemon finds its libraries
 
 The unit's `/usr` *is* the closure's `/usr`. The base system's

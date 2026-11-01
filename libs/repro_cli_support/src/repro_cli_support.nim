@@ -254,6 +254,10 @@ import repro_cli_support/home
 import repro_cli_support/selfhost as cli_selfhost
 import repro_cli_support/project_pins
 import repro_cli_support/infra
+when defined(linux):
+  import repro_addon/static_tree as addon_static_tree
+  from repro_dsl_stdlib/packages/apt_closure import AddOnSystemStoreRoot
+  import repro_core/host_apply_lock
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
@@ -39278,6 +39282,19 @@ proc runStoreCommand*(args: seq[string]): int =
         echo "  - " & path
       return 0
     of "recover":
+      when defined(linux):
+        # The add-on's system store may hold apt closure prefixes a realiser
+        # before version 3 wrote with no receipt; recovery would quarantine
+        # them under the units that bind them. Adopt and root them first,
+        # under the add-on's host apply lock like every add-on store writer.
+        if os.normalizedPath(absolutePath(root)) == AddOnSystemStoreRoot and
+            dirExists(AddOnSystemStoreRoot / "prefixes"):
+          var addonLock = acquireHostApplyLock("repro store recover")
+          defer: addonLock.release()
+          let legacy = addon_static_tree.migrateLegacyAptClosures()
+          echo "legacy apt prefixes adopted: " & $legacy.adopted.len
+          for r in legacy.refused:
+            echo "  - not adopted: " & r.path & ": " & r.reason
       let report = recoverStoreRoot(root)
       echo "repro store recover: store-root=" & root
       echo "index rebuilt: " & (if report.indexRebuilt: "yes" else: "no")

@@ -366,6 +366,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let objs = generation0Objects(Gen0Inputs("),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim",
+    binary: "build/test-bin/t_addon_legacy_apt_closure_adoption",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var store: string"),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim",
     binary: "build/test-bin/t_addon_preflight_needs_a_c_compiler",
     defines: @[],

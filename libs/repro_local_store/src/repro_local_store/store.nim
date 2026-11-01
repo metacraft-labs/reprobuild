@@ -286,6 +286,14 @@ type
 const
   StoreSchemaVersion* = 1
   ReceiptFileName* = ".repro-receipt"
+  AdoptedAdapterPrefix* = "adopted:"
+    ## The adapter of a receipt written for a prefix the store did not
+    ## publish: a directory an earlier layout placed under ``prefixes/``
+    ## that a migration verified and adopted where it lies (the apt closure
+    ## realiser's v2 prefixes, ``adoptLegacyAptClosurePrefixes``). Its
+    ## directory name predates the realization-hash naming, so recovery
+    ## checks such a receipt against the path it records instead of the
+    ## name its hash would give. Nothing else may write this adapter.
   ReceiptMagic* = "RPRC"                ## envelope magic
   ReceiptFormatVersion* = 3'u16
     ## v2: Recipe-Val M8 — appends ``outputName: string`` and a
@@ -2386,10 +2394,13 @@ proc reconcileUnindexedPrefixes(s: var Store; report: var RecoverReport) =
           report.quarantinedPrefixes.add(dir)
         except OSError: discard
         continue
-      # Verify the directory leaf name matches the realization-hash.
+      # Verify the directory leaf name matches the realization-hash -- or,
+      # for an adopted prefix, that the receipt records this very path.
       let expectedLeaf = realizationDirName(receipt.version,
         receipt.realizationHash)
-      if dir.extractFilename != expectedLeaf:
+      let adoptedHere = receipt.adapter.startsWith(AdoptedAdapterPrefix) and
+        receipt.realizedPath == s.relativeFromRoot(dir)
+      if dir.extractFilename != expectedLeaf and not adoptedHere:
         try:
           discard s.quarantineUnique(dir)
           s.appendAudit(gaQuarantine, receipt.realizationHash,
