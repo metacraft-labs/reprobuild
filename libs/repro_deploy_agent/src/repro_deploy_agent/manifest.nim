@@ -221,6 +221,16 @@ const
     ## Bit 2 of ``flags``: the compiled-profile pin ends with its system
     ## selection (``systemMode``, then ``systemActivities`` joined with
     ## ``,``). Only with bit 1.
+  DeployManifestFlagActionFields* = 8'u16
+    ## Bit 3 of ``flags``: every build action is followed by the fields the
+    ## v1 action encoding predates -- ``substituteOnly`` (u8),
+    ## ``expectedOutputDigest`` (text), ``activity`` (text) and
+    ## ``rebootRequired`` (u8). Only with bit 0. Set exactly when an action
+    ## carries one of them, so an envelope without such an action is
+    ## byte-for-byte what it was. A manifest that ships signed canonical text
+    ## carries the producer's compile's actions (rpi2: two substitute-only
+    ## store packages); without this bit a substitute-only action arrived as
+    ## an ordinary one and was built on the host.
   CompiledProfileDigestPrefix* = "sha256:"
   CompiledProfileDigestDomain* = "RDMF-compiled-profile-v1\n"
     ## The domain-separation prefix of ``compiledProfileDigest``'s input.
@@ -373,6 +383,25 @@ proc encodeBuildAction(buf: var seq[byte]; a: reproProfile.ProfileBuildAction) =
   writeU8(buf, if a.requiresElevation: 1'u8 else: 0'u8)
   writeU8(buf, if a.cacheable: 1'u8 else: 0'u8)
 
+proc hasActionFields(a: reproProfile.ProfileBuildAction): bool =
+  a.substituteOnly or a.expectedOutputDigest.len > 0 or a.activity.len > 0 or
+    a.rebootRequired
+
+proc encodeActionFields(buf: var seq[byte]; a: reproProfile.ProfileBuildAction) =
+  writeU8(buf, if a.substituteOnly: 1'u8 else: 0'u8)
+  writeString(buf, a.expectedOutputDigest)
+  writeString(buf, a.activity)
+  writeU8(buf, if a.rebootRequired: 1'u8 else: 0'u8)
+
+proc decodeBool(buf: openArray[byte]; pos: var int; what: string): bool
+
+proc decodeActionFields(buf: openArray[byte]; pos: var int;
+                        a: var reproProfile.ProfileBuildAction) =
+  a.substituteOnly = decodeBool(buf, pos, "substituteOnly")
+  a.expectedOutputDigest = readString(buf, pos)
+  a.activity = readString(buf, pos)
+  a.rebootRequired = decodeBool(buf, pos, "rebootRequired")
+
 proc decodeBuildAction(buf: openArray[byte]; pos: var int):
     reproProfile.ProfileBuildAction =
   result.id = readString(buf, pos)
@@ -385,6 +414,13 @@ proc decodeBuildAction(buf: openArray[byte]; pos: var int):
   result.toolIdentityRefs = readStrSeq(buf, pos)
   result.requiresElevation = readU8(buf, pos) != 0'u8
   result.cacheable = readU8(buf, pos) != 0'u8
+
+proc decodeBool(buf: openArray[byte]; pos: var int; what: string): bool =
+  let b = readU8(buf, pos)
+  if b > 1'u8:
+    raise newException(DeployManifestCodecError, "build action " & what &
+      " is " & $b & ", expected 0 or 1")
+  b == 1'u8
 
 # ---------------------------------------------------------------------------
 # Whole-manifest encode.
@@ -613,13 +649,18 @@ proc closureDigestFor*(m: DeployManifest; actionId: string): string =
   ""
 
 proc wireFlags*(m: DeployManifest): uint16 =
-  if not m.hasAttestations: 0'u16
-  elif m.hasCompiledProfilePin and m.compiledProfile.hasSystemSelection:
-    DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile or
-      DeployManifestFlagSystemSelection
-  elif m.hasCompiledProfilePin:
-    DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile
-  else: DeployManifestFlagAttestations
+  if not m.hasAttestations: return 0'u16
+  result =
+    if m.hasCompiledProfilePin and m.compiledProfile.hasSystemSelection:
+      DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile or
+        DeployManifestFlagSystemSelection
+    elif m.hasCompiledProfilePin:
+      DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile
+    else: DeployManifestFlagAttestations
+  for a in m.buildActions:
+    if hasActionFields(a):
+      result = result or DeployManifestFlagActionFields
+      break
 
 proc wireVersion*(m: DeployManifest): uint16 =
   ## The lowest format version that can express this manifest's content.
@@ -669,8 +710,17 @@ proc encodeUnsignedPrefix(m: DeployManifest): seq[byte] =
           writeString(result, m.compiledProfile.systemMode)
           writeString(result, m.compiledProfile.systemActivities.join(","))
   writeU32LE(result, uint32(m.buildActions.len))
+  let actionFields = (m.wireFlags and DeployManifestFlagActionFields) != 0
   for a in m.buildActions:
+    if not actionFields and hasActionFields(a):
+      # Without the attestation block there is no flag to carry them, and
+      # dropping a substitute-only mark would turn the action into a build.
+      raise newException(DeployManifestCodecError, "build action '" & a.id &
+        "' carries substituteOnly, expectedOutputDigest, activity or " &
+        "rebootRequired, which only an envelope with the attestation " &
+        "block (flags bit 3) can carry")
     encodeBuildAction(result, a)
+    if actionFields: encodeActionFields(result, a)
   if m.wireVersion >= DeployManifestFormatVersionV2:
     writeU8(result, if m.hasSecrets: 1'u8 else: 0'u8)
     if m.hasSecrets:
@@ -719,17 +769,17 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
   # rather than skipped (an older reader that ignored the word would
   # misparse the block as build actions).
   if flags != 0'u16 and (result.formatVersion < DeployManifestFormatVersionV3 or
-      flags notin [DeployManifestFlagAttestations,
-                   DeployManifestFlagAttestations or
-                     DeployManifestFlagCompiledProfile,
-                   DeployManifestFlagAttestations or
-                     DeployManifestFlagCompiledProfile or
-                     DeployManifestFlagSystemSelection]):
+      (flags and not DeployManifestFlagActionFields) notin [
+        DeployManifestFlagAttestations,
+        DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile,
+        DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile or
+          DeployManifestFlagSystemSelection]):
     raise newException(DeployManifestCodecError,
       "deploy manifest flags word is " & $flags & " in a formatVersion " &
       $result.formatVersion & " envelope (only formatVersion 3 may set " &
       "bit 0, the attestation block, with it bit 1, the compiled-profile " &
-      "pin, and with that bit 2, the pin's system selection)")
+      "pin, and with that bit 2, the pin's system selection; bit 3, the " &
+      "build actions' later fields, also needs bit 0)")
   result.target = readString(buf, pos)
   result.sequence = readU64LE(buf, pos)
   result.deploymentId = readString(buf, pos)
@@ -799,8 +849,20 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
     raise newException(DeployManifestCodecError, "element count exceeds remaining bytes")
   let actionCount = int(actionCountRaw)
   result.buildActions = newSeqOfCap[reproProfile.ProfileBuildAction](actionCount)
+  let actionFields = (flags and DeployManifestFlagActionFields) != 0
   for _ in 0 ..< actionCount:
-    result.buildActions.add(decodeBuildAction(buf, pos))
+    var a = decodeBuildAction(buf, pos)
+    if actionFields: decodeActionFields(buf, pos, a)
+    result.buildActions.add(a)
+  # Bit 3 is set exactly when an action needs it.
+  if actionFields:
+    var any = false
+    for a in result.buildActions:
+      if hasActionFields(a): any = true
+    if not any:
+      raise newException(DeployManifestCodecError,
+        "non-canonical envelope: flags bit 3 with no build action that " &
+        "carries its fields")
   if result.formatVersion >= DeployManifestFormatVersionV2:
     let flag = readU8(buf, pos)
     if flag > 1'u8:

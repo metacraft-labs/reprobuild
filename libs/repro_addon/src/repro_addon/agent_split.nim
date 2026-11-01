@@ -318,8 +318,12 @@ proc runAgentFetch*(conf: AgentConf; anchors: TrustAnchors;
     # by name rather than failing on the exec.
     let workspace = stagingRoot.parentDir / AgentCompileDirName
     # The staged sources are rebuilt on every tick (`stageProfileSources`);
-    # only the compiler's state persists.
-    let why = compileProfile(conf, m, dir, workspace)
+    # only the compiler's state persists. A profile no pin can vouch for is
+    # not compiled at all (``compiledProfilePrecheck``): the apply unit
+    # refuses it whatever the compile emits.
+    let early = compiledProfilePrecheck(m)
+    let why = if early.len > 0: early
+              else: compileProfile(conf, m, dir, workspace)
     if why.len > 0:
       notes.add("profile: " & why)
       canonical = ""

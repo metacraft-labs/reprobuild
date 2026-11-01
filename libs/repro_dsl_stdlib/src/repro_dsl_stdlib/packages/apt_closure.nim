@@ -1144,6 +1144,58 @@ proc publishThroughStore(st: var Store; tmp, final: string;
     raise newException(IOError, "apt closure: " & final &
       " was published without a receipt for its realization hash")
 
+proc legacyDebPrefix(dir: string): tuple[ok: bool; reason, name, version,
+                                          sha: string]
+
+proc legacyAptDebPrefixPath*(storeRoot: string; d: AptLockedDeb): string
+
+proc linkTree(src, dst: string; skip: openArray[string]) =
+  ## ``dst`` as a copy of the tree ``src`` that shares its files: a hard
+  ## link per regular file, the same symbolic links, directories with the
+  ## same mode. ``skip`` names top-level entries left out (markers). Both
+  ## lie in one store, so on one filesystem.
+  createDir(dst)
+  for kind, rel in walkDir(src, relative = true):
+    if rel in skip: continue
+    let s = src / rel
+    let d = dst / rel
+    case kind
+    of pcDir:
+      linkTree(s, d, [])
+      setFilePermissions(d, getFilePermissions(s))
+    of pcFile: createHardlink(s, d)
+    of pcLinkToFile, pcLinkToDir: createSymlink(expandSymlink(s), d)
+
+proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
+  ## An older realiser's prefix of exactly this member, "" when there is
+  ## none that verifies: at ``legacyAptDebPrefixPath``, its marker naming
+  ## the lock's SHA-256 (and its directory name that realiser's hash of
+  ## it), its tree within the store's policy (``legacyDebPrefix``). Realiser
+  ## 2 unpacked a member exactly as this one does (version 3 changed where
+  ## and how prefixes are published, not their bytes), so its tree is the
+  ## member's unpacked archive; the marker is that realiser's own record,
+  ## written as root into the root-owned store, of the archive it unpacked
+  ## -- the same record the store's adoption of it (``lockIdentity``)
+  ## rests on.
+  let dir = legacyAptDebPrefixPath(storeRoot, d)
+  if not dirExists(dir): return ""
+  let v = legacyDebPrefix(dir)
+  if not (v.ok and v.sha == d.sha256 and v.name == d.name): return ""
+  # Adopted already: its receipt must record the same archive digest (the
+  # store's own record of what the prefix holds), under the adopted
+  # member adapter, at this very path.
+  if fileExists(dir / ReceiptFileName):
+    try:
+      let rec = readReceiptFile(dir / ReceiptFileName)
+      if rec.adapter != AdoptedAdapterPrefix & "apt-deb-v2" or
+          rec.lockIdentity != d.sha256 or
+          rec.realizedPath != "prefixes/" & dir.parentDir.extractFilename &
+            "/" & dir.extractFilename:
+        return ""
+    except CatchableError:
+      return ""
+  dir
+
 proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
                 storeRoot: string; cacheDir: string; fetch: AptDebFetcher;
                 retainDebCache: bool): string =
@@ -1152,6 +1204,30 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
   if fileExists(marker) and readFile(marker) == d.sha256 & "\n" and
       (AptClosureMutation == "apt-closure-unrecorded" or
        ensureIndexed(st, result, aptDebPrefixId(d))):
+    return
+  # No archive cached, but an older realiser's prefix of the same archive
+  # bytes: the member is published from it, sharing its files, and nothing
+  # is fetched (a host upgraded from realiser 2 whose archive no longer
+  # serves the locked version; rpi2's libnss3 +deb13u4, 2026-11-01).
+  let legacy = if fileExists(cacheDir / (d.sha256 & ".deb")): ""
+               else: reusableLegacyMember(storeRoot, d)
+  if legacy.len > 0:
+    createDir(parentDir(result))
+    reclaimStaleScratch(parentDir(result))
+    let tmp = tempSibling(result, "apt-deb")
+    try:
+      linkTree(legacy, tmp, [DebPrefixMarker, ReceiptFileName])
+      verifyHardenedTree(tmp, d.name)
+      writeFile(tmp / DebPrefixMarker, d.sha256 & "\n")
+      setFilePermissions(tmp / DebPrefixMarker, FileMode)
+      publishThroughStore(st, tmp, result, aptDebPrefixId(d),
+        StoreReceiptHint(adapter: AptDebStoreAdapter,
+          packageName: debStorePackage(d), version: d.version,
+          lockIdentity: d.sha256, provenanceUrl: "file://" & legacy,
+          provenanceChecksum: "sha256:" & d.sha256))
+    except CatchableError:
+      if dirExists(tmp): removeDir(tmp)
+      raise
     return
   let deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
   createDir(parentDir(result))
@@ -1483,6 +1559,11 @@ type
     refused*: seq[tuple[path, reason: string]]
       ## v2-looking directories that did not verify; left exactly as found
       ## (they may still be bound), never indexed.
+    heldUnverified*: seq[tuple[path, reason: string]]
+      ## Of ``refused``, the ones something on the host names: adopted as
+      ## ``adopted:unverified`` and held all the same, so recovery does not
+      ## quarantine them from under a unit (filled by the add-on's
+      ## ``migrateLegacyAptClosures``).
 
 proc splitLegacyLeaf(leaf: string): tuple[version, hash: string] =
   ## ``<version>-<16 hex>`` -> its two parts; ``("", "")`` otherwise.
@@ -1527,6 +1608,25 @@ proc adoptOne(st: var Store; storeRoot, path: string; prefixId: PrefixIdBytes;
       packageName: rec.packageName, version: rec.version, realizedPath: rel,
       adapter: rec.adapter, receiptDigest: receiptDigest(rec),
       createdAtUnix: rec.createdAtUnix))
+
+const AdoptedUnverifiedAdapter* = AdoptedAdapterPrefix & "unverified"
+  ## The adapter of a prefix directory without a receipt that does not
+  ## verify as any older realiser's, adopted anyway because something on
+  ## the host still names it (``adoptUnverifiedPrefix``).
+
+proc adoptUnverifiedPrefix*(st: var Store; storeRoot, dir: string):
+    PrefixIdBytes =
+  ## Give ``dir`` (a receipt-less directory under ``prefixes/<package>/``)
+  ## an adopted receipt recording its path, and an index row, without
+  ## verifying its content: only so that the store's recovery keeps it and
+  ## a root can hold it while a unit or a hand-back record names it. Its
+  ## receipt says ``adopted:unverified``; nothing is trusted from it.
+  let pkg = dir.parentDir.extractFilename
+  let leaf = dir.extractFilename
+  result = computeRealizationHash(pkg, leaf, AdoptedUnverifiedAdapter,
+    lockIdentity = leaf, declaredExecutablePath = "")
+  adoptOne(st, storeRoot, dir, result, AdoptedUnverifiedAdapter, pkg, leaf,
+           leaf)
 
 proc legacyDebPrefix(dir: string): tuple[ok: bool; reason, name, version,
                                           sha: string] =

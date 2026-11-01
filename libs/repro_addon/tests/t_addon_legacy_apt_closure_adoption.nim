@@ -46,6 +46,7 @@ import repro_dsl_stdlib/packages/apt_closure
 from repro_dsl_stdlib/packages/apt_jammy import sha256OfString
 import repro_addon/static_tree
 from repro_addon/store_root import RootIdPrefix
+from repro_addon/addon_apply import closureSpace, DebProbe
 
 proc v2DebHash(sha: string): string =
   sha256OfString("repro.apt-deb\x00" & "2" & "\x00" & sha)[0 ..< 16]
@@ -204,6 +205,91 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
     check not dirExists(member)
     check dirExists(manifestUnion) and dirExists(manifestMember)
     s.close()
+
+  test "before any migration, what a unit or manifest on disk names is held":
+    # rpi2 before its first add-on switch: its 22 closure units and two
+    # tool manifests bind realiser 2's prefixes, and generation 0's reassert
+    # unit runs the add-on's own repro from the store. No generation's
+    # static tree binds any of it and nothing is preserved yet. At
+    # 0e84765db0 a `store gc` here adopted every union and member and
+    # collected them under the running services.
+    let member = v2Member(store, "alertmanager", "0.28.1", shaOf('a'))
+    let union = v2Union(store, "alertmanager", "0.28.1", "armhf",
+                        @[("alertmanager", shaOf('a'))])
+    let unbound = v2Union(store, "old", "2.0", "armhf",
+                          @[("old", shaOf('b'))])
+    # A store-published prefix (the add-on's own binary), held by nothing.
+    var s = openStore(store)
+    let own = s.realizePrefix(computeRealizationHash("repro-addon", "0.2.18",
+        "addon-bootstrap", lockIdentity = "x", declaredExecutablePath = ""),
+      StoreReceiptHint(adapter: "addon-bootstrap", packageName: "repro-addon",
+        version: "0.2.18"),
+      proc (stage: string; mechanism: var string) =
+        createDir(stage / "bin")
+        writeFile(stage / "bin" / "repro", "#!/bin/sh\n"))
+    s.close()
+    let units = store / "etc-systemd-system"
+    createDir(units)
+    writeFile(units / "prometheus-alertmanager.service", "[Service]\n" &
+      aptClosureUnitDirectives(union).join("\n") & "\n")
+    writeFile(units / "repro-addon-reassert.service", "[Service]\n" &
+      "ExecStart=" & own.absolutePath & "/bin/repro system addon verify " &
+      "--boot\n")
+    # A union that does not verify (its marker was damaged) but is bound.
+    let damaged = v2Union(store, "dnsmasq", "2.91", "armhf",
+                          @[("dnsmasq", shaOf('c'))])
+    writeFile(damaged / ".repro-apt-closure", "identity 0000000000000000\n")
+    writeFile(units / "dnsmasq-rpi2.service", "[Service]\n" &
+      aptClosureUnitDirectives(damaged).join("\n") & "\n")
+
+    let a = migrateLegacyAptClosures(store, live = @[units])
+    check a.heldUnverified.len == 1 and a.heldUnverified[0].path == damaged
+    check a.refused.len == 0
+    s = openStore(store)
+    discard s.gc(graceSeconds = 0)
+    let rec = s.recover()
+    check rec.quarantinedPrefixes.len == 0
+    discard s.gc(graceSeconds = 0)
+    check fileExists(union / "usr/share/alertmanager/ok.txt")
+    check dirExists(member)
+    check fileExists(own.absolutePath / "bin" / "repro")
+    check dirExists(damaged)
+    check not dirExists(unbound)
+    s.close()
+
+  test "the plan reuses a verified older member, and refuses an unserved archive":
+    # rpi2 (2026-11-01): the mirror 404s libnss3 +deb13u4, the cache is
+    # empty, and realiser 2's member of exactly that archive is on disk.
+    # At 0e84765db0 the plan counted it as a download and found nothing
+    # wrong; the switch failed at step 1 on every tick.
+    discard v2Member(store, "libnss3", "3.110-1", shaOf('a'))
+    let lock = AptClosureLock(archive: "http://mirror.invalid/raspbian",
+      suite: "trixie", components: @["main"], architecture: "armhf",
+      inReleaseSha256: shaOf('e'), roots: @["libnss3"],
+      debs: @[AptLockedDeb(name: "libnss3", version: "3.110-1",
+                architecture: "armhf", filename: "pool/main/libnss3.deb",
+                size: 100, sha256: shaOf('a')),
+              AptLockedDeb(name: "nut", version: "2.8.1",
+                architecture: "armhf", filename: "pool/main/nut.deb",
+                size: 200, sha256: shaOf('b'))])
+    var asked: seq[string]
+    let probe: DebProbe = proc (url: string): string =
+      asked.add(url)
+      "404 Not Found"
+    let space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.closures == 1 and space.members == 2
+    check space.reusedMembers == 1
+    check asked == @["http://mirror.invalid/raspbian/pool/main/nut.deb"]
+    check space.unavailable.len == 1 and "nut 2.8.1" in space.unavailable[0]
+    check space.sources.len == 2
+    check space.sources[0].startsWith("reuse\tlibnss3 3.110-1\t")
+    check space.sources[1].startsWith("download\tnut 2.8.1\t")
+    # A marker naming other bytes is not that member: it is a download.
+    writeFile(store / "prefixes" / "apt-deb-libnss3" /
+      ("3.110-1-" & v2DebHash(shaOf('a'))) / ".repro-apt-deb",
+      shaOf('c') & "\n")
+    check closureSpace(@[lock], store, store / "cache", probe).
+      reusedMembers == 0
 
   test "prefixes that do not verify are left as found":
     # The member's marker names another digest than its directory's hash.

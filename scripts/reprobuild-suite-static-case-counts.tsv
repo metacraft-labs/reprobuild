@@ -15,7 +15,7 @@
 #
 # Review the diff. A row that DECREASES or DISAPPEARS is a test leaving
 # the suite; that is the event this baseline exists to make visible.
-apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	12
+apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	13
 libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim	nim	36
@@ -26,7 +26,7 @@ libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	ni
 libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
-libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim	nim	11
+libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim	nim	12
 libs/repro_addon/tests/t_addon_agent_install_staged_outputs.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_refuses_a_pin_not_for_addon.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
@@ -42,7 +42,7 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
-libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	5
+libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	7
 libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	3
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	17
@@ -314,7 +314,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifes
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_freshness_and_state.nim	nim	5
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
-libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	6
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v3_profile_files.nim	nim	8
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim	nim	5
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_profile_file_paths_corpus.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_recipient_keygen.nim	nim	11
@@ -325,7 +325,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_action.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	37
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	38
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
@@ -414,7 +414,7 @@ libs/repro_elevation/tests/t_addon_apt_closure_ro_store_view.nim	nim	3
 libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21
 libs/repro_elevation/tests/t_passwd_user_driver_group_collision.nim	nim	5
 libs/repro_elevation/tests/t_sandbox_m1_fhssandbox_driver.nim	nim	37
-libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	399
+libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	401
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
 libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	35
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	13

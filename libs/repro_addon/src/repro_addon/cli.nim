@@ -563,6 +563,10 @@ proc renderAddonSections*(r: AddonApplyResult): string =
     result.add(renderReleaseUpgradeChecklist(r.baseIdentity))
   if r.storeSpace.len > 0:
     result.add("store space: " & r.storeSpace & "\n")
+  if r.closureSources.len > 0:
+    result.add("closure members (reuse an older realiser's prefix of the " &
+      "same archive, cached archive, or download):\n")
+    for l in r.closureSources: result.add("  " & l & "\n")
   if r.planId.len > 0:
     result.add("add-on plan-id: " & r.planId & "\n")
   if r.staticTree.len > 0:
@@ -609,6 +613,9 @@ proc runAddonStoreCli*(args: seq[string]): int =
         stderr.write("repro store " & args[0] &
           ": legacy apt prefix not adopted: " &
           r.path & ": " & r.reason & "\n")
+      for r in legacy.heldUnverified:
+        stderr.write("repro store " & args[0] & ": held unverified (a " &
+          "file on the host names it): " & r.path & ": " & r.reason & "\n")
     enterWritableStoreView()
     if args[0] == "recover":
       # The store's own recovery (the engine's ``repro store recover``):
@@ -810,7 +817,8 @@ proc runMigrationPlanCli*(args: seq[string]): int =
     agentState & ") into " & stateDir & "\n")
   try:
     let r = planLegacyMigration(stateDir, agentState, target, readHostname(),
-                                legacySecretsDir = legacySecrets)
+                                legacySecretsDir = legacySecrets,
+                                probeArchives = true)
     stdout.write(renderAddonSections(r))
     var restarts = 0
     for t in r.transitions:

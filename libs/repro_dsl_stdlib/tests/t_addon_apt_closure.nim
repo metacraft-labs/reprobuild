@@ -467,6 +467,49 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
       localFetcher(urls, count), hostMachine = "armv7l") == prefix
     check count[] == before
 
+  test "a member an older realiser unpacked is published from it, not fetched":
+    # rpi2 (2026-11-01): the archive no longer serves libnss3 +deb13u4, the
+    # download cache is empty, and realiser 2's prefix of exactly that
+    # archive is on disk. At 0e84765db0 the realiser could only fetch.
+    let root = scratch("reuse")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
+    var count = new int
+    discard realiseAptClosure(lock, root / "first", root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    let d = lock.debs[0]
+    # Realiser 2's member of the same archive: the same tree, its marker,
+    # no receipt, at that realiser's path.
+    let store = root / "store"
+    let legacy = legacyAptDebPrefixPath(store, d)
+    createDir(parentDir(legacy))
+    copyDirWithPermissions(aptDebPrefixPath(root / "first", d), legacy)
+    removeFile(legacy / ReceiptFileName)
+    check readFile(legacy / ".repro-apt-deb") == d.sha256 & "\n"
+    check reusableLegacyMember(store, d) == legacy
+    count[] = 0
+    let prefix = realiseAptClosure(lock, store, root / "empty-cache",
+      localFetcher(initTable[string, string](), count), hostMachine = "armv7l")
+    check count[] == 0
+    check readFile(prefix / "usr/bin/svc") == "svc-binary"
+    # Published at the store's path for the member, sharing the files.
+    check sameFile(aptDebPrefixPath(store, d) / "usr/bin/svc",
+                   legacy / "usr/bin/svc")
+    check fileExists(aptDebPrefixPath(store, d) / ReceiptFileName)
+    # A prefix whose marker names other bytes is not that member: fetched.
+    let other = root / "other"
+    let otherLegacy = legacyAptDebPrefixPath(other, d)
+    createDir(parentDir(otherLegacy))
+    copyDirWithPermissions(legacy, otherLegacy)
+    writeFile(otherLegacy / ".repro-apt-deb", repeat('f', 64) & "\n")
+    check reusableLegacyMember(other, d) == ""
+    count[] = 0
+    expect IOError:
+      discard realiseAptClosure(lock, other, root / "empty-cache-2",
+        localFetcher(initTable[string, string](), count),
+        hostMachine = "armv7l")
+    check count[] == 1
+
   test "retainDebCache keeps the verified archives":
     let root = scratch("retain")
     let (lock, urls) = buildDebs(root, @[

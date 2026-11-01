@@ -8,6 +8,7 @@
 ## the two agents cannot drift apart.
 
 import std/[json, os, strutils]
+from repro_core import ReprobuildSourceRevision
 
 import repro_infra
 import repro_infra/addon_diagnostics
@@ -307,6 +308,74 @@ proc addonPinSelectionRefusal*(m: DeployManifest): string =
       "': it was compiled for a full host, and an add-on host applies only " &
       "the add-on projection"
   ""
+
+proc compiledProfilePrecheck*(m: DeployManifest): string =
+  ## The refusals of a source profile that need no compile: the manifest
+  ## pins no digest of its compile, or its pin's selection is not the
+  ## add-on projection (``addonPinSelectionRefusal``). The compile is then
+  ## not run at all: whatever it emitted would be refused, and on a small
+  ## host (rpi2, 1 GB) a full compile every tick for a sequence that will be
+  ## refused is the whole cost of the tick. "" when a compile may decide.
+  if m.compiledProfile.digest.len == 0:
+    return CompiledProfileRefusal & ": " &
+      compiledProfileRefusal(m, "", "", "") & "; nothing was compiled or " &
+      "written"
+  let mode = addonPinSelectionRefusal(m)
+  if mode.len > 0:
+    return CompiledProfileRefusal & ": " & mode & "; nothing was compiled " &
+      "or written"
+  ""
+
+const
+  CompileRefusalMemoName* = "compile-refusals"
+    ## In the add-on's ``addon`` directory: the compiled-profile refusals
+    ## this engine already decided, one per line, ``<deployment>\t<sequence>
+    ## \t<pin digest>\t<engine revision>\t<refusal>``.
+  CompileRefusalMemoLines = 32
+
+proc compileRefusalMemoPath*(stateDir: string): string =
+  stateDir / "addon" / CompileRefusalMemoName
+
+proc compileRefusalKey(m: DeployManifest): string =
+  ## A refusal is memoised for exactly this manifest's pin and this
+  ## engine: another sequence, another pin, or an upgraded engine (whose
+  ## compile may now reproduce the pin) compiles again.
+  m.deploymentId & "\t" & $m.sequence & "\t" & m.compiledProfile.digest &
+    "\t" & ReprobuildSourceRevision
+
+proc memoisedCompileRefusal*(stateDir: string; m: DeployManifest): string =
+  ## The refusal an earlier tick decided for this manifest's compile, or "".
+  ## A sequence that will be refused is compiled once, not on every tick.
+  let p = compileRefusalMemoPath(stateDir)
+  if not fileExists(p): return ""
+  let key = compileRefusalKey(m) & "\t"
+  try:
+    for line in readFile(p).splitLines():
+      if line.startsWith(key): return line[key.len .. ^1]
+  except IOError, OSError:
+    discard
+  ""
+
+proc memoiseCompileRefusal*(stateDir: string; m: DeployManifest;
+                            why: string) =
+  ## Record ``why`` for ``memoisedCompileRefusal``, keeping the newest
+  ## ``CompileRefusalMemoLines``. Best effort: a tick that cannot write it
+  ## compiles again next time, which is what it did before.
+  let p = compileRefusalMemoPath(stateDir)
+  try:
+    var lines: seq[string]
+    if fileExists(p):
+      for l in readFile(p).splitLines():
+        if l.len > 0: lines.add(l)
+    lines.add(compileRefusalKey(m) & "\t" & why.replace("\n", " "))
+    if lines.len > CompileRefusalMemoLines:
+      lines = lines[lines.len - CompileRefusalMemoLines .. ^1]
+    createDir(parentDir(p))
+    let tmp = p & ".tmp"
+    writeFile(tmp, lines.join("\n") & "\n")
+    moveFile(tmp, p)
+  except IOError, OSError:
+    discard
 
 proc compiledProfileCheck*(m: DeployManifest;
                            canonicalText, actionsJson, revision: string):

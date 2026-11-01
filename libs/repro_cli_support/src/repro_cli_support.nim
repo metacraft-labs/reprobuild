@@ -39216,6 +39216,27 @@ proc runStoreCommand*(args: seq[string]): int =
       return 1
 
   let root = resolveStoreRoot(storeRootOverride)
+  when defined(linux):
+    # The add-on's system store is written under the host apply lock by
+    # every add-on writer, and holds what no generation's root does but a
+    # unit, a launcher manifest or a preserved hand-back record names (the
+    # `addon-hand-back` root, recomputed by the adoption): a collection of
+    # it takes the lock and recomputes that hold first, as the add-on's
+    # own `repro store gc` and `recover` do.
+    var addonLock: HostApplyLock
+    defer: addonLock.release()
+    if sub == "gc" and not dryRun and
+        os.normalizedPath(absolutePath(root)) == AddOnSystemStoreRoot and
+        dirExists(AddOnSystemStoreRoot / "prefixes"):
+      addonLock = acquireHostApplyLock("repro store gc")
+      let legacy = addon_static_tree.migrateLegacyAptClosures(
+        handBack = @[addon_static_tree.preservedDir()])
+      for r in legacy.refused:
+        stderr.writeLine("repro store gc: legacy apt prefix not adopted: " &
+          r.path & ": " & r.reason)
+      for r in legacy.heldUnverified:
+        stderr.writeLine("repro store gc: held unverified (a file on the " &
+          "host names it): " & r.path & ": " & r.reason)
   try:
     case sub
     of "gc":
@@ -39297,6 +39318,9 @@ proc runStoreCommand*(args: seq[string]): int =
           echo "legacy apt prefixes adopted: " & $legacy.adopted.len
           for r in legacy.refused:
             echo "  - not adopted: " & r.path & ": " & r.reason
+          for r in legacy.heldUnverified:
+            echo "  - held unverified (a file on the host names it): " &
+              r.path & ": " & r.reason
       let report = recoverStoreRoot(root)
       echo "repro store recover: store-root=" & root
       echo "index rebuilt: " & (if report.indexRebuilt: "yes" else: "no")

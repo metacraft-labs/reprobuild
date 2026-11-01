@@ -165,6 +165,18 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
           if compiler == nil:
             return (false, "the manifest's profile is source and this " &
               "agent has no unprivileged compiler; nothing was written")
+          # A source profile no pin can vouch for is refused before it is
+          # compiled (``compiledProfilePrecheck``).
+          let early = compiledProfilePrecheck(m)
+          if early.len > 0:
+            recordCompiledProfileRefusal(m, early)
+            return (false, early)
+          # A compile this engine already refused for this very pin is not
+          # run again on the next tick.
+          let memo = memoisedCompileRefusal(stateDir, m)
+          if memo.len > 0:
+            return (false, memo & " (decided by an earlier tick for this " &
+              "sequence; not compiled again)")
           let c = compiler(m)
           if not c.ok:
             return (false, "the profile did not compile: " & c.error)
@@ -172,6 +184,7 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
                                          c.revision)
           if pin.len > 0:
             recordCompiledProfileRefusal(m, pin)
+            memoiseCompileRefusal(stateDir, m, pin)
             return (false, pin)
           text = c.canonical
           if c.actionsJson.len > 0:
@@ -307,15 +320,19 @@ proc migrateLegacyAgentState*(stateDir, legacyStateDir, target,
 proc planLegacyMigration*(stateDir, legacyStateDir, target,
                           hostIdentity: string;
                           apply: AddonApplyFn = nil;
-                          legacySecretsDir = ""): AddonApplyResult =
+                          legacySecretsDir = "";
+                          probeArchives = false): AddonApplyResult =
   ## What the migration would do, decided and reported with nothing written
   ## (``planOnly``): every object it would adopt, write or refuse, and the
   ## service transitions. ``stateDir`` and ``legacyStateDir`` may be copies
-  ## of the host's (`repro system addon migration-plan`).
+  ## of the host's (`repro system addon migration-plan`). With
+  ## ``probeArchives`` every closure archive step 1 would fetch is asked
+  ## for (an HTTP ``HEAD``) and one not served is a refusal.
   let run = if apply != nil: apply else: defaultAddonApply()
   # Nothing is registered: a plan writes nothing, the directory is this
   # apply's only.
   var o = migrationOptions(stateDir, legacyStateDir, target, hostIdentity,
                            legacySecretsDir)
   o.planOnly = true
+  o.probeArchives = probeArchives
   run(o)

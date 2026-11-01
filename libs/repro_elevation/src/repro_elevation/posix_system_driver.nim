@@ -766,6 +766,29 @@ proc realiseAddOnAptClosure*(lock: AptClosureLock;
   enterWritableStoreView(storeRoot)
   realiseAptClosure(lock, storeRoot, cacheDir, fetch)
 
+proc unitObservedDigestHex*(fileContent, desiredContent: string;
+                            closureRealised: bool;
+                            closurePrefix: string): string =
+  ## The observed digest of a unit bound to a `package(apt)` closure. Its
+  ## file's digest, except when the file is exactly the desired one and the
+  ## closure is not realised: then a digest no desired state has (the
+  ## `apt-closure-absent:` sentinel), so the plan carries an update that
+  ## realises the closure.
+  ##
+  ## Only then. A unit whose file is not the desired one is an update by
+  ## its bytes already, and the realise comes with it. Before, a changed
+  ## lock (a new closure, not yet realised) put the sentinel over the old
+  ## file. The observation then matched neither the desired state nor what
+  ## the last apply recorded, so the planner reported actionable drift
+  ## instead of an update. rpi2's legacy agent (76f0f4f7a9) did this on
+  ## the six units bound to its re-locked nut closures and failed every
+  ## tick.
+  let fileDigest = posixDigestHexOfText(fileContent)
+  if closureRealised or fileContent != desiredContent: fileDigest
+  else:
+    posixDigestHexOfText("apt-closure-absent:" & closurePrefix & "\n" &
+      fileContent)
+
 proc observeSystemdSystemUnit*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Read the unit file under `/etc/systemd/system/` and query
@@ -782,10 +805,9 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
     # no desired state has, so the plan carries an update that realises it.
     if op.suAptClosureLock.len > 0 and not op.suDestroy:
       let lock = parseAptClosureLock(op.suAptClosureLock)
-      if not aptClosureRealised(AddOnSystemStoreRoot, lock):
-        result.digestHex = posixDigestHexOfText("apt-closure-absent:" &
-          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" &
-          readFile(path))
+      result.digestHex = unitObservedDigestHex(readFile(path), op.suContent,
+        aptClosureRealised(AddOnSystemStoreRoot, lock),
+        aptClosurePrefixPath(AddOnSystemStoreRoot, lock))
     # `systemctl show` is queried for completeness; the exit code is
     # not an error (a disabled / inactive unit is a valid state).
     discard execCmdEx("systemctl show " & quoteShell(op.suName) &
@@ -3451,16 +3473,45 @@ proc applyLinuxNixDaemonSetting*(op: PrivilegedOperation):
 # The destroy direction `stop`s + `disable`s + removes the unit file.
 # ===========================================================================
 
+proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
+                             unitFileState, activeState,
+                             lastTrigger: string): string =
+  ## The digest `observeSystemdSystemTimer` reports: the unit file's bytes
+  ## when the timer's enablement and activity are as declared, otherwise a
+  ## digest no desired state has, so the plan carries an update and the
+  ## apply's `enable` / `start` (or `disable` / `stop`) runs again. Before,
+  ## the digest covered the file alone: a timer whose file was right but
+  ## that was not running (rpi2's seven probe timers, enabled by the agent
+  ## at 76f0f4f7a9 and never active) planned as a no-op on every apply, and
+  ## was never started.
+  ##
+  ## A timer counts as running when systemd has it active (waiting for its
+  ## next elapse) or activating, and also when it is inactive after having
+  ## triggered (`LastTriggerUSec` set): a timer whose only trigger is in
+  ## the past elapses once and goes inactive, and starting it again would
+  ## run its service again. A state systemd did not report (an empty
+  ## `unitFileState` or `activeState`) is not judged.
+  let enabled = unitFileState.startsWith("enabled")
+  let active = activeState in ["active", "activating", "reloading"]
+  let triggered = lastTrigger.len > 0 and lastTrigger != "n/a" and
+    lastTrigger != "0"
+  let enabledOk = unitFileState.len == 0 or enabled == wantEnabled
+  let runningOk = activeState.len == 0 or
+    (if wantRunning: active or triggered else: not active)
+  if enabledOk and runningOk:
+    posixDigestHexOfText(content)
+  else:
+    posixDigestHexOfText("systemd-timer-state:" & unitFileState & "/" &
+      activeState & "\n" & content)
+
 proc observeSystemdSystemTimer*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Read the timer unit file under `/etc/systemd/system/` and query
   ## `systemctl show`. The digest covers the unit-file contents
-  ## verbatim (same model as `observeSystemdSystemUnit`); the
-  ## `is-enabled` / `is-active` cross-check runs for observability
-  ## tracing but does not feed the digest — drift on those flags is
-  ## a state-only difference the dispatch loop handles via the
-  ## desired-digest comparison after the apply, not via the file
-  ## bytes.
+  ## verbatim (same model as `observeSystemdSystemUnit`) while the
+  ## timer's enablement and activity are as declared, and differs from
+  ## every desired digest when they are not (`timerObservedDigestHex`):
+  ## the plan then carries an update that re-runs `enable` / `start`.
   when defined(linux):
     let path = systemUnitPath(op.stName)
     if not fileExists(path):
@@ -3470,10 +3521,23 @@ proc observeSystemdSystemTimer*(op: PrivilegedOperation):
     let content = readFile(path)
     result.present = true
     result.digestHex = posixDigestHexOfText(content)
-    # `systemctl show` is queried for completeness; the exit code is
-    # not an error (a disabled / inactive timer is a valid state).
-    discard execCmdEx("systemctl show " & quoteShell(op.stName) &
-      " --property=LoadState,ActiveState,UnitFileState")
+    if op.stDestroy: return
+    # A disabled or inactive timer is a valid state, so the exit code is
+    # not an error; an answer without the properties judges nothing.
+    let (o, code) = execCmdEx("systemctl show " & quoteShell(op.stName) &
+      " --property=UnitFileState,ActiveState,LastTriggerUSec")
+    if code != 0: return
+    var fileState, activeState, lastTrigger = ""
+    for line in o.splitLines():
+      let eq = line.find('=')
+      if eq <= 0: continue
+      case line[0 ..< eq]
+      of "UnitFileState": fileState = line[eq + 1 .. ^1].strip()
+      of "ActiveState": activeState = line[eq + 1 .. ^1].strip()
+      of "LastTriggerUSec": lastTrigger = line[eq + 1 .. ^1].strip()
+      else: discard
+    result.digestHex = timerObservedDigestHex(content, op.stEnabled,
+      op.stRunning, fileState, activeState, lastTrigger)
   else:
     raiseNotImplementedPlatform("systemd.systemTimer observe")
 

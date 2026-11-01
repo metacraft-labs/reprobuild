@@ -61,7 +61,8 @@
 ## ledger diff, the collision report, and the service transition list.
 
 import std/[algorithm, json, options, os, sets, strutils, tables, times]
-from std/posix import Statvfs, statvfs
+from std/posix import Statvfs, statvfs, Stat, lstat
+import std/httpclient
 
 import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
@@ -127,6 +128,10 @@ type
 
   AddonApplyOptions* = object
     stateDir*: string
+    probeArchives*: bool
+      ## A plan (the migration plan) asks the archive for every closure
+      ## member it would fetch (``httpDebProbe``) and refuses the ones not
+      ## served. The switch itself has no network and never sets it.
     hostIdentity*: string
     userProfileText*: string
     ownProfileText*: string
@@ -253,6 +258,8 @@ type
     ledgerDiff*: seq[string]       ## ``<verb>\t<path>\t<address>`` lines
     transitions*: seq[Transition]  ## the service transition list (§7.1, §7.3)
     drift*: seq[string]            ## left in place as actionable drift
+    closureSources*: seq[string]   ## where each closure member to publish
+                                   ## comes from (``ClosureSpace.sources``)
     storeSpace*: string            ## what realising the closures needs of
                                    ## the store's filesystem (``closureSpace``);
                                    ## "" when every closure is realised
@@ -2089,23 +2096,41 @@ const
 type
   ClosureSpace* = object
     ## What realising a profile's apt closures will take from the store's
-    ## filesystem (ReproOS Add-On Mode §9 "Migration", §8.3).
+    ## filesystem and the network (ReproOS Add-On Mode §9 "Migration",
+    ## §8.3).
     closures*: int          ## closures not realised at their store prefix
-    members*: int           ## members to unpack (each once)
-    downloadBytes*: int64   ## ``.deb`` archives not in the download cache
-    unpackBytes*: int64     ## the members' unpacked trees (estimated)
+    members*: int           ## members to publish (each once)
+    reusedMembers*: int     ## of those, published from an older realiser's
+                            ## prefix of the same archive bytes (shared
+                            ## files: nothing unpacked, nothing fetched)
+    downloadBytes*: int64   ## ``.deb`` archives to fetch
+    unpackBytes*: int64     ## the unpacked trees of the members not reused
     measuredMembers*: int   ## members whose size an older realiser's
-                            ## prefix of the same bytes gave exactly
-    largestDebBytes*: int64 ## the largest archive: it sits beside its
-                            ## unpacked tree until the member is published
+                            ## prefix gave (allocated blocks)
+    largestDebBytes*: int64 ## the largest archive to fetch: it sits beside
+                            ## its unpacked tree until it is published
     freeBytes*: int64       ## available to this process on that filesystem
     reserveBytes*: int64    ## left free at the least
+    unavailable*: seq[string] ## archives to fetch that the archive did not
+                            ## serve (``closureSpace``'s ``probe``)
+    sources*: seq[string]   ## one line per member to publish:
+                            ## ``reuse|cached|download <name> <version>
+                            ## <older prefix or URL>``
+
+  DebProbe* = proc (url: string): string {.closure.}
+    ## "" when ``url`` is served, otherwise why not.
 
 proc treeBytes(dir: string): int64 =
-  ## The bytes of the regular files under ``dir`` (links not followed).
+  ## The bytes the regular files under ``dir`` occupy (allocated blocks,
+  ## each inode once; links not followed).
+  var seen = initHashSet[(int64, int64)]()
   for f in walkDirRec(dir, yieldFilter = {pcFile}, followFilter = {pcDir}):
-    try: result += getFileInfo(f, followSymlink = false).size
-    except OSError: discard
+    var st: Stat
+    if lstat(f.cstring, st) != 0: continue
+    let key = (int64(st.st_dev), int64(st.st_ino))
+    if key in seen: continue
+    seen.incl(key)
+    result += int64(st.st_blocks) * 512
 
 proc availableBytes(path: string): int64 =
   ## Free bytes an unprivileged writer may use on the filesystem holding
@@ -2121,14 +2146,20 @@ proc neededBytes*(c: ClosureSpace): int64 =
 
 proc closureSpace*(locks: seq[AptClosureLock];
                    storeRoot = AddOnSystemStoreRoot;
-                   cacheDir = AddOnAptDebCacheDir): ClosureSpace =
+                   cacheDir = AddOnAptDebCacheDir;
+                   probe: DebProbe = nil): ClosureSpace =
   ## What realising ``locks`` will need: every closure not yet realised at
-  ## its store-published prefix, and every member of one not yet unpacked
-  ## there, counted once. An older realiser's prefix of the same archive
-  ## bytes gives a member's unpacked size exactly; the realiser does not
-  ## reuse that prefix (it unpacks the verified archive), so it is counted
-  ## all the same. A union is hard links of its members' files and costs
-  ## no file bytes of its own.
+  ## its store-published prefix, and every member of one not yet published
+  ## there, counted once. A member an older realiser's verified prefix
+  ## holds (``reusableLegacyMember``) is published from it with shared
+  ## files, so it costs neither bytes nor a fetch; one whose archive is
+  ## cached costs its unpacked tree; any other is fetched. An unpacked
+  ## tree is measured from an older realiser's prefix where one exists
+  ## (it does not verify, or it would be reused), else estimated at
+  ## ``ClosureUnpackFactor`` times the archive. A union is hard links of
+  ## its members' files and costs no file bytes of its own. With ``probe``
+  ## (the migration plan; the switch runs without network), every archive
+  ## to fetch is asked for, and each one not served is ``unavailable``.
   var seen = initHashSet[string]()
   for lock in locks:
     if aptClosureRealised(storeRoot, lock): continue
@@ -2139,9 +2170,25 @@ proc closureSpace*(locks: seq[AptClosureLock];
       if fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb"):
         continue
       inc result.members
-      if not fileExists(cacheDir / (d.sha256 & ".deb")):
+      let cached = fileExists(cacheDir / (d.sha256 & ".deb"))
+      let reusable = if cached: "" else: reusableLegacyMember(storeRoot, d)
+      if reusable.len > 0:
+        inc result.reusedMembers
+        result.sources.add("reuse\t" & d.name & " " & d.version & "\t" &
+          reusable)
+        continue
+      result.sources.add((if cached: "cached\t" else: "download\t") &
+        d.name & " " & d.version & "\t" &
+        (if cached: cacheDir / (d.sha256 & ".deb") else: debUrl(lock, d)))
+      if not cached:
         result.downloadBytes += d.size
-      result.largestDebBytes = max(result.largestDebBytes, d.size)
+        result.largestDebBytes = max(result.largestDebBytes, d.size)
+        if probe != nil:
+          let url = debUrl(lock, d)
+          let why = probe(url)
+          if why.len > 0:
+            result.unavailable.add(d.name & " " & d.version & ": " & url &
+              " (" & why & ")")
       let legacy = legacyAptDebPrefixPath(storeRoot, d)
       if dirExists(legacy):
         result.unpackBytes += treeBytes(legacy)
@@ -2150,6 +2197,19 @@ proc closureSpace*(locks: seq[AptClosureLock];
         result.unpackBytes += d.size * ClosureUnpackFactor
   result.freeBytes = availableBytes(storeRoot)
   result.reserveBytes = max(StoreSpaceReserveBytes, neededBytes(result) div 4)
+
+proc httpDebProbe*(timeoutMs = 15_000): DebProbe =
+  ## The migration plan's probe: an HTTP ``HEAD`` of the archive URL,
+  ## following redirects. Nothing is downloaded. "" for a 2xx answer,
+  ## otherwise the status or the error.
+  result = proc (url: string): string =
+    try:
+      let c = newHttpClient(timeout = timeoutMs, maxRedirects = 5)
+      defer: c.close()
+      let r = c.request(url, httpMethod = HttpHead)
+      if r.code.is2xx: "" else: $r.code
+    except CatchableError as e:
+      e.msg
 
 proc spaceIsShort*(c: ClosureSpace): bool =
   ## Whether the realisation would leave less than the reserve free. An
@@ -2161,12 +2221,13 @@ proc mib(b: int64): string = $((b + (1'i64 shl 20) - 1) shr 20) & " MiB"
 
 proc describe*(c: ClosureSpace): string =
   $c.closures & " closure(s) to realise, " & $c.members & " member(s) to " &
-    "unpack: about " & mib(neededBytes(c)) & " of store space (" &
-    mib(c.unpackBytes) & " unpacked, " & $c.measuredMembers & " of " &
-    $c.members & " measured from an older realiser's prefix; the largest " &
-    "archive " & mib(c.largestDebBytes) & "), " & mib(c.downloadBytes) &
-    " to download; " & (if c.freeBytes < 0: "free space unreadable"
-                        else: mib(c.freeBytes) & " free") &
+    "publish (" & $c.reusedMembers & " from an older realiser's prefix of " &
+    "the same archive): about " & mib(neededBytes(c)) & " of store space (" &
+    mib(c.unpackBytes) & " unpacked, " & $c.measuredMembers & " measured; " &
+    "the largest archive " & mib(c.largestDebBytes) & "), " &
+    mib(c.downloadBytes) & " to download; " &
+    (if c.freeBytes < 0: "free space unreadable"
+     else: mib(c.freeBytes) & " free") &
     ", " & mib(c.reserveBytes) & " to be left free"
 
 proc relocatesClosure*(r: SystemResource; path: string;
@@ -2597,6 +2658,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   for i in 0 ..< userResources.len:
     try:
       var r = userResources[i]
+      # The tool this file carries for, when it is one of the two files a
+      # `linux.addOnTool` of this profile writes (its shape alone is not
+      # enough: the tool must be declared).
+      let carrier = block:
+        let c = addOnToolCarrierOf(r)
+        if c in addOnTools: c else: ""
       var p = ResourcePlan(r: r)
       preObserve(p, driver)
       let saved = if replaying: replayPlan.savedPlanFor(r.address)
@@ -2724,7 +2791,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         try: (dec, obs) = decide(driver, inp, path)
         except AddonDriftError as e:
           if relocatesClosure(r, path,
-              addOnTools.getOrDefault(addOnToolCarrierOf(r))):
+              addOnTools.getOrDefault(carrier)):
             # §9 "Migration": the unit or launcher manifest an older
             # realiser's agent wrote, bound to its prefix of the same closure.
             # Rewritten at the current prefix, its bytes kept for hand-back,
@@ -2743,7 +2810,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
             userResources[i] = r
       if not p.closureRelocated and dec.verdict == cvUpdate and
           relocatesClosure(r, path,
-            addOnTools.getOrDefault(addOnToolCarrierOf(r))):
+            addOnTools.getOrDefault(carrier)):
         p.closureRelocated = true      # the ledger already holds those bytes
       decisions[r.address] = dec
       if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
@@ -2828,7 +2895,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       p.form = if held: prevForm.getOrDefault(path, "copy")
                elif r.address in supersedingUser: "copy"
                elif p.keepLedgerSha.len > 0: prevForm.getOrDefault(path, "copy")
-               elif addOnToolCarrierOf(r).len > 0: "copy"
+               elif carrier.len > 0: "copy"
                elif r.kind in LinkFormKinds and
                   dec.verdict notin {cvAdopt, cvDivert}: "link"
                else: "copy"
@@ -2843,53 +2910,83 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                                else: $dec.verdict) & "\t" & path & "\t" &
                               r.address)
       targets.add(targetFor(r.address, inp, path, dec, obs, saved))
-      if addOnToolCarrierOf(r).len > 0:
+      if carrier.len > 0:
         # The tool's own operation writes this file: the write-time re-check
         # of the file's decision is the tool's too.
-        targets.add(targetFor(addOnToolCarrierOf(r), inp, path, dec, obs, saved))
+        targets.add(targetFor(carrier, inp, path, dec, obs, saved))
       if r.address in supersedingUser and p.collision.len == 0:
         p.collision = "supersede"
-      if addOnToolCarrierOf(r).len > 0:
+      if carrier.len > 0:
         # The tool's driver writes this file (with the wrapper's mode); the
         # carrier only decides and ledgers it.
         p.skipInfra = true
       plans.add(p)
-    except AddonDriftError, AddonCollisionError, EAddOn:
-      # Every refusal is collected before any is raised: nothing has been
-      # written yet (the bytes to preserve wait in ``pendingPreserve``),
-      # and an operator fixing a host -- a migration plan above all --
-      # needs the whole list, not one refusal per run.
+    except CatchableError:
+      # Every refusal is collected before any is raised, whatever its type:
+      # nothing has been written yet (the bytes to preserve wait in
+      # ``pendingPreserve``), and an operator fixing a host -- a migration
+      # plan above all -- needs the whole list, not one refusal per run.
       refusals.add(getCurrentException())
+
+  # Realising the closures is step 1's first write to the store's
+  # filesystem (and, for an archive neither cached nor held by an older
+  # realiser's prefix, its only fetch): a profile whose closures would not
+  # fit, with the reserve left free, or whose archives the archive does not
+  # serve (asked only by a plan with ``probeArchives``: the switch has no
+  # network), is refused now, before anything is written (§9).
+  block:
+    var locks: seq[AptClosureLock]
+    for r in userResources:
+      try:
+        if r.kind == srkSystemdSystemUnit and r.suAptClosureLock.len > 0:
+          locks.add(parseAptClosureLock(r.suAptClosureLock))
+        elif r.kind == srkLinuxAddOnTool:
+          locks.add(parseAptClosureLock(r.atAptClosureLock))
+      except CatchableError:
+        discard          # the resource's own decision refused it above
+    let space = closureSpace(locks,
+      probe = (if opts.probeArchives: httpDebProbe() else: nil))
+    if space.closures > 0:
+      result.storeSpace = describe(space)
+      result.closureSources = space.sources
+      for u in space.unavailable:
+        refusals.add(newException(AddonStoreSpaceError, "refusing the " &
+          "switch: an apt closure member is neither cached, nor held by an " &
+          "older realiser's prefix of the same archive, nor served by the " &
+          "archive: " & u))
+      if spaceIsShort(space):
+        refusals.add(newException(AddonStoreSpaceError, "refusing the " &
+          "switch: realising its apt closures needs more of " &
+          AddOnSystemStoreRoot & "'s filesystem than is free: " &
+          result.storeSpace))
+  # A tool's driver writes its wrapper only with the sandbox launcher
+  # beside the engine that applies it (``addOnToolLauncherPath``); without
+  # it the apply would fail after the flip.
+  for r in userResources:
+    if r.kind == srkLinuxAddOnTool and
+        verdictByAddress.getOrDefault(r.address, cvNoOp) notin
+          {cvNoOp, cvAdopt} and
+        not fileExists(addOnToolLauncherPath()):
+      refusals.add(newException(AddonCollisionError, "refusing " &
+        r.address & ": its wrapper would be written, and the sandbox " &
+        "launcher it execs is not installed beside this engine at " &
+        addOnToolLauncherPath() & " (install the reprobuild bundle or " &
+        "add-on artefact that carries both)"))
+      break
 
   if refusals.len > 0:
     # The first refusal keeps its type (its typed diagnostic and exit
-    # status); its message lists every other one after it.
+    # status); its message lists every other one after it, and the store
+    # space the closures need.
     let first = refusals[0]
     if refusals.len > 1:
       var more = "\n" & $(refusals.len - 1) & " more refusal" &
         (if refusals.len > 2: "s" else: "") & ":"
       for e in refusals[1 .. ^1]: more.add("\n  " & e.msg)
       first.msg.add(more)
+    if result.storeSpace.len > 0:
+      first.msg.add("\nstore space: " & result.storeSpace)
     raise first
-
-  # Realising the closures is step 1's first write to the store's
-  # filesystem: a profile whose closures would not fit, with the reserve
-  # left free, is refused now, before anything is written (§9).
-  block:
-    var locks: seq[AptClosureLock]
-    for r in userResources:
-      if r.kind == srkSystemdSystemUnit and r.suAptClosureLock.len > 0:
-        locks.add(parseAptClosureLock(r.suAptClosureLock))
-      elif r.kind == srkLinuxAddOnTool:
-        locks.add(parseAptClosureLock(r.atAptClosureLock))
-    let space = closureSpace(locks)
-    if space.closures > 0:
-      result.storeSpace = describe(space)
-      if spaceIsShort(space):
-        raise newException(AddonStoreSpaceError, "refusing the switch: " &
-          "realising its apt closures needs more of " & AddOnSystemStoreRoot &
-          "'s filesystem than is free: " & result.storeSpace &
-          "; nothing was written")
 
   # `repro system adopt`: the addressed resource must actually be claimed
   # as it is. Anything else (the target is absent, package-owned, or
