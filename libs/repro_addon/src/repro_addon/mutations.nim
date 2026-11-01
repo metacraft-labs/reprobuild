@@ -288,6 +288,20 @@
 ## ``agent-management-path-names-only``       ssh/firewall/network units
 ##                                            are matched by name only,
 ##                                            aliases not resolved
+## ``agent-management-path-ignores-unit-names`` the management-path
+##                                            refusal does not ask systemd
+##                                            for a unit's ``Id``/``Names``
+## ``agent-management-path-ignores-install-alias`` the refusal ignores the
+##                                            ``Alias=`` a unit's own
+##                                            ``[Install]`` would create
+## ``agent-management-path-ignores-templates`` an instance (``ssh@x``) is
+##                                            not matched by its template
+## ``agent-staging-open-blocks``              the staging copy opens a file
+##                                            without ``O_NONBLOCK`` or a
+##                                            type re-check after the open
+## ``agent-staging-reads-whole-file``         the staging copy reads each
+##                                            file into memory before
+##                                            writing it
 ## ``floor-only-on-confirm``                  the rollback floor bounds only
 ##                                            confirmation failures
 ## ``retargeted-address-accepted``           a resource whose address now
@@ -406,6 +420,11 @@ const
                           "agent-install-trusts-cwd",
                           "agent-dns-via-resolved",
                           "agent-management-path-names-only",
+                          "agent-management-path-ignores-unit-names",
+                          "agent-management-path-ignores-install-alias",
+                          "agent-management-path-ignores-templates",
+                          "agent-staging-open-blocks",
+                          "agent-staging-reads-whole-file",
                           "floor-only-on-confirm",
                           # Milestone A5: the confirm-or-revert gate's
                           # timing falsifier.

@@ -39,8 +39,24 @@ const
 
 const ManagementPathFiles* = [
   # sshd and what can lock its users out.
-  "/etc/ssh/sshd_config", "/etc/pam.d/sshd", "/etc/nologin",
-  "/etc/hosts.allow", "/etc/hosts.deny", "/etc/security/access.conf",
+  "/etc/ssh/sshd_config", "/etc/nologin",
+  "/etc/hosts.allow", "/etc/hosts.deny",
+  # The PAM stacks of sshd and of the console login, and every file they
+  # include (``@include``) or whose modules can deny a login: Debian 12/13
+  # and Ubuntu 24.04/26.04 ``/etc/pam.d/sshd`` and ``/etc/pam.d/login``
+  # include ``common-auth``, ``common-account``, ``common-session`` and
+  # ``common-password`` (matched as the ``/etc/pam.d/common-`` prefix
+  # below); ``other`` is the stack of any service without its own file and
+  # ``/etc/pam.conf`` the legacy single-file form. The modules they run
+  # read ``/etc/security/access.conf`` (pam_access), ``limits.conf`` and
+  # ``limits.d/`` (pam_limits, a session ``required``: a zero ``nproc`` or
+  # ``maxlogins`` refuses every login), ``time.conf`` (pam_time),
+  # ``namespace.conf`` and ``namespace.d/`` (pam_namespace),
+  # ``faillock.conf`` (pam_faillock) and ``/etc/securetty`` (pam_securetty).
+  "/etc/pam.d/sshd", "/etc/pam.d/login", "/etc/pam.d/other", "/etc/pam.conf",
+  "/etc/security/access.conf", "/etc/security/limits.conf",
+  "/etc/security/time.conf", "/etc/security/namespace.conf",
+  "/etc/security/faillock.conf", "/etc/securetty",
   # The firewall and network classes' single files.
   "/etc/nftables.conf", "/etc/network/interfaces",
   "/etc/systemd/networkd.conf"]
@@ -48,6 +64,8 @@ const ManagementPathFiles* = [
   ## §7.5, §4.5; threat model G27): each can cut the management path.
 const ManagementPathPrefixes* = [
   "/etc/ssh/sshd_config.d/", "/etc/ssh/ssh_host_", "/etc/ssh/authorized_keys",
+  "/etc/pam.d/common-", "/etc/security/limits.d/",
+  "/etc/security/namespace.d/",
   "/etc/nftables.d/", "/etc/iptables/", "/etc/ufw/", "/etc/firewalld/",
   "/etc/systemd/network/", "/etc/systemd/networkd.conf.d/", "/etc/netplan/",
   "/etc/network/interfaces.d/", "/etc/NetworkManager/"]
@@ -87,8 +105,10 @@ proc templateOf(unit: string): string =
 
 proc managementUnitHit(names: openArray[string]): string =
   for n in names:
-    if n in ManagementPathUnits or templateOf(n) in ManagementPathUnits:
-      return n
+    if n in ManagementPathUnits: return n
+    # An instance (``ssh@x.service``) is the template's unit.
+    when not mutated("agent-management-path-ignores-templates"):
+      if templateOf(n) in ManagementPathUnits: return n
   ""
 
 proc managementPathFile(path: string): bool =
@@ -116,7 +136,7 @@ proc managementPathRefusal*(p: SystemProfile;
       let path = if r.kind == srkFsSystemFile: r.sfPath else: r.ddPath
       if managementPathFile(path):
         return r.address & " writes " & path & " (the management path: " &
-          "sshd, the firewall or the network)"
+          "sshd and the login PAM stack, the firewall or the network)"
     of srkSystemdSystemDropIn, srkSystemdSystemUnit, srkSystemdUnitState:
       let unit = case r.kind
         of srkSystemdSystemDropIn: r.diUnit
@@ -124,11 +144,16 @@ proc managementPathRefusal*(p: SystemProfile;
         else: r.usName
       var names = @[unit]
       when not mutated("agent-management-path-names-only"):
-        for n in unitNames(unit):
-          if n notin names: names.add(n)
-        if r.kind == srkSystemdSystemUnit:
-          for t in installTargets(r.suContent):
-            if t.kind == "Alias" and t.target notin names: names.add(t.target)
+        # Every name systemd knows the unit by (``Id``, ``Names``).
+        when not mutated("agent-management-path-ignores-unit-names"):
+          for n in unitNames(unit):
+            if n notin names: names.add(n)
+        # The aliases the unit's own ``[Install]`` section would create.
+        when not mutated("agent-management-path-ignores-install-alias"):
+          if r.kind == srkSystemdSystemUnit:
+            for t in installTargets(r.suContent):
+              if t.kind == "Alias" and t.target notin names:
+                names.add(t.target)
       let hit = managementUnitHit(names)
       if hit.len > 0:
         return r.address & " is " & (if hit == unit: "" else: "known as ") &

@@ -256,6 +256,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-agent-split-\" & $getCurren..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim",
+    binary: "build/test-bin/t_addon_agent_staging_copy_streams",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"t_staging_copy_\" & $getCurrentPr..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim",
     binary: "build/test-bin/t_addon_apt_hook_and_base_identity",
     defines: @[],

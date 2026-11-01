@@ -17,7 +17,6 @@ import repro_peer_cache/auth as peerAuth
 
 import repro_addon/agent_split
 import repro_addon/generation0
-import repro_addon/mutations
 
 let root = getTempDir() / ("addon-agent-split-" & $getCurrentProcessId())
 removeDir(root)
@@ -52,13 +51,15 @@ suite "agent split: configuration and units":
                  "OnSuccess=" & AgentApplyUnit]:
       checkpoint line
       check line in fetch
-    when not mutated("agent-fetch-unrestricted-egress"):
-      check "IPAddressDeny=any" in fetch
-      check "IPAddressAllow=10.0.2.2" in fetch
-    when not mutated("agent-apply-has-network"):
-      check "PrivateNetwork=yes" in apply
-      check "IPAddressDeny=any" in apply
+    # Unconditional: agent-fetch-unrestricted-egress and
+    # agent-apply-has-network each turn this test red.
+    check "IPAddressDeny=any" in fetch
+    check "IPAddressAllow=10.0.2.2" in fetch
+    check "PrivateNetwork=yes" in apply
+    check "IPAddressDeny=any" in apply
     check "MemorySwapMax=0" in apply
+    # Bounded memory that fits a small host (spec §9.1; 1 GB rpi2).
+    check ("MemoryMax=" & AgentApplyMemoryMax & "\n") in apply
     check "LimitMEMLOCK=infinity" in apply
     check "CAP_NET_ADMIN" notin apply
     # The two broad capabilities it keeps are bounded (A8 review, low):
@@ -68,8 +69,7 @@ suite "agent split: configuration and units":
     # Neither unit resolves names through the resolver's sockets (H2).
     for u in [fetch, apply]:
       check "/run/systemd/resolve" in u
-    when not mutated("agent-dns-via-resolved"):
-      check "/run/dbus" in fetch
+    check "/run/dbus" in fetch   # red under agent-dns-via-resolved
     # Inline-safe: the canonical text cannot carry quotes or braces.
     assertInlineSafe("fetch", fetch)
     assertInlineSafe("apply", apply)
@@ -89,21 +89,29 @@ suite "agent split: configuration and units":
       check p in paths
 
 suite "agent split: the apply unit's refusals":
-  test "sshd drop-ins, ssh unit drop-ins and the firewall class are refused":
+  # Each test states the spec's behaviour (§7.5, §4.5, §9.1; threat model
+  # G27) unconditionally. A falsifying build (-d:reproAddonMutation=...,
+  # scripts/run_addon_unit_mutation.sh) must turn the test it names red:
+  #   agent-allows-management-path            every test below but the
+  #                                           prefix-widening one
+  #   agent-management-path-names-only        the Id/Names and Alias= tests
+  #   agent-management-path-ignores-unit-names  the Id/Names test
+  #   agent-management-path-ignores-install-alias  the Alias= test
+  #   agent-management-path-ignores-templates the template-instance test
+  #   agent-apply-skips-recheck               the prefix-widening test
+  let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
+
+  test "sshd drop-ins and their managed prefix are refused; other files are not":
     let p = parseSystemProfile("fs.systemFile {\n  path = \"/etc/ssh/sshd_config.d/x.conf\"\n" &
       "  content = \"PermitRootLogin no\"\n}\n" &
       "addOn { managedEtcPrefixes = [\"/etc/ssh/sshd_config.d/\"] }\n")
-    when mutated("agent-allows-management-path"):
-      check managementPathRefusal(p) == ""
-    else:
-      check "management path" in managementPathRefusal(p)
+    check "management path" in managementPathRefusal(p, noNames)
     let ok = parseSystemProfile("fs.systemFile {\n  path = \"/etc/app/x.conf\"\n" &
       "  content = \"a\"\n}\naddOn { managedEtcPrefixes = [\"/etc/app/\"] }\n")
-    check managementPathRefusal(ok) == ""
+    check managementPathRefusal(ok, noNames) == ""
 
   test "every file of the management path is refused":
-    let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
-    for path in ["/etc/ssh/sshd_config", "/etc/pam.d/sshd", "/etc/nologin",
+    for path in ["/etc/ssh/sshd_config", "/etc/nologin",
                  "/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/authorized_keys/root",
                  "/etc/firewalld/zones/public.xml", "/etc/systemd/networkd.conf",
                  "/etc/systemd/networkd.conf.d/x.conf", "/etc/hosts.deny",
@@ -111,34 +119,66 @@ suite "agent split: the apply unit's refusals":
       checkpoint path
       let p = SystemProfile(resources: @[SystemResource(kind: srkFsSystemFile,
         address: "systemFile:" & path, sfPath: path)])
-      when mutated("agent-allows-management-path"):
-        check managementPathRefusal(p, noNames) == ""
-      else:
-        check managementPathRefusal(p, noNames).len > 0
+      check managementPathRefusal(p, noNames).len > 0
 
-  test "units are matched by every name systemd knows, and by their aliases":
+  test "the PAM stacks of sshd and login, and what they include, are refused":
+    # /etc/pam.d/sshd and /etc/pam.d/login on Debian 12/13 and Ubuntu
+    # 24.04/26.04 @include the common-* files; their modules read the
+    # /etc/security files and /etc/securetty below (spec §9.1).
+    for path in ["/etc/pam.d/sshd", "/etc/pam.d/login", "/etc/pam.d/other",
+                 "/etc/pam.conf", "/etc/pam.d/common-auth",
+                 "/etc/pam.d/common-account", "/etc/pam.d/common-session",
+                 "/etc/pam.d/common-session-noninteractive",
+                 "/etc/pam.d/common-password",
+                 "/etc/security/access.conf", "/etc/security/limits.conf",
+                 "/etc/security/limits.d/90-nproc.conf",
+                 "/etc/security/time.conf", "/etc/security/namespace.conf",
+                 "/etc/security/namespace.d/x.conf",
+                 "/etc/security/faillock.conf", "/etc/securetty"]:
+      checkpoint path
+      let p = SystemProfile(resources: @[SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:" & path, sfPath: path)])
+      check managementPathRefusal(p, noNames).len > 0
+    # A dpkg diversion of one is the same write.
+    let diversion = SystemProfile(resources: @[SystemResource(
+      kind: srkLinuxDpkgDiversion, address: "diversion:ca",
+      ddPath: "/etc/pam.d/common-auth")])
+    check managementPathRefusal(diversion, noNames).len > 0
+    # The PAM stack of a service that is not a login path is not refused.
+    for path in ["/etc/pam.d/cron", "/etc/pam.d/app-x"]:
+      checkpoint path
+      let p = SystemProfile(resources: @[SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:" & path, sfPath: path)])
+      check managementPathRefusal(p, noNames) == ""
+
+  test "a unit is matched by every name systemd knows it under (Id, Names)":
     let aliased: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} =
       if u == "my-login.service": @["my-login.service", "sshd.service"] else: @[]
-    let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
     let dropIn = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdSystemDropIn, address: "dropIn:my-login",
       diUnit: "my-login.service", diName: "10-x.conf")])
+    check "sshd.service" in managementPathRefusal(dropIn, aliased)
+    check managementPathRefusal(dropIn, noNames) == ""
+
+  test "a unit is matched by the Alias= its own [Install] would create":
     let installAlias = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdSystemUnit, address: "unit:fw", suName: "fw.service",
       suContent: "[Service]\nExecStart=/bin/true\n[Install]\nAlias=nftables.service\n")])
+    check "nftables.service" in managementPathRefusal(installAlias, noNames)
+    let plain = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemUnit, address: "unit:app", suName: "app.service",
+      suContent: "[Service]\nExecStart=/bin/true\n[Install]\nAlias=app2.service\n")])
+    check managementPathRefusal(plain, noNames) == ""
+
+  test "a template instance is matched by its template":
     let instance = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdSystemDropIn, address: "dropIn:ssh@", diUnit: "ssh@x.service",
       diName: "10-x.conf")])
-    when mutated("agent-allows-management-path"):
-      check managementPathRefusal(dropIn, aliased) == ""
-    elif mutated("agent-management-path-names-only"):
-      check managementPathRefusal(dropIn, aliased) == ""
-      check managementPathRefusal(installAlias, noNames) == ""
-      check managementPathRefusal(instance, noNames).len > 0
-    else:
-      check "sshd.service" in managementPathRefusal(dropIn, aliased)
-      check "nftables.service" in managementPathRefusal(installAlias, noNames)
-      check managementPathRefusal(instance, noNames).len > 0
+    check "ssh@x.service" in managementPathRefusal(instance, noNames)
+    let other = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemDropIn, address: "dropIn:app@", diUnit: "app@x.service",
+      diName: "10-x.conf")])
+    check managementPathRefusal(other, noNames) == ""
 
   test "a compiled profile may not widen the managed prefixes":
     let current = parseSystemProfile(
@@ -148,10 +188,7 @@ suite "agent split: the apply unit's refusals":
     let wider = parseSystemProfile(
       "addOn { managedEtcPrefixes = [\"/etc/app/\", \"/etc/shadow\"] }\n")
     check agentPrefixRefusal(same, current) == ""
-    when mutated("agent-apply-skips-recheck"):
-      check agentPrefixRefusal(wider, current) == ""
-    else:
-      check "/etc/shadow" in agentPrefixRefusal(wider, current)
+    check "/etc/shadow" in agentPrefixRefusal(wider, current)
 
 suite "agent split: the staging hand-off":
   let kp = peerAuth.generateKeypair()

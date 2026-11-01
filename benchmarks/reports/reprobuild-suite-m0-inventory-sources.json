@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2575,
+    "nimTestBinaries": 2576,
     "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 717,
+    "pureUnitTests": 718,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2615
+    "testEntries": 2616
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1504,9 +1504,9 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1427,
-      "platform/destructive": 162,
-      "pure unit": 717,
-      "unclassified": 291
+      "platform/destructive": 161,
+      "pure unit": 718,
+      "unclassified": 292
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1714,9 +1714,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2575,
+    "nimTestBinaryCount": 2576,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2615
+    "testEntryCount": 2616
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8216,8 +8216,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_agent_split",
-      "class": "platform/destructive",
-      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -8230,7 +8230,24 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_agent_split.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 11,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_agent_staging_copy_streams",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

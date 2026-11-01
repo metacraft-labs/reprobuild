@@ -338,6 +338,7 @@ var
   ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
   ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
   OCloExec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
+  ONonBlockFlag {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
   AtSymlinkNoFollow {.importc: "AT_SYMLINK_NOFOLLOW", header: "<fcntl.h>".}: cint
 
 proc c_openat(dirfd: cint; path: cstring; flags: cint; mode: Mode): cint
@@ -346,16 +347,45 @@ proc c_fstatat(dirfd: cint; path: cstring; st: var Stat; flags: cint): cint
   {.importc: "fstatat", header: "<sys/stat.h>".}
 proc c_fdopendir(fd: cint): ptr DIR {.importc: "fdopendir", header: "<dirent.h>".}
 
-proc openNoFollow(dirfd: cint; name: string; dir: bool): cint =
-  let flags = O_RDONLY or ONoFollow or OCloExec or
+const StagingCopyChunk = 65536
+  ## The staging copy reads and writes in chunks of this size, so its
+  ## memory does not grow with the size of a staged file (spec §9.1).
+
+proc openStagedNoFollow*(dirfd: cint; name: string; dir: bool): cint =
+  ## Open ``name`` relative to ``dirfd`` for the staging copy: never
+  ## following a link (``O_NOFOLLOW``), and never blocking. The fetch unit
+  ## owns the staging area and can swap an entry between the copy's
+  ## ``fstatat`` and this open; a FIFO swapped in would block a plain
+  ## ``O_RDONLY`` open until a writer appeared, stalling every later tick.
+  ## So the open carries ``O_NONBLOCK`` (a FIFO then opens at once, and a
+  ## regular file or directory ignores the flag), and the type is checked
+  ## again on the descriptor: anything but the expected directory or
+  ## regular file is refused. The caller owns the descriptor.
+  var flags = O_RDONLY or ONoFollow or OCloExec or
               (if dir: ODirectory else: 0)
+  when not mutated("agent-staging-open-blocks"):
+    flags = flags or ONonBlockFlag
   result = c_openat(dirfd, name.cstring, flags, 0.Mode)
   if result < 0:
     raise newException(EAgentStaging, "cannot open " & name & " in the " &
       "staging area without following a link: " & osErrorMsg(osLastError()))
+  when not mutated("agent-staging-open-blocks"):
+    var st: Stat
+    let ok = fstat(result, st) == 0 and
+             (if dir: S_ISDIR(st.st_mode) else: S_ISREG(st.st_mode))
+    if not ok:
+      discard posix.close(result)
+      raise newException(EAgentStaging, name & " in the staging area is " &
+        "not a " & (if dir: "directory" else: "regular file") &
+        " once opened (it was replaced); refused")
+
+proc openNoFollow(dirfd: cint; name: string; dir: bool): cint =
+  openStagedNoFollow(dirfd, name, dir)
 
 proc readAllFd(fd: cint; limit: int64): string =
-  var buf = newString(65536)
+  ## A small staged file read whole (the latest pointer); bounded by
+  ## ``limit``.
+  var buf = newString(StagingCopyChunk)
   while true:
     let n = posix.read(fd, addr buf[0], buf.len)
     if n < 0:
@@ -366,6 +396,46 @@ proc readAllFd(fd: cint; limit: int64): string =
     if result.len.int64 > limit:
       raise newException(EAgentStaging, "the staging area exceeds " &
         $MaxStagedBytes & " bytes")
+
+proc streamCopyFd(src: cint; dest: string; mode: int; budget: var int64) =
+  ## Copy the open regular file ``src`` to the new file ``dest`` in
+  ## ``StagingCopyChunk`` pieces, charging each piece to ``budget`` (the
+  ## whole staging area's byte limit); ``dest`` is created exclusively,
+  ## without following a link, with ``mode``'s permission bits, and
+  ## fsynced. Memory stays one chunk whatever the file's size.
+  let outFd = posix.open(dest.cstring,
+    O_WRONLY or O_CREAT or O_EXCL or ONoFollow or OCloExec, 0o600.Mode)
+  if outFd < 0:
+    raise newException(EAgentStaging, "cannot create the copy " & dest &
+      ": " & osErrorMsg(osLastError()))
+  var ok = false
+  try:
+    var buf = newString(StagingCopyChunk)
+    while true:
+      let n = posix.read(src, addr buf[0], buf.len)
+      if n < 0:
+        raise newException(EAgentStaging, "read failed: " &
+          osErrorMsg(osLastError()))
+      if n == 0: break
+      budget -= n.int64
+      if budget < 0:
+        raise newException(EAgentStaging, "the staging area exceeds " &
+          $MaxStagedBytes & " bytes")
+      var off = 0
+      while off < n:
+        let w = posix.write(outFd, addr buf[off], n - off)
+        if w <= 0:
+          raise newException(EAgentStaging, "cannot write the copy " & dest &
+            ": " & osErrorMsg(osLastError()))
+        off += w
+    if fchmod(outFd, Mode(mode)) != 0 or fsync(outFd) != 0:
+      raise newException(EAgentStaging, "cannot finish the copy " & dest &
+        ": " & osErrorMsg(osLastError()))
+    ok = true
+  finally:
+    discard posix.close(outFd)
+    if not ok:
+      try: removeFile(dest) except CatchableError: discard
 
 proc copyTreeFd(srcFd: cint; dest: string; depth: int; budget: var int64) =
   if depth > MaxStagedDepth:
@@ -403,12 +473,16 @@ proc copyTreeFd(srcFd: cint; dest: string; depth: int; budget: var int64) =
         var st2: Stat
         if fstat(fd, st2) != 0 or not S_ISREG(st2.st_mode):
           raise newException(EAgentStaging, name & " is not a regular file")
-        let data = readAllFd(fd, budget)
-        budget -= data.len.int64
         # The permission bits are kept (never set-id or sticky): a staged
         # output's archive digest covers them, and the copy must hash to
         # the same pin the fetch unit's bytes were checked against.
-        writeFileAtomic(dest / name, data, st2.st_mode.int and 0o777)
+        when mutated("agent-staging-reads-whole-file"):
+          # Falsifying build: the whole file in memory before the write.
+          let data = readAllFd(fd, budget)
+          budget -= data.len.int64
+          writeFileAtomic(dest / name, data, st2.st_mode.int and 0o777)
+        else:
+          streamCopyFd(fd, dest / name, st2.st_mode.int and 0o777, budget)
       finally: discard posix.close(fd)
     else:
       # A symbolic link, a device, a FIFO: nothing the fetch unit has a
@@ -849,5 +923,4 @@ proc pauseAfterRollback*(generation: string) =
   ## An operator rollback on a host whose deploy agent is configured
   ## pauses it (spec §9.3), naming the generation and the operator.
   if not fileExists(AgentConfPath): return
-  let op = getEnv("SUDO_USER", getEnv("USER", getEnv("LOGNAME", "root")))
-  writePauseMarker(AgentStateDir, generation, op)
+  writePauseMarker(AgentStateDir, generation, currentOperator())

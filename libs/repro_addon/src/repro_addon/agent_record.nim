@@ -138,12 +138,28 @@ proc agentStatesToPause*(stateDir: string): seq[string] =
   for d in WellKnownAgentStates:
     if dirExists(d) and d notin result: result.add(d)
 
+const MaxOperatorNameLen = 64
+  ## Longer than any login name a Debian or Ubuntu host accepts (32).
+
+proc isSafeOperatorName(s: string): bool =
+  ## A name that can stand alone as the value of a ``key=value`` line of a
+  ## pause marker or an evidence record: printable ASCII, no space, no
+  ## ``=``, bounded. Anything else is not trusted as a user name.
+  if s.len == 0 or s.len > MaxOperatorNameLen: return false
+  for c in s:
+    if c <= ' ' or c > '~' or c == '=': return false
+  true
+
 proc currentOperator*(): string =
-  ## Who ran the command: the sudo caller when there is one.
+  ## Who ran the command, for the pause marker and the records (spec §9.3):
+  ## the sudo caller when there is one (``SUDO_USER``), then ``LOGNAME``,
+  ## then ``USER``. A value that is not a plain user name (control
+  ## characters, spaces, ``=``, more than 64 bytes) is skipped, and with no
+  ## usable name the real user id is reported as ``uid <n>``.
   for v in ["SUDO_USER", "LOGNAME", "USER"]:
     let s = getEnv(v).strip()
-    if s.len > 0 and '\n' notin s and '=' notin s: return s
-  "uid " & $getCurrentProcessId()
+    if isSafeOperatorName(s): return s
+  "uid " & $getuid()
 
 proc pauseAgents*(stateDir, generation: string;
                   operator = currentOperator()): seq[string] =

@@ -543,6 +543,19 @@ proc agentFetchTimer*(): string =
   "[Install]\n" &
   "WantedBy=repro-addon.target\n"
 
+const AgentApplyMemoryMax* = "512M"
+  ## The apply unit's ``MemoryMax=`` (spec §9.1): a ceiling that leaves room
+  ## on the smallest supported host (a 1 GB Raspberry Pi 2) while bounding a
+  ## runaway apply. Past it the kernel kills the apply inside its own
+  ## control group and the tick fails, instead of pushing the host into
+  ## swap or its global OOM killer. The staging copy and the closure-digest
+  ## check stream in fixed-size chunks (``copyTreeFd``,
+  ## ``prefixSubsetArchiveDigestHex``), so neither grows with the staged
+  ## bytes. The ``.deb`` realiser does not yet: it reads one archive whole
+  ## (``apt_jammy.extractDebDataMemberToTar``), so a single ``.deb`` of a
+  ## few hundred MB in a closure needs that much of this budget.
+  ## ``LimitMEMLOCK=infinity`` locks plaintext secrets inside it too.
+
 proc agentApplyUnit*(reproExe: string): string =
   ## ``repro-agent-apply.service`` (spec §9.1): root, but no network of
   ## any kind, a bounded capability set without ``CAP_NET_ADMIN``, and,
@@ -566,6 +579,7 @@ proc agentApplyUnit*(reproExe: string): string =
   AgentApplyConfinement &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
+  "MemoryMax=" & AgentApplyMemoryMax & "\n" &
   net & NoSwapLine
 
 proc profileD(reproExe: string): string =
