@@ -6,6 +6,9 @@
 ##     the skew applies;
 ##   * an ``issuedAt`` older than the one last accepted is ``aoStale``
 ##     (``issued_at_regressed``), whatever the clock says;
+##   * several sources serving the same sequence and deployment signed at
+##     different times select the latest signature, whatever the order the
+##     sources are listed in (A8 review 2026-11-01, finding 2);
 ##   * an empty sequence-floor file fails the tick closed instead of
 ##     reading as "nothing applied";
 ##   * the floor, quarantine and pause files are replaced whole (no
@@ -30,9 +33,11 @@ let kp = peerAuth.generateKeypair()
 let anchors = anchorsFromKeypairs([kp.publicKey])
 const Now = 1_800_000_000'i64
 
-proc publish(dir: string; sequence: uint64; issuedAt: int64): string =
+proc publish(dir: string; sequence: uint64; issuedAt: int64;
+             deploymentId = ""): string =
   var m = DeployManifest(target: "h1", sequence: sequence,
-    deploymentId: "d" & $sequence & "-" & $issuedAt, profileText: "",
+    deploymentId: (if deploymentId.len > 0: deploymentId
+                   else: "d" & $sequence & "-" & $issuedAt), profileText: "",
     issuedAt: uint64(issuedAt), maxAgeSeconds: 3600)
   signManifest(kp, m)
   let bytes = encodeManifest(m)
@@ -42,8 +47,8 @@ proc publish(dir: string; sequence: uint64; issuedAt: int64): string =
   result = dir / "m.rdm"
   writeFile(result, s)
 
-proc tick(stateDir, src: string): AgentOutcome =
-  let cfg = AgentConfig(target: "h1", sources: @[src], anchors: anchors,
+proc tick(stateDir: string; srcs: varargs[string]): AgentOutcome =
+  let cfg = AgentConfig(target: "h1", sources: @srcs, anchors: anchors,
     stateDir: stateDir, requireAttestations: true)
   var deps: AgentDeps
   deps.apply = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
@@ -70,6 +75,21 @@ suite "deploy agent: freshness bounds and durable state":
     # The same sequence re-signed later is converged, and raises the mark.
     check tick(st, publish(root / "m2c", 5, Now - 50)).kind == aoConverged
     check tick(st, publish(root / "m2d", 6, Now - 80)).kind == aoStale
+
+  test "copies of one deployment from several sources: the latest signature wins in either order":
+    # The host last accepted sequence 5 signed at Now-80. One source still
+    # serves a copy signed at Now-100 (a mirror that froze before the
+    # re-signing), another the copy signed at Now-50. Both are the same
+    # sequence and deployment, so neither is ambiguous; the verdict must
+    # not depend on which source the configuration happens to list first.
+    let older = publish(root / "m5a", 5, Now - 100, "d5")
+    let newer = publish(root / "m5b", 5, Now - 50, "d5")
+    for order in [@[older, newer], @[newer, older]]:
+      let st = root / ("s5-" & $(order[0] == older))
+      check tick(st, publish(root / "m5c", 5, Now - 80, "d5")).kind == aoApplied
+      let o = tick(st, order)
+      check o.kind == aoConverged
+      check o.errorCode == ""
 
   test "an empty floor file fails closed":
     let st = root / "s3"
