@@ -123,7 +123,9 @@ build_target_pcre() {
   # CMake accepts), cross-configured for the target triple.
   local triple
   triple="$(basename "${cc}")"; triple="${triple%-cc}"
-  ( cd "${work}/src" && ./configure --host="${triple}" CC="${cc}" \
+  # No -g (autoconf's default CFLAGS): debug info would carry the build
+  # host's include paths into the installed library.
+  ( cd "${work}/src" && ./configure --host="${triple}" CC="${cc}" CFLAGS=-O2 \
       --disable-cpp --disable-static --enable-shared --enable-utf \
       --enable-unicode-properties --disable-pcregrep-libz \
       --disable-pcregrep-libbz2 >"${work}/configure.log" 2>&1 ) || {
