@@ -113,17 +113,29 @@ proc publish*(p: Producer; s: PublishSpec): seq[byte] =
 
 proc engineClosureTar(engine: string): string =
   ## ``engine``'s closure as one tar of absolute store paths (cached).
+  ##
+  ## A matrix runs one gate on several bases at once, and every cell may
+  ## find the cache empty. The build runs under an exclusive ``flock`` on a
+  ## sibling lock file and re-checks the cache once it holds the lock, so
+  ## exactly one cell writes the (multi-GB) tar and the others reuse it:
+  ## sharing one temporary let a cell rename a file another cell had
+  ## already moved away (ENOENT), and a temporary per cell would multiply
+  ## the disk the cache needs by the number of concurrent cells.
   result = reproRoot() / "build" / ("a8-engine-closure-" &
     engine.extractFilename & ".tar")
   if fileExists(result): return
   let (paths, c) = execCmdEx("nix-store -qR " & quoteShell(engine))
   doAssert c == 0, paths
-  let lst = result & ".list"
+  let lst = result & ".list." & $getCurrentProcessId()
   writeFile(lst, paths)
-  let (o, c2) = execCmdEx("tar -cf " & quoteShell(result & ".tmp") &
-    " -T " & quoteShell(lst))
+  defer: removeFile(lst)
+  let tmp = quoteShell(result & ".tmp")
+  let build = "[ -f " & quoteShell(result) & " ] || { tar -cf " & tmp &
+    " -T " & quoteShell(lst) & " && mv " & tmp & " " & quoteShell(result) &
+    "; } || { rc=$?; rm -f " & tmp & "; exit $rc; }"
+  let (o, c2) = execCmdEx("flock " & quoteShell(result & ".lock") &
+    " sh -c " & quoteShell(build))
   doAssert c2 == 0, o
-  moveFile(result & ".tmp", result)
 
 proc installEngineClosure*(g: Guest; engine: string) =
   ## The full engine (a Nix store path holding ``bin/reprobuild``, built
