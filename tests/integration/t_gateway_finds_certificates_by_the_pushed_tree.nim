@@ -11,7 +11,7 @@
 ##   1. a push whose note sits on ``<new>^{tree}`` is ACCEPTED and FORWARDED;
 ##   2. a reworded commit with the SAME tree is accepted on the same note;
 ##   3. a commit with different content is REJECTED with the content-specific
-##      remedy;
+##      remedy, which says the pushed content must be the tested content;
 ##   4. a note on the tree carrying a record for other content is REPORTED as
 ##      a misattached carrier fault (and the push, uncovered, is rejected);
 ##   5. a certificate noted on ``refs/notes/reprobuild/certificates`` is NOT
@@ -83,6 +83,11 @@ suite "TC-8c — the gateway finds certificates by the pushed tree":
     check pushC.code != 0
     check "no covering test certificate for the pushed content" in pushC.output
     check "no certificate note on the pushed tree" in pushC.output
+    # A commit that does not record what was tested carries no note, so this is
+    # the refusal a partial stage or a rewriting hook arrives at. It has to say so.
+    check "content must be the content that was tested" in pushC.output
+    check "re-run 'repro test' on it if a hook or a partial stage changed it" in
+      pushC.output
     check upstreamTip(fx) == reworded
 
     # ---- 4. a misattached note is reported as a carrier fault -------------
@@ -94,6 +99,8 @@ suite "TC-8c — the gateway finds certificates by the pushed tree":
     check "carrier fault" in pushMis.output
     check "misattached" in pushMis.output
     check bContent in pushMis.output
+    # Notes that do not cover the tree get the same explanation.
+    check "content must be the content that was tested" in pushMis.output
     check upstreamTip(fx) == reworded
 
     # ---- 5. the legacy notes ref is not read ------------------------------

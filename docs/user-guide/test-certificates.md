@@ -444,11 +444,14 @@ pass `--workspace-root=<workspace>` and `--current-repo=<repo>`, or the reposito
 taken for the workspace and its own store is read.
 
 **A gateway refuses with "no certificate note on the pushed tree".** Nothing
-propagated a note. Check whether the push used `--no-verify` or
-`TEST_CERTIFICATES_HOOK=off`, read the `repro hooks: certificates:` lines, and if the
-commit was already on the remote, use `repro push` or the two `notes` commands above.
-The gateway is saying the note is missing, so certifying again will not help if the
-store already holds the certificate.
+propagated a note, for one of two reasons. The commit may not record what you tested:
+after a partial stage or a hook that rewrote a file, no certificate exists for its
+content and there is nothing to carry. Compare its tree, `git rev-parse <commit>^{tree}`,
+with the id the run printed, and if they differ, run `repro test` on that commit. If
+they match, the certificate exists and did not travel, so certifying again will not
+help. Check whether the push used `--no-verify` or `TEST_CERTIFICATES_HOOK=off`, read
+the `repro hooks: certificates:` lines, and if the commit was already on the remote, use
+`repro push` or the two `notes` commands above.
 
 **`NOT fully propagated`.** The line above it gives the reason: a refused notes ref, a
 stalled remote, or an invalid scope. The push went through. Fix the cause, and a later

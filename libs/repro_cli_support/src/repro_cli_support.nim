@@ -66828,6 +66828,15 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     result.detail = "the anchor's [certificate_policy] is malformed (" &
       err.msg & "); counted as required"
 
+const GatewayTestedContentRemedy =
+  ". The pushed commit's content must be the content that was tested: re-run " &
+  "'repro test' on it if a hook or a partial stage changed it"
+  ## Why a developer who has just certified can be refused. A certificate names
+  ## content, so one issued for what was tested does nothing for a commit that
+  ## records something else, and the hook then has no note to carry for that
+  ## commit. It closes both refusals: the one with no note, which is where that
+  ## case arrives, and the one with notes that do not cover the tree.
+
 proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
                         updates: seq[GatewayRefUpdate];
                         cfg: GatewayConfig;
@@ -67034,7 +67043,8 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
              "'test-certificates notes push <remote>' first)"
          else: "") &
         (if verdict.outcome == voNotCovered and remedies.len > 0:
-           " — " & remedies.join("; ") else: "")
+           " — " & remedies.join("; ") else: "") &
+        (if verdict.outcome == voNotCovered: GatewayTestedContentRemedy else: "")
       result.outcome = verdict.outcome
       if effective == cgmRequired:
         result.accepted = false
