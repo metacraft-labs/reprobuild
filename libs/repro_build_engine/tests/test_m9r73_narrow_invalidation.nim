@@ -253,3 +253,42 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     check evidence.monitorReads == @[inputPath]
     check evidence.monitorWrites == @[outputPath]
     check evidence.monitorProbes == @[probedPath]
+
+  test "a file in a directory under /dev/shm is an input, a shm object is not":
+    ## A build tree moved to /dev/shm had its reads dropped, so an edited input
+    ## was a cache hit: the same silent drop as /run/user above.
+    resetTmp()
+    let rmdfPath = TmpDir / "dev-shm-paths.iomon"
+    let inputPath = "/dev/shm/build-scratch/src/input.txt"
+    let outputPath = "/dev/shm/build-scratch/output.txt"
+    let mediaPath = "/run/media/someone/disk/project/input.txt"
+    let records = @[
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: inputPath),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: mediaPath),
+      MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
+        osPid: 1, threadId: 1, path: outputPath),
+      # Still volatile: POSIX objects are flat entries, and the rest of /dev is
+      # not files at all.
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/dev/shm/sem.mp-1234"),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/dev/shm/"),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/dev/shmem/state"),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/dev/urandom"),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: "/run/mediator/state"),
+    ]
+    writeFile(rmdfPath, encodeCanonical(records))
+
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
+
+    check status == mesComplete
+    check evidence.monitorReads == @[inputPath, mediaPath]
+    check evidence.monitorWrites == @[outputPath]
+    check evidence.monitorProbes.len == 0

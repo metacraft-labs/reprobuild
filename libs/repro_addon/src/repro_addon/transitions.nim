@@ -55,6 +55,23 @@ type
       ## time. Step 2 stops them before the unit, step 7 starts them again
       ## after it, so an activation between the two steps cannot start the
       ## old definition again. Named in the reason, not rendered apart.
+    upholders*: seq[string]
+      ## `stop` and `stop-start` only: the add-on's own services that hold
+      ## this unit up (systemd's `UpheldBy=`, active at plan time). systemd
+      ## starts an upheld unit again as soon as it stops, so step 2 stops
+      ## them right before the unit and the switch starts them again after
+      ## step 7's starts (``planUpholds``). Named in the reason.
+    fresh*: bool
+      ## Exclusive `start` only: systemd had no definition of the unit when
+      ## the plan was made (``LoadState=not-found``), so any instance running
+      ## when step 7 reaches it was started from the generation's own file
+      ## (an upholder, or its own ``UpheldBy=`` link, started it as soon as
+      ## systemd loaded it) and is left running.
+    unlinkFirst*: bool
+      ## A removed unit held up only through its own ledgered `UpheldBy=`
+      ## install link (`<upholder>.upholds/<unit>`): step 2 removes its
+      ## install links and reloads systemd before stopping it, so the
+      ## uphold is gone when the stop happens.
 
   UnitAliveness* = enum
     ## What the unit's control group says (cgroup v2 ``cgroup.events``
@@ -112,6 +129,17 @@ type
                           ## its ``PropagatesReloadTo=``: a reload of this
                           ## unit reloads them (no instance starts; named in
                           ## the reason, not planned)
+    loadedAtPlan*: bool   ## systemd had the unit loaded (any definition)
+                          ## when the plan was made
+    upholders*: seq[string]
+                          ## the ACTIVE units whose ``Upholds=`` names it
+                          ## (systemd's ``UpheldBy=``): systemd starts it
+                          ## again whenever it finds it stopped
+    ownUpholdLinks*: seq[string]
+                          ## removed units only: the upholders whose
+                          ## uphold is the unit's own ledgered install link
+                          ## (``<upholder>.upholds/<unit>``, from
+                          ## ``UpheldBy=`` in its ``[Install]``)
 
 proc running*(f: UnitFacts): bool =
   ## Is an instance of the unit alive? For an exclusive unit the control
@@ -361,7 +389,8 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
           reason: (if f.isNew: "added (enabled)"
                    else: "enabled and inactive; (re)applied") & after(f),
           exclusive: f.exclusive,
-          predecessors: (if f.exclusive: predecessorsOf(f) else: @[])))
+          predecessors: (if f.exclusive: predecessorsOf(f) else: @[]),
+          fresh: f.exclusive and not f.loadedAtPlan))
       continue
     if not changed:
       continue
@@ -399,6 +428,65 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
   else:
     propagateStops(stops & starts, facts)
 
+type UpholdRefusal* = tuple[unit: string; exclusive: bool; detail: string]
+
+proc planUpholds*(ts: var seq[Transition]; facts: seq[UnitFacts]):
+    seq[UpholdRefusal] =
+  ## ``Upholds=`` (systemd 249+; systemd.unit(5)): while an upholder is
+  ## active, systemd starts every unit it upholds again whenever it finds
+  ## it inactive or failed, "without delay". A `stop` or `stop-start` of
+  ## an upheld unit would therefore be undone by systemd right after step
+  ## 2 -- a removed unit would run on with its file gone, an exclusive
+  ## unit's old instance could never be confirmed exited -- unless the
+  ## plan deals with each active upholder (spec §7.3):
+  ##
+  ## - a removed unit held up through its own ledgered ``UpheldBy=``
+  ##   install link: the link is the uphold, so step 2 removes the unit's
+  ##   install links and reloads systemd before the stop (``unlinkFirst``);
+  ## - an upholder that is one of the add-on's own services or scopes:
+  ##   paused -- stopped in step 2 right before the upheld unit and
+  ##   started again after step 7's starts (``upholders``);
+  ## - any other upholder (a target, a socket, a unit the add-on does not
+  ##   own): the add-on does not stop it, so the plan is refused. The
+  ##   returned refusals name the unit and each such upholder; empty when
+  ##   the plan can go ahead.
+  when mutated("upholder-not-planned"):
+    return
+  var byUnit = initTable[string, int]()
+  for i, f in facts: byUnit[f.unit] = i
+  for t in ts.mitems:
+    if t.verb notin {tvStop, tvStopStart} or t.unit notin byUnit: continue
+    let f = facts[byUnit[t.unit]]
+    var paused, unlinked, refused: seq[string]
+    for u in f.upholders:
+      if u == t.unit: continue
+      if f.removed and t.verb == tvStop and u in f.ownUpholdLinks:
+        t.unlinkFirst = true
+        unlinked.add(u)
+        continue
+      let owned = u in byUnit and facts[byUnit[u]].owned
+      if owned and isProcessUnit(u):
+        if u notin t.upholders: t.upholders.add(u)
+        paused.add(u)
+        continue
+      refused.add(u & (if not isProcessUnit(u): " (a " &
+        u[u.rfind('.') + 1 .. ^1] & " unit)" else: " (not the add-on's unit)"))
+    if unlinked.len > 0:
+      t.reason.add("; its own UpheldBy= link removed first (held up by " &
+        unlinked.join(", ") & ")")
+    if paused.len > 0:
+      t.reason.add("; pauses upholder " & paused.join(", ") & " (Upholds=)")
+    if refused.len > 0:
+      result.add((unit: t.unit, exclusive: t.exclusive, detail:
+        "it is held up by " & refused.join(", ") &
+        " through Upholds=: systemd starts it again as soon as step 2 " &
+        "stops it, so it cannot be " &
+        (if f.removed: "removed" elif t.exclusive: "stopped and confirmed " &
+           "exited before its new definition starts" else: "stopped") &
+        ", and the add-on does not stop a unit that is not its own service; " &
+        "drop the Upholds=/UpheldBy= that names " & t.unit & " (or stop " &
+        "the upholder) and apply again"))
+
 proc propagateDependencyChanges*(facts: var seq[UnitFacts];
                                  dependsOn: Table[string, seq[string]]) =
   ## `depends_on` to a fixpoint (the infra planner's `markDependencyRestarts`
@@ -421,6 +509,30 @@ proc propagateDependencyChanges*(facts: var seq[UnitFacts];
           facts[i].depsChanged = true
           changed = true
           break
+
+const KeptAsDriftReason* = "removed, but changed after the plan: kept as " &
+  "drift by the write-time re-check, left in place whole and not stopped " &
+  "(--reconcile-drift removes it)"
+  ## The reason of the ``leave`` entry ``executedTransitions`` adds for a
+  ## removed unit step 2's re-check kept.
+
+proc executedTransitions*(replanned: seq[Transition];
+                          keptUnits: openArray[string]): seq[Transition] =
+  ## The transition list a switch actually ran when step 2's re-check kept
+  ## removed units in place (spec §4.2 rule 1, §7.3): ``replanned`` -- the
+  ## plan's transitions planned again without those units, which is what
+  ## steps 2 and 7 executed -- with a ``leave`` entry marking each kept
+  ## unit as drift. The apply prints this list, not the reviewed plan's,
+  ## so the output never claims a stop that did not happen. A kept unit
+  ## that ``replanned`` still acts on (it was stopped after all) keeps that
+  ## entry and gets no ``leave``.
+  result = replanned
+  for u in keptUnits:
+    var listed = false
+    for t in replanned:
+      if t.unit == u: listed = true
+    if not listed:
+      result.add(Transition(unit: u, verb: tvLeave, reason: KeptAsDriftReason))
 
 proc renderTransitions*(ts: seq[Transition]): string =
   ## The plan's transition section: ``<verb>\t<unit>\t<reason>`` lines,

@@ -433,7 +433,9 @@ proc addAnchor*(anchors: TrustAnchors; publicKey: PublicKeyBytes) =
 
 proc loadTrustAnchors*(path: string): TrustAnchors =
   ## Parses a trust-anchor file. Each non-blank, non-`#` line carries a
-  ## hex-encoded uncompressed ECDSA-P256 public key (130 hex chars).
+  ## hex-encoded uncompressed ECDSA-P256 public key (130 hex chars). A
+  ## comment may hold any bytes (UTF-8 such as "§10.3" among them), and a
+  ## leading UTF-8 byte-order mark is skipped.
   ##
   ## The M3 `<pubkey_hex>:<privkey_hex>` shape is rejected with a clear
   ## error so operators know to migrate. Malformed hex lines raise
@@ -442,8 +444,15 @@ proc loadTrustAnchors*(path: string): TrustAnchors =
     raise newException(AuthError,
       "trust anchor file does not exist: " & path)
   result = newTrustAnchors()
+  var text = readFile(path)
+  # A UTF-8 byte-order mark (an editor's, before a comment) is not part of
+  # the first line: kept, it turned a `#` comment into a malformed key and
+  # refused the whole file. Comments are otherwise any bytes, UTF-8
+  # included; key lines stay strictly 130 ASCII hex digits.
+  if text.startsWith("\xEF\xBB\xBF"):
+    text = text[3 .. ^1]
   var lineNo = 0
-  for rawLine in readFile(path).splitLines:
+  for rawLine in text.splitLines:
     inc lineNo
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):

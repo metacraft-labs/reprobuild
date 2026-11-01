@@ -207,6 +207,21 @@ suite "confirm (§7.5)":
     check o.failures == @["b.service tcp:127.0.0.1:1: connection refused"]
     check took >= 1.0 and took < 3.0
 
+  test "the failure states how long the confirmation waited":
+    # The confirm-or-revert gate reads the wait from the attempt's
+    # `rolled-back` record, which carries this text; it must name both the
+    # timeout and the measured wait.
+    let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =
+      "connection refused"
+    let o = confirm(checks[1 .. 1], 1, runner, pollMs = 100)
+    check not o.passed
+    check o.waitedSec >= 1.0 and o.waitedSec < 1.0 + ConfirmOvershootSec.float
+    let s = failureSummary(o, 1)
+    check s.startsWith("1 health check(s) did not pass within " &
+                       "confirmTimeout (1 s; waited ")
+    check ("waited " & formatFloat(o.waitedSec, ffDecimal, 2) & " s)") in s
+    check s.endsWith("b.service tcp:127.0.0.1:1: connection refused")
+
   test "a probe gets the remaining budget and a hung one cannot extend the wait":
     var budgets: seq[int]
     let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string =

@@ -151,6 +151,13 @@ error: failed to push some refs to '/tmp/backend.git'
       "no url here :// at all"
     check redactUrlUserinfo("") == ""
 
+  test "a transcript becomes one redacted line":
+    check pushOutputOneLine("remote: see https://u:token@host/p\n\n" &
+      " ! [remote rejected] HEAD -> main (pre-receive hook declined)\n") ==
+      "remote: see https://" & urlUserinfoRedaction & "@host/p / " &
+      "! [remote rejected] HEAD -> main (pre-receive hook declined)"
+    check pushOutputOneLine("\n \n") == ""
+
   test "the scp-like SSH remote keeps its login name":
     # `git@host:path` has no scheme and its `git@` is a LOGIN NAME, not a
     # secret — the key never appears in the URL. Redacting it would delete a

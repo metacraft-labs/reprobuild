@@ -49,7 +49,7 @@ import ./static_tree
 import ./switch
 import ./transitions
 
-template withSecretsLocks(stateDir, what: string; body: untyped) =
+template withSecretsLocks*(stateDir, what: string; body: untyped) =
   ## The switch's two locks, in the switch's order (host first).
   var hostLock = acquireHostApplyLock(what)
   try:

@@ -285,10 +285,62 @@ suite "sysctl precedence (§4.3, §7.2 step 6)":
     check networkdRefusal("net.ipv4.ip_forward", "0", false, root) == ""
     check networkdRefusal("net.core.somaxconn", "1", true, root) == ""
     check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root).len > 0
+    # networkd >= 256 ignores IPForward= (deprecated); before 256 it only
+    # ever turns forwarding on.
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 255).len > 0
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 257) == ""
     writeFile(root / "run/systemd/network/10-eth.network",
               "[Match]\nName=eth0\n[Network]\nIPv6Forwarding=yes\n")
-    check networkdRefusal("net.ipv4.ip_forward", "0", true, root) == ""   # the other family
-    check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root).len > 0
+    # A per-link setting (>= 256) writes the link's own key only; before
+    # 256 the key does not exist.
+    check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root, 257) == ""
+    check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root, 252) == ""
+  test "IPForward=no never turns forwarding off (networkd before 256)":
+    createDir(root / "run/systemd/network")
+    createDir(root / "run/systemd/netif/links")
+    writeFile(root / "run/systemd/network/10-eth.network",
+              "[Match]\nName=eth0\n[Network]\nIPForward=no\n")
+    writeFile(root / "run/systemd/netif/links/2",
+              "ADMIN_STATE=configured\nNETWORK_FILE=/run/systemd/network/10-eth.network\n")
+    for v in [0, 252, 255, 256, 257, 258]:
+      check networkdRefusal("net.ipv4.ip_forward", "1", true, root, v) == ""
+      check networkdRefusal("net.ipv6.conf.all.forwarding", "1", true, root, v) == ""
+    # A drop-in of the file in use counts like the file.
+    createDir(root / "etc/systemd/network/10-eth.network.d")
+    writeFile(root / "etc/systemd/network/10-eth.network.d/50-fwd.conf",
+              "[Network]\nIPForward=ipv4\n")
+    check "50-fwd.conf" in networkdRefusal("net.ipv4.ip_forward", "0", true, root, 252)
+    check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root, 252) == ""
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 256) == ""
+  test "networkd.conf's IPv4Forwarding= is global from 256 on, either way":
+    createDir(root / "etc/systemd/networkd.conf.d")
+    writeFile(root / "etc/systemd/networkd.conf.d/50-fwd.conf",
+              "[Network]\nIPv4Forwarding=no\n")
+    check "IPv4Forwarding=no" in networkdRefusal("net.ipv4.ip_forward", "1", true, root, 257)
+    check "IPv4Forwarding=no" in networkdRefusal("net.ipv4.conf.all.forwarding", "1", true, root, 256)
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 257) == ""
+    check networkdRefusal("net.ipv6.conf.all.forwarding", "1", true, root, 257) == ""
+    # Before 256 networkd.conf has no forwarding setting.
+    check networkdRefusal("net.ipv4.ip_forward", "1", true, root, 252) == ""
+    check networkdRefusal("net.ipv4.ip_forward", "1", true, root, 255) == ""
+    # Unknown version: whatever either behaviour would overwrite.
+    check networkdRefusal("net.ipv4.ip_forward", "1", true, root, 0).len > 0
+  test "IPMasquerade= turns the global knob on before 256 and from 257 when networkd.conf is silent":
+    createDir(root / "run/systemd/network")
+    createDir(root / "run/systemd/netif/links")
+    writeFile(root / "run/systemd/network/10-eth.network",
+              "[Match]\nName=eth0\n[Network]\nIPMasquerade=ipv4\n")
+    writeFile(root / "run/systemd/netif/links/2",
+              "ADMIN_STATE=configured\nNETWORK_FILE=/run/systemd/network/10-eth.network\n")
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 252).len > 0
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 256) == ""
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 257).len > 0
+    check networkdRefusal("net.ipv6.conf.all.forwarding", "0", true, root, 257) == ""
+    createDir(root / "etc/systemd/networkd.conf.d")
+    writeFile(root / "etc/systemd/networkd.conf.d/50-fwd.conf",
+              "[Network]\nIPv4Forwarding=no\n")
+    # networkd.conf decides: masquerade no longer sets the global knob.
+    check networkdRefusal("net.ipv4.ip_forward", "0", true, root, 257) == ""
   test "a per-link key of a link networkd manages is refused, whatever it is":
     createDir(root / "run/systemd/netif/links")
     createDir(root / "sys/class/net/eth0")

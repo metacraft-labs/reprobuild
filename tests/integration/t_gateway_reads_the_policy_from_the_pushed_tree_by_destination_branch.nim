@@ -36,6 +36,7 @@
 import std/[os, osproc, strutils, unittest]
 
 include policy_gate_fixture
+import ./certificate_note_seed
 
 proc wirePolicyGateway(fx: StoreFixture) =
   ## The gateway, wired with the committed-lock source (no record store) and
@@ -63,7 +64,7 @@ proc upstreamRef(fx: StoreFixture; branch: string): string =
 proc noteCertificate(fx: StoreFixture; commit: string; targets: seq[string]) =
   let content = "git-tree-sha1:" & gitOut(fx.libAPath, "rev-parse",
     commit & "^{tree}")
-  check attachCertificate("git", fx.libAPath,
+  check seedCertificateNote("git", fx.libAPath,
     signedCertFor(fx, content, commit, targets = targets)).ok
 
 suite "TC-9c — the gateway reads the policy from the pushed tree":

@@ -15,6 +15,13 @@
 ## prefixes the current generation declares, and a unit file is reached
 ## through its class -- and the fingerprint is unchanged.
 ##
+## Since the compiled-profile pin, a compromised compile is refused before
+## this re-check by its digest (``e2e_addon_compromised_compiler_is_refused``).
+## This gate therefore has the PRODUCER pin exactly what the stand-in emits
+## -- a signed compile that widens the prefixes, say a producer's mistake --
+## so the pin passes and the re-check is the line under test: it holds even
+## for signed compiled text.
+##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=agent-apply-skips-recheck``):
 ## the apply takes the compiled text without its own re-check, and the
 ## ``/etc`` write goes through: red.
@@ -27,6 +34,7 @@
 import std/[json, os, strutils, unittest]
 
 import repro_test_support/reasoned_skip
+import repro_deploy_agent/manifest
 
 import ./addon_testbed
 import ./agent_e2e_support
@@ -38,6 +46,7 @@ const
     "fs.systemFile {\n  path = \"/etc/shadow\"\n  content = \"root::0:0:99999:7:::\n\"\n}\n"
   Cron = "addOn {\n  managedEtcPrefixes = [\"/etc/cron.d/\"]\n}\n\n" &
     "fs.systemFile {\n  path = \"/etc/cron.d/a8-evil\"\n  content = \"* * * * * root touch /run/a8-owned\n\"\n}\n"
+  StandInRevision = "a8-stand-in"
   UnitFile = "fs.systemFile {\n  path = \"/etc/systemd/system/a8-evil.service\"\n" &
     "  content = \"[Service]\nExecStart=/bin/true\n\"\n}\n"
 
@@ -48,8 +57,9 @@ proc compromise(g: Guest; evil: string) =
   g.copyTo(g.runDir / "evil.canonical", "/opt/a8/evil.canonical")
   discard g.run("cat > " & Compiler & " <<'EOS'\n" &
     "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in --canonical-out) c=$2;; " &
-    "--actions-out) a=$2;; esac; shift; done\n" &
-    "cat /opt/a8/evil.canonical > $c\nprintf '[]' > $a\nEOS\nchmod 0755 " &
+    "--actions-out) a=$2;; --revision-out) r=$2;; esac; shift; done\n" &
+    "cat /opt/a8/evil.canonical > $c\nprintf '[]' > $a\n" &
+    "[ -n \"$r\" ] && echo " & StandInRevision & " > $r\nexit 0\nEOS\nchmod 0755 " &
     Compiler & " && chmod 0644 /opt/a8/evil.canonical")
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
@@ -62,7 +72,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                               ("a unit file outside its class", UnitFile, false)]:
     g.compromise(evil)
     discard producer.publish(PublishSpec(sequence: sequence,
-      profileText: "import repro_profile\n# the profile, as source (" & $sequence & ")\n"))
+      profileText: "import repro_profile\n# the profile, as source (" & $sequence & ")\n",
+      compiledProfile: CompiledProfilePin(
+        digest: compiledProfileDigest(evil, "[]"),
+        compilerRevision: StandInRevision, platform: "linux",
+        arch: "x86_64", host: CompileHost)))
     inc sequence
     let t = g.tickUnits()
     discard g.exec("systemctl reset-failed repro-agent-apply.service")

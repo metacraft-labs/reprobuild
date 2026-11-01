@@ -29,6 +29,7 @@
 import std/[os, osproc, strutils, unittest]
 
 include tc8c_store_fixture
+import ./certificate_note_seed
 
 const legacyNotesRef = "refs/notes/reprobuild/certificates"
 
@@ -53,7 +54,7 @@ suite "TC-8c — the gateway finds certificates by the pushed tree":
       b & "^{tree}")
     let certB = issuedCertificate(fx.userRoot, bContent,
       currentPlatformTag()).cert
-    check attachCertificate("git", fx.libAPath, certB).ok
+    check seedCertificateNote("git", fx.libAPath, certB).ok
     # Keyed by the tree: there is no note on the commit itself.
     check execCmdEx(quoteShellCommand(@["git", "-C", fx.libAPath, "notes",
       "--ref", certificateNotesRef, "show", b])).exitCode != 0
@@ -86,7 +87,7 @@ suite "TC-8c — the gateway finds certificates by the pushed tree":
 
     # ---- 4. a misattached note is reported as a carrier fault -------------
     let cTree = gitOut(fx.libAPath, "rev-parse", c & "^{tree}")
-    check attachCertificateRecord("git", fx.libAPath, cTree, certB).ok
+    check seedCertificateRecord("git", fx.libAPath, cTree, certB).ok
     let pushMis = pushToGateway(fx, @["main", notes])
     checkpoint("push misattached: " & pushMis.output)
     check pushMis.code != 0
@@ -109,7 +110,7 @@ suite "TC-8c — the gateway finds certificates by the pushed tree":
     check upstreamTip(fx) == reworded
     # The very same certificate on the shared ref is accepted. (The
     # misattached record from 4 is still on that note, reported and ignored.)
-    check attachCertificate("git", fx.libAPath, certC).ok
+    check seedCertificateNote("git", fx.libAPath, certC).ok
     let pushShared = pushToGateway(fx, @["main", notes])
     checkpoint("push shared ref: " & pushShared.output)
     check pushShared.code == 0

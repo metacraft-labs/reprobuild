@@ -196,7 +196,6 @@ import repro_cli_support/certificate_propagation
 # one.
 from test_certificates/toml as tctoml import nil
 from test_certificates/note_framing as tcnotes import nil
-from test_certificates/notes as tcnotesref import nil
 from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
@@ -12674,6 +12673,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if tarballFallThrough and
           not tarballModeFallsThroughToFromSource(useDef):
         continue
+      if tarballFallThrough:
+        let scopeRefusal = tarballModeHostToolchainRefusal(useDef)
+        if scopeRefusal.len > 0:
+          raise newException(ValueError, scopeRefusal)
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind == rrSiblingMissing:
         continue
@@ -29776,6 +29779,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
+  var publishEdgeSpec = ""
+  var buildTargetTriple = ""
   var buildStrategy = lsDefault
   var strategyGiven = false
   var target = ""
@@ -30110,6 +30115,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       strategyGiven = true
     elif arg == "--print-solved-graph":
       printSolvedGraph = true
+    elif arg.startsWith("--publish="):
+      # CLI/build.md §"Publishing for an appliance": publish this build's
+      # target install mirror under a profile's substitute-only edge key.
+      publishEdgeSpec = arg["--publish=".len .. ^1]
     elif arg == "--target" or arg.startsWith("--target="):
       # ReproOS-Add-On-Mode A15: ``--target=<triple>`` is ``--variant
       # targetTriple=<triple>`` with the spelling canonicalised
@@ -30125,6 +30134,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         except ValueError as e:
           stderr.writeLine("repro build: " & e.msg)
           return 2
+      buildTargetTriple = triple
       if triple.len > 0:
         var existing = getEnv("REPRO_VARIANTS")
         if existing.len > 0:
@@ -30530,6 +30540,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         peerCacheInstaller = peerCacheBuildWiring.installer,
         actionOutcomeSink = actionOutcomeSink,
         graphAugmenter = graphAugmenter).exitCode
+      if result == 0 and publishEdgeSpec.len > 0 and not dryRun and
+          not prepareOnly:
+        let projectRoot =
+          try: projectRootForModule(absolutePath(
+                 parseBuildTarget(target).modulePath))
+          except CatchableError: getCurrentDir()
+        result = publishBuildForProfileEdge(publishEdgeSpec,
+          projectRoot / installMirrorSubpath(), buildTargetTriple,
+          projectRoot / ".repro" / "build" / "publish-state")
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -30625,8 +30644,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # A caller that needs the per-action outcome (certificate issuance) gets a
   # direct build: the daemon protocol carries an exit code and diagnostics,
   # not the engine's per-action results.
+  # `--publish` runs after the build in this process, so it takes the
+  # direct route.
   if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil or
-      graphAugmenter != nil:
+      graphAugmenter != nil or publishEdgeSpec.len > 0:
     return runDirectBuild()
   try:
     return runDaemonBuild()
@@ -54195,6 +54216,16 @@ proc redactUrlUserinfo*(text: string): string =
       result.add(text[authorityStart ..< j])
     i = j
 
+proc pushOutputOneLine*(output: string): string =
+  ## A push's transcript as one line, because a diagnostic is carried as one
+  ## JSON/report field, with URL userinfo redacted (`redactUrlUserinfo`). Blank
+  ## lines are dropped so the join cannot produce "... /  / ...".
+  var kept: seq[string]
+  for raw in output.splitLines():
+    let line = raw.strip()
+    if line.len > 0: kept.add(line)
+  redactUrlUserinfo(kept.join(" / "))
+
 proc pushOutputHookRefusalLines*(output: string): seq[string] =
   ## The lines of a failed push transcript that a REPROBUILD MANAGED HOOK
   ## wrote, rather than the transport.
@@ -54980,13 +55011,7 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
       let attempted = "git push " & target.remote & " HEAD:" &
         target.branch & " failed; verified local lock-only commit retained; "
       let refusal = pushOutputHookRefusalLines(pushRes.output)
-      # One line, because a diagnostic is carried as one JSON/report field.
-      # Blank lines are dropped so the join cannot produce "... /  / ...".
-      var transcriptLines: seq[string]
-      for raw in pushRes.output.splitLines():
-        let line = raw.strip()
-        if line.len > 0: transcriptLines.add(line)
-      let transcript = redactUrlUserinfo(transcriptLines.join(" / "))
+      let transcript = pushOutputOneLine(pushRes.output)
       result.diagnostic =
         if refusal.len > 0:
           attempted & "REFUSED BY THE MANAGED HOOKS of the lock backend " &
@@ -65088,17 +65113,15 @@ proc unmetRemedies*(v: ReprobuildCoverageVerdict): seq[string] =
 # tree. A verifier evaluating commit C looks up the note on ``C^{tree}``.
 # ``refs/notes/reprobuild/certificates`` is neither read nor written any more.
 #
-# reprobuild still WRITES notes on issuance until the reference tool's
-# pre-push hook propagates them from the local store (TC-8i); the switch away
-# is TC-8j (operator decision D12).
+# Reprobuild only READS notes. Issuance writes the local certificate store, and
+# the managed pre-push hook's call into the reference library publishes the
+# store's certificates as notes and pushes them
+# (``repro_cli_support/certificate_propagation``).
 #
 # Several certificates in one note (Transport §3.1): every record is its
 # canonical payload — plus, when signed, one blank line and the signature
 # table — PRECEDED by the line ``# --- test-certificate ---``, the framing the
-# reference tool and every conforming producer share. The writer adds a
-# record by rewriting the note blob verbatim: a new payload is appended, a
-# signed copy replaces an unsigned one in place, a payload already present is
-# not added again, and every other piece is kept byte for byte. The reader
+# reference tool and every conforming producer share. The reader
 # splits on whole delimiter lines; a piece that does not parse is reported
 # and skipped without invalidating its neighbours, and text before the first
 # delimiter — a blob framed some other way — is reported and never parsed.
@@ -65111,9 +65134,8 @@ proc unmetRemedies*(v: ReprobuildCoverageVerdict): seq[string] =
 const
   certificateNotesRef* = "refs/notes/test-certificates/certificates"
     ## The git-notes ref the certificate carrier lives in, shared with the
-    ## reference tool and ``ct test`` (D10). Notes are NOT pushed/fetched by
-    ## default; the push path pushes this ref explicitly and verifiers fetch
-    ## it.
+    ## reference tool and ``ct test``. Notes are NOT pushed/fetched by default;
+    ## the pre-push hook's propagation pushes this ref and verifiers fetch it.
   certificateNoteDelimiter* = tcnotes.NoteDelimiter
     ## The line that PRECEDES every record in a note (Transport §3.1). A
     ## line, not a substring: a value holding the text with escaped newlines
@@ -65176,29 +65198,6 @@ proc gitNoteQuery(gitBin: string;
   gitRunSeparated(gitBin, args, receivedObjectStoreEnv(received),
     exactStdout = true)
 
-proc certificateNoteRecord*(cert: TestCertificate): string =
-  ## One record as it is written into a note (Transport §3.1): the CANONICAL
-  ## PAYLOAD, followed — only when the certificate is signed — by one blank
-  ## line and the ``[certificate.signature]`` table with ``algorithm`` and
-  ## ``value``, in that order. Nothing else. Unlike
-  ## ``serializeCertificateToToml`` it never emits an empty signature table:
-  ## an unsigned record in a note is its payload alone.
-  ##
-  ## Canonical form is what makes the delimiter safe: every line is blank, a
-  ## table header or ``key = value``, and every newline inside a value is
-  ## escaped, so no line of a record can equal ``certificateNoteDelimiter``.
-  result = canonicalCertificatePayload(cert)
-  if cert.isSigned:
-    for value in [cert.signature.algorithm, cert.signature.value]:
-      if not certificateValueIsRepresentable(value):
-        raise newException(CertificateSerializationError,
-          "certificate signature has no canonical form (unescapable " &
-          "control character)")
-    result.add("\n[certificate.signature]\n")
-    result.add("algorithm = \"" &
-      tomlEscapeCert(cert.signature.algorithm) & "\"\n")
-    result.add("value = \"" & tomlEscapeCert(cert.signature.value) & "\"\n")
-
 type
   CertificateNotePiece* = object
     ## One piece of a note blob split on the delimiter (Transport §3.1).
@@ -65221,13 +65220,11 @@ type
       ## why it was skipped.
 
 # THE FRAMING IS THE REFERENCE LIBRARY'S (``test_certificates/note_framing``):
-# splitting on whole delimiter lines (a final line without LF is a line too),
-# the relay writer rule, the LF repair an append makes after an unterminated
-# piece, and the two-note union merge. What stays here is reprobuild's glue:
-# READING each piece through ``readCertificateRecord``, whose classification
-# (retired schema, earlier draft, unimplemented schema, malformed) the
-# library deliberately does not make, and the SIGNING-writer replacement,
-# which the library — a relay by definition (Tooling §1) — has no use for.
+# splitting on whole delimiter lines (a final line without LF is a line too).
+# What stays here is reprobuild's glue: READING each piece through
+# ``readCertificateRecord``, whose classification (retired schema, earlier
+# draft, unimplemented schema, malformed) the library deliberately does not
+# make.
 
 proc splitCertificateNote*(note: string): seq[CertificateNotePiece] =
   ## Split a note blob on lines EQUAL to ``certificateNoteDelimiter`` — never
@@ -65273,109 +65270,6 @@ proc readCertificateNote*(note: string): seq[CertificateNoteEntry] =
     else:
       result.add(CertificateNoteEntry(piece: piece,
         read: readCertificateRecord(piece.text)))
-
-proc addCertificateToNote*(note: string; cert: TestCertificate;
-                           signatureMade = false):
-    tuple[note: string; changed: bool] =
-  ## Add ``cert`` to a note blob as Transport §3.1 requires a writer to:
-  ##
-  ##   * a parsed record whose canonical payload equals ``cert``'s is the
-  ##     same claim, and no second copy is ever added;
-  ##   * as a RELAY (the default): a signed copy replaces the first unsigned
-  ##     record with that payload, but only when no signed copy is present
-  ##     anywhere — a relay cannot tell a valid signature from an invalid
-  ##     one, so it keeps the first signed copy; an unsigned copy never
-  ##     replaces anything;
-  ##   * as the SIGNING writer (``signatureMade``: this caller just made the
-  ##     signature, so it knows it verifies): a signed copy replaces the FIRST
-  ##     matching record, signed or not;
-  ##   * otherwise the record goes after the last piece, behind its own
-  ##     delimiter line — after exactly one LF is added if the blob does not
-  ##     end in one (an unterminated record, corrupt piece, foreign text or a
-  ##     delimiter at EOF), the only change §3.1 permits to existing bytes;
-  ##   * every other piece is kept byte for byte, and a note that is not
-  ##     appended to gets no LF repair.
-  ##
-  ## Raises ``CertificateSerializationError`` when ``cert`` has no canonical
-  ## record form.
-  let record = certificateNoteRecord(cert)
-  let incoming = tcnotes.recordPiece(record)
-  if incoming.kind != tcnotes.pkRecord:
-    raise newException(CertificateSerializationError,
-      "the certificate's note record does not read back as a " &
-      "test-certificate.v1 record: " & incoming.problem)
-  var pieces = tcnotes.splitNote(note)
-  if signatureMade and cert.isSigned:
-    for i, piece in pieces:
-      if piece.kind == tcnotes.pkRecord and
-          piece.payloadSha256 == incoming.payloadSha256:
-        if piece.body == incoming.body:
-          return (note, false)
-        # The replacement ends in LF (canonical records do), so a delimiter
-        # after it stays on its own line.
-        pieces[i] = incoming
-        let updated = tcnotes.renderNote(pieces)
-        return (updated, updated != note)
-  let outcome = tcnotes.addRecord(pieces, incoming)
-  if outcome == tcnotes.aoPresent:
-    return (note, false)
-  let updated = tcnotes.renderNote(pieces)
-  (updated, updated != note)
-
-type
-  NoteMergeReportKind* = enum
-    ## The report categories Transport §3.1 requires of a merge (the
-    ## ``expected.json`` categories of the ``notes/merge-*`` vectors).
-    nmrSignedConflict = "signed-conflict"
-      ## Both sides carry differently signed copies of one payload; the
-      ## published (base) copy was kept.
-    nmrLeadingJoined = "leading-joined"
-      ## Both sides carry different text before the first delimiter; the
-      ## incoming block was joined after the published one.
-    nmrLfRepair = "lf-repair"
-      ## One LF was supplied so that a following delimiter stays on its own
-      ## line (an append after an unterminated piece, an inserted leading
-      ## block or a replacement before a delimiter).
-    nmrOther = "other"
-      ## A remark the pinned library makes that maps to none of the above.
-
-  NoteMergeReport* = object
-    kind*: NoteMergeReportKind
-    message*: string
-
-  CertificateNoteMerge* = object
-    ## The union of two note blobs for the same object.
-    note*: string          ## the merged blob
-    changed*: bool         ## ``note`` differs from the published blob
-    added*: int            ## pieces of the incoming blob appended
-    replaced*: int         ## unsigned published records replaced in place
-    reports*: seq[NoteMergeReport]
-
-proc noteMergeReportKind*(remark: string): NoteMergeReportKind =
-  ## The §3.1 category of one of the library's merge remarks. Matched on the
-  ## remark's wording, which the PINNED library fixes; the conformance walker
-  ## asserts every ``merge-*`` vector's categories through this function, so
-  ## a library bump that rewords a remark fails there instead of silently
-  ## dropping a report.
-  if "published copy was kept" in remark: nmrSignedConflict
-  elif "text before the first delimiter" in remark: nmrLeadingJoined
-  elif "LF" in remark: nmrLfRepair
-  else: nmrOther
-
-proc mergeCertificateNotes*(published, incoming: string): CertificateNoteMerge =
-  ## Transport §3.1 "Merging two notes": ``published`` (the already
-  ## published side, the merge's base) with every piece of ``incoming`` it
-  ## lacks, in incoming order. Deterministic for the ordered inputs; neither
-  ## side is a signing writer, so a signed copy upgrades an unsigned one but
-  ## never replaces a signed one (that tie is reported). Repeating the merge
-  ## with the same ``incoming`` changes nothing. The merge itself is the
-  ## reference library's ``mergeNotes``; this adds the report categories.
-  let merged = tcnotes.mergeNotes(published, incoming)
-  result = CertificateNoteMerge(note: merged.blob, changed: merged.changed,
-    added: merged.added, replaced: merged.replaced)
-  for remark in merged.remarks:
-    result.reports.add(NoteMergeReport(kind: noteMergeReportKind(remark),
-      message: remark))
 
 proc certificateNoteKey*(content: string): tuple[ok: bool; oid, problem: string] =
   ## The object a certificate's note is attached to: the tree its content id
@@ -65579,97 +65473,6 @@ proc readNotedCertificates*(gitBin, repoPath, annotated, notesRef: string;
       result.certs.add(rec.cert)
     result.found.add(FoundCertificate(name: name, read: rec))
 
-proc attachCertificateRecord*(gitBin, repoPath, annotated: string;
-                              cert: TestCertificate; signatureMade = false;
-                              beforePublish: PublishStepHook = nil):
-    tuple[ok: bool; diagnostic: string] =
-  ## Add ``cert`` to the note on ``annotated`` (any object id) under
-  ## ``certificateNotesRef`` in ``repoPath`` (Transport §3.1 —
-  ## ``addCertificateToNote``), so several platforms' certificates accumulate
-  ## on one object without overwriting each other. ``attachCertificate`` is
-  ## the producer's call; this one is the bare carrier operation, which can
-  ## also misattach a record on purpose. ``signatureMade`` asserts this caller
-  ## made the signature. ``beforePublish`` interleaves a concurrent ref update
-  ## in tests; production leaves it nil.
-  ##
-  ## The new blob is stored with ``hash-object`` and attached with
-  ## ``notes add -f -C``, which takes the blob VERBATIM: ``notes append`` and
-  ## ``-m``/``-F`` clean the message up (blank lines, trailing whitespace),
-  ## which would rewrite pieces the writer must keep byte for byte. A note
-  ## that cannot be read is never overwritten.
-  # Build each update against an immutable snapshot, then compare-and-swap
-  # the public ref. A losing relay must re-evaluate the newer signed copy.
-  let (tokenFile, token) = createTempFile("repro-note-cas-", ".tmp")
-  tokenFile.close()
-  removeFile(token)
-  let workRef = "refs/notes/test-certificates-work/" & token.extractFilename
-  defer:
-    discard gitNoteRun(gitBin, ["-C", repoPath, "update-ref", "-d", workRef])
-  for attempt in 0 .. 4:
-    let refRead = gitNoteQuery(gitBin,
-      ["-C", repoPath, "rev-parse", "--verify", "--quiet", certificateNotesRef])
-    if refRead.code notin [0, 1]:
-      return (false, "cannot read certificate notes ref: " & refRead.diagnostic)
-    let old = refRead.output.strip()
-    let current = if old.len > 0:
-      readNoteBlob(gitBin, repoPath, annotated, old)
-      else: GitNoteRead(status: gorAbsent)
-    if current.status == gorUnreadable:
-      return (false, current.diagnostic)
-    let existing = if current.status == gorPresent: current.body else: ""
-    var added: tuple[note: string; changed: bool]
-    try:
-      added = addCertificateToNote(existing, cert, signatureMade)
-    except CertificateSerializationError as err:
-      return (false, err.msg)
-    if not added.changed:
-      return (true, "")
-    discard gitNoteRun(gitBin, ["-C", repoPath, "update-ref", "-d", workRef])
-    if old.len > 0:
-      let seeded = gitNoteRun(gitBin,
-        ["-C", repoPath, "update-ref", workRef, old])
-      if seeded.code != 0: return (false, seeded.output)
-    let (file, blobPath) = createTempFile("repro-cert-note-", ".txt")
-    var oid: string
-    try:
-      file.write(added.note)
-      file.close()
-      let blob = gitNoteRun(gitBin,
-        ["-C", repoPath, "hash-object", "-w", "--", blobPath])
-      oid = blob.output.strip()
-      if blob.code != 0 or oid.len == 0 or not oid.allCharsInSet(HexDigits):
-        return (false, "git hash-object of the note failed: " & blob.output.strip())
-    finally:
-      removeFile(blobPath)
-    let written = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", workRef, "add", "-f", "-C", oid, annotated])
-    if written.code != 0: return (false, written.output)
-    let fresh = gitNoteQuery(gitBin,
-      ["-C", repoPath, "rev-parse", "--verify", workRef])
-    if fresh.code != 0: return (false, fresh.diagnostic)
-    if beforePublish != nil: beforePublish(attempt)
-    let updated = gitNoteRun(gitBin,
-      ["-C", repoPath, "update-ref", certificateNotesRef,
-       fresh.output.strip(), old])
-    if updated.code == 0: return (true, "")
-    let latest = gitNoteQuery(gitBin,
-      ["-C", repoPath, "rev-parse", "--verify", "--quiet", certificateNotesRef])
-    if latest.code notin [0, 1] or latest.output.strip() == old:
-      return (false, "cannot update certificate notes ref: " & updated.output.strip())
-  (false, "certificate notes changed concurrently five times; nothing overwritten")
-
-proc attachCertificate*(gitBin, repoPath: string;
-                        cert: TestCertificate; signatureMade = false):
-    tuple[ok: bool; diagnostic: string] =
-  ## Attach ``cert`` as a git note on the tree its ``content`` names, under
-  ## ``certificateNotesRef`` in ``repoPath``. The tree object need not exist
-  ## in the repository: a verifier computes the id of the state in front of
-  ## it and looks the note up by that id.
-  let key = certificateNoteKey(cert.vcs.content)
-  if not key.ok:
-    return (ok: false, diagnostic: key.problem)
-  attachCertificateRecord(gitBin, repoPath, key.oid, cert, signatureMade)
-
 proc commitTreeOid*(gitBin, repoPath, commit: string;
                     received = ReceivedObjectStore()):
     tuple[ok: bool; tree, diagnostic: string] =
@@ -65701,72 +65504,6 @@ proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
     return NotedCertificates(status: gorUnreadable,
       diagnostic: tree.diagnostic)
   readNotedCertificates(gitBin, repoPath, tree.tree, notesRef, received)
-
-proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
-                                      notesRef: string):
-    seq[TestCertificate] =
-  ## The records noted on ``<commit>^{tree}`` under ``notesRef`` (a ref name
-  ## or a raw notes-commit id), for callers with nothing to do with a failed
-  ## read or a misattached record. Anything that must tell those apart calls
-  ## ``readAttachedCertificatesFrom``.
-  readAttachedCertificatesFrom(gitBin, repoPath, commit, notesRef).certs
-
-proc readAttachedCertificates*(gitBin, repoPath, commit: string):
-    seq[TestCertificate] =
-  ## The records noted on ``<commit>^{tree}`` under ``certificateNotesRef``.
-  ## Misattached and unparseable records are not returned.
-  readAttachedCertificatesFromRef(gitBin, repoPath, commit, certificateNotesRef)
-
-proc pushCertificateNotes*(gitBin, repoPath, remote: string):
-    tuple[ok: bool; pushed: bool; diagnostic: string; remarks: seq[string]] =
-  ## Carry the certificate notes ref to ``remote`` (TC-2: the push path pushes
-  ## ``certificateNotesRef`` explicitly, since notes are not pushed by
-  ## default). Every noted certificate travels in the single ref.
-  ## ``pushed=false`` with ``ok=true`` means there were no certificate notes
-  ## to carry (benign — nothing attached).
-  ##
-  ## The push is the reference library's ``pushNotes`` (Tooling §3 ``notes
-  ## push``): when the remote ref has moved, it fetches it, merges the two
-  ## sides as a UNION (Transport §3.1 — never one side's, the published side
-  ## as the base) and retries with backoff, instead of failing on the first
-  ## non-fast-forward the way a bare ``git push`` did. What the merges
-  ## decided — a signed tie kept, leading text joined, an LF supplied after
-  ## an unterminated piece — comes back in ``remarks``. Hooks run as for any
-  ## push the user asked for (``repro push`` is not itself a hook).
-  ##
-  ## Every git command, the library's included (``PushOptions.gitExe``),
-  ## runs ``gitBin``: the git this push resolved, never another one that
-  ## happens to be first on ``PATH``.
-  let probe = gitNoteRun(gitBin,
-    ["-C", repoPath, "rev-parse", "--verify", "--quiet",
-     certificateNotesRef])
-  if probe.code == 1:
-    # `--verify --quiet` exits 1 exactly when the ref does not exist locally
-    # → nothing attached, nothing to push.
-    return (ok: true, pushed: false, diagnostic: "no certificate notes",
-      remarks: newSeq[string]())
-  if probe.code != 0:
-    # Any other status is git failing to answer (not runnable, not a
-    # repository): that is not "nothing to push", and saying so would let a
-    # broken git hide every certificate this push should have carried.
-    return (ok: false, pushed: false, diagnostic: "could not read " &
-      certificateNotesRef & " with '" & gitBin & "' (exit " &
-      $probe.code & "): " & probe.output.strip(),
-      remarks: newSeq[string]())
-  var options = tcnotesref.defaultPushOptions()
-  options.gitExe = gitBin
-  let sync = tcnotesref.pushNotes(repoPath, remote, certificateNotesRef,
-    options)
-  if not sync.ok:
-    return (ok: false, pushed: false,
-      diagnostic: "git push " & certificateNotesRef & " failed: " &
-        sync.problems.join("; "), remarks: sync.remarks)
-  case sync.outcome
-  of tcnotesref.soNoLocalNotes:
-    (ok: true, pushed: false, diagnostic: "no certificate notes",
-     remarks: sync.remarks)
-  else:
-    (ok: true, pushed: true, diagnostic: "", remarks: sync.remarks)
 
 type
   PushedRefJudgement* = object
@@ -67202,7 +66939,10 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
              certificateNotesRef & ": nothing propagated one. The managed " &
              "pre-push hook carries them from the local certificate store, " &
              "and --no-verify skips it; otherwise push that ref with the " &
-             "branch)"
+             "branch. The hook carries only what a push introduces, so for a " &
+             "commit the remote or a remote-tracking ref already has, run " &
+             "'test-certificates notes publish <commit>' and " &
+             "'test-certificates notes push <remote>' first)"
          else: "") &
         (if verdict.outcome == voNotCovered and remedies.len > 0:
            " — " & remedies.join("; ") else: "")
@@ -71719,12 +71459,6 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
 #     RA-27's executor only fast-forwards, so the genuine upstream-integration
 #     step is push-owned per CLI/push.md §"--sync flavor").
 
-# TC-2: ``pushCertificateNotes`` (the certificate-notes carrier) is now
-# DEFINED earlier in this module (the certificate schema/verifier/transport
-# block was relocated above the RA-21 pre-push gate so the TC-3/RA-32
-# coverage stage can call the TC-1 verifier + TC-2 reader). ``executePush``
-# below calls it directly — no forward declaration is needed.
-
 type
   PushSyncMode = enum
     psmNone        ## no ``--sync`` — reconcile nothing, just push the closure.
@@ -71741,8 +71475,8 @@ type
       ## resolved to a declared repo NAME to seed the closure.
     syncMode: PushSyncMode
     certify: bool
-      ## ``--certify`` (default true): obtain/attach the test certificate.
-      ## The actual obtain+attach is the TC (test-certificate) campaign's
+      ## ``--certify`` (default true): obtain the test certificate.
+      ## Obtaining it is the TC (test-certificate) campaign's
       ## job and is NOT wired yet, so this is an honest documented no-op
       ## (see ``runPushCertifyStub``). ``--no-certify`` skips it entirely.
     toolProvisioning: ToolProvisioningMode
@@ -71763,6 +71497,9 @@ type
     outcome: PushRepoOutcome
     diagnostic: string
     remediation: string
+    notices: seq[string]
+      ## What this member's push said about its certificates, and what it did not
+      ## carry. Informational: none of it changes the outcome.
 
   PushSyncResult = object
     ## One closure member's ``--sync`` reconcile outcome. ``integrated`` is
@@ -71786,14 +71523,6 @@ type
     syncResults: seq[PushSyncResult]
     repos: seq[PushRepoResult]
     certifyDeferred: bool       ## ``--certify`` requested but TC path not wired.
-    certNotesPushed: seq[string]
-      ## TC-2: repo paths whose attached certificate notes
-      ## (``certificateNotesRef``) were carried to the upstream.
-    certNotesDiagnostic: string ## TC-2: a non-fatal note-push diagnostic.
-    certNotesRemarks: seq[string]
-      ## What the notes push decided while merging a moved remote notes ref
-      ## (Transport §3.1): a signed tie kept, leading text joined, an LF
-      ## supplied after an unterminated piece. Informational.
     lockPublished: bool
     lockDiagnostic: string
     stoppedRepo: string
@@ -72175,17 +71904,19 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     result.integrated = true
 
 proc runPushCertifyStub(report: var PushReport; certify: bool) =
-  ## RA-25 certify FLAG + pipeline slot. The certificate obtain+attach is the
+  ## RA-25 certify FLAG + pipeline slot. Obtaining the certificate is the
   ## TC (test-certificate) campaign's deliverable and is NOT wired here yet:
   ## this is the HONEST place in the pipeline where certification would run.
   ## ``--certify`` (default) records that the step is deferred (the push
-  ## relies on whatever certificates are already attached); ``--no-certify``
-  ## skips even that. We NEVER fake running tests or attaching a certificate.
+  ## relies on whatever certificates are already in the local store);
+  ## ``--no-certify`` skips even that. We NEVER fake running tests or issuing a
+  ## certificate.
   if certify:
     report.certifyDeferred = true
     stderr.writeLine("repro push: certification is not wired yet " &
       "(deferred to the test-certificate campaign); this push relies on " &
-      "whatever certificates are already attached. Use --no-certify to " &
+      "whatever certificates are already in the local store. Use " &
+      "--no-certify to " &
       "silence this notice.")
   else:
     report.certifyDeferred = false
@@ -72884,6 +72615,28 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
   result.ok = true
   result.verifiedLocalHead = localOid
 
+proc uncarriedCertificateNotice(identity: GitToolIdentity; repoAbs, headSha,
+                                remote: string): string =
+  ## What to say about a member that is already published: it is not pushed, so
+  ## no hook runs for it (Tooling §4.2), and a certificate issued since then is
+  ## still only in the store. Empty when there is nothing to say. Never fails the
+  ## push: a note or tree that cannot be read just yields no notice.
+  let tree = revParse(identity, repoAbs, headSha & "^{tree}")
+  if tree.len == 0:
+    return ""
+  let note = readNoteBlob(identity.binaryPath, repoAbs, tree,
+    certificateNotesRef)
+  if note.status == gorUnreadable:
+    return ""
+  let missing = storedCertificatesNotInNote(formatContentId(
+    if tree.len == 64: caGitTreeSha256 else: caGitTreeSha1, tree), note.body)
+  if missing == 0:
+    return ""
+  $missing & " stored certificate(s) for this content are not in the local " &
+    "notes, and an already-published member runs no hook. To carry them: " &
+    "test-certificates notes publish " & headSha &
+    " && test-certificates notes push " & remote
+
 proc executePush(args: PushArgs): PushReport =
   result.workspaceRoot = args.workspaceRoot
   result.syncMode =
@@ -73029,23 +72782,6 @@ proc executePush(args: PushArgs): PushReport =
   let recordStoreRoot = pickRecordStoreRoot(WorkspaceLockArgs(
     workspaceRoot: args.workspaceRoot,
     toolProvisioning: args.toolProvisioning), workspaceLocal)
-
-  # TC-2: carry the certificate notes ref of a closure member to its upstream.
-  # Runs whether the member was just PUSHED or was already-published (a
-  # developer may issue + attach a certificate for an already-published commit
-  # and run ``repro push`` purely to ship the attestation). Best-effort: a
-  # note-push failure is reported but never fails the branch publication.
-  proc carryCertNotes(report: var PushReport;
-                      gitBin, repoAbs, repoPath, remoteName: string) =
-    let notePush = pushCertificateNotes(gitBin, repoAbs, remoteName)
-    for remark in notePush.remarks:
-      report.certNotesRemarks.add(repoPath & ": " & remark)
-    if notePush.pushed:
-      report.certNotesPushed.add(repoPath)
-    elif not notePush.ok:
-      if report.certNotesDiagnostic.len > 0:
-        report.certNotesDiagnostic.add("; ")
-      report.certNotesDiagnostic.add(repoPath & ": " & notePush.diagnostic)
 
   # ---- 1. complete read-only preflight -----------------------------------
   # Predictable checkout, hook, cleanliness, and divergence failures are
@@ -73244,41 +72980,6 @@ proc executePush(args: PushArgs): PushReport =
         result.exitCode = 2
         return
 
-  var sourceComponentPeers = initTable[string, seq[string]]()
-  for component in pushComponents(resolved.repos, closure):
-    if component.len > 1:
-      for member in component: sourceComponentPeers[member] = component
-  var carriedComponents = initHashSet[string]()
-  template carrySourceNotes(sourceName, sourceAbs, sourcePath,
-      sourceRemote: untyped) =
-    # A notes-only push has no provisional source authority. Wait until the
-    # entire component is actually published, then transport its notes through
-    # the ordinary gate before moving on to dependent components. Published
-    # prefix members on retry take part too, so no notes are stranded.
-    if sourceName in sourceComponentPeers:
-      let peers = sourceComponentPeers[sourceName]
-      var ready = true
-      for peer in peers:
-        if not preflight[peer].published: ready = false
-      if ready and peers[0] notin carriedComponents:
-        for peer in peers:
-          let peerRepo = byName[peer]
-          let stable = revalidatePushRepo(identity, args.workspaceRoot,
-            peerRepo, preflight[peer])
-          if not stable.ok:
-            if result.certNotesDiagnostic.len > 0:
-              result.certNotesDiagnostic.add("; ")
-            result.certNotesDiagnostic.add(peerRepo.path &
-              ": certificate notes not carried: " & stable.diagnostic)
-            continue
-          carryCertNotes(result, identity.binaryPath,
-            args.workspaceRoot / peerRepo.path, peerRepo.path,
-            preflight[peer].remoteName)
-        carriedComponents.incl(peers[0])
-    else:
-      carryCertNotes(result, identity.binaryPath, sourceAbs, sourcePath,
-        sourceRemote)
-
   # ---- 3. closure push in topological order ------------------------------
   # Walk dependency-first. A dirty/divergent member STOPS the push with an
   # actionable {offender, remedy} diagnostic (never silently discarded). A
@@ -73307,10 +73008,11 @@ proc executePush(args: PushArgs): PushReport =
       return
     if observed.published:
       entry.outcome = proAlreadyPublished
+      let uncarried = uncarriedCertificateNotice(identity, repoAbs, entry.headSha,
+        rName)
+      if uncarried.len > 0:
+        entry.notices.add(uncarried)
       result.repos.add(entry)
-      # TC-2: ship any attached certificates even though the commit is already
-      # published (the cert may have been issued/attached after the push).
-      carrySourceNotes(name, repoAbs, repo.path, rName)
       continue
     if entry.branch.len == 0:
       # Unpublished work on a detached HEAD: we have no branch to push. STOP
@@ -73428,11 +73130,22 @@ proc executePush(args: PushArgs): PushReport =
         discardHookCapability(identity.binaryPath, repoAbs, token)
     if pushRes.code != 0:
       entry.outcome = proFailed
+      # What the remote or a hook said is the only explanation there is, a
+      # gateway's refusal included. The credential concern is a URL's userinfo,
+      # and `pushOutputOneLine` redacts that.
+      let transcript = pushOutputOneLine(pushRes.output)
       entry.diagnostic = "git push " & rName & " HEAD:" & entry.branch &
-        " failed in " & repo.path &
-        "; transport output was withheld because remotes may contain credentials"
-      entry.remediation = "resolve the push failure in " & repo.path &
-        " (fetch + reconcile, then re-run 'repro push --sync')"
+        " failed in " & repo.path & (
+          if transcript.len > 0: "; git said: " & transcript
+          else: "; git wrote nothing to explain the failure")
+      let lostRace = pushOutputIsNonFastForward(pushRes.output)
+      entry.remediation =
+        if lostRace:
+          "resolve the push failure in " & repo.path &
+            " (fetch + reconcile, then re-run 'repro push --sync')"
+        else:
+          "resolve what git reported above in " & repo.path &
+            ", then re-run 'repro push'"
       result.repos.add(entry)
       result.stoppedRepo = repo.name
       result.stoppedStage = "source-push"
@@ -73448,10 +73161,14 @@ proc executePush(args: PushArgs): PushReport =
         if localHead.len > 0:
           localHeads.add(plan.root & "@" & localHead)
       result.verifiedLocalBackendHead = localHeads.join(", ")
-      result.retryCommand = "repro push --sync --rebase"
+      result.retryCommand =
+        if lostRace: "repro push --sync --rebase" else: "repro push"
       result.exitCode = 1
       return
     entry.outcome = proPushed
+    for line in pushRes.output.splitLines():
+      if line.startsWith(certificatePropagationReportPrefix):
+        entry.notices.add(redactUrlUserinfo(line))
     result.repos.add(entry)
     if members.len > 0:
       # The next component member must see the prefix that actually landed,
@@ -73471,13 +73188,8 @@ proc executePush(args: PushArgs): PushReport =
         result.exitCode = 2
         return
       preflight[name] = refreshed.observed
-    # TC-2: carry any certificates attached to the just-pushed commits to the
-    # SAME upstream by pushing the certificate notes ref alongside the branch.
-    # Notes are not pushed by default, so this is the explicit step that makes
-    # the attestations travel.
-    carrySourceNotes(name, repoAbs, repo.path, rName)
 
-  # ---- 4. certificate slot (FLAG only; obtain+attach deferred to TC) -----
+  # ---- 4. certificate slot (FLAG only; obtaining one is deferred to TC) ---
   runPushCertifyStub(result, args.certify)
 
   # ---- 5. final lock completion (verify/recover only; never write) -------
@@ -73563,18 +73275,11 @@ proc renderPushTextLines(report: PushReport): seq[string] =
     result.add(line)
     if entry.remediation.len > 0:
       result.add("    remedy: " & entry.remediation)
+    for notice in entry.notices:
+      result.add("    " & notice)
   if report.certifyDeferred:
     result.add("repro push: certification deferred to the " &
       "test-certificate campaign (not wired yet)")
-  if report.certNotesPushed.len > 0:
-    result.add("repro push: carried certificate notes " &
-      "(" & certificateNotesRef & ") for " &
-      report.certNotesPushed.join(", "))
-  if report.certNotesDiagnostic.len > 0:
-    result.add("repro push: certificate-notes carry warning — " &
-      report.certNotesDiagnostic)
-  for remark in report.certNotesRemarks:
-    result.add("repro push: certificate notes: " & remark)
   if report.lockDiagnostic.len > 0:
     result.add("repro push: " & report.lockDiagnostic)
   if report.stoppedStage.len > 0:
@@ -73620,11 +73325,10 @@ proc toJsonNode(report: PushReport): JsonNode =
       of proFailed: "failed")
     o["diagnostic"] = %entry.diagnostic
     o["remediation"] = %entry.remediation
+    o["notices"] = %entry.notices
     repos.add(o)
   result["repos"] = repos
   result["certifyDeferred"] = %report.certifyDeferred
-  result["certNotesPushed"] = %report.certNotesPushed
-  result["certNotesDiagnostic"] = %report.certNotesDiagnostic
   result["lockPublished"] = %report.lockPublished
   result["lockDiagnostic"] = %report.lockDiagnostic
   result["stoppedRepo"] = %report.stoppedRepo
@@ -86434,27 +86138,6 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
     stderr.writeLine("repro test: " & delivered.retentionProblem)
   for problem in delivered.pruned.errors:
     stderr.writeLine("repro test: local certificate store prune: " & problem)
-  # Until the carrier switch (D12), the certificate also travels as a note on
-  # the shared ref, keyed by the tree its content names; a certificate
-  # already noted there is not appended twice.
-  let gitBin = findExe("git")
-  let noteKey = certificateNoteKey(cert.vcs.content)
-  if gitBin.len == 0 or not noteKey.ok:
-    stderr.writeLine("repro test: certificate for '" & name & "' is in the " &
-      "local store but was not noted: " &
-      (if gitBin.len == 0: "git not found on PATH" else: noteKey.problem))
-  else:
-    var alreadyNoted = false
-    for existing in readAttachedCertificates(gitBin, pre.repository,
-        noteKey.oid):
-      if existing.signature.value == cert.signature.value:
-        alreadyNoted = true
-    if not alreadyNoted:
-      let att = attachCertificate(gitBin, pre.repository, cert, signatureMade = true)
-      if not att.ok:
-        stderr.writeLine("repro test: certificate for '" & name & "' is in " &
-          "the local store but attaching it as a git note failed: " &
-          att.diagnostic)
   if certificateOut.len > 0:
     writeCertificateFile(cert, certificateOut)
   stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
@@ -87552,25 +87235,6 @@ proc runCertifyCheckSet*(args: openArray[string];
     for problem in lookup.problems:
       stderr.writeLine("repro certify --check-set: " & problem)
     return 2
-  # Attach once, keyed by the tree its content names on the shared notes ref
-  # (D10, D12): a re-certify that was a no-op must not append a duplicate.
-  let noteKey = certificateNoteKey(cert.vcs.content)
-  if not noteKey.ok:
-    stderr.writeLine("repro certify --check-set: certificate issued at " &
-      certPath & " but its content id names no tree to note it on: " &
-      noteKey.problem)
-    return 1
-  var alreadyAttached = false
-  for existing in readAttachedCertificates(gitBin, currentRepo, noteKey.oid):
-    if existing.signature.value == cert.signature.value:
-      alreadyAttached = true
-  if not alreadyAttached:
-    let att = attachCertificate(gitBin, currentRepo, cert)
-    if not att.ok:
-      stderr.writeLine("repro certify --check-set: certificate issued at " &
-        certPath & " but attaching it as a git note failed: " &
-        att.diagnostic)
-      return 1
   stderr.writeLine("repro certify --check-set: content " &
     cert.vcs.content & " is certified for '" & checkSetTarget & "' on " &
     cert.platform &
@@ -87597,9 +87261,10 @@ proc runCertifyCheckSet*(args: openArray[string];
 # a CI workflow runs `repro ci plan --platform=$RUNNER_PLATFORM --json`, runs the
 # `run` target set (e.g. `repro test --certify <run targets>`), skips the `skip`
 # set, and — on green — the issuance path (already wired into `repro test`)
-# writes + signs a certificate covering the run set for the platform, which the
-# workflow attaches with `repro push` so a green CI run is itself a presentable
-# certificate. The `.github/workflows/*.yml` that glues these calls together is
+# writes + signs a certificate covering the run set for the platform into the
+# local store, and the workflow's next push carries it through the managed
+# pre-push hook, so a green CI run is itself a presentable certificate. The
+# `.github/workflows/*.yml` that glues these calls together is
 # EXTERNAL (CI-runner-specific) and intentionally NOT shipped here — the
 # hermetically-testable decision + issuance core is complete and the YAML is the
 # honest deferral.

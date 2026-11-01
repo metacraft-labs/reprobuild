@@ -33,6 +33,7 @@ import repro_peer_cache/auth as peerAuth
 import ./fingerprint
 import ./generation0
 import ./host_exec
+export host_exec.systemdMajor
 import ./linux_fs
 import ./mutations
 import ./store_root
@@ -252,13 +253,6 @@ proc firstLine(path: string): string =
     result = readFile(path).splitLines()[0].strip()
   except IOError, OSError, IndexDefect:
     result = ""
-
-proc systemdMajor*(versionOutput: string): int =
-  ## ``systemd 257 (257.8-1~deb13u2)`` -> 257; 0 when unparsable.
-  let f = versionOutput.splitLines()[0].splitWhitespace()
-  if f.len >= 2 and f[0] == "systemd":
-    try: return parseInt(f[1]) except ValueError: discard
-  0
 
 proc fstabRootOptions*(text: string): string =
   ## The options field of the fstab entry for ``/``, "" if none.
@@ -586,6 +580,26 @@ proc isAddressLiteral(host: string): bool =
   except ValueError:
     false
 
+proc profileCompilerProblem*(compiler: string; timeoutSec = 120): string =
+  ## Why ``compiler`` (the configured profile compiler) could not compile a
+  ## profile on this host, or "": it is asked which Nim and which C
+  ## compiler it would use (``deploy-agent compile-profile
+  ## --probe-c-compiler``), with the host tools' fixed environment, which
+  ## is what the fetch unit's compile sees (§13 decision 31: the C compiler
+  ## is the base's, or the one the engine carries). A compiler that is not
+  ## there yet is not judged: a test bed installs its stand-in after the
+  ## bootstrap, and an operator may install the engine afterwards.
+  if not fileExists(compiler):
+    return ""
+  try:
+    let r = runHostTool([compiler, "deploy-agent", "compile-profile",
+                         "--probe-c-compiler"], timeoutSec = timeoutSec)
+    if r.exitCode != 0:
+      return r.output.strip()
+  except CatchableError as e:
+    return e.msg
+  ""
+
 proc resolveAgentInputs*(target: string; sources: seq[string];
                          cacheUrl, profileCompiler: string): AgentUnitsInputs =
   ## The deploy agent's part of generation 0. Every origin -- each manifest
@@ -603,6 +617,15 @@ proc resolveAgentInputs*(target: string; sources: seq[string];
       "path without spaces: " & profileCompiler)
   result.target = target
   result.profileCompiler = profileCompiler
+  if profileCompiler.len > 0:
+    # §13 decision 31: a host that compiles profiles needs a Nim and a C
+    # compiler the fetch unit's compile can find.
+    let problem = profileCompilerProblem(profileCompiler)
+    if problem.len > 0:
+      raise newException(ValueError, "--profile-compiler " &
+        profileCompiler & " cannot compile a profile on this host: " &
+        problem & " (a host that compiles profiles needs a C compiler: " &
+        "install one from the distribution, such as gcc)")
   var origins = sources
   if cacheUrl.len > 0: origins.add(cacheUrl)
   for src in sources:

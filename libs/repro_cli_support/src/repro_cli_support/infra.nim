@@ -41,10 +41,17 @@ import repro_infra/addon_diagnostics
 when defined(linux):
   import repro_addon/addon_apply as addon_apply
   import repro_addon/cli as addon_cli
+  import repro_addon/addon_secrets as addon_secrets
+  import repro_addon/full_host_secrets
+  import repro_addon/locked_buffer
+  import repro_addon/secrets_ops as addon_secrets_ops
+  import repro_addon/switch as addon_switch
 import repro_infra/host_base
 import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
 from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
+from repro_binary_cache_client/cli_dispatch import loadProducerKeypair, defaultCacheUrl
+from repro_project_dsl/target_platform import consumerPlatformForTarget
 
 # ---------------------------------------------------------------------------
 # M83 Phase D + F3: compile-then-adapt path for `system.nim` profiles.
@@ -770,6 +777,111 @@ proc runInfraCacheKeys(args: openArray[string]): int =
   stdout.write(renderCacheKeys(actions, platform))
   return 0
 
+proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
+                                 stateDir: string): int =
+  ## `repro build --publish=<profile>#<edge>` (CLI/build.md §"Publishing for
+  ## an appliance"): compile `<profile>` as `cache-keys` does, find the
+  ## substitute-only build-action edge `<edge>`, derive the key an apply on
+  ## the consuming platform of `targetTriple` (the build host's when empty)
+  ## looks it up under -- the same `buildActionCacheIdentity` derivation
+  ## `cache-keys` prints -- and publish the build's install mirror there.
+  ## The publication object check runs inside `publishInProcess`. Returns
+  ## the exit code; 2 for a refusal about the inputs.
+  const who = "repro build --publish"
+  let hash = spec.rfind('#')
+  if hash <= 0 or hash == spec.high:
+    stderr.writeLine(who & ": expected <profile.nim>#<edge-id>, got '" &
+      spec & "'")
+    return 2
+  let profilePath = absolutePath(spec[0 ..< hash])
+  let edgeId = spec[hash + 1 .. ^1]
+  if not fileExists(profilePath):
+    stderr.writeLine(who & ": no system profile at " & profilePath)
+    return 2
+  createDir(stateDir)
+  setStateDirOverride(stateDir)
+  var profileText: string
+  var actions: seq[ProfileBuildAction]
+  if not resolveSystemProfileText(profilePath, readFile(profilePath),
+      stateDir, who, profileText, planCommand = who,
+      outBuildActions = addr actions):
+    return 1
+  var found = -1
+  var ids: seq[string]
+  for i, action in actions:
+    ids.add(action.id)
+    if action.id == edgeId: found = i
+  if found < 0:
+    stderr.writeLine(who & ": the profile " & profilePath & " has no " &
+      "build-action edge '" & edgeId & "'; its edges: " &
+      (if ids.len > 0: ids.join(", ") else: "(none)"))
+    return 2
+  let action = actions[found]
+  if not action.substituteOnly:
+    stderr.writeLine(who & ": edge '" & edgeId & "' is not substitute-only: " &
+      "the host it belongs to builds it, so a producer does not publish " &
+      "for it (declare it `substituteOnly` to publish for it)")
+    return 2
+  if not bc_actions.isSubstitutable(action):
+    stderr.writeLine(who & ": edge '" & edgeId & "' is not substitutable: " &
+      "an output is not under its cwd")
+    return 2
+  let rels = bc_actions.outputRelPaths(action)
+  var prefix = ""
+  for candidate in [mirrorRoot, mirrorRoot / "usr"]:
+    var all = dirExists(candidate)
+    for rel in rels:
+      if rel.len > 0 and not (fileExists(candidate / rel) or
+          dirExists(candidate / rel)):
+        all = false
+    if all:
+      prefix = candidate
+      break
+  if prefix.len == 0:
+    stderr.writeLine(who & ": the build's install mirror " & mirrorRoot &
+      " does not hold edge '" & edgeId & "''s outputs (" & rels.join(", ") &
+      ") at the mirror or under its usr/")
+    return 2
+  let platform =
+    if targetTriple.len > 0: consumerPlatformForTarget(targetTriple)
+    else: bc_actions.localPlatformTriple(stateDir)
+  let idy = bc_actions.buildActionCacheIdentity(action, platform)
+  let key = deriveCacheEntryKeyHex(idy)
+  let keypair =
+    try: loadProducerKeypair()
+    except ValueError as e:
+      stderr.writeLine(who & ": " & e.msg)
+      return 2
+  # The profile pins the bytes (`expectedOutputDigest`), and the apply
+  # refuses an entry that digests otherwise, so a mismatch is refused here,
+  # before the upload, rather than published as an entry nothing can use.
+  const digestPrefix = "blake3:"
+  let pinned = action.expectedOutputDigest
+  if pinned.len > 0 and not pinned.startsWith(digestPrefix):
+    stderr.writeLine(who & ": edge '" & edgeId & "' pins " & pinned &
+      ", which is not a blake3:<hex> digest")
+    return 2
+  let res = publishInProcess(PublishInProcessRequest(entryKeyHex: key,
+    prefixDir: prefix, identity: idy, endpoint: defaultCacheUrl(),
+    keypair: keypair,
+    expectedRawDigestHex: pinned.substr(digestPrefix.len)))
+  if not res.ok:
+    if pinned.len > 0 and res.rawArchiveDigestHex.len > 0 and
+        pinned != digestPrefix & res.rawArchiveDigestHex:
+      stderr.writeLine(who & ": the profile pins edge '" & edgeId & "' to " &
+        pinned & ", but " & prefix & " digests to blake3:" &
+        res.rawArchiveDigestHex & "; nothing is published. If this build " &
+        "is the one the appliance should run, set the edge's " &
+        "expectedOutputDigest to that value and publish again")
+    else:
+      stderr.writeLine(who & ": " & res.error)
+    return (if res.statusCode == 0: 2 else: 1)
+  echo "published " & key & " for " & profilePath.extractFilename & "#" &
+    edgeId & " (" & platform.cpu & "/" & platform.os & "/" & platform.abi &
+    "/" & platform.libcVariant & ") from " & prefix
+  echo "output-digest blake3:" & res.rawArchiveDigestHex
+  0
+
 proc runInfraApply(args: openArray[string]): int =
   let (flags, positional) = parseInfraFlags(args)
   let stateDir = (if flags.stateDir.len > 0: flags.stateDir
@@ -878,6 +990,34 @@ proc runInfraApply(args: openArray[string]): int =
         stderr.writeLine("repro infra apply: " & e.msg)
         return 1
 
+  # A host realised in full materialises the profile's secrets itself
+  # (ReproOS Add-On Mode §10.3, as a full host has them): from the latest
+  # envelope, through the add-on's secrets library, before any unit the
+  # apply starts loads them, refusing before anything is applied when one
+  # cannot be served. The units whose secrets changed are restarted after
+  # the apply if it did not restart them already.
+  var secretConsumers: seq[string]
+  when defined(linux):
+    let fullProfile = parseSystemProfile(profileText)
+    let layout = addon_secrets.defaultSecretsLayout()
+    if fullProfile.secretFiles.len > 0 or
+        addon_secrets_ops.hostHasSecrets(layout):
+      let nr = addon_secrets_ops.reexecInNoSwapScope()
+      if nr >= 0: return nr
+      var changed: seq[string]
+      try:
+        changed = materialiseFullHostSecrets(layout, fullProfile.secretFiles)
+      except CatchableError as e:
+        stderr.writeLine("repro infra apply: secrets: " & e.msg)
+        return 1
+      var units: seq[tuple[name: string; credentials: seq[string]]]
+      for r in fullProfile.resources:
+        if r.kind == srkSystemdSystemUnit:
+          units.add((r.suName, r.suCredentials))
+      secretConsumers = consumersOf(units, changed)
+      if changed.len > 0:
+        echo "  secrets      : materialised for " & changed.join(", ")
+
   var opts: ApplyOptions
   opts.stateDir = stateDir
   opts.hostIdentity = host
@@ -941,6 +1081,17 @@ proc runInfraApply(args: openArray[string]): int =
     echo "  - " & d
   if applyResult.driftCount > 0 or applyResult.errorCount > 0:
     return 1
+  # A unit whose secrets changed reads them only at start: restart it if
+  # it runs (`try-restart` leaves a stopped unit stopped).
+  when defined(linux):
+    for unit in secretConsumers:
+      try:
+        addon_switch.tryRestartUnit(unit)
+      except CatchableError as e:
+        stderr.writeLine("repro infra apply: restarting " & unit &
+          " for its changed secrets failed: " & e.msg)
+        return 1
+      echo "  restarted    : " & unit & " (its secrets changed)"
   if applyResult.skippedCount > 0:
     # Partial success — the non-privileged subset applied, the
     # privileged ones were skipped.
@@ -1473,6 +1624,18 @@ proc runSystemCommand*(args: seq[string]): int =
           return addon_cli.runAddonRollbackCli(rest)
       return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
+    of "secret":
+      # `repro system secret put --service S --name N [--target T]`: an
+      # add-on host's verb is `repro system addon secret put`, which this
+      # hands over to; a host realised in full seals into its one envelope
+      # (`full_host_secrets`), materialised by the next `repro infra apply`.
+      when defined(linux):
+        if addon_apply.isAddonHost(resolveSystemStateDir()):
+          return addon_cli.runAddonCli(@["secret"] & rest)
+        return runFullHostSecretPutCli(rest)
+      else:
+        stderr.writeLine("repro system secret: supported only on Linux")
+        return 2
     of "addon":
       when defined(linux):
         return addon_cli.runAddonCli(rest)

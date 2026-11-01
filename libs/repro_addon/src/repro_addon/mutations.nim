@@ -167,6 +167,18 @@
 ##                                            re-check keeps in place is
 ##                                            still stopped with the plan's
 ##                                            transitions
+## ``apply-prints-reviewed-plan``            (with the pause seam) the
+##                                            apply prints the reviewed
+##                                            plan's transition list, not
+##                                            the one steps 2 and 7 ran
+##                                            after the re-check kept a
+##                                            removed unit
+## ``upholder-not-planned``                   the planner ignores
+##                                            ``UpheldBy=``: an active
+##                                            upholder is neither paused
+##                                            around the unit, nor the
+##                                            unit's own uphold link
+##                                            removed first, nor refused
 ## ``secrets-on-disk``                        secrets are materialised under
 ##                                            ``/var/lib/repro/secrets`` (the
 ##                                            root filesystem) and the tmpfs
@@ -278,6 +290,20 @@
 ##                                            aliases not resolved
 ## ``floor-only-on-confirm``                  the rollback floor bounds only
 ##                                            confirmation failures
+## ``retargeted-address-accepted``           a resource whose address now
+##                                            names another unit or path is
+##                                            applied, leaving the old one
+##                                            running and unledgered (A12)
+## ``addon-unit-renders-differently``         every unit the add-on writes
+##                                            gains one comment line, so
+##                                            its bytes differ from the
+##                                            full realisation's (A12)
+## ``confirm-overruns-deadline``              the confirm step keeps
+##                                            probing for twice
+##                                            ``confirmTimeout`` before it
+##                                            gives up, so a failing or
+##                                            hanging check holds the
+##                                            switch past its deadline
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -287,6 +313,13 @@ from repro_deploy_agent/agent_mutations import KnownAgentMutations
 const
   AddonMutation* {.strdefine: "reproAddonMutation".} = ""
   KnownAddonMutations* = ["uninstall-skips-diversion-removal",
+                          # Not a falsifier: a failure injected once
+                          # (while /var/tmp/repro-addon-fail-before-ledger
+                          # exists) after the flip and before the ledger
+                          # is written, so a gate drives the automatic
+                          # revert of a switch whose ledger copy still
+                          # describes the previous generation.
+                          "switch-fails-before-ledger",
                           "bootstrap-installs-jq", "preflight-writes",
                           "recipient-key-0644", "provisions-publisher-key",
                           "apply-skips-kind-check",
@@ -316,12 +349,17 @@ const
                           "refused-recovery-forgets-marker",
                           "secrets-after-recovery",
                           "kept-units-still-stopped",
+                          "apply-prints-reviewed-plan",
+                          "upholder-not-planned",
                           "secrets-on-disk",
                           "secrets-on-tmpfs",
                           "secrets-single-retained-envelope",
                           "credentials-not-planned",
                           "rotation-not-reconciled",
                           "secrets-plaintext-swappable",
+                          # Milestone A12: the parity gate's falsifying build.
+                          "addon-unit-renders-differently",
+                          "retargeted-address-accepted",
                           "secrets-plaintext-unlocked",
                           "replay-reverts-on-secrets",
                           "retirement-not-resumed",
@@ -355,7 +393,10 @@ const
                           "agent-install-trusts-cwd",
                           "agent-dns-via-resolved",
                           "agent-management-path-names-only",
-                          "floor-only-on-confirm"]
+                          "floor-only-on-confirm",
+                          # Milestone A5: the confirm-or-revert gate's
+                          # timing falsifier.
+                          "confirm-overruns-deadline"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
@@ -369,6 +410,7 @@ template mutated*(name: static string): bool =
 
 const TestPauseSeam* = AddonMutation in ["pause-before-write",
                                          "pause-before-write-no-recheck",
-                                         "kept-units-still-stopped"]
+                                         "kept-units-still-stopped",
+                                         "apply-prints-reviewed-plan"]
   ## The write-time re-check gate's pause seam is compiled in (a test-only
   ## build; see the table above). False in every product build.

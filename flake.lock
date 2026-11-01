@@ -2871,17 +2871,17 @@
     "test-certificates-tools-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793454285,
-        "narHash": "sha256-sIjVph9UdQtE1VxY62OkVNuixWp9VkOIh//nWnnk/uQ=",
+        "lastModified": 1793471164,
+        "narHash": "sha256-wQgxkcxoMWOxSYwsyCeCiaLrHXmJX8sVXkWtCBXOCNo=",
         "owner": "metacraft-labs",
         "repo": "test-certificates-tools",
-        "rev": "ddc6b18ee2987ca0fff177f51133eb3eadc9fc2a",
+        "rev": "40e62089e8d157ff0fb6f1eeb2cf331f274234b7",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "test-certificates-tools",
-        "rev": "ddc6b18ee2987ca0fff177f51133eb3eadc9fc2a",
+        "rev": "40e62089e8d157ff0fb6f1eeb2cf331f274234b7",
         "type": "github"
       }
     },

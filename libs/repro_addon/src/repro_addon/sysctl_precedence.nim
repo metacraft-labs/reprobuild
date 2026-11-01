@@ -210,13 +210,54 @@ proc boolSetting(v: string): string =
   of "no", "false", "0", "off": "0"
   else: ""
 
-proc networkdForwardingValues*(settings: seq[string]):
+const
+  NetworkdGlobalForwardingSince* = 256
+  ## The systemd release whose networkd changed how it writes forwarding
+  ## (systemd v256 NEWS; ``src/network/networkd-sysctl.c`` at v255 and
+  ## v256, https://github.com/systemd/systemd/blob/v256/src/network/networkd-sysctl.c).
+  ##
+  ## Before 256, ``IPForward=`` (``yes``/``ipv4``/``ipv6``/``both``) and
+  ## ``IPMasquerade=`` in a ``.network`` file only ever turn the global
+  ## knob ON (``net.ipv4.ip_forward``, ``net.ipv6.conf.all.forwarding``),
+  ## when a link with that file is configured, and never turn it off
+  ## again: ``IPForward=no`` writes nothing. ``networkd.conf`` has no
+  ## forwarding setting, and ``IPv4Forwarding=`` / ``IPv6Forwarding=`` are
+  ## unknown keys.
+  ##
+  ## From 256 on, ``IPForward=`` is deprecated and ignored. The global
+  ## knob is ``IPv4Forwarding=`` / ``IPv6Forwarding=`` in ``networkd.conf``
+  ## (and its drop-ins): a boolean networkd writes in BOTH directions to
+  ## ``net.<family>.conf.{default,all}.forwarding``. The same settings in a
+  ## ``.network`` file are per link: they write only that link's
+  ## ``net.<family>.conf.<link>.forwarding`` (a per-link key of a managed
+  ## link is refused on its own, below). ``IPMasquerade=`` enables the
+  ## link's forwarding and, from 257 on, the global knob too while
+  ## ``networkd.conf`` leaves it unset.
+  NetworkdMasqueradeGlobalSince* = 257
+
+proc isGlobalNetworkdSource(source: string): bool =
+  ## A ``<file>: <Key>=<value>`` line from ``networkd.conf`` or one of its
+  ## drop-ins (global), as opposed to a ``.network`` file or one of its
+  ## drop-ins (per link).
+  let colon = source.find(": ")
+  let file = if colon >= 0: source[0 ..< colon] else: ""
+  file.endsWith("networkd.conf") or "networkd.conf.d/" in file
+
+proc networkdForwardingValues*(settings: seq[string];
+                               networkdVersion = 0):
     seq[tuple[family, value, source: string]] =
   ## What networkd's forwarding settings (``<file>: <Key>=<value>`` lines,
-  ## ``networkdForwardingSettings``) write, per family: ``IPForward=``
-  ## (``yes``/``no``/``ipv4``/``ipv6``), ``IPv4Forwarding=`` /
-  ## ``IPv6Forwarding=`` (booleans) and ``IPMasquerade=``
-  ## (``ipv4``/``ipv6``/``both``/``yes``, which turns forwarding on).
+  ## ``networkdForwardingSettings``) write to the GLOBAL forwarding knob
+  ## of each family, as networkd ``networkdVersion`` does
+  ## (``NetworkdGlobalForwardingSince``). Per-link writes are not listed:
+  ## they touch only the link's own key. A version of 0 (unknown) unites
+  ## both behaviours, so an unknown networkd is never assumed harmless.
+  let legacy = networkdVersion == 0 or networkdVersion < NetworkdGlobalForwardingSince
+  let modern = networkdVersion == 0 or networkdVersion >= NetworkdGlobalForwardingSince
+  let masqGlobal = networkdVersion == 0 or
+                   networkdVersion >= NetworkdMasqueradeGlobalSince
+  var globalSet: array[2, bool]   # ipv4, ipv6: networkd.conf sets it (>= 256)
+  var masquerade: seq[tuple[family, source: string]]
   for line in settings:
     let colon = line.find(": ")
     let assign = if colon >= 0: line[colon + 2 .. ^1] else: line
@@ -224,32 +265,50 @@ proc networkdForwardingValues*(settings: seq[string]):
     if eq <= 0: continue
     let k = assign[0 ..< eq].strip()
     let v = assign[eq + 1 .. ^1].strip().toLowerAscii()
+    let global = isGlobalNetworkdSource(line)
     case k
     of "IPForward":
-      case v
-      of "ipv4": result.add(("ipv4", "1", line))
-      of "ipv6": result.add(("ipv6", "1", line))
-      else:
-        let b = boolSetting(v)
-        if b.len > 0:
-          result.add(("ipv4", b, line))
-          result.add(("ipv6", b, line))
-    of "IPv4Forwarding":
+      # A .network setting before 256, one way only: ON, never off.
+      if legacy and not global:
+        case v
+        of "ipv4": result.add(("ipv4", "1", line))
+        of "ipv6": result.add(("ipv6", "1", line))
+        of "both":
+          result.add(("ipv4", "1", line))
+          result.add(("ipv6", "1", line))
+        else:
+          if boolSetting(v) == "1":
+            result.add(("ipv4", "1", line))
+            result.add(("ipv6", "1", line))
+    of "IPv4Forwarding", "IPv6Forwarding":
+      # Global (networkd.conf) from 256 on, in both directions.
+      let fam = if k == "IPv4Forwarding": "ipv4" else: "ipv6"
       let b = boolSetting(v)
-      if b.len > 0: result.add(("ipv4", b, line))
-    of "IPv6Forwarding":
-      let b = boolSetting(v)
-      if b.len > 0: result.add(("ipv6", b, line))
+      if modern and global and b.len > 0:
+        result.add((fam, b, line))
+        globalSet[(if fam == "ipv4": 0 else: 1)] = true
     of "IPMasquerade":
-      if v in ["ipv4", "both", "yes", "true", "on", "1"]: result.add(("ipv4", "1", line))
-      if v in ["ipv6", "both"]: result.add(("ipv6", "1", line))
+      if global: continue
+      var fams: seq[string]
+      if v in ["ipv4", "both", "yes", "true", "on", "1"]: fams.add("ipv4")
+      if v in ["ipv6", "both"]: fams.add("ipv6")
+      for fam in fams:
+        if legacy: result.add((fam, "1", line))
+        if masqGlobal: masquerade.add((fam, line))
     else: discard
+  # From 257 on a masquerading link turns the global knob on, unless
+  # networkd.conf decides it.
+  for (fam, line) in masquerade:
+    if not globalSet[(if fam == "ipv4": 0 else: 1)]:
+      let entry = (family: fam, value: "1", source: line)
+      if entry notin result: result.add(entry)
 
 proc networkdForwardingSettings*(root = "/"): seq[string] =
   ## Every ``[Network]`` forwarding setting networkd applies now: in a
-  ## ``.network`` file it has applied to a link (``networkFilesInUse``),
-  ## and in ``networkd.conf`` with its drop-ins (global), as ``<file>:
-  ## <Key>=<value>``.
+  ## ``.network`` file it has applied to a link (``networkFilesInUse``)
+  ## and that file's drop-ins (``<name>.network.d/*.conf`` in any network
+  ## directory, systemd.network(5)), and in ``networkd.conf`` with its
+  ## drop-ins (global), as ``<file>: <Key>=<value>``.
   proc scan(path: string; acc: var seq[string]) =
     var text: string
     try: text = readFile(path)
@@ -266,9 +325,24 @@ proc networkdForwardingSettings*(root = "/"): seq[string] =
       let k = t[0 ..< eq].strip()
       if k in NetworkdForwardingKeys:
         acc.add(path & ": " & t)
+  proc scanDropIns(dirName: string; acc: var seq[string]) =
+    # A drop-in name in an earlier directory hides the same name later.
+    var seen: seq[string]
+    var files: seq[(string, string)]
+    for d in NetworkdDirs:
+      let dir = (if root == "/": "" else: root) & d / dirName
+      if not dirExists(dir): continue
+      for kind, path in walkDir(dir):
+        let n = extractFilename(path)
+        if n.endsWith(".conf") and n notin seen:
+          seen.add(n)
+          files.add((n, path))
+    files.sort(proc(a, b: (string, string)): int = cmp(a[0], b[0]))
+    for (_, path) in files: scan(path, acc)
   let base = if root == "/": "" else: root
   for f in networkFilesInUse(root):
     scan(base & f, result)
+    scanDropIns(extractFilename(f) & ".d", result)
   for c in NetworkdConfs:
     scan(base & c, result)
     let dropDir = base & c & ".d"
@@ -277,7 +351,7 @@ proc networkdForwardingSettings*(root = "/"): seq[string] =
         if path.endsWith(".conf"): scan(path, result)
 
 proc networkdRefusal*(key, value: string; networkdInUse: bool;
-                      root = "/"): string =
+                      root = "/"; networkdVersion = 0): string =
   ## "" unless an enabled or running systemd-networkd would overwrite the
   ## add-on's value of ``key`` at runtime, whenever it configures a link
   ## (spec §7.2 step 6):
@@ -286,10 +360,14 @@ proc networkdRefusal*(key, value: string; networkdInUse: bool;
   ##   ``net/ipv6/conf/<link>/...``) of a link networkd manages now: it
   ##   writes the link's settings (forwarding, ``accept_ra``, reverse-path
   ##   filtering, proxy ARP, ...) each time it configures it;
-  ## - a forwarding key whose family networkd's configuration sets to
-  ##   another value (``IPForward=``, ``IPv4Forwarding=``,
-  ##   ``IPv6Forwarding=``, ``IPMasquerade=``) -- the same value is no
-  ##   conflict.
+  ## - a forwarding key whose family's global knob networkd
+  ##   ``networkdVersion`` would write with another value
+  ##   (``networkdForwardingValues``: before 256 ``IPForward=`` and
+  ##   ``IPMasquerade=`` only ever turn it on, from 256 ``networkd.conf``'s
+  ##   ``IPv4Forwarding=`` / ``IPv6Forwarding=`` set it either way) -- the
+  ##   same value is no conflict, and neither is a setting this networkd
+  ##   ignores (``IPForward=no``, ``IPForward=`` from 256 on). 0 (unknown)
+  ##   refuses what either behaviour would overwrite.
   ##
   ## *Known limit:* a ``.network`` file that matches a link only later (a
   ## device plugged in, a VPN brought up) is not seen until it does.
@@ -307,10 +385,13 @@ proc networkdRefusal*(key, value: string; networkdInUse: bool;
   if fam.len == 0: return ""
   let want = value.strip()
   var clashes: seq[string]
-  for (f, v, src) in networkdForwardingValues(networkdForwardingSettings(root)):
+  for (f, v, src) in networkdForwardingValues(networkdForwardingSettings(root),
+                                              networkdVersion):
     if f == fam and v != want: clashes.add(src)
   if clashes.len == 0: return ""
-  "systemd-networkd writes " & key & " itself at runtime with another " &
+  "systemd-networkd" & (if networkdVersion > 0: " " & $networkdVersion
+                        else: "") & " writes " & key &
+    " itself at runtime with another " &
     "value (" & clashes.join("; ") & "); the ledger's value " & want &
     " would not hold. Drop or change the networkd setting, or leave the " &
     "key to networkd"

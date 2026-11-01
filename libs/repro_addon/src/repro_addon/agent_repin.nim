@@ -25,6 +25,7 @@ import std/[algorithm, os, strutils]
 import repro_binary_cache_client/caches_config
 
 import ./addon_apply
+import ./agent_split
 import ./fingerprint
 import ./generation0
 import ./preflight
@@ -124,22 +125,12 @@ proc repinOwnProfile*(own: string; fresh: AgentUnitsInputs;
 proc freshAgentInputs*(): AgentUnitsInputs =
   ## The origins resolved now: every manifest source in ``agent.conf`` and
   ## every cache ``caches.conf`` names.
-  var target, compiler = ""
-  var sources: seq[string]
-  for raw in readFile(AgentConfPath).splitLines():
-    let l = raw.strip()
-    if l.len == 0 or l.startsWith("#"): continue
-    let kv = l.split('=', 1)
-    if kv.len != 2: continue
-    case kv[0].strip()
-    of "target": target = kv[1].strip()
-    of "source": sources.add(kv[1].strip())
-    of "profile-compiler": compiler = kv[1].strip()
-    else: discard
-  result = resolveAgentInputs(target, sources, "", compiler)
+  let conf = loadAgentConf()
+  result = resolveAgentInputs(conf.target, conf.sources, "",
+                              conf.profileCompiler)
   if fileExists(CachesConfPath):
     for c in parseCachesFile(CachesConfPath):
-      let extra = resolveAgentInputs(target, @[c.url], "", "")
+      let extra = resolveAgentInputs(conf.target, @[c.url], "", "")
       for a in extra.allowedAddresses:
         if a notin result.allowedAddresses: result.allowedAddresses.add(a)
       for h in extra.hosts:

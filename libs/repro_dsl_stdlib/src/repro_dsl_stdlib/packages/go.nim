@@ -65,6 +65,30 @@ package go:
       extractPath = "go",
       cpu = "aarch64",
       os = "linux"
+    # Go 1.26 for Linux, from go.dev's release archives: the pinned
+    # nixpkgs carries Go 1.25, and modules whose `go.mod` declares a 1.26
+    # language version (a `go 1.26.x` line is a minimum toolchain since
+    # Go 1.21, https://go.dev/doc/toolchain) cannot build with it. Digests
+    # from https://go.dev/dl/?mode=json&include=all. The archive's `go/`
+    # directory is GOROOT, located relative to the executable.
+    tarball url = "https://go.dev/dl/go1.26.10.linux-amd64.tar.gz",
+      sha256 = "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.26.10",
+      packageId = "go@1.26.10",
+      extractPath = "go",
+      cpu = "x86_64",
+      os = "linux"
+    tarball url = "https://go.dev/dl/go1.26.10.linux-arm64.tar.gz",
+      sha256 = "3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.26.10",
+      packageId = "go@1.26.10",
+      extractPath = "go",
+      cpu = "aarch64",
+      os = "linux"
     tarball url = "https://go.dev/dl/go1.23.4.darwin-amd64.tar.gz",
       sha256 = "6700067389a53a1607d30aa8d6e01d198230397029faa0b109e89bc871ab5a0e",
       archiveType = "tar.gz",

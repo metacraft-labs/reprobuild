@@ -28,6 +28,7 @@ import repro_test_support/reasoned_skip
 import std/[os, osproc, sequtils, strutils, unittest]
 
 include tc8c_store_fixture
+import ./certificate_note_seed
 
 proc moveStore(fromRoot, toRoot: string) =
   createDir(toRoot.parentDir)
@@ -152,8 +153,9 @@ suite "TC-8c — client gates search both store roots":
       "HEAD^{tree}")
     # A genuine, registered-signed certificate — attached as a note only.
     let cert = signedCertFor(fx, content, head)
-    check attachCertificate("git", fx.libAPath, cert).ok
-    check readAttachedCertificates("git", fx.libAPath, head).len == 1
+    check seedCertificateNote("git", fx.libAPath, cert).ok
+    check readAttachedCertificatesFrom("git", fx.libAPath, head,
+      certificateNotesRef).certs.len == 1
     let refused = checkPrePush(fx, head)
     checkpoint("note only: " & refused.output)
     check refused.code == 2

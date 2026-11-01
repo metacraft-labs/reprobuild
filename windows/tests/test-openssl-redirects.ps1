@@ -41,6 +41,19 @@ function Assert-Rejected([scriptblock]$Operation, [string]$Pattern) {
     }
     if ($chain -notmatch $Pattern) {
       Write-Host "REJECTION CHAIN DID NOT MATCH '$Pattern':$chain"
+      # Say what the SERVER saw as well. The client's chain cannot distinguish
+      # a handshake that died before certificate validation from one the
+      # client refused on trust -- both can surface as "the remote party has
+      # closed the transport stream" -- and those are opposite outcomes: the
+      # first means the control never exercised trust at all.
+      if ($null -ne $script:fixture) {
+        $seen = $script:fixture.Current
+        if ($null -ne $seen) {
+          Write-Host ("SERVER SAW: tcp=$($seen.TcpConnections) " +
+            "handshakes=$($seen.Handshakes) refusal=$($seen.HandshakeRefusal) " +
+            "failure=$($seen.Failure)")
+        }
+      }
       throw
     }
     return

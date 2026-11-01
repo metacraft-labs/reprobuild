@@ -20,7 +20,7 @@ import std/[os, osproc, streams, strtabs, strutils]
 from repro_core/paths import extendedPath
 from repro_core/process_streams import drainStream, drainStdoutAndStderr
 from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
-  installedLayoutPackageTrees
+  installedLayoutPackageTrees, runningImagePrefixCandidates
 from repro_core/ambient_execution import uncontrolledFindExe
 from repro_core/c_compiler import CCompilerUnusableError, explicitCCompiler,
   bootstrapCCompilerEnv, fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags,
@@ -52,12 +52,31 @@ const ProfileNimCompilerEnvVar* = "REPRO_NIM_COMPILER"
   ## wrapper sets it to the fork (`package.nix`), and the provider compile
   ## already honours it (`repro_interface_artifacts.nimCompilerPath`).
 
+proc installedNimCompiler*(prefixes: openArray[string]): string =
+  ## The `nim` an installed reprobuild prefix ships beside its engine, or "".
+  ## A prefix counts only when it is a reprobuild install (it carries
+  ## `share/repro`), so an engine that happens to live in `/usr/bin` never
+  ## picks the distribution's `/usr/bin/nim` this way. The cross-built and
+  ## release prefixes keep the compiler at `nim/bin/nim` with a `bin/nim`
+  ## link to it.
+  for prefix in prefixes:
+    if prefix.len == 0 or not dirExists(extendedPath(prefix / "share" / "repro")):
+      continue
+    for candidate in [prefix / "nim" / "bin" / "nim", prefix / "bin" / "nim"]:
+      if fileExists(extendedPath(candidate)):
+        return candidate
+  ""
+
 proc resolveProfileNimCompiler*(): string =
-  ## The `nim` that compiles a profile: `$REPRO_NIM_COMPILER` when set, the
-  ## first `nim` on `PATH` otherwise — the provider compile's order, so one
-  ## installed `repro` compiles its recipes and its profiles with the same
-  ## compiler (the profile imports the very libs that compiler built the
-  ## binary from).
+  ## The `nim` that compiles a profile: `$REPRO_NIM_COMPILER` when set; else
+  ## the `nim` the installed prefix this engine runs from ships
+  ## (`installedNimCompiler`); else the first `nim` on `PATH` -- the provider
+  ## compile's order, so one installed `repro` compiles its recipes and its
+  ## profiles with the same compiler (the profile imports the very libs that
+  ## compiler built the binary from). The prefix arm is what lets an
+  ## installed engine compile in a clean environment (a dynamic user's
+  ## transient unit, whose `PATH` is systemd's default): it used to find no
+  ## compiler there unless the base had one on `PATH`.
   ##
   ## An explicit `$REPRO_NIM_COMPILER` that names no file is refused rather
   ## than quietly replaced by whatever `PATH` offers: the variable is the
@@ -78,6 +97,9 @@ proc resolveProfileNimCompiler*(): string =
         " does not name an existing file. Point it at a Nim compiler, or " &
         "unset it to use the `nim` on PATH.")
     return explicit
+  let shipped = installedNimCompiler(runningImagePrefixCandidates())
+  if shipped.len > 0:
+    return shipped
   let nimExe = findExe("nim")
   if nimExe.len == 0:
     raise newException(CompileFailure,
@@ -137,6 +159,18 @@ proc resolveProfileCCompiler*(): string =
   if uncontrolledFindExe(NimDefaultCCompilerExe).len > 0:
     return ""
   result = fallbackCCompiler()
+  when not defined(windows):
+    # Nothing resolved: no compiler named, none on PATH, and the one this
+    # engine was built with is not on this host (a cross-built engine's is
+    # on its build host). Refused here, by name, rather than handed to Nim
+    # as "use your default" -- which failed later as `gcc: not found`. A host
+    # that compiles profiles gets its C compiler from its base (ReproOS
+    # add-on mode §13 decision 31).
+    if result.len == 0:
+      raise newException(CompileFailure,
+        "repro profile compile: no C compiler. Nim compiles a profile to C, " &
+        "and this host has none: install one from the distribution (gcc, " &
+        "or cc), or name one with $REPRO_BOOTSTRAP_CC or an absolute $CC.")
 
 proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
   ## The flags the profile compile hands the C compiler through Nim's

@@ -319,6 +319,32 @@ suite "a nix realization is held to the declared range":
       executableName: "zlib", rawConstraint: "zlib >=2.0")
     enforceUsesVersionRange(viaAttr, ngUse)
 
+  test "an attribute's `^outputs` selector is not part of the package name":
+    # `uses "zstd-dev >=0"` is realized through `#zstd^*` (Nix's installable
+    # output selector) as `zstd-1.5.7-dev`. The attribute is `zstd`, the
+    # store path's pname, so 1.5.7 holds; comparing against `zstd^*` refused
+    # it as unverifiable (reprobuild-pm issue 2026-10-31-uses-version-check-
+    # drops-a-dev-output-store-path-version-because-the-nix-attribute-keeps-
+    # its-output-suffix).
+    let dev = PathOnlyToolProfile(installMethod: "nix",
+      nixSelector: "github:NixOS/nixpkgs/addf7cf5f383a3101ecfba091b98d0a1263dc9b8#zstd^*",
+      resolvedExecutablePath: "/nix/store/abc-zstd-1.5.7-dev/include/zstd.h",
+      selectedStorePath: "/nix/store/abc-zstd-1.5.7-dev/include/zstd.h")
+    let zstdDev = InterfaceToolUse(packageSelector: "zstd-dev",
+      executableName: "zstd-dev", rawConstraint: "zstd-dev >=0")
+    enforceUsesVersionRange(dev, zstdDev)
+    # The version is now read, not skipped: a range excluding 1.5.7 is
+    # refused as out of range, naming the version, not as unverifiable.
+    let tooNew = InterfaceToolUse(packageSelector: "zstd-dev",
+      executableName: "zstd-dev", rawConstraint: "zstd-dev >=2")
+    try:
+      enforceUsesVersionRange(dev, tooNew)
+      check false
+    except OSError as err:
+      check "reports version 1.5.7" in err.msg
+      check "outside the declared range" in err.msg
+      check "zstd-dev >=2" in err.msg
+
   test "the probe outranks the store path name":
     # A wrapper's store path names the wrapper's version, not the tool's.
     let useDef = InterfaceToolUse(packageSelector: "rustc",
@@ -327,3 +353,59 @@ suite "a nix realization is held to the declared range":
     profile.selectedStorePath = "/nix/store/abc-rustc-wrapper-1.94.0"
     expect OSError:
       enforceUsesVersionRange(profile, useDef)
+
+suite "tool-provisioning=nix falls back to an in-range archive":
+  # The pinned nixpkgs builds one version of each package. A recipe whose
+  # range excludes it is served by an archive the catalog pins inside the
+  # range, which is what the refusal tells the author to add; the predicate
+  # below is the whole of the decision `toolProfileFor`'s `tpmNix` arm makes.
+  let linuxX86 = realizationTargetFor(pcX86_64, poLinux, mlX86_64_v1)
+
+  proc goUse(constraint: string): InterfaceToolUse =
+    result = InterfaceToolUse(packageSelector: "go", executableName: "go",
+      rawConstraint: constraint)
+    for (cpu, os, version) in [("x86_64", "linux", "1.23.4"),
+                               ("x86_64", "linux", "1.26.10"),
+                               ("aarch64", "linux", "1.26.10")]:
+      result.tarballProvisioning.add(InterfaceTarballProvisioning(
+        cpu: cpu, os: os, url: "https://example.invalid/go" & version,
+        sha256: repeat('a', 64), executablePath: "bin/go"))
+      result.tarballProvisioning[^1].detail.version = version
+
+  test "the out-of-range refusal is a distinct, still-OSError, type":
+    let useDef = InterfaceToolUse(packageSelector: "go",
+      executableName: "go", rawConstraint: "go >=1.26.5")
+    expect UsesVersionOutOfRange:
+      enforceUsesVersionRange(nixProfile("go version go1.25.4 linux/amd64"),
+        useDef)
+    expect OSError:
+      enforceUsesVersionRange(nixProfile("go version go1.25.4 linux/amd64"),
+        useDef)
+
+  test "an archive inside the range is the fallback":
+    let useDef = goUse("go >=1.26.5")
+    check nixRangeRefusalFallsBackToTarball(useDef, linuxX86)
+    check tarballAcquisitionPlan(useDef, target = linuxX86).url.endsWith(
+      "go1.26.10")
+
+  test "no range, no archive in range, or none for the host: it stands":
+    check not nixRangeRefusalFallsBackToTarball(goUse("go"), linuxX86)
+    check not nixRangeRefusalFallsBackToTarball(goUse("go >=1.27"), linuxX86)
+    check not nixRangeRefusalFallsBackToTarball(goUse("go >=1.26.5"),
+      realizationTargetFor(pcAArch64, poMacos))
+    var noArchives = goUse("go >=1.26.5")
+    noArchives.tarballProvisioning = @[]
+    check not nixRangeRefusalFallsBackToTarball(noArchives, linuxX86)
+
+  test "a tool with no nixPackage arm is realized from its archive":
+    # zig: the catalog pins release archives only. Under nix mode that is
+    # the realization, as it is in path mode; a tool with a nix arm, or
+    # with no archive for the host, is not redirected.
+    let zigUse = goUse("go >=1.26.5")
+    check nixModeTakesTarballArm(zigUse, linuxX86)
+    check not nixModeTakesTarballArm(zigUse,
+      realizationTargetFor(pcAArch64, poMacos))
+    var withNix = zigUse
+    withNix.nixProvisioning.add(InterfaceNixProvisioning(
+      selector: "nixpkgs#go", executablePath: "bin/go"))
+    check not nixModeTakesTarballArm(withNix, linuxX86)

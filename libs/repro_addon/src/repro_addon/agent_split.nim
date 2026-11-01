@@ -100,7 +100,9 @@ const
 # ---------------------------------------------------------------------------
 
 proc parseAgentConf*(text: string): AgentConf =
-  ## ``key = value`` lines; ``#`` comments; ``source`` repeats.
+  ## ``key = value`` lines; ``#`` comments (any bytes, UTF-8 included);
+  ## ``source`` repeats. A leading UTF-8 byte-order mark is skipped.
+  let text = if text.startsWith("\xEF\xBB\xBF"): text[3 .. ^1] else: text
   for raw in text.splitLines():
     let line = raw.strip()
     if line.len == 0 or line[0] == '#': continue
@@ -247,8 +249,14 @@ proc stageDebs(canonical: string; dir: string; notes: var seq[string]) =
   except CatchableError: return
   let fetch = httpDebFetcher()
   for r in prof.resources:
-    if r.kind != srkSystemdSystemUnit or r.suAptClosureLock.len == 0: continue
-    let lock = parseAptClosureLock(r.suAptClosureLock)
+    # A unit's closure and an operator tool's (`linux.addOnTool`): the
+    # apply unit realises both from these copies.
+    let lockText =
+      if r.kind == srkSystemdSystemUnit: r.suAptClosureLock
+      elif r.kind == srkLinuxAddOnTool: r.atAptClosureLock
+      else: ""
+    if lockText.len == 0: continue
+    let lock = parseAptClosureLock(lockText)
     for d in lock.debs:
       let url = debUrl(lock, d)
       let dest = dir / StagedDebsDir / stagedDebName(url)

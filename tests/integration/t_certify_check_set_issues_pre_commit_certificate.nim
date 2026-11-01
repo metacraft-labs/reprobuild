@@ -1,24 +1,26 @@
 ## Agents-Push-Gate.md §3.2 / §4.4 (Sovereign-CI-Fleet P6.e) —
 ## `repro certify --check-set` runs a repository's pre-commit check set as the
 ## certifiable target `pre-commit`, through the ordinary issuance path, and
-## attaches the result as a git note.
+## delivers the result to the local certificate store. It writes no git note:
+## the managed pre-push hook publishes one when the content is pushed.
 ##
 ##   1. A FAILING check set issues nothing and exits 2.
 ##   2. A PASSING check set on a clean, committed, UNPUBLISHED head issues a
 ##      signed certificate covering `pre-commit` into the local certificate
-##      store, attaches it on the TREE it names under the shared
-##      `refs/notes/test-certificates/certificates` (TC-8c), and leaves the
+##      store, under the content id of the TREE it names, and leaves the
 ##      repository CLEAN (the run's files go to a scratch directory, never the
-##      repo).
-##   3. Re-running is idempotent: no second note record is appended.
+##      repo), with no notes ref.
+##   3. Re-running is idempotent: no second certificate is stored for the
+##      content.
 ##   4. TC-8d: a MODIFIED, uncommitted working tree is certified by its
-##      content (no clean, committed state is needed) and noted on the tree
-##      that content names.
+##      content (no clean, committed state is needed) and stored under the
+##      content id that state has.
 ##
 ## Falsifiability: a certify that ignored the run's result would issue in (1);
 ## a certify that wrote its fixture or logs into the repo would fail the
-## cleanliness check in (2); a certify that attached unconditionally would
-## leave two records in (3).
+## cleanliness check in (2); a certify that stored by something other than the
+## content would leave two certificates in (3); one that wrote a note fails the
+## notes-ref check in (2), (3) and (4).
 ##
 ## The check-set command is passed with `--check-set-command`, so the test
 ## does not depend on prek being installed; the default (`prek run
@@ -211,33 +213,6 @@ proc rewindUpstreamToSeed(gitBin: string; fx: Fixture) =
   discard requireGit(q(gitBin) & " -C " & q(fx.upstreamBare) &
     " update-ref refs/heads/main " & q(fx.seedSha))
 
-proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
-    TestCertificate =
-  ## Drive the TC-1 issuance path (a REAL passing run, clean state) to mint a
-  ## genuine daemon-signed cert for ``headSha``, then attach it (TC-2) to the
-  ## pushed commit in the developer clone.
-  let fixtureJson = fx.scratch / "fixture-pass.json"
-  writeTestFixtureJson(fixtureJson, "t-unit", "exit 0")
-  let issued = runShell(shellCommand(@[
-    fx.reproBin, "test",
-    "--fixture-from=" & fixtureJson,
-    "--shard=1/1",
-    "--certify",
-    "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath],
-    daemonKeyEnv(fx.daemonKey, tc6KeyId)), fx.workspaceRoot)
-  if issued.code != 0:
-    checkpoint("repro test output: " & issued.output)
-  check issued.code == 0
-  let content = treeContentId(gitBin, fx.libAPath, headSha)
-  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
-  # TC-8b: the record names the tested CONTENT and, informationally, HEAD.
-  check result.vcs.base == headSha
-  check result.vcs.content == content
-  check "t-unit" in result.targets
-  let att = attachCertificate(gitBin, fx.libAPath, result)
-  check att.ok
-
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =
   ## True iff the REAL upstream bare contains ``sha`` as a reachable object on
   ## its branch (``git cat-file -e`` + the branch actually points there).
@@ -258,17 +233,14 @@ proc certifyCheckSet(fx: Fixture; command: string): CmdResult =
     "--current-repo=" & fx.libAPath],
     daemonKeyEnv(fx.daemonKey, tc6KeyId)), fx.libAPath)
 
-proc noteRecordCount(gitBin: string; fx: Fixture; sha: string): int =
-  ## Records in the note on ``sha``'s TREE (TC-8c: notes are keyed by the
-  ## tree the content names, not by the commit).
-  let note = runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " notes --ref " &
-    q(certificateNotesRef) & " show " & q(sha & "^{tree}"))
-  if note.code != 0: return 0
-  note.output.count("# --- test-certificate ---")
+proc hasLocalNotes(gitBin: string; fx: Fixture): bool =
+  ## Whether the clone has a certificate notes ref: issuance must not make one.
+  runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " rev-parse --verify --quiet " &
+    q(certificateNotesRef)).code == 0
 
 suite "P6.e — repro certify --check-set":
 
-  test "t_certify_check_set_issues_and_attaches_pre_commit_certificate":
+  test "t_certify_check_set_issues_pre_commit_certificate":
     let gitBin = findExe("git")
     if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
       skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
@@ -284,9 +256,9 @@ suite "P6.e — repro certify --check-set":
       checkpoint("failing: " & failing.output)
       check failing.code == 2
       check storedCertificateFiles(fx.certStore, content).len == 0
-      check noteRecordCount(gitBin, fx, head) == 0
+      check not hasLocalNotes(gitBin, fx)
 
-      # ---- 2. a passing check set issues, signs, attaches -----------------
+      # ---- 2. a passing check set issues, signs, stores --------------------
       let passing = certifyCheckSet(fx, "true")
       checkpoint("passing: " & passing.output)
       check passing.code == 0
@@ -299,10 +271,7 @@ suite "P6.e — repro certify --check-set":
         check cert.targets == @["pre-commit"]
         check cert.isSigned
         check cert.commands.len == 1
-      check noteRecordCount(gitBin, fx, head) == 1
-      # Keyed by the tree, not by the commit.
-      check runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " notes --ref " &
-        q(certificateNotesRef) & " show " & head).code != 0
+      check not hasLocalNotes(gitBin, fx)
       let status = runCmd(q(gitBin) & " -C " & q(fx.libAPath) &
         " status --porcelain --untracked-files=all")
       check status.code == 0
@@ -313,12 +282,12 @@ suite "P6.e — repro certify --check-set":
       # ---- 3. idempotent ----------------------------------------------------
       let again = certifyCheckSet(fx, "true")
       check again.code == 0
-      check noteRecordCount(gitBin, fx, head) == 1
+      check storedCertificateFiles(fx.certStore, content).len == 1
+      check not hasLocalNotes(gitBin, fx)
 
       # ---- 4. TC-8d: an uncommitted working tree is certified ---------------
       # No clean, committed state is needed: the modified tree is certified by
-      # its content and noted on the tree that content names, before any
-      # commit records it.
+      # its content, before any commit records it.
       writeFile(fx.libAPath / "feature.txt", "edited, not committed\n")
       let modified = workingTreeContentIdOf(gitBin, fx.libAPath,
         fx.scratch / "expected-index")
@@ -333,8 +302,4 @@ suite "P6.e — repro certify --check-set":
         check cert.vcs.content == modified
         check cert.vcs.base == head
         check cert.targets == @["pre-commit"]
-      let modifiedTree = modified["git-tree-sha1:".len .. ^1]
-      let noted = runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " notes --ref " &
-        q(certificateNotesRef) & " show " & modifiedTree)
-      check noted.code == 0
-      check noted.output.count("# --- test-certificate ---") == 1
+      check not hasLocalNotes(gitBin, fx)
