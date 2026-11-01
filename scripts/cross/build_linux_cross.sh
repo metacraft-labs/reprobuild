@@ -658,6 +658,14 @@ if build_target_clingo "${cc_wrapper}" "${cxx_wrapper}" "${sysroot}" \
 else
   record_failure "clingo for ${triple}"
 fi
+if [ "${skip_nim}" = 0 ]; then
+  if build_target_pcre "${cc_wrapper}" "${sysroot}" "${stage}/lib" \
+      "${build_root}/pcre"; then
+    check_target_elf "${stage}/lib/libpcre.so.1" || true
+  else
+    record_failure "pcre for ${triple}"
+  fi
+fi
 bundle_runtime_closure "${stage}" "${sysroot}" "${triple}" ||
   record_failure "bundling the runtime libraries"
 check_prefix_closure "${stage}" || record_failure "the prefix's runtime closure"

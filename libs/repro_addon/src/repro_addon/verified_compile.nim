@@ -27,6 +27,7 @@
 import std/[base64, json, os, strutils]
 
 import repro_deploy_agent/manifest
+import repro_deploy_agent/agent_mutations
 
 import ./host_exec
 
@@ -42,9 +43,14 @@ proc compileFactArgs*(m: DeployManifest): seq[string] =
   ## facts the producer compiled for. Empty when the manifest pins no
   ## compile: such a manifest's source profile is refused anyway, and the
   ## compile then runs with the host's own facts only to say why.
+  ## With a signed system selection the compile is asked for exactly it.
   if m.compiledProfile.digest.len == 0: return
-  @["--host", m.compiledProfile.host, "--platform", m.compiledProfile.platform,
-    "--arch", m.compiledProfile.arch]
+  result = @["--host", m.compiledProfile.host, "--platform",
+    m.compiledProfile.platform, "--arch", m.compiledProfile.arch]
+  when not agentMutated("compile-pin-drops-selection"):
+    if m.compiledProfile.hasSystemSelection:
+      result.add(["--system-mode", m.compiledProfile.systemMode,
+        "--system-activities", m.compiledProfile.systemActivities.join(",")])
 
 proc launcherOf*(exe: string): string =
   ## The program to exec to run ``exe`` in a FRESH environment. A transient

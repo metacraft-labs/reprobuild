@@ -845,7 +845,10 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
           repositories: |
+            codetracer-native-backend
             codetracer-native-recorder
+            codetracer-visual-replay
+            lldb-sys.rs
             tree-sitter-nim
           permission-contents: read
 
@@ -871,9 +874,29 @@ jobs:
           GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
           GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.ci_token_build.outputs.token }}@github.com/metacraft-labs/tree-sitter-nim.git.insteadOf
           GIT_CONFIG_VALUE_1: https://github.com/metacraft-labs/tree-sitter-nim.git
+          # CodeTracer's flake has FOUR private metacraft-labs inputs, and a
+          # private repository a credential cannot see answers 404, not 403 --
+          # so an authorization gap reads as "this revision does not exist".
+          # Measured in run 41251151966: after 134 minutes this step died on
+          # `lldb-sys.rs` with GitHub's `{"message": "Not Found"}`, while the
+          # repository is present, the revision is present, and the tarball
+          # returns 200 to a credential that covers it. Three of the four only
+          # survived because they came from the binary cache; any cache miss
+          # repeats this, so all of them are declared rather than just the one
+          # that failed.
+          #
+          # `codetracer-image-diff` is the fourth and is NOT here: it is the
+          # one private input this workflow never requests a token for
+          # anywhere, so whether the token provider app can even see it is
+          # unproven, and asking for a repository it cannot reach fails the
+          # token step outright. Confirm the app's installation covers it
+          # before adding it.
           NIX_CONFIG: >-
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_build.outputs.token }}
+            github.com/metacraft-labs/codetracer-native-backend=${{ steps.ci_token_build.outputs.token }}
+            github.com/metacraft-labs/codetracer-visual-replay=${{ steps.ci_token_build.outputs.token }}
+            github.com/metacraft-labs/lldb-sys.rs=${{ steps.ci_token_build.outputs.token }}
           REPRO_PUBLISH_KEY: ${{ secrets.REPRO_PUBLISH_KEY }}
           REPRO_PUBLISH_CERT: ${{ secrets.REPRO_PUBLISH_CERT }}
         run: |

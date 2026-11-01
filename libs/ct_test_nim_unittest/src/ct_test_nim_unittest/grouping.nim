@@ -22,6 +22,19 @@
 ## at most one, so there is no small tail group paying the closure for a few
 ## files (M1, "Partition"). Group names are a function of the key and the
 ## chunk index, so the same tree always produces the same groups.
+##
+## DIRECTORY-PREFIX FALLBACK. The spec's grouping key is "a compile-option key
+## and a directory prefix". Most directories group on their own directory, but
+## some trees hold one test per subdirectory (a scenario per milestone under
+## ``tests/e2e``), so each of their sources would be alone on its
+## exact-directory key. Under
+## the roots in ``DirectoryPrefixGroupRoots``, a source that would be ALONE on
+## its exact-directory key is keyed again on the root (``prefixOptionKey``:
+## the same options, the root as the directory) and grouped there, in
+## ``t_group_<root>_prefix[_o<hash>]_gNN`` groups of at most
+## ``PrefixGroupMaxMembers``. Sources that already share their exact
+## directory keep their groups, and every other single reason applies first,
+## unchanged.
 
 import std/[algorithm, os, strutils, tables]
 
@@ -31,6 +44,39 @@ const
     ## condition that a failed group compile falls back to single compiles —
     ## see ``scripts/test_group_fallback.py`` — and that members with heavy
     ## module initialisation are kept apart).
+
+  PrefixGroupMaxMembers* = 25
+    ## The maximum size of a directory-prefix group, below the general G = 50
+    ## because the members of such a tree are typically one-per-directory
+    ## scenario or recipe tests that ``import ./repro``: a recipe module's
+    ## ``package`` block registers with the DSL at module initialisation, and
+    ## a group binary runs every member's initialisation for every case it
+    ## starts (M1 measured 56-68 ms of start-up for sources importing recipe
+    ## modules; spec, "Per-case start-up overhead"). G = 25 halves that
+    ## per-case cost against G = 50.
+
+  DirectoryPrefixGroupRoots* = ["tests/e2e"]
+    ## Roots whose sources, when alone on their exact directory, group on the
+    ## root instead (see "DIRECTORY-PREFIX FALLBACK" above). A source directly
+    ## in the root takes part too: its exact key is the root's already. A
+    ## ``nim.cfg`` / ``config.nims`` between a source and the repository root
+    ## keeps it single before the planner sees it (the generator's
+    ## ``directoryConfigReason``), so a prefix group never loses one.
+    ##
+    ## NOT ``recipes/packages/source``, although its 195 one-per-directory
+    ## recipe tests were the first candidates. Measured 2026-10-31 at
+    ## ``agents`` 3cfae787b7 (module initialisation: an unknown ``--run``
+    ## name, user CPU): one recipe test alone 0.01 s; 5 recipe tests in one
+    ## binary 23 s, 10 in one binary 28 s, 25 in one binary 43 s, with
+    ## 147 clingo solves over a growing program logged at start-up for the
+    ## 25. Every case of such a group would pay that, so grouping them costs
+    ## far more at run time than it saves at compile time. Revisit once
+    ## several ``package`` blocks in one program initialise as cheaply as one.
+
+  PrefixGroupTagSuffix* = "_prefix"
+    ## Appended to a prefix group's directory tag, so that its stems
+    ## (``t_group_tests_e2e_prefix_g01``) never equal those of a group keyed
+    ## on the root's own exact directory (``t_group_tests_e2e_g01``).
 
   GroupStemPrefix* = "t_group_"
     ## Group binaries live in ``build/test-bin`` beside the single ones, so the
@@ -55,6 +101,10 @@ type
     optionKey*: string
       ## ``compileOptionKey`` of the source. Two sources may share a binary
       ## only when these are equal.
+    prefixKey*: string
+      ## ``prefixOptionKey`` of the source: the key it is grouped on when it
+      ## is alone on ``optionKey``. "" when it is under no root in
+      ## ``DirectoryPrefixGroupRoots``.
     singleReason*: string
       ## Non-empty when the source must keep its own binary, with the reason.
       ## The planner adds its own reasons (clashes, a key with one member) on
@@ -85,18 +135,9 @@ proc sourceDir(source: string): string =
   let slash = source.rfind('/')
   if slash < 0: "" else: source[0 ..< slash]
 
-proc compileOptionKey*(source: string; defines, extraPassC,
-                       extraPassL: openArray[string];
-                       targetOs: string): string =
-  ## The compile-option key: the source's directory, then every per-test
-  ## option that changes the compile. The directory is part of the key for two
-  ## reasons: a group binary then stays bisectable to one owner, and Nim reads
-  ## ``nim.cfg`` / ``config.nims`` from the main module's parent chain, so
-  ## sources from different directories can differ in configuration the
-  ## ``TestSpec`` row does not show.
-  ##
-  ## Defines are sorted: their order on the command line changes nothing.
-  result = sourceDir(source)
+proc optionKeyFor(dir: string; defines, extraPassC,
+                  extraPassL: openArray[string]; targetOs: string): string =
+  result = dir
   var opts: seq[string]
   var ds = @defines
   ds.sort()
@@ -108,8 +149,40 @@ proc compileOptionKey*(source: string; defines, extraPassC,
   if opts.len > 0:
     result.add "|" & opts.join(" ")
 
-proc groupTag(optionKey: string): string =
-  ## A file-name-safe tag for a key: the directory, sanitised, plus a short
+proc compileOptionKey*(source: string; defines, extraPassC,
+                       extraPassL: openArray[string];
+                       targetOs: string): string =
+  ## The compile-option key: the source's directory, then every per-test
+  ## option that changes the compile. The directory is part of the key for two
+  ## reasons: a group binary then stays bisectable to one owner, and Nim reads
+  ## ``nim.cfg`` / ``config.nims`` from the main module's parent chain, so
+  ## sources from different directories can differ in configuration the
+  ## ``TestSpec`` row does not show.
+  ##
+  ## Defines are sorted: their order on the command line changes nothing.
+  optionKeyFor(sourceDir(source), defines, extraPassC, extraPassL, targetOs)
+
+proc directoryPrefixRoot*(source: string): string =
+  ## The ``DirectoryPrefixGroupRoots`` entry that ``source`` is under, or "".
+  let dir = sourceDir(source)
+  for root in DirectoryPrefixGroupRoots:
+    if dir == root or dir.startsWith(root & "/"):
+      return root
+  ""
+
+proc prefixOptionKey*(source: string; defines, extraPassC,
+                      extraPassL: openArray[string];
+                      targetOs: string): string =
+  ## ``compileOptionKey`` with the source's directory replaced by its
+  ## ``DirectoryPrefixGroupRoots`` root, or "" when it is under none. The
+  ## group still traces to one owner: the root directory.
+  let root = directoryPrefixRoot(source)
+  if root.len == 0: return ""
+  optionKeyFor(root, defines, extraPassC, extraPassL, targetOs)
+
+proc groupTag(optionKey: string; prefixGroup = false): string =
+  ## A file-name-safe tag for a key: the directory, sanitised, then
+  ## ``PrefixGroupTagSuffix`` for a directory-prefix group, plus a short
   ## stable hash of the options when there are any.
   let bar = optionKey.find('|')
   let dir = if bar < 0: optionKey else: optionKey[0 ..< bar]
@@ -119,6 +192,8 @@ proc groupTag(optionKey: string): string =
     if c == '_' and (result.len == 0 or result[^1] == '_'): continue
     result.add c
   if result.endsWith("_"): result.setLen(result.len - 1)
+  if prefixGroup:
+    result.add PrefixGroupTagSuffix
   if bar >= 0:
     result.add "_o" & toHex(fnv1a32(optionKey[bar + 1 .. ^1]), 8).toLowerAscii
 
@@ -130,17 +205,27 @@ proc balancedChunks*(n, maxMembers: int): seq[int] =
   for i in 0 ..< k:
     result.add(n div k + (if i < n mod k: 1 else: 0))
 
-proc groupStem*(optionKey: string; index, count: int): string =
+proc groupStem*(optionKey: string; index, count: int;
+                prefixGroup = false): string =
   ## ``t_group_<tag>_g<NN>``: index is 0-based, printed 1-based and padded
   ## to the width of ``count`` (at least two digits). A valid Nim identifier,
   ## because it is also the generated group module's name.
   let width = max(2, len($count))
-  GroupStemPrefix & groupTag(optionKey) & "_g" & align($(index + 1), width, '0')
+  GroupStemPrefix & groupTag(optionKey, prefixGroup) & "_g" &
+    align($(index + 1), width, '0')
 
 proc planGroups*(candidates: openArray[GroupCandidate];
-                 maxMembers = DefaultMaxGroupMembers): seq[GroupAssignment] =
+                 maxMembers = DefaultMaxGroupMembers;
+                 prefixMaxMembers = PrefixGroupMaxMembers):
+    seq[GroupAssignment] =
   ## Assign every candidate to a group or to a single binary. The result is in
   ## source order and does not depend on the input order.
+  ##
+  ## Two passes. The first groups on ``optionKey`` (the exact directory), at
+  ## most ``maxMembers`` per group. The second takes the sources the first
+  ## left ALONE on their key that carry a ``prefixKey`` and groups them on
+  ## it, at most ``prefixMaxMembers`` per group. The clash rules
+  ## (``{.compile:}`` targets, case names) apply within each pass's key.
   var cands = @candidates
   cands.sort(proc (a, b: GroupCandidate): int = cmp(a.source, b.source))
   result = newSeq[GroupAssignment](cands.len)
@@ -159,11 +244,16 @@ proc planGroups*(candidates: openArray[GroupCandidate];
       keys.add c.optionKey
     buckets[c.optionKey].add i
   keys.sort()
-  for key in keys:
+
+  proc place(res: var seq[GroupAssignment]; cands: seq[GroupCandidate];
+             key: string; members: seq[int]; limit: int;
+             prefixGroup: bool): seq[int] =
+    ## Group ``members`` (sorted indices into ``cands`` sharing ``key``) and
+    ## return the ones left alone, without a reason.
     var kept: seq[int]
     var compiledBy = initTable[string, string]()
     var caseBy = initTable[string, string]()
-    for i in buckets[key]:
+    for i in members:
       let c = cands[i]
       var clash = ""
       for target in c.compiledC:
@@ -180,23 +270,43 @@ proc planGroups*(candidates: openArray[GroupCandidate];
       if clash.len > 0:
         # The first source in sorted order keeps its place; later ones stay
         # single, so adding a source never moves an earlier one out.
-        result[i].singleReason = clash
+        res[i].singleReason = clash
         continue
       for target in c.compiledC: compiledBy[target] = c.source
       for name in c.caseNames:
         if name notin caseBy: caseBy[name] = c.source
       kept.add i
-    if kept.len < 2:
-      for i in kept:
-        result[i].singleReason = "no other source shares its compile options"
-      continue
-    let sizes = balancedChunks(kept.len, maxMembers)
+    if kept.len < 2 or limit < 2:
+      return kept
+    let sizes = balancedChunks(kept.len, limit)
     var at = 0
     for chunk, size in sizes:
-      let stem = groupStem(key, chunk, sizes.len)
+      let stem = groupStem(key, chunk, sizes.len, prefixGroup)
       for j in at ..< at + size:
-        result[kept[j]].group = stem
+        res[kept[j]].group = stem
       at += size
+
+  const Alone = "no other source shares its compile options"
+  var alone: seq[int]
+  for key in keys:
+    alone.add place(result, cands, key, buckets[key], maxMembers, false)
+  var prefixBuckets = initTable[string, seq[int]]()
+  var prefixKeys: seq[string]
+  for i in alone:
+    let pk = cands[i].prefixKey
+    if pk.len == 0:
+      result[i].singleReason = Alone
+      continue
+    if pk notin prefixBuckets:
+      prefixBuckets[pk] = @[]
+      prefixKeys.add pk
+    prefixBuckets[pk].add i
+  prefixKeys.sort()
+  for key in prefixKeys:
+    var members = prefixBuckets[key]
+    members.sort()
+    for i in place(result, cands, key, members, prefixMaxMembers, true):
+      result[i].singleReason = Alone
 
 proc groupMembers*(plan: openArray[GroupAssignment]): OrderedTable[string, seq[string]] =
   ## group stem -> sorted member sources, groups in sorted stem order.
@@ -252,8 +362,10 @@ const
     ## guards code on being the main module. In a group binary
     ## ``isMainModule`` is false in every member and ``getAppFilename`` names
     ## the group, so neither would behave (spec M3 gives them a supported
-    ## path). Matched anywhere in the text, comments included: a false
-    ## positive costs one single compile, a false negative a broken case.
+    ## path). Matched anywhere in the CODE, string literals included (a false
+    ## positive costs one single compile, a false negative a broken case),
+    ## but not in comments: a comment that mentions ``getAppFilename`` runs
+    ## nothing (see ``withoutComments``).
 
   ModuleLevelSideEffects* = ["setCurrentDir", "putEnv", "delEnv",
     "addExitProc", "quit", "setControlCHook", "onSignal"]
@@ -271,9 +383,104 @@ const
     ## ``{.define: reproDaemonParentPrewarmTest.}`` and its group failed with
     ## an undeclared identifier.
 
+proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
+
+proc withoutComments*(text: string): string =
+  ## ``text`` with every Nim comment removed: ``#`` / ``##`` line comments
+  ## and ``#[ ]#`` / ``##[ ]##`` block comments (which nest). Line breaks are
+  ## kept. String and character literals are copied verbatim, so a ``#``
+  ## inside ``"…"``, ``r"…"``, a triple-quoted string or ``'#'`` does not
+  ## start a comment. Where the lexing is approximate (an unterminated
+  ## literal runs to the end of its line, or of the text for a triple quote)
+  ## it errs towards keeping text, which can only make a marker visible.
+  let n = text.len
+  var i = 0
+  while i < n:
+    let c = text[i]
+    if c == '#':
+      let blockStart =
+        if i + 1 < n and text[i + 1] == '[': 2
+        elif i + 2 < n and text[i + 1] == '#' and text[i + 2] == '[': 3
+        else: 0
+      if blockStart == 0:
+        while i < n and text[i] != '\n': inc i
+        continue
+      var depth = 1
+      i += blockStart
+      while i < n and depth > 0:
+        if text[i] == '#' and i + 1 < n and text[i + 1] == '[':
+          inc depth
+          i += 2
+        elif text[i] == '#' and i + 2 < n and text[i + 1] == '#' and
+            text[i + 2] == '[':
+          inc depth
+          i += 3
+        elif text[i] == ']' and i + 1 < n and text[i + 1] == '#':
+          dec depth
+          i += 2
+          if i < n and text[i] == '#': inc i # the closing ``]##``
+        else:
+          if text[i] == '\n': result.add '\n'
+          inc i
+    elif c == '"' and i + 2 < n and text[i + 1] == '"' and text[i + 2] == '"':
+      # Triple-quoted: no escapes; it ends at the first run of three or more
+      # quotes (the extra ones belong to the literal).
+      result.add "\"\"\""
+      i += 3
+      while i < n:
+        if text[i] == '"' and i + 2 < n and text[i + 1] == '"' and
+            text[i + 2] == '"':
+          while i < n and text[i] == '"':
+            result.add '"'
+            inc i
+          break
+        result.add text[i]
+        inc i
+    elif c == '"':
+      # After an identifier character this is a raw or generalized raw
+      # literal (``r"…"``, ``fmt"…"``): no backslash escapes, ``""`` is a
+      # quote.
+      let raw = i > 0 and isIdentChar(text[i - 1])
+      result.add c
+      inc i
+      while i < n and text[i] != '\n':
+        let d = text[i]
+        if not raw and d == '\\' and i + 1 < n:
+          result.add text[i .. i + 1]
+          i += 2
+        elif d == '"' and raw and i + 1 < n and text[i + 1] == '"':
+          result.add "\"\""
+          i += 2
+        elif d == '"':
+          result.add d
+          inc i
+          break
+        else:
+          result.add d
+          inc i
+    elif c == '\'' and not (i > 0 and isIdentChar(text[i - 1])):
+      # A character literal (``'#'``, ``'\''``, ``'\x23'``). After an
+      # identifier character a quote is a numeric suffix (``1'u8``).
+      var j = i + 1
+      if j < n and text[j] == '\\':
+        j += 2
+        while j < n and text[j] notin {'\'', '\n'}: inc j
+      else:
+        inc j
+      if j < n and text[j] == '\'':
+        result.add text[i .. j]
+        i = j + 1
+      else:
+        result.add c
+        inc i
+    else:
+      result.add c
+      inc i
+
 proc selfSpawnMarker*(text: string): string =
+  let code = withoutComments(text)
   for m in SelfSpawnMarkers:
-    if m in text: return m
+    if m in code: return m
   ""
 
 proc moduleLevelSideEffect*(text: string): string =
@@ -314,9 +521,20 @@ proc staticCaseNames*(text: string): seq[string] =
   ## ``std/unittest`` fork catalogs it under). Names built at run time are
   ## invisible here; the runner refuses an ambiguous ``--run`` name it meets
   ## in a catalog regardless.
+  ##
+  ## Lines inside a triple-quoted string are not this file's code and are
+  ## skipped: a fixture recipe written at column 0 inside a ``suite`` must
+  ## not end the suite. It did, and ten sources whose later tests share a
+  ## name with another file's (in a DIFFERENT suite) were kept single for a
+  ## clash that ``--run suite::test`` never sees.
   var suiteName = ""
   var suiteIndent = -1
+  var inTripleQuote = false
   for line in text.splitLines:
+    if line.count("\"\"\"") mod 2 == 1:
+      inTripleQuote = not inTripleQuote
+      continue
+    if inTripleQuote: continue
     let t = line.strip(trailing = false)
     let indent = line.len - t.len
     if suiteIndent >= 0 and t.len > 0 and indent <= suiteIndent and

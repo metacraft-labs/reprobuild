@@ -155,171 +155,187 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
          (if result: "" else: "\n" & g.serviceJournal(["eth-execution.service",
             "eth-beacon.service", pins.validatorUnit])))
     inc sequence
-  # 0. The activity comes up and the chain justifies.
-  if not apply("the validator activity"): return
-  # The epoch the validators began signing in: the chain starts when the
-  # activity does, whatever the genesis time (empty slots before it).
-  let guestNow = parseInt(g.run("date +%s").strip())
-  let startEpoch = max(guestNow - net.genesisTime, 0) div 12
-  record["startEpoch"] = %startEpoch
-  step("the chain justifies an epoch",
-       g.waitJustified(startEpoch + 2, 900),
-       "justified " & $g.justifiedEpoch() & ", started at " & $startEpoch)
-  # By the time an epoch is justified, at least two thirds of the keys have
-  # attested; every key's history must reach back at least this far.
-  let justifiedAt = max(parseInt(g.run("date +%s").strip()) - net.genesisTime,
-                        0) div 12
-  record["justifiedAtEpoch"] = %justifiedAt
-  # 1. restart
-  discard g.run("systemctl restart " & pins.validatorUnit)
-  g.waitSigning(2)
-  # 2. re-configuration
-  pins.validatorExtraConfig = "graffiti: \"a12-reconfigured\"\n"
-  if not apply("re-configuration"): return
-  g.waitSigning(2)
-  # 3. re-closure
-  pins.validatorPrefix = prefixPath("prysm-validator", "7.3.1-b",
-                                    pins.validatorDigest)
-  if not apply("re-closure"): return
-  g.waitSigning(2)
-  # 4a. A rename that keeps the unit's resource address is refused: the
-  # ledger knows objects by address, so it would leave the old unit (and
-  # its instance) in place beside the new one.
-  let kept = pins
-  pins.validatorUnit = RenamedUnit
-  pins.validatorUnitAddress = "systemd.systemUnit:" & DefaultValidatorUnit
-  block:
-    var fixedAddress = kept
-    fixedAddress.validatorUnitAddress = pins.validatorUnitAddress
-    discard publishPins(bs.producer, cache, kp, engine, pk, net, fixedAddress,
-                        sequence)
-    inc sequence
-    discard g.tickUnits()
-    discard publishPins(bs.producer, cache, kp, engine, pk, net, pins, sequence)
-    let t = g.tickUnits()
-    inc sequence
-    step("a rename that keeps its address is refused, nothing changed",
-         t.outcome != "aoApplied" and "address" in t.message and
-         g.exec("systemctl is-active " & DefaultValidatorUnit).exitCode == 0 and
-         g.exec("test -e /etc/systemd/system/" & RenamedUnit).exitCode != 0,
-         $t)
-  pins.validatorUnitAddress = ""
-  # 4. rename
-  pins.validatorUnit = RenamedUnit
-  if gateMutation() == "validator-state-follows-unit-name":
-    pins.validatorStateDir = "/var/lib/ethereum/" &
-      pins.validatorUnit.replace(".service", "")
-  if not apply("rename"): return
-  step("the old unit is stopped and disabled after the rename",
-       g.exec("systemctl is-active " & DefaultValidatorUnit).exitCode != 0 and
-       g.exec("systemctl is-enabled " & DefaultValidatorUnit).exitCode != 0, "")
-  g.waitSigning(2)
-  # 5. rollback
-  let rb = g.exec(repro & " system rollback", timeoutSec = 1800)
-  step("rollback to the generation before the rename", rb.exitCode == 0,
-       rb.stdout & rb.stderr)
-  step("after the rollback the validator runs under its old name",
-       g.exec("systemctl is-active " & DefaultValidatorUnit).exitCode == 0 and
-       g.exec("systemctl is-active " & RenamedUnit).exitCode != 0, "")
-  g.waitSigning(3)
-  # The lifetimes and databases of the five steps.
-  discard g.exec("pkill -f validator-monitor.py")
-  let lifeLog = g.run("cat " & LifetimeLog)
-  record["lifetimes"] = %lifeLog
-  let ls = parseLifetimes(lifeLog)
-  let ov = overlaps(ls)
-  step("no two validator lifetimes overlap", ov.len == 0, ov.join("\n"))
-  step("each step started a new instance (at least six)", ls.len >= 6,
-       $ls.len)
-  let dbs = databasesHeld(lifeLog)
-  record["databases"] = %dbs
-  step("every instance held the same slashing-protection database",
-       dbs.len == 1, $dbs)
-  # The chain, before anything below touches it.
-  let slashed = g.slashedValidators()
-  step("no validator is slashed", slashed.len == 0, $slashed)
-  # G26 residual 1: a validator outside the unit's control group.
+  # Shared by the sections below; each section records its own failure
+  # and the next one still runs, so the lifetime and database checks
+  # are evaluated whatever an earlier step did.
+  var justifiedAt = 0
+  var prysmBin = ""
   let unit = DefaultValidatorUnit
-  let prysmBin = pins.validatorPrefix
   let chainCfg = pins.testnetPrefix & "/share/ethereum-testnet/config.yml"
-  let walletPw = "/run/repro/secrets/eth-validator/wallet-password"
-  let strayCmd = "systemd-run --scope --unit=a12-stray-" & $getCurrentProcessId() &
-    " --uid=eth-validator --gid=eth-validator " &
-    validatorCmd(prysmBin, chainCfg & " --wallet-password-file=/run/a12-pw")
-  discard g.run("install -m 0400 -o eth-validator " & walletPw & " /run/a12-pw")
-  let besideUnit = g.exec("timeout 60 " & strayCmd)
-  step("a validator beside the running unit cannot open its database",
-       besideUnit.exitCode != 0 and "cannot obtain database lock" in
-         besideUnit.stdout & besideUnit.stderr,
-       besideUnit.stdout & besideUnit.stderr)
-  discard g.run("systemctl stop " & unit)
-  discard g.run("setsid nohup " & strayCmd & " > /root/stray.log 2>&1 &")
-  sleep(15_000)
-  let since = g.run("date +%s").strip()
-  discard g.exec("systemctl start " & unit)
-  sleep(20_000)
-  let unitLog = g.exec("journalctl -q -o cat --since @" & since & " -u " & unit).stdout
-  step("an instance the unit starts beside it cannot open the database",
-       "cannot obtain database lock" in unitLog, unitLog)
-  discard g.exec("pkill -u eth-validator -f 'bin/validator'; sleep 5; " &
-                 "systemctl reset-failed " & unit & "; systemctl start " & unit)
-  g.waitSigning(2)
-  # G26 residual 2: a second host with the same keys.
   let rogueDir = "/var/lib/ethereum/a12-second-host"
-  discard g.run("rm -rf " & rogueDir & " && mkdir -p " & rogueDir & " && " &
-    "cp -a " & StateDir & "/wallet " & rogueDir & "/ && " &
-    "chown -R eth-validator: " & rogueDir)
-  let second = g.exec("timeout 180 runuser -u eth-validator -- " &
-    validatorCmd(prysmBin, chainCfg & " --wallet-password-file=/run/a12-pw " &
-      "--datadir=" & rogueDir & " --wallet-dir=" & rogueDir & "/wallet " &
-      "--monitoring-port=8091"), timeoutSec = 240)
-  step("a second host's instance finds the keys live and exits",
-       "Duplicate instances exists" in second.stdout & second.stderr,
-       second.stdout & second.stderr)
-  # The unit's history.
-  discard g.run("systemctl stop " & unit)
-  let hist = g.exportHistory(prysmBin, StateDir, "/var/tmp/a12-exp-unit")
-  var all = @[hist]
-  block:
-    # The second host's instance may have exited before creating its
-    # database; when it did create one, it must hold no signature.
-    let r2 = g.exec("test -e " & rogueDir & "/validator.db")
-    if r2.exitCode == 0:
-      let h2 = g.exportHistory(prysmBin, rogueDir, "/var/tmp/a12-exp-second")
-      step("the second host's instance signed nothing",
-           attestationCount([h2]) == 0, $attestationCount([h2]))
-      all.add(h2)
-  let cs = conflicts(all)
-  step("the slashing-protection records hold no conflicting signature",
-       cs.len == 0, $cs.len & ": " & $(%cs))
-  let first = earliestTarget([hist])
-  var late: seq[string]
-  for k in net.pubkeys:
-    let key = (if k.startsWith("0x"): k else: "0x" & k).toLowerAscii()
-    if first.getOrDefault(key, high(int)) > justifiedAt:
-      late.add(k)
-  step("every key's history begins where the run began (none started over)",
-       late.len == 0, $late)
-  step("the history holds the run's attestations",
-       attestationCount([hist]) >= 8 * 10, $attestationCount([hist]))
-  # Positive control: a real double sign, found by the same check.
-  discard g.run("systemctl start " & unit)
-  let ctlDir = "/var/lib/ethereum/a12-control"
-  discard g.run("rm -rf " & ctlDir & " && mkdir -p " & ctlDir & " && " &
-    "cp -a " & StateDir & "/wallet " & ctlDir & "/ && chown -R eth-validator: " &
-    ctlDir)
-  discard g.exec("timeout 120 runuser -u eth-validator -- " &
-    validatorCmd(prysmBin, chainCfg & " --wallet-password-file=/run/a12-pw " &
-      "--datadir=" & ctlDir & " --wallet-dir=" & ctlDir & "/wallet " &
-      "--monitoring-port=8092 --enable-doppelganger=false " &
-      "--graffiti=a12-control"), timeoutSec = 200)
-  discard g.run("systemctl stop " & unit)
-  let hu = g.exportHistory(prysmBin, StateDir, "/var/tmp/a12-exp-unit2")
-  let hc = g.exportHistory(prysmBin, ctlDir, "/var/tmp/a12-exp-control")
-  let found = conflicts([hu, hc])
-  record["positiveControlConflicts"] = %found.len
-  step("positive control: a second database's real double sign is found",
-       found.len > 0, "")
+  template section(what: string; body: untyped) =
+    try:
+      body
+    except CatchableError as e:
+      step(what & ": raised", false, e.msg)
+  section("the five replacements"):
+    # 0. The activity comes up and the chain justifies.
+    discard apply("the validator activity")
+    # The epoch the validators began signing in: the chain starts when the
+    # activity does, whatever the genesis time (empty slots before it).
+    let guestNow = parseInt(g.run("date +%s").strip())
+    let startEpoch = max(guestNow - net.genesisTime, 0) div 12
+    record["startEpoch"] = %startEpoch
+    step("the chain justifies an epoch",
+         g.waitJustified(startEpoch + 2, 900),
+         "justified " & $g.justifiedEpoch() & ", started at " & $startEpoch)
+    # By the time an epoch is justified, at least two thirds of the keys have
+    # attested; every key's history must reach back at least this far.
+    justifiedAt = max(parseInt(g.run("date +%s").strip()) - net.genesisTime,
+                          0) div 12
+    record["justifiedAtEpoch"] = %justifiedAt
+    # 1. restart
+    discard g.run("systemctl restart " & pins.validatorUnit)
+    g.waitSigning(2)
+    # 2. re-configuration
+    pins.validatorExtraConfig = "graffiti: \"a12-reconfigured\"\n"
+    discard apply("re-configuration")
+    g.waitSigning(2)
+    # 3. re-closure
+    pins.validatorPrefix = prefixPath("prysm-validator", "7.3.1-b",
+                                      pins.validatorDigest)
+    discard apply("re-closure")
+    g.waitSigning(2)
+    # 4a. A rename that keeps the unit's resource address is refused: the
+    # ledger knows objects by address, so it would leave the old unit (and
+    # its instance) in place beside the new one.
+    let kept = pins
+    pins.validatorUnit = RenamedUnit
+    pins.validatorUnitAddress = "systemd.systemUnit:" & DefaultValidatorUnit
+    block:
+      var fixedAddress = kept
+      fixedAddress.validatorUnitAddress = pins.validatorUnitAddress
+      discard publishPins(bs.producer, cache, kp, engine, pk, net, fixedAddress,
+                          sequence)
+      inc sequence
+      discard g.tickUnits()
+      discard publishPins(bs.producer, cache, kp, engine, pk, net, pins, sequence)
+      let t = g.tickUnits()
+      inc sequence
+      step("a rename that keeps its address is refused, nothing changed",
+           t.outcome != "aoApplied" and "address" in t.message and
+           g.exec("systemctl is-active " & DefaultValidatorUnit).exitCode == 0 and
+           g.exec("test -e /etc/systemd/system/" & RenamedUnit).exitCode != 0,
+           $t)
+    pins.validatorUnitAddress = ""
+    # 4. rename
+    pins.validatorUnit = RenamedUnit
+    if gateMutation() == "validator-state-follows-unit-name":
+      pins.validatorStateDir = "/var/lib/ethereum/" &
+        pins.validatorUnit.replace(".service", "")
+    discard apply("rename")
+    step("the old unit is stopped and disabled after the rename",
+         g.exec("systemctl is-active " & DefaultValidatorUnit).exitCode != 0 and
+         g.exec("systemctl is-enabled " & DefaultValidatorUnit).exitCode != 0, "")
+    g.waitSigning(2)
+    # 5. rollback
+    let rb = g.exec(repro & " system rollback", timeoutSec = 1800)
+    step("rollback to the generation before the rename", rb.exitCode == 0,
+         rb.stdout & rb.stderr)
+    step("after the rollback the validator runs under its old name",
+         g.exec("systemctl is-active " & DefaultValidatorUnit).exitCode == 0 and
+         g.exec("systemctl is-active " & RenamedUnit).exitCode != 0, "")
+    g.waitSigning(3)
+  section("lifetimes and databases"):
+    # The lifetimes and databases of the five steps.
+    discard g.exec("pkill -f validator-monitor.py")
+    let lifeLog = g.run("cat " & LifetimeLog)
+    record["lifetimes"] = %lifeLog
+    let ls = parseLifetimes(lifeLog)
+    let ov = overlaps(ls)
+    step("no two validator lifetimes overlap", ov.len == 0, ov.join("\n"))
+    step("each step started a new instance (at least six)", ls.len >= 6,
+         $ls.len)
+    let dbs = databasesHeld(lifeLog)
+    record["databases"] = %dbs
+    step("every instance held the same slashing-protection database",
+         dbs.len == 1, $dbs)
+    # The chain, before anything below touches it.
+    let slashed = g.slashedValidators()
+    step("no validator is slashed", slashed.len == 0, $slashed)
+  section("G26 residuals"):
+    # The validator package the host runs now (after the re-closure).
+    prysmBin = pins.validatorPrefix
+    # G26 residual 1: a validator outside the unit's control group.
+    let strayCmd = "systemd-run --scope --unit=a12-stray-" & $getCurrentProcessId() &
+      " --uid=eth-validator --gid=eth-validator " &
+      validatorCmd(prysmBin, chainCfg & " --wallet-password-file=/run/a12-pw")
+    discard g.run("printf %s " & quoteShell(WalletPasswordValue) & " > /run/a12-pw && chown eth-validator /run/a12-pw && chmod 0400 /run/a12-pw")
+    let besideUnit = g.exec("timeout 60 " & strayCmd)
+    step("a validator beside the running unit cannot open its database",
+         besideUnit.exitCode != 0 and "cannot obtain database lock" in
+           besideUnit.stdout & besideUnit.stderr,
+         besideUnit.stdout & besideUnit.stderr)
+    discard g.run("systemctl stop " & unit)
+    discard g.run("setsid nohup " & strayCmd & " > /root/stray.log 2>&1 &")
+    sleep(15_000)
+    let since = g.run("date +%s").strip()
+    discard g.exec("systemctl start " & unit)
+    sleep(20_000)
+    let unitLog = g.exec("journalctl -q -o cat --since @" & since & " -u " & unit).stdout
+    step("an instance the unit starts beside it cannot open the database",
+         "cannot obtain database lock" in unitLog, unitLog)
+    discard g.exec("pkill -u eth-validator -f 'bin/validator'; sleep 5; " &
+                   "systemctl reset-failed " & unit & "; systemctl start " & unit)
+    g.waitSigning(2)
+    # G26 residual 2: a second host with the same keys.
+    discard g.run("rm -rf " & rogueDir & " && mkdir -p " & rogueDir & " && " &
+      "cp -a " & StateDir & "/wallet " & rogueDir & "/ && " &
+      "chown -R eth-validator: " & rogueDir)
+    let second = g.exec("timeout 180 runuser -u eth-validator -- " &
+      validatorCmd(prysmBin, chainCfg & " --wallet-password-file=/run/a12-pw " &
+        "--datadir=" & rogueDir & " --wallet-dir=" & rogueDir & "/wallet " &
+        "--monitoring-port=8091"), timeoutSec = 240)
+    step("a second host's instance finds the keys live and exits",
+         "Duplicate instances exists" in second.stdout & second.stderr,
+         second.stdout & second.stderr)
+  section("the history"):
+    # The unit's history.
+    discard g.run("systemctl stop " & unit)
+    let hist = g.exportHistory(prysmBin, StateDir, "/var/tmp/a12-exp-unit")
+    var all = @[hist]
+    block:
+      # The second host's instance may have exited before creating its
+      # database; when it did create one, it must hold no signature.
+      let r2 = g.exec("test -e " & rogueDir & "/validator.db")
+      if r2.exitCode == 0:
+        let h2 = g.exportHistory(prysmBin, rogueDir, "/var/tmp/a12-exp-second")
+        step("the second host's instance signed nothing",
+             attestationCount([h2]) == 0, $attestationCount([h2]))
+        all.add(h2)
+    let cs = conflicts(all)
+    step("the slashing-protection records hold no conflicting signature",
+         cs.len == 0, $cs.len & ": " & $(%cs))
+    let first = earliestTarget([hist])
+    var late: seq[string]
+    for k in net.pubkeys:
+      let key = (if k.startsWith("0x"): k else: "0x" & k).toLowerAscii()
+      if first.getOrDefault(key, high(int)) > justifiedAt:
+        late.add(k)
+    step("every key's history begins where the run began (none started over)",
+         late.len == 0, $late)
+    step("the history holds the run's attestations",
+         attestationCount([hist]) >= 8 * 10, $attestationCount([hist]))
+  section("positive control"):
+    # Positive control: a real double sign, found by the same check.
+    discard g.run("systemctl start " & unit)
+    let ctlDir = "/var/lib/ethereum/a12-control"
+    discard g.run("rm -rf " & ctlDir & " && mkdir -p " & ctlDir & " && " &
+      "cp -a " & StateDir & "/wallet " & ctlDir & "/ && chown -R eth-validator: " &
+      ctlDir)
+    discard g.exec("timeout 120 runuser -u eth-validator -- " &
+      validatorCmd(prysmBin, chainCfg & " --wallet-password-file=/run/a12-pw " &
+        "--datadir=" & ctlDir & " --wallet-dir=" & ctlDir & "/wallet " &
+        "--monitoring-port=8092 --enable-doppelganger=false " &
+        "--graffiti=a12-control"), timeoutSec = 200)
+    discard g.run("systemctl stop " & unit)
+    let hu = g.exportHistory(prysmBin, StateDir, "/var/tmp/a12-exp-unit2")
+    let hc = g.exportHistory(prysmBin, ctlDir, "/var/tmp/a12-exp-control")
+    let found = conflicts([hu, hc])
+    record["positiveControlConflicts"] = %found.len
+    step("positive control: a second database's real double sign is found",
+         found.len > 0, "")
+
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest

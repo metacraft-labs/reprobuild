@@ -151,11 +151,157 @@ suite "test binary grouping: eligibility":
     for row in planGroups(unitFiles(5), 1):
       check row.group == ""
 
+proc prefixCand(source: string; defines: seq[string] = @[];
+                reason = ""; cases: seq[string] = @[]): GroupCandidate =
+  ## A candidate keyed the way the generator keys it.
+  GroupCandidate(source: source,
+    optionKey: compileOptionKey(source, defines, [], [], "soAny"),
+    prefixKey: prefixOptionKey(source, defines, [], [], "soAny"),
+    singleReason: reason, caseNames: cases)
+
+proc scenarioFiles(n: int): seq[GroupCandidate] =
+  ## One test per scenario directory, the tests/e2e/m<NN> shape.
+  for i in 0 ..< n:
+    let dir = "m" & align($i, 3, '0')
+    result.add prefixCand("tests/e2e/" & dir & "/t_" & dir & ".nim")
+
+suite "test binary grouping: directory-prefix fallback":
+  test "prefix keys exist only under the configured roots":
+    check DirectoryPrefixGroupRoots == ["tests/e2e"]
+    # Recipe tests stay out: several recipe modules in one binary cost tens
+    # of CPU-seconds of module initialisation per start (see the constant).
+    check prefixOptionKey("recipes/packages/source/zlib/test_zlib_source.nim",
+      [], [], [], "soAny") == ""
+    check prefixOptionKey("tests/e2e/m73/t_x.nim", [], [], [], "soAny") ==
+      "tests/e2e"
+    check prefixOptionKey("tests/e2e/t_top.nim", [], [], [], "soAny") ==
+      "tests/e2e"
+    check prefixOptionKey("tests/unit/t_a.nim", [], [], [], "soAny") == ""
+    # A sibling whose name only starts like a root is not under it.
+    check prefixOptionKey("tests/e2e-extra/t_a.nim", [], [], [], "soAny") == ""
+    # The options stay in the key: a prefix group never mixes them.
+    check prefixOptionKey("tests/e2e/m73/t_x.nim", ["reproProviderMode"], [],
+      [], "soAny") != "tests/e2e"
+
+  test "sources alone in their directory group on the root, at most 25 each":
+    check PrefixGroupMaxMembers == 25
+    let plan = planGroups(scenarioFiles(195))
+    let groups = groupMembers(plan)
+    # ceil(195 / 25) = 8 balanced chunks (25, 25, 25, 24, ...), not 4 of 50.
+    check groups.len == 8
+    var total = 0
+    for stem, members in groups:
+      check stem.startsWith("t_group_tests_e2e_prefix_g0")
+      check stem.validIdentifier
+      check members.len <= 25
+      check members.len >= 24
+      total += members.len
+    check total == 195
+    check toSeq(groups.keys)[0] == "t_group_tests_e2e_prefix_g01"
+    for row in plan: check row.singleReason == ""
+
+  test "an explicit prefix cap is honoured independently of G":
+    let plan = planGroups(scenarioFiles(30), 50, 10)
+    let groups = groupMembers(plan)
+    check groups.len == 3
+    for stem, members in groups: check members.len == 10
+
+  test "directories with several sources keep their exact-directory groups":
+    var cands = @[
+      prefixCand("tests/e2e/addon/t_a.nim"), prefixCand("tests/e2e/addon/t_b.nim"),
+      prefixCand("tests/e2e/m73/t_lone.nim"), prefixCand("tests/e2e/m74/t_lone2.nim"),
+      prefixCand("tests/e2e/t_top.nim")]
+    let plan = planGroups(cands)
+    check plan.groupOf("tests/e2e/addon/t_a.nim") == "t_group_tests_e2e_addon_g01"
+    check plan.groupOf("tests/e2e/addon/t_b.nim") == "t_group_tests_e2e_addon_g01"
+    for lone in ["tests/e2e/m73/t_lone.nim", "tests/e2e/m74/t_lone2.nim",
+                 "tests/e2e/t_top.nim"]:
+      check plan.groupOf(lone) == "t_group_tests_e2e_prefix_g01"
+
+  test "a prefix group's stem cannot collide with the root's own group":
+    # Two sources directly in tests/e2e form the root's exact-directory group;
+    # the subdirectory leftovers form a prefix group with a distinct stem.
+    let plan = planGroups(@[
+      prefixCand("tests/e2e/t_a.nim"), prefixCand("tests/e2e/t_b.nim"),
+      prefixCand("tests/e2e/m73/t_c.nim"), prefixCand("tests/e2e/m74/t_d.nim")])
+    check plan.groupOf("tests/e2e/t_a.nim") == "t_group_tests_e2e_g01"
+    check plan.groupOf("tests/e2e/m73/t_c.nim") == "t_group_tests_e2e_prefix_g01"
+
+  test "single reasons and option keys still apply under a prefix":
+    let plan = planGroups(@[
+      prefixCand("tests/e2e/m73/t_a.nim"),
+      prefixCand("tests/e2e/m74/t_b.nim", reason = "self-spawn marker isMainModule"),
+      prefixCand("tests/e2e/m75/t_c.nim", defines = @["reproProviderMode"]),
+      prefixCand("tests/e2e/m76/t_d.nim")])
+    check plan.groupOf("tests/e2e/m73/t_a.nim") == "t_group_tests_e2e_prefix_g01"
+    check plan.groupOf("tests/e2e/m76/t_d.nim") == "t_group_tests_e2e_prefix_g01"
+    check plan.groupOf("tests/e2e/m74/t_b.nim") == ""
+    check plan[1].singleReason == "self-spawn marker isMainModule"
+    # Alone on its options even under the root: still single.
+    check plan.groupOf("tests/e2e/m75/t_c.nim") == ""
+    check plan[2].singleReason == "no other source shares its compile options"
+
+  test "case-name clashes are checked across a prefix group's members":
+    let plan = planGroups(@[
+      prefixCand("tests/e2e/m73/t_a.nim", cases = @["s::x"]),
+      prefixCand("tests/e2e/m74/t_b.nim", cases = @["s::y"]),
+      prefixCand("tests/e2e/m75/t_c.nim", cases = @["s::x"])])
+    check plan.groupOf("tests/e2e/m75/t_c.nim") == ""
+    check "case name `s::x` is also declared by tests/e2e/m73/t_a.nim" in
+      plan[2].singleReason
+    check plan.groupOf("tests/e2e/m73/t_a.nim") ==
+      plan.groupOf("tests/e2e/m74/t_b.nim")
+
+  test "a lone source outside every root stays single":
+    let plan = planGroups(@[prefixCand("tests/unit/t_only.nim"),
+      prefixCand("recipes/packages/source/a/test_a_source.nim"),
+      prefixCand("recipes/packages/source/b/test_b_source.nim")])
+    for row in plan:
+      check row.group == ""
+      check row.singleReason == "no other source shares its compile options"
+
 suite "test binary grouping: source text facts":
   test "self-spawn markers":
     check selfSpawnMarker("let me = getAppFilename()") == "getAppFilename"
     check selfSpawnMarker("when isMainModule:\n  main()") == "isMainModule"
     check selfSpawnMarker("import std/unittest") == ""
+
+  test "self-spawn markers in comments only do not count":
+    check selfSpawnMarker("# no getAppFilename here\nlet x = 1") == ""
+    check selfSpawnMarker("## Doc: unlike t_x, this never calls " &
+      "getAppFilename.\nlet x = 1") == ""
+    check selfSpawnMarker("let x = 1 # not isMainModule") == ""
+    check selfSpawnMarker("#[ getAppFilename\n  isMainModule ]#\nlet x = 1") == ""
+    check selfSpawnMarker("##[ doc\n getAppFilename ]##\nlet x = 1") == ""
+    # Block comments nest.
+    check selfSpawnMarker("#[ a #[ b ]# getAppFilename ]#\nlet x = 1") == ""
+    # Code after a closed block comment, or on the next line, still counts.
+    check selfSpawnMarker("#[ c ]# let me = getAppFilename()") ==
+      "getAppFilename"
+    check selfSpawnMarker("# c\nwhen isMainModule: main()") == "isMainModule"
+
+  test "a # inside a string or character literal does not start a comment":
+    check selfSpawnMarker("let s = \"#\"; let me = getAppFilename()") ==
+      "getAppFilename"
+    check selfSpawnMarker("let s = \"a \\\"#\\\" b\"; discard getAppFilename()") ==
+      "getAppFilename"
+    check selfSpawnMarker("let s = r\"C:\\#\"; discard getAppFilename()") ==
+      "getAppFilename"
+    check selfSpawnMarker("let c = '#'; discard getAppFilename()") ==
+      "getAppFilename"
+    check selfSpawnMarker("let c = '\\''; discard getAppFilename() # x") ==
+      "getAppFilename"
+    let q = "\"\"\""
+    check selfSpawnMarker("let s = " & q & "a # b" & q &
+      "; discard getAppFilename()") == "getAppFilename"
+    # A marker inside a string literal still counts (conservative).
+    check selfSpawnMarker("let s = \"getAppFilename\"") == "getAppFilename"
+    check selfSpawnMarker("let s = " & q & "\n# isMainModule\n" & q) ==
+      "isMainModule"
+
+  test "comments are removed and line breaks kept":
+    check withoutComments("a # c\nb ## d\n#[ x\ny ]#c") == "a \nb \n\nc"
+    check withoutComments("let n = 1'u8 # x") == "let n = 1'u8 "
 
   test "module-level process-global effects are found only at column 0":
     check moduleLevelSideEffect("putEnv(\"A\", \"1\")") == "putEnv"
@@ -230,6 +376,16 @@ test "loose":
   discard
 """
     check staticCaseNames(text) == @["alpha::one", "alpha::two", "::loose"]
+
+  test "a triple-quoted fixture at column 0 does not end the suite":
+    # The shape of the *_direct_convention and *_dep_scanner tests: a recipe
+    # written at column 0 inside a test made every later test look
+    # suite-less, so two files' tests in different suites seemed to clash.
+    let q = "\"\"\""
+    let text = ["suite \"beta\":", "  test \"one\":",
+      "    writeFile(\"repro.nim\", " & q, "package p:", "  discard",
+      q & ")", "  test \"two\":", "    discard", ""].join("\n")
+    check staticCaseNames(text) == @["beta::one", "beta::two"]
 
 suite "test binary grouping: case identity (runner keying)":
   const tableText = """

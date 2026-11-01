@@ -20,13 +20,21 @@
 ## (`/var/lib/repro/agent/sealed-secrets`), and every `repro infra apply`
 ## materialises the profile's declarations from it before any unit starts.
 ##
+## *At boot.* The ramfs is empty after a reboot. Every unit that loads
+## credentials wants and is ordered after `repro-addon-secrets.service`
+## (the renderer's `SecretsOrderingUnit`, the same on both realisations),
+## and on a full host the apply installs that unit itself
+## (`fullHostSecretsUnit`): a bounded oneshot that re-materialises the
+## declarations the last apply recorded (`FullHostDeclsPath`) from the
+## latest envelope, as an add-on host's boot secrets unit does.
+##
 ##   repro system secret put --service S --name N [--target T] < bytes
 ##       On a full host: create the recipient key if there is none, seal the
 ##       secret from stdin into the latest envelope. On an add-on host the
 ##       verb is `repro system addon secret put`, and this one hands over to
 ##       it.
 
-import std/[algorithm, os]
+import std/[algorithm, os, strutils]
 
 import repro_infra
 
@@ -34,6 +42,9 @@ import repro_deploy_agent/secrets as agentSecrets
 import repro_peer_cache/auth as peerAuth
 
 from ./addon_apply import DefaultStateDir
+from ./generation0 import NoSwapLine, SecretsUnitTimeoutSec
+import ./switch
+import ./host_exec
 import ./addon_secrets
 import ./locked_buffer
 import ./secrets_ops
@@ -139,3 +150,100 @@ proc runFullHostSecretPutCli*(args: seq[string]): int =
   except CatchableError as e:
     stderr.write("repro system secret put: " & e.msg & "\n")
     1
+
+const
+  FullHostDeclsPath* = "/var/lib/repro/agent/full-host-secrets"
+    ## The declarations the last apply materialised, one `<service>/<name>`
+    ## per line (0600 root): what the boot unit re-materialises.
+  FullHostSecretsUnitPath* = "/etc/systemd/system/" & SecretsBootUnit
+
+proc fullHostSecretsUnit*(reproExe: string): string =
+  ## The boot-time secrets unit of a host realised in full. Like the
+  ## add-on's (`generation0.secretsUnit`) it is on the boot path of every
+  ## unit that loads credentials, so it is bounded, needs no network and
+  ## never fails the boot: a secret it cannot materialise is reported and
+  ## the unit that loads it fails to start.
+  "[Unit]\n" &
+    "Description=Reprobuild secrets for this boot (system realised in full)\n" &
+    "After=local-fs.target\n" &
+    "\n[Service]\n" &
+    "Type=oneshot\n" &
+    "RemainAfterExit=yes\n" &
+    "TimeoutStartSec=" & $SecretsUnitTimeoutSec & "s\n" &
+    "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " &
+      reproExe & " system secret materialise --boot; else echo repro " &
+      "secrets: degraded: " & reproExe & " is unavailable; fi'\n" &
+    "PrivateNetwork=yes\n" &
+    "NoNewPrivileges=yes\n" &
+    "ProtectHome=yes\n" &
+    "PrivateTmp=yes\n" &
+    NoSwapLine &
+    "\n[Install]\n" &
+    "WantedBy=multi-user.target\n"
+
+proc renderDecls*(decls: openArray[SecretFileDecl]): string =
+  for d in decls: result.add(secretEntryPath(d.service, d.name) & "\n")
+
+proc parseDecls*(text: string): seq[SecretFileDecl] =
+  ## The inverse of `renderDecls`; a line that is not one safe
+  ## `<service>/<name>` raises.
+  for line in text.splitLines():
+    let t = line.strip()
+    if t.len == 0: continue
+    let parts = t.split('/')
+    if parts.len != 2 or not isSafeSecretComponent(parts[0]) or
+        not isSafeSecretComponent(parts[1]):
+      raise newException(AddonSecretsFailed, FullHostDeclsPath &
+        ": not a secret entry: " & t)
+    result.add(SecretFileDecl(service: parts[0], name: parts[1]))
+
+proc recordFullHostSecrets*(decls: openArray[SecretFileDecl];
+                            reproExe: string; declsPath = FullHostDeclsPath;
+                            unitPath = FullHostSecretsUnitPath): seq[string] =
+  ## After an apply materialised ``decls``: record them for the boot unit,
+  ## and install and enable that unit when its bytes changed. Returns what
+  ## it did. With no declaration the record is emptied and the unit stays
+  ## (it then clears nothing and materialises nothing).
+  createDir(parentDir(declsPath))
+  let text = renderDecls(decls)
+  if not fileExists(declsPath) or readFile(declsPath) != text:
+    writeFile(declsPath & ".tmp", text)
+    setFilePermissions(declsPath & ".tmp", {fpUserRead, fpUserWrite})
+    moveFile(declsPath & ".tmp", declsPath)
+    result.add("recorded " & $decls.len & " secret declaration(s)")
+  if decls.len == 0 and not fileExists(unitPath): return
+  let unit = fullHostSecretsUnit(reproExe)
+  if not fileExists(unitPath) or readFile(unitPath) != unit:
+    writeFile(unitPath & ".tmp", unit)
+    setFilePermissions(unitPath & ".tmp",
+                       {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+    moveFile(unitPath & ".tmp", unitPath)
+    daemonReload()
+    let r = runSystemctl(["enable", "--", SecretsBootUnit])
+    if r.exitCode != 0:
+      raise newException(AddonSecretsFailed, "enabling " & SecretsBootUnit &
+        " failed: " & r.output.strip())
+    result.add("installed " & unitPath)
+
+proc bootFullHostSecrets*(l = defaultSecretsLayout();
+                          declsPath = FullHostDeclsPath): string =
+  ## The boot unit's work: re-materialise the recorded declarations from
+  ## the latest envelope. Never raises: it reports.
+  try:
+    let decls = if fileExists(declsPath): parseDecls(readFile(declsPath))
+                else: @[]
+    let changed = materialiseFullHostSecrets(l, decls)
+    "repro secrets: ok: " & $decls.len & " declared, materialised for " &
+      (if changed.len > 0: changed.join(", ") else: "none")
+  except CatchableError as e:
+    "repro secrets: degraded: " & e.msg
+
+proc runFullHostSecretMaterialiseCli*(args: seq[string]): int =
+  ## ``repro system secret materialise --boot``: the boot unit's verb.
+  if args.len != 1 or args[0] != "--boot":
+    stderr.write("usage: repro system secret materialise --boot\n")
+    return 2
+  let reexec = reexecInNoSwapScope()
+  if reexec >= 0: return reexec
+  stdout.write(bootFullHostSecrets() & "\n")
+  0

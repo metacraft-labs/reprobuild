@@ -294,10 +294,19 @@
 ##                                            names another unit or path is
 ##                                            applied, leaving the old one
 ##                                            running and unledgered (A12)
+## ``activity-edges-unselected``             an activity's store-package
+##                                            edges are realised on every
+##                                            host, selected or not (A12)
 ## ``addon-unit-renders-differently``         every unit the add-on writes
 ##                                            gains one comment line, so
 ##                                            its bytes differ from the
 ##                                            full realisation's (A12)
+## ``confirm-overruns-deadline``              the confirm step keeps
+##                                            probing for twice
+##                                            ``confirmTimeout`` before it
+##                                            gives up, so a failing or
+##                                            hanging check holds the
+##                                            switch past its deadline
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -354,6 +363,8 @@ const
                           # Milestone A12: the parity gate's falsifying build.
                           "addon-unit-renders-differently",
                           "retargeted-address-accepted",
+                          # Read by repro_profile_compile's adapter_system.
+                          "activity-edges-unselected",
                           "secrets-plaintext-unlocked",
                           "replay-reverts-on-secrets",
                           "retirement-not-resumed",
@@ -387,7 +398,10 @@ const
                           "agent-install-trusts-cwd",
                           "agent-dns-via-resolved",
                           "agent-management-path-names-only",
-                          "floor-only-on-confirm"]
+                          "floor-only-on-confirm",
+                          # Milestone A5: the confirm-or-revert gate's
+                          # timing falsifier.
+                          "confirm-overruns-deadline"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

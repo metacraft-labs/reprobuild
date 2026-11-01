@@ -83,6 +83,12 @@ type
       ## manifest), so the profile pins the bytes and the cache
       ## publisher is transport, not authority. Empty: no pin (the
       ## pre-existing behaviour for edges the host can build itself).
+    activity*: string
+      ## The system activity that declared the edge (`activity <name>:
+      ## resources:`), "" for a profile-level edge. The system planner keeps
+      ## an activity's edges only on a host that selects the activity, so a
+      ## host fetches only the store packages its activities use (ReproOS
+      ## Add-On Mode §8.2).
     rebootRequired*: bool
       ## Mirror of ``BuildActionDef.rebootRequired``: the edge's effect
       ## needs a restart before it takes hold. An edge that actually RAN

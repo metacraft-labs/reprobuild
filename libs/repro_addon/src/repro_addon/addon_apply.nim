@@ -108,6 +108,10 @@ type
     ## when the switch did not commit, its pending marker stays (a recovery
     ## finishes it forward, never reverts it) and ``floor-hold`` records why.
   AddonRolledBack* = object of AddonApplyError
+  AddonRecordedOnly* = object of AddonApplyError
+    ## A record-only replay finished: it recorded the failed switch's
+    ## writes and, by design, committed nothing. Any other error out of a
+    ## record-only replay is a real failure.
     ## The switch did not complete -- a health check failed within
     ## ``confirmTimeout``, a write was refused, a step failed -- and it was
     ## reverted: the host is back in the generation ``current`` names
@@ -470,20 +474,38 @@ const RawCredentialDirectives* = ["LoadCredential", "LoadCredentialEncrypted",
   ## through its ``credentials`` field, which names its own service's
   ## secrets and nothing else (spec §10.3, CRED-3).
 
+proc credentialSourceResolvesUnder*(src, dir: string): bool =
+  ## Whether ``src``, as the filesystem resolves it now, is still below
+  ## ``dir``: a symbolic link inside the secrets directory that points out
+  ## of it is refused (spec §10.3, "Legacy delivery"). A source that does
+  ## not exist yet resolves to nothing and is accepted: the directory is
+  ## root-owned and neither group- nor world-writable
+  ## (``legacySecretsDirTrustError``), so only root can put a link there
+  ## later, and root can read any file anyway.
+  var realSrc, realDir: string
+  try: realDir = expandFilename(dir)
+  except OSError: return false
+  try: realSrc = expandFilename(src)
+  except OSError: return true
+  realSrc.startsWith(realDir & "/")
+
 proc legacyCredentialSource*(value: string;
                              legacySecretsDirs: openArray[string]): bool =
   ## Whether a ``LoadCredential=`` value (``ID:PATH``) loads a file under
   ## one of the agent's legacy secrets directories (spec §10.3, "Legacy
-  ## delivery"): an absolute, normalised path with no specifier, strictly
-  ## below the directory. ``ID`` alone (systemd's credential store) and any
-  ## other source are not.
+  ## delivery"): a clean path (``legacySecretsPathError``: no `\` or `"`
+  ## systemd would unescape, no specifier) strictly below the directory,
+  ## which also resolves below it (``credentialSourceResolvesUnder``).
+  ## ``ID`` alone (systemd's credential store) and any other source are not.
   let colon = value.find(':')
   if colon <= 0: return false
   let id = value[0 ..< colon].strip()
   let src = value[colon + 1 .. ^1].strip()
-  if id.len == 0 or legacySecretsDirError(src).len > 0: return false
+  if id.len == 0 or '\\' in id or '"' in id: return false
+  if legacySecretsPathError(src).len > 0: return false
   for d in legacySecretsDirs:
-    if legacySecretsDirError(d).len == 0 and src.startsWith(d & "/"):
+    if legacySecretsDirError(d).len == 0 and src.startsWith(d & "/") and
+        credentialSourceResolvesUnder(src, d):
       return true
   false
 
@@ -781,11 +803,20 @@ proc droppedSupplementaryGroups*(r: SystemResource;
   ## The supplementary groups a `passwd.user` update drops: its driver's
   ## `usermod --groups` sets exactly the declared set, so a live group the
   ## resource does not name goes (spec §4.4, "accounts"). Read from
-  ## ``groupText`` (/etc/group when empty).
+  ## ``groupText``, else through NSS (`getent group`, the database `usermod`
+  ## itself consults), else /etc/group when no getent is installed.
   if r.kind != srkPasswdUser: return
-  let text = if groupText.len > 0: groupText
-             elif fileExists("/etc/group"): readFile("/etc/group")
-             else: ""
+  var text = groupText
+  if text.len == 0:
+    let getent = resolveHostTool(["/usr/bin/getent", "/bin/getent"])
+    if getent.len > 0:
+      try:
+        let g = runHostTool([getent, "group"], mergeStderr = false)
+        if g.exitCode == 0: text = g.output
+      except CatchableError:
+        discard
+    if text.len == 0 and fileExists("/etc/group"):
+      text = readFile("/etc/group")
   for line in text.splitLines():
     let f = line.split(':')
     if f.len < 4 or f[0].len == 0: continue
@@ -1431,7 +1462,18 @@ proc systemctlOrRaise(args: openArray[string]) =
   except HostToolMissing as e:
     raise newException(AddonApplyError, e.msg)
 
-proc restoreUnitState*(e: LedgerEntry; driver: CollisionDriver) =
+proc quietHandBack*(preservedSha, ledgerSha: string;
+                    dropInsChanged, dependenciesChanged: bool): bool =
+  ## Whether a unit handed back to the base may be left running: the bytes
+  ## put back are the ones it ran (an adopted unit, handed back as found),
+  ## and nothing else it loads changed in this switch -- no drop-in the
+  ## add-on wrote for it, no `depends_on` target. Otherwise it is restarted
+  ## from the base's file (§7.3).
+  preservedSha.len > 0 and preservedSha == ledgerSha and
+    not dropInsChanged and not dependenciesChanged
+
+proc restoreUnitState*(e: LedgerEntry; driver: CollisionDriver;
+                       othersChanged = true) =
   ## After the add-on's unit file left (restored or removed), put the unit
   ## back in the state the base had it: a `replace`d package unit that was
   ## enabled and active stays so, now from the package's file. Runs after
@@ -1446,12 +1488,18 @@ proc restoreUnitState*(e: LedgerEntry; driver: CollisionDriver) =
       now.loadState == "loaded":
     systemctlOrRaise(["enable", "--", e.unit])
   # The bytes put back are the bytes the add-on had there (an adopted
-  # unit, handed back as found): the definition systemd runs did not
-  # change, so a running instance is left alone.
-  let unchanged = e.preserved.len > 0 and fileExists(e.preserved) and
-    sha256Hex(readFile(e.preserved)) == e.sha256
+  # unit, handed back as found), and nothing else it loads changed
+  # (``othersChanged``: its drop-ins, its `depends_on` targets): the
+  # definition systemd runs did not change, so a running instance is left
+  # alone. ``othersChanged`` defaults to true: a caller that has not
+  # established that restarts.
+  let preservedSha = if e.preserved.len > 0 and fileExists(e.preserved):
+                       sha256Hex(readFile(e.preserved)) else: ""
+  let quiet = quietHandBack(preservedSha, e.sha256,
+                            dropInsChanged = othersChanged,
+                            dependenciesChanged = othersChanged)
   if e.baseActiveState == "active" and now.loadState == "loaded":
-    if unchanged and now.activeState == "active":
+    if quiet and now.activeState == "active":
       discard
     else:
       # The running instance is the add-on's definition; restart it from
@@ -1970,6 +2018,25 @@ proc acceptedOutOfBandDiff*(accepted: seq[tuple[path, address: string]]):
     seen.incl(a.path)
     result.add("accepted-out-of-band\t" & a.path & "\t" & a.address)
 
+proc ledgerRecordsAttempt(stateDir, fromGeneration: string): bool =
+  ## The ledger copy was rewritten since ``fromGeneration`` was committed:
+  ## only the interrupted switch (or a replay of it) writes it while
+  ## `current` still names ``fromGeneration``, and it does so after its
+  ## writes, so a revert planned from it can tell them apart.
+  let lp = ledgerCopyPath(stateDir)
+  if not fileExists(lp): return false
+  try: readLedger(lp).generation != fromGeneration
+  except CatchableError: false
+
+proc revertMayKeep*(purpose: string; ledgerOwns, regularFile: bool;
+                    currentSha, plannedSha: string): bool =
+  ## Whether a revert keeps a drifted ledger-owned file as found (§7.5, "A
+  ## revert over drift the failed switch did not cause"): only a regular
+  ## file whose bytes are exactly what the failed switch's plan observed
+  ## before the flip -- bytes it found there and left alone.
+  purpose == "revert" and ledgerOwns and regularFile and
+    plannedSha.len > 0 and currentSha == plannedSha
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -2099,7 +2166,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         r.suContent.add("# rendered by the add-on\n")
   var legacyDirs = registeredLegacySecretsDirs(stateDir)
   for d in opts.legacySecretsDirs:
-    if d notin legacyDirs: legacyDirs.add(d)
+    # This apply's own directory is held to the registry's rules.
+    let why = legacySecretsDirTrustError(d)
+    if why.len > 0:
+      result.drift.add("legacy secrets directory not accepted: " & why)
+    elif d notin legacyDirs: legacyDirs.add(d)
   checkScope(user, legacyDirs)
   # The envelope this switch's secrets come from (spec §10.3, A7).
   let secretsLayout = defaultSecretsLayout()
@@ -2248,6 +2319,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     pendingPreserve.add(bytes)
     preservePath(stateDir, bytes)
   var revertHeldDrift: seq[string]
+  # What the failed switch observed at each target before it changed
+  # anything (its write-ahead plan, still the pending one while its revert
+  # plans): a revert keeps a file as found only when it still has exactly
+  # those bytes, i.e. the failed switch did not touch it.
+  var failedPlanObserved = initTable[string, string]()
+  if purpose == "revert" and hasPendingPlan(stateDir):
+    try:
+      for sp in readPendingPlan(stateDir).plans:
+        if sp.targetPath.len > 0 and sp.observedSha256.len > 0:
+          failedPlanObserved[sp.targetPath] = sp.observedSha256
+    except CatchableError:
+      discard          # unreadable: nothing is kept as found (refused below)
   proc revertHeld(r: var SystemResource; p: var ResourcePlan;
                   inp: DecisionInputs; e: ref AddonDriftError):
       (CollisionDecision, TargetObservation) =
@@ -2257,10 +2340,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## caches.conf -- is not the revert's to refuse: it is kept as found,
     ## asked for its own bytes so nothing is written, its ledger digest kept
     ## (the drift stays visible), and reported. Any other purpose refuses.
-    if purpose != "revert" or not inp.ledgerOwns or
-        not (fileExists(p.targetPath) and not symlinkExists(p.targetPath)):
+    let regular = fileExists(p.targetPath) and not symlinkExists(p.targetPath)
+    let current = if regular: readFile(p.targetPath) else: ""
+    # Only bytes the failed switch found there and left alone: the same
+    # digest its plan observed before the flip. Anything else -- a file it
+    # wrote, or one that changed since -- is refused as before.
+    if not revertMayKeep(purpose, inp.ledgerOwns, regular, sha256Hex(current),
+                         failedPlanObserved.getOrDefault(p.targetPath)):
       raise e
-    let current = readFile(p.targetPath)
     pinToBytes(r, p, current, deferPreserve(current), opts.planOnly)
     p.keepLedgerSha = inp.ledgerSha256
     let o = observeTarget(driver, p.targetPath, inp.unit)
@@ -2656,6 +2743,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var forgottenEntries: seq[LedgerEntry]  # unitState requirements dropped:
                                           # the state stays, accounted for
   var removedUnits: seq[SystemResource]   # units whose files go
+  var handedBackUnits: seq[SystemResource] # units handed back to the base
   var removedSysctl: seq[LedgerEntry]     # keys to restore in step 6
   var handedBack = initHashSet[string]()
     # `<class> <path>` of every entry whose path a package came to own: its
@@ -2802,6 +2890,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     if not restoresInstead and not alreadyRemoved:
       destroy.add(r)
     if r.kind == srkSystemdSystemUnit and restoresInstead:
+      handedBackUnits.add(r)
       # Handed back to the base (a `replace`d package unit, an adopted or
       # reconciled hand-written one): the switch neither stops nor
       # disables it; `restoreUnitState` re-asserts the base's enablement
@@ -2901,6 +2990,38 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var addressByKey = initTable[string, string]()
   for r in composed.resources:
     addressByKey[resourceKindTag(r) & ":" & resourceName(r)] = r.address
+  # A unit handed back as found stays running only when nothing it loads
+  # changes in this switch (``quietHandBack``): none of the drop-ins the
+  # add-on wrote for it, none of its `depends_on` targets. A target still
+  # declared changes unless its verdict writes nothing; a removed one
+  # changes unless it, too, goes back with the bytes it has.
+  var loudHandBack = initHashSet[string]()
+  block:
+    var removedByKey = initTable[string, SystemResource]()
+    for r in removed:
+      removedByKey[resourceKindTag(r) & ":" & resourceName(r)] = r
+    proc restoredAsIs(address: string): bool =
+      var any = false
+      for e in restore:
+        if e.resource != address: continue
+        any = true
+        if not (e.preserved.len > 0 and fileExists(e.preserved) and
+                sha256Hex(readFile(e.preserved)) == e.sha256):
+          return false
+      for d in destroy:
+        if d.address == address: return false
+      any
+    for r in handedBackUnits:
+      var changed = r.suName in dropInsChangedFor
+      for dep in r.dependsOn:
+        let key = dep.kind & ":" & dep.name
+        if key in addressByKey:
+          if verdictByAddress.getOrDefault(addressByKey[key], cvNoOp) notin
+              {cvNoOp, cvAdopt}:
+            changed = true
+        elif key in removedByKey:
+          if not restoredAsIs(removedByKey[key].address): changed = true
+      if changed: loudHandBack.incl(r.suName)
   for r in user.resources:
     # A timer is composed as a unit (``reshape``): a `depends_on` names it
     # by its own kind.
@@ -3372,6 +3493,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       why.join("; ")
   var hookSysctl: seq[tuple[key, value: string]]
   var hookGeneration = ""
+  var hookRecordedClean = false
+    ## A record-only replay got through steps 4-6 with no problem of its
+    ## own: its only "failure" is the not-committed note it adds itself.
   var paused: seq[string]      # triggers step 2 stopped; step 7 restarts
   var notRunning: seq[string]  # stop-start units that ended before step 2
   var hookConfirm: ConfirmOutcome
@@ -3554,6 +3678,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       if opts.recordOnly:
         # Only the record of what the failed switch wrote is wanted: no
         # start, no confirm, no commit.
+        hookRecordedClean = clean and problems.len == 0
         problems.add("replayed to record what the failed switch wrote; " &
           "not committed")
       # --- Step 7: start. Only after a clean step 4-6: a half-written
@@ -3587,9 +3712,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                               hostNamespaceProbe(probeExe))
         if not hookConfirm.passed:
           hookHealthFailed = true
-          problems.add("step 8 (confirm): " & $hookConfirm.failures.len &
-            " health check(s) did not pass within confirmTimeout (" &
-            $confirmTimeout & " s): " & hookConfirm.failures.join("; "))
+          problems.add("step 8 (confirm): " &
+            failureSummary(hookConfirm, confirmTimeout))
       marker.step = ssConfirm
       writePendingMarker(stateDir, marker)
       # Objects a removed resource adopted or replaced go back to what they
@@ -3635,7 +3759,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         except CatchableError as ex:
           problems.add(ex.msg)
       for e in unitsToRestore:
-        try: restoreUnitState(e, driver)
+        try: restoreUnitState(e, driver,
+                              othersChanged = e.unit in loudHandBack)
         except CatchableError as ex:
           problems.add(ex.msg)
       # Directories the removed resources had created.
@@ -3885,6 +4010,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           $opts.rollbackFloor & " is above " & committedPrevious & "; the " &
           "pending marker at " & pendingMarkerPath(stateDir) & " stays, and " &
           "a recovery finishes the switch forward")
+    if opts.recordOnly and hookRecordedClean and
+        not infraError.startsWith("repro infra apply failed"):
+      raise newException(AddonRecordedOnly, "the failed switch's writes " &
+        "were recorded; nothing was committed (record-only replay)")
     if isRevert or opts.recordOnly or committedPrevious.len == 0:
       # A revert that fails, a record-only replay (its caller reverts), or
       # a first switch (bootstrap) with nothing to go back to (owner
@@ -3905,11 +4034,13 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     let back = revertProfiles(stateDir, committedPrevious, ownText,
                               previousUserText)
     var reverted: AddonApplyResult
-    if hookGeneration.len == 0 and not replaying:
+    if not replaying and not ledgerRecordsAttempt(stateDir, committedPrevious):
       # The switch failed before it recorded what it wrote (an exception
-      # out of the infra apply ahead of the ledger): the ledger copy still
-      # describes the old generation while the host carries some of the
-      # new one's writes, and a revert planned from it could neither
+      # out of the infra apply, or out of its own steps 6-8, ahead of the
+      # ledger write -- whether or not its post-write hook had begun): the
+      # ledger copy still describes the old generation while the host
+      # carries some of the new one's writes, and a revert planned from it
+      # could neither
       # recognise them nor remove them. The failed switch is first replayed
       # from its write-ahead plan -- its writes only, no start, no commit --
       # which brings the ledger copy up to date with what it wrote; the
@@ -3918,8 +4049,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         discard runAddonApply(AddonApplyOptions(stateDir: stateDir,
           hostIdentity: opts.hostIdentity, replay: true, recordOnly: true,
           driver: opts.driver, reproExe: opts.reproExe))
-      except AddonApplyError:
-        discard        # the record-only replay always "fails" to commit
+      except AddonRecordedOnly:
+        discard        # recorded, and by design not committed
+      except CatchableError as e:
+        # The writes could not be recorded: a revert planned from the old
+        # ledger could not tell them apart, so none is attempted.
+        raise newException(AddonApplyError, why & "\nthe failed switch's " &
+          "writes could not be recorded, so it was not rolled back: " &
+          e.msg & "\nthe pending marker at " & pendingMarkerPath(stateDir) &
+          " records it; run `repro system addon recover`")
     try:
       reverted = runAddonApply(AddonApplyOptions(stateDir: stateDir,
         hostIdentity: opts.hostIdentity, ownProfileText: back.own,
@@ -4010,16 +4148,6 @@ type
     why*: string           ## why no revert was possible (when not)
     source*: string        ## what the revert re-applied (when reverted)
 
-proc ledgerRecordsAttempt(stateDir, fromGeneration: string): bool =
-  ## The ledger copy was rewritten since ``fromGeneration`` was committed:
-  ## only the interrupted switch (or a replay of it) writes it while
-  ## `current` still names ``fromGeneration``, and it does so after its
-  ## writes, so a revert planned from it can tell them apart.
-  let lp = ledgerCopyPath(stateDir)
-  if not fileExists(lp): return false
-  try: readLedger(lp).generation != fromGeneration
-  except CatchableError: false
-
 proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
                               replayError: string;
                               driver: CollisionDriver = nil;
@@ -4106,13 +4234,19 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     # The switch wrote but had not recorded it: replay its writes only,
     # which records them in the ledger copy (see the not-committed path
     # of `runAddonApply`).
+    var recordError = ""
     try:
       discard runAddonApply(AddonApplyOptions(stateDir: stateDir,
         hostIdentity: readHostname(), replay: true, recordOnly: true,
         driver: driver))
-    except CatchableError:
-      discard        # a record-only replay never commits
+    except AddonRecordedOnly:
+      discard        # recorded, and by design not committed
+    except CatchableError as e:
+      recordError = e.msg
     tracked = ledgerRecordsAttempt(stateDir, fromGen)
+    if not tracked and recordError.len > 0:
+      return FailedReplayRevert(why: "recording the interrupted switch's " &
+        "writes failed: " & recordError)
   if not tracked:
     return FailedReplayRevert(why: "the write-ahead record is " &
       (if planUsable: "usable but its writes could not be recorded"

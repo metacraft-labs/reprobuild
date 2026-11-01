@@ -101,11 +101,21 @@ type
     ## producer used (``ReprobuildSourceRevision``): an agent whose compiler
     ## is another revision reports that, distinctly, instead of a bare
     ## digest mismatch.
+    ## ``systemMode`` (``addOn`` / ``full``) and ``systemActivities`` (sorted,
+    ## no duplicates) are the system-activity selection the producer
+    ## compiled for (what the target's host-registry entry selects); the
+    ## agent compiles with exactly these, and the digest binds them
+    ## (``compiledProfileDigest``). Both empty: the ``default`` activity
+    ## realised in full, the pin's meaning before the selection existed,
+    ## and the envelope is then byte-for-byte the earlier one (flags bit 2
+    ## clear).
     digest*: string
     compilerRevision*: string
     platform*: string
     arch*: string
     host*: string
+    systemMode*: string
+    systemActivities*: seq[string]
 
   ClosureDigest* = object
     ## One pinned closure output (RDMF v3): the archive digest of the
@@ -199,9 +209,16 @@ const
   DeployManifestFlagCompiledProfile* = 2'u16
     ## Bit 1 of ``flags``: the attestation block ends with the
     ## compiled-profile pin (``CompiledProfilePin``). Only with bit 0.
+  DeployManifestFlagSystemSelection* = 4'u16
+    ## Bit 2 of ``flags``: the compiled-profile pin ends with its system
+    ## selection (``systemMode``, then ``systemActivities`` joined with
+    ## ``,``). Only with bit 1.
   CompiledProfileDigestPrefix* = "sha256:"
   CompiledProfileDigestDomain* = "RDMF-compiled-profile-v1\n"
     ## The domain-separation prefix of ``compiledProfileDigest``'s input.
+  CompiledProfileSelectionDigestDomain* = "RDMF-compiled-profile-v2\n"
+    ## The prefix when the pin carries a system selection, which the digest
+    ## then also frames (``compiledProfileDigest``).
   ClosureDigestPrefix* = "blake3:"
   ClosureDigestHexLen* = 64
   StagedProfileModule* = "manifest_profile.nim"
@@ -459,6 +476,15 @@ proc hasAttestations*(m: DeployManifest): bool =
   m.issuedAt != 0 or m.maxAgeSeconds != 0 or m.rollbackFloor != 0 or
     m.closureDigests.len > 0 or m.hasCompiledProfilePin
 
+proc hasSystemSelection*(p: CompiledProfilePin): bool =
+  p.systemMode.len > 0 or p.systemActivities.len > 0
+
+proc systemSelectionText*(p: CompiledProfilePin): string =
+  ## The selection as the digest frames it and the envelope carries it:
+  ## ``<mode>`` and the sorted activities joined with ``,``. "" without one.
+  if not p.hasSystemSelection: return ""
+  p.systemMode & "\n" & p.systemActivities.join(",")
+
 proc compiledProfilePinError*(p: CompiledProfilePin): string =
   ## Why ``p`` is not a well-formed pin, or "".
   if not p.digest.startsWith(CompiledProfileDigestPrefix) or
@@ -478,6 +504,25 @@ proc compiledProfilePinError*(p: CompiledProfilePin): string =
       if c notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-'}:
         return "the compiled-profile pin's " & name & " '" & v &
           "' has a character outside [A-Za-z0-9._-]"
+  if p.hasSystemSelection:
+    if p.systemMode notin ["addOn", "full"]:
+      return "the compiled-profile pin's system mode '" & p.systemMode &
+        "' is not addOn or full"
+    if p.systemActivities.len == 0:
+      return "the compiled-profile pin names a system mode and no activity"
+    var prev = ""
+    for a in p.systemActivities:
+      if a.len == 0 or a == "default":
+        return "the compiled-profile pin's activity list names '" & a &
+          "' (an activity is never empty, and `default` is implied)"
+      for c in a:
+        if c notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}:
+          return "the compiled-profile pin's activity '" & a &
+            "' has a character outside [A-Za-z0-9_]"
+      if a <= prev:
+        return "the compiled-profile pin's activities are not sorted " &
+          "without duplicates: " & p.systemActivities.join(",")
+      prev = a
   ""
 
 proc validateAttestations*(m: DeployManifest) =
@@ -514,6 +559,9 @@ proc closureDigestFor*(m: DeployManifest; actionId: string): string =
 
 proc wireFlags*(m: DeployManifest): uint16 =
   if not m.hasAttestations: 0'u16
+  elif m.hasCompiledProfilePin and m.compiledProfile.hasSystemSelection:
+    DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile or
+      DeployManifestFlagSystemSelection
   elif m.hasCompiledProfilePin:
     DeployManifestFlagAttestations or DeployManifestFlagCompiledProfile
   else: DeployManifestFlagAttestations
@@ -562,6 +610,9 @@ proc encodeUnsignedPrefix(m: DeployManifest): seq[byte] =
         writeString(result, m.compiledProfile.platform)
         writeString(result, m.compiledProfile.arch)
         writeString(result, m.compiledProfile.host)
+        if m.compiledProfile.hasSystemSelection:
+          writeString(result, m.compiledProfile.systemMode)
+          writeString(result, m.compiledProfile.systemActivities.join(","))
   writeU32LE(result, uint32(m.buildActions.len))
   for a in m.buildActions:
     encodeBuildAction(result, a)
@@ -615,12 +666,15 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
   if flags != 0'u16 and (result.formatVersion < DeployManifestFormatVersionV3 or
       flags notin [DeployManifestFlagAttestations,
                    DeployManifestFlagAttestations or
-                     DeployManifestFlagCompiledProfile]):
+                     DeployManifestFlagCompiledProfile,
+                   DeployManifestFlagAttestations or
+                     DeployManifestFlagCompiledProfile or
+                     DeployManifestFlagSystemSelection]):
     raise newException(DeployManifestCodecError,
       "deploy manifest flags word is " & $flags & " in a formatVersion " &
       $result.formatVersion & " envelope (only formatVersion 3 may set " &
-      "bit 0, the attestation block, and with it bit 1, the " &
-      "compiled-profile pin)")
+      "bit 0, the attestation block, with it bit 1, the compiled-profile " &
+      "pin, and with that bit 2, the pin's system selection)")
   result.target = readString(buf, pos)
   result.sequence = readU64LE(buf, pos)
   result.deploymentId = readString(buf, pos)
@@ -667,6 +721,16 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
         result.compiledProfile.platform = readString(buf, pos)
         result.compiledProfile.arch = readString(buf, pos)
         result.compiledProfile.host = readString(buf, pos)
+        if (flags and DeployManifestFlagSystemSelection) != 0:
+          result.compiledProfile.systemMode = readString(buf, pos)
+          let acts = readString(buf, pos)
+          if acts.len > 0:
+            result.compiledProfile.systemActivities = acts.split(',')
+          # A bit 2 whose selection is empty is a layout no producer emits.
+          if not result.compiledProfile.hasSystemSelection:
+            raise newException(DeployManifestCodecError,
+              "non-canonical envelope: flags bit 2 with an empty system " &
+              "selection")
         # A bit 1 whose pin is empty is a layout no producer emits.
         if not result.hasCompiledProfilePin:
           raise newException(DeployManifestCodecError,
@@ -827,7 +891,8 @@ proc writeU64Frame(dst: var string; v: uint64) =
   for i in 0 ..< 8:
     dst.add(char((v shr (8 * i)) and 0xff'u64))
 
-proc compiledProfileDigest*(canonicalText, actionsJson: string): string =
+proc compiledProfileDigest*(canonicalText, actionsJson: string;
+                            systemSelection = ""): string =
   ## The digest a producer pins for its compile of a source profile, and
   ## an agent recomputes over what its own compile emitted:
   ## ``sha256:`` and the lowercase hex SHA-256 of
@@ -841,11 +906,29 @@ proc compiledProfileDigest*(canonicalText, actionsJson: string): string =
   ## split of the two texts collides with another. SHA-256 rather than
   ## BLAKE3 so a producer written in any language computes it from its
   ## standard library (infra's Python producer does).
+  ##
+  ## With a system selection (``systemSelectionText`` of the pin) the
+  ## prefix is ``RDMF-compiled-profile-v2\n`` and a third frame, u64 LE
+  ## length then the selection's bytes, follows: the digest then says not
+  ## only what the compile emitted but which activities it was asked for,
+  ## so a pin cannot be reused for another selection. Without one the input
+  ## is exactly the v1 input.
   var input = CompiledProfileDigestDomain
+  var selection = systemSelection
+  when agentMutated("compile-pin-drops-selection"):
+    # FALSIFYING MUTATION (e2e_addon_compiled_pin_carries_activity_selection):
+    # the selection is bound into nothing (and, in ``compileFactArgs``, not
+    # passed to the agent's compile).
+    selection = ""
+  if selection.len > 0:
+    input = CompiledProfileSelectionDigestDomain
   writeU64Frame(input, uint64(canonicalText.len))
   input.add(canonicalText)
   writeU64Frame(input, uint64(actionsJson.len))
   input.add(actionsJson)
+  if selection.len > 0:
+    writeU64Frame(input, uint64(selection.len))
+    input.add(selection)
   CompiledProfileDigestPrefix & toLowerAscii($sha256.digest(input))
 
 const CompilerRevisionMismatch* = "compiler revision mismatch"
@@ -880,10 +963,15 @@ proc compiledProfileRefusal*(m: DeployManifest;
       "compiler is " & (if compilerRevision.len > 0: compilerRevision
                         else: "of an unknown revision") &
       "; the profile is applied only when both compile with one revision"
-  let actual = compiledProfileDigest(canonicalText, actionsJson)
+  let actual = compiledProfileDigest(canonicalText, actionsJson,
+                                     systemSelectionText(m.compiledProfile))
   if actual != m.compiledProfile.digest:
     return "compiled-profile digest mismatch: the signed manifest pins " &
       m.compiledProfile.digest & " (compiled for " &
       m.compiledProfile.platform & "/" & m.compiledProfile.arch & ", host " &
-      m.compiledProfile.host & "), this host's compile is " & actual
+      m.compiledProfile.host &
+      (if m.compiledProfile.hasSystemSelection:
+         ", system " & m.compiledProfile.systemMode & " " &
+         m.compiledProfile.systemActivities.join(",")
+       else: "") & "), this host's compile is " & actual
   ""

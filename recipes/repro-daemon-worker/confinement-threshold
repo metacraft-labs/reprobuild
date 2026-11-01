@@ -1,11 +1,23 @@
-# Overall exposure ceiling for repro-daemon-worker.service, in tenths:
-# 26 means 2.6, the value `systemd-analyze security --offline` reports
-# for this unit.
+# Overall exposure ceiling for repro-daemon-worker.service, in tenths, PER
+# HOST CLASS: `none = 26` means 2.6 on bare metal.
 #
-# MEASURED ON BARE METAL (gpu-server-001-mcl-bench-001, systemd 260.1,
-# run 41208389754). The same unit with the same pinned analyzer reports
-# 3.1 inside the ephemeral GARM containers -- 0.5 higher -- because some
-# checks cannot be verified from inside one. A refusal that reports 3.1
-# on an ephemeral runner is therefore NOT evidence that the unit
-# regressed; compare like with like before moving this number.
-26
+# The same unit, analysed by the same pinned binary, measures differently
+# depending on whether the host is virtualised, because some of
+# systemd-analyze's checks cannot be verified from inside a container or VM:
+#
+#   none         2.6  bare metal (gpu-server-001-mcl-bench-001, systemd 260.1,
+#                     run 41208389754)
+#   virtualized  3.1  ephemeral GARM runners (runs 41186521526, 41197758502,
+#                     41201815981, 41251151966) -- 0.5 higher
+#
+# Recorded per class rather than routed to one class deliberately: both runner
+# kinds register with the IDENTICAL labels `self-hosted,linux,x64`, so a job's
+# `runs-on` cannot select the class a number was measured on. Giving the check
+# the class is the only way to compare like with like.
+#
+# Neither number is a concession. Each is the measured value for its own class,
+# so an exposure above its class's ceiling is a real regression, and a class
+# with no line here is REFUSED rather than passed -- a new kind of runner has
+# to be measured and recorded, never assumed.
+none = 26
+virtualized = 31

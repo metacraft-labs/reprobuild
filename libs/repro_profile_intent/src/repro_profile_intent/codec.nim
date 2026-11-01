@@ -304,7 +304,7 @@ proc encodeBuildAction(b: ProfileBuildAction): DynamicValue =
   ## flattened mirror has fixed shape, no optional keys. ``cacheable``
   ## defaults to true at the helper level so a decoded value never
   ## carries an undefined cacheability semantic.
-  cborMap(@[
+  var entries = @[
     entry(KeyId, cborText(b.id)),
     entry(KeyArgv, encodeStringArray(b.argv)),
     entry(KeyCwd, cborText(b.cwd)),
@@ -316,7 +316,11 @@ proc encodeBuildAction(b: ProfileBuildAction): DynamicValue =
     entry(KeyRequiresElevation, cborBool(b.requiresElevation)),
     entry(KeyCacheable, cborBool(b.cacheable)),
     entry(KeySubstituteOnly, cborBool(b.substituteOnly)),
-    entry(KeyExpectedOutputDigest, cborText(b.expectedOutputDigest))])
+    entry(KeyExpectedOutputDigest, cborText(b.expectedOutputDigest))]
+  # Only when set, so a profile-level edge encodes exactly as before.
+  if b.activity.len > 0:
+    entries.add entry(KeyActivity, cborText(b.activity))
+  cborMap(entries)
 
 proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var acts: seq[DynamicValue] = @[]
@@ -623,6 +627,10 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
       let eodNode = lookupOpt(bEntries, KeyExpectedOutputDigest, eodFound)
       if eodFound:
         ba.expectedOutputDigest = expectText(eodNode, KeyExpectedOutputDigest)
+      var actFound: bool
+      let actNode = lookupOpt(bEntries, KeyActivity, actFound)
+      if actFound:
+        ba.activity = expectText(actNode, KeyActivity)
       for it in expectArray(lookup(bEntries, KeyArgv,
           "ProfileBuildAction"), KeyArgv):
         ba.argv.add expectText(it, KeyArgv)

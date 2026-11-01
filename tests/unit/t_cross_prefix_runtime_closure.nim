@@ -66,6 +66,14 @@ suite "a cross-built prefix's runtime closure":
     # The prefix runs from anywhere: the RUNPATH, not the sysroot, finds them.
     removeDir(tmp / "sysroot")
     check sh(stage / "bin" / "prog").code == 0
+    # A prefix that ships the Nim compiler also needs what it dlopens.
+    createDir(stage / "nim" / "bin")
+    copyFile(stage / "bin" / "prog", stage / "nim" / "bin" / "nim")
+    let nimOpen = run("check_prefix_closure " & stage)
+    check nimOpen.code != 0
+    check "libpcre.so.1" in nimOpen.output
+    writeFile(stage / "lib" / "libpcre.so.1", "")
+    check run("check_prefix_closure " & stage).code == 0
     # A library that goes missing is refused by name.
     removeFile(stage / "lib" / "libbar.so.1")
     let after = run("check_prefix_closure " & stage)

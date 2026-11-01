@@ -97,8 +97,13 @@ proc run(cmd: string; what: string): string =
 # The store packages.
 # ---------------------------------------------------------------------------
 
-proc recipeOutput(root, name: string): string =
-  root / "packages" / "source" / name / ".repro" / "output" / "install" / "usr"
+proc recipeOutput(root, name: string; target = ""): string =
+  ## The recipe's installed tree. vaultwarden is built for an explicit
+  ## target (``--target=x86_64-unknown-linux-musl``, the static build), so
+  ## its output directory carries the target; geth and prysm are built for
+  ## the host with static linking and do not.
+  let install = if target.len > 0: "install@" & target else: "install"
+  root / "packages" / "source" / name / ".repro" / "output" / install / "usr"
 
 proc stageTree(dest: string; sources: openArray[(string, string)]) =
   ## A prefix tree at ``dest`` with each (source file, name) under `bin/`.
@@ -117,13 +122,8 @@ proc refPackages*(work: string): RefPackages =
     raise newException(TestBedError, "REPRO_A12_PACKAGES must name the " &
       "reprobuild-packages checkout the reference packages were built in")
   result.vaultwarden = work / "trees" / "vaultwarden"
-  # `REPRO_A12_VAULTWARDEN_BIN` names a statically linked vaultwarden built
-  # elsewhere (a pinned nixpkgs `pkgsStatic.vaultwarden`), for a host whose
-  # Rust cross toolchain cannot build the recipe; the record names it.
-  let vwOverride = getEnv("REPRO_A12_VAULTWARDEN_BIN")
-  let vwBinary =
-    if vwOverride.len > 0: vwOverride
-    else: recipeOutput(root, "vaultwarden") / "bin" / "vaultwarden"
+  let vwBinary = recipeOutput(root, "vaultwarden",
+                             "x86_64-unknown-linux-musl") / "bin" / "vaultwarden"
   stageTree(result.vaultwarden, [(vwBinary, "vaultwarden")])
   result.geth = work / "trees" / "geth"
   stageTree(result.geth, [(recipeOutput(root, "geth") / "bin" / "geth", "geth")])

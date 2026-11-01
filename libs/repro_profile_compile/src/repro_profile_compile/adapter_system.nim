@@ -771,6 +771,25 @@ proc systemPlanTarget*(host: string; activities: HashSet[string];
     result.activities.incl DefaultSystemActivity
   result.realisation = realisation
 
+const AddonMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation switch (``repro_addon/mutations``),
+  ## read here directly because this module cannot import that one.
+
+proc selectedBuildActions*(actions: openArray[ProfileBuildAction];
+                           target: SystemPlanTarget): seq[ProfileBuildAction] =
+  ## The action edges ``target`` realises: every profile-level edge, and an
+  ## activity's edges only when the target selects that activity (spec
+  ## ReproOS-Add-On-Mode §8.2), so a host fetches only the store packages
+  ## its activities use.
+  for a in actions:
+    when AddonMutation == "activity-edges-unselected":
+      # FALSIFYING MUTATION (t_system_activity_selects_its_store_packages,
+      # e2e_addon_reproos_service_parity): every edge on every host.
+      result.add a
+    else:
+      if a.activity.len == 0 or a.activity in target.activities:
+        result.add a
+
 proc defaultSystemPlanTarget*(host = ""): SystemPlanTarget =
   ## The target of a plan that reads no host registry: the running machine
   ## (named `host` when given), the `default` system activity only, realised

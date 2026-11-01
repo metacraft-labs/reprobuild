@@ -25,7 +25,7 @@
 ## is the test's own uid and the filesystem check is off (a scratch
 ## directory is not a ramfs), as in the A7 unit tests.
 
-import std/[os, posix, unittest]
+import std/[os, posix, strutils, unittest]
 
 import repro_infra/profile
 import repro_addon/addon_secrets
@@ -115,3 +115,34 @@ suite "full-host secrets":
     check consumersOf(units, ["geth"]).len == 0
     check consumersOf(units, ["vaultwarden", "beacon", "x"]) ==
       @["beacon.service", "vaultwarden.service"]
+
+  test "the boot path: recorded declarations are re-materialised":
+    let (root, l) = newLayout("boot")
+    defer: removeDir(root)
+    discard ensureFullHostRecipientKey(l)
+    discard addEntry(l, latestEnvelopePath(l), "vaultwarden/admin-token",
+                     bytesOf("token-b"), "h", createIfAbsent = true)
+    let decls = @[SecretFileDecl(service: "vaultwarden", name: "admin-token")]
+    check parseDecls(renderDecls(decls)) == decls
+    expect AddonSecretsFailed: discard parseDecls("../x\n")
+    let declsPath = root / "decls"
+    # No declaration and no unit yet: only the (empty) record is written,
+    # nothing is installed.
+    discard recordFullHostSecrets([], "/x/repro", declsPath, root / "unit")
+    check readFile(declsPath) == ""
+    check not fileExists(root / "unit")
+    writeFile(declsPath, renderDecls(decls))
+    # A reboot empties the ramfs; the boot verb puts the secret back.
+    check bootFullHostSecrets(l, declsPath).startsWith("repro secrets: ok")
+    check readFile(l.runDir / "vaultwarden" / "admin-token") == "token-b"
+    # An unreadable record is reported, never raised.
+    writeFile(declsPath, "not a secret\n")
+    check bootFullHostSecrets(l, declsPath).startsWith("repro secrets: degraded")
+
+  test "the boot unit is bounded, wanted by the boot and runs the verb":
+    let u = fullHostSecretsUnit("/nix/store/x/bin/reprobuild")
+    check "Type=oneshot" in u
+    check "TimeoutStartSec=" in u
+    check "system secret materialise --boot" in u
+    check "WantedBy=multi-user.target" in u
+    check "PrivateNetwork=yes" in u

@@ -42,7 +42,7 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[base64, json, os, sets, strutils]
+import std/[algorithm, base64, json, os, sequtils, sets, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -65,6 +65,8 @@ when defined(linux):
   from repro_core/source_root import publicCliImagePath
 import repro_elevation
 import repro_profile_compile
+from repro_profile_compile/compile import CompileFailure,
+  resolveProfileNimCompiler, resolveProfileCCompiler
 
 type
   DeployAgentFlags = object
@@ -232,6 +234,20 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   var host, platform, arch, systemMode = ""
   var systemActivities: seq[string]
   var hostGiven, stdio = false
+  if args == @["--probe-c-compiler"]:
+    # The toolchain a compile here would use, without compiling: the Nim
+    # compiler and the C compiler (ReproOS add-on mode §13 decision 31: a
+    # host that compiles profiles needs both). Exit 1, naming what is
+    # missing, when either does not resolve. Bootstrap's preflight asks it.
+    try:
+      let nim = resolveProfileNimCompiler()
+      let cc = resolveProfileCCompiler()
+      echo "nim: " & nim
+      echo "cc: " & (if cc.len > 0: cc else: "the Nim default (on PATH)")
+      return 0
+    except CompileFailure as e:
+      stderr.writeLine(e.msg)
+      return 1
   var i = 0
   while i < args.len:
     let a = args[i]
@@ -330,7 +346,18 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   writeFile(canonicalOut, text)
   writeFile(actionsOut, actionsJson)
   if digestOut.len > 0:
-    writeFile(digestOut, compiledProfileDigest(text, actionsJson) & "\n")
+    # The selection the compile was asked for is bound into the digest
+    # (``compiledProfileDigest``), spelled as the pin carries it.
+    var selected = systemActivities
+    selected.sort()
+    selected = selected.deduplicate(isSorted = true)
+    let selection = systemSelectionText(CompiledProfilePin(
+      systemMode: (if systemMode.len > 0 or selected.len > 0:
+                     (if systemMode.len > 0: systemMode else: "full")
+                   else: ""),
+      systemActivities: selected))
+    writeFile(digestOut, compiledProfileDigest(text, actionsJson, selection) &
+      "\n")
   if revisionOut.len > 0:
     # The revision this compiler was built from, which a producer pins
     # beside the digest (``CompiledProfilePin.compilerRevision``).

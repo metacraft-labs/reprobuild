@@ -284,3 +284,17 @@ template guarded*[T: ResourceIntent | ConfigOverride](
     let guardPred = pred
     body
     applyGuard(target, guardStart, guardPred)
+
+proc applyActionActivity*(target: var seq[ProfileBuildAction]; start: int;
+                          activity: string) =
+  ## Scope every action edge appended since `start` to `activity`: a store
+  ## package an activity declares is realised only on a host that selects
+  ## that activity (ReproOS Add-On Mode §8.2). An edge already scoped to a
+  ## DIFFERENT activity is refused, as `applyActivity` refuses a resource.
+  for i in start ..< target.len:
+    let current = target[i].activity
+    if current.len > 0 and current != activity:
+      raise newException(ValueError, "action edge `" & target[i].id &
+        "` is declared in activity `" & activity & "` and in `" & current &
+        "`; an action edge belongs to one activity")
+    target[i].activity = activity

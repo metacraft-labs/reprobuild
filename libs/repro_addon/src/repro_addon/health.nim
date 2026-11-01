@@ -23,6 +23,7 @@ import std/[math, net, os, strutils, times]
 import repro_infra/profile
 
 import ./host_exec
+import ./mutations
 
 type
   UnitHealthCheck* = object
@@ -44,6 +45,13 @@ type
 const
   ProbeConnectTimeoutMs* = 2000
   ConfirmPollIntervalMs* = 1000
+  ConfirmOvershootSec* = 2
+    ## The most a failed confirmation's wait can run past
+    ## ``confirmTimeout`` (spec §7.5): the last probe's budget is what is
+    ## left rounded up to a whole second (< 1 s), and the apply waits one
+    ## second more for ``systemd-run`` after PID 1 stops the probe at its
+    ## ``RuntimeMaxSec=``. A probe that returns early is followed by at
+    ## most one poll interval, which also ends within this margin.
 
 proc unitActiveState(unit: string): string =
   let r = runSystemctl(["show", "-p", "ActiveState", "--value", "--", unit])
@@ -128,7 +136,11 @@ proc confirm*(checks: seq[UnitHealthCheck]; timeoutSec: int;
   ## Wait up to ``timeoutSec`` for every check to pass once. The clock
   ## starts when this proc is called (the end of step 7).
   let start = epochTime()
-  let deadline = start + timeoutSec.float
+  # The falsifying build of the confirm-or-revert gate keeps waiting for
+  # twice the timeout, which is the defect the gate's bound must catch.
+  let allowed = when mutated("confirm-overruns-deadline"): 2 * timeoutSec
+                else: timeoutSec
+  let deadline = start + allowed.float
   var pending = checks
   var lastWhy = newSeq[string](checks.len)
   while true:
@@ -158,3 +170,14 @@ proc confirm*(checks: seq[UnitHealthCheck]; timeoutSec: int;
         let why = if lastWhy[i].len > 0: lastWhy[i]
                   else: "no answer within confirmTimeout"
         result.failures.add(c.unit & " " & c.raw & ": " & why)
+
+proc failureSummary*(o: ConfirmOutcome; timeoutSec: int): string =
+  ## The step-8 problem as the apply reports it, and so as the attempt's
+  ## ``rolled-back`` record carries it (spec §7.5). It states how long the
+  ## confirmation actually waited, measured by the apply's own clock from
+  ## the end of step 7, so an operator -- and the confirm-or-revert gate --
+  ## can tell the confirm wait, which ``confirmTimeout`` bounds, from the
+  ## transitions before and after it, which it does not.
+  $o.failures.len & " health check(s) did not pass within confirmTimeout (" &
+    $timeoutSec & " s; waited " & formatFloat(o.waitedSec, ffDecimal, 2) &
+    " s): " & o.failures.join("; ")

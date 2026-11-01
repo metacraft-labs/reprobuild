@@ -6,8 +6,7 @@
 ## archive no well-formed tree can produce (a link, then an entry beneath
 ## it).
 ##
-## The daemon is the one ``REPRO_ADDON_CACHE_SERVER`` names, else the
-## ``repro-binary-cache`` beside ``repro`` on ``PATH``. It runs permissive
+## The daemon is this tree's (``cacheServerExe``). It runs permissive
 ## (any key may publish): what the gates test is which publisher keys the
 ## HOST trusts, so the cache accepting a key the host does not anchor is
 ## the point.
@@ -36,35 +35,50 @@ type CacheServer* = ref object
   logPath*: string
 
 proc cacheServerExe(): string =
+  ## The daemon of THIS tree: ``REPRO_ADDON_CACHE_SERVER``, else the one in
+  ## the engine closure the gate was given (``REPRO_ADDON_ENGINE_CLOSURE``),
+  ## else ``build/bin`` of the checkout. Never a ``repro`` found on PATH: a
+  ## pinned older daemon is another program than the one under test.
   result = getEnv("REPRO_ADDON_CACHE_SERVER")
   if result.len > 0: return
-  let repro = findExe("repro")
-  if repro.len > 0:
-    let real = if symlinkExists(repro): expandSymlink(repro) else: repro
-    for cand in [real.parentDir / "repro-binary-cache",
-                 repro.parentDir / "repro-binary-cache"]:
-      if fileExists(cand): return cand
-  raise newException(TestBedError, "no repro-binary-cache: set " &
-    "REPRO_ADDON_CACHE_SERVER")
+  let engine = getEnv("REPRO_ADDON_ENGINE_CLOSURE")
+  for cand in [(if engine.len > 0: engine / "bin" / "repro-binary-cache" else: ""),
+               reproRoot() / "build" / "bin" / "repro-binary-cache"]:
+    if cand.len > 0 and fileExists(cand): return cand
+  raise newException(TestBedError, "no repro-binary-cache of this tree: set " &
+    "REPRO_ADDON_CACHE_SERVER or REPRO_ADDON_ENGINE_CLOSURE, or build it")
 
 proc startCache*(g: Guest): CacheServer =
+  ## Start the cache on a port the kernel picks (``127.0.0.1:0``) and wait
+  ## for the line the daemon prints once its listener is bound, which
+  ## names that port. There is no deadline: the wait ends when the daemon
+  ## reports it is listening or when it exits (then with its status and
+  ## log). A port probed free and handed over to bind later could be taken
+  ## in between by another gate's listener on a busy host, and a deadline
+  ## on startup turned a slow start under load into a failure.
   result = CacheServer(root: g.runDir / "cache")
   createDir(result.root)
-  let (o, _) = execCmdEx("python3 -c 'import socket; s=socket.socket(); " &
-    "s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1]); s.close()'")
-  result.port = parseInt(o.strip())
   result.logPath = g.runDir / "cache.log"
   result.process = startProcess("/bin/sh", args = ["-c",
     "exec " & quoteShell(cacheServerExe()) & " --root=" &
-    quoteShell(result.root) & " --listen=127.0.0.1:" & $result.port &
-    " >> " & quoteShell(result.logPath) & " 2>&1"])
-  for _ in 0 ..< 100:
-    let (_, c) = execCmdEx("curl -sf -o /dev/null http://127.0.0.1:" &
-                           $result.port & "/healthz")
-    if c == 0: return
-    sleep(100)
-  raise newException(TestBedError, "the binary cache did not start: " &
-    readFile(result.logPath))
+    quoteShell(result.root) & " --listen=127.0.0.1:0 >> " &
+    quoteShell(result.logPath) & " 2>&1"])
+  const Marker = "repro-binary-cache listening on 127.0.0.1:"
+  while true:
+    if fileExists(result.logPath):
+      for line in readFile(result.logPath).splitLines():
+        if line.startsWith(Marker):
+          result.port = parseInt(line[Marker.len .. ^1].split(' ')[0])
+          if result.port == 0:
+            raise newException(TestBedError, "the binary cache reports " &
+              "port 0: it predates reporting the bound port")
+          return
+    let code = result.process.peekExitCode()
+    if code != -1:
+      raise newException(TestBedError, "the binary cache exited (status " &
+        $code & ") before listening: " &
+        (if fileExists(result.logPath): readFile(result.logPath) else: ""))
+    sleep(50)
 
 proc stop*(c: CacheServer) =
   if c != nil and c.process != nil:

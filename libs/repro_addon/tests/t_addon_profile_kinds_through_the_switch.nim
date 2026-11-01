@@ -126,21 +126,21 @@ suite "an account is decided as its driver compares it":
 
 suite "legacy LoadCredential= under the agent's --secrets-dir (§10.3)":
   # Operator decision 2026-10-31: a full-engine agent keeps its
-  # --secrets-dir delivery through the switch. At f25f69eda0 every
-  # hand-written LoadCredential= was refused; the first test fails there.
+  # --secrets-dir delivery through the switch. The accepting path needs a
+  # root-owned directory below /var/lib/repro/agent, which the VM gate
+  # e2e_addon_agent_generations_and_rollback provides; here, what is
+  # refused, and the checks underneath.
   const Dir = "/var/lib/repro/agent/secrets"
   proc unitWith(line: string): string =
     "[Service]\nExecStart=/bin/true\n" & line & "\n"
-  test "a source under the registered directory is accepted, nothing else":
-    check rawCredentialDirective(unitWith("LoadCredential=pushover:" & Dir &
-      "/secrets/alertmanager/pushover"), [Dir]) == ""
-    check rawCredentialDirective(unitWith("LoadCredential=x:" & Dir &
-      "/bundle/a.py"), [Dir]) == ""
+  test "everything but a clean source below the directory is refused":
     for bad in ["LoadCredential=x:/run/other/a",
                 "LoadCredential=x:" & Dir & "-evil/a",
                 "LoadCredential=x:" & Dir & "/../agent/recipient.key",
                 "LoadCredential=x:" & Dir,
                 "LoadCredential=x:" & Dir & "/%i",
+                "LoadCredential=x:" & Dir & "/\\x2e\\x2e/recipient.key",
+                "LoadCredential=x:" & Dir & "/a\"b",
                 "LoadCredential=x",
                 "LoadCredential=x:relative/a"]:
       check rawCredentialDirective(unitWith(bad), [Dir]) == "LoadCredential"
@@ -148,26 +148,68 @@ suite "legacy LoadCredential= under the agent's --secrets-dir (§10.3)":
       Dir & "/a"), [Dir]) == "LoadCredentialEncrypted"
     check rawCredentialDirective(unitWith("SetCredential=x:y"), [Dir]) ==
       "SetCredential"
-    # No directory registered: refused as before.
     check rawCredentialDirective(unitWith("LoadCredential=x:" & Dir & "/a")) ==
       "LoadCredential"
 
-  test "the agent registers its directory; a malformed one is refused":
+  test "a path systemd would unescape is not clean (m1 of 49370cf2f2)":
+    # At 49370cf2f2 the check was textual and `\x2e\x2e` passed it.
+    check legacySecretsPathError(Dir & "/a/\\x2e\\x2e/b").len > 0
+    check legacySecretsPathError(Dir & "/a\"b").len > 0
+    check legacySecretsPathError(Dir & "/secrets/alertmanager/pushover") == ""
+
+  test "a symlink in the directory that leaves it is refused":
+    let tmp = createTempDir("addon-legacy-resolve-", "")
+    defer: removeDir(tmp)
+    let dir = tmp / "secrets"
+    createDir(dir)
+    writeFile(dir / "ok", "x")
+    writeFile(tmp / "outside", "x")
+    createSymlink(tmp / "outside", dir / "leak")
+    createSymlink(dir / "ok", dir / "alias")
+    check credentialSourceResolvesUnder(dir / "ok", dir)
+    check credentialSourceResolvesUnder(dir / "alias", dir)
+    check not credentialSourceResolvesUnder(dir / "leak", dir)
+    check credentialSourceResolvesUnder(dir / "not-yet", dir)
+
+  test "only a root-owned directory below /var/lib/repro/agent (m2)":
+    # At 49370cf2f2 any absolute path registered, and the registry only
+    # grew: one `--secrets-dir /etc` widened the accepted sources for good.
+    check legacySecretsDirError("/etc").len > 0
+    check legacySecretsDirError("/var/lib/repro/agent").len > 0
+    check legacySecretsDirError("/var/lib/repro/agent-x/s").len > 0
+    check legacySecretsDirError(Dir) == ""
+    check legacySecretsTrustError(true, false, 0, 0o40700) == ""
+    check legacySecretsTrustError(true, false, 0, 0o40755) == ""
+    check legacySecretsTrustError(true, false, 1000, 0o40700).len > 0
+    check legacySecretsTrustError(true, false, 0, 0o40770).len > 0
+    check legacySecretsTrustError(true, false, 0, 0o40702).len > 0
+    check legacySecretsTrustError(true, true, 0, 0o40700).len > 0
+    check legacySecretsTrustError(false, false, 0, 0o100600).len > 0
     let tmp = createTempDir("addon-legacy-secrets-", "")
     defer: removeDir(tmp)
-    registerLegacySecretsDir(tmp, Dir)
-    registerLegacySecretsDir(tmp, Dir)              # idempotent
-    check registeredLegacySecretsDirs(tmp) == @[Dir]
-    for bad in ["/", "relative", Dir & "/", "/var//lib", "/var/lib/../x"]:
+    for bad in ["/", "/etc", "relative", Dir & "/", "/var//lib",
+                "/var/lib/../x", tmp]:
       expect AgentRecordError:
         registerLegacySecretsDir(tmp, bad)
+    # A registry naming an untrusted or foreign directory accepts nothing.
+    createDir(tmp / "addon")
+    writeFile(legacySecretsDirsPath(tmp), "/etc\n" & tmp & "\n")
+    check registeredLegacySecretsDirs(tmp).len == 0
     let prof = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdSystemUnit, address: "systemUnit:a.service",
       suName: "a.service",
-      suContent: unitWith("LoadCredential=k:" & Dir & "/secrets/a/k"))])
-    checkScope(prof, registeredLegacySecretsDirs(tmp))
+      suContent: unitWith("LoadCredential=k:/etc/shadow"))])
     expect EAddOnOutOfScope:
-      checkScope(prof)
+      checkScope(prof, registeredLegacySecretsDirs(tmp))
+
+suite "a unit handed back as found stays running only if nothing changed":
+  test "its own bytes, its drop-ins and its dependencies (m4)":
+    # At 49370cf2f2 only the unit's own bytes were compared.
+    check quietHandBack("s", "s", false, false)
+    check not quietHandBack("s", "s", true, false)
+    check not quietHandBack("s", "s", false, true)
+    check not quietHandBack("s", "t", false, false)
+    check not quietHandBack("", "", false, false)
 
 suite "an owned account's update reports the groups it drops":
   test "the live groups the resource does not declare":
@@ -183,3 +225,14 @@ suite "a depends_on naming a timer is a unit dependency (§4.1, §7.3)":
     check isUnitDependency("systemd.systemUnit")
     check isUnitDependency("systemd.systemTimer")
     check not isUnitDependency("fs.systemFile")
+
+suite "a revert keeps a drifted file only as the failed switch found it":
+  test "regular, ledger-owned, and the bytes its plan observed (m3)":
+    # At 49370cf2f2 any drifted ledger-owned regular file was kept.
+    check revertMayKeep("revert", true, true, "s", "s")
+    check not revertMayKeep("revert", true, true, "s", "t")
+    check not revertMayKeep("revert", true, true, "s", "")
+    check not revertMayKeep("revert", false, true, "s", "s")
+    check not revertMayKeep("revert", true, false, "s", "s")
+    check not revertMayKeep("apply", true, true, "s", "s")
+    check not revertMayKeep("rollback", true, true, "s", "s")

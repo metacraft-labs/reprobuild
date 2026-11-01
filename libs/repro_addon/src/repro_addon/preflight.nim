@@ -580,23 +580,24 @@ proc isAddressLiteral(host: string): bool =
   except ValueError:
     false
 
-const SystemdDefaultPath* =
-  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-  ## The PATH systemd gives a service that sets none (systemd.exec(5),
-  ## "Environment variables in spawned processes").
-
-proc hostCCompiler*(searchPath = SystemdDefaultPath): string =
-  ## The C compiler a profile compile in the fetch unit would find: `cc`,
-  ## else `gcc`, else `clang`, on `searchPath`; "" when there is none.
-  for name in ["cc", "gcc", "clang"]:
-    for dir in searchPath.split(':'):
-      let p = dir / name
-      if fileExists(p):
-        try:
-          let perms = getFilePermissions(p)
-          if fpOthersExec in perms or fpUserExec in perms: return p
-        except OSError:
-          discard
+proc profileCompilerProblem*(compiler: string; timeoutSec = 120): string =
+  ## Why ``compiler`` (the configured profile compiler) could not compile a
+  ## profile on this host, or "": it is asked which Nim and which C
+  ## compiler it would use (``deploy-agent compile-profile
+  ## --probe-c-compiler``), with the host tools' fixed environment, which
+  ## is what the fetch unit's compile sees (§13 decision 31: the C compiler
+  ## is the base's, or the one the engine carries). A compiler that is not
+  ## there yet is not judged: a test bed installs its stand-in after the
+  ## bootstrap, and an operator may install the engine afterwards.
+  if not fileExists(compiler):
+    return ""
+  try:
+    let r = runHostTool([compiler, "deploy-agent", "compile-profile",
+                         "--probe-c-compiler"], timeoutSec = timeoutSec)
+    if r.exitCode != 0:
+      return r.output.strip()
+  except CatchableError as e:
+    return e.msg
   ""
 
 proc resolveAgentInputs*(target: string; sources: seq[string];
@@ -616,14 +617,15 @@ proc resolveAgentInputs*(target: string; sources: seq[string];
       "path without spaces: " & profileCompiler)
   result.target = target
   result.profileCompiler = profileCompiler
-  if profileCompiler.len > 0 and hostCCompiler().len == 0:
-    # §13 decision 31: a host that compiles profiles takes its C compiler
-    # from its base. The fetch unit runs with systemd's default PATH, so
-    # that is where it must be.
-    raise newException(ValueError, "--profile-compiler is given, but this " &
-      "host has no C compiler on systemd's default PATH (" &
-      SystemdDefaultPath & "): the profile compile turns a profile into C " &
-      "and needs one. Install one from the distribution (gcc) first")
+  if profileCompiler.len > 0:
+    # §13 decision 31: a host that compiles profiles needs a Nim and a C
+    # compiler the fetch unit's compile can find.
+    let problem = profileCompilerProblem(profileCompiler)
+    if problem.len > 0:
+      raise newException(ValueError, "--profile-compiler " &
+        profileCompiler & " cannot compile a profile on this host: " &
+        problem & " (a host that compiles profiles needs a C compiler: " &
+        "install one from the distribution, such as gcc)")
   var origins = sources
   if cacheUrl.len > 0: origins.add(cacheUrl)
   for src in sources:

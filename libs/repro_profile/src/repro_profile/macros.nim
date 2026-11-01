@@ -1242,32 +1242,23 @@ proc parseActivityResources(blk: NimNode; actName: string;
   ## only on a host that selects the activity -- and, under a guard, only
   ## where the guard also holds.
   ##
-  ## Action edges (`expandArchive.build`, `inlineExecCall`) are refused: they
-  ## land in `buildActions`, which has no activity, so inside an activity
-  ## they would run on every host.
-  let edge = findActionEdgeCall(blk[1])
-  if not edge.isNil:
-    error("activity `" & actName & "`: an action edge (`expandArchive." &
-      "build`, `inlineExecCall`) cannot sit in an activity's `resources:` " &
-      "block; action edges carry no activity. Declare it in the " &
-      "profile-level `resources:` block.", edge)
+  ## Action edges (`expandArchive.build`, `inlineExecCall` -- the
+  ## substitute-only store package an activity's units run from) belong to
+  ## the activity too (`ProfileBuildAction.activity`, `applyActionActivity`):
+  ## the system planner keeps an edge only on a host that selects its
+  ## activity, so a host fetches only the packages its activities use.
   let start = genSym(nskLet, "activityResourcesStart")
   let actionsBefore = genSym(nskLet, "activityActionsBefore")
   let lowered = parseResourcesSection(blk[1], profileVar)
   let nameLit = newStrLitNode(actName)
-  let msg = newStrLitNode("activity `" & actName & "`: an action edge " &
-    "cannot sit in an activity's `resources:` block; action edges carry " &
-    "no activity")
   result = quote do:
     block:
       let `start` = `profileVar`.resources.len
       let `actionsBefore` = `profileVar`.buildActions.len
       `lowered`
-      # A helper template could still add an action edge the AST check
-      # above cannot see; refuse it rather than run it on every host.
-      if `profileVar`.buildActions.len != `actionsBefore`:
-        raise newException(ValueError, `msg`)
       applyActivity(`profileVar`.resources, `start`, `nameLit`)
+      applyActionActivity(`profileVar`.buildActions, `actionsBefore`,
+                          `nameLit`)
 
 proc parseActivityStowEntries(body: NimNode; actName: string;
                               profileVar, guardSym, guardAst: NimNode;
