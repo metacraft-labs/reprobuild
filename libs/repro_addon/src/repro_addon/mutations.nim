@@ -336,6 +336,12 @@
 ##                                            compiler cross-built against a
 ##                                            newer glibc than the host's
 ##                                            (§7.9, the glibc exception)
+## ``profile-cc-unresolved-unrefused``        a profile compile that resolves
+##                                            no C compiler is handed to Nim
+##                                            instead of refused (decision 31)
+## ``apt-closure-adopts-unverified``          a realiser-v2 closure prefix is
+##                                            adopted without verifying its
+##                                            v2 hash or identity
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -462,6 +468,12 @@ const
                           "cross-prefix-glibc-unchecked",
                           # A8 review M5: agent-repin's falsifier.
                           "agent-repin-keeps-allow-list",
+                          # Read by repro_profile_compile (compile.nim), which
+                          # cannot import this module: decision 31's refusal.
+                          "profile-cc-unresolved-unrefused",
+                          # Read by repro_dsl_stdlib's apt_closure.nim: the
+                          # legacy adoption without its verification.
+                          "apt-closure-adopts-unverified",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",

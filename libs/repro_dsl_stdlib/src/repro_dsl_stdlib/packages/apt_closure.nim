@@ -1635,7 +1635,10 @@ proc adoptLegacyAptClosurePrefixes*(st: var Store; storeRoot: string):
       if legacyClosureIdentity(arch, shas) == identity:
         verified = true
         break
-    if not verified or identity != hash:
+    # The falsifying build adopts a union without checking that its members
+    # give the identity its directory names.
+    if AptClosureMutation != "apt-closure-adopts-unverified" and
+        (not verified or identity != hash):
       result.refused.add((dir, "the marker's members do not give the " &
         "directory's closure identity"))
       continue
