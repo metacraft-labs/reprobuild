@@ -29780,6 +29780,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
   var publishEdgeSpec = ""
+  var publishGiven = false
   var buildTargetTriple = ""
   var buildStrategy = lsDefault
   var strategyGiven = false
@@ -30119,6 +30120,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # CLI/build.md §"Publishing for an appliance": publish this build's
       # target install mirror under a profile's substitute-only edge key.
       publishEdgeSpec = arg["--publish=".len .. ^1]
+      publishGiven = true
     elif arg == "--target" or arg.startsWith("--target="):
       # ReproOS-Add-On-Mode A15: ``--target=<triple>`` is ``--variant
       # targetTriple=<triple>`` with the spelling canonicalised
@@ -30182,6 +30184,31 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # fold name-shaped selectors into one engine pass.
       positionalSelectors.add(arg)
     inc i
+
+  # CLI/build.md §"Publishing for an appliance": `--publish` publishes what
+  # the build produced, so a build that produces nothing cannot carry it,
+  # and the consuming platform is `--target`'s -- a target assigned through
+  # `--variant targetTriple=` alone would build for it and publish under
+  # the build host's platform. Each is refused before anything is built.
+  if publishGiven:
+    if publishEdgeSpec.len == 0:
+      stderr.writeLine("repro build: --publish= names no edge; expected " &
+        "--publish=<profile.nim>#<edge-id>")
+      return 2
+    if dryRun or prepareOnly:
+      stderr.writeLine("repro build: --publish publishes the build's " &
+        "output, and " & (if prepareOnly: "--prepare-only" else: "--dry-run") &
+        " produces none; drop one of them")
+      return 2
+    if buildTargetTriple.len == 0:
+      for assignment in getEnv("REPRO_VARIANTS").split(','):
+        if assignment.startsWith(TargetTripleVariantName & "="):
+          stderr.writeLine("repro build: --publish takes the consuming " &
+            "platform from --target; the target here is assigned by " &
+            "--variant " & assignment & ", which --publish cannot see. " &
+            "Spell it --target=" &
+            assignment[TargetTripleVariantName.len + 1 .. ^1])
+          return 2
 
   # Edge-Determinism-And-Soft-Rebuild.md §4.5: `--only` is a selector ON a
   # rebuild verb, and on its own it selects nothing to do. Refusing it is

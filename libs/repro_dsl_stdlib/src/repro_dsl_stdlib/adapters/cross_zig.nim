@@ -65,6 +65,10 @@ import std/[os, strutils, tables]
 import repro_project_dsl
 
 import ../interfaces/cross_target
+# The wrapper edge's `sh`, registered wherever the adapter is. `coreutils`
+# is the catalog's package (reprobuild-packages `packages/interfaces/
+# coreutils`), so the stdlib does not define a second one.
+import ../packages/sh as zig_wrapper_sh
 export cross_target
 
 type
@@ -89,10 +93,19 @@ const
     # The Raspberry Pi's own C library: what an object LD_PRELOADed into the
     # Pi's (glibc) processes must be built against, which the static-musl
     # row above cannot serve. zig links against its glibc ABI lists at the
-    # pinned version (Debian bookworm's 2.36; a binary built for it runs on
-    # trixie's 2.41) -- https://ziglang.org/download/0.13.0/release-notes.html#glibc
+    # pinned version (https://ziglang.org/download/0.13.0/release-notes.html#glibc),
+    # and a binary built for version N runs on any glibc >= N.
+    #
+    # 2.38, MEASURED rather than chosen (2026-11-01, Debian trixie armhf
+    # Packages index): the trixie libraries the appliance build links
+    # require it -- libsqlite3-0 3.46.1-7+deb13u2 and libssl3t64's
+    # libcrypto 3.5.7-1~deb13u2 reference GLIBC_2.38 (libcrypto through
+    # `__isoc23_strtol`), libzstd1 1.5.7 only GLIBC_2.34. Bookworm's 2.36
+    # cannot link them; trixie itself ships 2.41 (the Pi: 2.41-12+rpt1),
+    # beyond zig 0.13's newest ABI list, 2.39, so 2.38 is the oldest
+    # version that serves.
     ZigCrossTarget(rustTriple: "armv7-unknown-linux-gnueabihf",
-                   zigTarget: "arm-linux-gnueabihf.2.36",
+                   zigTarget: "arm-linux-gnueabihf.2.38",
                    mcpu: "generic+v7a+vfp3d16+thumb2",
                    opensslTarget: "linux-armv4",
                    nimCpu: "arm"),
@@ -224,6 +237,11 @@ proc isZigCrossTarget*(ct: CrossTarget): bool =
   ## Whether `ct` was produced by this adapter.
   ct != nil and (not ct.isNative) and ct.name.startsWith(ZigCrossAdapterPrefix)
 
+proc isZigGlibcTarget*(t: ZigCrossTarget): bool =
+  ## A row that links against glibc (`…-gnu…` zig target) rather than zig's
+  ## static musl.
+  "-gnu" in t.zigTarget
+
 proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
                             libDir: string): string =
   ## The text of one wrapper. `role` is `cc`, `c++`, `ar`, `ranlib` or
@@ -259,7 +277,15 @@ proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
     "*/self-contained/crtn.o|*/self-contained/crtbegin.o|" &
     "*/self-contained/crtend.o|*/self-contained/rcrt1.o|" &
     "*/self-contained/Scrt1.o) continue;;\n" &
-    "    -lgcc_s|--target=*) continue;;\n" &
+    # `-lgcc_s` is dropped for the musl rows only, where the measured links
+    # (llm-api-proxy for armv7 musl, run on the Pi) need nothing from it:
+    # zig links compiler-rt in its place. A glibc row gets no
+    # such proof -- the catalog carries no rust-std for it, so no Rust link
+    # has been measured -- and keeping the flag makes a Rust link for it
+    # fail by name (zig ships no libgcc_s) instead of silently linking a
+    # binary whose unwinder nobody checked.
+    (if isZigGlibcTarget(t): "    --target=*) continue;;\n"
+     else: "    -lgcc_s|--target=*) continue;;\n") &
     "  esac\n" &
     "  set -- \"$@\" \"$a\"\n" &
     "done\n" &
@@ -287,11 +313,6 @@ proc zigCrossCmakeToolchain*(t: ZigCrossTarget; wrapperDir: string): string =
     "set(CMAKE_AR " & q(wrapperDir / "ar") & " CACHE FILEPATH \"\")\n" &
     "set(CMAKE_RANLIB " & q(wrapperDir / "ranlib") & " CACHE FILEPATH \"\")\n" &
     "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n"
-
-proc isZigGlibcTarget*(t: ZigCrossTarget): bool =
-  ## A row that links against glibc (`…-gnu…` zig target) rather than zig's
-  ## static musl.
-  "-gnu" in t.zigTarget
 
 proc zigCrossRustflags*(remapRoot: string; rustTriple = ""): string =
   ## The target RUSTFLAGS: the static-musl flags for a musl row (none for a
@@ -367,4 +388,10 @@ proc emitZigCrossWrappersAction*(projectRoot, packageName,
     cacheable = true,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "zig-cross.wrappers",
-    toolIdentityRefs = @["sh", "rm", "mkdir", "printf", "chmod", "zig"])
+    # The script's tools are the adapter's, not the recipe's: `sh`, and
+    # `coreutils` for `rm` / `mkdir` / `chmod` (`printf` is the shell's
+    # builtin). Declaring `zig` adds both to the recipe's
+    # `nativeBuildDeps:` (`zigCrossAutoInjectShellTools` in
+    # repro_project_dsl), so they resolve, or are refused by name, like any
+    # declared tool (Reprobuild-Standard-Library.md, `cross_zig`).
+    toolIdentityRefs = @["sh", "coreutils", "zig"])

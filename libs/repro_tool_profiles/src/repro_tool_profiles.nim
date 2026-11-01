@@ -9566,6 +9566,15 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
       # failure is the result (Dependency-Provisioning-In-Build-Graph.md 4.3).
       result = resolveTarballTool(useDef, storeRoot)
     else:
+      # The Linux C toolchain is out of tarball mode's scope (§4.3, "Not the
+      # Linux C toolchain"). `repro build` refuses where it decides the
+      # fall-through; this is the same refusal for every other caller --
+      # dev-env activation, which never builds recipes, would otherwise
+      # tell the operator to `repro build` the gcc recipe and walk into
+      # the cycle.
+      let scopeRefusal = tarballModeHostToolchainRefusal(useDef)
+      if scopeRefusal.len > 0:
+        raise newException(OSError, scopeRefusal)
       result = resolveTarballModeFromSource(useDef)
   of tpmScoop:
     result = resolveScoopTool(useDef, storeRoot)

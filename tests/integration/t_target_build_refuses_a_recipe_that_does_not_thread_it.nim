@@ -372,6 +372,43 @@ suite "--target refuses a recipe that does not thread it, end to end":
         check elf[4] == '\x01'
         check (uint8(elf[37]) and 0x04'u8) != 0
 
+  test "t_target_build_links_a_glibc_armv7_executable_against_glibc_2_38":
+    # The glibc row (Reprobuild-Standard-Library.md, `cross_zig`): a real
+    # link for armv7-unknown-linux-gnueabihf, read back with binutils'
+    # readelf. It must be a dynamic ARM hard-float executable that asks for
+    # the Pi's loader and libc, and need no glibc symbol version newer than
+    # the row's 2.38 -- the floor the trixie libraries it will link set.
+    requirePreconditions(["zig", "readelf"]):
+      const GlibcTriple = "armv7-unknown-linux-gnueabihf"
+      let root = createTempDir("target-glibc-executable-", "")
+      defer: removeDir(root)
+      let project = createProject(root, CExecutableRecipe)
+      let cross = runBuild(root, project, @["--target=" & GlibcTriple])
+      checkpoint(cross.output)
+      check cross.code == 0
+      let exe = project / ("hello@" & GlibcTriple)
+      require isElf(exe, EmArm)
+      let elf = readFile(exe)
+      check elf[4] == '\x01'
+      check (uint8(elf[37]) and 0x04'u8) != 0
+      let headers = execCmdEx("readelf -lW " & quoteShell(exe))
+      checkpoint(headers.output)
+      check "[Requesting program interpreter: /lib/ld-linux-armhf.so.3]" in
+        headers.output
+      let dynamic = execCmdEx("readelf -dW " & quoteShell(exe))
+      checkpoint(dynamic.output)
+      check "Shared library: [libc.so.6]" in dynamic.output
+      let versions = execCmdEx("readelf -VW " & quoteShell(exe))
+      checkpoint(versions.output)
+      var newest = (0, 0)
+      for word in versions.output.splitWhitespace():
+        if word.startsWith("GLIBC_2."):
+          let parts = word["GLIBC_".len .. ^1].split('.')
+          let v = (parseInt(parts[0]), parseInt(parts[1]))
+          if v > newest: newest = v
+      check newest >= (2, 4)
+      check newest <= (2, 38)
+
   test "t_target_publish_admits_target_bytes_and_refuses_host_bytes":
     # A cross build's bytes reach a cache by `repro cache publish` under an
     # identity naming the consumer's platform (Binary-Caches.md, "Publishing
@@ -493,6 +530,24 @@ profile "publishProbe":
       requiresElevation = true,
       address = "plain-prefix",
       commandStatsId = "inlineExecCall")
+    inlineExecCall(
+      argv = @["/bin/sh", "-c", "exit 70"],
+      cwd = "/repro/store/prefixes/outside/1",
+      outputs = @["/etc/outside-the-cwd"],
+      requiresElevation = true,
+      address = "outside-prefix",
+      commandStatsId = "inlineExecCall",
+      substituteOnly = true,
+      expectedOutputDigest = "$1")
+    inlineExecCall(
+      argv = @["/bin/sh", "-c", "exit 70"],
+      cwd = "/repro/store/prefixes/libs/1",
+      outputs = @["lib"],
+      requiresElevation = true,
+      address = "libs-prefix",
+      commandStatsId = "inlineExecCall",
+      substituteOnly = true,
+      expectedOutputDigest = "$1")
 """ % helloDigest
 
 suite "repro build --publish=<profile>#<edge>":
@@ -517,6 +572,24 @@ suite "repro build --publish=<profile>#<edge>":
       let creds = @[("REPRO_BINARY_CACHE_URL", url),
                     ("REPRO_BINARY_CACHE_KEY_PATH", root / "producer.key"),
                     ("REPRO_BINARY_CACHE_CERT_PATH", root / "producer.cert")]
+      # Arguments --publish cannot act on are refused before the build.
+      let empty = runBuild(root, project, @["--target=" & Triple,
+        "--publish="], creds)
+      checkpoint(empty.output)
+      check empty.code == 2
+      check "--publish= names no edge" in empty.output
+      let dry = runBuild(root, project, @["--target=" & Triple, "--dry-run",
+        "--publish=" & profile & "#hello-prefix"], creds)
+      checkpoint(dry.output)
+      check dry.code == 2
+      check "--dry-run produces none" in dry.output
+      let viaVariant = runBuild(root, project, @["--variant",
+        "targetTriple=" & Triple, "--publish=" & profile & "#hello-prefix"],
+        creds)
+      checkpoint(viaVariant.output)
+      check viaVariant.code == 2
+      check ("Spell it --target=" & Triple) in viaVariant.output
+      check manifestCount(root) == 0
       # Unknown edge: refused by name, the edges listed, nothing published.
       let unknown = runBuild(root, project, @["--target=" & Triple,
         "--publish=" & profile & "#no-such-edge"], creds)
@@ -531,6 +604,36 @@ suite "repro build --publish=<profile>#<edge>":
       checkpoint(plain.output)
       check plain.code == 2
       check "is not substitute-only" in plain.output
+      check manifestCount(root) == 0
+      # An edge with no output under its cwd has no prefix an apply could
+      # install: refused as not substitutable, nothing published.
+      let outside = runBuild(root, project, @["--target=" & Triple,
+        "--publish=" & profile & "#outside-prefix"], creds)
+      checkpoint(outside.output)
+      check outside.code == 2
+      check "edge 'outside-prefix' is not substitutable" in outside.output
+      check manifestCount(root) == 0
+      # The mirror holds `usr/bin/hello` but no `lib`: refused, naming the
+      # outputs it lacks, nothing published.
+      let libs = runBuild(root, project, @["--target=" & Triple,
+        "--publish=" & profile & "#libs-prefix"], creds)
+      checkpoint(libs.output)
+      check libs.code == 2
+      check "does not hold edge 'libs-prefix''s outputs (lib)" in libs.output
+      check manifestCount(root) == 0
+      # A mistyped cert path: refused by name after the build, the producer
+      # key that is there left byte-identical, nothing published (the
+      # publisher loads its key and never generates one).
+      let keyBefore = readFile(root / "producer.key")
+      var typoCreds = creds
+      typoCreds[2] = ("REPRO_BINARY_CACHE_CERT_PATH", root / "prodcuer.cert")
+      let typo = runBuild(root, project, @["--target=" & Triple,
+        "--publish=" & profile & "#hello-prefix"], typoCreds)
+      checkpoint(typo.output)
+      check typo.code == 2
+      check "prodcuer.cert" in typo.output
+      check readFile(root / "producer.key") == keyBefore
+      check not fileExists(root / "prodcuer.cert")
       check manifestCount(root) == 0
       # The profile pins other bytes: refused before the upload, naming the
       # digest the build's bytes do have.

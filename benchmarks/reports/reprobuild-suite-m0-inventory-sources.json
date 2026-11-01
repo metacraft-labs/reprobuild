@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2571,
+    "nimTestBinaries": 2574,
     "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 716,
+    "pureUnitTests": 717,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2611
+    "testEntries": 2614
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1503,10 +1503,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1425,
+      "integration": 1426,
       "platform/destructive": 162,
-      "pure unit": 716,
-      "unclassified": 290
+      "pure unit": 717,
+      "unclassified": 291
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1714,9 +1714,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2571,
+    "nimTestBinaryCount": 2574,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2611
+    "testEntryCount": 2614
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8999,7 +8999,7 @@
     {
       "binary": "build/test-bin/t_a3_p1_cache_key",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -9169,6 +9169,43 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_publish_compressed_payload_is_exclusive_and_verified",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_binary_cache_server",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_binary_cache_client",
+      "requiresReproBinary": false,
+      "source": "libs/repro_binary_cache_client/tests/t_publish_compressed_payload_is_exclusive_and_verified.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_publisher_key_files_are_never_overwritten",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_binary_cache_client",
+      "requiresReproBinary": false,
+      "source": "libs/repro_binary_cache_client/tests/t_publisher_key_files_are_never_overwritten.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_r1_caches_config",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -9245,7 +9282,7 @@
     {
       "binary": "build/test-bin/t_a2_p1_manifest_roundtrip",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -13398,7 +13435,7 @@
     {
       "binary": "build/test-bin/t_repro_deploy_agent_freshness_and_state",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -13434,7 +13471,7 @@
     {
       "binary": "build/test-bin/t_repro_deploy_agent_manifest_v3_profile_files",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -13543,7 +13580,7 @@
     {
       "binary": "build/test-bin/t_repro_deploy_agent_rejects_wrong_signer",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -13727,7 +13764,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim",
       "sourceSuiteCount": 6,
-      "staticCaseCount": 28,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21934,7 +21971,7 @@
     {
       "binary": "build/test-bin/t_remix_composition_is_order_independent",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -21952,7 +21989,7 @@
     {
       "binary": "build/test-bin/t_remix_conformance_vectors",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -21987,7 +22024,7 @@
     {
       "binary": "build/test-bin/t_remix_export_bundle",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22022,7 +22059,7 @@
     {
       "binary": "build/test-bin/t_remix_lowering_writes_patched_recipes",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22041,7 +22078,7 @@
     {
       "binary": "build/test-bin/t_remix_manifest_canonical_roundtrip_and_identity",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22059,7 +22096,7 @@
     {
       "binary": "build/test-bin/t_remix_negative_safety_blocks_all_install_paths",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22077,7 +22114,7 @@
     {
       "binary": "build/test-bin/t_remix_signature_transparency_and_revocation",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22095,7 +22132,7 @@
     {
       "binary": "build/test-bin/t_remix_federation_mirror_and_offline_install",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22132,7 +22169,7 @@
     {
       "binary": "build/test-bin/t_remix_registry_boundary_and_authorship",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22170,7 +22207,7 @@
     {
       "binary": "build/test-bin/t_remix_registry_restart",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -22189,7 +22226,7 @@
     {
       "binary": "build/test-bin/t_remix_registry_statements",
       "class": "unclassified",
-      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/secret_key.nim`)",
+      "classificationReason": "imports `posix`, which grants out-of-process reach (through `libs/repro_peer_cache/src/repro_peer_cache/auth.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -47274,6 +47311,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tarball_mode_refuses_the_linux_c_toolchain",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_tarball_mode_refuses_the_linux_c_toolchain.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_tarball_provisioning_cold_store_extractors",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47313,7 +47368,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_target_build_refuses_a_recipe_that_does_not_thread_it.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51656,13 +51711,14 @@
         "repro_dsl_stdlib",
         "repro_interface_artifacts",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_m9r11_stub_provisioning_widening.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

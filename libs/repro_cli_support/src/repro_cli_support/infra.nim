@@ -848,15 +848,22 @@ proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
   let idy = bc_actions.buildActionCacheIdentity(action, platform)
   let key = deriveCacheEntryKeyHex(idy)
   let keypair =
+    # Unset variables (ValueError), a missing, malformed or mismatched key
+    # file (AuthError), an unreadable one (IOError): each is refused by
+    # name, after the build and before anything is uploaded.
     try: loadProducerKeypair()
-    except ValueError as e:
+    except CatchableError as e:
       stderr.writeLine(who & ": " & e.msg)
       return 2
   # The profile pins the bytes (`expectedOutputDigest`), and the apply
   # refuses an entry that digests otherwise, so a mismatch is refused here,
   # before the upload, rather than published as an entry nothing can use.
   const digestPrefix = "blake3:"
-  let pinned = action.expectedOutputDigest
+  # Prefix and hex compared case-insensitively alike (publishInProcess
+  # lowers the hex). A compiled profile holds only lowercase today
+  # (`repro_profile/build_actions` refuses anything else), so this only
+  # keeps the two halves from disagreeing if that rule is ever relaxed.
+  let pinned = action.expectedOutputDigest.toLowerAscii()
   if pinned.len > 0 and not pinned.startsWith(digestPrefix):
     stderr.writeLine(who & ": edge '" & edgeId & "' pins " & pinned &
       ", which is not a blake3:<hex> digest")

@@ -217,7 +217,10 @@ proc loadProducerKeypair*(): peerAuth.PeerKeypair =
     raise newException(ValueError,
       "publish requires REPRO_BINARY_CACHE_KEY_PATH + " &
       "REPRO_BINARY_CACHE_CERT_PATH to be set")
-  result = peerAuth.loadOrGenerateKeypair(certPath, keyPath)
+  # Load, never generate: a publisher's key is the identity a cache's
+  # allowlist names, so a missing or mistyped file is refused by name
+  # (`AuthError`) rather than replaced by a fresh pair. `gen-key` creates one.
+  result = peerAuth.loadExistingKeypair(certPath, keyPath)
 
 # ---------------------------------------------------------------------------
 # lookup / substitute
@@ -445,7 +448,9 @@ proc cmdPublish(rawArgs: seq[string]): int =
   let idy = identityFromArgs(args)
   let kp =
     try: loadProducerKeypair()
-    except ValueError as e:
+    except CatchableError as e:
+      # Unset variables, or a missing / malformed / mismatched key file:
+      # refused by name, nothing generated (`loadProducerKeypair`).
       stderr.writeLine(e.msg)
       return 2
   let req = PublishInProcessRequest(

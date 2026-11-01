@@ -54,6 +54,10 @@
 ## owned by the proc currently calling them.
 
 import std/[hashes, os, sets, strutils]
+when defined(posix):
+  from std/posix import nil
+when defined(windows):
+  import ./owner_only_file
 
 import bearssl/[ec, hash as bsslHash]
 import bearssl/abi/bearssl_ec as bsslEcAbi
@@ -323,20 +327,59 @@ proc privateKeyFileText*(priv: PrivateKeyBytes): string =
   ## `loadOrGenerateKeypair`.
   KeyFilePrefix & toHex32(priv) & "\n"
 
+proc createNewFile(path, content: string; mode: int; ownerOnly: bool) =
+  ## Creates `path` holding `content`, refusing when anything is already
+  ## there: on POSIX `open(O_CREAT|O_EXCL)` with `mode` (so a private key is
+  ## 0600 from the moment it exists, whatever the umask leaves), every write
+  ## checked; on Windows `CREATE_NEW`, with a DACL holding only the current
+  ## user when `ownerOnly`. Never truncates an existing file: a key file a
+  ## caller did not expect to be missing is refused, not replaced. The same
+  ## writer `pki.nim` uses for host CA keys.
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  when defined(posix):
+    let fd = posix.open(path.cstring, posix.O_WRONLY or posix.O_CREAT or
+      posix.O_EXCL or posix.O_CLOEXEC, posix.Mode(mode))
+    if fd < 0:
+      raise newException(AuthError, "cannot create " & path &
+        " exclusively: " & osErrorMsg(osLastError()))
+    try:
+      var off = 0
+      while off < content.len:
+        let n = posix.write(fd, unsafeAddr content[off], content.len - off)
+        if n < 0:
+          if posix.errno == posix.EINTR: continue
+          raise newException(AuthError, "cannot write " & path & ": " &
+            osErrorMsg(osLastError()))
+        off += n
+    finally:
+      discard posix.close(fd)
+  elif defined(windows):
+    if fileExists(path) or symlinkExists(path):
+      raise newException(AuthError, "cannot create " & path &
+        " exclusively: it already exists")
+    if ownerOnly:
+      try:
+        createNewOwnerOnlyFile(path, content)
+      except OwnerOnlyFileError as err:
+        raise newException(AuthError, "cannot create " & path & ": " &
+          err.msg)
+    else:
+      writeFile(path, content)
+  else:
+    {.error: "key files need a POSIX or Windows writer".}
+
 proc writeKeyFile(path: string; priv: PrivateKeyBytes) =
   ## Persists the private scalar to `path` as `ecdsa-p256:<hex>` so the
   ## file is unambiguously an ECDSA-P256 key, not an M3 stand-in seed.
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-  writeFile(path, privateKeyFileText(priv))
+  ## Owner-only, created exclusively (`createNewFile`).
+  createNewFile(path, privateKeyFileText(priv), 0o600, ownerOnly = true)
 
 proc writeCertFile(path: string; pub: PublicKeyBytes) =
-  ## Persists the public key to `path` as a single 130-char hex line.
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-  writeFile(path, toHex65(pub) & "\n")
+  ## Persists the public key to `path` as a single 130-char hex line,
+  ## created exclusively (`createNewFile`); a public key need not be private.
+  createNewFile(path, toHex65(pub) & "\n", 0o644, ownerOnly = false)
 
 proc readSingleHexLine(path: string; what: string): string =
   if not fileExists(path):
@@ -397,6 +440,26 @@ proc loadPrivateKeyFile*(path: string): PrivateKeyBytes =
   ## anything addressed to it and reports no reason why.
   readKeyFile(path)
 
+proc loadExistingKeypair*(certPath, keyPath: string): PeerKeypair =
+  ## Loads a keypair that must already exist: both files present, the key
+  ## an `ecdsa-p256:` private scalar, and the cert the public key it
+  ## derives. Raises `AuthError` naming the file otherwise, and never writes
+  ## anything. For a publisher, whose key is an identity a cache was told to
+  ## trust: a missing file is a mistake to report, not a key to mint.
+  if not fileExists(keyPath):
+    raise newException(AuthError, "publisher private-key file does not " &
+      "exist: " & keyPath)
+  if not fileExists(certPath):
+    raise newException(AuthError, "publisher public-key (cert) file does " &
+      "not exist: " & certPath)
+  let pub = readCertFile(certPath)
+  let priv = readKeyFile(keyPath)
+  if derivePublicKey(priv) != pub:
+    raise newException(AuthError,
+      "peer public-key file does not match ECDSA-P256 derive(" &
+      "privkey): " & certPath & " vs derive(" & keyPath & ")")
+  PeerKeypair(publicKey: pub, privateKey: priv)
+
 proc loadOrGenerateKeypair*(certPath, keyPath: string): PeerKeypair =
   ## Loads the peer's keypair from disk, generating + persisting a
   ## fresh one when either file is missing. The cert file holds the
@@ -406,18 +469,25 @@ proc loadOrGenerateKeypair*(certPath, keyPath: string): PeerKeypair =
   ## When **both** files exist they are read and the public key is
   ## re-derived from the private key + compared with the on-disk
   ## public key; mismatch raises `AuthError`.
+  ##
+  ## Generates only when **neither** file exists. When one exists and the
+  ## other does not -- a typo in one of the two paths is the usual cause --
+  ## it raises `AuthError` naming both instead of minting a pair over the
+  ## file that is there: the private key may be the only copy of a
+  ## publisher identity a cache trusts.
   if fileExists(certPath) and fileExists(keyPath):
-    let pub = readCertFile(certPath)
-    let priv = readKeyFile(keyPath)
-    let derived = derivePublicKey(priv)
-    if derived != pub:
-      raise newException(AuthError,
-        "peer public-key file does not match ECDSA-P256 derive(" &
-        "privkey): " & certPath & " vs derive(" & keyPath & ")")
-    return PeerKeypair(publicKey: pub, privateKey: priv)
+    return loadExistingKeypair(certPath, keyPath)
+  if fileExists(certPath) or fileExists(keyPath) or
+      symlinkExists(certPath) or symlinkExists(keyPath):
+    raise newException(AuthError,
+      "refusing to generate a keypair: only one of the two files exists " &
+      "(cert " & certPath & (if fileExists(certPath): " exists" else:
+      " is missing") & ", key " & keyPath & (if fileExists(keyPath):
+      " exists" else: " is missing") & "); fix the path that is wrong, or " &
+      "remove the remaining file to start a new identity")
   let kp = generateKeypair()
-  writeCertFile(certPath, kp.publicKey)
   writeKeyFile(keyPath, kp.privateKey)
+  writeCertFile(certPath, kp.publicKey)
   kp
 
 # ---------------------------------------------------------------------------
