@@ -363,6 +363,15 @@ proc emitZigCrossWrappersAction*(projectRoot, packageName,
   ##
   ## Cacheable: the inputs are the script text (in the argv) and `zig`
   ## (a tool identity ref); the outputs are a pure function of both.
+  ##
+  ## One edge per package and triple: a package with several zig-built
+  ## edges (reprobuild's own `.#apps`, one `nim.c` per image) gets the edge
+  ## registered by the first and the same edge back for the rest, so the
+  ## graph never holds two nodes with one id.
+  let id = zigCrossWrappersActionId(packageName, rustTriple)
+  for existing in registeredBuildActions():
+    if existing.id == id:
+      return existing
   let t = zigCrossTarget(rustTriple)
   let dir = zigCrossWrapperDir(projectRoot, rustTriple)
   let libDir = dir / "lib"
@@ -381,7 +390,7 @@ proc emitZigCrossWrappersAction*(projectRoot, packageName,
   # from (zig's compiler-rt provides the atomics).
   script.add("zig ar rc " & q(libDir / "libatomic.a"))
   buildAction(
-    id = zigCrossWrappersActionId(packageName, rustTriple),
+    id = id,
     call = inlineExecCall(@["sh", "-c", script], projectRoot),
     inputs = @[],
     outputs = @[dir],

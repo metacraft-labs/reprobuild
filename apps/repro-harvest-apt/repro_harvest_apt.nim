@@ -286,7 +286,19 @@ proc fetchAndVerifyIndexes(client: FetchClient; spec: AptSourceSpec;
   ## otherwise the key bundle), then fetch each component's ``Packages``
   ## index and check it against the SHA-256 the signed payload lists.
   stderr.writeLine "fetch: ", inReleaseUrl(spec)
-  let inRel = fetchUrl(client, inReleaseUrl(spec), maxBytes = MaxInReleaseBytes)
+  # A snapshot's InRelease never changes, so the cache may answer for it.
+  # An archive with no snapshot service (Raspbian: `--archive`, no
+  # snapshot) moves on, and a cached InRelease of it is a stale view: the
+  # locks it gives name archives the pool no longer serves. Such an
+  # InRelease is fetched afresh unless the run is `--offline`.
+  let moving = spec.snapshot.len == 0
+  let inRel = fetchUrl(client, inReleaseUrl(spec),
+    forceRefetch = moving and not client.offline,
+    maxBytes = MaxInReleaseBytes)
+  if moving and inRel.fromCache:
+    stderr.writeLine "WARNING: --offline: using the cached InRelease of " &
+      "an archive with no snapshot service (" & inRel.cachePath &
+      "); it may be stale"
   result.inReleaseSha256 = sha256HexStr(inRel.bytes)
   var payload = ""
   if insecure:
@@ -327,7 +339,13 @@ proc fetchAndVerifyIndexes(client: FetchClient; spec: AptSourceSpec;
       pkgRel = component & "/binary-" & arch & "/Packages.xz"
     let pkgUrl = spec.suiteBaseUrl & "/" & pkgRel
     stderr.writeLine "fetch: ", pkgUrl
-    let pkgFetch = fetchUrl(client, pkgUrl, maxBytes = MaxPackagesIndexBytes)
+    var pkgFetch = fetchUrl(client, pkgUrl, maxBytes = MaxPackagesIndexBytes)
+    if expectedSha.len > 0 and pkgFetch.fromCache and not client.offline and
+        sha256HexStr(pkgFetch.bytes) != expectedSha:
+      # The cached index is an older one of the same URL: the InRelease
+      # names the current one.
+      pkgFetch = fetchUrl(client, pkgUrl, forceRefetch = true,
+                          maxBytes = MaxPackagesIndexBytes)
     let actual = sha256HexStr(pkgFetch.bytes)
     if expectedSha.len > 0 and actual != expectedSha:
       raise newException(SignatureVerificationError,

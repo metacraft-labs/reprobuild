@@ -790,19 +790,92 @@ proc selectedBuildActions*(actions: openArray[ProfileBuildAction];
       if a.activity.len == 0 or a.activity in target.activities:
         result.add a
 
+proc runtimePathTexts(r: SystemResource):
+    seq[tuple[what, text: string]] =
+  ## Every text of ``r`` from which a unit's executables and paths can come
+  ## when it runs (A12 round-2 review): the unit body and its health check
+  ## (`exec:/repro/store/...`), a drop-in for another unit (which can set
+  ## `ExecStart=` or `Environment=`), a timer, a file a unit execs or reads
+  ## (a wrapper script, an `EnvironmentFile=`), a system variable, an
+  ## account's home and shell, and the other rule files that name programs
+  ## (udev `RUN+=`, tmpfiles symlinks, polkit, sudoers), plus the paths of
+  ## an FHS sandbox, an add-on tool and a launchd daemon. A kind that cannot
+  ## name a path (a sysctl, a group, a firewall rule) has none.
+  ## ``what`` names the resource the way a refusal shows it.
+  case r.kind
+  of srkSystemdSystemUnit:
+    result.add ("unit " & r.suName, r.suContent)
+    if r.suHealthCheck.len > 0:
+      result.add ("the health check of unit " & r.suName, r.suHealthCheck)
+  of srkSystemdSystemDropIn:
+    result.add ("drop-in " & r.diName & " of unit " & r.diUnit, r.diContent)
+  of srkSystemdSystemTimer:
+    result.add ("timer " & r.stName, r.stContent)
+  of srkFsSystemFile:
+    result.add ("file " & r.sfPath, r.sfContent)
+  of srkEnvSystemVariable:
+    result.add ("system variable " & r.evName, r.evContribution.join("\n"))
+  of srkPasswdUser:
+    result.add ("user " & r.puName, r.puHome & "\n" & r.puShell)
+  of srkLinuxSysusersEntry:
+    result.add ("sysusers entry " & r.seName, r.seHome & "\n" & r.seShell)
+  of srkLinuxUdevRule:
+    result.add ("udev rule " & r.udevName, r.udevContent)
+  of srkLinuxPolkitRule:
+    result.add ("polkit rule " & r.polkitName, r.polkitContent)
+  of srkLinuxTmpfilesRule:
+    result.add ("tmpfiles rule " & r.tmpfilesName, r.tmpfilesContent)
+  of srkLinuxSudoersRule:
+    result.add ("sudoers rule " & r.sudoersName, r.sudoersContent)
+  of srkLinuxFhsSandbox:
+    result.add ("FHS sandbox " & r.fsbBinPath, (@[r.fsbBinPath] &
+      r.fsbFhsTreeRoots & r.fsbArgv).join("\n"))
+  of srkLinuxAddOnTool:
+    result.add ("add-on tool " & r.atCommand, r.atProgram)
+  of srkLaunchdSystemDaemon:
+    result.add ("launchd daemon " & r.sdaLabel, r.sdaProgramArgs.join("\n"))
+  else:
+    discard
+
+const
+  PrefixLeftBounds = {'=', ' ', '\t', '\n', ':', '"', '\'', ',', '(', '[',
+                      '@', '-', '+', '!', '|'}
+    ## What may stand before a store prefix where it is used as a path:
+    ## an assignment, whitespace, a separator, a quote, and the systemd
+    ## `Exec*=` prefixes (`@`, `-`, `+`, `!`, `|`... `-` also opens an
+    ## optional `EnvironmentFile=-/path`).
+  PrefixRightBounds = {'/', ' ', '\t', '\n', ':', '"', '\'', ',', ')', ']',
+                       ';'}
+    ## What may follow it: a path below it, or the end of the token.
+
+proc namesPrefix(text, prefix: string): bool =
+  ## Whether ``text`` uses the store ``prefix`` as a path -- bounded on both
+  ## sides, so `/…/geth-prefix/12` does not match `/…/geth-prefix/1`.
+  var i = text.find(prefix)
+  while i >= 0:
+    let after = i + prefix.len
+    if (i == 0 or text[i - 1] in PrefixLeftBounds) and
+       (after >= text.len or text[after] in PrefixRightBounds):
+      return true
+    i = text.find(prefix, i + 1)
+  false
+
 proc unitPrefixRefusal*(profile: SystemProfile;
                         actions, selected: openArray[ProfileBuildAction]):
     string =
-  ## Why the selected resources cannot run on this target, or "": a unit
-  ## names the store prefix of an action edge the target does not realise
-  ## (A12 review finding 12, spec ReproOS-Add-On-Mode §8.2). An activity's
-  ## edges are realised only where the activity is selected
+  ## Why the selected resources cannot run on this target, or "": a
+  ## resource names the store prefix of an action edge the target does not
+  ## realise (A12 review finding 12, spec ReproOS-Add-On-Mode §8.2). An
+  ## activity's edges are realised only where the activity is selected
   ## (``selectedBuildActions``), so a unit that runs from another activity's
-  ## package -- an `ExecStart=` or a confinement under that edge's prefix --
-  ## would start without its executable on a host that selects the unit's
-  ## activity but not the package's. Refused at plan time, naming the unit,
-  ## the prefix and the activity that owns it; declare the package in the
-  ## unit's own activity (or at profile level) instead.
+  ## package would start without its executable on a host that selects the
+  ## unit's activity but not the package's. The executable can come from the
+  ## unit body, but equally from a drop-in, a health check, a wrapper file
+  ## the unit execs, an environment file or variable, or an account's shell
+  ## (``runtimePathTexts``), and each is checked (A12 round-2 review).
+  ## Refused at plan time, naming the resource, the prefix and the activity
+  ## that owns it; declare the package in the resource's own activity (or at
+  ## profile level) instead.
   when AddonMutation == "unit-prefix-unchecked":
     # FALSIFYING MUTATION (t_system_activity_selects_its_store_packages).
     return ""
@@ -814,21 +887,20 @@ proc unitPrefixRefusal*(profile: SystemProfile;
       continue
     let prefix = a.cwd.strip(leading = false, chars = {'/'})
     for r in profile.resources:
-      if r.kind != srkSystemdSystemUnit: continue
-      var i = r.suContent.find(prefix)
-      while i >= 0:
-        let after = i + prefix.len
-        let bounded = (i == 0 or r.suContent[i - 1] in {'=', ' ', '\t', '\n',
-                                                         ':', '"', '\''}) and
-          (after >= r.suContent.len or
-           r.suContent[after] in {'/', ' ', '\t', '\n', ':', '"', '\''})
-        if bounded:
-          return "unit " & r.suName & " runs from the store prefix " & prefix &
+      when AddonMutation == "unit-prefix-bodies-only":
+        # FALSIFYING MUTATION (t_system_activity_selects_its_store_packages):
+        # the round-1 check, which read unit bodies and nothing else.
+        if r.kind != srkSystemdSystemUnit: continue
+        let texts = @[("unit " & r.suName, r.suContent)]
+      else:
+        let texts = runtimePathTexts(r)
+      for (what, text) in texts:
+        if namesPrefix(text, prefix):
+          return what & " runs from the store prefix " & prefix &
             ", which action edge `" & a.id & "` of activity `" & a.activity &
             "` produces, and this host does not select that activity, so " &
             "the prefix would never be realised; declare the package in " &
-            "the unit's own activity or at profile level"
-        i = r.suContent.find(prefix, i + 1)
+            "the resource's own activity or at profile level"
   ""
 
 proc defaultSystemPlanTarget*(host = ""): SystemPlanTarget =

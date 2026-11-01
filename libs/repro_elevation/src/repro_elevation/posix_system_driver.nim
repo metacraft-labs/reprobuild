@@ -766,6 +766,29 @@ proc realiseAddOnAptClosure*(lock: AptClosureLock;
   enterWritableStoreView(storeRoot)
   realiseAptClosure(lock, storeRoot, cacheDir, fetch)
 
+proc unitObservedDigestHex*(fileContent, desiredContent: string;
+                            closureRealised: bool;
+                            closurePrefix: string): string =
+  ## The observed digest of a unit bound to a `package(apt)` closure. Its
+  ## file's digest, except when the file is exactly the desired one and the
+  ## closure is not realised: then a digest no desired state has (the
+  ## `apt-closure-absent:` sentinel), so the plan carries an update that
+  ## realises the closure.
+  ##
+  ## Only then. A unit whose file is not the desired one is an update by
+  ## its bytes already, and the realise comes with it. Before, a changed
+  ## lock (a new closure, not yet realised) put the sentinel over the old
+  ## file. The observation then matched neither the desired state nor what
+  ## the last apply recorded, so the planner reported actionable drift
+  ## instead of an update. rpi2's legacy agent (76f0f4f7a9) did this on
+  ## the six units bound to its re-locked nut closures and failed every
+  ## tick.
+  let fileDigest = posixDigestHexOfText(fileContent)
+  if closureRealised or fileContent != desiredContent: fileDigest
+  else:
+    posixDigestHexOfText("apt-closure-absent:" & closurePrefix & "\n" &
+      fileContent)
+
 proc observeSystemdSystemUnit*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Read the unit file under `/etc/systemd/system/` and query
@@ -782,10 +805,9 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
     # no desired state has, so the plan carries an update that realises it.
     if op.suAptClosureLock.len > 0 and not op.suDestroy:
       let lock = parseAptClosureLock(op.suAptClosureLock)
-      if not aptClosureRealised(AddOnSystemStoreRoot, lock):
-        result.digestHex = posixDigestHexOfText("apt-closure-absent:" &
-          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" &
-          readFile(path))
+      result.digestHex = unitObservedDigestHex(readFile(path), op.suContent,
+        aptClosureRealised(AddOnSystemStoreRoot, lock),
+        aptClosurePrefixPath(AddOnSystemStoreRoot, lock))
     # `systemctl show` is queried for completeness; the exit code is
     # not an error (a disabled / inactive unit is a valid state).
     discard execCmdEx("systemctl show " & quoteShell(op.suName) &
@@ -3451,16 +3473,84 @@ proc applyLinuxNixDaemonSetting*(op: PrivilegedOperation):
 # The destroy direction `stop`s + `disable`s + removes the unit file.
 # ===========================================================================
 
+const
+  TimerEnabledStates = ["enabled", "static", "generated", "alias",
+    "transient"]
+    ## `UnitFileState` values under which a timer declared enabled is armed
+    ## for the next boot, or cannot be enabled at all, per the
+    ## `systemctl is-enabled` table:
+    ## https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#is-enabled%20UNIT%E2%80%A6
+    ##
+    ## * `enabled`: enabled through `.wants/` or `.requires/` symlinks.
+    ## * `static`: the unit has no `[Install]` section; it is pulled in by
+    ##   something else, and `enable` does nothing.
+    ## * `generated`: written by a generator at boot; `enable` does nothing.
+    ## * `alias`: the name is an alias of another unit, whose state decides.
+    ## * `transient`: created at runtime; it cannot be enabled.
+    ##
+    ## Not counted: `enabled-runtime` (only under /run, gone at reboot),
+    ## `linked`/`linked-runtime` (made available, not enabled) and
+    ## `indirect` (not enabled itself, only its `Also=` units); `enable`
+    ## then makes it enabled for the next boot.
+  TimerRepeatingKeys = ["OnUnitActiveSec", "OnUnitInactiveSec", "OnCalendar"]
+    ## `[Timer]` settings that make a timer fire again and again; a timer
+    ## with only `OnBootSec=`, `OnStartupSec=` or `OnActiveSec=` fires once
+    ## per activation. https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
+
+proc timerRepeats*(content: string): bool =
+  ## Whether the timer unit ``content`` fires repeatedly.
+  for raw in content.splitLines():
+    let line = raw.strip()
+    let eq = line.find('=')
+    if eq > 0 and line[0 ..< eq].strip() in TimerRepeatingKeys and
+        line[eq + 1 .. ^1].strip().len > 0:
+      return true
+
+proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
+                             unitFileState, activeState,
+                             lastTrigger: string): string =
+  ## The digest `observeSystemdSystemTimer` reports: the unit file's bytes
+  ## when the timer's enablement and activity are as declared, otherwise a
+  ## digest no desired state has, so the plan carries an update and the
+  ## apply's `enable` / `start` (or `disable` / `stop`) runs again. Before,
+  ## the digest covered the file alone: a timer whose file was right but
+  ## that was not running (rpi2's seven probe timers, enabled by the agent
+  ## at 76f0f4f7a9 and never active) planned as a no-op on every apply, and
+  ## was never started.
+  ##
+  ## Enabled means any of ``TimerEnabledStates``; disabled means not
+  ## `enabled`/`enabled-runtime`. ``content`` is the unit file with its
+  ## drop-ins appended, so a repeating trigger a drop-in adds counts. A repeating timer (``timerRepeats``) is
+  ## running only while systemd has it active or activating: one that fired
+  ## and then stopped is not. A timer that fires once per activation also
+  ## counts as running when it is inactive after having triggered
+  ## (`LastTriggerUSec` set): it elapsed, and starting it again would run
+  ## its service again. A state systemd did not report is not judged.
+  let enabled = unitFileState in TimerEnabledStates
+  let explicitlyEnabled = unitFileState in ["enabled", "enabled-runtime"]
+  let active = activeState in ["active", "activating", "reloading"]
+  let triggered = lastTrigger.len > 0 and lastTrigger != "n/a" and
+    lastTrigger != "0"
+  let enabledOk = unitFileState.len == 0 or
+    (if wantEnabled: enabled else: not explicitlyEnabled)
+  let runningOk = activeState.len == 0 or
+    (if not wantRunning: not active
+     elif timerRepeats(content): active
+     else: active or triggered)
+  if enabledOk and runningOk:
+    posixDigestHexOfText(content)
+  else:
+    posixDigestHexOfText("systemd-timer-state:" & unitFileState & "/" &
+      activeState & "\n" & content)
+
 proc observeSystemdSystemTimer*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Read the timer unit file under `/etc/systemd/system/` and query
   ## `systemctl show`. The digest covers the unit-file contents
-  ## verbatim (same model as `observeSystemdSystemUnit`); the
-  ## `is-enabled` / `is-active` cross-check runs for observability
-  ## tracing but does not feed the digest — drift on those flags is
-  ## a state-only difference the dispatch loop handles via the
-  ## desired-digest comparison after the apply, not via the file
-  ## bytes.
+  ## verbatim (same model as `observeSystemdSystemUnit`) while the
+  ## timer's enablement and activity are as declared, and differs from
+  ## every desired digest when they are not (`timerObservedDigestHex`):
+  ## the plan then carries an update that re-runs `enable` / `start`.
   when defined(linux):
     let path = systemUnitPath(op.stName)
     if not fileExists(path):
@@ -3470,10 +3560,36 @@ proc observeSystemdSystemTimer*(op: PrivilegedOperation):
     let content = readFile(path)
     result.present = true
     result.digestHex = posixDigestHexOfText(content)
-    # `systemctl show` is queried for completeness; the exit code is
-    # not an error (a disabled / inactive timer is a valid state).
-    discard execCmdEx("systemctl show " & quoteShell(op.stName) &
-      " --property=LoadState,ActiveState,UnitFileState")
+    if op.stDestroy: return
+    # Its drop-ins may add triggers (`OnCalendar=` in a `.d/*.conf`), which
+    # decide whether it repeats; the digest stays the file's own.
+    var withDropIns = content
+    for dir in [path & ".d", "/run/systemd/system/" & op.stName & ".d"]:
+      if dirExists(dir):
+        for kind, f in walkDir(dir):
+          if kind in {pcFile, pcLinkToFile} and f.endsWith(".conf"):
+            try: withDropIns.add("\n" & readFile(f))
+            except IOError, OSError: discard
+    # A disabled or inactive timer is a valid state, so the exit code is
+    # not an error; an answer without the properties judges nothing.
+    let (o, code) = execCmdEx("systemctl show " & quoteShell(op.stName) &
+      " --property=UnitFileState,ActiveState,LastTriggerUSec")
+    if code != 0: return
+    var fileState, activeState, lastTrigger = ""
+    for line in o.splitLines():
+      let eq = line.find('=')
+      if eq <= 0: continue
+      case line[0 ..< eq]
+      of "UnitFileState": fileState = line[eq + 1 .. ^1].strip()
+      of "ActiveState": activeState = line[eq + 1 .. ^1].strip()
+      of "LastTriggerUSec": lastTrigger = line[eq + 1 .. ^1].strip()
+      else: discard
+    let observed = timerObservedDigestHex(withDropIns, op.stEnabled,
+      op.stRunning, fileState, activeState, lastTrigger)
+    # As converged it reports the file's own digest; otherwise the state
+    # sentinel, whatever the drop-ins say.
+    if observed != posixDigestHexOfText(withDropIns):
+      result.digestHex = observed
   else:
     raiseNotImplementedPlatform("systemd.systemTimer observe")
 

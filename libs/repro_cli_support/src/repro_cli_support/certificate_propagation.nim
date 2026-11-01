@@ -20,6 +20,7 @@
 
 import std/[os, sequtils, strutils]
 
+from test_certificates/cli as tccli import nil
 from test_certificates/git as tcgit import nil
 from test_certificates/hook as tchook import nil
 from test_certificates/notes as tcnotes import nil
@@ -198,6 +199,12 @@ proc carryCertificatesOfCommit*(repoRoot, remoteName, commit: string;
     except Exception:
       discard
   cpNotPropagated
+
+proc linkedCertificateLibraryVersion*(): string =
+  ## The version of the ``test_certificates`` library this build links, as the
+  ## library's own executable reports it. ``repro health`` shows it: the library
+  ## cannot be missing, so what can differ between two builds is which one.
+  tccli.Version
 
 proc certificatePropagationEnvironmentFindings*(): seq[string] =
   ## What in this process's environment would stop every push made from it. An

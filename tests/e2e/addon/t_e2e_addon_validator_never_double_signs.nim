@@ -25,7 +25,11 @@
 ##   of the A12 review: the former clock check counted a plain restart's
 ##   successor as overlapping), every instance ran in a validator unit's
 ##   cgroup, and there were at least six instances (one per step, the
-##   vacuity guard);
+##   vacuity guard); the monitor lost no cgroup event (`IN_Q_OVERFLOW`)
+##   and never went longer than ``MaxScanGapSec`` between two scans, so an
+##   incarnation in which it saw no validator held none that could sign
+##   (both, and the count of such incarnations, are in the record's
+##   `monitor`);
 ## - **every instance held the same database**, the declared state
 ##   directory's ``validator.db`` (one device and inode);
 ## - the database's history, exported at the end as an EIP-3076
@@ -263,6 +267,20 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     let ls = parseLifetimes(lifeLog)
     let ov = cgroupOverlaps(lifeLog)
     step("no two validator lifetimes overlap", ov.len == 0, ov.join("\n"))
+    # The monitor's own coverage (validator_safety, A12 round-2 review): no
+    # cgroup event lost to IN_Q_OVERFLOW, and no gap between two scans of
+    # /proc long enough for an unseen validator to sign.
+    let ms = monitorStats(lifeLog)
+    record["monitor"] = %*{"inotifyOverflows": ms.overflows,
+      "longestScanGapSec": ms.longestScanGapSec,
+      "maxScanGapSec": MaxScanGapSec,
+      "unitIncarnations": ms.incarnations,
+      "incarnationsWithoutValidator": ms.withoutValidator}
+    step("the monitor lost no cgroup event (no IN_Q_OVERFLOW)",
+         ms.overflows == 0, $ms)
+    step("the monitor scanned for validators at least every " &
+         $MaxScanGapSec & " s", ms.longestScanGapSec > 0 and
+         ms.longestScanGapSec < MaxScanGapSec, $ms)
     var inUnits = 0
     for inst in ls:
       if inst.unit.len > 0: inc inUnits

@@ -40,12 +40,17 @@
 ## the way realiser v2 wrote them.
 
 import std/[algorithm, os, strutils, tables, unittest]
+when defined(posix):
+  import std/posix
 
 import repro_local_store
 import repro_dsl_stdlib/packages/apt_closure
 from repro_dsl_stdlib/packages/apt_jammy import sha256OfString
 import repro_addon/static_tree
 from repro_addon/store_root import RootIdPrefix
+from repro_addon/addon_apply import closureSpace, DebProbe, DebServed,
+  dsServed, dsUnserved, dsUnknown,
+  probeVerdict
 
 proc v2DebHash(sha: string): string =
   sha256OfString("repro.apt-deb\x00" & "2" & "\x00" & sha)[0 ..< 16]
@@ -204,6 +209,187 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
     check not dirExists(member)
     check dirExists(manifestUnion) and dirExists(manifestMember)
     s.close()
+
+  test "before any migration, what a unit or manifest on disk names is held":
+    # rpi2 before its first add-on switch: its 22 closure units and two
+    # tool manifests bind realiser 2's prefixes, and generation 0's reassert
+    # unit runs the add-on's own repro from the store. No generation's
+    # static tree binds any of it and nothing is preserved yet. At
+    # 0e84765db0 a `store gc` here adopted every union and member and
+    # collected them under the running services.
+    let member = v2Member(store, "alertmanager", "0.28.1", shaOf('a'))
+    let union = v2Union(store, "alertmanager", "0.28.1", "armhf",
+                        @[("alertmanager", shaOf('a'))])
+    let unbound = v2Union(store, "old", "2.0", "armhf",
+                          @[("old", shaOf('b'))])
+    # A store-published prefix (the add-on's own binary), held by nothing.
+    var s = openStore(store)
+    let own = s.realizePrefix(computeRealizationHash("repro-addon", "0.2.18",
+        "addon-bootstrap", lockIdentity = "x", declaredExecutablePath = ""),
+      StoreReceiptHint(adapter: "addon-bootstrap", packageName: "repro-addon",
+        version: "0.2.18"),
+      proc (stage: string; mechanism: var string) =
+        createDir(stage / "bin")
+        writeFile(stage / "bin" / "repro", "#!/bin/sh\n"))
+    s.close()
+    let units = store / "etc-systemd-system"
+    createDir(units)
+    writeFile(units / "prometheus-alertmanager.service", "[Service]\n" &
+      aptClosureUnitDirectives(union).join("\n") & "\n")
+    writeFile(units / "repro-addon-reassert.service", "[Service]\n" &
+      "ExecStart=" & own.absolutePath & "/bin/repro system addon verify " &
+      "--boot\n")
+    # A union that does not verify (its marker was damaged) but is bound.
+    let damaged = v2Union(store, "dnsmasq", "2.91", "armhf",
+                          @[("dnsmasq", shaOf('c'))])
+    writeFile(damaged / ".repro-apt-closure", "identity 0000000000000000\n")
+    writeFile(units / "dnsmasq-rpi2.service", "[Service]\n" &
+      aptClosureUnitDirectives(damaged).join("\n") & "\n")
+
+    let a = migrateLegacyAptClosures(store, live = @[units])
+    check a.heldUnverified.len == 1 and a.heldUnverified[0].path == damaged
+    check a.refused.len == 0
+    s = openStore(store)
+    discard s.gc(graceSeconds = 0)
+    let rec = s.recover()
+    check rec.quarantinedPrefixes.len == 0
+    discard s.gc(graceSeconds = 0)
+    check fileExists(union / "usr/share/alertmanager/ok.txt")
+    check dirExists(member)
+    check fileExists(own.absolutePath / "bin" / "repro")
+    check dirExists(damaged)
+    check not dirExists(unbound)
+    s.close()
+
+  test "the plan downloads what is served, reuses only what is not, refuses the unknown":
+    # rpi2 (2026-11-01): the mirror 404s libnss3 +deb13u4 and realiser 2's
+    # member of exactly that archive is on disk. The operator's decision
+    # ("strict, reuse as fallback"): download what is served, stand an
+    # older prefix in only for what is not, refuse what cannot be probed.
+    # At 0e84765db0 the plan counted every member as a download.
+    discard v2Member(store, "libnss3", "3.110-1", shaOf('a'))
+    discard v2Member(store, "nut", "2.8.1", shaOf('b'))
+    let lock = AptClosureLock(archive: "http://mirror.invalid/raspbian",
+      suite: "trixie", components: @["main"], architecture: "armhf",
+      inReleaseSha256: shaOf('e'), roots: @["libnss3"],
+      debs: @[AptLockedDeb(name: "libnss3", version: "3.110-1",
+                architecture: "armhf", filename: "pool/main/libnss3.deb",
+                size: 100, sha256: shaOf('a')),
+              AptLockedDeb(name: "nut", version: "2.8.1",
+                architecture: "armhf", filename: "pool/main/nut.deb",
+                size: 200, sha256: shaOf('b')),
+              AptLockedDeb(name: "zz", version: "1",
+                architecture: "armhf", filename: "pool/main/zz.deb",
+                size: 300, sha256: shaOf('c'))])
+    var answers = initTable[string, DebServed]()
+    answers["http://mirror.invalid/raspbian/pool/main/libnss3.deb"] = dsUnserved
+    answers["http://mirror.invalid/raspbian/pool/main/nut.deb"] = dsServed
+    answers["http://mirror.invalid/raspbian/pool/main/zz.deb"] = dsServed
+    let probe: DebProbe = proc (url: string):
+        tuple[verdict: DebServed; detail: string] =
+      (answers[url], "fixture")
+    var space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.closures == 1 and space.members == 3
+    check space.reusedMembers == 1 and space.unavailable.len == 0
+    check space.sources.len == 3
+    check space.sources[0].startsWith("reuse-because-unserved\tlibnss3 ")
+    # Served: downloaded, although an older prefix of it exists.
+    check space.sources[1].startsWith("download\tnut 2.8.1\t")
+    check space.downloadBytes == 500
+    # Not served and no older prefix: refused.
+    answers["http://mirror.invalid/raspbian/pool/main/zz.deb"] = dsUnserved
+    space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.unavailable.len == 1 and "zz 1" in space.unavailable[0]
+    # Inconclusive: refused, even with an older prefix.
+    answers["http://mirror.invalid/raspbian/pool/main/zz.deb"] = dsServed
+    answers["http://mirror.invalid/raspbian/pool/main/libnss3.deb"] = dsUnknown
+    space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.unavailable.len == 1 and "libnss3" in space.unavailable[0] and
+      "could not be probed" in space.unavailable[0]
+    check probeVerdict(200) == dsServed and probeVerdict(206) == dsServed
+    check probeVerdict(404) == dsUnserved and probeVerdict(410) == dsUnserved
+    check probeVerdict(403) == dsUnknown and probeVerdict(500) == dsUnknown
+
+  test "a drop-in, a linked unit or a runtime unit holds what it names; an unreadable one refuses":
+    # Review of d14cd72e9f: only regular files directly in the two
+    # directories were read, and an unreadable file degraded to holding the
+    # older prefixes alone.
+    let a = v2Union(store, "a", "1.0", "armhf", @[("a", shaOf('a'))])
+    discard v2Member(store, "a", "1.0", shaOf('a'))
+    let b = v2Union(store, "b", "1.0", "armhf", @[("b", shaOf('b'))])
+    discard v2Member(store, "b", "1.0", shaOf('b'))
+    let c = v2Union(store, "c", "1.0", "armhf", @[("c", shaOf('c'))])
+    discard v2Member(store, "c", "1.0", shaOf('c'))
+    let etc = store / "etc-units"
+    let run = store / "run-units"
+    createDir(etc / "x.service.d")
+    createDir(run)
+    writeFile(etc / "x.service.d" / "10-bind.conf", "[Service]\n" &
+      "BindReadOnlyPaths=\"" & a & "/usr:/usr\"\n")
+    # A unit file that is a link into the store: the link's target holds.
+    createDir(c / "lib")
+    writeFile(c / "lib" / "y.service", "[Service]\nExecStart=/bin/true\n")
+    createSymlink(c / "lib" / "y.service", etc / "y.service")
+    writeFile(run / "z.service", "[Service]\nExecStart='" & b &
+      "/usr/bin/z'\n")
+    # A dangling link (a Debian alias left by a removed package), a link
+    # to itself, and a link into a store prefix whose file is gone: none of
+    # them stops the hold (review of 0a0cb3f4a3: each raised, and every
+    # gc, recover and switch step 1 refused); the last still names, and
+    # holds, the prefix its text points into.
+    let d = v2Union(store, "d", "1.0", "armhf", @[("d", shaOf('d'))])
+    discard v2Member(store, "d", "1.0", shaOf('d'))
+    createSymlink("/nonexistent/dbus-org.bluez.service",
+                  etc / "dbus-org.bluez.service")
+    createSymlink(etc / "loop.service", etc / "loop.service")
+    createSymlink(d / "lib" / "gone.service", etc / "gone.service")
+    # The launcher link of /etc/repro/bin while the swap renames
+    # /usr/local/repro (or for good, with an install that lacks it): a
+    # hidden name, dangling.
+    let bin = store / "etc-repro-bin"
+    createDir(bin)
+    createSymlink("/nonexistent/usr/local/repro/bin/reprobuild-sandbox-launcher",
+                  bin / ".reprobuild-sandbox-launcher")
+    check liveReferenceRefusal(@[], @[bin]) == ""
+    check liveReferenceRefusal(@[], @[etc, run]) == ""
+    discard migrateLegacyAptClosures(store, live = @[etc, run])
+    var s = openStore(store)
+    discard s.gc(graceSeconds = 0)
+    s.close()
+    check dirExists(a) and dirExists(b) and dirExists(c) and dirExists(d)
+    # An unreadable file: nothing is decided, nothing collected.
+    when defined(posix):
+      if getuid() != 0:
+        writeFile(etc / "secret.service", "x")
+        setFilePermissions(etc / "secret.service", {})
+        removeFile(etc / "x.service.d" / "10-bind.conf")
+        expect StaticTreeError:
+          discard migrateLegacyAptClosures(store, live = @[etc, run])
+        check "secret.service" in liveReferenceRefusal(@[], @[etc, run])
+        s = openStore(store)
+        discard s.gc(graceSeconds = 0)
+        s.close()
+        check dirExists(a)
+
+  test "the hand-back records are the add-on's real state directory's":
+    # Review of d14cd72e9f: `store gc` and `store recover` read the default
+    # state directory's records, not those of a host bootstrapped with
+    # another; the hold was then rebuilt without them.
+    let other = store / "custom-state"
+    createDir(other)
+    let pointer = store / "addon-state-dir"
+    writeFile(pointer, other & "\n")
+    setFilePermissions(pointer, {fpUserRead, fpUserWrite, fpGroupRead,
+                                 fpOthersRead})
+    when defined(posix):
+      check hostHandBackDirs(pointer, owner = int(getuid())) ==
+        @[other / "addon" / "preserved"]
+      check hostHandBackDirs(store / "absent", owner = int(getuid())) ==
+        @[preservedDir()]
+      setFilePermissions(pointer, {fpUserRead, fpUserWrite, fpGroupWrite,
+                                   fpOthersRead})
+      expect StaticTreeError:
+        discard hostHandBackDirs(pointer, owner = int(getuid()))
 
   test "prefixes that do not verify are left as found":
     # The member's marker names another digest than its directory's hash.

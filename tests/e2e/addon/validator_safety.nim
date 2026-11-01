@@ -46,8 +46,26 @@
 ##    (`overlaps`), which only errs towards an overlap. The monitor also
 ##    records, once per instance, the slashing-protection database it holds
 ##    open (`db <pid> <device>:<inode> <path>`).
+##
+##    *What the order cannot see, and how it is bounded* (A12 round-2
+##    review). The kernel drops inotify events when the descriptor's queue
+##    is full and says so once with `IN_Q_OVERFLOW`; the monitor logs that
+##    as `cg overflow`, and an overflow is itself reported as an overlap
+##    (`cgroupOverlaps`): with events missing the order decides nothing, so
+##    the check fails closed. An incarnation in which no validator process
+##    was seen is left out of the pairing: either the unit failed before
+##    its `ExecStart=` ran (a credential that did not load, a start limit),
+##    or the process lived less than one scan of `/proc`. The second is
+##    harmless only if a validator cannot sign within one scan, so the
+##    monitor logs the longest gap between the starts of two scans
+##    (`scan <seconds>`, each time it grows) and the gate requires it below
+##    ``MaxScanGapSec``: before its first signature a validator client
+##    decrypts its EIP-2335 keystores (scrypt, about a second for the
+##    test's keys), connects to its beacon node and waits for a duty in a
+##    slot. ``monitorStats`` gives the gate both numbers and the count of
+##    incarnations left out, and the record carries them.
 
-import std/[json, strutils, tables]
+import std/[json, sets, strutils, tables]
 
 type
   Conflict* = object
@@ -62,6 +80,10 @@ type
     goneAt*: float
     unit*: string          ## the validator unit it ran in, "" outside them
     cgroup*: string        ## that incarnation's cgroup inode
+
+const MaxScanGapSec* = 0.5
+  ## The longest the monitor may go between two scans of `/proc` for an
+  ## unseen validator instance to be harmless (module header).
 
 proc rootOf(n: JsonNode): string =
   if n.hasKey("signing_root"): n["signing_root"].getStr().toLowerAscii() else: ""
@@ -134,9 +156,9 @@ proc parseLifetimes*(log: string): seq[Instance] =
     let t = line.strip()
     if t.len == 0: continue
     let f = t.splitWhitespace()
-    if f[0] in ["db", "cg"]:
+    if f[0] in ["db", "cg", "scan"]:
       continue          # the database (`databasesHeld`), the cgroups
-                        # (`cgroupOverlaps`)
+                        # (`cgroupOverlaps`), the scan gap (`monitorStats`)
     if f[0] == "seen" and f.len in [3, 5]:
       open[f[1]] = result.len
       var inst = Instance(pid: f[1], start: parseFloat(f[2]), lastSeen: -1,
@@ -206,6 +228,12 @@ proc cgroupOverlaps*(log: string): seq[string] =
       if f[1] in current:
         incs[current[f[1]]].deleted = pos
         current.del(f[1])
+    elif f.len == 2 and f[1] == "overflow":
+      # IN_Q_OVERFLOW: events were dropped, so the order is incomplete and
+      # cannot show that two incarnations did not coexist.
+      result.add("the monitor's inotify queue overflowed (IN_Q_OVERFLOW) " &
+        "at log line " & $pos & ": cgroup events were lost, so the kernel's " &
+        "order cannot decide an overlap")
     else:
       raise newException(ValueError, "malformed cgroup line: " & line.strip())
   let ls = parseLifetimes(log)
@@ -243,6 +271,36 @@ proc cgroupOverlaps*(log: string): seq[string] =
           result.add(o)
           break
 
+type MonitorStats* = object
+  ## What the monitor's log says about its own coverage (module header).
+  overflows*: int            ## `cg overflow` lines (IN_Q_OVERFLOW)
+  longestScanGapSec*: float  ## the largest `scan` value, 0 when none
+  incarnations*: int         ## validator-unit cgroup incarnations created
+  withoutValidator*: int     ## of those, the ones no validator was seen in
+
+proc monitorStats*(log: string): MonitorStats =
+  ## The coverage numbers the gate requires and records. A malformed
+  ## `scan` line raises.
+  var seenIn: HashSet[string]
+  var created: seq[string]
+  for line in log.splitLines():
+    let f = line.strip().splitWhitespace()
+    if f.len == 0: continue
+    case f[0]
+    of "cg":
+      if f.len == 2 and f[1] == "overflow": inc result.overflows
+      elif f.len == 4 and f[2] == "create": created.add(f[1] & " " & f[3])
+    of "scan":
+      if f.len != 2:
+        raise newException(ValueError, "malformed scan line: " & line.strip())
+      result.longestScanGapSec = max(result.longestScanGapSec, parseFloat(f[1]))
+    of "seen":
+      if f.len == 5 and f[3] != "-": seenIn.incl(f[3] & " " & f[4])
+    else: discard
+  result.incarnations = created.len
+  for c in created:
+    if c notin seenIn: inc result.withoutValidator
+
 const MonitorScript* = """
 import ctypes, os, struct, sys, time
 # The validator client's processes (an executable named `validator` under
@@ -252,7 +310,7 @@ tck = os.sysconf('SC_CLK_TCK')
 log = open(sys.argv[1], 'a', buffering=1)
 units = set(sys.argv[2:])
 SLICE = '/sys/fs/cgroup/system.slice'
-IN_CREATE, IN_DELETE = 0x100, 0x200
+IN_CREATE, IN_DELETE, IN_Q_OVERFLOW = 0x100, 0x200, 0x4000
 libc = ctypes.CDLL(None, use_errno=True)
 ifd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
 if ifd < 0 or libc.inotify_add_watch(ifd, SLICE.encode(), IN_CREATE | IN_DELETE) < 0:
@@ -277,6 +335,10 @@ def drain():
             wd, mask, cookie, ln = struct.unpack_from('iIII', buf, i)
             name = buf[i + 16:i + 16 + ln].split(b'\0', 1)[0].decode()
             i += 16 + ln
+            if wd == -1 and mask & IN_Q_OVERFLOW:
+                # The kernel dropped events: say so, the check fails closed.
+                log.write('cg overflow\n')
+                continue
             if name in units:
                 if mask & IN_CREATE:
                     created(name)
@@ -288,9 +350,17 @@ for u in sorted(units):
 def start_of(p):
     st = open('/proc/%s/stat' % p).read()
     return int(st[st.rindex(')') + 2:].split()[19]) / tck
+last_scan = None
+max_gap = 0.0
 while True:
     drain()
     t0 = now()
+    if last_scan is not None and t0 - last_scan > max_gap:
+        # The longest gap between two scans: an instance that lived less
+        # than it may go unseen (validator_safety.nim, MaxScanGapSec).
+        max_gap = t0 - last_scan
+        log.write('scan %.6f\n' % max_gap)
+    last_scan = t0
     seen = set()
     pending = []
     for p in os.listdir('/proc'):

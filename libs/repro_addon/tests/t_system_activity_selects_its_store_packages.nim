@@ -13,7 +13,10 @@
 ## - a unit that runs from the prefix of an edge its host does not realise
 ##   is refused at plan time (`unitPrefixRefusal`, A12 review finding 12),
 ##   and one that runs from a realised prefix, or merely names a longer path
-##   sharing its text, is not;
+##   sharing its text, is not; the executable is looked for wherever a unit
+##   can get one -- a drop-in, a health check, a wrapper or environment
+##   file, a system variable, an account's shell, a udev or tmpfiles rule
+##   (A12 round-2 review), not only in the unit body;
 ## - the activity travels through both encodings a compiled profile
 ##   crosses (the RBPI envelope and the JSON form), and a profile-level
 ##   edge encodes exactly as before (no `activity` key).
@@ -23,8 +26,9 @@
 ##
 ## Falsifying mutations: ``scripts/run_addon_unit_mutation.sh
 ## t_system_activity_selects_its_store_packages activity-edges-unselected``
-## (every edge on every host) and ``... unit-prefix-unchecked`` (a unit's
-## unrealised prefix is planned) must each turn it red.
+## (every edge on every host), ``... unit-prefix-unchecked`` (a unit's
+## unrealised prefix is planned) and ``... unit-prefix-bodies-only`` (only
+## unit bodies are read, the round-1 check) must each turn it red.
 ##
 ## *Mocking.* None: the production functions and codecs.
 
@@ -114,3 +118,52 @@ suite "activity-scoped store packages":
     let both = systemPlanTarget("h", toHashSet(["vaultwarden",
       "ethereum_validator"]), srFull)
     check unitPrefixRefusal(bad, all, selectedBuildActions(all, both)) == ""
+
+  test "a prefix reached through a drop-in, a health check or a file is refused":
+    let all = @[edge("common", ""), edge("vaultwarden-prefix", "vaultwarden"),
+                edge("geth-prefix", "ethereum_validator")]
+    let vw = systemPlanTarget("h", toHashSet(["vaultwarden"]), srFull)
+    let sel = selectedBuildActions(all, vw)
+    const geth = "/repro/store/prefixes/geth-prefix/1"
+    const own = "/repro/store/prefixes/vaultwarden-prefix/1"
+    let unitOk = SystemResource(kind: srkSystemdSystemUnit,
+      suName: "vaultwarden.service",
+      suContent: "[Service]\nExecStart=" & own & "/bin/vw\n")
+    # Each carrier, with geth's prefix (refused) and with the unit's own
+    # (planned); the unit body itself is clean in every case.
+    let carriers = @[
+      ("drop-in 50-x of unit vaultwarden.service", proc (p: string): SystemResource =
+        SystemResource(kind: srkSystemdSystemDropIn, diUnit: "vaultwarden.service",
+          diName: "50-x", diContent: "[Service]\nExecStart=\nExecStart=-" & p &
+          "/bin/x\n")),
+      ("drop-in 50-env of unit ssh.service", proc (p: string): SystemResource =
+        SystemResource(kind: srkSystemdSystemDropIn, diUnit: "ssh.service",
+          diName: "50-env", diContent: "[Service]\nEnvironment=PATH=" & p &
+          "/bin:/usr/bin\n")),
+      ("the health check of unit vw2.service", proc (p: string): SystemResource =
+        SystemResource(kind: srkSystemdSystemUnit, suName: "vw2.service",
+          suContent: "[Service]\nExecStart=" & own & "/bin/vw\n",
+          suHealthCheck: "exec:" & p & "/bin/probe")),
+      ("file /usr/local/bin/vw-wrapper", proc (p: string): SystemResource =
+        SystemResource(kind: srkFsSystemFile, sfPath: "/usr/local/bin/vw-wrapper",
+          sfContent: "#!/bin/sh\nexec \"" & p & "/bin/x\" \"$@\"\n")),
+      ("system variable PATH", proc (p: string): SystemResource =
+        SystemResource(kind: srkEnvSystemVariable, evName: "PATH",
+          evContribution: @[p & "/bin"], evIsPathList: true)),
+      ("sysusers entry vw", proc (p: string): SystemResource =
+        SystemResource(kind: srkLinuxSysusersEntry, seName: "vw",
+          seShell: p & "/bin/sh")),
+      ("udev rule 90-x.rules", proc (p: string): SystemResource =
+        SystemResource(kind: srkLinuxUdevRule, udevName: "90-x.rules",
+          udevContent: "ACTION==\"add\", RUN+=\"" & p & "/bin/x\"\n")),
+      ("tmpfiles rule x.conf", proc (p: string): SystemResource =
+        SystemResource(kind: srkLinuxTmpfilesRule, tmpfilesName: "x.conf",
+          tmpfilesContent: "L+ /usr/local/bin/x - - - - " & p & "/bin/x\n"))]
+    for (what, make) in carriers:
+      checkpoint what
+      let bad = SystemProfile(resources: @[unitOk, make(geth)])
+      let why = unitPrefixRefusal(bad, all, sel)
+      check why.startsWith(what & " runs from the store prefix " & geth)
+      check "ethereum_validator" in why
+      let good = SystemProfile(resources: @[unitOk, make(own)])
+      check unitPrefixRefusal(good, all, sel) == ""

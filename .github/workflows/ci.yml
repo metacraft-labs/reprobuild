@@ -847,63 +847,28 @@ jobs:
           # what this step exists to do -- rather than pinning a revision
           # here that would need moving by hand whenever `codetracer=dev`
           # advances.
-          # EVERY recipe-pinned sibling is skipped, not just one. This run
-          # skipped eight -- codetracer-trace-format-nim, io-mon,
-          # nim-shm-gset, nim-shm-queue, nim-stackable-hooks, reprobuild,
-          # reprobuild-packages, test-certificates-tools -- and refused on
-          # the second of them only after the first was fixed, 118 minutes
-          # in. So reconcile them from the lock together rather than
-          # discovering them one long build at a time.
+          # Two consumers build from ONE sibling tree -- CodeTracer's `ct`
+          # against codetracer/repro.lock, reprobuild's own collections
+          # against reprobuild/repro.lock -- and those locks name DIFFERENT
+          # revisions for every sibling they share, so no single checkout
+          # satisfies both. Each consumer is therefore given its own
+          # revisions immediately before it builds.
           #
-          # The repository under test is excluded by name: its checkout must
-          # stay at the revision this run is testing, and the lock names a
-          # different one. Entries marked `self` are the consumer itself, for
-          # the same reason.
-          #
-          # grep and sed, not python3: python3 reaches this step only through
-          # `dev-exec` (as the credential helper above uses it), and a bare
-          # python3 is not on PATH here. The lock keeps its entries as brace
-          # groups on very long lines, so match the groups first.
+          # Both revision sets are fetched HERE, because this is where the
+          # credential config is in scope: the `just test` step runs with
+          # GIT_CONFIG_GLOBAL=/dev/null and cannot reach the forge, and the
+          # clones need that config even for a public repository.
           repro_name="$(basename "$repro_root")"
-          lock_entries="$RUNNER_TEMP/lock-vcs-entries"
-          grep -o '{[^{}]*}' "$ct_root/repro.lock" \
-            | grep 'coord_kind' \
-            | grep -v 'self = "true"' > "$lock_entries" || true
-          # Read from a FILE, not a pipe: the loop must run in this shell so
-          # that a refusal inside it ends the step.
-          while IFS= read -r lock_entry; do
-            dep_name="$(printf '%s' "$lock_entry" \
-              | sed -n 's/.*[^-]name = "\([^"]*\)".*/\1/p')"
-            dep_rev="$(printf '%s' "$lock_entry" \
-              | sed -n 's/.*revision = "\([0-9a-f]\{40\}\)".*/\1/p')"
-            if [ -z "$dep_name" ] || [ -z "$dep_rev" ]; then continue; fi
-            if [ "$dep_name" = "$repro_name" ]; then continue; fi
-            dep_dir="$siblings_root/$dep_name"
-            if [ ! -d "$dep_dir/.git" ]; then continue; fi
-            if [ "$dep_dir" = "$ct_root" ]; then continue; fi
-            if [ "$(git -C "$dep_dir" rev-parse HEAD)" = "$dep_rev" ]; then
-              continue
-            fi
-            echo "reconcile: $dep_name -> locked $dep_rev"
-            # Under the same credentials `develop` uses; without them the
-            # fetch is asked for a username and dies with "terminal prompts
-            # disabled" even for a public repository, because the clone
-            # reaches the forge through that config. The fallback fetches
-            # every branch, since a single-branch clone cannot produce a
-            # revision that lives on another mainline.
-            ( export GIT_CONFIG_GLOBAL="$git_auth_config"
-              git -C "$dep_dir" fetch --quiet origin "$dep_rev" \
-                || git -C "$dep_dir" fetch --quiet origin \
-                     '+refs/heads/*:refs/remotes/origin/*' )
-            git -C "$dep_dir" checkout --quiet --detach "$dep_rev"
-            dep_head="$(git -C "$dep_dir" rev-parse HEAD)"
-            if [ "$dep_head" != "$dep_rev" ]; then
-              echo "reconcile: $dep_name is at $dep_head, not the locked" \
-                "$dep_rev" >&2
-              exit 1
-            fi
-            echo "reconcile: $dep_name at $dep_head"
-          done < "$lock_entries"
+          ( export GIT_CONFIG_GLOBAL="$git_auth_config"
+            bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
+              "$ct_root/repro.lock" "$siblings_root" "$repro_name" \
+              --fetch-only
+            bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
+              "$repro_root/repro.lock" "$siblings_root" "$repro_name" \
+              --fetch-only )
+          # The ct build runs next, so leave them at CodeTracer's revisions.
+          bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
+            "$ct_root/repro.lock" "$siblings_root" "$repro_name" --detach
 
       # CodeTracer's Nix graph reads native-recorder, while its submodule graph
       # also reads tree-sitter-nim. Mint exactly that repository set immediately
@@ -1093,6 +1058,21 @@ jobs:
           ct_bin="$ct_root/src/build-debug-repro/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
+          # CodeTracer's revisions are no longer needed: hand the shared
+          # siblings to the NEXT consumer at the revisions ITS lock names.
+          # The two locks disagree on all four siblings they share, so
+          # without this `just test` refuses before planning -- "cross-repo
+          # producer ... source revision mismatch" -- and writes no runner
+          # summary, leaving the run with no case counts at all.
+          #
+          # Done here rather than in a step of its own because the job's step
+          # timeouts already sum to its ceiling, so another step would make
+          # the job limit fire before a step's own. Needs no network: both
+          # revision sets were fetched while the credential config was in
+          # scope, and the suite step runs with GIT_CONFIG_GLOBAL=/dev/null.
+          bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
+            "$repro_root/repro.lock" "$(cd "$repro_root/.." && pwd)" \
+            "$(basename "$repro_root")" --detach
 
       - name: Refresh installation token for tests
         timeout-minutes: 15

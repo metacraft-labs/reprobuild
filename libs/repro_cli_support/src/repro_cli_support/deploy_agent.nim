@@ -550,8 +550,20 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   var deps: AgentDeps
   var throughAddonSwitch = false
   when defined(linux):
-    let addonState = hostAddonStateDir()
-    let route = engineAgentRoute(addonState, flags.stateDir)
+    let (addonState, pointerUntrusted) = hostAddonStateDirChecked()
+    let route = engineAgentRoute(addonState, flags.stateDir, pointerUntrusted)
+    # The falsifying build (engine-agent-pointer-refusal-unwired) does not
+    # act on the route here, so the tick falls through to the plain apply.
+    if route == earRefuseUntrustedPointer and
+        not agentMutated("engine-agent-pointer-refusal-unwired"):
+      # Spec §9, decision 29: the pointer says this is an add-on host, and
+      # it cannot be trusted to say where the add-on's state is. An A8
+      # apply or none: none, until bootstrap's pointer is repaired.
+      stderr.writeLine("repro deploy-agent: the add-on's state-directory " &
+        "pointer is not trusted (" & pointerUntrusted & "); this host is " &
+        "an add-on host, so the agent applies only through the add-on " &
+        "switch, and cannot find it. Nothing was applied.")
+      return 2
     if route == earRefuseSharedState:
       # Spec §9, decision 29: an agent apply on an add-on host is an A8
       # apply or none. The add-on's state directory is the switch's; the

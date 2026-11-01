@@ -286,3 +286,38 @@ suite "C2 P3 Valid-Until through fetchAndVerifyIndexes":
           keyBundleDir = "", keyring = home / "keyring.gpg",
           sbExternalGpg, insecure = false, @["main"], "armhf")
       removeDir(home)
+
+suite "C2 an archive with no snapshot service is not read from a stale cache":
+
+  test "its InRelease is fetched afresh; a snapshot's is read from the cache":
+    # rpi2 (2026-11-01): `--archive` Raspbian has no snapshot service. A
+    # harvest read the InRelease cached in the default cache directory and
+    # wrote byte-identical locks naming archives the pool no longer served,
+    # until a fresh --cache-dir was used. Here the cache holds an InRelease
+    # for the URL and the host does not resolve: a moving archive's harvest
+    # must go to the network for the InRelease (and fail there); a
+    # snapshot's may take it from the cache (and fail later, on the index).
+    proc planted(spec: AptSourceSpec): FetchClient =
+      let cacheDir = createTempDir("c2-moving-cache-", "")
+      let path = cachePathFor(cacheDir, inReleaseUrl(spec))
+      createDir(parentDir(path))
+      # Clearsigned in shape only: the run is --insecure (no key here), so
+      # the payload is sliced out and the signature is not checked.
+      writeFile(path, "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA512\n\n" &
+        "Origin: Fixture\nSuite: trixie\nSHA256:\n " &
+        "0".repeat(64) & " 1 main/binary-armhf/Packages\n" &
+        "-----BEGIN PGP SIGNATURE-----\n\nAAAA\n-----END PGP SIGNATURE-----\n")
+      newFetchClient(cacheDir, minIntervalMs = 0)
+    proc failedUrl(spec: AptSourceSpec): string =
+      try:
+        discard fetchAndVerifyIndexes(planted(spec), spec, keyBundleDir = "",
+          keyring = "", sbExternalGpg, insecure = true, @["main"], "armhf")
+      except FetchError as e:
+        return e.url
+      ""
+    var moving = parseAptSourceSpec("apt:x@fixture/trixie")
+    moving.archive = "http://archive.fixture.invalid/raspbian"
+    check failedUrl(moving).endsWith("/InRelease")
+    var snapshot = parseAptSourceSpec("apt:x@fixture/trixie:20261001T000000Z")
+    snapshot.archive = "http://archive.fixture.invalid/debian"
+    check failedUrl(snapshot).endsWith("/Packages")

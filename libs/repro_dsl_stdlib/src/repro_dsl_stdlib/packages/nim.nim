@@ -42,6 +42,7 @@ import repro_dsl_stdlib/openssl_layout
 # Hand-authored builds use the same pending identity as source conventions.
 import repro_project_dsl/source_cache_identity
 import repro_dsl_stdlib/active_context
+import repro_dsl_stdlib/operations/zig_c
 
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
@@ -699,7 +700,21 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## so a hand-authored recipe's public-interface binaries publish with
   ## no extra ceremony.
   discard imports
-  requireCrossTargetConsulted("nim.c")
+  # ReproOS-Add-On-Mode A15: a zig target is threaded here as
+  # `nim_executable` threads it -- Nim's --cpu/--os, and clang pointed at
+  # the `cross_zig` wrapper -- unless the caller chose the compiler or CPU
+  # itself (a Windows bitness edge), in which case the caller answers for
+  # the target and the fail-closed guard applies as before. So
+  # `repro build --target=<zig triple> .#apps` builds reprobuild's own
+  # images (Reprobuild-Standard-Library.md, `cross_zig`).
+  let zigTarget = activeZigCrossTarget()
+  let threadZig = zigTarget != nil and cpu.len == 0 and cc.len == 0 and
+    gccExe.len == 0 and gccLinkerExe.len == 0
+  var cross: ZigNimCross
+  if threadZig:
+    cross = zigNimCross(zigTarget, "nim.c")
+  else:
+    requireCrossTargetConsulted("nim.c")
   # Windows: nim appends `.exe` to an executable regardless of what `--out:`
   # says, so a recipe that writes `binary = "build/bin/foo"` produces
   # `build/bin/foo.exe`. The `output` flag is `role = output` and is what
@@ -726,7 +741,17 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         binary & ".exe"
     else:
       binary
-  let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
+  # A target build's output and nimcache are keyed by the target, so a
+  # native and a target build of one edge coexist (CLI/build.md §"Cross
+  # Targets: `--target`").
+  let outBinary =
+    if threadZig: targetKeyedPath(effectiveBinary) else: effectiveBinary
+  let cacheDir =
+    if threadZig:
+      targetKeyedPath(if nimcache.len > 0: nimcache
+                      else: defaultNimcacheDir(binary))
+    elif nimcache.len > 0: nimcache
+    else: defaultNimcacheDir(binary)
   let effectivePassL = passL & opensslPassLForSsl(defines)
   var inputs = @extraInputs
   if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
@@ -750,14 +775,21 @@ proc c*(pkg: NimPackage; source: string; binary: string;
       relativePath(path, runDir, '/')
 
   result = c(pkg = pkg, source = fromRunDir(source),
-    output = fromRunDir(effectiveBinary),
+    output = fromRunDir(outBinary),
     defines = defines,
-    cpu = cpu, cc = cc, gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
+    cpu = (if threadZig: cross.cpu else: cpu),
+    os = (if threadZig: cross.os else: ""),
+    cc = (if threadZig: "clang" else: cc),
+    clangExe = (if threadZig: cross.ccExe else: ""),
+    clangLinkerExe = (if threadZig: cross.ccExe else: ""),
+    gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
     paths = paths.mapIt(fromRunDir(it)), passC = passC,
     passL = effectivePassL, nimcache = fromRunDir(cacheDir),
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,
-    deps = deps, after = after, extraInputs = inputs,
+    deps = deps,
+    after = (if threadZig: @after & @[cross.wrappers] else: @after),
+    extraInputs = inputs,
     extraOutputs = extraOutputs.mapIt(fromRunDir(it)), extraEnv = extraEnv,
     depfile = fromRunDir(depfile), cacheable = cacheable,
     dependencyPolicy = compileDependencyPolicy(
@@ -823,7 +855,12 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     if cc.len > 0: cc
     elif defined(macosx): "clang"
     else: "gcc"
-  appendRegisteredActionToolIdentityRefs(result.id, [backendCompiler])
+  if threadZig:
+    # The backend is the `cross_zig` `cc` wrapper, a shell script that execs
+    # `zig cc`: its two tools are what this edge's PATH must hold.
+    appendRegisteredActionToolIdentityRefs(result.id, ["zig", "sh"])
+  else:
+    appendRegisteredActionToolIdentityRefs(result.id, [backendCompiler])
   maybeTagPublicInterface(result, publish, publishAs)
 
 

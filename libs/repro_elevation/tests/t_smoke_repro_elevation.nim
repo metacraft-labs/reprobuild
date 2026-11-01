@@ -3746,6 +3746,72 @@ suite "repro_elevation: systemd.systemTimer pure surface":
     check w2.operation.kind == pokSystemdSystemTimer
     check w2.operation.stDestroy
 
+  test "a unit's changed closure lock is an update, not drift":
+    # rpi2 (legacy agent 76f0f4f7a9): re-locking the nut closures turned
+    # the six units bound to them into actionable drift on every tick.
+    let old = "[Service]\nBindReadOnlyPaths=/repro/store/prefixes/a/1-x/usr:/usr\n"
+    let desired = "[Service]\nBindReadOnlyPaths=/repro/store/prefixes/a/1-y/usr:/usr\n"
+    # The file is the old rendering and the new closure is not realised:
+    # the file's own digest, which the last apply recorded.
+    check unitObservedDigestHex(old, desired, false, "/p/a/1-y") ==
+      posixDigestHexOfText(old)
+    # The file is already the desired one but its closure is missing: not
+    # converged.
+    check unitObservedDigestHex(desired, desired, false, "/p/a/1-y") !=
+      posixDigestHexOfText(desired)
+    check unitObservedDigestHex(desired, desired, true, "/p/a/1-y") ==
+      posixDigestHexOfText(desired)
+
+  test "a systemd.systemTimer that is not running as declared is not converged":
+    # rpi2 (legacy agent at 76f0f4f7a9): seven probe timers enabled, never
+    # active, each planned as a no-op on every apply because the observed
+    # digest covered the file alone.
+    let content = "[Timer]\nOnBootSec=3min\nOnUnitInactiveSec=10min\n"
+    let fileDigest = posixDigestHexOfText(content)
+    # Enabled and waiting: converged.
+    check timerObservedDigestHex(content, true, true, "enabled", "active",
+                                 "n/a") == fileDigest
+    # Enabled, never started: not converged.
+    check timerObservedDigestHex(content, true, true, "enabled", "inactive",
+                                 "n/a") != fileDigest
+    check timerObservedDigestHex(content, true, true, "enabled", "inactive",
+                                 "") != fileDigest
+    # A repeating timer that fired once and then stopped is not running
+    # (review of d14cd72e9f: LastTriggerUSec made it look converged).
+    check timerObservedDigestHex(content, true, true, "enabled", "inactive",
+      "Sun 2026-11-01 12:25:09 EET") != fileDigest
+    # A timer that fires once per activation, inactive after triggering:
+    # running as declared (starting it again would run its service again).
+    let oneShot = "[Timer]\nOnBootSec=3min\n"
+    check not timerRepeats(oneShot) and timerRepeats(content)
+    check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
+      "Sun 2026-11-01 12:25:09 EET") == posixDigestHexOfText(oneShot)
+    check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
+      "n/a") != posixDigestHexOfText(oneShot)
+    # Static, generated, aliased and transient timers are not re-enabled
+    # (enable does nothing for them); a linked, indirect or runtime-only
+    # one is not enabled for the next boot, so it is (review of
+    # 0a0cb3f4a3: those three counted as enabled and never were).
+    for st in ["alias", "generated", "static", "transient"]:
+      check timerObservedDigestHex(content, true, true, st, "active",
+                                   "n/a") == fileDigest
+    for st in ["linked", "linked-runtime", "indirect", "enabled-runtime"]:
+      check timerObservedDigestHex(content, true, true, st, "active",
+                                   "n/a") != fileDigest
+    check timerObservedDigestHex(content, false, false, "linked",
+                                 "inactive", "n/a") == fileDigest
+    # A drop-in that adds a repeating trigger makes the timer repeating.
+    check timerRepeats(oneShot & "\n[Timer]\nOnCalendar=daily\n")
+    # Running but not enabled, and the stopped direction.
+    check timerObservedDigestHex(content, true, true, "disabled", "active",
+                                 "n/a") != fileDigest
+    check timerObservedDigestHex(content, false, false, "disabled",
+                                 "inactive", "n/a") == fileDigest
+    check timerObservedDigestHex(content, false, false, "disabled", "active",
+                                 "n/a") != fileDigest
+    # Nothing reported: not judged.
+    check timerObservedDigestHex(content, true, true, "", "", "") == fileDigest
+
   test "posix desired digest for systemd.systemTimer matches content bytes":
     let op = PrivilegedOperation(kind: pokSystemdSystemTimer,
       address: "x",

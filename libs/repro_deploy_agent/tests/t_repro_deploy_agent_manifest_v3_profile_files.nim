@@ -28,6 +28,7 @@
 import std/[os, strutils, unittest]
 
 import repro_deploy_agent
+import repro_profile
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 proc bundled(files: seq[ProfileFile]): DeployManifest =
@@ -163,3 +164,77 @@ suite "RDMF v3: profile bundle":
       check false
     except DeployManifestCodecError as e:
       check "non-canonical" in e.msg
+
+suite "RDMF v3: build actions keep their later fields (flags bit 3)":
+  test "a substitute-only action survives a signed round trip":
+    # rpi2 (2026-11-01): its manifests carry signed canonical text and the
+    # producer's compile's actions, two of which are substitute-only store
+    # packages. At 0e84765db0 the action encoding dropped substituteOnly,
+    # expectedOutputDigest, activity and rebootRequired, so such an action
+    # arrived as an ordinary one and was built on the host.
+    let digest = "blake3:" & repeat('a', 64)
+    let action = ProfileBuildAction(id: "searxng-prefix",
+      argv: @["/bin/sh", "-c", "exit 70"],
+      cwd: "/repro/store/prefixes/searxng/2026.05.16", outputs: @["bin"],
+      requiresElevation: true, cacheable: true, substituteOnly: true,
+      expectedOutputDigest: digest, activity: "search",
+      rebootRequired: true)
+    var m = DeployManifest(target: "rpi2", sequence: 9'u64,
+      deploymentId: "d-9", profileText: "fs.systemFile {\n}\n",
+      issuedAt: 1'u64, maxAgeSeconds: 600'u64,
+      closureDigests: @[ClosureDigest(actionId: "searxng-prefix",
+                                      digest: digest)],
+      buildActions: @[action])
+    check (m.wireFlags and DeployManifestFlagActionFields) != 0
+    let kp = peerAuth.generateKeypair()
+    signManifest(kp, m)
+    let back = decodeManifest(encodeManifest(m))
+    check back.buildActions == @[action]
+    check verifyTrusted(back, anchorsFromKeypairs([kp.publicKey]))
+    # The fields are inside the signed prefix.
+    var tampered = back
+    tampered.buildActions[0].substituteOnly = false
+    check not verifySignature(tampered)
+
+  test "without such an action the envelope is what it was; without the block they are refused":
+    var plain = DeployManifest(target: "rpi2", sequence: 9'u64,
+      deploymentId: "d-9", profileText: "x", issuedAt: 1'u64,
+      maxAgeSeconds: 600'u64,
+      buildActions: @[ProfileBuildAction(id: "a", argv: @["/bin/true"])])
+    check (plain.wireFlags and DeployManifestFlagActionFields) == 0
+    var noBlock = DeployManifest(target: "rpi2", sequence: 9'u64,
+      deploymentId: "d-9", profileText: "x",
+      buildActions: @[ProfileBuildAction(id: "a", substituteOnly: true,
+        expectedOutputDigest: "blake3:" & repeat('b', 64))])
+    let kp = peerAuth.generateKeypair()
+    expect DeployManifestCodecError:
+      signManifest(kp, noBlock)
+      discard encodeManifest(noBlock)
+
+  test "an expectedOutputDigest that is not a closure digest is refused both ways":
+    # Review of d14cd72e9f: the decoder took any text.
+    let good = "blake3:" & repeat('a', 64)
+    var m = DeployManifest(target: "rpi2", sequence: 9'u64,
+      deploymentId: "d-9", profileText: "x", issuedAt: 1'u64,
+      maxAgeSeconds: 600'u64,
+      closureDigests: @[ClosureDigest(actionId: "a", digest: good)],
+      buildActions: @[ProfileBuildAction(id: "a", substituteOnly: true,
+        expectedOutputDigest: good)])
+    let kp = peerAuth.generateKeypair()
+    signManifest(kp, m)
+    var bytes = encodeManifest(m)
+    # The same envelope with the action's digest in upper case.
+    let needle = cast[seq[byte]]("blake3:" & repeat('a', 64))
+    var at = -1
+    for i in countdown(bytes.len - needle.len, 0):
+      if bytes[i ..< i + needle.len] == needle:
+        at = i
+        break
+    check at > 0
+    for i in at + 7 ..< at + needle.len: bytes[i] = byte('A')
+    expect DeployManifestCodecError:
+      discard decodeManifest(bytes)
+    var bad = m
+    bad.buildActions[0].expectedOutputDigest = "sha256:" & repeat('a', 64)
+    expect DeployManifestCodecError:
+      discard encodeManifest(bad)

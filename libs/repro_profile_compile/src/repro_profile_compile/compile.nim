@@ -113,6 +113,13 @@ const NimDefaultCCompilerExe* =
   ## The C compiler executable Nim runs when told none (its default `cc`
   ## family on this platform), looked up through `PATH`.
 
+const ProfileCompileMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation switch (``repro_addon/mutations``), read
+  ## here directly because this module cannot import that one. Only
+  ## ``profile-cc-unresolved-unrefused`` is read: it hands Nim "use your
+  ## default" when no C compiler resolves, instead of refusing by name
+  ## (decision 31's refusal, its falsifier).
+
 proc resolveProfileCCompiler*(): string =
   ## The C compiler the profile compile names to Nim, or "" to let Nim use
   ## its default. Built from the recipe compile's selection
@@ -166,7 +173,7 @@ proc resolveProfileCCompiler*(): string =
     # as "use your default" -- which failed later as `gcc: not found`. A host
     # that compiles profiles gets its C compiler from its base (ReproOS
     # add-on mode §13 decision 31).
-    if result.len == 0:
+    if result.len == 0 and ProfileCompileMutation != "profile-cc-unresolved-unrefused":
       raise newException(CompileFailure,
         "repro profile compile: no C compiler. Nim compiles a profile to C, " &
         "and this host has none: install one from the distribution (gcc, " &

@@ -24,7 +24,8 @@ import std/[algorithm, os, posix, strutils, tables, times]
 import repro_core
 import repro_local_store/store
 from repro_dsl_stdlib/packages/apt_closure import
-  adoptLegacyAptClosurePrefixes, LegacyAptAdoption, LegacyAptPrefix
+  adoptLegacyAptClosurePrefixes, adoptUnverifiedPrefix, LegacyAptAdoption,
+  LegacyAptPrefix
 from repro_infra/apply_lock import currentBootId, processAlive
 
 import ./etc_write
@@ -90,14 +91,11 @@ const
     ## The store root that holds the tree being switched to until the
     ## generation that owns it is committed and registered.
   HandBackRootId* = "addon-hand-back"
-    ## The store root that holds every adopted older-realiser closure (and
-    ## its members) whose path a hand-back record names: bytes the switch
-    ## preserved when it relocated a unit or a launcher manifest from that
-    ## prefix to the store-published one (ReproOS Add-On Mode §9
-    ## "Migration"). A relocated service keeps running from the old prefix
-    ## until it next restarts, a rollback to the generation before the
-    ## relocation writes those bytes back, and so does a removal; none of
-    ## them is a generation's static tree. Recomputed by every
+    ## The store root that holds every prefix a file on the host names
+    ## outside any generation's static tree: a unit or launcher manifest on
+    ## disk (``LiveReferenceDirs``), or a hand-back record the switch
+    ## preserved when it relocated one from an older realiser's prefix
+    ## (ReproOS Add-On Mode §5.2, §9 "Migration"). Recomputed by every
     ## ``migrateLegacyAptClosures``.
 
 const SystemStateDir* = "/var/lib/repro/system"
@@ -288,50 +286,126 @@ proc closureBindings(treeRoot: string): seq[string] =
         if src.endsWith("/usr"):
           result.add(src[0 ..< src.len - "/usr".len])
 
-proc handBackNames(dirs: seq[string]; path: string): bool =
-  ## Whether a hand-back record under ``dirs`` names the prefix ``path``
-  ## (as ``<path>/``: a unit's ``BindReadOnlyPaths=<path>/usr:/usr``, a
-  ## launcher manifest's ``<path>/usr:/usr:rbind,ro``). An unreadable
-  ## record counts as naming it: holding a prefix too long costs space,
-  ## releasing one a service still runs from costs the service.
-  let needle = path & "/"
+const LiveReferenceDirs* = @["/etc/systemd/system", "/run/systemd/system",
+                             "/etc/repro/bin"]
+  ## Where the files are that name store prefixes the host runs from right
+  ## now, whatever wrote them: unit files (`BindReadOnlyPaths=`, or an
+  ## `ExecStart=` of a store binary such as generation 0's
+  ## `repro-addon-reassert.service`), their drop-ins (`<unit>.d/*.conf`),
+  ## transient and runtime units, and launcher manifests.
+
+proc referenceText*(dirs: seq[string]): string =
+  ## What the files in ``dirs`` say, concatenated: every regular file
+  ## directly in each directory and in its ``*.d`` drop-in directories. For
+  ## a symbolic link there (a unit file linked from elsewhere, maybe from
+  ## the store, or a Debian alias) its link text and that text resolved
+  ## against the link's directory -- read with `readlink`, never followed
+  ## to the end -- and, when it leads to a file, that file's text. A link
+  ## that dangles or loops names its target and nothing more: it is a
+  ## common, harmless state (an alias left by a removed package), and
+  ## refusing over it would stop every collection and every switch.
+  ## Raises ``StaticTreeError`` only when a file that exists cannot be read
+  ## (or a link's own text cannot): then nothing can say what it binds, and
+  ## a collection that went ahead could take a prefix a unit runs from.
+  proc fail(f, why: string) {.noreturn.} =
+    raise newException(StaticTreeError, "cannot read " & f & " (" & why &
+      "), so what it binds in the store cannot be held")
+  proc addFile(f: string; acc: var string) =
+    if symlinkExists(f):
+      var target = ""
+      try: target = expandSymlink(f)
+      except OSError as e: fail(f, e.msg)
+      acc.add(target & "\n")
+      if not target.isAbsolute: target = parentDir(f) / target
+      acc.add(os.normalizedPath(target) & "\n")
+      # `fileExists` follows the link: false when it dangles or loops.
+      if not fileExists(f): return
+    try:
+      acc.add(readFile(f))
+      acc.add("\n")
+    except IOError, OSError:
+      fail(f, getCurrentExceptionMsg())
   for d in dirs:
     if not dirExists(d): continue
     for kind, f in walkDir(d):
-      if kind != pcFile: continue
-      try:
-        if needle in readFile(f): return true
-      except IOError, OSError:
-        return true
+      case kind
+      of pcFile, pcLinkToFile: addFile(f, result)
+      of pcDir:
+        if f.endsWith(".d"):
+          for k2, g in walkDir(f):
+            if k2 in {pcFile, pcLinkToFile}: addFile(g, result)
+      else: discard
+
+proc liveReferenceRefusal*(handBack: seq[string];
+                           live: seq[string] = LiveReferenceDirs): string =
+  ## Why the store's hold could not be computed now (``referenceText``), or
+  ## "". A plan runs it, so that a plan is never clean while the switch's
+  ## step 1 (which recomputes the hold) would refuse.
+  try:
+    discard referenceText(handBack & live)
+    ""
+  except StaticTreeError as e:
+    e.msg
+
+proc names(text, path: string): bool =
+  ## Whether ``text`` names the prefix ``path``: followed by `/` (a bind of
+  ## its `usr`, a binary in its `bin`) or by an end of the path (a line
+  ## end, a space, a `:`, a quote).
+  for sep in ["/", "\n", " ", ":", "\"", "'", "\t"]:
+    if (path & sep) in text: return true
 
 proc migrateLegacyAptClosures*(storeRoot = StoreRoot;
-                               handBack: seq[string] = @[]):
+                               handBack: seq[string] = @[];
+                               live: seq[string] = LiveReferenceDirs):
     LegacyAptAdoption =
   ## Adopt the apt closure prefixes a realiser before version 3 wrote (no
-  ## receipt, no index row; ``adoptLegacyAptClosurePrefixes``) and root each
-  ## adopted closure -- its union and its members -- to every generation
-  ## root (and the pending root) whose static tree has a unit binding it,
-  ## and to ``HandBackRootId`` while a hand-back record (a file in one of
-  ## the ``handBack`` directories: the add-on's preserved bytes) names it.
-  ## Before version 3 a switch rooted only its static tree, so without this
-  ## an adopted closure would be indexed but held by nothing, and the next
-  ## ``repro store gc`` would collect what a retained generation's units
-  ## run from; a closure the switch relocated a unit away from is bound by
-  ## no static tree at all, but its service runs from it until it restarts
-  ## and a rollback or a removal writes the old binding back. Adopted and
-  ## named by neither, a stale one is collected as it should be. Runs under
-  ## the caller's host apply lock (every add-on store writer holds it), in
-  ## one store session, before anything collects. Idempotent and cheap when
-  ## the store holds no v2 prefix. ``storeRoot`` is the add-on's system
-  ## store; another root is for tests.
+  ## receipt, no index row; ``adoptLegacyAptClosurePrefixes``) and root
+  ## them:
+  ##
+  ## * each adopted closure -- its union and its members -- to every
+  ##   generation root (and the pending root) whose static tree has a unit
+  ##   binding it;
+  ## * to ``HandBackRootId``, every indexed prefix (adopted or the store's
+  ##   own; a closure with its members) that a file names, in the
+  ##   ``handBack`` directories (the add-on's preserved bytes) or the
+  ##   ``live`` ones (``LiveReferenceDirs``): before the first add-on switch
+  ##   of an upgraded host, rpi2's 22 closure units, its tool manifests and
+  ##   generation 0's reassert unit (which runs the add-on's own
+  ##   `repro` from the store) are bound by no generation's static tree;
+  ##   after it, a relocated service still runs from its older prefix
+  ##   until it restarts, and a rollback or a removal writes the older
+  ##   binding back.
+  ##
+  ## A file under those directories that cannot be read raises
+  ## ``StaticTreeError`` before anything is adopted or released (the caller
+  ## refuses its collection or recovery). An older realiser's directory
+  ## that does not verify but that a file names is adopted unverified (``adoptUnverifiedPrefix``) and held, and
+  ## reported (``heldUnverified``): recovery would otherwise quarantine it
+  ## under the unit. The hand-back hold is recomputed from scratch on each
+  ## run, so a prefix no file names any more is released and collected by
+  ## the next gc. Runs under the caller's host apply lock (every add-on
+  ## store writer holds it), in one store session, before anything
+  ## collects. Idempotent. ``storeRoot`` is the add-on's system store;
+  ## another root is for tests.
   if not dirExists(storeRoot / "prefixes"): return
   if storeRoot == StoreRoot: enterWritableStoreView()
   var s = openStore(storeRoot)
   defer: s.close()
+  let refs = referenceText(handBack & live)
   result = adoptLegacyAptClosurePrefixes(s, storeRoot)
-  # The hand-back hold is recomputed from scratch: a closure no record
-  # names any more is released here, and collected by the next gc.
-  s.deleteRoot(HandBackRootId)
+  # Directories that did not verify but that a file names: held anyway.
+  var stillRefused: seq[tuple[path, reason: string]]
+  for r in result.refused:
+    if names(refs, r.path):
+      try:
+        discard adoptUnverifiedPrefix(s, storeRoot, r.path)
+        result.heldUnverified.add(r)
+      except CatchableError as e:
+        stillRefused.add((r.path, r.reason & "; adopting it unverified " &
+          "failed: " & e.msg))
+    else:
+      stillRefused.add(r)
+  result.refused = stillRefused
   var byPath = initTable[string, seq[PrefixIdBytes]]()
   var debIds = initTable[string, PrefixIdBytes]()
   for a in result.adopted:
@@ -342,14 +416,20 @@ proc migrateLegacyAptClosures*(storeRoot = StoreRoot;
       for m in a.members:
         if m in debIds: ids.add(debIds[m])
       byPath[a.path] = ids
-  if byPath.len == 0: return
+  s.deleteRoot(HandBackRootId)
   var held = false
-  for path, ids in byPath:
-    if handBackNames(handBack, path):
-      if not held:
-        s.registerRoot(HandBackRootId, rkProfile)
-        held = true
-      for id in ids: s.attachPrefixToRoot(HandBackRootId, id)
+  for row in s.listPrefixes():
+    let path = storeRoot / row.realizedPath
+    let legacy = path in byPath
+    if not names(refs, path):
+      continue
+    if not held:
+      s.registerRoot(HandBackRootId, rkProfile)
+      held = true
+    s.attachPrefixToRoot(HandBackRootId, row.prefixId)
+    if legacy:
+      for id in byPath[path]: s.attachPrefixToRoot(HandBackRootId, id)
+  if byPath.len == 0: return
   for r in s.listRoots():
     if not (r.rootId.startsWith(RootIdPrefix) or r.rootId == PendingRootId):
       continue
@@ -537,6 +617,25 @@ proc readAddonStateDirPointer*(path = AddonStateDirPointer;
     stderr.writeLine("repro-addon: ignoring the add-on state-directory " &
       "pointer: " & r.why)
   r.dir
+
+proc hostHandBackDirs*(pointer = AddonStateDirPointer; owner = 0):
+    seq[string] =
+  ## The hand-back record directory of the add-on's real state directory:
+  ## the one bootstrap recorded in its trusted pointer
+  ## (``readAddonStateDirPointerChecked``), else the default. What a
+  ## collection or a recovery of the store must hold is named there; a
+  ## `store gc` that read the default directory of a host bootstrapped
+  ## with another one rebuilt the hold without those records, and collected
+  ## the older prefixes relocated services still run from. A pointer that
+  ## is not trusted cannot say where they are: raises ``StaticTreeError``,
+  ## and nothing is collected or recovered.
+  let r = readAddonStateDirPointerChecked(pointer, owner)
+  if r.why.len > 0:
+    raise newException(StaticTreeError, "the add-on's state-directory " &
+      "pointer is not trusted (" & r.why & "), so the hand-back records " &
+      "the store must keep cannot be found; nothing was collected or " &
+      "recovered")
+  @[preservedDir(if r.dir.len > 0: r.dir else: SystemStateDir)]
 
 proc markerOwnerLive*(m: PendingMarker): bool =
   ## True when the process that owns the switch is still running it: the

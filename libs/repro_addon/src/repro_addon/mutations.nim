@@ -336,6 +336,39 @@
 ##                                            compiler cross-built against a
 ##                                            newer glibc than the host's
 ##                                            (§7.9, the glibc exception)
+## ``profile-cc-unresolved-unrefused``        a profile compile that resolves
+##                                            no C compiler is handed to Nim
+##                                            instead of refused (decision 31)
+## ``apt-closure-adopts-unverified``          a realiser-v2 closure prefix is
+##                                            adopted without verifying its
+##                                            v2 hash or identity
+## ``agent-management-path-ignores-dropin-prefixes``  a drop-in is judged by
+##                                            its own unit name only, not by
+##                                            the units systemd applies it to
+##                                            (dash prefixes, template, type)
+## ``agent-management-path-dropin-ignores-instance-forms``  a drop-in's
+##                                            dash prefixes are taken from
+##                                            the template only, so
+##                                            ``serial-@ttyS0.service.d`` and
+##                                            ``serial-@.service.d`` pass
+## ``agent-management-path-dropin-ignores-unit-aliases``  the drop-in
+##                                            directories of management
+##                                            units' aliases (``dbus-.service``
+##                                            via networkd's D-Bus alias) are
+##                                            not derived
+## ``agent-management-path-allows-login-slices``  slices are not management
+##                                            units: drop-ins for
+##                                            ``user.slice``, ``user-.slice``,
+##                                            ``user-<uid>.slice``,
+##                                            ``-.slice`` and ``slice`` pass
+##                                            (decision 37)
+## ``agent-management-path-allows-session-units``  login sessions and user
+##                                            managers are not management
+##                                            units: ``session-.scope``,
+##                                            ``session-<n>.scope``,
+##                                            ``user@.service`` and its
+##                                            instances pass (decision 37,
+##                                            extended)
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -355,6 +388,13 @@
 ## ``unit-prefix-unchecked``                  a unit that runs from the
 ##                                            prefix of an activity edge its
 ##                                            host does not select is planned
+## ``unit-prefix-bodies-only``                that check reads unit bodies
+##                                            only, not drop-ins, health
+##                                            checks, files or accounts
+## ``failed-consumer-left-failed``            a unit whose secrets an apply
+##                                            or the re-assert materialised
+##                                            is try-restarted even when it
+##                                            has failed (left failed)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -462,6 +502,20 @@ const
                           "cross-prefix-glibc-unchecked",
                           # A8 review M5: agent-repin's falsifier.
                           "agent-repin-keeps-allow-list",
+                          # Read by repro_profile_compile (compile.nim), which
+                          # cannot import this module: decision 31's refusal.
+                          "profile-cc-unresolved-unrefused",
+                          # Read by repro_dsl_stdlib's apt_closure.nim: the
+                          # legacy adoption without its verification.
+                          "apt-closure-adopts-unverified",
+                          # A8 round 3: drop-ins judged by exact name only.
+                          "agent-management-path-ignores-dropin-prefixes",
+                          # A8 round 4: the instance-form and alias-derived
+                          # drop-in directories, and decision 37's slices.
+                          "agent-management-path-dropin-ignores-instance-forms",
+                          "agent-management-path-dropin-ignores-unit-aliases",
+                          "agent-management-path-allows-login-slices",
+                          "agent-management-path-allows-session-units",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",
@@ -473,7 +527,14 @@ const
                           "full-host-boot-secrets-unlocked",
                           # A12 review finding 12: a unit may run from a
                           # prefix its host does not realise.
-                          "unit-prefix-unchecked"]
+                          "unit-prefix-unchecked",
+                          # A12 round-2 review: the round-1 check, which
+                          # read unit bodies only.
+                          "unit-prefix-bodies-only",
+                          # A12 round-2 review: a consumer that failed for
+                          # want of its secrets is try-restarted (left
+                          # failed) once they are back.
+                          "failed-consumer-left-failed"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

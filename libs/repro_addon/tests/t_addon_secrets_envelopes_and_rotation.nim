@@ -15,7 +15,9 @@
 ##   change;
 ## - the planner turns a credential change into a confirmed stop-start for
 ##   an exclusive unit, a restart otherwise, and a pending ``leave`` when
-##   the unit holds its restarts -- never a reload;
+##   the unit holds its restarts -- never a reload; a credential restart is
+##   flagged (``secretsChanged``) so step 7 starts the unit again if it
+##   has failed by then, and a unit already failed at plan time is started;
 ## - ``rawCredentialDirective`` finds ``LoadCredential=`` and its kin;
 ## - the plaintext bound is one bound: a payload of exactly
 ##   ``MaxPlaintextBytes`` is built and one byte more is refused before
@@ -161,6 +163,19 @@ suite "envelopes and rotation":
                          activeState: "active", enabled: true,
                          credentialsChanged: true)
     check one(base).verb == tvRestart
+    # A credential restart is flagged so step 7 also starts the unit if it
+    # has failed by then (A12 round-2 review); a file-only restart is not.
+    check one(base).secretsChanged
+    var fileOnly = base
+    fileOnly.credentialsChanged = false
+    fileOnly.fileChanged = true
+    check one(fileOnly).verb == tvRestart
+    check not one(fileOnly).secretsChanged
+    # Failed at plan time (not running) and enabled: started outright.
+    var failedAtPlan = base
+    failedAtPlan.active = false
+    failedAtPlan.activeState = "failed"
+    check one(failedAtPlan).verb == tvStart
     var ex = base
     ex.exclusive = true
     ex.alive = uaPopulated

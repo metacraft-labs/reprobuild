@@ -655,6 +655,11 @@ proc selectManifest*(cfg: AgentConfig; deps: AgentDeps): Selection =
   # envelope bytes, which keeps the choice a function of the set alone.
   trusted.sort(proc (a, b: Candidate): int =
     result = cmp(a.manifest.sequence, b.manifest.sequence)
+    # The falsifying build compares the sequence alone: the sort is stable,
+    # so equal sequences keep their source order and the last-listed copy
+    # wins, whatever its signing time.
+    when agentMutated("agent-select-by-source-order"):
+      return
     if result == 0: result = cmp(a.manifest.issuedAt, b.manifest.issuedAt)
     if result == 0:
       for i in 0 ..< min(a.bytes.len, b.bytes.len):

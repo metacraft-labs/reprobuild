@@ -28,6 +28,7 @@ import repro_dsl_stdlib/operations/link
 import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/constructors/c_executable
 import repro_dsl_stdlib/constructors/nim_executable
+import repro_dsl_stdlib/packages/nim as nim_module
 import repro_dsl_stdlib/constructors/nim_library
 import repro_dsl_stdlib/constructors/cmake_package
 import repro_dsl_stdlib/constructors/autotools_package
@@ -92,6 +93,8 @@ suite "--target refuses every constructor that does not thread it":
           discard c_executable("hello", @["src/hello.c"])),
         ("nim_executable", proc() =
           discard nim_executable("hello", "src/hello.nim")),
+        ("nim.c", proc() =
+          discard nim.c(source = "src/hello.nim", binary = "build/bin/hello")),
         ("nim_library", proc() =
           discard nim_library("hello", "src/hello.nim")),
         ("cmake_package", proc() =
@@ -341,6 +344,51 @@ suite "a zig target is threaded into the C operations":
         let lib = nim_library("hello", "src/hello.nim")
         check "cpu=arm" in argStrings(lib.install)))
 
+  test "the nim.c shorthand builds for the zig target":
+    # What `repro build --target=<zig triple> .#apps` needs: reprobuild's own
+    # images are `nim.c(...)` edges, not `nim_executable`.
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let act = nim.c(source = "src/shorthand.nim",
+          binary = "build/bin/shorthand", nimcache = "build/nimcache/shorthand")
+        let args = argStrings(act)
+        checkpoint($args)
+        check "cpu=arm" in args
+        check "os=linux" in args
+        check "cc=clang" in args
+        check args.anyIt(it.startsWith("clangExe=") and it.endsWith("/cc"))
+        # Output and nimcache keyed by the target: a native build of the
+        # same edge writes other files.
+        check ("output=build@" & ZigTriple & "/bin/shorthand") in args
+        check args.anyIt(it.startsWith("nimcache=build@" & ZigTriple))
+        var wrappers = ""
+        for a in registeredBuildActions():
+          if a.id.startsWith("zig-cross-wrappers-"): wrappers = a.id
+        check wrappers.len > 0
+        check wrappers in act.deps
+        # The backend is the zig wrapper: the edge's PATH carries zig and
+        # sh, not the host gcc (refs recorded on the registered action).
+        var refs: seq[string]
+        for a in registeredBuildActions():
+          if a.id == act.id: refs = a.toolIdentityRefs
+        check "zig" in refs
+        check "sh" in refs
+        check "gcc" notin refs
+        # A second nim.c in the same package (reprobuild's `.#apps` has one
+        # per image) reuses the one wrapper edge: no duplicate graph node.
+        let second = nim.c(source = "src/second.nim",
+          binary = "build/bin/second", nimcache = "build/nimcache/second")
+        var wrapperCount = 0
+        for a in registeredBuildActions():
+          if a.id.startsWith("zig-cross-wrappers-"): inc wrapperCount
+        check wrapperCount == 1
+        check wrappers in second.deps
+        # A caller that picks the CPU itself answers for the target: the
+        # fail-closed guard applies, as before.
+        check refusal(proc() =
+          discard nim.c(source = "src/hello.nim", binary = "build/bin/h32",
+            cpu = "i386")).len > 0))
+
   test "cmake_package configures with a toolchain file naming the wrappers":
     withTarget(ZigTriple, proc() =
       inBuild(proc() =
@@ -357,6 +405,14 @@ suite "a zig target is threaded into the C operations":
         checkpoint(args)
         check "CMAKE_TOOLCHAIN_FILE=" in args
         check "toolchain.cmake" in args))
+
+
+  test "binutils link flags are a native configure's, never a zig one's":
+    # `cmake_package` appends these only when it knows the project root (a
+    # provider run), so the decision is checked where it is made.
+    check cmakeTransitiveLinkerFlags(false, ["/l"]) ==
+      "-Wl,--copy-dt-needed-entries -Wl,-rpath-link,/l"
+    check cmakeTransitiveLinkerFlags(true, ["/l"]) == ""
 
   test "autotools_package configures with the zig toolchain and --host":
     withTarget(ZigTriple, proc() =

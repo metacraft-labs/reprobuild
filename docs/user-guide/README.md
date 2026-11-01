@@ -34,6 +34,9 @@ rest of the implementation documentation.
   [Workspace Locking](workspace-locking.md) for choosing a public / team /
   personal scheme, restoring a workspace on a new machine, and recovering
   from a refused push.
+- **Gating commits and pushes on tests that really ran?** See
+  [Test Certificates](test-certificates.md) for certifying before you commit,
+  the pre-commit gate, how certificates reach a gateway, and `repro push`.
 - **Feeding your home profile to another tool (Nix, scripts, CI)?** See
   [Exporting a home profile](home-export.md) for `repro home export`, its
   JSON schema, and `--check` for committed snapshots.

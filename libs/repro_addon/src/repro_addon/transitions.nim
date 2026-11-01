@@ -67,6 +67,13 @@ type
       ## when step 7 reaches it was started from the generation's own file
       ## (an upholder, or its own ``UpheldBy=`` link, started it as soon as
       ## systemd loaded it) and is left running.
+    secretsChanged*: bool
+      ## `restart` only: the secrets the unit loads changed in this apply
+      ## (`credentials`). Step 7 restarts it if it runs and also if it has
+      ## FAILED by then (``switch.restartForChangedSecrets``): a unit whose
+      ## credential could not be loaded -- a boot whose secrets step
+      ## deferred to this apply -- fails, and `try-restart` would leave it
+      ## failed on the secrets this apply has just put back.
     unlinkFirst*: bool
       ## A removed unit held up only through its own ledgered `UpheldBy=`
       ## install link (`<upholder>.upholds/<unit>`): step 2 removes its
@@ -420,7 +427,8 @@ proc planTransitions*(facts: seq[UnitFacts]): seq[Transition] =
           (if f.reloadDependents.len > 0: "; systemd also reloads " &
              f.reloadDependents.join(", ") & " (PropagatesReloadTo=)" else: "")))
     else:
-      starts.add(Transition(unit: f.unit, verb: tvRestart, reason: why))
+      starts.add(Transition(unit: f.unit, verb: tvRestart, reason: why,
+                            secretsChanged: f.credentialsChanged))
   when mutated("partof-not-propagated"):
     # The falsifying mutation of the propagation: the plan leaves what
     # systemd carries along PartOf=/BindsTo= implicit.

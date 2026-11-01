@@ -41,6 +41,16 @@
 ##                                      add-on host compiles a pinned
 ##                                      source profile for ``default`` and
 ##                                      never compares the pinned digest
+## ``agent-select-by-source-order``     among copies of one sequence the
+##                                      agent takes the last-listed source,
+##                                      not the latest signature
+## ``engine-agent-ignores-untrusted-pointer``  an untrusted add-on
+##                                      state-directory pointer reads as
+##                                      none, and the engine agent takes the
+##                                      plain apply
+## ``engine-agent-pointer-refusal-unwired``  the CLI does not act on the
+##                                      untrusted-pointer route, and the
+##                                      tick takes the plain apply
 ## ===================================  ====================================
 
 const AgentMutation {.strdefine: "reproAddonMutation".} = ""
@@ -54,7 +64,10 @@ const KnownAgentMutations* = ["rdmf-ignores-revoked-keys",
                               "engine-agent-skips-a8",
                               "engine-agent-shares-addon-state",
                               "compile-pin-drops-selection",
-                              "engine-agent-ignores-pin"]
+                              "engine-agent-ignores-pin",
+                              "agent-select-by-source-order",
+                              "engine-agent-ignores-untrusted-pointer",
+                              "engine-agent-pointer-refusal-unwired"]
 
 template agentMutated*(name: static string): bool =
   ## True only in the build compiled with ``-d:reproAddonMutation=<name>``.

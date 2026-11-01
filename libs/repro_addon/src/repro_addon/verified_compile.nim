@@ -30,6 +30,8 @@ import repro_deploy_agent/manifest
 import repro_deploy_agent/agent_mutations
 
 import ./host_exec
+from ./generation0 import AgentCompileMemoryMax, AgentCompileNice,
+  AgentCompileWeight, AgentCompileOomScoreAdjust
 
 const
   CompiledProfileStdioMarker* = "REPRO-COMPILED-PROFILE "
@@ -67,6 +69,22 @@ proc launcherOf*(exe: string): string =
     if fileExists(launcher): return launcher
   exe
 
+const
+  UnprivilegedCompileMemoryMax* = AgentCompileMemoryMax
+  UnprivilegedCompileNice* = AgentCompileNice
+  UnprivilegedCompileWeight* = AgentCompileWeight
+    ## The fetch unit's bounds (``generation0.agentCompileBounds``): one
+    ## compile, one budget, whichever unit runs it.
+
+proc unprivilegedCompileLimits*(): seq[string] =
+  ## The compile unit's resource properties (``systemd-run --property``).
+  @["--property=MemoryMax=" & UnprivilegedCompileMemoryMax,
+    "--property=MemorySwapMax=0",
+    "--property=Nice=" & $UnprivilegedCompileNice,
+    "--property=CPUWeight=" & $UnprivilegedCompileWeight,
+    "--property=IOWeight=" & $UnprivilegedCompileWeight,
+    "--property=OOMScoreAdjust=" & $AgentCompileOomScoreAdjust]
+
 proc unprivilegedCompileArgv*(engineExe: string; m: DeployManifest;
                               timeoutSec = UnprivilegedCompileTimeoutSec):
     seq[string] =
@@ -102,8 +120,8 @@ proc unprivilegedCompileArgv*(engineExe: string; m: DeployManifest;
     "--property=RuntimeMaxSec=" & $timeoutSec,
     # The PATH bootstrap's preflight probed (§13 decision 31), named rather
     # than inherited from the manager, whose block an operator can change.
-    "--setenv=PATH=" & ProfileCompilePath,
-    "--", engineExe, "deploy-agent", "compile-profile", "--stdio"]
+    "--setenv=PATH=" & ProfileCompilePath] & unprivilegedCompileLimits() &
+    @["--", engineExe, "deploy-agent", "compile-profile", "--stdio"]
   for a in compileFactArgs(m): result.add(a)
 
 proc compileInput*(m: DeployManifest): string =

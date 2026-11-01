@@ -48,6 +48,9 @@ import repro_addon/agent_record
 import repro_addon/agent_switch
 import repro_addon/collision
 import repro_addon/ledger
+import repro_addon/verified_compile
+from repro_addon/generation0 import agentCompileBounds, agentFetchUnit,
+  AgentUnitsInputs
 
 type Recorder = ref object
   calls: seq[AddonApplyOptions]
@@ -207,9 +210,13 @@ suite "the agent's apply goes through the add-on switch":
     check hook(m5).ok
     check r.calls[0].userProfileText == Canonical
     check r.calls[0].buildActions[0].id == "searxng"
-    # A source profile the producer pinned no compile of: refused.
+    # A source profile the producer pinned no compile of: refused, and not
+    # compiled at all (rpi2 compiled a whole profile every tick for a
+    # sequence it then refused; at 0e84765db0 the compiler ran here).
+    let before = calls
     let unpinned = hook(manifest(6, "d6", "import repro_profile"))
     check not unpinned.ok and "pins no digest" in unpinned.message
+    check calls == before
     # A compiler that emits something else (a root unit): refused.
     emit = Canonical & "systemd.systemUnit {\n  name = \"evil.service\"\n" &
       "  content = \"[Service]\\nExecStart=/bin/true\\n\"\n}\n"
@@ -217,6 +224,13 @@ suite "the agent's apply goes through the add-on switch":
     pinned(m7, Canonical, actionsJson)
     let evil = hook(m7)
     check not evil.ok and CompiledProfileRefusal in evil.message
+    # The next tick of the same sequence, pin and engine is refused again
+    # without compiling again; another sequence compiles.
+    let compiledSoFar = calls
+    let again = hook(m7)
+    check not again.ok and CompiledProfileRefusal in again.message and
+      "not compiled again" in again.message
+    check calls == compiledSoFar
     # A compiler of another revision: refused as that, not as a digest
     # mismatch, even when it emits the pinned bytes.
     emit = Canonical
@@ -235,6 +249,22 @@ suite "the agent's apply goes through the add-on switch":
       unitNames = noUnits)
     check not none(m5).ok
     check r.calls.len == 1
+
+  test "the compile unit is bounded in memory, CPU and I/O":
+    # A 1 GB Pi compiled a whole profile in a transient unit with no
+    # ceiling and default weights beside its own services (0e84765db0).
+    let limits = unprivilegedCompileLimits()
+    check "--property=MemoryMax=" & UnprivilegedCompileMemoryMax in limits
+    check "--property=Nice=" & $UnprivilegedCompileNice in limits
+    check "--property=CPUWeight=" & $UnprivilegedCompileWeight in limits
+    check "--property=IOWeight=" & $UnprivilegedCompileWeight in limits
+    # A share of the host's memory, which systemd resolves per host (a
+    # fixed 512M was most of a 1 GB Pi), and the same bounds on the fetch
+    # unit, which compiles too (review of d14cd72e9f).
+    check UnprivilegedCompileMemoryMax.endsWith("%")
+    check "--property=OOMScoreAdjust=500" in limits
+    check "OOMScoreAdjust=500\n" in agentCompileBounds()
+    check agentCompileBounds() in agentFetchUnit("/x/repro", AgentUnitsInputs())
 
   test "the management path and an unpinned action are refused before the switch":
     let r = Recorder()
