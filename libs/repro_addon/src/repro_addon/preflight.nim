@@ -608,8 +608,11 @@ proc profileCompilerProblem*(compiler: string; timeoutSec = 120;
                          "--probe-c-compiler"], timeoutSec = timeoutSec,
                         path = path)
     if r.exitCode != 0:
-      return r.output.strip() & " (a host that compiles profiles needs a " &
-        "C compiler: install one from the distribution, such as gcc)"
+      # The remedy first, the compiler's own words after it, unchanged and
+      # last: callers (and tests) read its final line as what it reported.
+      return "a host that compiles profiles needs a C compiler (install " &
+        "one from the distribution, such as gcc); the profile compiler " &
+        "reported: " & r.output.strip()
   except CatchableError as e:
     return e.msg
   ""
