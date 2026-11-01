@@ -332,11 +332,31 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
     createSymlink(c / "lib" / "y.service", etc / "y.service")
     writeFile(run / "z.service", "[Service]\nExecStart='" & b &
       "/usr/bin/z'\n")
+    # A dangling link (a Debian alias left by a removed package), a link
+    # to itself, and a link into a store prefix whose file is gone: none of
+    # them stops the hold (review of 0a0cb3f4a3: each raised, and every
+    # gc, recover and switch step 1 refused); the last still names, and
+    # holds, the prefix its text points into.
+    let d = v2Union(store, "d", "1.0", "armhf", @[("d", shaOf('d'))])
+    discard v2Member(store, "d", "1.0", shaOf('d'))
+    createSymlink("/nonexistent/dbus-org.bluez.service",
+                  etc / "dbus-org.bluez.service")
+    createSymlink(etc / "loop.service", etc / "loop.service")
+    createSymlink(d / "lib" / "gone.service", etc / "gone.service")
+    # The launcher link of /etc/repro/bin while the swap renames
+    # /usr/local/repro (or for good, with an install that lacks it): a
+    # hidden name, dangling.
+    let bin = store / "etc-repro-bin"
+    createDir(bin)
+    createSymlink("/nonexistent/usr/local/repro/bin/reprobuild-sandbox-launcher",
+                  bin / ".reprobuild-sandbox-launcher")
+    check liveReferenceRefusal(@[], @[bin]) == ""
+    check liveReferenceRefusal(@[], @[etc, run]) == ""
     discard migrateLegacyAptClosures(store, live = @[etc, run])
     var s = openStore(store)
     discard s.gc(graceSeconds = 0)
     s.close()
-    check dirExists(a) and dirExists(b) and dirExists(c)
+    check dirExists(a) and dirExists(b) and dirExists(c) and dirExists(d)
     # An unreadable file: nothing is decided, nothing collected.
     when defined(posix):
       if getuid() != 0:
@@ -345,6 +365,7 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
         removeFile(etc / "x.service.d" / "10-bind.conf")
         expect StaticTreeError:
           discard migrateLegacyAptClosures(store, live = @[etc, run])
+        check "secret.service" in liveReferenceRefusal(@[], @[etc, run])
         s = openStore(store)
         discard s.gc(graceSeconds = 0)
         s.close()

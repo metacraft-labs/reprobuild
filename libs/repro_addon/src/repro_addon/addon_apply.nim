@@ -60,9 +60,11 @@
 ## The plan's three add-on sections (spec §7.1) are in the result: the
 ## ledger diff, the collision report, and the service transition list.
 
-import std/[algorithm, json, options, os, sets, strutils, tables, times]
+import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
+            times]
 from std/posix import Statvfs, statvfs, Stat, lstat
-import std/httpclient
+import std/uri
+import repro_binary_cache_client/http_pool
 
 import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
@@ -2237,23 +2239,50 @@ proc httpDebProbe*(timeoutMs = 10_000; deadlineMs = 300_000): DebProbe =
   ## answer, an error (no TLS in this build, no network) or a probe begun
   ## after ``deadlineMs`` since the first is ``dsUnknown``: a plan of a
   ## host with hundreds of members ends in bounded time.
-  var started = -1.0
+  var started: MonoTime
+  var begun = false
   result = proc (url: string): tuple[verdict: DebServed; detail: string] =
-    let now = epochTime()
-    if started < 0: started = now
-    if (now - started) * 1000 > float(deadlineMs):
+    # A monotonic clock: a wall clock stepped by NTP mid-plan (a Pi boots
+    # without one) would stretch or cut the deadline.
+    let now = getMonoTime()
+    if not begun:
+      started = now
+      begun = true
+    if (now - started).inMilliseconds > deadlineMs:
       return (dsUnknown, "the plan's probe deadline of " &
         $(deadlineMs div 1000) & " s had passed")
     try:
-      let c = newHttpClient(timeout = timeoutMs, maxRedirects = 5)
-      defer: c.close()
-      var code = c.request(url, httpMethod = HttpHead).code.int
+      let pool = newHttpPool(maxConnections = 1, receiveTimeoutMs = timeoutMs)
+      defer: pool.close()
+      proc ask(meth: string; headers: seq[(string, string)]):
+          tuple[code: int; final: string] =
+        ## Status and headers only, never a body (a mirror that ignores
+        ## ``Range`` would send the whole archive). Redirects are followed
+        ## by hand, at most five, so that only the configured archive's own
+        ## 404/410 reads as "not served", as the realiser's fetch reads it
+        ## (``downloadBounded``).
+        var current = url
+        for _ in 0 .. 5:
+          let r = pool.requestStatusOnly(meth, current, headers)
+          if r.statusCode in [301, 302, 303, 307, 308] and r.location.len > 0:
+            let next = $combine(parseUri(current), parseUri(r.location))
+            if parseUri(current).scheme == "https" and
+                parseUri(next).scheme != "https":
+              return (-1, "a redirect to " & next & " drops TLS")
+            current = next
+            continue
+          return (r.statusCode, current)
+        (-1, "more than five redirects")
+      var (code, final) = ask("HEAD", @[])
       var how = "HEAD"
       if code in [403, 405, 501]:
-        c.headers = newHttpHeaders({"Range": "bytes=0-0"})
-        code = c.request(url, httpMethod = HttpGet).code.int
+        (code, final) = ask("GET", @[("Range", "bytes=0-0")])
         how = "GET bytes=0-0"
-      (probeVerdict(code), how & " " & $code)
+      if code < 0: return (dsUnknown, final)
+      var verdict = probeVerdict(code)
+      if verdict == dsUnserved and originOf(final) != originOf(url):
+        verdict = dsUnknown
+      (verdict, how & " " & $code & (if final != url: " at " & final else: ""))
     except CatchableError as e:
       (dsUnknown, e.msg)
 
@@ -3003,6 +3032,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           "switch: realising its apt closures needs more of " &
           AddOnSystemStoreRoot & "'s filesystem than is free: " &
           result.storeSpace))
+  # Step 1 recomputes the store's hold from every unit, manifest and
+  # hand-back record on the host (``migrateLegacyAptClosures``); one that
+  # cannot be read stops it there. The plan reads them the same way, so it
+  # is not clean while the switch would refuse, and the switch refuses
+  # before it writes anything.
+  block:
+    let why = liveReferenceRefusal(@[preservedDir(stateDir)])
+    if why.len > 0:
+      refusals.add(newException(AddonCollisionError, "refusing the " &
+        "switch: step 1 recomputes the store's hold, and " & why))
   # A tool's driver writes its wrapper only with the sandbox launcher
   # beside the engine that applies it (``addOnToolLauncherPath``); without
   # it the apply would fail after the flip.

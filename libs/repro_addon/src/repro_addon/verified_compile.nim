@@ -31,7 +31,7 @@ import repro_deploy_agent/agent_mutations
 
 import ./host_exec
 from ./generation0 import AgentCompileMemoryMax, AgentCompileNice,
-  AgentCompileWeight
+  AgentCompileWeight, AgentCompileOomScoreAdjust
 
 const
   CompiledProfileStdioMarker* = "REPRO-COMPILED-PROFILE "
@@ -82,7 +82,8 @@ proc unprivilegedCompileLimits*(): seq[string] =
     "--property=MemorySwapMax=0",
     "--property=Nice=" & $UnprivilegedCompileNice,
     "--property=CPUWeight=" & $UnprivilegedCompileWeight,
-    "--property=IOWeight=" & $UnprivilegedCompileWeight]
+    "--property=IOWeight=" & $UnprivilegedCompileWeight,
+    "--property=OOMScoreAdjust=" & $AgentCompileOomScoreAdjust]
 
 proc unprivilegedCompileArgv*(engineExe: string; m: DeployManifest;
                               timeoutSec = UnprivilegedCompileTimeoutSec):

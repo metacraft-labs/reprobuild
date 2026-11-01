@@ -256,7 +256,8 @@ import repro_cli_support/project_pins
 import repro_cli_support/infra
 when defined(linux):
   import repro_addon/static_tree as addon_static_tree
-  from repro_dsl_stdlib/packages/apt_closure import AddOnSystemStoreRoot
+  from repro_dsl_stdlib/packages/apt_closure import AddOnSystemStoreRoot,
+    LegacyAptAdoption
   import repro_core/host_apply_lock
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
@@ -39234,14 +39235,14 @@ proc runStoreCommand*(args: seq[string]): int =
     defer: addonLock.release()
     if sub == "gc" and not dryRun and isAddonSystemStore(root):
       addonLock = acquireHostApplyLock("repro store gc")
-      var handBack: seq[string]
+      var legacy: LegacyAptAdoption
       try:
-        handBack = addon_static_tree.hostHandBackDirs()
+        legacy = addon_static_tree.migrateLegacyAptClosures(
+          handBack = addon_static_tree.hostHandBackDirs())
       except CatchableError as e:
-        stderr.writeLine("repro store gc: " & e.msg)
+        stderr.writeLine("repro store gc: " & e.msg & "; nothing was " &
+          "collected")
         return 1
-      let legacy = addon_static_tree.migrateLegacyAptClosures(
-        handBack = handBack)
       for r in legacy.refused:
         stderr.writeLine("repro store gc: legacy apt prefix not adopted: " &
           r.path & ": " & r.reason)

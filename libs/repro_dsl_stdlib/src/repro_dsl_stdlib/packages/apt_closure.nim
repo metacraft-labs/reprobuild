@@ -605,6 +605,14 @@ type
     ## ``expectedSize`` of them; raise on failure. Injected so a caller can
     ## supply its own transport; verification never depends on it.
 
+proc originOf*(url: string): string =
+  ## ``scheme://host:port`` of ``url``, the port spelled out (RFC 6454).
+  let u = parseUri(url)
+  let port = if u.port.len > 0: u.port
+             elif u.scheme == "https": "443"
+             else: "80"
+  toLowerAscii(u.scheme) & "://" & toLowerAscii(u.hostname) & ":" & port
+
 proc downloadBounded*(url, dest: string; maxBytes: int64;
                       expectedSize = -1'i64; timeoutMs = 30_000;
                       maxRedirects = 5): int64 =
@@ -646,13 +654,24 @@ proc downloadBounded*(url, dest: string; maxBytes: int64;
       removeFile(dest)
       raise newException(IOError, "writing " & dest & " failed")
     if resp.statusCode in [301, 302, 303, 307, 308] and resp.location.len > 0:
-      current = $combine(parseUri(current), parseUri(resp.location))
+      let next = $combine(parseUri(current), parseUri(resp.location))
       removeFile(dest)
+      if parseUri(current).scheme == "https" and
+          parseUri(next).scheme != "https":
+        raise newException(IOError, "refusing a redirect from " & current &
+          " to " & next & ": it drops TLS")
+      current = next
       continue
     if resp.statusCode in [404, 410]:
       removeFile(dest)
-      raise newException(EAptDebUnserved, "HTTP " & $resp.statusCode &
-        " for " & current)
+      # Only the configured archive's own answer says it no longer serves
+      # the file (the fallback of threat model C20): a 404 from another
+      # origin a redirect led to is just a failed fetch.
+      if originOf(current) == originOf(url):
+        raise newException(EAptDebUnserved, "HTTP " & $resp.statusCode &
+          " for " & current)
+      raise newException(IOError, "HTTP " & $resp.statusCode & " for " &
+        current & ", another origin than " & url & " redirected to")
     if resp.statusCode < 200 or resp.statusCode >= 300:
       removeFile(dest)
       raise newException(IOError, "HTTP " & $resp.statusCode & " for " &

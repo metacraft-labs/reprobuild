@@ -3788,12 +3788,20 @@ suite "repro_elevation: systemd.systemTimer pure surface":
       "Sun 2026-11-01 12:25:09 EET") == posixDigestHexOfText(oneShot)
     check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
       "n/a") != posixDigestHexOfText(oneShot)
-    # Linked, aliased, indirect or generated timers are not re-enabled.
-    for st in ["linked", "alias", "indirect", "generated", "static"]:
+    # Static, generated, aliased and transient timers are not re-enabled
+    # (enable does nothing for them); a linked, indirect or runtime-only
+    # one is not enabled for the next boot, so it is (review of
+    # 0a0cb3f4a3: those three counted as enabled and never were).
+    for st in ["alias", "generated", "static", "transient"]:
       check timerObservedDigestHex(content, true, true, st, "active",
                                    "n/a") == fileDigest
+    for st in ["linked", "linked-runtime", "indirect", "enabled-runtime"]:
+      check timerObservedDigestHex(content, true, true, st, "active",
+                                   "n/a") != fileDigest
     check timerObservedDigestHex(content, false, false, "linked",
                                  "inactive", "n/a") == fileDigest
+    # A drop-in that adds a repeating trigger makes the timer repeating.
+    check timerRepeats(oneShot & "\n[Timer]\nOnCalendar=daily\n")
     # Running but not enabled, and the stopped direction.
     check timerObservedDigestHex(content, true, true, "disabled", "active",
                                  "n/a") != fileDigest

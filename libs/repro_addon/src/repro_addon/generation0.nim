@@ -492,6 +492,12 @@ const
     ## ``CPUWeight=`` / ``IOWeight=`` (``AgentCompileWeight``) to every
     ## default-weight (100) unit.
   AgentCompileWeight* = 20
+  AgentCompileOomScoreAdjust* = 500
+    ## ``MemoryMax=`` bounds the compile's own control group; it does not
+    ## keep the host's global OOM killer off the host's services when the
+    ## whole host runs short. A positive ``OOMScoreAdjust=`` makes the
+    ## compile the killer's first choice instead (systemd.exec(5)).
+    ## https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#OOMScoreAdjust=
 
 proc agentCompileBounds*(): string =
   ## The resource lines of a unit that compiles a profile.
@@ -499,7 +505,8 @@ proc agentCompileBounds*(): string =
   "MemorySwapMax=0\n" &
   "Nice=" & $AgentCompileNice & "\n" &
   "CPUWeight=" & $AgentCompileWeight & "\n" &
-  "IOWeight=" & $AgentCompileWeight & "\n"
+  "IOWeight=" & $AgentCompileWeight & "\n" &
+  "OOMScoreAdjust=" & $AgentCompileOomScoreAdjust & "\n"
 
 proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   ## ``repro-agent-fetch.service`` (spec §9.1): a dynamic user with no
