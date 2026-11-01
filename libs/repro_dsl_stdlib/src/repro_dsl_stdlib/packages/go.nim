@@ -1,5 +1,5 @@
 import repro_project_dsl
-import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/go_toolchain_pins
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
@@ -9,9 +9,18 @@ export packages_schema
 
 package go:
   provisioning:
-    nixPackage "nixpkgs#go", executablePath = "bin/go",
-      nixpkgsRev = CanonicalNixpkgsRev,
-      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # The Nix channel realises go.dev's own 1.25.4 release, the same archive
+    # as this platform's `tarball` arm below, unpacked as-is (decision 36).
+    # Not `nixpkgs#go`: nixpkgs patches the standard library to read tzdata,
+    # iana-etc and mailcap from fixed /nix/store paths, which every binary
+    # it compiles then embeds -- and a binary the catalog ships to a Debian
+    # host would look them up in a store that host does not have. With one
+    # compiler in both modes, Nix and tarball mode build identical bytes.
+    # See `nix/go-1.25.4/default.nix` and `go_toolchain_pins`.
+    nixPackage "reprobuild-stdlib-go-1.25.4",
+      executablePath = "bin/go",
+      expressionFile = "nix/go-1.25.4/default.nix",
+      lockIdentity = GoNixLockIdentity
     # Windows: go.dev's own release zip. It carries a `go/` wrapper holding
     # bin, pkg and src; the toolchain locates GOROOT relative to the
     # executable, so stripComponents=1 flattens the wrapper and keeps that

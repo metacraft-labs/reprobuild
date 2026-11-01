@@ -3732,6 +3732,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let ps = findPowerShell()"),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_go_nix_toolchain_embeds_no_store_paths.nim",
+    binary: "build/test-bin/t_go_nix_toolchain_embeds_no_store_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_go_package_extra_binaries_and_static_cgo.nim",
     binary: "build/test-bin/t_go_package_extra_binaries_and_static_cgo",
     defines: @[],
