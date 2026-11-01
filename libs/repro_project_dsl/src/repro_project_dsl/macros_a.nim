@@ -2198,14 +2198,22 @@ proc zigCrossAutoInjectShellTools(pkg: var PackageDef) =
   ## cross target through `cross_zig`, whose wrapper edge is a shell script
   ## running ``sh`` and coreutils. Those are the adapter's tools, so they
   ## are added here rather than asked of every recipe: ``sh`` and
-  ## ``coreutils`` join ``nativeBuildDeps:`` unless already declared there
-  ## (Reprobuild-Standard-Library.md, `cross_zig`, amended 2026-11-01).
+  ## ``install-file`` join ``nativeBuildDeps:`` unless already declared
+  ## there (Reprobuild-Standard-Library.md, `cross_zig`, amended 2026-11-01).
+  ## ``install-file`` is the stdlib's realization of GNU coreutils
+  ## (``packages/coreutils_install``, `nixpkgs#coreutils`), whose directory
+  ## carries ``rm``, ``mkdir`` and ``chmod``. It is not the catalog's
+  ## ``coreutils``: that name has no realization in the catalog, and inside
+  ## the catalog's own tree its from-source recipe
+  ## (``packages/source/coreutils``) is found first as a workspace sibling,
+  ## so a zig recipe there was refused in Nix mode (reprobuild-pm issue
+  ## 2026-11-01-zig-recipes-unrealisable-in-nix-mode-coreutils-has-no-realisation).
   ##
   ## Expansion time for the same reason as the Qt6 pass below: tool
   ## identities are allocated from the dependency lists the macro emits, so
-  ## a use added when the constructor runs would never be resolved. A
-  ## native build realizes only the tools its selected edges name, and no
-  ## native edge names these through this route, so it never resolves them.
+  ## a use added when the constructor runs would never be resolved. They are
+  ## resolved whenever an edge names them, which includes a native build
+  ## through zig (``go_package(staticCgo = true)``).
   var hasZig = false
   var declared: seq[string] = @[]
   for use in pkg.nativeBuildDeps:
@@ -2214,7 +2222,7 @@ proc zigCrossAutoInjectShellTools(pkg: var PackageDef) =
       hasZig = true
   if not hasZig:
     return
-  for tool in ["sh", "coreutils"]:
+  for tool in ["sh", "install-file"]:
     if tool in declared:
       continue
     pkg.nativeBuildDeps.add(PackageUseDef(

@@ -213,22 +213,23 @@ suite "cross_zig: the target table and the environment":
     check "zig ar rc '/proj/.repro/build/cross/" & Triple & "/zig/lib/libatomic.a'" in script
     check act.outputs == @["/proj" / ".repro/build/cross" / Triple / "zig"]
     check ("rm -rf '/proj/.repro/build/cross/" & Triple & "'") notin script
-    # Exactly the adapter's own tools: `sh`, `coreutils` (whose directory
-    # carries `rm` / `mkdir` / `chmod`) and `zig` -- none a recipe has to
+    # Exactly the adapter's own tools: `sh`, `install-file` (the stdlib's
+    # GNU coreutils, whose directory carries `rm` / `mkdir` / `chmod`) and
+    # `zig` -- none a recipe has to
     # declare beyond `zig`, and nothing that only resolves by sitting beside
     # some other declared tool.
-    check act.toolIdentityRefs == @["sh", "coreutils", "zig"]
+    check act.toolIdentityRefs == @["sh", "install-file", "zig"]
 
-  test "declaring zig declares the wrapper edge's sh and coreutils":
+  test "declaring zig declares the wrapper edge's sh and install-file":
     # Reprobuild-Standard-Library.md, `cross_zig` (amended 2026-11-01).
     proc natives(name: string): seq[string] =
       for pkg in registeredPackages():
         if pkg.packageName == name:
           for use in pkg.nativeBuildDeps:
             result.add(use.executableName)
-    check natives("zigOnlyProbe") == @["nim", "zig", "sh", "coreutils"]
+    check natives("zigOnlyProbe") == @["nim", "zig", "sh", "install-file"]
     # A recipe's own declaration is kept, not doubled.
-    check natives("zigWithShProbe") == @["sh", "zig", "coreutils"]
+    check natives("zigWithShProbe") == @["sh", "zig", "install-file"]
     # No zig, nothing added.
     check natives("noZigProbe") == @["nim"]
 
