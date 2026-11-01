@@ -277,6 +277,37 @@ proc tryRestartUnit*(unit: string; noBlock = false) =
   systemctlVerb("try-restart", unit, noBlock)
   ## Restart only if active (§7.3: "a restart applies only to a unit that
   ## is active when the apply reaches it").
+proc restartForChangedSecrets*(unit: string; noBlock = false): bool =
+  ## Restart ``unit`` because the secrets it loads changed: if it runs (as
+  ## `try-restart` does), and also if it has FAILED, which `try-restart`
+  ## leaves failed (systemctl(1): it does nothing to a unit that is not
+  ## running, and a failed unit is not). True when it started a failed one.
+  ##
+  ## A unit that loads credentials fails when one is missing (systemd.exec(5)
+  ## `LoadCredential=`, exit status 243/CREDENTIALS) and, with
+  ## `Restart=on-failure`, soon hits its start limit. That is what a boot
+  ## whose secrets step deferred to a running apply leaves behind (spec
+  ## ReproOS-Add-On-Mode §10.3): the consumers start before the apply
+  ## materialises their secrets. Once the secrets are back, such a unit is
+  ## started again (`reset-failed` first, which also clears the start
+  ## limit). A unit that is merely inactive -- stopped by an operator, or
+  ## never started -- is left alone, as `try-restart` leaves it. A12 round-2
+  ## review.
+  let state = unitProperty(unit, "ActiveState")
+  when mutated("failed-consumer-left-failed"):
+    # FALSIFYING MUTATION: a failed consumer is try-restarted, i.e. left
+    # failed, as before the round-2 review.
+    discard state
+    tryRestartUnit(unit, noBlock)
+    return false
+  else:
+    if state == "failed":
+      systemctlVerb("reset-failed", unit)
+      restartUnit(unit, noBlock)
+      return true
+    tryRestartUnit(unit, noBlock)
+    false
+
 proc reloadUnit*(unit: string; noBlock = false) =
   systemctlVerb("reload", unit, noBlock)
 proc disableUnit*(unit: string) = systemctlVerb("disable", unit)
@@ -537,7 +568,9 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
         # activation from here on runs the new definition.
         restoreTriggers(t.triggers)
         startUnit(t.unit, noBlock)
-    of tvRestart: tryRestartUnit(t.unit, noBlock)
+    of tvRestart:
+      if t.secretsChanged: discard restartForChangedSecrets(t.unit, noBlock)
+      else: tryRestartUnit(t.unit, noBlock)
     of tvReload: reloadUnit(t.unit, noBlock)
     else: discard
   when mutated("exclusive-as-plain-restart"):

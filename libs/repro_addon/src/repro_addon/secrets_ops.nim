@@ -353,8 +353,10 @@ proc reassertSecrets*(stateDir: string; l: SecretsLayout): SecretsCheck =
   ## what a crash may have cut short (the commit's envelope copy and key
   ## retirement, a rotation's public half and ledger digests), then
   ## re-materialise the current generation's secrets from its own
-  ## envelope, and report every running unit that loads credentials older
-  ## than its secrets (a pending restart). Never raises.
+  ## envelope, start again every unit that FAILED before the secrets it
+  ## loads were materialised by this run, and report every running unit
+  ## that loads credentials older than its secrets (a pending restart).
+  ## Never raises.
   result.status = "ok"
   var (hostLock, holder, _) = tryAcquireHostApplyLock(
     "re-materialising secrets")
@@ -392,8 +394,32 @@ proc reassertSecrets*(stateDir: string; l: SecretsLayout): SecretsCheck =
       (if changed.len > 0: ", materialised for " & changed.join(", ") else: ""))
     for r in profile.resources:
       if r.kind != srkSystemdSystemUnit or r.suCredentials.len == 0: continue
-      if not unitIsActive(r.suName): continue
       let svc = credentialServiceOf(r.suName)
+      if svc in changed and unitProperty(r.suName, "ActiveState") == "failed":
+        # A consumer that failed for want of the secrets this run has just
+        # put back -- the boot's secrets step deferred to an apply and the
+        # unit started before anything materialised them -- is started
+        # again, queued (`--no-block`): this runs on the boot path. A unit
+        # that runs is left to the drift report below, and one that is
+        # merely inactive stays so. An exclusive unit is started only by a
+        # switch, which first confirms its predecessors exited (§7.3), so
+        # here it is reported. A12 round-2 review.
+        if isExclusiveUnit(r):
+          result.findings.add("drift: " & r.suName & " failed before its " &
+            "secrets were materialised; it is exclusive, so only an apply " &
+            "starts it again")
+          if result.status == "ok": result.status = "drift"
+          continue
+        try:
+          if restartForChangedSecrets(r.suName, noBlock = true):
+            result.notes.add("secrets: restarted " & r.suName & ", which " &
+              "had failed before its secrets were materialised")
+        except CatchableError as e:
+          result.findings.add("degraded: secrets: restarting the failed " &
+            r.suName & " failed: " & e.msg)
+          result.status = "degraded"
+        continue
+      if not unitIsActive(r.suName): continue
       let since = unitStartedAt(r.suName)
       let newest = runDirMtimes(l, svc)
       if since > 0 and newest > since:

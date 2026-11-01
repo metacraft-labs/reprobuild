@@ -19,7 +19,7 @@
 ## `repro system add/remove/list/...` profile-editing family is
 ## deferred to a later phase.
 
-import std/[algorithm, options, os, sequtils, sets, strutils, times]
+import std/[algorithm, options, os, sequtils, sets, strutils, tables, times]
 
 import repro_core/file_lock
 import repro_core/host_apply_lock
@@ -1017,7 +1017,12 @@ proc runInfraApply(args: openArray[string]): int =
   # (`FullHostPendingRestartsPath`): an apply that stops early (a stale
   # plan, an apply error, drift) leaves them for the next one, which finds
   # the secrets already current and would otherwise restart nothing.
+  # "Already": each pending unit's systemd invocation id is read once the
+  # secrets are materialised, and a unit the apply itself restarted or
+  # started (its unit file changed, `enable --now`) has a new one and runs
+  # the new secrets, so it is not restarted a second time.
   var secretConsumers: seq[string]
+  var invocationBefore: Table[string, string]
   when defined(linux):
     let fullProfile = parseSystemProfile(profileText)
     let layout = addon_secrets.defaultSecretsLayout()
@@ -1053,6 +1058,14 @@ proc runInfraApply(args: openArray[string]): int =
           echo "  secrets      : " & line
       except CatchableError as e:
         stderr.writeLine("repro infra apply: secrets at boot: " & e.msg)
+        return 1
+      # Which instance of each pending unit runs now, after the secrets
+      # were materialised: one the apply starts from here on loads them.
+      try:
+        for u in readPendingRestarts() & secretConsumers:
+          invocationBefore[u] = addon_switch.unitProperty(u, "InvocationID")
+      except CatchableError as e:
+        stderr.writeLine("repro infra apply: secrets: " & e.msg)
         return 1
 
   var opts: ApplyOptions
@@ -1119,7 +1132,13 @@ proc runInfraApply(args: openArray[string]): int =
   if applyResult.driftCount > 0 or applyResult.errorCount > 0:
     return 1
   # A unit whose secrets changed reads them only at start: restart it if
-  # it runs (`try-restart` leaves a stopped unit stopped). This apply's
+  # it runs, and start it again if it has failed -- a consumer whose
+  # credential was missing (the boot's secrets step deferred to this
+  # apply) fails, and `try-restart` would leave it failed
+  # (``restartForChangedSecrets``, A12 round-2 review); a unit that is
+  # merely stopped stays stopped. Not a unit the apply has already
+  # restarted or started since the secrets were materialised (its
+  # invocation id changed, see above): it runs them. This apply's
   # consumers and every one an earlier, unsuccessful apply left pending; a
   # pending unit the profile no longer declares is dropped (it is not
   # running this profile's secrets any more). What is restarted leaves the
@@ -1144,8 +1163,17 @@ proc runInfraApply(args: openArray[string]): int =
         left.add(unit)
         continue
       try:
-        addon_switch.tryRestartUnit(unit)
-        echo "  restarted    : " & unit & " (its secrets changed)"
+        let current = addon_switch.unitProperty(unit, "InvocationID")
+        if unit in invocationBefore and current.len > 0 and
+            current != invocationBefore[unit] and
+            addon_switch.unitIsActive(unit):
+          echo "  restarted    : " & unit & " (by the apply, after its " &
+            "secrets changed)"
+        elif addon_switch.restartForChangedSecrets(unit):
+          echo "  restarted    : " & unit & " (it had failed; its secrets " &
+            "changed)"
+        else:
+          echo "  restarted    : " & unit & " (its secrets changed; if it runs)"
       except CatchableError as e:
         failed = "restarting " & unit & " for its changed secrets failed: " &
           e.msg

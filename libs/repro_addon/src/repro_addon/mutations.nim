@@ -381,6 +381,13 @@
 ## ``unit-prefix-unchecked``                  a unit that runs from the
 ##                                            prefix of an activity edge its
 ##                                            host does not select is planned
+## ``unit-prefix-bodies-only``                that check reads unit bodies
+##                                            only, not drop-ins, health
+##                                            checks, files or accounts
+## ``failed-consumer-left-failed``            a unit whose secrets an apply
+##                                            or the re-assert materialised
+##                                            is try-restarted even when it
+##                                            has failed (left failed)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -512,7 +519,14 @@ const
                           "full-host-boot-secrets-unlocked",
                           # A12 review finding 12: a unit may run from a
                           # prefix its host does not realise.
-                          "unit-prefix-unchecked"]
+                          "unit-prefix-unchecked",
+                          # A12 round-2 review: the round-1 check, which
+                          # read unit bodies only.
+                          "unit-prefix-bodies-only",
+                          # A12 round-2 review: a consumer that failed for
+                          # want of its secrets is try-restarted (left
+                          # failed) once they are back.
+                          "failed-consumer-left-failed"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

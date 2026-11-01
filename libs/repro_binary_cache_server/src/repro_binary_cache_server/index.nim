@@ -29,6 +29,10 @@
 ## publishing).
 
 import std/[os, sets, strutils, tempfiles]
+when defined(windows):
+  import std/winlean
+else:
+  import std/posix
 
 import blake3
 import repro_local_store
@@ -294,6 +298,41 @@ proc close*(s: BinaryCacheServerState) =
 # Manifest CRUD.
 # ---------------------------------------------------------------------------
 
+const ManifestFileMode* = {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead}
+  ## 0644: what a stored manifest is readable as (see ``storeManifest``).
+
+proc syncManifestFile(f: File; path: string) =
+  ## Push the temporary manifest's bytes to the disk before it is renamed
+  ## into place. On macOS ``F_FULLFSYNC`` also flushes the drive's cache
+  ## (https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html),
+  ## falling back to ``fsync`` where the filesystem refuses it.
+  when defined(windows):
+    if flushFileBuffers(Handle(getOsFileHandle(f))) == 0:
+      raiseOSError(osLastError(), "FlushFileBuffers " & path)
+  else:
+    let fd = getFileHandle(f)
+    when defined(macosx):
+      const FFullFsync = cint(51)
+      if posix.fcntl(fd, FFullFsync) == 0: return
+    if posix.fsync(fd) != 0:
+      raiseOSError(osLastError(), "fsync " & path)
+
+proc syncManifestDir(dir: string) =
+  ## Make the rename durable: on POSIX a rename is a change to the
+  ## directory, persisted only once the directory is synced. Windows has no
+  ## directory sync; NTFS journals the rename itself.
+  when not defined(windows):
+    let fd = posix.open(dir.cstring, O_RDONLY or O_CLOEXEC)
+    if fd < 0:
+      raiseOSError(osLastError(), "open directory " & dir)
+    try:
+      # EINVAL: a filesystem that cannot sync a directory still renamed
+      # atomically, which is all it can offer.
+      if posix.fsync(fd) != 0 and osLastError() != OSErrorCode(EINVAL):
+        raiseOSError(osLastError(), "fsync directory " & dir)
+    finally:
+      discard posix.close(fd)
+
 proc storeManifest*(s: BinaryCacheServerState;
                     m: BinaryCacheManifest): string =
   ## Writes the encoded manifest envelope under
@@ -318,13 +357,23 @@ proc storeManifest*(s: BinaryCacheServerState;
   # final path: a concurrent reader (`loadManifest`, a substituting client)
   # sees the old manifest or the new one, never a partial write, and a
   # republish replaces whatever sat at the path -- a planted symlink
-  # included -- instead of writing through it.
+  # included -- instead of writing through it. `createTempFile` creates the
+  # file 0600; a manifest is public, signed data that every reader of the
+  # cache directory (a static file server, another account's client) must
+  # be able to read, so it gets 0644 as `writeFile` gave it before the
+  # rename was introduced (A12 round-2 review of 0fff46bb1a). The file is
+  # synced before the rename and the directory after it, so a power cut
+  # leaves the old manifest or the whole new one, never an empty file under
+  # the final name (a rename can reach the disk before the data does).
   let (tmpFile, tmpPath) = createTempFile(".manifest-", ".tmp", parentDir(path))
   try:
     tmpFile.write(content)
     tmpFile.flushFile()
+    syncManifestFile(tmpFile, tmpPath)
     tmpFile.close()
+    setFilePermissions(tmpPath, ManifestFileMode)
     moveFile(tmpPath, path)
+    syncManifestDir(parentDir(path))
   except CatchableError:
     try: tmpFile.close()
     except CatchableError: discard

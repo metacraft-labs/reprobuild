@@ -98,11 +98,13 @@ package go:
       extractPath = "go",
       cpu = "aarch64",
       os = "linux"
-    # Go 1.25.4 for Linux: the pinned nixpkgs' `go`, as go.dev's release
-    # archives, so a recipe that needs one exact Go (`go ==1.25.4`: geth,
-    # whose binary digest is pinned) builds with the same release in the
-    # Nix and the tarball modes (A12 review finding 12). Digests from
-    # https://go.dev/dl/?mode=json&include=all.
+    # Go 1.25.4 for Linux in tarball mode: the same go.dev release archives
+    # the Nix channel above unpacks (`nix/go-1.25.4/default.nix`, decision
+    # 36), so a recipe that needs one exact Go (`go ==1.25.4`: geth and
+    # prysm, whose binary digests are pinned) builds with byte-identical
+    # toolchains in both modes. Digests from
+    # https://go.dev/dl/?mode=json&include=all, the same ones
+    # `go_toolchain_pins` gives the Nix expression.
     tarball url = "https://go.dev/dl/go1.25.4.linux-amd64.tar.gz",
       sha256 = "9fa5ffeda4170de60f67f3aa0f824e426421ba724c21e133c1e35d6159ca1bec",
       archiveType = "tar.gz",

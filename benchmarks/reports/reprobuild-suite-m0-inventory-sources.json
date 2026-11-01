@@ -8754,7 +8754,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_system_activity_selects_its_store_packages.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9439,7 +9439,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_binary_cache_server/tests/t_store_manifest_replaces_atomically.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28972,7 +28972,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_validator_safety_checks.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

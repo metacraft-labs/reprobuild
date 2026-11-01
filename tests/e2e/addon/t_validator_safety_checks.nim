@@ -10,7 +10,7 @@
 ##
 ## *Mocking.* None: pure functions over literal records.
 
-import std/[json, tables, unittest]
+import std/[json, strutils, tables, unittest]
 
 import ./validator_safety
 
@@ -123,6 +123,28 @@ suite "validator_safety":
       "seen 11 2.0 - -\n"
     check cgroupOverlaps(stray).len == 1
     expect ValueError: discard cgroupOverlaps("cg u.service frozen\n")
+
+  test "monitor coverage: an overflow fails closed; scan gaps and empty incarnations are counted":
+    let clean = "cg u.service create 1\nscan 0.006\nseen 10 1.0 u.service 1\n" &
+      "scan 0.012\ncg u.service delete\ncg u.service create 2\n" &
+      "cg u.service delete\n"
+    check cgroupOverlaps(clean).len == 0
+    let st = monitorStats(clean)
+    check st.overflows == 0
+    check st.longestScanGapSec == 0.012
+    check st.incarnations == 2
+    check st.withoutValidator == 1
+    # Events were dropped between two incarnations that look handed over in
+    # order: the order no longer shows it, so it is reported.
+    let lost = "cg u.service create 1\nseen 10 1.0 u.service 1\n" &
+      "cg overflow\ncg u.service delete\ncg v.service create 2\n" &
+      "seen 11 2.0 v.service 2\n"
+    let ov = cgroupOverlaps(lost)
+    check ov.len == 1
+    check "IN_Q_OVERFLOW" in ov[0]
+    check monitorStats(lost).overflows == 1
+    check parseLifetimes(lost).len == 2
+    expect ValueError: discard monitorStats("scan\n")
 
   test "databasesHeld: distinct databases, and db lines do not disturb lifetimes":
     let log = "seen 10 1.0\ndb 10 2049:77 /var/lib/x/validator.db\n" &

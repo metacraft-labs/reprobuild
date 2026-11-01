@@ -9,6 +9,14 @@
 ## the path was followed. It now writes a temporary file in the same
 ## directory and renames it over the path.
 ##
+## The A12 round-2 review of that change: the temporary file came from
+## `createTempFile`, which creates it 0600, so every manifest became
+## unreadable to any other reader of the cache directory; and nothing was
+## synced, so a power cut could leave an empty file under the final name.
+## A stored manifest is 0644 whatever the umask, and the file and its
+## directory are synced (fsync is not observable short of a power cut;
+## `strace -e trace=fsync` of this test shows the two calls per store).
+##
 ## Real files, a real server state and a real signed manifest; no mocks.
 
 import std/[os, tempfiles, unittest]
@@ -82,3 +90,19 @@ suite "storeManifest":
     discard openBinaryCacheServer(root)
     check not fileExists(stale)
     check fileExists(path)
+
+  when defined(posix):
+    test "a stored manifest is 0644, whatever the umask":
+      let root = createTempDir("store-manifest-", "")
+      defer: removeDir(root)
+      let s = openBinaryCacheServer(root)
+      let kp = peerAuth.generateKeypair()
+      for (mask, version) in [(Mode(0o077), "4"), (Mode(0o022), "5"),
+                              (Mode(0o002), "6")]:
+        let old = umask(mask)
+        let path = s.storeManifest(sampleManifest(kp, version))
+        discard umask(old)
+        var st: Stat
+        check lstat(path.cstring, st) == 0
+        check (int(st.st_mode) and 0o7777) == 0o644
+        check getFilePermissions(path) == ManifestFileMode

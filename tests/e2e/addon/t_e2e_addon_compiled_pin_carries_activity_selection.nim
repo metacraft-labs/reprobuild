@@ -64,6 +64,11 @@ proc present(g: Guest; path: string): bool = g.exec("test -e " & path).exitCode 
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
+  # Which engine this verdict is about (A12 round-2 review, as
+  # e2e_addon_engine_agent_enforces_a8 records it since ec187a1693): the
+  # store path of the closure the producer and the guest's profile compiler
+  # ran (REPRO_ADDON_ENGINE_CLOSURE), so records are told apart by it alone.
+  record["engineClosure"] = %engine
   # 1. The selection the producer signs is the one the host compiles.
   let pin = producerCompile(engine, Source, systemMode = "addOn",
                             systemActivities = @["backup"])

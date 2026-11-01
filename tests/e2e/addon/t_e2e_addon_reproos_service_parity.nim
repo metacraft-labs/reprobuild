@@ -45,7 +45,13 @@
 ## Then a new admin token is put, an apply with a stale plan id stops early
 ## after materialising it, and the next good apply must still restart
 ## vaultwarden onto the new token (A12 review finding 1; falsifying build
-## of the engine ``full-host-restart-forgets-pending``). A difference
+## of the engine ``full-host-restart-forgets-pending``). Then, on both
+## guests, vaultwarden's materialised token is removed and the unit
+## restarted until it fails (what a boot whose secrets step deferred to an
+## apply leaves); the full guest's next apply, and the add-on guest's
+## ``repro system addon reassert``, must materialise the token and start
+## the failed unit again (A12 round-2 review; falsifying builds of the
+## engine and of the add-on ``failed-consumer-left-failed``). A difference
 ## fails the gate unless the ``add-on-debian`` realisation profile lists it
 ## as ignored with a reason (``addOnDebianProfile().realisationDifferences``);
 ## the record lists each difference with the entry that excused it.
@@ -345,6 +351,55 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
        shaOf(credPath) == shaOf(tokenPath) and shaOf(credPath) != tokenBefore,
        good.stdout & good.stderr & "\ncred " & shaOf(credPath) & " run " &
        shaOf(tokenPath) & " started " & started0 & " -> " & startedOf())
+  # --- A consumer that failed for want of its secret (A12 round-2 review):
+  # what a boot whose secrets step deferred to a running apply leaves --
+  # vaultwarden starts before its credential is back, fails to load it and
+  # hits its start limit. Once the secret is materialised again, by the full
+  # guest's next apply and by the add-on guest's re-assert, vaultwarden must
+  # run again: `try-restart` would leave it failed. Falsifying builds (the
+  # engine and the add-on artefact) `failed-consumer-left-failed`.
+  proc probeOf(g: Guest): string =
+    (if g == add: addRepro else: eng) & " system addon probe "
+  proc stateOf(g: Guest): string =
+    g.exec("systemctl show -P ActiveState vaultwarden.service").stdout.strip()
+  proc failVaultwarden(g: Guest): string =
+    ## Remove the materialised token and restart the consumer until systemd
+    ## gives up on it; the unit's state when it settles.
+    discard g.exec("rm -f " & tokenPath & " && systemctl restart " &
+                   "vaultwarden.service")
+    let until = epochTime() + 90
+    while epochTime() < until and g.stateOf() != "failed": sleep(1000)
+    g.stateOf()
+  proc waitActive(g: Guest): bool =
+    let until = epochTime() + 180
+    while epochTime() < until:
+      if g.stateOf() == "active" and g.exec(probeOf(g) &
+          quoteShell("http://127.0.0.1:8000/alive")).exitCode == 0:
+        return true
+      sleep(3000)
+    false
+  let fullFailed = full.failVaultwarden()
+  step("without its credential vaultwarden fails on the full guest",
+       fullFailed == "failed", fullFailed & "\n" &
+       full.serviceJournal(["vaultwarden.service"]))
+  let again = full.exec(env & applyCmd, timeoutSec = 3600)
+  step("the full guest's next apply materialises the token and starts the " &
+       "failed vaultwarden again",
+       again.exitCode == 0 and shaOf(tokenPath) == shaOf(credPath) and
+       full.waitActive(),
+       again.stdout & again.stderr & "\nstate " & full.stateOf() & "\n" &
+       full.serviceJournal(["vaultwarden.service"]))
+  let addFailed = add.failVaultwarden()
+  step("without its credential vaultwarden fails on the add-on guest",
+       addFailed == "failed", addFailed & "\n" &
+       add.serviceJournal(["vaultwarden.service"]))
+  let ra = add.exec(addRepro & " system addon reassert", timeoutSec = 600)
+  step("the add-on guest's re-assert materialises the token and starts the " &
+       "failed vaultwarden again",
+       ra.exitCode == 0 and add.exec("test -s " & tokenPath).exitCode == 0 and
+       add.waitActive(),
+       ra.stdout & ra.stderr & "\nstate " & add.stateOf() & "\n" &
+       add.serviceJournal(["vaultwarden.service"]))
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var add, full: Guest
