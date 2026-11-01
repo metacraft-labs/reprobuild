@@ -12,10 +12,18 @@
 # product build. Exit 0 only when the gate is green without the mutation
 # and red with it.
 set -euo pipefail
+# A verdict taken under a foreign preload is about that preload, not this
+# tree: an agent session's command-trace shim printed a line of its own on a
+# tool's output and read t_addon_preflight_needs_a_c_compiler green while it
+# was red. Unsetting the variable is not enough -- a library already loaded
+# into this shell re-inserts itself into every child at exec -- so the shared
+# guard re-executes this script once in a shell started without it (keeping
+# reprobuild's own monitor shim), and refuses when it comes back. It runs
+# before the `cd`, so the re-exec finds this script by the path it was given.
+# shellcheck source=scripts/lib/foreign_preload.sh
+source "$(dirname "$0")/lib/foreign_preload.sh"
+foreign_preload_guard "$@"
 cd "$(dirname "$0")/.."
-# A verdict taken under a foreign preload is not about this tree.
-# shellcheck source=scripts/strip_foreign_preload.sh
-source scripts/strip_foreign_preload.sh
 
 test="${1:?usage: run_addon_unit_mutation.sh <test-basename> <mutation>}"
 mutation="${2:?usage: run_addon_unit_mutation.sh <test-basename> <mutation>}"

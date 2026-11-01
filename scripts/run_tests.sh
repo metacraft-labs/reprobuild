@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# A suite run under a foreign preload measures that preload, not this tree.
-# shellcheck source=scripts/strip_foreign_preload.sh
-source "$(dirname "$0")/strip_foreign_preload.sh"
 # Bootstrap-And-Self-Build B5: the legacy shell loop is compressed to
 # project-DSL graph steps. ``.#apps`` builds binaries, ``.#test-helpers``
 # builds helpers, and ``.#test-builds`` compiles every test with the HCR
