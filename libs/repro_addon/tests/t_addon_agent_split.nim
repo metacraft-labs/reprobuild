@@ -115,7 +115,16 @@ suite "agent split: the apply unit's refusals":
                  "/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/authorized_keys/root",
                  "/etc/firewalld/zones/public.xml", "/etc/systemd/networkd.conf",
                  "/etc/systemd/networkd.conf.d/x.conf", "/etc/hosts.deny",
-                 "/etc/iptables/rules.v4", "/etc/systemd/network/10-a.link"]:
+                 "/etc/iptables/rules.v4", "/etc/systemd/network/10-a.link",
+                 "/etc/nsswitch.conf",
+                 # The console gettys' unit files and drop-in directories.
+                 "/etc/systemd/system/getty@.service",
+                 "/etc/systemd/system/getty@.service.d/autologin.conf",
+                 "/etc/systemd/system/getty@tty1.service.d/x.conf",
+                 "/etc/systemd/system/serial-getty@ttyS0.service.d/x.conf",
+                 "/etc/systemd/system/console-getty.service",
+                 "/etc/systemd/system/console-getty.service.d/x.conf",
+                 "/etc/systemd/system/container-getty@.service.d/x.conf"]:
       checkpoint path
       let p = SystemProfile(resources: @[SystemResource(kind: srkFsSystemFile,
         address: "systemFile:" & path, sfPath: path)])
@@ -158,6 +167,13 @@ suite "agent split: the apply unit's refusals":
       kind: srkSystemdSystemDropIn, address: "dropIn:my-login",
       diUnit: "my-login.service", diName: "10-x.conf")])
     check "sshd.service" in managementPathRefusal(dropIn, aliased)
+    # A drop-in for a unit systemd knows as the console getty.
+    let consoleNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} =
+      if u == "my-console.service": @["my-console.service", "console-getty.service"] else: @[]
+    let consoleDropIn = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemDropIn, address: "dropIn:my-console",
+      diUnit: "my-console.service", diName: "10-x.conf")])
+    check "console-getty.service" in managementPathRefusal(consoleDropIn, consoleNames)
     check managementPathRefusal(dropIn, noNames) == ""
 
   test "a unit is matched by the Alias= its own [Install] would create":
@@ -165,6 +181,11 @@ suite "agent split: the apply unit's refusals":
       kind: srkSystemdSystemUnit, address: "unit:fw", suName: "fw.service",
       suContent: "[Service]\nExecStart=/bin/true\n[Install]\nAlias=nftables.service\n")])
     check "nftables.service" in managementPathRefusal(installAlias, noNames)
+    # The console login by alias, too.
+    let gettyAlias = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemUnit, address: "unit:con", suName: "con.service",
+      suContent: "[Service]\nExecStart=/bin/true\n[Install]\nAlias=console-getty.service\n")])
+    check "console-getty.service" in managementPathRefusal(gettyAlias, noNames)
     let plain = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdSystemUnit, address: "unit:app", suName: "app.service",
       suContent: "[Service]\nExecStart=/bin/true\n[Install]\nAlias=app2.service\n")])
@@ -175,6 +196,14 @@ suite "agent split: the apply unit's refusals":
       kind: srkSystemdSystemDropIn, address: "dropIn:ssh@", diUnit: "ssh@x.service",
       diName: "10-x.conf")])
     check "ssh@x.service" in managementPathRefusal(instance, noNames)
+    # The console and serial gettys' instances.
+    for unit in ["getty@tty1.service", "serial-getty@ttyS0.service",
+                 "container-getty@1.service"]:
+      checkpoint unit
+      let getty = SystemProfile(resources: @[SystemResource(
+        kind: srkSystemdSystemDropIn, address: "dropIn:" & unit, diUnit: unit,
+        diName: "10-x.conf")])
+      check unit in managementPathRefusal(getty, noNames)
     let other = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdSystemDropIn, address: "dropIn:app@", diUnit: "app@x.service",
       diName: "10-x.conf")])

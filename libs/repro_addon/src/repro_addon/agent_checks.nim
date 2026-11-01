@@ -58,6 +58,10 @@ const ManagementPathFiles* = [
   "/etc/security/access.conf", "/etc/security/limits.conf",
   "/etc/security/time.conf", "/etc/security/namespace.conf",
   "/etc/security/faillock.conf", "/etc/securetty",
+  # Name service switch: every login (sshd's and the console's) resolves
+  # its user, groups and shell through it, so a `passwd: none` line, or a
+  # source that cannot answer, locks every user out.
+  "/etc/nsswitch.conf",
   # The firewall and network classes' single files.
   "/etc/nftables.conf", "/etc/network/interfaces",
   "/etc/systemd/networkd.conf"]
@@ -69,7 +73,14 @@ const ManagementPathPrefixes* = [
   "/etc/security/namespace.d/",
   "/etc/nftables.d/", "/etc/iptables/", "/etc/ufw/", "/etc/firewalld/",
   "/etc/systemd/network/", "/etc/systemd/networkd.conf.d/", "/etc/netplan/",
-  "/etc/network/interfaces.d/", "/etc/NetworkManager/"]
+  "/etc/network/interfaces.d/", "/etc/NetworkManager/",
+  # The console gettys' unit files and drop-in directories as files (the
+  # unit names below catch a drop-in object; these catch a plain file
+  # written there): `getty@` and `serial-getty@` cover the templates, their
+  # instances (`getty@tty1.service`) and every `.d/` directory of either.
+  "/etc/systemd/system/getty@", "/etc/systemd/system/serial-getty@",
+  "/etc/systemd/system/container-getty@",
+  "/etc/systemd/system/console-getty.service"]
   ## Path prefixes of the same classes (a directory, or a name stem such as
   ## the host keys ``/etc/ssh/ssh_host_*``).
 const ManagementPathUnits* = [
@@ -78,7 +89,12 @@ const ManagementPathUnits* = [
   "iptables.service", "ip6tables.service", "ufw.service",
   "firewalld.service", "systemd-networkd.service", "systemd-networkd.socket",
   "systemd-networkd-wait-online.service", "NetworkManager.service",
-  "NetworkManager-wait-online.service", "networking.service"]
+  "NetworkManager-wait-online.service", "networking.service",
+  # The console login: if sshd is lost, a getty on the console or a serial
+  # line is the way back in (spec §9.1, "what can lock sshd's or the
+  # console's users out"). Templates match their instances (templateOf).
+  "getty@.service", "serial-getty@.service", "console-getty.service",
+  "container-getty@.service"]
   ## Units of the management path. A unit or drop-in is matched by every
   ## name systemd knows it under (its id and aliases), and by the aliases
   ## its own ``[Install]`` section would create, never by the text alone.
