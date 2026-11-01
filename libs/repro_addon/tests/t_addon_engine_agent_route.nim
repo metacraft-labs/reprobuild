@@ -18,7 +18,7 @@
 ## state directory (``isAddonHost``), which a test writes on the real
 ## filesystem; the route reads nothing else.
 
-import std/[os, tempfiles, unittest]
+import std/[os, posix, strutils, tempfiles, unittest]
 
 import repro_addon/addon_apply
 import repro_addon/agent_switch
@@ -60,3 +60,39 @@ suite "the engine agent's route on an add-on host":
       earRefuseSharedState
     createSymlink(addonState, tmp / "alias")
     check engineAgentRoute(addonState, tmp / "alias") == earRefuseSharedState
+
+suite "an untrusted state-directory pointer refuses, never routes around":
+  # Falsifier: ``engine-agent-ignores-untrusted-pointer`` reads an untrusted
+  # pointer as none (the old fallback to the default directory), and the
+  # refusal below goes red.
+  test "a group-writable pointer refuses; a trusted one routes to the switch":
+    let tmp = createTempDir("engine-agent-route-pointer-", "")
+    defer: removeDir(tmp)
+    let addon = tmp / "system"
+    fakeAddonHost(addon)
+    let pointer = tmp / "state-dir"
+    writeFile(pointer, addon & "\n")
+    let me = int(getuid())
+    # As bootstrap writes it (owner, 0644): trusted, the add-on's directory.
+    setFilePermissions(pointer, {fpUserRead, fpUserWrite, fpGroupRead,
+                                 fpOthersRead})
+    let ok = hostAddonStateDirChecked(pointer, me)
+    check ok.untrusted == ""
+    check ok.dir == addon
+    check engineAgentRoute(ok.dir, tmp / "agent", ok.untrusted) == earAddonSwitch
+    # Writable by its group: not trusted, and the tick is refused -- not
+    # routed to the plain apply on the default directory.
+    setFilePermissions(pointer, {fpUserRead, fpUserWrite, fpGroupRead,
+                                 fpGroupWrite, fpOthersRead})
+    let bad = hostAddonStateDirChecked(pointer, me)
+    check "writable by group or others" in bad.untrusted
+    check engineAgentRoute(bad.dir, tmp / "agent", bad.untrusted) ==
+      earRefuseUntrustedPointer
+    # Owned by someone else (the test cannot chown, so it names another
+    # owner): not trusted either.
+    setFilePermissions(pointer, {fpUserRead, fpUserWrite, fpGroupRead,
+                                 fpOthersRead})
+    let other = hostAddonStateDirChecked(pointer, me + 1)
+    check "owned by uid" in other.untrusted
+    check engineAgentRoute(other.dir, tmp / "agent", other.untrusted) ==
+      earRefuseUntrustedPointer

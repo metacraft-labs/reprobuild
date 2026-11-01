@@ -50,6 +50,17 @@ proc hostAddonStateDir*(pointer = AddonStateDirPointer): string =
   let recorded = readAddonStateDirPointer(pointer)
   if recorded.len > 0: recorded else: DefaultStateDir
 
+proc hostAddonStateDirChecked*(pointer = AddonStateDirPointer; owner = 0):
+    tuple[dir, untrusted: string] =
+  ## ``hostAddonStateDir`` with the reason the recorded pointer is not
+  ## trusted (``untrusted``; "" when it is trusted or there is none). A
+  ## pointer that exists is bootstrap's mark that this is an add-on host;
+  ## one that is not trusted (owned by another user, writable by group or
+  ## others, a symbolic link) must not silently turn into "no add-on here".
+  let r = readAddonStateDirPointerChecked(pointer, owner)
+  result.untrusted = r.why
+  result.dir = if r.dir.len > 0: r.dir else: DefaultStateDir
+
 type EngineAgentRoute* = enum
   ## How the full engine's `repro deploy-agent` applies on this host.
   earPlainApply      ## not an add-on host: the ordinary `repro infra apply`
@@ -58,6 +69,10 @@ type EngineAgentRoute* = enum
   earRefuseSharedState
     ## an add-on host whose agent was given the add-on's own state
     ## directory as its ``--state-dir``: refused, nothing applied
+  earRefuseUntrustedPointer
+    ## the add-on's state-directory pointer exists but is not trusted:
+    ## refused, nothing applied -- it cannot say where the add-on's state
+    ## is, and it says this host is an add-on host
 
 proc samePath(a, b: string): bool =
   ## Whether ``a`` and ``b`` name one directory: the same file when both
@@ -70,7 +85,8 @@ proc samePath(a, b: string): bool =
     discard
   normalizedPath(absolutePath(a)) == normalizedPath(absolutePath(b))
 
-proc engineAgentRoute*(addonState, agentStateDir: string): EngineAgentRoute =
+proc engineAgentRoute*(addonState, agentStateDir: string;
+                       pointerUntrusted = ""): EngineAgentRoute =
   ## The route of one engine agent tick (spec §9, decision 29). On an
   ## add-on host every agent apply is an A8 apply. An agent whose own
   ## state directory IS the add-on's has no separate state to keep its
@@ -79,6 +95,15 @@ proc engineAgentRoute*(addonState, agentStateDir: string): EngineAgentRoute =
   ## no attestation block, a compile in this root process, no
   ## management-path, prefix or pin check -- so it is refused instead, and
   ## never routed around the A8 rules.
+  ##
+  ## ``pointerUntrusted`` is why bootstrap's state-directory pointer was not
+  ## trusted (``hostAddonStateDirChecked``). A pointer exists only on an
+  ## add-on host; an untrusted one used to read as "no pointer", so the
+  ## default directory was probed, found empty, and the tick took the plain
+  ## apply. It is refused instead: an A8 apply or none (decision 29).
+  if pointerUntrusted.len > 0:
+    when not agentMutated("engine-agent-ignores-untrusted-pointer"):
+      return earRefuseUntrustedPointer
   if not isAddonHost(addonState):
     return earPlainApply
   if samePath(addonState, agentStateDir):
