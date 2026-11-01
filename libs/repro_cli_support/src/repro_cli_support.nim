@@ -75128,6 +75128,14 @@ type
       ## The policy's ``ci_trust`` (``advisory`` when none is recorded).
     branch*: string
       ## The checked-out branch the rule was matched for, as a gate names it.
+    policyName*: string
+      ## The policy's declared name.
+    policyPackage*: string
+      ## The package exporting the policy, named as its ``repro.lock``
+      ## dependency entry. Empty when the snapshot names none.
+    policyPin*: string
+      ## That dependency's locked revision, which is what pins the policy. Empty
+      ## when the lock has no entry for the package.
 
 proc checkedOutPushPolicy*(repoPath: string): CheckedOutPushPolicy =
   ## The push policy of ``repoPath``'s checked-out branch, read from the
@@ -75160,6 +75168,17 @@ proc checkedOutPushPolicy*(repoPath: string): CheckedOutPushPolicy =
       result.detail = CommittedLockFileName & " records no certificate policy"
       return
     result.present = true
+    result.policyName = read.policy.name
+    result.policyPackage = read.policy.package
+    if read.policy.package.len > 0:
+      # The pin is reported, never judged: a lock whose dependency table does
+      # not parse is the lock row's finding, not a reason to lose the policy.
+      try:
+        for dep in parseLockedDepsAt(text, repoPath).deps:
+          if dep.name == read.policy.package:
+            result.policyPin = dep.coordinates.revision
+      except CatchableError:
+        discard
     let requirement = snapshotGateRequirement(read.policy, target, cgkPush)
     result.mode = requirement.mode
     result.requires = requirement.requires
@@ -75203,11 +75222,112 @@ proc healthBranchAncestry(identity: GitToolIdentity; abs: string;
     result.diagnostic = "cannot compare with " & result.comparison & ": " &
       mb.output.strip().splitLines().join(" | ")
 
-proc certificatePropagationCheck(workspaceRoot: string): HealthCheck =
-  ## The ``certificate-propagation`` row of ``repro health``. The hook body is
-  ## linked, so its presence is not in question. What can still stop
-  ## certificates reaching a gateway is each repository's own configuration,
-  ## and a push reports that only in output nobody may be reading.
+type
+  CertificatePolicyStalenessMemo = Table[string, CertificatePolicyStaleness]
+    ## One ``repro health`` run's staleness answers, by repository path:
+    ## asking evaluates the repository's recipe, and two rows ask.
+
+proc memoisedPolicyStaleness(memo: var CertificatePolicyStalenessMemo;
+                             repoPath: string): CertificatePolicyStaleness =
+  if repoPath notin memo:
+    memo[repoPath] = certificatePolicyStaleness(repoPath)
+  memo[repoPath]
+
+proc currentRepositoryCertificateState(workspaceRoot: string;
+    memo: var CertificatePolicyStalenessMemo):
+    tuple[text: string; data: JsonNode; stale: bool; remedy: string] =
+  ## What the certificate line says about the repository the command runs in:
+  ## the policy its ``repro.lock`` records, that policy's pin, whether the
+  ## snapshot is stale, and whether the hook that carries its notes is there.
+  ##
+  ## "The repository" is the one holding the working directory, and only when
+  ## it is inside the workspace being diagnosed. ``--workspace-root`` from
+  ## elsewhere asks about that workspace, and a verdict on an unrelated
+  ## checkout would read as a verdict on it.
+  result.data = newJNull()
+  let top = gitTopLevel(getCurrentDir())
+  if top.len == 0 or not pathIsInside(top, workspaceRoot):
+    result.text = "no current repository in this workspace"
+    return
+  let label = top.lastPathPart
+  var hook = "could not be inspected"
+  var hookInstalled = false
+  try:
+    hookInstalled = isReprobuildVcsHook(hookPath(gitHooksDir(top), "pre-push"),
+      "pre-push")
+    hook = if hookInstalled: "installed" else: "MISSING"
+  except CatchableError as err:
+    hook = "could not be inspected (" & err.msg & ")"
+  let policy = checkedOutPushPolicy(top)
+  var state = ""
+  var staleness: CertificatePolicyStaleness
+  var stalenessError = ""
+  try:
+    staleness = memoisedPolicyStaleness(memo, top)
+  except CatchableError as err:
+    stalenessError = err.msg
+  if stalenessError.len > 0:
+    result.stale = true
+    result.remedy = "repro lock refresh " & quoteShell(top)
+    state = "snapshot staleness UNKNOWN (" & stalenessError & ")"
+  elif staleness.stale:
+    result.stale = true
+    result.remedy = staleness.remedy
+    state = "snapshot STALE (" & staleness.detail & ")"
+  elif policy.present:
+    state = "snapshot current"
+  var policyText = ""
+  if policy.malformed:
+    policyText = "policy unreadable: " & policy.detail
+  elif not policy.present:
+    policyText = "no policy: " & policy.detail
+  else:
+    let pin =
+      if policy.policyPackage.len == 0: "no package named, so no pin"
+      elif policy.policyPin.len == 0: "from " & policy.policyPackage &
+        ", which " & CommittedLockFileName & " does not pin"
+      else: "from " & policy.policyPackage & " pinned at " & policy.policyPin
+    policyText = "policy '" & policy.policyName & "' " & pin & "; " &
+      policy.branch & ": " & policy.detail
+  result.text = label & ": pre-push hook " & hook & "; " & policyText &
+    (if state.len > 0: "; " & state else: "")
+  result.data = %*{
+    "path": top,
+    "pre_push_hook_installed": hookInstalled,
+    "policy_present": policy.present,
+    "policy_malformed": policy.malformed,
+    "policy": policy.policyName,
+    "policy_package": policy.policyPackage,
+    "policy_pin": policy.policyPin,
+    "snapshot_stale": result.stale,
+  }
+
+proc certificatePropagationCheck(workspaceRoot: string;
+    memo: var CertificatePolicyStalenessMemo): HealthCheck =
+  ## The certificate line of ``repro health`` (the row is named
+  ## ``certificate-propagation``). It always reports where certificates are
+  ## kept and how they travel, so a reader can tell which arrangement this build
+  ## has without reading its source:
+  ##
+  ## * the resolved store roots;
+  ## * the reference library this build links. It is linked, so its presence
+  ##   is not in question, but its version is a fact about this build;
+  ## * the carrier: this build writes no notes, and the managed ``pre-push``
+  ##   hook carries them, so whether that hook is installed in the current
+  ##   repository is what the carrier depends on. The ``vcs-hooks`` row owns
+  ##   the verdict on a missing hook across the workspace;
+  ## * the current repository's policy, pin and snapshot staleness.
+  ##
+  ## It warns about what can still stop certificates reaching a gateway, which
+  ## is each repository's own configuration and which a push reports only in
+  ## output nobody may be reading, and about a stale snapshot in the current
+  ## repository, which the workspace-wide snapshot row cannot see when that
+  ## repository does not participate.
+  ##
+  ## It deliberately never looks at the earlier-draft
+  ## ``.repro/workspace/certificates`` directory or the old notes ref: those
+  ## records are removed by hand, and one met during verification is rejected
+  ## with the re-issue remedy.
   const name = "certificate-propagation"
   let enumerated = enumerateParticipatingRepos(workspaceRoot)
   var findings = certificatePropagationEnvironmentFindings()
@@ -75217,20 +75337,45 @@ proc certificatePropagationCheck(workspaceRoot: string): HealthCheck =
     inc inspected
     for finding in certificatePropagationFindings(repo.repoPath):
       findings.add(repo.name & ": " & finding)
-  if findings.len == 0:
+  let store = nativeCertificateStoreRoots()
+  proc shown(root: string): string =
+    if root.len > 0: root else: "UNRESOLVED"
+  let current = currentRepositoryCertificateState(workspaceRoot, memo)
+  let facts = "store roots: user " & shown(store.user) & ", system " &
+    shown(store.system) & "; reference library " &
+    "test_certificates " & linkedCertificateLibraryVersion() & " linked; " &
+    "carrier switched: this build writes no notes, the pre-push hook " &
+    "carries them; " & current.text
+  let data = %*{
+    "store_user_root": store.user,
+    "store_system_root": store.system,
+    "reference_library_version": linkedCertificateLibraryVersion(),
+    "reference_library_linked": true,
+    "carrier": "pre-push-hook",
+    "reprobuild_writes_notes": false,
+    "current_repository": current.data,
+  }
+  if findings.len == 0 and not current.stale:
     return HealthCheck(name: name, status: hsOk,
-      detail: "scope declarations and notes ref valid in " &
+      detail: facts & "; scope declarations and notes ref valid in " &
         $inspected & " repo(s)",
-      remedy: "", fixKind: hfNone)
+      remedy: "", fixKind: hfNone, data: data)
+  var problems: seq[string]
+  var remedies: seq[string]
+  if findings.len > 0:
+    problems.add($findings.len & " configuration problem(s) keep " &
+      "certificates from reaching a gateway; pushes still go through: " &
+      findings.join("; "))
+    remedies.add("fix or remove the named value: git -C <repo> config " &
+      "--unset-all testCertificates.notesRef, git -C <repo> config " &
+      "--remove-section testCertificatesScope.<name>, or unset " &
+      CertificateHookSwitchVariable)
+  if current.stale:
+    remedies.add(current.remedy)
   HealthCheck(name: name, status: hsWarn,
-    detail: $findings.len & " configuration problem(s) keep certificates " &
-      "from reaching a gateway; pushes still go through: " &
-      findings.join("; "),
-    remedy: "fix or remove the named value: git -C <repo> config --unset-all " &
-      "testCertificates.notesRef, git -C <repo> config --remove-section " &
-      "testCertificatesScope.<name>, or unset " &
-      CertificateHookSwitchVariable,
-    fixKind: hfNone)
+    detail: (@[facts] & problems).join("; "),
+    remedy: remedies.join("; "),
+    fixKind: hfNone, data: data)
 
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
@@ -76104,7 +76249,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # 8c'. The configuration the managed pre-push hook's propagation reads.
   #      Warnings, never failures: a push goes through regardless (Tooling
   #      §4.3). What is lost is what a receiving gate will see.
-  checks.add(certificatePropagationCheck(parsed.workspaceRoot))
+  var policyStalenessMemo: CertificatePolicyStalenessMemo
+  checks.add(certificatePropagationCheck(parsed.workspaceRoot,
+    policyStalenessMemo))
 
   # 8d. The post-commit lock writer's OUTCOME (CLI/health.md, **Lock writer**).
   #
@@ -76879,7 +77026,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     for repo in enumerateParticipatingRepos(parsed.workspaceRoot).repos:
       if gitTopLevel(repo.repoPath).len == 0:
         continue
-      let staleness = certificatePolicyStaleness(repo.repoPath)
+      let staleness = memoisedPolicyStaleness(policyStalenessMemo,
+        gitTopLevel(repo.repoPath))
       if not staleness.relevant:
         continue
       if staleness.stale:

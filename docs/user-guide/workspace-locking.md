@@ -289,6 +289,9 @@ Here is what each one means.
 
 ### Certificates travel through the pre-push hook
 
+[Test Certificates](test-certificates.md) covers the whole workflow; this section
+is what it means for a push.
+
 A gateway that requires test certificates reads them from git notes on the
 pushed tree. It has no access to your local certificate store. The managed
 `pre-push` hook gets them there: before the publication gate reports, it runs

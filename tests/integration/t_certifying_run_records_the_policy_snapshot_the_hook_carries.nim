@@ -45,8 +45,9 @@ proc teamPolicy(mode: string): string =
     "    gateMode " & mode & "\n" &
     "    requires \"test\"\n"
 
-proc healthRow(fx: WorkspaceCertifyFixture): JsonNode =
-  ## ``repro health app --json``'s ``certificate-policy-snapshot`` row, or nil.
+proc healthRow(fx: WorkspaceCertifyFixture;
+               name = "certificate-policy-snapshot"): JsonNode =
+  ## The row called ``name`` in ``repro health app --json``, or nil.
   let res = runShell(shellCommand(@[fx.cf.sib.repro, "health", "app",
     "--json", "--workspace-root=" & fx.cf.sib.ws],
     @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]), fx.app)
@@ -55,7 +56,7 @@ proc healthRow(fx: WorkspaceCertifyFixture): JsonNode =
   if start < 0:
     return nil
   for entry in parseJson(res.output[start .. ^1])["checks"]:
-    if entry["name"].getStr() == "certificate-policy-snapshot":
+    if entry["name"].getStr() == name:
       return entry
   nil
 
@@ -119,6 +120,17 @@ suite "TC-9b — the node records the snapshot, the hook carries it":
       check not row1.isNil
       if not row1.isNil:
         check row1["status"].getStr() == "ok"
+      # The certificate line reports the same state for the current repository,
+      # with the policy's name, its package and the revision the lock pins.
+      let line1 = fx.healthRow("certificate-propagation")
+      check not line1.isNil
+      if not line1.isNil:
+        check line1["status"].getStr() == "ok"
+        let detail = line1["detail"].getStr()
+        check "pre-push hook installed" in detail
+        check "policy 'team'" in detail
+        check ("from lib-b pinned at " & libBPin1) in detail
+        check "snapshot current" in detail
 
       # (2) The policy moves; health reports the snapshot stale, as a warning.
       writeFile(libB / "policy" / "team_policy.nim", teamPolicy("required"))
@@ -131,6 +143,12 @@ suite "TC-9b — the node records the snapshot, the hook carries it":
         check row2["status"].getStr() == "warn"
         check CertificatePolicySnapshotStale in row2["detail"].getStr()
         check "repro lock refresh" in row2["remedy"].getStr()
+      let line2 = fx.healthRow("certificate-propagation")
+      check not line2.isNil
+      if not line2.isNil:
+        check line2["status"].getStr() == "warn"
+        check "snapshot STALE" in line2["detail"].getStr()
+        check "repro lock refresh" in line2["remedy"].getStr()
 
       # (3) A commit: the hook re-pins lib-b and never writes the snapshot.
       writeFile(fx.app / "README.md", "app fixture, edited\n")
