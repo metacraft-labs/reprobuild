@@ -875,12 +875,30 @@ jobs:
             fi
             if [ "$(git -C "$tf_dir" rev-parse HEAD)" != "$tf_rev" ]; then
               echo "reconcile: codetracer-trace-format-nim -> locked $tf_rev"
-              git -C "$tf_dir" fetch --quiet origin "$tf_rev" \
-                || git -C "$tf_dir" fetch --quiet --tags origin
+              # Under the same credentials `develop` uses. Without them the
+              # fetch is asked for a username and dies with "could not read
+              # Username for 'https://github.com': terminal prompts
+              # disabled" (run 41287280466), even though this repository is
+              # public -- the clone reaches the forge through that config,
+              # not anonymously.
+              #
+              # The fallback fetches every branch, not just the clone's own:
+              # clone-siblings may have made a single-branch clone, and the
+              # locked revision lives on a DIFFERENT mainline from the one
+              # it cloned, so fetching only that branch cannot produce it.
+              ( export GIT_CONFIG_GLOBAL="$git_auth_config"
+                git -C "$tf_dir" fetch --quiet origin "$tf_rev" \
+                  || git -C "$tf_dir" fetch --quiet origin \
+                       '+refs/heads/*:refs/remotes/origin/*' )
               git -C "$tf_dir" checkout --quiet --detach "$tf_rev"
             fi
-            echo "reconcile: codetracer-trace-format-nim at" \
-              "$(git -C "$tf_dir" rev-parse HEAD)"
+            tf_head="$(git -C "$tf_dir" rev-parse HEAD)"
+            if [ "$tf_head" != "$tf_rev" ]; then
+              echo "reconcile: codetracer-trace-format-nim is at $tf_head," \
+                "not the locked $tf_rev" >&2
+              exit 1
+            fi
+            echo "reconcile: codetracer-trace-format-nim at $tf_head"
           fi
 
       # CodeTracer's Nix graph reads native-recorder, while its submodule graph
