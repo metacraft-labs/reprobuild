@@ -8422,8 +8422,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 9,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -2,27 +2,27 @@
 ## reprobuild-pm issue
 ## 2026-10-31-addon-revert-of-a-failed-switch-refuses-drift-the-switch-did-not-cause).
 ##
-## A switch that fails after its flip is reverted automatically, even
-## when the previous generation's ledger disagrees with a file the failed
-## switch never wrote. This is rpi2's caches.conf: its agent wrote the
-## profile's bytes over generation 0's outside the switch. The migration
-## accepts those bytes without a write (accepted out of band), and a
-## migration that then fails has to revert to generation 0 over them.
+## A switch that fails after its flip, before it writes its ledger, is
+## reverted automatically, also when a file it accepted without writing
+## (rpi2's caches.conf: its agent wrote the profile's bytes outside the
+## switch) disagrees with the previous generation's ledger.
 ##
 ## 1. Generation 1 takes over /etc/repro/caches.conf with bytes A (§9,
-##    supersede).
-## 2. caches.conf is changed by hand to B, and the next profile declares B,
-##    so the switch accepts it without a write.
-## 3. That switch fails after its flip and before it writes its ledger (a
-##    failure injected once by the `switch-fails-before-ledger` build; a
-##    crash or any exception at that point leaves the same state). Its
-##    automatic revert plans from generation 1's ledger, which holds A.
+##    supersede), and owns a link-form file a.conf.
+## 2. caches.conf is changed by hand to B, and the next profile declares B
+##    (accepted without a write), rewrites a.conf and adds new.conf.
+## 3. That switch fails after its flip, in its post-write steps, before it
+##    writes its ledger (a failure injected once by the
+##    `switch-fails-before-ledger` build; a crash or any exception there
+##    leaves the same state).
 ##
-## The revert must succeed. No pending marker stays, the failed switch's
-## new file is removed, and caches.conf is kept as found (B), reported as
-## drift, because the failed switch never wrote it. At f25f69eda0 (with
-## the same injection) the revert refused caches.conf as EDrift and left
-## the host pending for an operator.
+## The revert must succeed: no pending marker stays, new.conf goes, a.conf
+## is generation 1's again, and caches.conf carries generation 1's bytes.
+## Before the revert, the failed switch is replayed record-only, so the
+## revert plans from a ledger that knows what it wrote. At f25f69eda0 and
+## at 49370cf2f2 (with the same injection) the revert planned from the old
+## ledger. It refused caches.conf (f25f69eda0) or the rewritten link-form
+## a.conf (49370cf2f2) as drift, and left the host pending.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and
 ## ``REPRO_ADDON_MUTATION=switch-fails-before-ledger``. Without the
@@ -47,9 +47,9 @@ proc fileResource(path, content: string): string =
   "fs.systemFile {\n  path = " & quoteSystemValue(path) & "\n  content = " &
     quoteSystemValue(content) & "\n}\n\n"
 
-proc profile(caches: string; extra = false): string =
+proc profile(caches: string; extra = false; aConf = "a = 1\n"): string =
   "addOn {\n  managedEtcPrefixes = [\"" & Fx & "\"]\n}\n\n" &
-    fileResource(Fx & "a.conf", "a = 1\n") &
+    fileResource(Fx & "a.conf", aConf) &
     fileResource(CachesConf, caches) &
     (if extra: fileResource(Fx & "new.conf", "new = 1\n") else: "")
 
@@ -81,7 +81,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     writeFile(g.runDir / "b", bBytes)
     g.copyTo(g.runDir / "b", CachesConf)
     discard g.run("touch " & Trigger)
-    r = g.applyProfile(repro, "two", profile(bBytes, extra = true))
+    # The failed switch also rewrites a.conf, a file the ledger owns: its
+    # own write, which the revert must undo.
+    r = g.applyProfile(repro, "two", profile(bBytes, extra = true,
+                                             aConf = "a = 2\n"))
     let out2 = r.stdout & r.stderr
     step("the failed switch is reverted automatically",
          r.exitCode != 0 and ("rolled back to " & gen1) in out2 and
@@ -91,11 +94,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("cat /var/lib/repro/system/addon/pending").stdout)
     step("the failed switch's new file is gone",
          g.exec("test ! -e " & Fx & "new.conf").exitCode == 0, "")
-    step("caches.conf, which the failed switch never wrote, is kept as found",
-         g.run("cat " & CachesConf) == bBytes, g.exec("cat " & CachesConf).stdout)
+    step("a file the failed switch rewrote is generation 1's again",
+         g.run("cat " & Fx & "a.conf") == "a = 1\n",
+         g.exec("cat " & Fx & "a.conf").stdout)
+    step("caches.conf carries generation 1's bytes again",
+         g.run("cat " & CachesConf) == a, g.exec("cat " & CachesConf).stdout)
     r = g.exec(repro & " system addon verify")
-    step("and it is reported as drift",
-         CachesConf in r.stdout & r.stderr, r.stdout & r.stderr)
+    step("and verify finds no drift",
+         r.exitCode == 0 and "drift" notin r.stdout, r.stdout & r.stderr)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})
@@ -108,7 +114,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   fails
 
 suite Gate:
-  test "a switch that fails after its flip is reverted over drift it did not cause":
+  test "a switch that fails before its ledger is recorded, then reverted":
     if not gatesEnabled():
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1")
     elif mutation() != "switch-fails-before-ledger":

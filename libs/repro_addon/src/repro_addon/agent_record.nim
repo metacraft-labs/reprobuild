@@ -11,7 +11,7 @@
 ## agent of the host so an operator rollback can pause all of them (see the
 ## section below).
 
-import std/[os, strutils]
+import std/[os, posix, strutils]
 
 import repro_deploy_agent/agent
 import repro_infra
@@ -176,37 +176,83 @@ const LegacySecretsDirsName* = "legacy-secrets-dirs"
 proc legacySecretsDirsPath*(stateDir: string): string =
   stateDir / "addon" / LegacySecretsDirsName
 
-proc legacySecretsDirError*(dir: string): string =
-  ## "" when ``dir`` may be registered: absolute, normalised (no `.`, `..`,
-  ## empty segment or trailing `/`) and not `/` itself.
-  if dir.len < 2 or not dir.isAbsolute: return dir & " is not an absolute path"
-  if dir.endsWith("/") or "//" in dir: return dir & " is not normalised"
-  for seg in dir[1 .. ^1].split('/'):
-    if seg in ["", ".", ".."]: return dir & " is not normalised"
-  if '%' in dir or '\n' in dir or ':' in dir:
-    return dir & " holds a character a unit directive cannot carry"
+const LegacySecretsRoot* = "/var/lib/repro/agent"
+  ## Every agent secrets directory lies below this one (spec §10.3,
+  ## "Legacy delivery"): one root `--secrets-dir /etc` cannot widen the
+  ## accepted sources to all of /etc.
+
+proc legacySecretsPathError*(path: string): string =
+  ## "" when ``path`` is an absolute, normalised path a unit directive
+  ## carries verbatim: no `.`, `..`, empty segment or trailing `/`, and none
+  ## of `%` (a specifier), `\` or `"` (systemd C-unescapes a LoadCredential=
+  ## path, so `\x2e\x2e` would read as `..`), `:`, or a line break.
+  if path.len < 2 or not path.isAbsolute:
+    return path & " is not an absolute path"
+  if path.endsWith("/") or "//" in path: return path & " is not normalised"
+  for seg in path[1 .. ^1].split('/'):
+    if seg in ["", ".", ".."]: return path & " is not normalised"
+  for c in ['%', '\\', '"', ':', '\n', '\r']:
+    if c in path:
+      return path & " holds a character a unit directive does not carry " &
+        "verbatim (" & escape($c) & ")"
   ""
 
+proc legacySecretsDirError*(dir: string): string =
+  ## "" when ``dir`` may be an agent secrets directory by its text: a clean
+  ## path (``legacySecretsPathError``) strictly below ``LegacySecretsRoot``.
+  result = legacySecretsPathError(dir)
+  if result.len == 0 and not dir.startsWith(LegacySecretsRoot & "/"):
+    result = dir & " is not below " & LegacySecretsRoot
+
+proc legacySecretsTrustError*(isDir, isLink: bool; uid: int; mode: int):
+    string =
+  ## "" when a directory with these properties may be trusted as an agent
+  ## secrets directory: a real directory (not a link), owned by root, and
+  ## neither group- nor world-writable.
+  if isLink: return "is a symbolic link"
+  if not isDir: return "is not a directory"
+  if uid != 0: return "is not owned by root (uid " & $uid & ")"
+  if (mode and 0o022) != 0:
+    return "is group- or world-writable (mode " & toOct(mode and 0o7777, 4) & ")"
+  ""
+
+proc legacySecretsDirTrustError*(dir: string): string =
+  ## ``legacySecretsDirError`` and ``legacySecretsTrustError`` of the
+  ## directory as it is on the host now.
+  result = legacySecretsDirError(dir)
+  if result.len > 0: return
+  var st: Stat
+  if lstat(dir.cstring, st) != 0:
+    return dir & " does not exist"
+  let why = legacySecretsTrustError(S_ISDIR(st.st_mode), S_ISLNK(st.st_mode),
+    int(st.st_uid), int(st.st_mode))
+  if why.len > 0: result = dir & " " & why
+
 proc registeredLegacySecretsDirs*(stateDir: string): seq[string] =
+  ## The current agent's secrets directory, when it is registered and still
+  ## trusted (``legacySecretsDirTrustError``); empty otherwise. At most one:
+  ## a registration replaces the one before.
   try:
     for l in readFile(legacySecretsDirsPath(stateDir)).splitLines():
       let d = l.strip()
-      if d.len > 0 and legacySecretsDirError(d).len == 0 and d notin result:
-        result.add(d)
+      if d.len > 0 and legacySecretsDirTrustError(d).len == 0:
+        return @[d]
   except IOError, OSError:
     discard
 
 proc registerLegacySecretsDir*(stateDir, dir: string) =
-  ## Record the agent's `--secrets-dir` (idempotent; durable like the
-  ## agent-state registry). Refuses a directory `legacySecretsDirError`
+  ## Record the agent's `--secrets-dir`, replacing any directory registered
+  ## before (only the current agent's is accepted; durable like the
+  ## agent-state registry). Refuses one ``legacySecretsDirTrustError``
   ## names.
-  let why = legacySecretsDirError(dir)
+  let why = legacySecretsDirTrustError(dir)
   if why.len > 0:
     raise newException(AgentRecordError, "cannot register the legacy " &
       "secrets directory: " & why)
-  var known = registeredLegacySecretsDirs(stateDir)
-  if dir in known: return
-  known.add(dir)
   let path = legacySecretsDirsPath(stateDir)
+  if fileExists(path):
+    try:
+      if readFile(path) == dir & "\n": return
+    except IOError, OSError: discard
   createDir(parentDir(path))
-  writeFileAtomic(path, known.join("\n") & "\n", 0o644)
+  writeFileAtomic(path, dir & "\n", 0o644)
