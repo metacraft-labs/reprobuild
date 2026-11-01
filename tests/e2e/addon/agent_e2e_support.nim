@@ -12,7 +12,7 @@
 ## *Mocking.* None: real units under the guest's systemd, a real HTTP
 ## origin, real signatures.
 
-import std/[json, os, osproc, strutils, times]
+import std/[algorithm, json, os, osproc, strutils, times]
 
 import repro_deploy_agent/manifest
 import repro_deploy_agent/secrets
@@ -37,26 +37,31 @@ type
     process: Process
     signer*: PeerKeypair
 
-proc freeLoopbackPort(): int =
-  let (o, _) = execCmdEx("python3 -c 'import socket; s=socket.socket(); " &
-    "s.bind((\"127.0.0.1\",0)); print(s.getsockname()[1]); s.close()'")
-  parseInt(o.strip())
-
 proc startProducer*(g: Guest; signer: PeerKeypair): Producer =
-  ## An HTTP origin on the host's loopback serving ``g.runDir/served``.
+  ## An HTTP origin on the host's loopback serving ``g.runDir/served``, on a
+  ## port the kernel picks: the server binds port 0 and prints the port it
+  ## got ("Serving HTTP on 127.0.0.1 port N"), and the wait ends on that
+  ## line or on the server's exit, never on a deadline (see
+  ## ``cache_e2e_support.startCache`` for why a probed port and a startup
+  ## deadline are both races on a busy host).
   result = Producer(dir: g.runDir / "served", signer: signer)
   createDir(result.dir / AgentTarget)
-  result.port = freeLoopbackPort()
-  result.process = startProcess("python3", args = ["-m", "http.server",
-    "--bind", "127.0.0.1", $result.port, "--directory", result.dir],
-    options = {poUsePath, poStdErrToStdOut})
-  # Wait until it answers.
-  for _ in 0 ..< 50:
-    let (_, c) = execCmdEx("curl -s -o /dev/null http://127.0.0.1:" &
-                           $result.port & "/")
-    if c == 0: return
-    sleep(100)
-  raise newException(TestBedError, "the producer's HTTP server did not start")
+  let log = g.runDir / "producer.log"
+  result.process = startProcess("/bin/sh", args = ["-c",
+    "exec python3 -u -m http.server --bind 127.0.0.1 0 --directory " &
+    quoteShell(result.dir) & " >> " & quoteShell(log) & " 2>&1"])
+  const Marker = "Serving HTTP on 127.0.0.1 port "
+  while true:
+    if fileExists(log):
+      for line in readFile(log).splitLines():
+        if line.startsWith(Marker):
+          result.port = parseInt(line[Marker.len .. ^1].split(' ')[0])
+          return
+    let code = result.process.peekExitCode()
+    if code != -1:
+      raise newException(TestBedError, "the producer's HTTP server exited " &
+        "(status " & $code & "): " & (if fileExists(log): readFile(log) else: ""))
+    sleep(50)
 
 proc stop*(p: Producer) =
   if p != nil and p.process != nil:
@@ -134,7 +139,9 @@ const CompileHost* = "a8-testbed"
 
 proc producerCompile*(engine, source: string; arch = "x86_64";
                       host = CompileHost;
-                      files: seq[ProfileFile] = @[]): CompiledProfilePin =
+                      files: seq[ProfileFile] = @[];
+                      systemMode = "";
+                      systemActivities: seq[string] = @[]): CompiledProfilePin =
   ## The producer's side of the compiled-profile pin: compile ``source``
   ## on THIS machine with ``engine`` (a store path holding
   ## ``bin/reprobuild``), for the facts the target's agent will compile
@@ -153,14 +160,22 @@ proc producerCompile*(engine, source: string; arch = "x86_64";
     "--canonical-out", work / "c", "--actions-out", work / "a",
     "--digest-out", work / "d", "--revision-out", work / "r",
     "--state-dir", work / "state", "--host", host, "--platform", "linux",
-    "--arch", arch])
+    "--arch", arch] & (if systemMode.len > 0 or systemActivities.len > 0:
+      @["--system-mode", (if systemMode.len > 0: systemMode else: "full"),
+        "--system-activities", systemActivities.join(",")]
+    else: @[]))
   let (o, c) = execCmdEx("env HOME=" & quoteShell(work / "home") & " " & cmd)
   doAssert c == 0, "the producer's compile failed: " & o
+  var selected = systemActivities
+  selected.sort()
   result = CompiledProfilePin(digest: readFile(work / "d").strip(),
     compilerRevision: readFile(work / "r").strip(), platform: "linux",
-    arch: arch, host: host)
+    arch: arch, host: host,
+    systemMode: (if systemMode.len > 0 or selected.len > 0:
+                   (if systemMode.len > 0: systemMode else: "full") else: ""),
+    systemActivities: selected)
   doAssert result.digest == compiledProfileDigest(readFile(work / "c"),
-    readFile(work / "a"))
+    readFile(work / "a"), systemSelectionText(result))
 
 proc agentFlags*(a: Anchors; p: Producer; cacheUrl = ""): string =
   ## Preflight / bootstrap options: the anchors, the agent's target and

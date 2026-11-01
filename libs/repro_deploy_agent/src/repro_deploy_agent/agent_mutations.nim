@@ -39,7 +39,8 @@ const KnownAgentMutations* = ["rdmf-ignores-revoked-keys",
                               "agent-issued-at-future-trusted",
                               "agent-state-plain-write",
                               "agent-skips-compile-digest",
-                              "engine-agent-skips-a8"]
+                              "engine-agent-skips-a8",
+                              "compile-pin-drops-selection"]
 
 template agentMutated*(name: static string): bool =
   ## True only in the build compiled with ``-d:reproAddonMutation=<name>``.

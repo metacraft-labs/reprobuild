@@ -42,7 +42,7 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[base64, json, os, sets, strutils]
+import std/[algorithm, base64, json, os, sequtils, sets, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -346,7 +346,18 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   writeFile(canonicalOut, text)
   writeFile(actionsOut, actionsJson)
   if digestOut.len > 0:
-    writeFile(digestOut, compiledProfileDigest(text, actionsJson) & "\n")
+    # The selection the compile was asked for is bound into the digest
+    # (``compiledProfileDigest``), spelled as the pin carries it.
+    var selected = systemActivities
+    selected.sort()
+    selected = selected.deduplicate(isSorted = true)
+    let selection = systemSelectionText(CompiledProfilePin(
+      systemMode: (if systemMode.len > 0 or selected.len > 0:
+                     (if systemMode.len > 0: systemMode else: "full")
+                   else: ""),
+      systemActivities: selected))
+    writeFile(digestOut, compiledProfileDigest(text, actionsJson, selection) &
+      "\n")
   if revisionOut.len > 0:
     # The revision this compiler was built from, which a producer pins
     # beside the digest (``CompiledProfilePin.compilerRevision``).

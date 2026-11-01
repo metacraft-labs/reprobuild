@@ -245,6 +245,9 @@ proc encodeBuildAction(b: ProfileBuildAction): string =
   result.add ",\"substituteOnly\":" &
     (if b.substituteOnly: "true" else: "false")
   result.add ",\"expectedOutputDigest\":" & encodeStr(b.expectedOutputDigest)
+  # Only when set: a profile-level edge encodes exactly as before.
+  if b.activity.len > 0:
+    result.add ",\"activity\":" & encodeStr(b.activity)
   result.add "}"
 
 proc emitProfileIntentJson*(p: ProfileIntent): string =
@@ -499,6 +502,8 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         # exactly -- no envelope had a reboot to report.
         rebootRequired: (if b.hasKey("rebootRequired"):
                            b["rebootRequired"].getBool() else: false),
+        # Optional: absent for a profile-level edge.
+        activity: (if b.hasKey("activity"): b["activity"].getStr() else: ""),
         # Optional for the same reason: an envelope written before the
         # substitute-only edge existed has neither, and decodes as an
         # ordinary buildable edge, which is what it was.

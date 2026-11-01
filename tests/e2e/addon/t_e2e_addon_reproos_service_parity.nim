@@ -36,7 +36,10 @@
 ## of each unit (``FragmentPath``, ``DropInPaths``, ``LoadState``,
 ## ``UnitFileState``, ``ActiveState``) and the health of each unit through
 ## the same probe code on both guests (``repro system addon probe``), and
-## for the chain the beacon node's head moving past genesis. A difference
+## for the chain the beacon node's head moving past genesis. Then the full
+## guest is rebooted: its secrets ramfs is empty, and the boot secrets
+## unit its apply installed must re-materialise the admin token (same
+## bytes, mode 0400) so that vaultwarden comes up healthy with no apply. A difference
 ## fails the gate unless the ``add-on-debian`` realisation profile lists it
 ## as ignored with a reason (``addOnDebianProfile().realisationDifferences``);
 ## the record lists each difference with the entry that excused it.
@@ -127,7 +130,7 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
   createDir(work)
   let pk = refPackages(work)
   record["packages"] = packageSha256s(pk)
-  record["vaultwardenBin"] = %(let o = getEnv("REPRO_A12_VAULTWARDEN_BIN"); (if o.len > 0: o else: "reprobuild-packages recipe"))
+  record["vaultwardenBin"] = %"reprobuild-packages recipe (x86_64-unknown-linux-musl)"
   let cache = add.startCache()
   defer: cache.stop()
   let kp = peerAuth.generateKeypair()
@@ -168,8 +171,24 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
     putReferenceSecrets(g, verb, jwt, adminToken, [DefaultValidatorUnit],
                         step)
     provisionWallet(g, net)
-  # --- realise on the add-on guest.
+  # --- a host that selects only vaultwarden fetches only its package.
+  let vwOnly = compileReference(engine, pins, "addOn", ["vaultwarden"])
+  var vwIds: seq[string]
+  for a in vwOnly.actions: vwIds.add a.id
+  step("a vaultwarden-only compile carries only vaultwarden's package",
+       vwIds == @["vaultwarden-prefix"], $vwIds)
   discard bs.producer.publish(PublishSpec(sequence: 1,
+    profileText: vwOnly.canonical, buildActions: vwOnly.actions,
+    closureDigests: publishAll(cache, kp, pk, net, pins, vwOnly.actions)))
+  let t0 = add.tickUnits()
+  let fetched = add.run("ls /repro/store/prefixes 2>/dev/null").strip()
+  step("a host selecting only vaultwarden applies it and fetches no " &
+       "geth, prysm or network package",
+       t0.outcome == "aoApplied" and "vaultwarden" in fetched and
+       "geth" notin fetched and "prysm" notin fetched and
+       "ethereum-testnet" notin fetched, $t0 & "\nprefixes: " & fetched)
+  # --- realise on the add-on guest.
+  discard bs.producer.publish(PublishSpec(sequence: 2,
     profileText: addC.canonical, buildActions: addC.actions,
     closureDigests: digests))
   let t1 = add.tickUnits()
@@ -258,6 +277,26 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
   let slotF = full.waitHeadSlot(6, 600)
   step("both chains produce blocks past genesis", slotA and slotF,
        $add.headSlot() & " / " & $full.headSlot())
+  # --- A reboot of the full guest: the ramfs is empty again, and the boot
+  # secrets unit the apply installed must put the credential back before
+  # the service that loads it starts (nothing applies in between).
+  let tokenBefore = f.getOrDefault(SecretsRunRoot & "/vaultwarden/admin-token").sha256
+  full.rebootGuest()
+  var healthy = false
+  let deadline = epochTime() + 300
+  while epochTime() < deadline and not healthy:
+    healthy = full.exec(eng & " system addon probe " &
+      quoteShell("http://127.0.0.1:8000/alive")).exitCode == 0
+    if not healthy: sleep(3000)
+  let after = full.observe(@[SecretsRunRoot & "/vaultwarden/admin-token"])
+  let tokenAfter = after.getOrDefault(SecretsRunRoot & "/vaultwarden/admin-token")
+  step("after a reboot the full guest re-materialises the secret at boot",
+       tokenAfter.sha256 == tokenBefore and tokenAfter.mode == "400",
+       $tokenAfter & " / before " & tokenBefore & "\n" &
+       full.serviceJournal([SecretsBootUnit]))
+  step("after a reboot vaultwarden is healthy with its credential",
+       healthy and full.exec("systemctl is-active vaultwarden.service").exitCode == 0,
+       full.serviceJournal(["vaultwarden.service", SecretsBootUnit]))
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var add, full: Guest

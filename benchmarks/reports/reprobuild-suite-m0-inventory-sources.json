@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2568,
+    "nimTestBinaries": 2570,
     "pureUnitConsolidationGroups": 75,
-    "pureUnitTests": 714,
+    "pureUnitTests": 715,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2608
+    "testEntries": 2610
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1490,9 +1490,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1424,
+      "integration": 1425,
       "platform/destructive": 162,
-      "pure unit": 714,
+      "pure unit": 715,
       "unclassified": 290
     },
     "graphOwnedTestArtifacts": [
@@ -1701,9 +1701,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2568,
+    "nimTestBinaryCount": 2570,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2608
+    "testEntryCount": 2610
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8612,7 +8612,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8634,6 +8634,25 @@
       "source": "libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_system_activity_selects_its_store_packages",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_profile_intent"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_system_activity_selects_its_store_packages.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13305,7 +13324,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27964,6 +27983,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_collision_matrix.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_compiled_pin_carries_activity_selection",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_deploy_agent",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_compiled_pin_carries_activity_selection.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

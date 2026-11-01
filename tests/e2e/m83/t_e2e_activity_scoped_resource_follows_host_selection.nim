@@ -275,11 +275,14 @@ suite "GM9: activity-scoped resources follow host selection":
       "gm9WindowManager"]
 
   test "e2e_activity_resources_misplacements_refused":
-    ## Two placements an activity's `resources:` block cannot express are
+    ## A placement an activity's `resources:` block cannot express is
     ## refused when the profile compiles -- never compiled into something
     ## that would apply on every host: a `resources:` block under a `when`
-    ## of the activity body, and an action edge (which carries no activity)
-    ## inside an activity's `resources:` block.
+    ## of the activity body. (An action edge inside an activity's
+    ## `resources:` block is no longer refused: it belongs to the activity,
+    ## `ProfileBuildAction.activity`, and the system planner realises it
+    ## only on a host that selects the activity --
+    ## `t_system_activity_selects_its_store_packages`.)
     const UnderWhen = """
 import repro_profile
 
@@ -292,22 +295,9 @@ profile "gm9Misplaced":
   hosts:
     "gm9-desktop": [desktop_core]
 """
-    const ActionEdge = """
-import repro_profile
-
-profile "gm9ActionEdge":
-  activity desktop_core:
-    resources:
-      inlineExecCall(id = "gm9-edge", argv = @["true"])
-
-  hosts:
-    "gm9-desktop": [desktop_core]
-"""
     for (label, text, needle) in [
         ("under-when", UnderWhen,
-         "must sit directly in the activity body"),
-        ("action-edge", ActionEdge,
-         "cannot sit in an activity's `resources:` block")]:
+         "must sit directly in the activity body")]:
       let sb = newProfileSandbox("gm9-" & label, text)
       defer: sb.dispose()
       let run = sb.runRepro(["home", "plan", "--host", "gm9-desktop"],

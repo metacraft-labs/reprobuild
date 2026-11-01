@@ -50,8 +50,9 @@ libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
-libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	5
+libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	7
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
+libs/repro_addon/tests/t_system_activity_selects_its_store_packages.nim	nim	3
 libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim	nim	7
 libs/repro_agent_backend/tests/t_agent_preview_strategy.nim	nim	3
 libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim	nim	21
@@ -299,7 +300,7 @@ libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim	nim	6
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	4
 libs/repro_deploy_agent/tests/t_deploy_agent_records_the_resolved_host.nim	nim	3
 libs/repro_deploy_agent/tests/t_deploy_agent_secret_files_are_private_and_never_follow_links.nim	nim	3
-libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim	nim	10
+libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim	nim	11
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_fetch_is_bounded.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_freshness_and_state.nim	nim	4
@@ -1106,6 +1107,7 @@ tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_uninstall_byte_identity.nim	nim	1
 tests/e2e/addon/t_e2e_addon_collision_matrix.nim	nim	1
+tests/e2e/addon/t_e2e_addon_compiled_pin_carries_activity_selection.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compromised_compiler_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compromised_fetch_cannot_write_etc.nim	nim	1
 tests/e2e/addon/t_e2e_addon_confirm_or_revert.nim	nim	1

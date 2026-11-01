@@ -231,7 +231,7 @@ Options=bind,ro
 WantedBy=repro-addon.target
 """
 
-const NoSwapLine =
+const NoSwapLine* =
   # Both boot units open sealed envelopes. The plaintext is locked in RAM
   # (``locked_buffer``), which LimitMEMLOCK=infinity lets them do whatever
   # the size; where a cgroup v2 memory controller exists their control

@@ -134,6 +134,7 @@ export adapter_system.SystemAdaptation
 export adapter_system.systemPlanTarget
 export adapter_system.defaultSystemPlanTarget
 export adapter_system.adaptSystemProfile
+export adapter_system.selectedBuildActions
 export addon_realisation
 
 # One resource-scope classification for both adapters.

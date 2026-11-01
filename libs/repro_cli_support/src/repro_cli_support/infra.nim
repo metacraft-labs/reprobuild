@@ -147,7 +147,7 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
   except CatchableError as err:
     result.adaptError = err.msg
     return
-  result.buildActions = intent.buildActions
+  result.buildActions = selectedBuildActions(intent.buildActions, target)
   result.compiled = true
 
 proc resolveSystemProfileText*(profilePath: string;
@@ -1017,6 +1017,15 @@ proc runInfraApply(args: openArray[string]): int =
       secretConsumers = consumersOf(units, changed)
       if changed.len > 0:
         echo "  secrets      : materialised for " & changed.join(", ")
+      # What the boot unit re-materialises after a reboot, and the boot
+      # unit itself (the one every credential-loading unit is after).
+      try:
+        for line in recordFullHostSecrets(fullProfile.secretFiles,
+                                          reproExePath()):
+          echo "  secrets      : " & line
+      except CatchableError as e:
+        stderr.writeLine("repro infra apply: secrets at boot: " & e.msg)
+        return 1
 
   var opts: ApplyOptions
   opts.stateDir = stateDir
@@ -1628,8 +1637,12 @@ proc runSystemCommand*(args: seq[string]): int =
       # `repro system secret put --service S --name N [--target T]`: an
       # add-on host's verb is `repro system addon secret put`, which this
       # hands over to; a host realised in full seals into its one envelope
-      # (`full_host_secrets`), materialised by the next `repro infra apply`.
+      # (`full_host_secrets`), materialised by the next `repro infra apply`
+      # and, after a reboot, by `repro system secret materialise --boot`
+      # (the boot unit that apply installs).
       when defined(linux):
+        if rest.len > 0 and rest[0] == "materialise":
+          return runFullHostSecretMaterialiseCli(rest[1 .. ^1])
         if addon_apply.isAddonHost(resolveSystemStateDir()):
           return addon_cli.runAddonCli(@["secret"] & rest)
         return runFullHostSecretPutCli(rest)

@@ -19,7 +19,8 @@
 ##   closure or a rollback finds the same database.
 ##
 ## The store packages are substitute-only build-action edges with pinned
-## output digests: the host never builds them, and a cache entry whose
+## output digests, declared in the activity that runs them, so a host
+## fetches only the packages of the activities it selects: the host never builds them, and a cache entry whose
 ## archive is not the pinned one is refused before extraction. The pins,
 ## the prefixes and what the validator gate varies (the validator's unit
 ## name, its prefix and extra configuration) are in
@@ -134,46 +135,19 @@ profile "referenceServices":
       "/etc/vaultwarden"
       "/etc/ethereum"
 
-  # The store packages. Action edges carry no activity (the profile macro
-  # refuses one inside `activity`), so they are profile-level: every host
-  # this profile applies to substitutes all of them, and each activity's
-  # units name the prefixes they run from.
-  resources:
-    inlineExecCall(
-      argv = @["/bin/sh", "-c", CannotBuildHere],
-      cwd = VaultwardenPrefix,
-      outputs = @["bin"],
-      requiresElevation = true,
-      address = "vaultwarden-prefix",
-      commandStatsId = "inlineExecCall",
-      substituteOnly = true,
-      expectedOutputDigest = VaultwardenDigest)
-    inlineExecCall(
-      argv = @["/bin/sh", "-c", CannotBuildHere],
-      cwd = GethPrefix, outputs = @["bin"], requiresElevation = true,
-      address = "geth-prefix", commandStatsId = "inlineExecCall",
-      substituteOnly = true, expectedOutputDigest = GethDigest)
-    inlineExecCall(
-      argv = @["/bin/sh", "-c", CannotBuildHere],
-      cwd = PrysmPrefix, outputs = @["bin"], requiresElevation = true,
-      address = "prysm-prefix", commandStatsId = "inlineExecCall",
-      substituteOnly = true, expectedOutputDigest = PrysmDigest)
-    inlineExecCall(
-      argv = @["/bin/sh", "-c", CannotBuildHere],
-      cwd = TestnetPrefix, outputs = @["share"], requiresElevation = true,
-      address = "testnet-prefix", commandStatsId = "inlineExecCall",
-      substituteOnly = true, expectedOutputDigest = TestnetDigest)
-    # The validator client from a prefix of its own (the same package's
-    # tree published under its own path), so a new closure of the
-    # validator alone is a change of this one edge and of its unit.
-    inlineExecCall(
-      argv = @["/bin/sh", "-c", CannotBuildHere],
-      cwd = ValidatorPrefix, outputs = @["bin"], requiresElevation = true,
-      address = "validator-prefix", commandStatsId = "inlineExecCall",
-      substituteOnly = true, expectedOutputDigest = ValidatorDigest)
-
   activity vaultwarden:
     resources:
+      # Its store package: an activity's edge, realised only on a host
+      # that selects the activity.
+      inlineExecCall(
+        argv = @["/bin/sh", "-c", CannotBuildHere],
+        cwd = VaultwardenPrefix,
+        outputs = @["bin"],
+        requiresElevation = true,
+        address = "vaultwarden-prefix",
+        commandStatsId = "inlineExecCall",
+        substituteOnly = true,
+        expectedOutputDigest = VaultwardenDigest)
       linuxSysusersEntry(name = "vaultwarden", kind = "user",
         description = "Vaultwarden", home = "/var/lib/vaultwarden",
         address = "vaultwardenUser")
@@ -203,6 +177,31 @@ profile "referenceServices":
 
   activity ethereum_validator:
     resources:
+      # Its store packages, the network definition among them: edges of
+      # this activity, realised only on a host that selects it.
+      inlineExecCall(
+        argv = @["/bin/sh", "-c", CannotBuildHere],
+        cwd = GethPrefix, outputs = @["bin"], requiresElevation = true,
+        address = "geth-prefix", commandStatsId = "inlineExecCall",
+        substituteOnly = true, expectedOutputDigest = GethDigest)
+      inlineExecCall(
+        argv = @["/bin/sh", "-c", CannotBuildHere],
+        cwd = PrysmPrefix, outputs = @["bin"], requiresElevation = true,
+        address = "prysm-prefix", commandStatsId = "inlineExecCall",
+        substituteOnly = true, expectedOutputDigest = PrysmDigest)
+      inlineExecCall(
+        argv = @["/bin/sh", "-c", CannotBuildHere],
+        cwd = TestnetPrefix, outputs = @["share"], requiresElevation = true,
+        address = "testnet-prefix", commandStatsId = "inlineExecCall",
+        substituteOnly = true, expectedOutputDigest = TestnetDigest)
+      # The validator client from a prefix of its own (the same package's
+      # tree published under its own path), so a new closure of the
+      # validator alone is a change of this one edge and of its unit.
+      inlineExecCall(
+        argv = @["/bin/sh", "-c", CannotBuildHere],
+        cwd = ValidatorPrefix, outputs = @["bin"], requiresElevation = true,
+        address = "validator-prefix", commandStatsId = "inlineExecCall",
+        substituteOnly = true, expectedOutputDigest = ValidatorDigest)
       linuxSysusersEntry(name = "eth-execution", kind = "user",
         description = "Ethereum execution client",
         home = "/var/lib/ethereum/execution", address = "ethExecutionUser")

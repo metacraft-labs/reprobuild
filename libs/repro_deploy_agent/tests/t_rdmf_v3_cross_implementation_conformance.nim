@@ -313,6 +313,33 @@ suite "RDMF v3 cross-implementation conformance":
     check CompilerRevisionMismatch in compiledProfileRefusal(m,
       readFile(profile), "[]", "def456")
 
+  test "a pin with a system selection: Python signs and binds it as this library does":
+    let canon = work / "selected.canonical"
+    let acts = work / "selected.actions"
+    writeFile(canon, readFile(profile))
+    writeFile(acts, "[]")
+    let path = render("selected", @["--max-age-seconds", "3600",
+      "--issued-at", $(now - 10), "--sequence", "12",
+      "--compiled-canonical", canon, "--compiled-actions", acts,
+      "--compile-platform", "linux", "--compile-arch", "x86_64",
+      "--compile-host", "validator-01", "--compiler-revision", "abc123",
+      "--compile-system-mode", "addOn",
+      "--compile-system-activities", "vaultwarden,ethereum_validator"])
+    let m = decodeManifest(cast[seq[byte]](readFile(path)))
+    check verifyTrusted(m, anchors)
+    check m.wireFlags == 7'u16   # attestations, pin, selection
+    check m.compiledProfile.systemMode == "addOn"
+    check m.compiledProfile.systemActivities ==
+      @["ethereum_validator", "vaultwarden"]
+    let sel = systemSelectionText(m.compiledProfile)
+    check m.compiledProfile.digest ==
+      compiledProfileDigest(readFile(profile), "[]", sel)
+    # The selection is bound: the same compile pinned without it differs.
+    check m.compiledProfile.digest != compiledProfileDigest(readFile(profile), "[]")
+    check compiledProfileRefusal(m, readFile(profile), "[]", "abc123") == ""
+    # A pin re-encoded here round-trips to the same bytes Python signed.
+    check encodeManifest(m) == cast[seq[byte]](readFile(path))
+
   test "a real compiler: Python's pin is reproduced by a second compile here":
     let compiler = getEnv("RDMF_PROFILE_COMPILER")
     if compiler.len == 0:
@@ -418,6 +445,22 @@ suite "RDMF v3 cross-implementation conformance":
     check j["attestations"]["maxAgeSeconds"].getInt == 900
     check j["attestations"]["rollbackFloor"].getInt == 8
     check j["attestations"]["closureDigests"].len == 2
+    # And with a system selection (flags bit 2).
+    var ms = m
+    ms.sequence = 10'u64
+    ms.compiledProfile.systemMode = "full"
+    ms.compiledProfile.systemActivities = @["backup", "web"]
+    ms.compiledProfile.digest = compiledProfileDigest("canonical", "[]",
+      systemSelectionText(ms.compiledProfile))
+    signManifest(signer, ms)
+    writeFile(work / "nim-selected.rdm", cast[string](encodeManifest(ms)))
+    let rs = py(@["inspect", "--manifest", work / "nim-selected.rdm"])
+    check rs.code == 0
+    let js = parseJson(rs.output)
+    check js["flags"].getInt == 7
+    check js["signatureVerifies"].getBool
+    check js["attestations"]["compiledProfile"]["systemMode"].getStr == "full"
+    check js["attestations"]["compiledProfile"]["systemActivities"].len == 2
     check j["attestations"]["closureDigests"][0]["digest"].getStr == DigestA
     check j["sealedSecrets"]["present"].getBool
     let anchorsFile = work / "anchors.txt"

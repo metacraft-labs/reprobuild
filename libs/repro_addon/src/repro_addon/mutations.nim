@@ -294,6 +294,9 @@
 ##                                            names another unit or path is
 ##                                            applied, leaving the old one
 ##                                            running and unledgered (A12)
+## ``activity-edges-unselected``             an activity's store-package
+##                                            edges are realised on every
+##                                            host, selected or not (A12)
 ## ``addon-unit-renders-differently``         every unit the add-on writes
 ##                                            gains one comment line, so
 ##                                            its bytes differ from the
@@ -360,6 +363,8 @@ const
                           # Milestone A12: the parity gate's falsifying build.
                           "addon-unit-renders-differently",
                           "retargeted-address-accepted",
+                          # Read by repro_profile_compile's adapter_system.
+                          "activity-edges-unselected",
                           "secrets-plaintext-unlocked",
                           "replay-reverts-on-secrets",
                           "retirement-not-resumed",
