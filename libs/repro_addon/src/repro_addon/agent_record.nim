@@ -216,17 +216,36 @@ proc legacySecretsTrustError*(isDir, isLink: bool; uid: int; mode: int):
     return "is group- or world-writable (mode " & toOct(mode and 0o7777, 4) & ")"
   ""
 
-proc legacySecretsDirTrustError*(dir: string): string =
-  ## ``legacySecretsDirError`` and ``legacySecretsTrustError`` of the
-  ## directory as it is on the host now.
+type
+  LegacyStat* = tuple[exists, isDir, isLink: bool; uid, mode: int]
+  LegacyStatFn* = proc(path: string): LegacyStat {.gcsafe.}
+
+proc lstatLegacy*(path: string): LegacyStat =
+  ## ``lstat`` of ``path`` as the trust check reads it.
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return (false, false, false, -1, 0)
+  (true, S_ISDIR(st.st_mode), S_ISLNK(st.st_mode), int(st.st_uid),
+   int(st.st_mode))
+
+proc legacySecretsDirTrustError*(dir: string;
+                                 statOf: LegacyStatFn = lstatLegacy): string =
+  ## ``legacySecretsDirError``, then ``legacySecretsTrustError`` of every
+  ## directory from /var/lib/repro down to ``dir`` as it is on the host now
+  ## (``statOf``, ``lstat`` by default): a group-writable /var/lib/repro or
+  ## /var/lib/repro/agent would let someone other than root swap the
+  ## directory under the check.
   result = legacySecretsDirError(dir)
   if result.len > 0: return
-  var st: Stat
-  if lstat(dir.cstring, st) != 0:
-    return dir & " does not exist"
-  let why = legacySecretsTrustError(S_ISDIR(st.st_mode), S_ISLNK(st.st_mode),
-    int(st.st_uid), int(st.st_mode))
-  if why.len > 0: result = dir & " " & why
+  var chain = @[parentDir(LegacySecretsRoot), LegacySecretsRoot]
+  var cur = LegacySecretsRoot
+  for seg in dir[LegacySecretsRoot.len + 1 .. ^1].split('/'):
+    cur = cur & "/" & seg
+    chain.add(cur)
+  for p in chain:
+    let st = statOf(p)
+    if not st.exists: return p & " does not exist"
+    let why = legacySecretsTrustError(st.isDir, st.isLink, st.uid, st.mode)
+    if why.len > 0: return p & " " & why
 
 proc registeredLegacySecretsDirs*(stateDir: string): seq[string] =
   ## The current agent's secrets directory, when it is registered and still

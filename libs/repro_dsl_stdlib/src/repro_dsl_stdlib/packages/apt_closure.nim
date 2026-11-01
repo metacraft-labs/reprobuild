@@ -477,16 +477,19 @@ proc aptDebPrefixId*(d: AptLockedDeb): PrefixIdBytes =
     provenanceChecksum = "sha256:" & d.sha256,
     extra = [AptClosureRealiserVersion, d.architecture])
 
+proc aptClosureIdentityFor(lock: AptClosureLock; realiser: string): string =
+  var shas: seq[string] = @[]
+  for d in lock.debs: shas.add(d.sha256)
+  shas.sort(cmp)
+  sha256OfString("repro.apt-closure\x00" & realiser &
+    "\x00" & lock.architecture & "\x00" & shas.join("\x00"))[0 ..< 16]
+
 proc aptClosureIdentity*(lock: AptClosureLock): string =
   ## 16-hex identity of the closure's CONTENT: realiser version,
   ## architecture and the sorted member digests. The archive URL, suite and
   ## roots do not enter it — the same bytes from a mirror are the same
   ## closure.
-  var shas: seq[string] = @[]
-  for d in lock.debs: shas.add(d.sha256)
-  shas.sort(cmp)
-  sha256OfString("repro.apt-closure\x00" & AptClosureRealiserVersion &
-    "\x00" & lock.architecture & "\x00" & shas.join("\x00"))[0 ..< 16]
+  aptClosureIdentityFor(lock, AptClosureRealiserVersion)
 
 proc rootDeb(lock: AptClosureLock): AptLockedDeb =
   for d in lock.debs:
@@ -518,6 +521,23 @@ proc aptClosurePrefixPath*(storeRoot: string; lock: AptClosureLock): string =
   let r = rootDeb(lock)
   storeRoot / prefixRelativePath("apt-closure-" & r.name, r.version,
     aptClosurePrefixId(lock))
+
+const LegacyAptClosureRealisers* = ["2"]
+  ## Realiser versions whose closure prefixes predate the store-published
+  ## layout ("3"): unpublished directories at
+  ## ``<store>/prefixes/apt-closure-<root>/<version>-<identity>``, the
+  ## identity computed with that realiser version. Same package bytes, other
+  ## path. A unit an older realiser's host bound to one is recognised by
+  ## ``legacyAptClosurePrefixPaths`` (ReproOS Add-On Mode §9 "Migration").
+
+proc legacyAptClosurePrefixPaths*(storeRoot: string;
+                                  lock: AptClosureLock): seq[string] =
+  ## Where each older realiser (``LegacyAptClosureRealisers``) put this
+  ## closure's union prefix.
+  let r = rootDeb(lock)
+  for v in LegacyAptClosureRealisers:
+    result.add(storeRoot / "prefixes" / ("apt-closure-" & r.name) /
+      (pathSafeVersion(r.version) & "-" & aptClosureIdentityFor(lock, v)))
 
 proc aptClosurePrefixIds*(lock: AptClosureLock): seq[PrefixIdBytes] =
   ## Every store prefix a realised closure consists of: the union first,

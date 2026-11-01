@@ -167,7 +167,11 @@ suite "legacy LoadCredential= under the agent's --secrets-dir (§10.3)":
     createSymlink(tmp / "outside", dir / "leak")
     createSymlink(dir / "ok", dir / "alias")
     check credentialSourceResolvesUnder(dir / "ok", dir)
-    check credentialSourceResolvesUnder(dir / "alias", dir)
+    # A source that is itself a link is refused, wherever it points, and
+    # so is a dangling one. At c3ca271319 both were accepted.
+    check not credentialSourceResolvesUnder(dir / "alias", dir)
+    createSymlink(dir / "nowhere", dir / "dangling")
+    check not credentialSourceResolvesUnder(dir / "dangling", dir)
     check not credentialSourceResolvesUnder(dir / "leak", dir)
     check credentialSourceResolvesUnder(dir / "not-yet", dir)
 
@@ -236,3 +240,60 @@ suite "a revert keeps a drifted file only as the failed switch found it":
     check not revertMayKeep("revert", true, false, "s", "s")
     check not revertMayKeep("apply", true, true, "s", "s")
     check not revertMayKeep("rollback", true, true, "s", "s")
+
+suite "the directories above a legacy secrets directory are trusted too":
+  test "/var/lib/repro and /var/lib/repro/agent are root-owned, not g/o-writable":
+    # At c3ca271319 only the directory itself was checked.
+    proc fake(writable: string): LegacyStatFn =
+      result = proc(p: string): LegacyStat {.gcsafe.} =
+        (true, true, false, 0, (if p == writable: 0o40777 else: 0o40755))
+    const Dir = "/var/lib/repro/agent/secrets"
+    check legacySecretsDirTrustError(Dir, fake("")) == ""
+    for p in ["/var/lib/repro", "/var/lib/repro/agent", Dir]:
+      let why = legacySecretsDirTrustError(Dir, fake(p))
+      check why.startsWith(p & " ") and "writable" in why
+    let deeper = "/var/lib/repro/agent/x/secrets"
+    check "/var/lib/repro/agent/x " in
+      legacySecretsDirTrustError(deeper, fake("/var/lib/repro/agent/x"))
+
+suite "an untrusted legacy secrets directory is named in the refusal":
+  test "the refusal of its lines says which directory and why (m2)":
+    # At c3ca271319 the reason went only to a drift line, lost when the
+    # scope check refused.
+    let prof = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemUnit, address: "systemUnit:a.service",
+      suName: "a.service", suContent: "[Service]\nExecStart=/bin/true\n" &
+        "LoadCredential=k:/var/lib/repro/agent/secrets/a/k\n")])
+    try:
+      checkScope(prof, newSeq[string](), ["/var/lib/repro/agent/secrets " &
+        "(/var/lib/repro/agent/secrets is group- or world-writable)"])
+      check false
+    except EAddOnOutOfScope as e:
+      check "not accepted as one: /var/lib/repro/agent/secrets " &
+        "(/var/lib/repro/agent/secrets is group- or world-writable)" in e.msg
+
+suite "a unit an older closure realiser bound is relocated, not refused":
+  test "recognised by its older prefix path alone (§9 Migration)":
+    # At 4379adfd3b rpi2's prometheus-node-exporter.service, as its agent
+    # wrote it (realiser 2's prefix), was EDrift: none of this existed.
+    let r = SystemResource(kind: srkSystemdSystemUnit,
+      address: "systemUnit:x.service", suName: "x.service",
+      suContent: "[Unit]\nDescription=x\n\n[Service]\nExecStart=/usr/bin/x\n",
+      suAptClosureLock: Lock)
+    let lock = parseAptClosureLock(Lock)
+    let current = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+    let legacy = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock)
+    check legacy.len == 1 and legacy[0] != current
+    check legacy[0].startsWith(AddOnSystemStoreRoot & "/prefixes/apt-closure-ipmitool/1.0-1-")
+    let rendered = renderedSystemUnitContent(r)
+    let old = legacyClosureRenderings(r)
+    check old.len == 1 and current notin old[0] and legacy[0] in old[0]
+    check old[0] == rendered.replace(current & "/", legacy[0] & "/")
+    let tmp = createTempDir("addon-closure-reloc-", "")
+    defer: removeDir(tmp)
+    writeFile(tmp / "x.service", old[0])
+    check relocatesClosure(r, tmp / "x.service")
+    writeFile(tmp / "x.service", old[0] & "Nice=5\n")
+    check not relocatesClosure(r, tmp / "x.service")
+    writeFile(tmp / "x.service", rendered)
+    check not relocatesClosure(r, tmp / "x.service")

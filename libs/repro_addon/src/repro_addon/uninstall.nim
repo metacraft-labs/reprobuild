@@ -257,7 +257,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   #    and activity are re-asserted (spec §4.2, C36).
   var handBack: seq[LedgerEntry]
   for u in byClass[lcUnit]:
-    if u.collision in ["replace", "adopt", "reconcile"]:
+    if u.collision in ["replace", "adopt", "reconcile", "closure-relocate"]:
       handBack.add(u)
     elif fileExists(u.path):
       # Stopped, then disabled by removing exactly its ledgered install
