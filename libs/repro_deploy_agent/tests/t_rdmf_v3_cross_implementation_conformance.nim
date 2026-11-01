@@ -478,10 +478,21 @@ suite "RDMF v3 cross-implementation conformance":
 
   test "a real compiler: Python's pin is reproduced by a second compile here":
     let compiler = getEnv("RDMF_PROFILE_COMPILER")
+    # Configured but unusable is a failure, never a skip: a measurement
+    # that names a compiler must have compiled with it. Only an unset
+    # RDMF_PROFILE_COMPILER skips, and RDMF_PROFILE_COMPILER_REQUIRED=1
+    # turns that into a failure too.
+    let usable = compiler.len > 0 and fileExists(compiler) and
+      fpUserExec in getFilePermissions(compiler) and
+      execCmdEx(quoteShellCommand(@[compiler, "--version"])).exitCode == 0
     if compiler.len == 0:
       check getEnv("RDMF_PROFILE_COMPILER_REQUIRED") != "1"
       echo "SKIPPED: no RDMF_PROFILE_COMPILER (the engine's reprobuild); the " &
         "compile determinism half is NOT checked here"
+    elif not usable:
+      checkpoint "RDMF_PROFILE_COMPILER=" & compiler & " is set but is not " &
+        "an executable that answers --version"
+      check usable
     else:
       let src = work / "source.nim"
       writeFile(src, "import repro_profile\n\nprofile \"conformance\":\n" &
@@ -616,5 +627,148 @@ suite "RDMF v3 cross-implementation conformance":
     let b = execCmdEx(quoteShellCommand(@[python, "-I", probe, producer(), path]))
     check b.exitCode == 0
     check b.output.strip() == "IDENTICAL"
+
+  test "an issuedAt of 2^63 or more is malformed in both codecs, never a crash":
+    # The agent compares issuedAt with its clock in signed arithmetic. A
+    # u64 above int64's range must be refused at decode -- before this it
+    # decoded, and the freshness check overflowed (a RangeDefect, which no
+    # tick handler catches).
+    check MaxIssuedAt == uint64(high(int64))
+    let atMax = render("issued-max", @["--max-age-seconds", "3600",
+      "--issued-at", $high(int64), "--sequence", "13"])
+    let okm = decodeManifest(cast[seq[byte]](readFile(atMax)))
+    check okm.issuedAt == MaxIssuedAt
+    let over = py(@["render", "--target", Target, "--profile", profile,
+      "--signing-key", signerKey, "--state-dir", work / "state-issued-over",
+      "--output", work / "issued-over.rdm", "--producer", "conformance",
+      "--max-age-seconds", "3600", "--sequence", "13",
+      "--issued-at", "9223372036854775808"])
+    checkpoint over.output
+    check over.code != 0
+    check "issuedAt" in over.output
+    check "Traceback" notin over.output
+    var bad = okm
+    bad.issuedAt = MaxIssuedAt + 1
+    expect DeployManifestCodecError:
+      discard encodeManifest(bad)
+    # The same envelope with only the u64 field raised past int64 (its
+    # signature no longer matters: the block is checked before it).
+    var wire = readFile(atMax)
+    let needle = "\xff\xff\xff\xff\xff\xff\xff\x7f"
+    check wire.count(needle) == 1
+    wire = wire.replace(needle, "\x00\x00\x00\x00\x00\x00\x00\x80")
+    let overPath = work / "issued-over-patched.rdm"
+    writeFile(overPath, wire)
+    expect DeployManifestCodecError:
+      discard decodeManifest(cast[seq[byte]](wire))
+    var applied: seq[DeployManifest]
+    let o = tickOf(overPath, anchors, now, applied)
+    check o.kind == aoRejected
+    check o.errorCode == "malformed_manifest"
+    check applied.len == 0
+    let pi = py(@["inspect", "--manifest", overPath])
+    checkpoint pi.output
+    check pi.code != 0
+    check "Traceback" notin pi.output
+
+  test "key lists: both readers accept and refuse exactly the same lines":
+    let k = peerAuth.generateKeypair().publicKey
+    let good = hexOf(k)
+    let probe = work / "keys_grammar.py"
+    writeFile(probe, "import importlib.util, sys\n" &
+      "spec = importlib.util.spec_from_file_location('rdm', sys.argv[1])\n" &
+      "mod = importlib.util.module_from_spec(spec); sys.modules['rdm'] = mod; spec.loader.exec_module(mod)\n" &
+      "try:\n" &
+      "    a = sorted(k.hex() for k in mod.load_trust_anchors(sys.argv[2]))\n" &
+      "    r = sorted(k.hex() for k in mod.load_revoked_recipient_keys(sys.argv[2]))\n" &
+      "    print('KEYS ' + ' '.join(a)); print('KEYS ' + ' '.join(r))\n" &
+      "except mod.ManifestError as e:\n" &
+      "    print('REFUSED ' + str(e))\n")
+    proc pyReads(file: string): string =
+      let r = execCmdEx(quoteShellCommand(@[python, "-I", probe, producer(), file]))
+      checkpoint r.output
+      check r.exitCode == 0
+      r.output.strip()
+    proc nimReads(file: string): string =
+      try:
+        var keys: seq[string]
+        for x in peerAuth.loadTrustAnchors(file).publicKeys: keys.add(hexOf(x))
+        keys.sort()
+        discard loadRevokedRecipientKeys(file)
+        "KEYS " & keys.join(" ")
+      except CatchableError:
+        "REFUSED"
+    # A comment holding bytes that are not UTF-8 is still only a comment.
+    let latin = work / "keys-latin1.txt"
+    writeFile(latin, "# revoked (caf\xe9, \xff\xfe not UTF-8)\n" & good & "\n")
+    check nimReads(latin) == "KEYS " & good
+    check pyReads(latin) == "KEYS " & good & "\nKEYS " & good
+    # Lines one side used to accept and the other refuse: spaces between
+    # bytes (bytes.fromhex skips them), a 05 point prefix, and pairs that
+    # Nim's parseHexInt read as hex ("_f", "#f").
+    let spaced = good[0 ..< 64] & " " & good[64 ..< 126] & " " & good[126 .. ^1]
+    var bads = @[("spaces", good[0 ..< 2] & " " & good[3 .. ^1]),
+                 ("spaces-short", spaced[0 ..< 130]),
+                 ("prefix-05", "05" & good[2 .. ^1]),
+                 ("underscore", good[0 ..< 10] & "_f" & good[12 .. ^1]),
+                 ("hash", good[0 ..< 10] & "#f" & good[12 .. ^1]),
+                 ("0x", good[0 ..< 10] & "0x" & good[12 .. ^1])]
+    for (name, line) in bads:
+      let f = work / ("keys-bad-" & name & ".txt")
+      writeFile(f, "# " & name & "\n" & line & "\n")
+      checkpoint name
+      check nimReads(f) == "REFUSED"
+      check pyReads(f).startsWith("REFUSED")
+
+  test "strings that are not UTF-8 round-trip through Python byte for byte":
+    # The format's strings are bytes; Python's decoder reads them with
+    # surrogateescape, and its encoder must write them back unchanged.
+    var m = DeployManifest(target: Target, sequence: 14'u64,
+      deploymentId: "nim-\xff\xfe-caf\xe9-14", profileText: "x\xff\n",
+      issuedAt: uint64(now - 30), maxAgeSeconds: 900'u64)
+    signManifest(signer, m)
+    let path = work / "nim-bytes.rdm"
+    writeFile(path, cast[string](encodeManifest(m)))
+    let probe = work / "reencode-bytes.py"
+    writeFile(probe, "import importlib.util, sys\n" &
+      "spec = importlib.util.spec_from_file_location('rdm', sys.argv[1])\n" &
+      "mod = importlib.util.module_from_spec(spec); sys.modules['rdm'] = mod; spec.loader.exec_module(mod)\n" &
+      "buf = open(sys.argv[2], 'rb').read()\n" &
+      "m, sig = mod.decode_manifest(buf)\n" &
+      "print('IDENTICAL' if m.unsigned_prefix() + sig == buf else 'DIFFERENT')\n")
+    let b = execCmdEx(quoteShellCommand(@[python, "-I", probe, producer(), path]))
+    checkpoint b.output
+    check b.exitCode == 0
+    check b.output.strip() == "IDENTICAL"
+    let v = py(@["inspect", "--manifest", path])
+    checkpoint v.output
+    check v.code == 0
+    check parseJson(v.output)["signatureVerifies"].getBool
+
+  test "a system selection without a compiled profile is refused by both producers":
+    # Before, this library's encoder ignored a pin that held only a
+    # selection (the pin counted as absent) and signed the envelope
+    # without it, while Python refuses the pin for its missing digest.
+    var m = DeployManifest(target: Target, sequence: 15'u64,
+      deploymentId: "nim-15", profileText: "x\n",
+      issuedAt: uint64(now - 30), maxAgeSeconds: 900'u64,
+      compiledProfile: CompiledProfilePin(systemMode: "addOn",
+        systemActivities: @["web"]))
+    check m.hasCompiledProfilePin
+    # Signing encodes the prefix, so the refusal comes there already.
+    expect DeployManifestCodecError:
+      signManifest(signer, m)
+    expect DeployManifestCodecError:
+      discard encodeManifest(m)
+    let probe = work / "selection_only.py"
+    writeFile(probe, "import importlib.util, sys\n" &
+      "spec = importlib.util.spec_from_file_location('rdm', sys.argv[1])\n" &
+      "mod = importlib.util.module_from_spec(spec); sys.modules['rdm'] = mod; spec.loader.exec_module(mod)\n" &
+      "p = mod.CompiledProfilePin(digest='', compilerRevision='', platform='', arch='', host='', systemMode='addOn', systemActivities=['web'])\n" &
+      "print('REFUSED' if mod.compiled_profile_pin_error(p) else 'ACCEPTED')\n")
+    let r = execCmdEx(quoteShellCommand(@[python, "-I", probe, producer()]))
+    checkpoint r.output
+    check r.exitCode == 0
+    check r.output.strip() == "REFUSED"
 
 removeDir(work)
