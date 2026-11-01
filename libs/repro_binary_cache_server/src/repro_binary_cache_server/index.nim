@@ -28,7 +28,7 @@
 ## its own key in v1; the directory is forward-compat for federated
 ## publishing).
 
-import std/[os, sets, strutils]
+import std/[os, sets, strutils, tempfiles]
 
 import blake3
 import repro_local_store
@@ -306,7 +306,24 @@ proc storeManifest*(s: BinaryCacheServerState;
   var content = newString(bytes.len)
   for i in 0 ..< bytes.len:
     content[i] = char(bytes[i])
-  writeFile(path, content)
+  # Written to a temporary file in the same directory and renamed over the
+  # final path: a concurrent reader (`loadManifest`, a substituting client)
+  # sees the old manifest or the new one, never a partial write, and a
+  # republish replaces whatever sat at the path -- a planted symlink
+  # included -- instead of writing through it.
+  let (tmpFile, tmpPath) = createTempFile(".manifest-", ".tmp", parentDir(path))
+  try:
+    tmpFile.write(content)
+    tmpFile.flushFile()
+    tmpFile.close()
+    moveFile(tmpPath, path)
+  except CatchableError:
+    try: tmpFile.close()
+    except CatchableError: discard
+    if fileExists(tmpPath):
+      try: removeFile(tmpPath)
+      except CatchableError: discard
+    raise
   return path
 
 proc loadManifest*(s: BinaryCacheServerState;

@@ -30205,7 +30205,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         " produces none; drop one of them")
       return 2
     if buildTargetTriple.len == 0:
-      for assignment in getEnv("REPRO_VARIANTS").split(','):
+      for rawAssignment in getEnv("REPRO_VARIANTS").split(','):
+        let assignment = rawAssignment.strip()
         if assignment.startsWith(TargetTripleVariantName & "="):
           stderr.writeLine("repro build: --publish takes the consuming " &
             "platform from --target; the target here is assigned by " &

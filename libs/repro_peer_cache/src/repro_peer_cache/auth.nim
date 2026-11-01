@@ -361,17 +361,16 @@ proc createNewFile(path, content: string; mode: int; ownerOnly: bool) =
     finally:
       discard posix.close(fd)
   elif defined(windows):
-    if fileExists(path) or symlinkExists(path):
+    # `CREATE_NEW` itself refuses an existing file or link, so there is no
+    # check-then-create window. The cert gets the same owner-only DACL as
+    # the key: a public key loses nothing by it, and one writer means one
+    # exclusive-create path.
+    discard ownerOnly
+    try:
+      createNewOwnerOnlyFile(path, content)
+    except OwnerOnlyFileError as err:
       raise newException(AuthError, "cannot create " & path &
-        " exclusively: it already exists")
-    if ownerOnly:
-      try:
-        createNewOwnerOnlyFile(path, content)
-      except OwnerOnlyFileError as err:
-        raise newException(AuthError, "cannot create " & path & ": " &
-          err.msg)
-    else:
-      writeFile(path, content)
+        " exclusively: " & err.msg)
   else:
     {.error: "key files need a POSIX or Windows writer".}
 

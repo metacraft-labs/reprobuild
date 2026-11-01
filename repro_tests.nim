@@ -960,6 +960,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_binary_cache_server_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_binary_cache_server/tests/t_store_manifest_replaces_atomically.nim",
+    binary: "build/test-bin/t_store_manifest_replaces_atomically",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_binary_cache_server_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_action_cache_output_integrity.nim",
     binary: "build/test-bin/t_action_cache_output_integrity",
     defines: @[],

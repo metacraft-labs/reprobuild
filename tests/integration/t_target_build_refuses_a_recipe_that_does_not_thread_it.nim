@@ -376,13 +376,23 @@ suite "--target refuses a recipe that does not thread it, end to end":
     # The glibc row (Reprobuild-Standard-Library.md, `cross_zig`): a real
     # link for armv7-unknown-linux-gnueabihf, read back with binutils'
     # readelf. It must be a dynamic ARM hard-float executable that asks for
-    # the Pi's loader and libc, and need no glibc symbol version newer than
-    # the row's 2.38 -- the floor the trixie libraries it will link set.
+    # the Pi's loader and libc, link a symbol glibc 2.38 introduced, and
+    # need exactly GLIBC_2.38 -- the floor the trixie libraries it will
+    # link set.
     requirePreconditions(["zig", "readelf"]):
       const GlibcTriple = "armv7-unknown-linux-gnueabihf"
       let root = createTempDir("target-glibc-executable-", "")
       defer: removeDir(root)
       let project = createProject(root, CExecutableRecipe)
+      # `__isoc23_strtol` first appears in glibc 2.38 (it is how trixie's
+      # libcrypto reaches strtol). It links only if the row's glibc floor
+      # really is 2.38 -- zig's 2.36 ABI list has no such symbol -- and the
+      # binary must then ask for GLIBC_2.38, no more and no less.
+      writeFile(project / "src/hello.c",
+        "long __isoc23_strtol(const char *, char **, int);\n" &
+        "int main(int argc, char **argv) {\n" &
+        "  return (int)__isoc23_strtol(argc > 1 ? argv[1] : \"0\", 0, 10);\n" &
+        "}\n")
       let cross = runBuild(root, project, @["--target=" & GlibcTriple])
       checkpoint(cross.output)
       check cross.code == 0
@@ -406,8 +416,9 @@ suite "--target refuses a recipe that does not thread it, end to end":
           let parts = word["GLIBC_".len .. ^1].split('.')
           let v = (parseInt(parts[0]), parseInt(parts[1]))
           if v > newest: newest = v
-      check newest >= (2, 4)
-      check newest <= (2, 38)
+      check newest == (2, 38)
+      check "__isoc23_strtol" in execCmdEx("readelf -WsD " &
+        quoteShell(exe)).output
 
   test "t_target_publish_admits_target_bytes_and_refuses_host_bytes":
     # A cross build's bytes reach a cache by `repro cache publish` under an
@@ -589,6 +600,14 @@ suite "repro build --publish=<profile>#<edge>":
       checkpoint(viaVariant.output)
       check viaVariant.code == 2
       check ("Spell it --target=" & Triple) in viaVariant.output
+      # The same assignment arriving through REPRO_VARIANTS with spaces
+      # around the item (as a hand-written environment has it).
+      let spaced = runBuild(root, project, @["--publish=" & profile &
+        "#hello-prefix"], creds & @[("REPRO_VARIANTS",
+        "foo=bar , targetTriple=" & Triple & " ")])
+      checkpoint(spaced.output)
+      check spaced.code == 2
+      check ("Spell it --target=" & Triple) in spaced.output
       check manifestCount(root) == 0
       # Unknown edge: refused by name, the edges listed, nothing published.
       let unknown = runBuild(root, project, @["--target=" & Triple,

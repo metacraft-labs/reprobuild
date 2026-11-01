@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2583,
+    "nimTestBinaries": 2584,
     "pureUnitConsolidationGroups": 76,
     "pureUnitTests": 721,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2623
+    "testEntries": 2624
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1507,7 +1507,7 @@
       "integration": 1431,
       "platform/destructive": 161,
       "pure unit": 721,
-      "unclassified": 292
+      "unclassified": 293
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1715,9 +1715,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2583,
+    "nimTestBinaryCount": 2584,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2623
+    "testEntryCount": 2624
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9421,6 +9421,24 @@
       "owner": "libs/repro_binary_cache_server",
       "requiresReproBinary": false,
       "source": "libs/repro_binary_cache_server/tests/t_start_binds_before_it_returns.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_manifest_replaces_atomically",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_server",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_binary_cache_server",
+      "requiresReproBinary": false,
+      "source": "libs/repro_binary_cache_server/tests/t_store_manifest_replaces_atomically.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
