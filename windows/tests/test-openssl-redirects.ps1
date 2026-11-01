@@ -122,6 +122,14 @@ try {
   Assert-Rejected { Download-VerifiedFileFromMirrors -Urls @($uri) -OutFile $script:output -ExpectedSha256 $script:payloadSha } 'SSL|TLS|trust|certificate|secure channel'
   Require ($script:fixture.Current.TcpConnections -gt 0) 'System-trust refusal did not reach the TLS origin.'
   Assert-NoOutput
+  # A refusal only means what this control claims if the handshake actually
+  # reached certificate validation. With a server that cannot present its
+  # certificate at all, the download fails too -- for an unrelated reason --
+  # and the control cannot tell the difference. Assert the fixture's own
+  # health, the same way the timed-redirect control already does.
+  $seen = $script:fixture.Current
+  Require ($seen.Failure -eq '') "The TLS fixture failed: $($seen.Failure)"
+  Require ($seen.TcpConnections -ge 1) 'The refusal control never reached the fixture.'
   Write-Host 'PASS: unchanged default system trust refuses the private fixture certificate'
 
   # Only construction is replaced. Redirect policy, requests, cancellation,
