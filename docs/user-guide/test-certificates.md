@@ -12,8 +12,8 @@ Moving certificates around is the job of the
 [`test_certificates`](https://github.com/metacraft-labs/test-certificates-tools)
 library, which is linked into `repro`, so you install nothing extra.
 
-> **Status:** ✓ Implemented on Linux, where every command below was run. macOS
-> and Windows run the same code but have not been exercised end to end yet.
+> **Status:** ✓ Implemented and exercised on Linux. macOS and Windows run the same
+> code but have not been exercised end to end.
 
 ## What a certificate binds to
 
@@ -183,7 +183,8 @@ and a branch no rule matches has no requirement.
 `repro certificates policy` prints the policy and the rule for the current branch.
 After changing the policy or moving its pin, run `repro lock refresh`; until then
 `repro health` reports the snapshot as stale, and the next certifying run updates it
-too. Run `repro hooks ensure --vcs` once after adopting a policy, to install the
+too. If `repro health` still reports it stale after the refresh, see
+[Troubleshooting](#troubleshooting). Run `repro hooks ensure --vcs` once after adopting a policy, to install the
 gate below.
 
 ## The pre-commit gate
@@ -320,7 +321,7 @@ test-certificates notes push <remote>
 `test-certificates` is the executable of the same library, and `repro` does not
 install it. To run it without installing anything, use
 `nix run github:metacraft-labs/test-certificates-tools -- notes publish <commit>`.
-There is no such one-liner on Windows yet.
+On Windows, use `repro push`, which carries both cases.
 
 ## `repro push`
 
@@ -440,11 +441,12 @@ staged.
 
 **`key_id '…' not registered`.** The verifier could not find the signing key in the
 registered-keys store of the workspace it used. For `repro ci plan` in a workspace,
-pass `--workspace-root=<workspace>` and `--current-repo=<repo>`, or the repository is
-taken for the workspace and its own store is read.
+pass `--workspace-root=<workspace>` and `--current-repo=<path to the repository>`, or the
+repository is taken for the workspace and its own store is read.
 
 **A gateway refuses with "no certificate note on the pushed tree".** Nothing
-propagated a note, for one of two reasons. The commit may not record what you tested:
+propagated a note, for one of two reasons, and the refusal ends by saying the pushed
+commit's content must be the content that was tested. The commit may not record it:
 after a partial stage or a hook that rewrote a file, no certificate exists for its
 content and there is nothing to carry. Compare its tree, `git rev-parse <commit>^{tree}`,
 with the id the run printed, and if they differ, run `repro test` on that commit. If
@@ -464,6 +466,11 @@ introduce commits and the `repro` servicing the hook is a build from before
 propagation, which answers the same hook contract, carries nothing and reports
 nothing. The line `repro hooks: pre-push above was produced by …` names that build;
 compare it with the `repro` you expect.
+
+**`repro lock refresh` leaves the snapshot stale.** Once `repro certify` or
+`repro certificates list` has evaluated the recipe, a refresh can go on recording the
+previous policy, and `repro health` keeps warning. Run `repro certify`: its lock-update
+step records the current policy and stages `repro.lock`.
 
 **The row says `pre-push hook MISSING`.** Run `repro hooks ensure --vcs`. Without the
 hook a plain `git push` carries no notes.
