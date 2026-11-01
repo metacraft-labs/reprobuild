@@ -72634,51 +72634,6 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
   result.ok = true
   result.verifiedLocalHead = localOid
 
-proc pushIntroducedCommits(identity: GitToolIdentity; repoAbs: string;
-                           observed: PushPreflightRepo):
-    tuple[ok: bool; commits: seq[string]; problem: string] =
-  ## The commits this member's ``git push <remote> HEAD:<branch>`` introduces, by
-  ## test-certificates Tooling §4.2
-  ## (https://github.com/metacraft-labs/test-certificates-spec/blob/latest/Tooling.md),
-  ## newest first. It has one entry per push URL, so §4.2's "other entries" do not
-  ## arise, and the union over the URLs is the answer. The reference library works
-  ## this out inside its hook and does not export it; the hook itself is what
-  ## this must agree with, and ``t_repro_push_certifies_only_content_that_was_not_tested``
-  ## checks that it does for the rows ``repro push`` can reach.
-  ##
-  ## The remote objects come from the advertisement the preflight verified, not
-  ## from a remote-tracking ref that may be stale.
-  var seen = initHashSet[string]()
-  var bounds: seq[seq[string]]
-  for destination in observed.advertisementFingerprint.splitLines():
-    let fields = destination.split('\t')
-    if fields.len < 3:
-      continue
-    # A branch the remote lacks, or a tip this repository never fetched: the
-    # remote-tracking refs stand in for it (§4.2's second exclusion).
-    let bound =
-      if fields[2] != "<missing>" and gitRunPlainQuery(identity,
-          ["-C", repoAbs, "rev-parse", "--verify", "--quiet",
-           fields[2] & "^{commit}"]).code == 0:
-        @["^" & fields[2]]
-      else:
-        @["--not", "--remotes=" & observed.remoteName]
-    if bound notin bounds:
-      bounds.add(bound)
-  if bounds.len == 0:
-    bounds.add(@["--not", "--remotes=" & observed.remoteName])
-  for bound in bounds:
-    let listed = gitRunPlainQuery(identity,
-      @["-C", repoAbs, "rev-list", observed.headSha] & bound)
-    if listed.code != 0:
-      return (false, @[], "the commits this push introduces could not be " &
-        "listed in " & repoAbs & " (git rev-list exit " & $listed.code & ")")
-    for line in listed.output.splitLines():
-      let commit = line.strip()
-      if commit.len > 0 and not seen.containsOrIncl(commit):
-        result.commits.add(commit)
-  result.ok = true
-
 type
   PushCertifyDecision = object
     ## What the certify step of ``repro push`` decided for one member.
@@ -73288,7 +73243,12 @@ proc executePush(args: PushArgs): PushReport =
     if observed.published:
       continue
     let repoAbs = args.workspaceRoot / byName[name].path
-    let introduced = pushIntroducedCommits(identity, repoAbs, observed)
+    let introduced = commitsPushIntroduces(repoAbs, observed.remoteName,
+      observed.headSha, observed.destinationRef,
+      observed.advertisementFingerprint.splitLines().mapIt(
+        block:
+          let fields = it.split('\t')
+          if fields.len < 3 or fields[2] == "<missing>": "" else: fields[2]))
     # The hook carries what a push introduces, and the tip is either among that
     # or nothing is. With nothing, this command has to carry it (see below).
     if introduced.ok and observed.headSha notin introduced.commits:

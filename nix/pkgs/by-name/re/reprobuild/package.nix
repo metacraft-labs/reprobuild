@@ -168,8 +168,8 @@
   testCertificatesToolsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "test-certificates-tools";
-    rev = "40e62089e8d157ff0fb6f1eeb2cf331f274234b7";
-    hash = "sha256-wQgxkcxoMWOxSYwsyCeCiaLrHXmJX8sVXkWtCBXOCNo=";
+    rev = "4b395de551d86c745d6eb8ebf7c7228df25298f5";
+    hash = "sha256-kj7SWWfs675mrVpN5iiaBenh/hiKAP68aPNTADmSwP8=";
   },
   # Source only. reprobuild compiles `runquota_client`/`_codec`/`_core`/`_ipc`/
   # `_process`/`_protocol` out of this tree. The separate runquotaTools package

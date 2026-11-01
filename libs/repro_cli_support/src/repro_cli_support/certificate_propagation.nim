@@ -18,7 +18,7 @@
 ## Nothing here decides the push: what could not be propagated is reported, and
 ## the receiving gate decides what the missing notes mean (§4.3).
 
-import std/[os, strutils]
+import std/[os, sequtils, strutils]
 
 from test_certificates/git as tcgit import nil
 from test_certificates/hook as tchook import nil
@@ -111,6 +111,37 @@ proc propagateCertificates*(repoRoot, remoteName, remoteLocation,
     except Exception:
       discard
   cpNotPropagated
+
+proc commitsPushIntroduces*(repoRoot, remoteName, commit, destinationRef: string;
+                           remoteObjects: openArray[string]):
+    tuple[ok: bool; commits: seq[string]; problem: string] =
+  ## The commits ``git push <remoteName> <commit>:<destinationRef>`` introduces
+  ## (Tooling §4.2), asked of the library before the push, so what is decided here
+  ## and what its hook carries cannot disagree. ``remoteObjects`` has what each
+  ## push URL advertises for the destination, "" where it has nothing: each URL
+  ## gets a hook run of its own, so the answer is the union over them. Never raises.
+  try:
+    let options = hookOptions(proc (line: string) = discard)
+    let absent = repeat('0', commit.len)
+    let destinations =
+      if remoteObjects.len > 0: toSeq(remoteObjects) else: @[""]
+    var asked: seq[string]
+    for advertised in destinations:
+      if advertised in asked:
+        continue
+      asked.add(advertised)
+      let answer = tchook.introducedCommits(repoRoot, remoteName,
+        commit & " " & commit & " " & destinationRef & " " &
+          (if advertised.len > 0: advertised else: absent) & "\n", options)
+      if not answer.ok:
+        return (false, @[], answer.problems.join("; "))
+      for introduced in answer.commits:
+        if introduced notin result.commits:
+          result.commits.add(introduced)
+    result.ok = true
+  except Exception as err: # Defect included, as in the other entry points here.
+    return (false, @[], "the commits this push introduces could not be told: " &
+      err.msg)
 
 proc carryCertificatesOfCommit*(repoRoot, remoteName, commit: string;
                                 report: proc (line: string)):
