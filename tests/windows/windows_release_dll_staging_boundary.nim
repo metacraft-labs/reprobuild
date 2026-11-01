@@ -122,7 +122,14 @@ Set-Content (Join-Path $versionRoot 'nim.install.meta') "nim_version=2.2.8`ninst
 $first = $text.IndexOf('$nimVersionRoot ='); $last = $text.IndexOf('$opensslRoot =', $first)
 if ($first -lt 0 -or $last -lt 0) { throw 'Production Nim selection block missing.' }
 . ([ScriptBlock]::Create($text.Substring($first, $last-$first)))
-Require ($nimDir -eq (Join-Path $toolchainRoot "$relative/bin")) 'source-mode selected prefix is preserved'
+# Compare the PATHS, not their separator styles. Production resolves the
+# selected prefix with [IO.Path]::GetFullPath, which canonicalises
+# `nim/2.2.8/source/selected` to backslashes, while Join-Path leaves the
+# forward slashes of its relative argument untouched -- so the two strings
+# differed while naming the same directory, and this control failed on a
+# correct selection. It had never actually run on Windows: the job died in
+# an earlier step until that step was fixed.
+Require (([IO.Path]::GetFullPath($nimDir)) -eq ([IO.Path]::GetFullPath((Join-Path $toolchainRoot "$relative/bin")))) 'source-mode selected prefix is preserved'
 $tmp = Join-Path $Fixture 'tmp'
 $fallback = Join-Path $tmp 'sqlite-3460100'
 New-Item -ItemType Directory -Force -Path $fallback | Out-Null
