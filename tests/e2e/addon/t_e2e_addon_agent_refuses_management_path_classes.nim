@@ -22,6 +22,8 @@ import ./addon_testbed
 import ./agent_e2e_support
 
 const Gate = "e2e_addon_agent_refuses_management_path_classes"
+# Run after every tick; see the first loop of `body` for why both units.
+const ResetUnits = "systemctl reset-failed repro-agent-apply.service repro-agent-fetch.service"
 
 proc withPrefixes(prefixes: seq[string]; body: string): string =
   var q: seq[string]
@@ -47,8 +49,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     let t = g.tickUnits()
     # The refused apply leaves its unit `failed` (exit 1), which the
     # fingerprint's live state would show; that is the agent's report, not
-    # a change to the host.
-    discard g.exec("systemctl reset-failed repro-agent-apply.service")
+    # a change to the host. The fetch unit is reset as well, for its start
+    # rate counter: this gate starts it nine times, a few seconds apart,
+    # where its timer starts it once a period, and systemd refuses a sixth
+    # start within ten seconds (StartLimitIntervalSec=10s,
+    # StartLimitBurst=5, systemd.unit(5)) as `start-limit-hit`. reset-failed
+    # clears that counter (systemctl(1)); measured on debian-13-amd64 at
+    # a26b331ccc, where the sixth and seventh ticks were refused that way.
+    discard g.exec(ResetUnits)
     step("the agent refuses " & what, t.outcome == "aoApplyFailed" and
          "EAddOnManagementPath" in t.message, $t & t.applyLog)
     step(what & ": nothing was written", g.exec("test -e " & path).exitCode != 0, "")
@@ -69,7 +77,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     discard producer.publish(PublishSpec(sequence: sequence, profileText: prof))
     inc sequence
     let t = g.tickUnits()
-    discard g.exec("systemctl reset-failed repro-agent-apply.service")
+    discard g.exec(ResetUnits)
     step("the agent refuses " & what, t.outcome == "aoApplyFailed" and
          "EAddOnManagementPath" in t.message, $t & t.applyLog)
     step(what & ": nothing was written", g.exec("test -e " & path).exitCode != 0, "")
@@ -102,7 +110,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     discard producer.publish(PublishSpec(sequence: sequence, profileText: prof))
     inc sequence
     let t = g.tickUnits()
-    discard g.exec("systemctl reset-failed repro-agent-apply.service")
+    discard g.exec(ResetUnits)
     step("the agent refuses " & what, t.outcome == "aoApplyFailed" and
          "EAddOnManagementPath" in t.message, $t & t.applyLog)
     if path.len == 0:
