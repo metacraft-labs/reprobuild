@@ -252,6 +252,14 @@
 ##                                            symlink the archive planted,
 ##                                            and the union builder's link
 ##                                            check is off
+## ``closure-prefixes-unrooted``              the switch does not attach its
+##                                            units' apt closure prefixes to
+##                                            the pending root, so the
+##                                            committed generation's root
+##                                            does not hold them and
+##                                            ``repro store gc`` collects a
+##                                            closure a current unit binds
+##                                            (G38)
 ## ``floor-ignored``                          a failure after the flip reverts
 ##                                            even below the signed rollback
 ##                                            floor
@@ -404,6 +412,8 @@ const
                           # build accepts them.
                           "apt-closure-unrecorded",
                           "apt-deb-reader-follows-symlinks",
+                          # G38: the switch roots its units' closures.
+                          "closure-prefixes-unrooted",
                           # Milestone A8 (``agent_split``, ``generation0``,
                           # ``addon_apply``): each gate's falsifying build.
                           "floor-ignored",

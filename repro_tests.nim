@@ -12136,6 +12136,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_addon_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/addon/t_e2e_addon_closure_prefixes_survive_gc.nim",
+    binary: "build/test-bin/t_e2e_addon_closure_prefixes_survive_gc",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_collision_matrix.nim",
     binary: "build/test-bin/t_e2e_addon_collision_matrix",
     defines: @[],

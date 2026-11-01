@@ -3376,17 +3376,23 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # before recovery -- must not collect what the switch is about to run.
   # Every prefix of each closure is held (the union and its members, all
   # indexed by the realiser); a member the collector already took is not
-  # in the index and is not needed by the realised union.
-  block:
-    var closurePrefixes: seq[PrefixIdBytes]
-    enterWritableStoreView()
-    var st = openStore(StoreRoot)
-    for lock in closureLocks:
-      for id in aptClosurePrefixIds(lock):
-        if st.lookupPrefix(id).found and id notin closurePrefixes:
-          closurePrefixes.add(id)
-    st.close()
-    holdOnPendingRoot(closurePrefixes)
+  # in the index and is not needed by the realised union. The committed
+  # generation's root takes these over from the pending root in step 9
+  # (``promotePendingRoot``): the ledger names only the static tree, so this
+  # block is the closures' only route to a root (gate
+  # ``e2e_addon_closure_prefixes_survive_gc``; falsifier
+  # ``closure-prefixes-unrooted``).
+  when not mutated("closure-prefixes-unrooted"):
+    block:
+      var closurePrefixes: seq[PrefixIdBytes]
+      enterWritableStoreView()
+      var st = openStore(StoreRoot)
+      for lock in closureLocks:
+        for id in aptClosurePrefixIds(lock):
+          if st.lookupPrefix(id).found and id notin closurePrefixes:
+            closurePrefixes.add(id)
+      st.close()
+      holdOnPendingRoot(closurePrefixes)
 
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]

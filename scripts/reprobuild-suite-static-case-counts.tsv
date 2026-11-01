@@ -1110,6 +1110,7 @@ tests/e2e/addon/t_e2e_addon_base_boots_without_store.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_uninstall_byte_identity.nim	nim	1
+tests/e2e/addon/t_e2e_addon_closure_prefixes_survive_gc.nim	nim	1
 tests/e2e/addon/t_e2e_addon_collision_matrix.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compiled_pin_carries_activity_selection.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compromised_compiler_is_refused.nim	nim	1
