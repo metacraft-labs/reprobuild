@@ -24,9 +24,12 @@
 ##    dynamic user -- a watcher sees compiler processes (vacuity guard), none
 ##    as UID 0 -- and applied;
 ## 7. a later sequence signed before the one applied (an older ``issuedAt``)
-##    is ``aoStale`` (``issued_at_regressed``).
+##    is ``aoStale`` (``issued_at_regressed``);
+## 8. with the add-on's state-directory pointer made group-writable, a
+##    pinned source profile the plain apply could apply is refused (exit 2,
+##    "pointer is not trusted") and ``/etc/repro/a8-pointer`` is not written.
 ##
-## Nothing of 1-5 or 7 is written (the marker files are absent).
+## Nothing of 1-5, 7 or 8 is written (the marker files are absent).
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=engine-agent-skips-a8``): the
 ## engine's agent requires no attestation block and skips the profile
@@ -37,6 +40,9 @@
 ## .currentSystem}.reprobuild).overrideAttrs (_: { REPRO_ADDON_MUTATION =
 ## "engine-agent-skips-a8"; })')`` (``scripts/build_apps.sh`` compiles the
 ## variable in).
+## ``engine-agent-pointer-refusal-unwired`` is step 8's falsifier, built the
+## same way: its CLI does not act on the untrusted-pointer route, the tick
+## takes the plain apply, and ``/etc/repro/a8-pointer`` is written.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_ADDON_ENGINE_CLOSURE``.
 ##
@@ -68,6 +74,12 @@ const
   OtherSource = "import repro_profile\n\nprofile \"a8Other\":\n  resources:\n" &
     "    fsSystemFile(path = \"/etc/repro/a8-other\", content = \"other\\n\",\n" &
     "      address = \"a8Other\")\n"
+  PointerSource = "import repro_profile\n\nprofile \"a8Pointer\":\n  resources:\n" &
+    "    fsSystemFile(path = \"/etc/repro/a8-pointer\", content = \"pointer\\n\",\n" &
+    "      address = \"a8Pointer\")\n"
+    ## Step 8's profile: a source profile with the producer's pin, which the
+    ## plain apply compiles and applies, so a build that does not act on
+    ## the untrusted-pointer route writes ``/etc/repro/a8-pointer``.
 
 let engine = getEnv("REPRO_ADDON_ENGINE_CLOSURE")
 
@@ -224,22 +236,32 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # Made writable by its group, as root, the pointer can no longer be
   # trusted to say where the add-on's state is; the engine's agent must
   # refuse the tick (exit 2, nothing applied) rather than read it as "no
-  # add-on here" and take the plain apply. The pointer is put back exactly
-  # as it was afterwards. Falsifier: an engine built with
-  # engine-agent-pointer-refusal-unwired, whose CLI no longer acts on the
-  # route, applies the marker.
+  # add-on here" and take the plain apply. The profile is a pinned source
+  # profile the plain apply can compile and apply, so the refusal is the
+  # only thing between it and /etc/repro/a8-pointer. The pointer is put
+  # back exactly as it was afterwards. Falsifier: an engine built with
+  # engine-agent-pointer-refusal-unwired, whose CLI does not act on the
+  # route: the tick takes the plain apply, which writes
+  # /etc/repro/a8-pointer (the step's "nothing was applied" fails, and the
+  # record's pointerTick shows the apply).
   const Pointer = "/var/lib/repro/addon-state-dir"
   let had = g.exec("test -f " & Pointer).exitCode == 0
   if not had:
     discard g.run("printf '%s\n' " & DefaultStateDir & " > " & Pointer &
                   " && chmod 0644 " & Pointer)
   discard g.run("chmod g+w " & Pointer)
-  var untrusted = manifestOf(11, marker)
+  var untrusted = manifestOf(11, PointerSource)
+  untrusted.compiledProfile = producerCompile(engine, PointerSource)
   let t11 = g.tick(signer, untrusted)
   discard g.run(if had: "chmod g-w " & Pointer else: "rm -f " & Pointer)
+  let pointerWritten = g.exec("test -e /etc/repro/a8-pointer").exitCode == 0
+  record["pointerTick"] = %($t11.exitCode & " " & $t11 & "\n" & t11.output &
+    "\n/etc/repro/a8-pointer written: " & $pointerWritten)
   step("an untrusted state-directory pointer refuses the engine's tick",
-       t11.exitCode == 2 and "pointer is not trusted" in t11.output and
-       notWritten(), $t11.exitCode & "\n" & t11.output)
+       t11.exitCode == 2 and "pointer is not trusted" in t11.output, $t11.exitCode &
+       "\n" & t11.output)
+  step("an untrusted state-directory pointer: nothing was applied",
+       not pointerWritten, $t11)
 
 suite Gate:
   test "the engine's deploy-agent on an add-on host enforces every A8 rule":
