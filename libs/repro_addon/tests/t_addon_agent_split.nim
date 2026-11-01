@@ -284,10 +284,16 @@ suite "agent split: the staging hand-off":
 removeDir(root)
 
 suite "a drop-in is judged by the units systemd applies it to":
-  # systemd.unit(5): a drop-in directory applies to a unit when it is named
-  # after the unit, its template, a dash-truncated prefix of its name, or
-  # its bare type. Falsifier: agent-management-path-ignores-dropin-prefixes
-  # (exact names only) turns the first case red.
+  # systemd's unit_file_find_dropin_paths (src/shared/dropin.c), over every
+  # name of every management unit: the name, its template, the name rebuilt
+  # from each dash-truncated prefix keeping the instance, and the bare type.
+  # Falsifiers: agent-management-path-ignores-dropin-prefixes (exact names
+  # only) turns "dash prefixes ..." red;
+  # agent-management-path-dropin-ignores-instance-forms turns "instance-form
+  # prefixes ..." red; agent-management-path-dropin-ignores-unit-aliases
+  # turns "a management unit's aliases ..." red;
+  # agent-management-path-allows-login-slices turns "the login and root
+  # slices ..." red.
   let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
   proc dropIn(unit: string): SystemProfile =
     SystemProfile(resources: @[SystemResource(kind: srkSystemdSystemDropIn,
@@ -298,16 +304,54 @@ suite "a drop-in is judged by the units systemd applies it to":
                  "getty.target", "service", "socket", "target"]:
       checkpoint unit
       check "management path" in managementPathRefusal(dropIn(unit), noNames)
+  test "instance-form prefixes of management templates are refused":
+    # serial-getty@ttyS0.service also reads serial-@ttyS0.service.d/ and
+    # serial-@.service.d/; container-getty@1.service container-@.service.d/.
+    for unit in ["serial-@.service", "serial-@ttyS0.service",
+                 "container-@.service", "container-@1.service",
+                 "ssh@.service", "sshd@x.service"]:
+      checkpoint unit
+      check "management path" in managementPathRefusal(dropIn(unit), noNames)
+  test "a management unit's aliases are judged as the unit, prefixes included":
+    # dbus-.service.d/ reaches systemd-networkd through its D-Bus alias, and
+    # NetworkManager and firewalld the same way; the static aliases hold
+    # before the alias is enabled, the host's Names after.
+    for unit in ["dbus-.service", "dbus-org.freedesktop.network1.service",
+                 "dbus-org.freedesktop.NetworkManager.service",
+                 "dbus-org.fedoraproject.FirewallD1.service"]:
+      checkpoint unit
+      check "management path" in managementPathRefusal(dropIn(unit), noNames)
+    let hostNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} =
+      if u == "nftables.service": @["nftables.service", "fw-rules.service"]
+      else: @[]
+    check "management path" in managementPathRefusal(dropIn("fw-.service"), hostNames)
+    check managementPathRefusal(dropIn("fw-.service"), noNames) == ""
+  test "the login and root slices are refused (decision 37)":
+    for unit in ["user.slice", "user-.slice", "user-1000.slice",
+                 "user-0.slice", "-.slice", "slice"]:
+      checkpoint unit
+      check "management path" in managementPathRefusal(dropIn(unit), noNames)
+    let state = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdUnitState, address: "unitState:user", usName: "user-1000.slice")])
+    check "management path" in managementPathRefusal(state, noNames)
   test "drop-ins that reach no management unit are not refused":
-    for unit in ["app-.service", "app@.service", "web-api.service"]:
+    for unit in ["app-.service", "app@.service", "web-api.service",
+                 "app-@x.service", "system.slice", "app.slice",
+                 "app-web.slice", "web-.slice"]:
       checkpoint unit
       check managementPathRefusal(dropIn(unit), noNames) == ""
   test "the lookup names are systemd's":
     check dropInDirUnits("serial-getty@ttyS0.service") ==
       @["serial-getty@ttyS0.service", "serial-getty@.service",
-        "serial-.service", "service"]
+        "serial-.service", "serial-@ttyS0.service", "serial-@.service",
+        "service"]
     check dropInDirUnits("systemd-networkd.service") ==
       @["systemd-networkd.service", "systemd-.service", "service"]
+    check dropInDirUnits("foo-bar-baz.service") ==
+      @["foo-bar-baz.service", "foo-bar-.service", "foo-.service", "service"]
+    check dropInDirUnits("user-1000.slice") ==
+      @["user-1000.slice", "user-.slice", "slice"]
+    check dropInDirUnits("-.slice") == @["-.slice", "slice"]
   test "masking or stopping getty.target is refused":
     let state = SystemProfile(resources: @[SystemResource(
       kind: srkSystemdUnitState, address: "unitState:getty", usName: "getty.target")])

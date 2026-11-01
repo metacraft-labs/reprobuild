@@ -346,6 +346,22 @@
 ##                                            its own unit name only, not by
 ##                                            the units systemd applies it to
 ##                                            (dash prefixes, template, type)
+## ``agent-management-path-dropin-ignores-instance-forms``  a drop-in's
+##                                            dash prefixes are taken from
+##                                            the template only, so
+##                                            ``serial-@ttyS0.service.d`` and
+##                                            ``serial-@.service.d`` pass
+## ``agent-management-path-dropin-ignores-unit-aliases``  the drop-in
+##                                            directories of management
+##                                            units' aliases (``dbus-.service``
+##                                            via networkd's D-Bus alias) are
+##                                            not derived
+## ``agent-management-path-allows-login-slices``  slices are not management
+##                                            units: drop-ins for
+##                                            ``user.slice``, ``user-.slice``,
+##                                            ``user-<uid>.slice``,
+##                                            ``-.slice`` and ``slice`` pass
+##                                            (decision 37)
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -480,6 +496,11 @@ const
                           "apt-closure-adopts-unverified",
                           # A8 round 3: drop-ins judged by exact name only.
                           "agent-management-path-ignores-dropin-prefixes",
+                          # A8 round 4: the instance-form and alias-derived
+                          # drop-in directories, and decision 37's slices.
+                          "agent-management-path-dropin-ignores-instance-forms",
+                          "agent-management-path-dropin-ignores-unit-aliases",
+                          "agent-management-path-allows-login-slices",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",

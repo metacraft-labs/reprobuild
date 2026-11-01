@@ -7,6 +7,16 @@
 ## each with the fingerprint unchanged. The same resources through an
 ## operator apply over SSH (an open session) are applied.
 ##
+## The same holds for the console login and name service, for drop-ins that
+## reach a management unit only through systemd's drop-in lookup (a
+## dash-truncated or instance-form prefix, a template, an alias's prefix),
+## and for the login and root slices (decision 37). A last step checks the
+## lookup model against the guest's own systemd: probe drop-ins in every
+## directory the model derives for three probe units (a template instance,
+## a unit with an enabled alias, a dash-named slice) and in directories it
+## does not, then ``systemctl show -P DropInPaths``; systemd may apply no
+## directory the model does not derive.
+##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=agent-allows-management-path``):
 ## the refusal is gone and the agent writes the sshd drop-in: red.
 ##
@@ -14,12 +24,13 @@
 ##
 ## *Mocking.* None.
 
-import std/[json, strutils, unittest]
+import std/[json, os, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 
 import ./addon_testbed
 import ./agent_e2e_support
+from repro_addon/agent_checks import dropInDirUnits
 
 const Gate = "e2e_addon_agent_refuses_management_path_classes"
 # Run after every tick; see the first loop of `body` for why both units.
@@ -37,6 +48,8 @@ let Cases = @[
    "*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n"),
   ("a network link", "/etc/systemd/network/", "/etc/systemd/network/10-a8.link",
    "[Match]\nOriginalName=a8dummy0\n[Link]\nDescription=a8\n")]
+
+proc dropInProbe(g: Guest; step: StepFn; record: JsonNode)
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
@@ -90,7 +103,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # template, and getty.target. /etc/nsswitch.conf exists on every base, so
   # "not written" is its digest unchanged; for a drop-in, its file absent.
   let nsBefore = g.exec("sha256sum /etc/nsswitch.conf").stdout
-  let consoleCases = @[
+  var consoleCases = @[
     ("/etc/nsswitch.conf", withPrefixes(@["/etc/nsswitch.conf"],
        canonicalFile("/etc/nsswitch.conf", "passwd: files\n")), ""),
     ("a drop-in in serial-.service.d", "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
@@ -105,6 +118,26 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        "systemd.systemDropIn {\n  unit = \"getty.target\"\n  name = \"a8\"\n" &
        "  content = \"[Unit]\nRefuseManualStart=yes\n\"\n}\n",
      "/etc/systemd/system/getty.target.d/a8.conf")]
+  # Round 4: the instance-form prefixes of the getty templates
+  # (serial-getty@ttyS0.service reads serial-@ttyS0.service.d/ and
+  # serial-@.service.d/), the prefix of networkd's D-Bus alias
+  # (dbus-org.freedesktop.network1.service reads dbus-.service.d/), and the
+  # login and root slices (decision 37). The bare type directories
+  # (service.d/, slice.d/) are not listed: a drop-in resource must name a
+  # unit with a type suffix, so the profile cannot express them.
+  for (unit, section) in [("serial-@.service", "Service"),
+                          ("serial-@ttyS0.service", "Service"),
+                          ("container-@.service", "Service"),
+                          ("dbus-.service", "Service"),
+                          ("user.slice", "Slice"), ("user-.slice", "Slice"),
+                          ("user-1000.slice", "Slice"), ("-.slice", "Slice")]:
+    let content = if section == "Slice": "[Slice]\nTasksMax=1\n"
+                  else: "[Service]\nExecStart=\n"
+    consoleCases.add(("a drop-in in " & unit & ".d",
+      "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
+      "systemd.systemDropIn {\n  unit = \"" & unit & "\"\n  name = \"a8\"\n" &
+      "  content = \"" & content & "\"\n}\n",
+      "/etc/systemd/system/" & unit & ".d/a8.conf"))
   for (what, prof, path) in consoleCases:
     let f0 = g.takeFingerprint(repro)
     discard producer.publish(PublishSpec(sequence: sequence, profileText: prof))
@@ -132,6 +165,81 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   for (what, _, path, content) in Cases:
     step(what & " is in place after the operator apply",
          g.exec("cat " & path).stdout == content, "")
+  dropInProbe(g, step, record)
+
+proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
+  ## The drop-in lookup model (``dropInDirUnits`` over every name a unit
+  ## has) against the guest's systemd: whatever DropInPaths reports for a
+  ## probe unit must come from a directory the model derives. Probe units
+  ## stand for the management units' shapes: a template instance with a
+  ## dashed prefix (serial-getty@ttyS0), a unit with an enabled
+  ## ``[Install] Alias=`` (networkd's D-Bus alias), a dashed slice
+  ## (user-1000.slice) and the root slice. The probe drop-ins set only an
+  ## ``X-`` key, which systemd ignores.
+  let ver = g.exec("systemctl --version | head -1").stdout.strip()
+  record["systemdVersion"] = %ver
+  const Units = {
+    "a8p-gw-x@.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
+    "a8q-net.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n" &
+      "[Install]\nAlias=a8r-org.bus1.service\n",
+    "a8s-1000.slice": "[Unit]\nDescription=a8 probe\n"}
+  for (name, content) in Units:
+    discard g.run("printf '%s' '" & content & "' > /etc/systemd/system/" & name)
+  discard g.run("systemctl daemon-reload && systemctl enable a8q-net.service")
+  let probes = ["a8p-gw-x@i1.service", "a8q-net.service", "a8s-1000.slice",
+                "-.slice"]
+  var predicted: seq[(string, seq[string])]
+  var candidates = @["a8p-gw-@i2.service", "a8p-gw-x@i2.service",
+    "a8p-gw.service", "a8p.service", "a8r-org.service", "a8q.service",
+    "a8s.slice", "a8s-1000-.slice"]
+  for u in probes:
+    let names = g.exec("systemctl show -P Names -- " & quoteShell(u)).stdout.
+      splitWhitespace()
+    var dirs: seq[string]
+    for n in (if names.len > 0: names else: @[u]):
+      for d in dropInDirUnits(n):
+        if d notin dirs: dirs.add(d)
+    predicted.add((u, dirs))
+    for d in dirs:
+      if d notin candidates: candidates.add(d)
+  for d in candidates:
+    discard g.run("mkdir -p /etc/systemd/system/" & quoteShell(d & ".d") &
+      " && printf '[Unit]\\nX-A8-Probe=yes\\n' > /etc/systemd/system/" &
+      quoteShell(d & ".d/zz-a8probe.conf"))
+  discard g.run("systemctl daemon-reload")
+  var report = newJObject()
+  var unsound: seq[string]
+  for (u, dirs) in predicted:
+    var applied: seq[string]
+    for p in g.exec("systemctl show -P DropInPaths -- " & quoteShell(u)).stdout.
+        splitWhitespace():
+      if p.endsWith(".d/zz-a8probe.conf"):
+        applied.add(p.splitPath.head.splitPath.tail[0 ..< ^2])
+    var extra, unused: seq[string]
+    for a in applied:
+      if a notin dirs: extra.add(a)
+    for d in dirs:
+      if d notin applied: unused.add(d)
+    report[u] = %*{"applied": applied, "derived": dirs,
+                   "appliedNotDerived": extra, "derivedNotApplied": unused}
+    if extra.len > 0: unsound.add(u & ": " & extra.join(", "))
+  record["dropInProbe"] = report
+  for d in candidates:
+    discard g.run("rm -rf /etc/systemd/system/" & quoteShell(d & ".d") &
+      "/zz-a8probe.conf; rmdir /etc/systemd/system/" & quoteShell(d & ".d") &
+      " 2>/dev/null; true")
+  discard g.run("systemctl disable a8q-net.service; rm -f " &
+    "/etc/systemd/system/a8p-gw-x@.service /etc/systemd/system/a8q-net.service " &
+    "/etc/systemd/system/a8s-1000.slice; systemctl daemon-reload")
+  step("systemd (" & ver & ") applies no drop-in directory the model does " &
+       "not derive", unsound.len == 0, unsound.join("\n") & "\n" & $report)
+  # The model's own claim, measured: every derived directory is applied.
+  var underused: seq[string]
+  for (u, _) in predicted:
+    if report[u]["derivedNotApplied"].len > 0:
+      underused.add(u & ": " & $report[u]["derivedNotApplied"])
+  step("systemd (" & ver & ") applies every drop-in directory the model " &
+       "derives", underused.len == 0, underused.join("\n"))
 
 suite Gate:
   test "sshd drop-ins and the firewall and network classes are refused in agent applies":
