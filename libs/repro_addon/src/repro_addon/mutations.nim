@@ -311,6 +311,10 @@
 ##                                            compiler cross-built against a
 ##                                            newer glibc than the host's
 ##                                            (§7.9, the glibc exception)
+## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
+##                                            hosts file but leaves the fetch
+##                                            unit's ``IPAddressAllow=`` on
+##                                            the old addresses
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -407,7 +411,9 @@ const
                           # timing falsifier.
                           "confirm-overruns-deadline",
                           # §7.9: the cross prefix's glibc check.
-                          "cross-prefix-glibc-unchecked"]
+                          "cross-prefix-glibc-unchecked",
+                          # A8 review M5: agent-repin's falsifier.
+                          "agent-repin-keeps-allow-list"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
