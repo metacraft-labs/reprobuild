@@ -39,8 +39,9 @@
 ##      with every repository behind its own gateway and the real managed
 ##      hooks installed; lib-b's and app's new commits are unpublished, and
 ##      app's lock pins lib-b's. Every push is accepted and lands on both the
-##      gateway and the upstream. `repro push` does not relay the gateways'
-##      output, so the evidence here is the gateways' accepted branch tips.
+##      gateway and the upstream. `repro push` keeps each gateway's report
+##      under the member it judged: app's names the lock blob its gateway read
+##      and lib-b and lib-c as not verified server-side.
 ##
 ## Falsifiability (observed): with the gate checking every `git-sha*` entry
 ## against the received objects again (the gate before this test), cases 1
@@ -97,6 +98,19 @@ proc commitLockBody(fx: SiblingFixture; body: string): string =
   discard fx.git(fx.app, "add repro.lock")
   discard fx.git(fx.app, "commit -q -m " & q("edit lock"))
   fx.headOf(fx.app)
+
+proc memberReport(output, name: string): string =
+  ## What `repro push` printed for closure member ``name``: its outcome line
+  ## and the indented lines under it.
+  var inside = false
+  for line in output.splitLines():
+    if line.startsWith("repro push: "):
+      inside = ("(" & name & ") → ") in line
+      if inside: result.add(line & "\n")
+    elif inside and line.startsWith("    "):
+      result.add(line & "\n")
+    else:
+      inside = false
 
 proc unverifiedLine(name: string): string =
   "public-tier lock gate: '" & name & "' NOT verified server-side"
@@ -302,10 +316,26 @@ suite "gateway lock gate: entries pinning other repositories are named, " &
     # They reached the upstreams THROUGH the gateways: each gateway's own
     # branch sits at the commit it accepted, which its pre-receive (the lock
     # gate included, reading app's lock that pins lib-b and lib-c) let in.
-    # `repro push` does not relay the gateways' output, so this is the
-    # evidence that app's gateway accepted a lock pinning siblings.
     proc gatewayTip(name: string): string =
       runCmd(q(fx.gitBin) & " -C " & q(fx.scratch / ("gateway-" & name &
         ".git")) & " rev-parse refs/heads/main").output.strip()
     check gatewayTip("lib-b") == newLibB
     check gatewayTip("app") == appTip
+    # And `repro push` says what app's gateway reported, under app, without
+    # git's `remote:` prefix: the lock blob it read, and the siblings it did
+    # not verify.
+    let appReport = memberReport(pushed.output, "app")
+    checkpoint("app's report:\n" & appReport)
+    check ("(app) → pushed") in appReport
+    check ("    reprobuild gateway: refs/heads/main: public-tier lock gate: " &
+      "read repro.lock blob " & fx.lockBlobAt(appTip)) in appReport
+    check ("    reprobuild gateway: refs/heads/main: " &
+      unverifiedLine("lib-b")) in appReport
+    check ("    reprobuild gateway: refs/heads/main: " &
+      unverifiedLine("lib-c")) in appReport
+    check "remote: reprobuild gateway:" notin pushed.output
+    # lib-b's push carried no lock, so its gateway's lock gate read nothing
+    # and app's report is the only one naming siblings.
+    let libBReport = memberReport(pushed.output, "lib-b")
+    check "(lib-b) → pushed" in libBReport
+    check "NOT verified server-side" notin libBReport

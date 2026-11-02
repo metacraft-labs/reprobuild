@@ -54373,6 +54373,18 @@ proc pushOutputOneLine*(output: string): string =
     if line.len > 0: kept.add(line)
   redactUrlUserinfo(kept.join(" / "))
 
+const gatewayReportPrefix* = "reprobuild gateway: "
+  ## How every line a push gateway's ``pre-receive`` writes begins.
+
+proc gatewayReportLine*(line: string): string =
+  ## ``line`` of a push transcript as the gateway wrote it, or "" when it is
+  ## not a gateway's line. Git relays a receiving hook's stderr as
+  ## ``remote: <text>`` padded with trailing blanks; both are removed.
+  var text = line.strip()
+  if not text.startsWith("remote:"): return ""
+  text = text["remote:".len .. ^1].strip()
+  if text.startsWith(gatewayReportPrefix): text else: ""
+
 proc pushOutputHookRefusalLines*(output: string): seq[string] =
   ## The lines of a failed push transcript that a REPROBUILD MANAGED HOOK
   ## wrote, rather than the transport.
@@ -73736,6 +73748,16 @@ proc executePush(args: PushArgs): PushReport =
     for line in pushRes.output.splitLines():
       if line.startsWith(certificatePropagationReportPrefix):
         entry.notices.add(redactUrlUserinfo(line))
+      else:
+        # A push gateway's report — the certificate verdict, what the public
+        # lock gate read, and the lock entries it did NOT verify server-side —
+        # is the receiving side's account of this member's push. On success
+        # git prints it and nothing else would; it is kept under the member it
+        # describes, so the boundary statement is seen in the normal flow and
+        # not only when a push is refused.
+        let report = gatewayReportLine(line)
+        if report.len > 0:
+          entry.notices.add(redactUrlUserinfo(report))
     result.repos.add(entry)
     if members.len > 0:
       # The next component member must see the prefix that actually landed,
