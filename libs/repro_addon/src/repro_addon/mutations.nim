@@ -571,7 +571,24 @@ const
                           "agent-apply-has-cap-net-admin",
                           "reassert-has-network",
                           "floor-without-noexec",
-                          "floor-without-mdwe"]
+                          "floor-without-mdwe",
+                          # A13: a state backup or restore runs while a
+                          # unit of the set may run.
+                          "state-units-not-checked",
+                          # A13: the backup does not hold the set's units,
+                          # so one can start again before the conversion.
+                          "state-units-not-held",
+                          # A13: a restore reads an archive whose SHA-256
+                          # it did not check against the manifest.
+                          "state-archive-unchecked",
+                          # A13: a restore renames a staged tree into place
+                          # without checking its digest.
+                          "state-restore-unverified",
+                          # A13: an apply starts a unit whose carried state
+                          # is not restored yet.
+                          "apply-ignores-carried-state",
+                          # A13: the import writes its skeleton on the host.
+                          "import-writes-skeleton"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

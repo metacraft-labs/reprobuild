@@ -22,6 +22,8 @@
 ##                                [--expect <file>]
 ##   repro system addon expected-delta <before-ledger|-> <after-ledger>
 ##   repro system addon ledger
+##   repro system addon import --unit <name>
+##   repro system addon state backup|release|verify|restore|digest|unit
 ##   repro system addon retention [--keep-generations N] [--keep-days D]
 ##   repro system addon selfcheck-write <path>
 ##   repro system adopt <address> --profile <file>
@@ -48,6 +50,7 @@ import repro_elevation/posix_system_driver
 import repro_local_store/store as local_store
 
 import ./addon_apply
+import ./adoption_cli
 import ./addon_rollback
 import ./agent_record
 import ./agent_repin
@@ -147,6 +150,15 @@ commands:
       The fingerprint diff an apply between two ledgers may cause.
   ledger
       Print the current ownership ledger.
+  import --unit <name>
+      Print a profile skeleton that reproduces a hand-configured unit, its
+      environment files, the /etc files it names and its tmpfiles
+      fragments as they are, with a FLAG line for everything it cannot
+      declare (spec §11.2 step 1). Writes nothing on the host.
+  state backup|release|verify|restore|digest|unit
+      The profile's declared state set (stateDirectories, spec §11.1):
+      back it up before a conversion, restore it after; see
+      `repro system addon state --help`.
   status
       The current generation, the generations held as store roots, the
       static tree and the pending switch marker, and the store root's kind.
@@ -311,6 +323,10 @@ proc runAddonCli*(args: seq[string]): int =
     case cmd
     of "fingerprint":
       return runFingerprintCli(rest)
+    of "import":
+      return runAddonImportCli(rest)
+    of "state":
+      return runStateCli(rest)
     of "preflight":
       var inp: PreflightInputs
       var json = false
@@ -728,8 +744,9 @@ proc runAddonGeneration(verb: string; args: seq[string];
       raise newException(ValueError,
         "this host is not an add-on host (no ownership ledger); run " &
         "`repro system addon bootstrap` first")
+    let profileText = readFile(profile)
     let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
-      hostIdentity: readHostname(), userProfileText: readFile(profile),
+      hostIdentity: readHostname(), userProfileText: profileText,
       reconcileDrift: reconcile, adoptAddresses: adopt, planOnly: planOnly,
       retention: retention, planId: planId))
     stdout.write(renderAddonSections(r))

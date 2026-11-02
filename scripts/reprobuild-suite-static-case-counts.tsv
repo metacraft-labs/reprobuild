@@ -40,6 +40,7 @@ libs/repro_addon/tests/t_addon_engine_agent_route.nim	nim	4
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
+libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	7
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
 libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	9
@@ -53,6 +54,7 @@ libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_service_floor.nim	nim	12
+libs/repro_addon/tests/t_addon_state_sets.nim	nim	9
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	6
@@ -654,6 +656,7 @@ libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	96
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	41
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim	nim	8
+libs/repro_profile_compile/tests/t_system_unit_state_directories.nim	nim	7
 libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim	nim	5
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	35
@@ -1111,6 +1114,7 @@ tests/bundles/bundle_repro_solver_pure_unit.nim	nim	82
 tests/e2e/addon/t_addon_agent_apply_unit_lacks_cap_net_admin.nim	nim	2
 tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	0
 tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	0
+tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim	nim	1
@@ -1162,6 +1166,7 @@ tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_survives_point_upgrades.nim	nim	1
 tests/e2e/addon/t_e2e_addon_switch_is_planned_exactly.nim	nim	1
 tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim	nim	1
+tests/e2e/addon/t_e2e_addon_to_reproos_conversion_keeps_state.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1

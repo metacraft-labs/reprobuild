@@ -145,6 +145,8 @@ profile "referenceServices":
           "Restart=on-failure\n", after = "network-online.target"),
         hardening = "serviceFloor",
         credentials = @["admin-token"],
+        # Its data: on a disk a conversion keeps (spec §11.1).
+        stateDirectories = @["keep:/var/lib/vaultwarden"],
         healthCheck = "http://127.0.0.1:8000/alive",
         address = "vaultwardenUnit",
         dependsOn = @["fs.systemFile:/etc/vaultwarden/config.env", "linux.tmpfilesRule:repro-vaultwarden.conf",
@@ -229,6 +231,7 @@ profile "referenceServices":
           "Restart=on-failure\n"),
         hardening = "serviceFloor",
         credentials = @["jwt"],
+        stateDirectories = @["carry:/var/lib/ethereum/execution"],
         healthCheck = "tcp:127.0.0.1:8545",
         address = "gethUnit",
         dependsOn = @["linux.tmpfilesRule:repro-ethereum.conf", "linux.sysusersEntry:eth-execution"])
@@ -249,6 +252,7 @@ profile "referenceServices":
           families = DefaultFamilies & " AF_NETLINK"),
         hardening = "serviceFloor",
         credentials = @["jwt"],
+        stateDirectories = @["carry:/var/lib/ethereum/beacon"],
         healthCheck = "http://127.0.0.1:3500/eth/v1/node/version",
         address = "beaconUnit",
         dependsOn = @["linux.tmpfilesRule:repro-ethereum.conf", "linux.sysusersEntry:eth-beacon", "fs.systemFile:/etc/ethereum/beacon.yaml"])
@@ -271,6 +275,9 @@ profile "referenceServices":
         hardening = "serviceFloor",
         exclusive = true,
         credentials = @["wallet-password"],
+        # The slashing-protection database and the wallet: carried across
+        # a conversion, restored before the client first starts (§11.1).
+        stateDirectories = @["carry:" & ValidatorStateDir],
         healthCheck = "http://127.0.0.1:8081/healthz",
         # Empty: the default address, which names the unit, so a rename is
         # a removal and an addition. The validator gate sets it to show a

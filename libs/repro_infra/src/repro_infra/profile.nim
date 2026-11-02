@@ -79,6 +79,22 @@ type
     srkSystemdSystemDropIn = "systemd.systemDropIn"
     srkLinuxSysusersEntry = "linux.sysusersEntry"
 
+  StateDisposition* = enum
+    ## What a conversion to ReproOS does with a declared state directory
+    ## (ReproOS-Add-On-Mode §11.1 step 2).
+    sdKeep = "keep"
+      ## The directory is on a disk the conversion keeps: it is not
+      ## copied, and is checked by digest before and after.
+    sdCarry = "carry"
+      ## Backed up before the conversion, restored before the service's
+      ## first start on the converted host, and verified by digest.
+
+  StateDirectoryDecl* = object
+    ## One `stateDirectories` entry of a `systemd.systemUnit`, written
+    ## `"<keep|carry>:<absolute path>"`.
+    disposition*: StateDisposition
+    path*: string
+
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
     ## components. The match against another resource in the same
@@ -244,6 +260,13 @@ type
         ## `floorExceptions = ["<Setting>: <reason>", ...]`: the floor
         ## settings this unit weakens, each with its reason (CONF-2);
         ## printed in every plan (`floorExceptionPlanLines`).
+      suStateDirectories*: seq[StateDirectoryDecl]
+        ## `stateDirectories = ["keep:/var/lib/x", "carry:/var/lib/y"]`
+        ## (ReproOS-Add-On-Mode §11.1): the directories holding this
+        ## service's state, and for each what a conversion to ReproOS does
+        ## with it. Metadata only: nothing is rendered into the unit and
+        ## no apply writes the directory (`parseStateDirectory`,
+        ## `checkStateDirectories`).
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -1302,6 +1325,108 @@ proc checkSecretDeclarations*(p: SystemProfile) =
           "no `" & SecretFileStanzaTag & " { service = \"" & svc &
           "\"  name = \"" & c & "\" }`")
 
+const
+  StateDirectoryRoots* = ["/var/lib/", "/var/cache/", "/var/spool/",
+                          "/var/log/", "/srv/"]
+    ## Where a declared state directory may live (the FHS's variable-state
+    ## locations). Everything else -- configuration, the store, packages'
+    ## files, volatile or kernel file systems -- is either declared as a
+    ## resource of its own or is not state a conversion moves.
+  StateDirectoryExcluded* = ["/var/lib/repro/", "/var/cache/repro/",
+                             "/var/lib/dpkg/", "/var/lib/apt/",
+                             "/var/cache/apt/", "/var/lib/ucf/",
+                             "/var/lib/systemd/"]
+    ## Below a permitted root but never a service's state: Reprobuild's
+    ## own state and the distribution's package and init databases.
+
+proc stateDirectoryError*(path: string): string =
+  ## Why `path` cannot be a declared state directory, or "" when it can.
+  let canon = nonCanonicalPathError("stateDirectories path", path)
+  if canon.len > 0:
+    return canon
+  for c in path:
+    if ord(c) < 32 or ord(c) == 127 or c in {'\\', '"'}:
+      return "stateDirectories path '" & path &
+        "' contains a control character, a backslash or a quote"
+  let asDir = path & "/"
+  var under = false
+  for root in StateDirectoryRoots:
+    if asDir.startsWith(root) and asDir != root:
+      under = true
+  if not under:
+    return "stateDirectories path '" & path & "' is not below one of " &
+      StateDirectoryRoots.join(", ") & " (a directory of its own, not " &
+      "the root itself)"
+  for ex in StateDirectoryExcluded:
+    if asDir.startsWith(ex) or ex.startsWith(asDir):
+      return "stateDirectories path '" & path & "' overlaps " & ex &
+        ", which is not a service's state"
+  ""
+
+proc parseStateDirectory*(unitName, entry: string): StateDirectoryDecl =
+  ## One `"<keep|carry>:<path>"` entry. The disposition is required: a
+  ## conversion destroys whatever is not kept or carried, so there is no
+  ## default to fall back on.
+  let colon = entry.find(':')
+  let what = "systemd.systemUnit '" & unitName & "' stateDirectories entry '" &
+    entry & "'"
+  if colon <= 0:
+    raiseSystemProfileInvalid(what & " must be written \"keep:<path>\" or " &
+      "\"carry:<path>\"")
+  case entry[0 ..< colon]
+  of $sdKeep: result.disposition = sdKeep
+  of $sdCarry: result.disposition = sdCarry
+  else:
+    raiseSystemProfileInvalid(what & ": '" & entry[0 ..< colon] &
+      "' is not one of keep / carry")
+  result.path = entry[colon + 1 .. ^1]
+  let err = stateDirectoryError(result.path)
+  if err.len > 0:
+    raiseSystemProfileInvalid(what & ": " & err)
+
+proc parseStateDirectories*(unitName: string;
+                            entries: seq[string]): seq[StateDirectoryDecl] =
+  for e in entries:
+    result.add(parseStateDirectory(unitName, e))
+
+proc renderStateDirectory*(d: StateDirectoryDecl): string =
+  $d.disposition & ":" & d.path
+
+proc stateDirectoryEntries*(r: SystemResource): seq[string] =
+  ## The `stateDirectories` list as written in canonical text.
+  if r.kind != srkSystemdSystemUnit: return
+  for d in r.suStateDirectories:
+    result.add(renderStateDirectory(d))
+
+proc checkStateDirectories*(p: SystemProfile) =
+  ## The profile-wide refusals of the state set (§11.1), shared by the text
+  ## parser and the DSL adapter. A directory may be named by more than one
+  ## unit (services sharing a database) only with the same disposition; a
+  ## directory inside another declared one is refused, because keeping the
+  ## outer and carrying the inner (or carrying both) has no single meaning.
+  ## Raises `ESystemProfileInvalid`.
+  var seen: seq[(string, StateDisposition, string)]
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit: continue
+    var own: seq[string]
+    for d in r.suStateDirectories:
+      if d.path in own:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' declares the state directory " & d.path & " twice")
+      own.add(d.path)
+      for (path, disp, unit) in seen:
+        if path == d.path:
+          if disp != d.disposition:
+            raiseSystemProfileInvalid("the state directory " & d.path &
+              " is `" & $disp & "` for " & unit & " and `" &
+              $d.disposition & "` for " & r.suName)
+        elif (d.path & "/").startsWith(path & "/") or
+             (path & "/").startsWith(d.path & "/"):
+          raiseSystemProfileInvalid("the state directory " & d.path &
+            " (" & r.suName & ") and " & path & " (" & unit &
+            ") are nested; declare one of them")
+      seen.add((d.path, d.disposition, r.suName))
+
 proc managedPrefixError*(prefix: string): string =
   ## Why `prefix` cannot be a managed `/etc` prefix, or "" when it can.
   ## A prefix is written as the add-on reads it: `/etc/name/` for a
@@ -1854,6 +1979,9 @@ proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
           else: @[])
       if addOnDefaults and floorAppliesByDefault(res):
         res.suHardening = ServiceFloorHardening
+      if "stateDirectories" in rawFields:
+        res.suStateDirectories = parseStateDirectories(res.suName,
+          parseListLiteral(rawFields["stateDirectories"]))
       if res.suHealthCheck.len > 0:
         discard parseHealthCheck(res.suHealthCheck)
       if res.suDropInName.len > 0 and res.suCollision != "dropIn":
@@ -2321,6 +2449,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
   checkUnitStateConflicts(result.resources)
   checkPasswdPrimaryGroups(result.resources)
   checkSecretDeclarations(result)
+  checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------
 # SystemResource -> typed PrivilegedOperation. A `destroy` flag flips

@@ -162,6 +162,19 @@ proc checkPinned(tree, root, name: string) =
         ", but the recipe pins " & want & " (rebuild it from the recipe in " &
         "REPRO_A12_PACKAGES)")
 
+proc vaultwardenBinary*(): string =
+  ## The static vaultwarden binary the reference recipe built under
+  ## ``REPRO_A12_PACKAGES`` (the A13 gates install it by hand, as an
+  ## operator would, and package it as a fixture ``.deb``).
+  let root = getEnv("REPRO_A12_PACKAGES")
+  if root.len == 0:
+    raise newException(TestBedError, "REPRO_A12_PACKAGES must name the " &
+      "reprobuild-packages checkout the reference packages were built in")
+  result = recipeOutput(root, "vaultwarden", "x86_64-unknown-linux-musl") /
+    "bin" / "vaultwarden"
+  if not fileExists(result):
+    raise newException(TestBedError, "missing package binary " & result)
+
 proc refPackages*(work: string): RefPackages =
   ## Stage the three packages from ``REPRO_A12_PACKAGES`` under ``work``.
   let root = getEnv("REPRO_A12_PACKAGES")

@@ -337,6 +337,8 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  hardening = " & renderScalar(r.suHardening))
     if r.suFloorExceptions.len > 0:
       result.add("  floorExceptions = " & renderList(r.suFloorExceptions))
+    if r.suStateDirectories.len > 0:
+      result.add("  stateDirectories = " & renderList(stateDirectoryEntries(r)))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))

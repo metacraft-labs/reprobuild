@@ -315,6 +315,10 @@ type
     serialLog*: string
     booted*: bool
     log*: seq[string]
+    dataDisks*: seq[string]
+      ## Extra writable disks attached after the boot disk (``/dev/vdb``,
+      ## ...), each a ``DataDisk`` the gate owns: destroying the guest does
+      ## not delete them (QEMU only).
     relayPort*: int
       ## > 0: the guest's network is restricted (QEMU ``restrict=on``) and
       ## its only reachable service is ``GuestProxyAddress:GuestProxyPort``,
@@ -325,6 +329,15 @@ type
       incus*: IncusBackend
       vm*: VmHandle
       incusNetwork*: string
+
+  DataDisk* = object
+    ## A disk that outlives the guests it is attached to: created in a run
+    ## directory of its own (claimed and token-owned like a guest's), so a
+    ## gate can shut one guest down and attach the same disk to the next --
+    ## the shape of a reinstall that keeps a data disk.
+    path*: string
+    dir*: string
+    token*: string
 
   ExecOut* = object
     exitCode*: int
@@ -359,6 +372,22 @@ proc releaseRunDir(dir, token: string) =
     raise newException(TestBedError, "refusing to remove " & dir &
       ": its owner token is not this run's")
   removeDir(dir)
+
+proc newDataDisk*(sizeGiB: int): DataDisk =
+  ## An empty qcow2 disk of ``sizeGiB`` in a run directory of its own.
+  let name = QemuNamePrefix & "data-" & $getCurrentProcessId() & "-" &
+    randomHex(6)
+  let (dir, token) = claimRunDir(name)
+  result = DataDisk(path: dir / "data.qcow2", dir: dir, token: token)
+  if execCmd("qemu-img create -q -f qcow2 " & quoteShell(result.path) & " " &
+             $sizeGiB & "G") != 0:
+    releaseRunDir(dir, token)
+    raise newException(TestBedError, "qemu-img create of a data disk failed")
+
+proc release*(d: DataDisk) =
+  ## Delete the disk and its directory (only when the token is still ours).
+  if d.dir.len > 0:
+    releaseRunDir(d.dir, d.token)
 
 proc freePort(): int =
   ## A loopback TCP port the kernel just handed out (bound to port 0 and
@@ -452,7 +481,8 @@ when defined(gostiAvailable):
       generation: (if g.base.debArch == "amd64": 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
-      diskReadonly: readonly, diskInPlace: true)
+      diskReadonly: readonly, diskInPlace: true,
+      dataDiskPaths: g.dataDisks)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & (if readonly: " (disk read-only)" else: "") &
            (if g.relayPort > 0: " (network restricted to the mirror)" else: ""))
@@ -548,6 +578,13 @@ proc copyTo*(g: Guest; hostPath, guestPath: string) =
       g.incus.copyToGuest(g.vm, hostPath, guestPath)
     else:
       g.qemu.copyToGuest(g.vm, hostPath, guestPath)
+
+proc copyFrom*(g: Guest; guestPath, hostPath: string) =
+  ## Copy a guest file or directory (recursively) to the host (QEMU only).
+  when defined(gostiAvailable):
+    if g.kind == gkIncus:
+      raise newException(TestBedError, "copyFrom is not supported on Incus")
+    g.qemu.copyFromGuest(g.vm, guestPath, hostPath)
 
 proc shutdown*(g: Guest) =
   ## Power the guest off and wait for QEMU to exit (the disk is then

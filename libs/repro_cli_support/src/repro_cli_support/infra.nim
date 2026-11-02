@@ -47,6 +47,7 @@ when defined(linux):
   import repro_addon/mutations as addon_mutations
   import repro_addon/secrets_ops as addon_secrets_ops
   import repro_addon/switch as addon_switch
+  import repro_addon/state_sets as addon_state_sets
 import repro_infra/host_base
 import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
@@ -956,6 +957,21 @@ proc runInfraApply(args: openArray[string]): int =
   defer: releaseInfraApplyLock(stateDir)
 
   when defined(linux):
+    # A host a conversion brought carried state to applies nothing that
+    # would start a unit of it before the restore (ReproOS Add-On Mode
+    # §11.1): refused here, before anything is written, on a full host and
+    # an add-on host alike.
+    try:
+      let why = addon_state_sets.carriedStateRefusal(
+        parseSystemProfile(profileText))
+      if why.len > 0:
+        stderr.writeLine("repro infra apply: " & why)
+        return 2
+    except ESystemProfileInvalid as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
+
+  when defined(linux):
     # ReproOS add-on mode: on a host the add-on was bootstrapped on, every
     # generation is the add-on's own objects plus this profile, and the
     # ownership ledger decides what may be removed. A plain infra apply here
@@ -1723,6 +1739,16 @@ proc runSystemCommand*(args: seq[string]): int =
           return addon_cli.runAddonRollbackCli(rest)
       return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
+    of "state":
+      # `repro system state <verb>`: the declared state set (ReproOS Add-On
+      # Mode §11.1). A restore runs on a host realised in full after a
+      # conversion, so the verbs answer on every Linux host, not only an
+      # add-on one.
+      when defined(linux):
+        return addon_cli.runAddonCli(@["state"] & rest)
+      else:
+        stderr.writeLine("repro system state: supported only on Linux")
+        return 2
     of "secret":
       # `repro system secret put --service S --name N [--target T]`: an
       # add-on host's verb is `repro system addon secret put`, which this

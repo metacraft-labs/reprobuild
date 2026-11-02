@@ -138,6 +138,12 @@ e2e_addon_hostile_deb_cannot_escape_its_prefix:
 e2e_addon_closure_prefixes_survive_gc:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_closure_prefixes_survive_gc
 
+e2e_addon_adopt_hand_configured_service:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_adopt_hand_configured_service
+
+e2e_addon_to_reproos_conversion_keeps_state:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_to_reproos_conversion_keeps_state
+
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
 

@@ -778,6 +778,7 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             credentials: seq[string] = @[];
                             hardening: string = "";
                             floorExceptions: seq[string] = @[];
+                            stateDirectories: seq[string] = @[];
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
@@ -806,6 +807,13 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
   ## unit's name without .service>, name = ...)`, and renders as
   ## `LoadCredential=<name>:/run/repro/secrets/<service>/<name>`, so the
   ## service reads it from `$CREDENTIALS_DIRECTORY`.
+  ##
+  ## `stateDirectories` declares the directories holding the service's
+  ## state, each written `"keep:<path>"` (on a disk a conversion to
+  ## ReproOS keeps) or `"carry:<path>"` (backed up before the conversion,
+  ## restored before the service first starts, verified by digest);
+  ## ReproOS Add-On Mode spec §11.1. Paths are below /var/lib, /var/cache,
+  ## /var/spool, /var/log or /srv. Nothing is rendered into the unit.
   ##
   ## `collision` is add-on mode's opt-in when a distribution package
   ## already provides a unit of this name (ReproOS Add-On Mode spec §4.3):
@@ -870,6 +878,8 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
       fields["hardening"] = strField(hardening)
     if floorExceptions.len > 0:
       fields["floorExceptions"] = listField(floorExceptions)
+    if stateDirectories.len > 0:
+      fields["stateDirectories"] = listField(stateDirectories)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,

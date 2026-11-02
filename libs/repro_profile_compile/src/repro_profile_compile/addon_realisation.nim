@@ -156,7 +156,11 @@ proc addOnDebianProfile*(): RealisationProfile =
               "(spec §10.1)"),
           FieldRule(field: "floorExceptions", class: fcShared,
             reason: "the floor settings the unit weakens, each with its " &
-              "reason, printed in every plan (spec §10.1, CONF-2)")]),
+              "reason, printed in every plan (spec §10.1, CONF-2)"),
+          FieldRule(field: "stateDirectories", class: fcShared,
+            reason: "the service's state set and what a conversion to " &
+              "ReproOS keeps or carries (spec §11.1); not rendered into " &
+              "the unit")]),
     KindRule(kind: "secrets.secretFile", class: fcShared,
       reason: "a sealed secret materialised under /run/repro/secrets " &
         "for one service (spec §8.3, §10.3)",

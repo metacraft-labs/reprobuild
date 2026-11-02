@@ -96,6 +96,7 @@ import ./static_tree
 import ./store_root
 import ./switch
 import ./evidence
+import ./state_sets
 import ./sysctl_precedence
 import ./transitions
 
@@ -2402,6 +2403,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         "there); re-run as root" &
         (if getEnv(ForceBrokerEnvVar).len > 0: " without " & ForceBrokerEnvVar
          else: ""))
+    # Carried state a conversion brought is restored before any apply
+    # starts a unit of it (spec §11.1), whichever path asked for the apply
+    # (an operator, the deploy agent, an adopt).
+    let why = carriedStateRefusal(parseSystemProfile(opts.userProfileText))
+    if why.len > 0:
+      raise newException(AddonApplyError, why)
   # One apply at a time per HOST, whatever its state directory
   # (``repro_core/host_apply_lock``), taken before the first write and
   # before the state directory's own lock, and held across the whole

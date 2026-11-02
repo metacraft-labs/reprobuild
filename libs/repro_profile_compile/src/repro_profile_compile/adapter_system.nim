@@ -323,6 +323,11 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suCredentials: fieldList(r, "credentials"),
       suHardening: fieldString(r, "hardening"),
       suFloorExceptions: fieldList(r, "floorExceptions"))
+    try:
+      result.suStateDirectories = parseStateDirectories(result.suName,
+        fieldList(r, "stateDirectories"))
+    except ESystemProfileInvalid as e:
+      raise newException(ValueError, e.msg)
     if result.suHealthCheck.len > 0:
       discard parseHealthCheck(result.suHealthCheck)
     if result.suDropInName.len > 0 and result.suCollision != "dropIn":
@@ -1095,6 +1100,7 @@ proc adaptSystemProfile*(p: ProfileIntent;
   checkUnitStateConflicts(result.profile.resources)
   checkPasswdPrimaryGroups(result.profile.resources)
   checkSecretDeclarations(result.profile)
+  checkStateDirectories(result.profile)
 
 proc profileIntentToSystemProfile*(p: ProfileIntent;
                                    target: SystemPlanTarget): SystemProfile =
@@ -1308,6 +1314,9 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("hardening", quoteSystemValue(r.suHardening)))
       if r.suFloorExceptions.len > 0:
         pairs.add(("floorExceptions", renderListLiteral(r.suFloorExceptions)))
+      if r.suStateDirectories.len > 0:
+        pairs.add(("stateDirectories",
+          renderListLiteral(stateDirectoryEntries(r))))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))

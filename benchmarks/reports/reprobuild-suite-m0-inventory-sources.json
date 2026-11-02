@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2594,
-    "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 720,
+    "nimTestBinaries": 2599,
+    "pureUnitConsolidationGroups": 77,
+    "pureUnitTests": 721,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2634
+    "testEntries": 2639
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -599,6 +599,21 @@
       "sources": [
         "libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim",
         "libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "sources": [
+        "libs/repro_profile_compile/tests/t_compiled_profile_keeps_secrets_and_credentials.nim",
+        "libs/repro_profile_compile/tests/t_system_unit_state_directories.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1504,10 +1519,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1437,
+      "integration": 1439,
       "platform/destructive": 164,
-      "pure unit": 720,
-      "unclassified": 295
+      "pure unit": 721,
+      "unclassified": 297
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1715,9 +1730,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2594,
+    "nimTestBinaryCount": 2599,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2634
+    "testEntryCount": 2639
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8452,6 +8467,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_import_skeleton",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_import_skeleton.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_key_lists_accept_utf8_comments",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -8697,6 +8731,25 @@
       "source": "libs/repro_addon/tests/t_addon_service_floor.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_state_sets",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_state_sets.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19894,6 +19947,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_system_unit_state_directories",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_system_unit_state_directories.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_systemd_unit_restart_on_change",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -28116,6 +28188,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_addon_adopt_hand_configured_service",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_dsl_stdlib",
+        "repro_infra",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -29017,6 +29109,25 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_to_reproos_conversion_keeps_state",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_to_reproos_conversion_keeps_state.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
