@@ -91,7 +91,13 @@ proc buildThroughWorkerDaemon(d: WorkerDaemon; projectRoot: string;
     workingDir = repoRootDir(), env = env,
     options = {poUsePath, poStdErrToStdOut, poParentStreams})
   defer: p.close()
-  let deadline = epochTime() + 600.0
+  # The build's one action is trivial; its cost is compiling the recipe
+  # itself (interface extraction and the provider `nim c` against the DSL)
+  # into this case's fresh action cache, which no smaller project avoids.
+  # That compile took 438 s on an idle host and overran 600 s at load
+  # 150-300, so the bound is sized for a loaded full-suite host. It stays a
+  # bound: a build that never finishes is killed and fails `code == 0`.
+  let deadline = epochTime() + 1800.0
   while p.running and epochTime() < deadline:
     for h in keepServing: h.tick(20)
   if p.running:
@@ -181,7 +187,9 @@ suite "Distributed-Execution M7: the worker hydrates over the caller's connectio
       discard waitFor orch.host.client.connectKnownPeers()
       check orch.waitConnected(workerId, worker)
       var refusedEdge = false
-      let deadline = epochTime() + 15.0
+      # Polled: the refusal is seen as soon as the sink records it. The bound
+      # is sized for a loaded full-suite host, where 15 s was not enough.
+      let deadline = epochTime() + 120.0
       while not refusedEdge and epochTime() < deadline:
         orch.host.tick(50)
         for e in sink.detections("frame-refused"):
@@ -235,7 +243,7 @@ suite "Distributed-Execution M7: the worker hydrates over the caller's connectio
     # The orchestrator's Hello put its listener in the worker's registry
     # (beside the seed): exactly what a hosted build used to be seeded with.
     var known = false
-    let knownDeadline = epochTime() + 15.0
+    let knownDeadline = epochTime() + 120.0
     while not known and epochTime() < knownDeadline:
       orch.host.tick(50)
       seedHost.tick(10)

@@ -177,13 +177,15 @@ const
   StartupBudgetMillis = 60_000
     ## Child start, plus `startAutoRunQuotaIfNeeded`'s own readiness wait
     ## (up to 300 x 50 ms), plus slack for a loaded host.
-  DaemonExitBudgetMillis = 15_000
+  DaemonExitBudgetMillis = 90_000
     ## The daemon's orderly shutdown joins a worker pool and drains its
-    ## SQLite writers; runquota's own SIGTERM tests allow the same 15 s. The
-    ## parent watch adds one poll interval (200 ms) to it. A daemon that
-    ## does not stop at all overruns this by an unbounded margin -- the
-    ## orphans this file is about lived for hours.
-  EofBudgetMillis = 15_000
+    ## SQLite writers; runquota's own SIGTERM tests allow 15 s on an idle
+    ## host. The parent watch adds one poll interval (200 ms) to it. The
+    ## verdict polls, so a prompt stop is seen at once; the budget is sized
+    ## for a full-suite host at load 150-300, where 15 s was overrun by
+    ## 0.4 s (run 45). A daemon that does not stop at all overruns this by
+    ## an unbounded margin -- the orphans this file is about lived for hours.
+  EofBudgetMillis = 90_000
     ## From the child's death to end of file on its stdout. With no other
     ## holder of the pipe, end of file is immediate; the budget only has to
     ## outlast the daemon's own shutdown, after which nothing can hold it.

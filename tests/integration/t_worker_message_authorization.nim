@@ -262,8 +262,15 @@ suite "Distributed-Execution M7: per-message authorization at the worker":
         pump(2_000)
         check worker.statusInt("worker_goals_executed") == leasesBefore
         # Lease metadata (the goal's stdout/stderr) is not retained (EVID-6).
-        var metaLeft = 0
-        for _ in walkDir(worker.stateDir / "worker" / "lease-meta"): inc metaLeft
+        # The worker removes it when a lease ends, on its own schedule; on a
+        # loaded host that can take longer than the pump above, so wait for
+        # it -- bounded, so metadata that is never removed still fails here.
+        proc leaseMetaLeft(): int =
+          for _ in walkDir(worker.stateDir / "worker" / "lease-meta"): inc result
+        let metaDeadline = epochTime() + 90.0
+        while leaseMetaLeft() > 0 and epochTime() < metaDeadline:
+          pump(100)
+        let metaLeft = leaseMetaLeft()
         check metaLeft == 0
 
         # -- Every refusal reached the off-host sink --------------------------
