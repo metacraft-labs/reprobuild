@@ -593,6 +593,11 @@ proc runInfraPlan(args: openArray[string]): int =
   if hostNote.len > 0:
     echo "  note    : " & hostNote
   echo "  plan-id : " & env.planId
+  # Every weakening of a unit's hardening floor, in every plan (ReproOS
+  # Add-On Mode §10.1, CONF-2); the add-on's own plan above lists its own.
+  # The text parsed for `producePlan` above, so it parses here too.
+  for l in floorExceptionPlanLines(parseSystemProfile(profileText)):
+    echo "  floor exception: " & l
   var changeCount = 0
   for op in env.operations:
     let marker = if op.action == "no-op": "  " else: "* "

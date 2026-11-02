@@ -65,6 +65,7 @@ import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
 from std/posix import Statvfs, statvfs, Stat, lstat
 import std/uri
 import repro_binary_cache_client/http_pool
+from repro_binary_cache_client/in_process import prefixArchiveDigestHex
 
 import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
@@ -283,6 +284,15 @@ type
     baseIdentity*: BaseIdentity    ## the base observed at plan time (§7.4)
     previousBase*: BaseIdentity    ## the one the current generation recorded
     baseChanges*: seq[string]      ## what changed between the two (§7.9)
+    floorIntroduced*: seq[string]
+      ## Units installed without the hardening floor that this generation
+      ## gives it (``floorIntroducedUnits``): each is a changed unit file
+      ## and a restart, listed apart in the plan; an agent apply refuses
+      ## them (spec §10.1).
+    floorExceptions*: seq[string]
+      ## The target profile's hardening-floor exceptions (spec §10.1,
+      ## CONF-2): ``<unit>: <Setting>: <reason>`` each, printed in every
+      ## plan (``floorExceptionPlanLines``).
     failedAtFloor*: seq[string]
       ## Non-empty when the switch failed after its flip and the rollback
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
@@ -393,6 +403,41 @@ proc isAddonHost*(stateDir = DefaultStateDir): bool =
 proc readHostname*(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
+
+proc parseAddOnUserProfile*(text: string): SystemProfile =
+  ## A user profile as the add-on realises it: parsed with the add-on's
+  ## defaults (``parseSystemProfile(..., addOnDefaults = true)``), so every
+  ## unit with a ``[Service]`` section that is not a ``collision = dropIn``
+  ## gets the hardening floor unless it names an exception (spec §10.1).
+  ## Every add-on path that plans, applies or compares a user profile --
+  ## the target, the current and the previous generation's -- parses
+  ## through here, so a unit renders the same bytes wherever the add-on
+  ## renders it, and a unit a pre-floor generation installed without the
+  ## floor is planned as a change of its file (a restart in the transition
+  ## list), never applied silently.
+  parseSystemProfile(text, addOnDefaults = true)
+
+proc floorIntroducedUnits*(previous: Ledger;
+                           units: openArray[SystemResource]): seq[string] =
+  ## The units the hardening floor is about to change on a host that
+  ## installed them without it (an upgrade to a build with the floor, spec
+  ## §10.1): a unit under the floor whose ledgered file holds exactly the
+  ## bytes the unit renders WITHOUT the floor. Its file changes and it
+  ## restarts only because of the floor, which every plan says
+  ## (``AddonApplyResult.floorIntroduced``) and an agent apply refuses
+  ## (``runAddonApply``): the first floor a running service gets is an
+  ## operator's reviewed apply, never an unattended restart.
+  for r in units:
+    if r.kind != srkSystemdSystemUnit or
+        r.suHardening != ServiceFloorHardening: continue
+    let path = unitPath(r.suName)
+    for e in previous.entries:
+      if e.class != lcUnit or e.path != path or e.sha256.len == 0: continue
+      let before = sha256Hex(renderedUnitBeforeFloor(r))
+      if e.sha256 == before and
+          before != sha256Hex(renderedSystemUnitContent(r)):
+        result.add(r.suName)
+      break
 
 # ---------------------------------------------------------------------------
 # Scope (spec §4.1, §4.4; threat model G8).
@@ -1636,7 +1681,7 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   ## 2026-10-30): an adopt widens the scope by exactly what the adopted
   ## object needs. Raises when ``given`` does not declare an addressed
   ## resource.
-  let current = if currentText.len > 0: parseSystemProfile(currentText)
+  let current = if currentText.len > 0: parseAddOnUserProfile(currentText)
                 else: SystemProfile()
   result.addOn = current.addOn
   # An adopt changes no secret: the current generation's declarations stay.
@@ -2450,9 +2495,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var own = parseSystemProfile(ownText)
   var user =
     if adoptAddresses.len > 0:
-      scopedAdoptProfile(parseSystemProfile(targetUserText),
+      scopedAdoptProfile(parseAddOnUserProfile(targetUserText),
                          previousUserText, adoptAddresses)
-    else: parseSystemProfile(targetUserText)
+    else: parseAddOnUserProfile(targetUserText)
   when mutated("addon-unit-renders-differently"):
     # FALSIFYING MUTATION (e2e_addon_reproos_service_parity): the add-on
     # writes every unit with one line the full realisation does not.
@@ -3124,7 +3169,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var removed: seq[SystemResource]
   var previousUser: SystemProfile
   if previousUserText.len > 0:
-    previousUser = parseSystemProfile(previousUserText)
+    previousUser = parseAddOnUserProfile(previousUserText)
     var prevDropIns = initHashSet[string]()
     let previousShaped = reshape(previousUser, prevDropIns)
     when not mutated("retargeted-address-accepted"):
@@ -3691,8 +3736,21 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       treeFiles.add(StaticFile(path: e.path, content: readFile(e.path)))
   result.staticTree = staticTreePath(treeFiles)
 
+  result.floorExceptions = floorExceptionPlanLines(user)
+  result.floorIntroduced = floorIntroducedUnits(previous, user.resources)
   if opts.planOnly:
     return
+  # An unattended (agent) apply never gives a running service its first
+  # floor: the change is reviewed in an operator's plan (spec §10.1). A
+  # replay or a revert of a switch already under way is not refused.
+  if opts.agentSequence > 0'u64 and purpose == "apply" and not replaying and
+      result.floorIntroduced.len > 0:
+    raise newException(AddonApplyError, "the hardening floor (serviceFloor) " &
+      "would change " & result.floorIntroduced.join(", ") & ", installed " &
+      "without it; an agent apply does not restart a service into its " &
+      "first floor. Review `repro system addon plan` and apply this " &
+      "profile as an operator once (or name floorExceptions); nothing was " &
+      "changed")
 
   # Step 1 recomputes the store's hold from every unit, manifest and
   # hand-back record on the host; the plan checked they can be read, but
@@ -3774,6 +3832,25 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
             closurePrefixes.add(id)
       st.close()
       holdOnPendingRoot(closurePrefixes)
+
+  # What the flip will make the host run, as realised: the static tree,
+  # each bound closure and each store prefix a unit's command lines run
+  # from, with the digest of its whole tree. Step 3 recomputes them just
+  # before the flip and refuses on any difference (spec §10.2, A9): a
+  # store path changed between realise and flip -- by anything that got
+  # write access to the store -- is never activated.
+  var realisedStore: seq[tuple[path, digest: string]]
+  block:
+    var objs = @[treePath]
+    for lock in closureLocks:
+      let p = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+      if p notin objs: objs.add(p)
+    for p in plans:
+      if p.r.kind == srkSystemdSystemUnit:
+        for o in commandStoreObjects(renderedSystemUnitContent(p.r)):
+          if o notin objs and dirExists(o): objs.add(o)
+    for o in objs:
+      realisedStore.add((path: o, digest: prefixArchiveDigestHex(o)))
 
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]
@@ -4022,6 +4099,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       marker.step = ssPreStop
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-2")
+      # Nothing the generation runs from changed since step 1 (§10.2).
+      when not mutated("flip-skips-store-recheck"):
+        var changed: seq[string]
+        for (path, digest) in realisedStore:
+          let now = if dirExists(path): prefixArchiveDigestHex(path)
+                    else: "(gone)"
+          if now != digest: changed.add(path)
+        if changed.len > 0:
+          raise newAddOnError(adStoreChanged, "the store changed between " &
+            "the switch's realise step and its flip: " & changed.join(", ") &
+            " no longer hold" & (if changed.len == 1: "s" else: "") &
+            " what was realised; nothing was switched")
       # The flip is durable (its directory is synced) before the marker
       # says it happened; recovery never trusts the step anyway.
       flipStatic(treePath)

@@ -149,7 +149,14 @@ proc addOnDebianProfile*(): RealisationProfile =
               "before committing a generation (spec §7.5)"),
           FieldRule(field: "credentials", class: fcShared,
             reason: "the secrets the unit loads through systemd " &
-              "credentials, rendered as `LoadCredential=` (spec §10.3)")]),
+              "credentials, rendered as `LoadCredential=` (spec §10.3)"),
+          FieldRule(field: "hardening", class: fcShared,
+            reason: "`serviceFloor` renders the hardening floor on both " &
+              "realisations; unset, the add-on applies it by default " &
+              "(spec §10.1)"),
+          FieldRule(field: "floorExceptions", class: fcShared,
+            reason: "the floor settings the unit weakens, each with its " &
+              "reason, printed in every plan (spec §10.1, CONF-2)")]),
     KindRule(kind: "secrets.secretFile", class: fcShared,
       reason: "a sealed secret materialised under /run/repro/secrets " &
         "for one service (spec §8.3, §10.3)",

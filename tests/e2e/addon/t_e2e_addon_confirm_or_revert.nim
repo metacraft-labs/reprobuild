@@ -86,7 +86,7 @@ proc service(page: string): string =
 proc profile(page, check: string; timeout = 0): string =
   "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n" &
     (if timeout > 0: "  confirmTimeout = " & $timeout & "\n" else: "") & "}\n\n" &
-    "systemd.systemUnit {\n  name = \"repro-fixture-web.service\"\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fixture-web.service\"\n" &
     "  content = \"" & service(page) & "\"\n  healthCheck = \"" & check &
     "\"\n}\n\n" &
     "fs.systemFile {\n  path = \"/etc/repro-fixture/page.conf\"\n" &

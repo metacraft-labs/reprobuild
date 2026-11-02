@@ -333,6 +333,10 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  healthCheck = " & renderScalar(r.suHealthCheck))
     if r.suCredentials.len > 0:
       result.add("  credentials = " & renderList(r.suCredentials))
+    if r.suHardening.len > 0:
+      result.add("  hardening = " & renderScalar(r.suHardening))
+    if r.suFloorExceptions.len > 0:
+      result.add("  floorExceptions = " & renderList(r.suFloorExceptions))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))

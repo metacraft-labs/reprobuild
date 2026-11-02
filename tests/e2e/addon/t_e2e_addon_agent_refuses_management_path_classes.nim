@@ -84,7 +84,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        canonicalFile("/etc/firewalld/zones/a8.xml", "<zone/>\n")),
      "/etc/firewalld/zones/a8.xml"),
     ("a unit aliasing the ssh service", "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
-       "systemd.systemUnit {\n  name = \"a8-login.service\"\n  content = \"[Service]\n" &
+       "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"a8-login.service\"\n  content = \"[Service]\n" &
        "ExecStart=/bin/true\n\n[Install]\nAlias=sshd@.service\nWantedBy=multi-user.target\n\"\n" &
        "  enabled = false\n}\n", "/etc/systemd/system/a8-login.service")]
   for (what, prof, path) in agentOnly:

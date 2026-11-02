@@ -320,7 +320,9 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suReloadIfChanged: fieldBool(r, "reloadIfChanged", false),
       suExclusive: fieldBool(r, "exclusive", false),
       suHealthCheck: fieldString(r, "healthCheck"),
-      suCredentials: fieldList(r, "credentials"))
+      suCredentials: fieldList(r, "credentials"),
+      suHardening: fieldString(r, "hardening"),
+      suFloorExceptions: fieldList(r, "floorExceptions"))
     if result.suHealthCheck.len > 0:
       discard parseHealthCheck(result.suHealthCheck)
     if result.suDropInName.len > 0 and result.suCollision != "dropIn":
@@ -1083,6 +1085,12 @@ proc adaptSystemProfile*(p: ProfileIntent;
       result.profile.secretFiles.add(d)
       continue
     result.profile.resources.add(buildSystemResource(r))
+  # The add-on realisation's default hardening (spec §10.1): the same
+  # default the add-on's own parse applies (`parseSystemProfile(...,
+  # addOnDefaults = true)`), so the canonical text a producer compiles for
+  # an add-on host names the floor explicitly.
+  if target.realisation == srAddOnDebian:
+    applyAddOnServiceFloor(result.profile)
   # Same cross-resource refusal as the text path (`parseSystemProfile`).
   checkUnitStateConflicts(result.profile.resources)
   checkPasswdPrimaryGroups(result.profile.resources)
@@ -1296,6 +1304,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("healthCheck", quoteSystemValue(r.suHealthCheck)))
       if r.suCredentials.len > 0:
         pairs.add(("credentials", renderListLiteral(r.suCredentials)))
+      if r.suHardening.len > 0:
+        pairs.add(("hardening", quoteSystemValue(r.suHardening)))
+      if r.suFloorExceptions.len > 0:
+        pairs.add(("floorExceptions", renderListLiteral(r.suFloorExceptions)))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))

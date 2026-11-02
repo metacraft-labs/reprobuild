@@ -51,7 +51,7 @@ const
 
 proc profile(): string =
   "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"repro-fixture-nostore.service\"\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fixture-nostore.service\"\n" &
     "  content = \"" & Service & "\"\n}\n\n" &
     "fs.systemFile {\n  path = \"/etc/repro-fixture/nostore.conf\"\n" &
     "  content = \"read through the store\n\"\n}\n"

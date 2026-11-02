@@ -162,6 +162,7 @@ fs.systemFile {
 }
 """
   UnitRefused = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "cron.service"
   content = "[Service]
 Nice=5
@@ -169,6 +170,7 @@ Nice=5
 }
 """
   UnitDropIn = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "cron.service"
   content = "[Service]
 Nice=5
@@ -177,6 +179,7 @@ Nice=5
 }
 """
   UnitReplace = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "cron.service"
   content = "[Unit]
 Description=Regular background program processing daemon (Reprobuild add-on replace fixture)
@@ -194,18 +197,21 @@ WantedBy=multi-user.target
   HandUnitV1 = "[Unit]\nDescription=hand-written fixture one\n\n[Service]\nExecStart=/bin/sleep infinity\n"
   HandUnitV2 = "[Unit]\nDescription=hand-written fixture two\n\n[Service]\nExecStart=/bin/sleep infinity\n"
   HandProfile = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fixture-hand.service"
   content = "$1"
   enabled = false
 }
 """
   TwoHandProfile = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fixture-hand.service"
   content = "$1"
   enabled = false
 }
 
 systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fixture-hand2.service"
   content = "$2"
   enabled = false
@@ -234,6 +240,7 @@ fs.systemFile {
 """
   BaseUnit = "[Unit]\nDescription=base fixture the add-on adopts\n\n[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n"
   FinalProfile = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "cron.service"
   content = "[Unit]
 Description=Regular background program processing daemon (Reprobuild add-on replace fixture)
@@ -249,6 +256,7 @@ WantedBy=multi-user.target
 }
 
 systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "fixture-base.service"
   content = "$1"
 }
@@ -286,6 +294,7 @@ fs.systemFile {
 }
 """
   DropInNothing = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fixture-nothing.service"
   content = "[Service]
 Nice=5
@@ -372,6 +381,7 @@ linux.sysusersEntry {
 }
 """
   UnitNameSpace = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = " cron.service"
   content = "[Service]
 ExecStart=/bin/true
@@ -387,6 +397,7 @@ Nice=5
 }
 """
   AliasShadow = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fx-alias.service"
   content = "[Service]
 ExecStart=/bin/sleep infinity
@@ -398,6 +409,7 @@ Alias=cron.service
 }
 """
   AlsoForeign = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fx-also.service"
   content = "[Service]
 ExecStart=/bin/sleep infinity
@@ -409,6 +421,7 @@ Also=fixture-off.service
 }
 """
   InstallOwn = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fx-inst.service"
   content = "[Service]
 ExecStart=/bin/sleep infinity
@@ -901,7 +914,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            (not isDebian or aliasBefore == frag or
             aliasBefore == frag.replace("/usr/lib/", "/lib/")),
            frag & " alias " & aliasBefore & " enabled " & baseEnabled)
-      let prof = "systemd.systemUnit {\n  name = \"ssh.service\"\n  content = \"" &
+      let prof = "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"ssh.service\"\n  content = \"" &
         content & "\"\n  enabled = " & (if baseEnabled == "enabled": "true" else: "false") &
         "\n  collision = \"replace\"\n}\n"
       discard applied("replace-ssh", prof)
@@ -922,6 +935,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # --- Row: a vendor unit arriving under a name the add-on owns. ---
     block:
       let owned = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fx-owned.service"
   content = "[Service]
 ExecStart=/bin/sleep infinity

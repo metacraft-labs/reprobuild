@@ -40,7 +40,7 @@ proc service(page: string): string =
 proc profile(page, check: string): string =
   "addOn {\n  managedEtcPrefixes = []\n  confirmTimeout = " &
     $ConfirmTimeout & "\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"a8-web.service\"\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"a8-web.service\"\n" &
     "  content = \"" & service(page) & "\"\n  healthCheck = \"" & check &
     "\"\n}\n"
 

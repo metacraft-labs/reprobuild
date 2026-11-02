@@ -52,10 +52,12 @@ libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
+libs/repro_addon/tests/t_addon_service_floor.nim	nim	12
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
+libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	2
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
 libs/repro_addon/tests/t_system_activity_selects_its_store_packages.nim	nim	5
@@ -1106,6 +1108,7 @@ tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
 tests/bundles/bundle_repro_solver_pure_unit.nim	nim	82
+tests/e2e/addon/t_addon_agent_apply_unit_lacks_cap_net_admin.nim	nim	2
 tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	0
 tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	0
 tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	nim	1
@@ -1140,6 +1143,7 @@ tests/e2e/addon/t_e2e_addon_net_sysctl_applies_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_no_plaintext_secret_on_disk.nim	nim	1
 tests/e2e/addon/t_e2e_addon_preflight_is_zero_write.nim	nim	1
 tests/e2e/addon/t_e2e_addon_profile_compiles_unprivileged.nim	nim	1
+tests/e2e/addon/t_e2e_addon_reassert_unit_has_no_network.nim	nim	1
 tests/e2e/addon/t_e2e_addon_recipient_key_rotation.nim	nim	1
 tests/e2e/addon/t_e2e_addon_recovery_never_holds_up_boot.nim	nim	1
 tests/e2e/addon/t_e2e_addon_refused_recovery_keeps_its_record.nim	nim	1
@@ -1149,15 +1153,18 @@ tests/e2e/addon/t_e2e_addon_revert_keeps_earlier_drift.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_follow_generations.nim	nim	1
 tests/e2e/addon/t_e2e_addon_secrets_without_memory_controller.nim	nim	1
 tests/e2e/addon/t_e2e_addon_sequence_floor_survives_and_is_root_only.nim	nim	1
+tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim	nim	1
 tests/e2e/addon/t_e2e_addon_service_reads_only_its_credentials.nim	nim	1
 tests/e2e/addon/t_e2e_addon_staging_swap_after_verify_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_stale_manifest_is_reported.nim	nim	1
+tests/e2e/addon/t_e2e_addon_store_is_read_only_to_everything_else.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_survives_point_upgrades.nim	nim	1
 tests/e2e/addon/t_e2e_addon_switch_is_planned_exactly.nim	nim	1
 tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
+tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1

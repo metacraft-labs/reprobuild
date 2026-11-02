@@ -121,7 +121,7 @@ const
   Anchors = "/etc/repro/anchors/deploy-signers.anchors"
 
 proc unitResource(name, marker: string; extra = ""): string =
-  "systemd.systemUnit {\n  name = \"" & name & ".service\"\n  content = \"" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & name & ".service\"\n  content = \"" &
     unitText(name, marker) & "\"\n" & extra & "}\n\n"
 
 proc fileResource(path, content: string): string =
@@ -136,7 +136,7 @@ const
 
 proc kindMix(lockText: string): string =
   ## A timer and its service, a group and a user, an operator tool.
-  "systemd.systemUnit {\n  name = \"" & TickService & "\"\n  content = " &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & TickService & "\"\n  content = " &
     quoteSystemValue(TickServiceText) & "\n  enabled = false\n}\n\n" &
   "systemd.systemTimer {\n  name = \"" & TickTimer & "\"\n  content = " &
     quoteSystemValue(TickTimerText) & "\n}\n\n" &
@@ -146,7 +146,7 @@ proc kindMix(lockText: string): string =
     "\"]\n}\n\n" &
   "linux.addOnTool {\n  command = \"" & FxTool & "\"\n  aptClosureLock = " &
     quoteSystemValue(lockText) & "\n}\n\n" &
-  "systemd.systemUnit {\n  name = \"repro-fx-cred.service\"\n  content = " &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fx-cred.service\"\n  content = " &
     quoteSystemValue(CredServiceText) & "\n}\n\n"
 
 proc profile(changeMarker, caches, anchors, lockText: string;
@@ -157,7 +157,7 @@ proc profile(changeMarker, caches, anchors, lockText: string;
     addOnExtra & "}\n\n" &
     kindMix(lockText) & extra &
     (if closureLockText.len > 0:
-       "systemd.systemUnit {\n  name = \"" & FxClosureUnit & "\"\n  content = " &
+       "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & FxClosureUnit & "\"\n  content = " &
        quoteSystemValue(FxClosureText) & "\n  aptClosureLock = " &
        quoteSystemValue(closureLockText) & "\n}\n\n"
      else: "") &
@@ -577,7 +577,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # A LoadCredential= from anywhere else is refused, with nothing written
     # (§10.3): an operator plan of the same profile plus one such unit.
     writeFile(g.runDir / "outside.profile", prof("v1",
-      extra = "systemd.systemUnit {\n  name = \"repro-fx-outside.service\"\n" &
+      extra = "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fx-outside.service\"\n" &
         "  content = " & quoteSystemValue("[Service]\nExecStart=/bin/true\n" &
         "LoadCredential=token:/etc/repro-agent-fixture/token\n") & "\n}\n\n"))
     g.copyTo(g.runDir / "outside.profile", "/var/tmp/outside.profile")
@@ -641,7 +641,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     writeFile(g.runDir / "caches3", caches3)
     g.copyTo(g.runDir / "caches3", CachesConf)
     let m3 = g.publishManifest(signer, Target, 3, prof("v2",
-      extra = "systemd.systemUnit {\n  name = \"repro-fx-fail.service\"\n" &
+      extra = "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fx-fail.service\"\n" &
         "  content = " & quoteSystemValue(unitText("repro-fx-fail", "fail")) &
         "\n  healthCheck = \"tcp:127.0.0.1:9\"\n}\n\n",
       addOnExtra = "  confirmTimeout = 15\n", cachesText = caches3), @[], "")

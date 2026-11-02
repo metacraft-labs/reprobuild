@@ -32,6 +32,15 @@ import repro_elevation
 import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
+import ./service_floor
+
+export service_floor.EServiceFloor, service_floor.ServiceFloorHardening,
+  service_floor.commandStoreObjects
+
+const InfraAddonMutation {.strdefine: "reproAddonMutation".} = ""
+  ## A falsifying build of the add-on's gates (``repro_addon/mutations``);
+  ## "" in every product build. Read here because the floor is rendered by
+  ## this module, below the add-on.
 
 type
   SystemResourceKind* = enum
@@ -226,6 +235,15 @@ type
         ## the unit's `[Service]` section (`renderedSystemUnitContent`), so
         ## the service reads it from `$CREDENTIALS_DIRECTORY` and its
         ## account never gets access to the shared directory.
+      suHardening*: string
+        ## `hardening = "serviceFloor"` (ReproOS-Add-On-Mode §10.1): the
+        ## unit gets the hardening floor (`service_floor`). "" means the
+        ## realisation's default: the floor on an add-on host (the parse
+        ## with `addOnDefaults`, `applyAddOnServiceFloor`), none elsewhere.
+      suFloorExceptions*: seq[string]
+        ## `floorExceptions = ["<Setting>: <reason>", ...]`: the floor
+        ## settings this unit weakens, each with its reason (CONF-2);
+        ## printed in every plan (`floorExceptionPlanLines`).
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -786,8 +804,9 @@ proc credentialLines*(unitName: string; credentials: openArray[string]):
     result.add("LoadCredential=" & c & ":" & SecretsRunRoot & "/" & svc &
                "/" & c)
 
-proc renderedSystemUnitContent*(r: SystemResource): string =
-  ## The unit-file bytes a `systemd.systemUnit` resource installs. Without
+proc renderedUnitBeforeFloor*(r: SystemResource): string =
+  ## The unit-file bytes a `systemd.systemUnit` resource installs, before
+  ## the hardening floor (`renderedSystemUnitContent`). Without
   ## a closure lock that is `suContent` verbatim. With one, the unit's
   ## `[Service]` section gains the closure's `BindReadOnlyPaths=` /
   ## `InaccessiblePaths=` lines (Add-On spec §8.3 item 5), naming the
@@ -861,6 +880,69 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     outLines = @["[Unit]", "Wants=" & SecretsOrderingUnit,
                  "After=" & SecretsOrderingUnit, ""] & outLines
   outLines.join("\n")
+
+proc effectiveHardening*(r: SystemResource): string =
+  ## The hardening the unit is rendered with: its `hardening` field, which
+  ## the add-on's parse defaults to `serviceFloor` (`applyAddOnServiceFloor`).
+  r.suHardening
+
+proc renderedSystemUnitContent*(r: SystemResource): string =
+  ## The unit-file bytes a `systemd.systemUnit` resource installs: its
+  ## content with the closure binding and credential lines
+  ## (`renderedUnitBeforeFloor`), then, under `hardening = "serviceFloor"`,
+  ## the hardening floor appended to its `[Service]` section
+  ## (`service_floor`, ReproOS-Add-On-Mode §10.1). A unit the floor cannot
+  ## be applied to as written, and an exception that names no floor
+  ## setting or gives no reason, are `ESystemProfileInvalid`.
+  result = renderedUnitBeforeFloor(r)
+  case r.suHardening
+  of "":
+    return
+  of ServiceFloorHardening:
+    discard
+  else:
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+      "' hardening '" & r.suHardening & "' is not known (the one value is " &
+      "\"" & ServiceFloorHardening & "\")")
+  if not hasServiceSection(result):
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+      "' asks for the serviceFloor but has no [Service] section")
+  try:
+    let ex = parseFloorExceptions(r.suName, r.suFloorExceptions)
+    let lines = renderServiceFloorLines(r.suName, result, ex,
+      dropExec = InfraAddonMutation == "floor-without-noexec",
+      dropMdwe = InfraAddonMutation == "floor-without-mdwe")
+    result = appendToServiceSection(result, lines)
+  except EServiceFloor as e:
+    raiseSystemProfileInvalid(e.msg)
+
+proc floorAppliesByDefault*(r: SystemResource): bool =
+  ## Whether the add-on's default puts this unit under the floor: a unit
+  ## with no `hardening` of its own that has a `[Service]` section and is
+  ## the add-on's to define. A `collision = "dropIn"` unit is not: its
+  ## content is a drop-in over a distribution package's unit, whose
+  ## command lines are the package's (spec §10.1, amended with A9).
+  r.kind == srkSystemdSystemUnit and r.suHardening.len == 0 and
+    r.suCollision != "dropIn" and hasServiceSection(r.suContent)
+
+proc applyAddOnServiceFloor*(p: var SystemProfile) =
+  ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
+  ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
+  ## Validates each such unit (`renderedSystemUnitContent`).
+  for r in p.resources.mitems:
+    if floorAppliesByDefault(r):
+      r.suHardening = ServiceFloorHardening
+      discard renderedSystemUnitContent(r)
+
+proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
+  ## Every floor exception of the profile's units under the floor, one
+  ## `<unit>: <Setting>: <reason>` line each: what every plan prints
+  ## (CONF-2, "a named exception, shown in every plan").
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suHardening.len > 0 and
+        r.suFloorExceptions.len > 0:
+      try: result.add(floorExceptionLines(r.suName, r.suFloorExceptions))
+      except EServiceFloor as e: raiseSystemProfileInvalid(e.msg)
 
 
 proc legacyClosureRenderings*(r: SystemResource): seq[string] =
@@ -1368,11 +1450,16 @@ proc systemProfileStanzaLineSpans*(text: string;
     let e = lineOf(span.close)
     result.add((startLine: s, endLine: e))
 
-proc parseSystemProfile*(text: string): SystemProfile =
+proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
   ## Parse the declarative `system.nim` text into a `SystemProfile`.
   ## Raises `ESystemProfileInvalid` on any structural error or an
   ## unknown / deferred resource kind. Brace-aware: a stanza body may
   ## be on one line (`kind { k = v }`) or spread across many.
+  ##
+  ## With `addOnDefaults` the add-on realisation's defaults are applied as
+  ## each resource is read (`applyAddOnServiceFloor`): what every add-on
+  ## path that reads a user profile parses with, so a unit is rendered the
+  ## same way wherever the add-on renders it.
   # Strip comments globally (quote state carried across lines), then walk
   # by `{` / `}` braces. The bytes of a quoted value reach `unquote`
   # unchanged: no line splitting, so a `\r` inside a value survives too.
@@ -1758,7 +1845,15 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "healthCheck" in fields: fields["healthCheck"] else: "",
         suCredentials:
           if "credentials" in rawFields: parseListLiteral(rawFields["credentials"])
+          else: @[],
+        suHardening:
+          if "hardening" in fields: fields["hardening"] else: "",
+        suFloorExceptions:
+          if "floorExceptions" in rawFields:
+            parseListLiteral(rawFields["floorExceptions"])
           else: @[])
+      if addOnDefaults and floorAppliesByDefault(res):
+        res.suHardening = ServiceFloorHardening
       if res.suHealthCheck.len > 0:
         discard parseHealthCheck(res.suHealthCheck)
       if res.suDropInName.len > 0 and res.suCollision != "dropIn":

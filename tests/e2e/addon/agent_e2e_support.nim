@@ -274,9 +274,12 @@ proc `$`*(t: TickResult): string =
   t.outcome & " (exit " & $t.exitCode & ", " & t.errorCode & ") seq " &
     $t.sequence & ": " & t.message
 
-proc unitProfile*(name, execStart: string; health = ""; extra = ""): string =
-  ## A ``systemd.systemUnit`` the add-on runs, as canonical text.
-  "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"[Unit]\n" &
+proc unitProfile*(name, execStart: string; health = ""; extra = "";
+                  floorWaiver = true): string =
+  ## A ``systemd.systemUnit`` the add-on runs, as canonical text; with
+  ## ``floorWaiver`` the hardening floor is waived (``FixtureFloorWaiver``).
+  "systemd.systemUnit {\n" & (if floorWaiver: FixtureFloorWaiver else: "") &
+    "  name = \"" & name & "\"\n  content = \"[Unit]\n" &
     "Description=A8 fixture " & name & "\n\n[Service]\nExecStart=" &
     execStart & "\n" & extra & "\n[Install]\nWantedBy=multi-user.target\n\"\n" &
     "  enabled = true\n" &

@@ -147,6 +147,14 @@ const
       note: "base-files 14ubuntu6.1; 6.2 (26.04.1) reached resolute-updates in August 2026"),
   ]
 
+  FixtureFloorWaiver* = "  floorExceptions = [\"serviceFloor: a test " &
+    "fixture that runs the base's own binaries\"]\n"
+    ## The canonical-text field that waives the add-on's hardening floor
+    ## (spec §10.1) for a fixture unit: the gates of the other milestones
+    ## run the base's own ``/bin/sleep``, ``/bin/sh`` or ``python3`` as
+    ## root, which the floor's exec confinement rightly refuses, and their
+    ## units must keep the bytes they were measured with. A waived unit is
+    ## rendered exactly as written; the waiver is printed in every plan.
   DefaultBases* = ["debian-12-amd64", "debian-13-amd64", "ubuntu-24.04-amd64"]
     ## The amd64 matrix run under KVM when ``REPRO_ADDON_BASES`` is unset.
 

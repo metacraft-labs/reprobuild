@@ -46,7 +46,7 @@ proc unit(me, other: string): string =
     "ls /run/repro/secrets/" & other & " > " & d & "other-ls 2>&1; " &
     "echo rc=$$? >> " & d & "other-ls; touch " & d & "done; exec sleep infinity"
   "secrets.secretFile {\n  service = \"" & me & "\"\n  name = \"token\"\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"" & me & ".service\"\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & me & ".service\"\n" &
     "  content = \"[Unit]\nDescription=credential isolation probe\n\n" &
     "[Service]\nDynamicUser=yes\nRuntimeDirectory=" & me & "-probe\n" &
     "RuntimeDirectoryMode=0755\nExecStart=/bin/sh -c '" & script & "'\n\n" &

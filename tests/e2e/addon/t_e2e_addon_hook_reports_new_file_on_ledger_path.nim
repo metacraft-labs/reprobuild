@@ -75,14 +75,14 @@ proc fileRes(name, content: string): string =
 proc profile(files: openArray[string]; withCopyUnit = true): string =
   result = "addOn {\n  managedEtcPrefixes = [\"" & Fx & "\"]\n}\n\n"
   for f in files: result.add(fileRes(f, "add-on " & f))
-  result.add("systemd.systemUnit {\n  name = \"" & VendorA & "\"\n" &
+  result.add("systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & VendorA & "\"\n" &
     "  content = \"[Unit]\nDescription=add-on replacement of " & VendorA &
     "\n[Service]\nType=oneshot\nExecStart=/bin/true\n\"\n" &
     "  collision = \"replace\"\n  enabled = false\n}\n\n")
-  result.add("systemd.systemUnit {\n  name = \"" & VendorB & "\"\n" &
+  result.add("systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & VendorB & "\"\n" &
     "  content = \"[Service]\nNice=5\n\"\n  collision = \"dropIn\"\n}\n\n")
   if withCopyUnit:
-    result.add("systemd.systemUnit {\n  name = \"" & CopyUnit & "\"\n" &
+    result.add("systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & CopyUnit & "\"\n" &
       "  content = \"[Unit]\nDescription=add-on copy-form unit\n[Service]\n" &
       "Type=oneshot\nExecStart=/bin/true\n\"\n  enabled = false\n}\n\n")
 

@@ -190,7 +190,7 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
           if c.actionsJson.len > 0:
             resolved = to(parseJson(c.actionsJson), seq[ProfileBuildAction])
         var prof: SystemProfile
-        try: prof = parseSystemProfile(text)
+        try: prof = parseAddOnUserProfile(text)
         except CatchableError as e:
           return (false, "the profile does not parse: " & e.msg)
         let refusal = agentProfileRefusal(m, prof, source, stateDir, unitNames)

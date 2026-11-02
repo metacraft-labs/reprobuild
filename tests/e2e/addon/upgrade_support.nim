@@ -120,11 +120,11 @@ proc fixtureProfile*(c: ClosureFixture; page = "fixture-a"): string =
       "ProtectSystem=strict\nDynamicUser=yes\n\n" &
       "[Install]\nWantedBy=multi-user.target\n"
   "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n}\n\n" &
-  "systemd.systemUnit {\n  name = \"" & FixtureUnits[0] & "\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & FixtureUnits[0] & "\"\n" &
   "  content = \"" & unit("A10 fixture web", WebPort) & "\"\n" &
   "  aptClosureLock = \"" & c.lockText & "\"\n" &
   "  healthCheck = \"http://127.0.0.1:" & $WebPort & "/copyright\"\n}\n\n" &
-  "systemd.systemUnit {\n  name = \"" & FixtureUnits[1] & "\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & FixtureUnits[1] & "\"\n" &
   "  content = \"" & unit("A10 fixture docs", DocsPort) & "\"\n" &
   "  aptClosureLock = \"" & c.lockText & "\"\n}\n\n" &
   "fs.systemFile {\n  path = \"/etc/repro-fixture/a.conf\"\n" &

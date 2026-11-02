@@ -88,6 +88,7 @@ fs.systemFile {
 """
 
   WithD = """systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-fx-rc.service"
   content = "[Service]
 ExecStart=/bin/sleep infinity

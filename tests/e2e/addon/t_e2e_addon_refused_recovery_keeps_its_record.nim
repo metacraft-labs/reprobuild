@@ -79,7 +79,7 @@ proc profile(gen: string; check = ""; timeout = 0): string =
     (if timeout > 0: "  confirmTimeout = " & $timeout & "\n" else: "") & "}\n\n" &
     "fs.systemFile {\n  path = \"" & GenFile & "\"\n  content = \"" & gen &
     "\n\"\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"" & Unit & "\"\n  content = \"" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & Unit & "\"\n  content = \"" &
     unitText(gen) & "\"\n  exclusive = true\n" &
     (if check.len > 0: "  healthCheck = \"" & check & "\"\n" else: "") & "}\n\n"
 

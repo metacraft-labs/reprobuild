@@ -550,6 +550,16 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   ## the sysctl values observed from the host's namespaces too.
   result = renderLedgerDiff(r) & renderCollisionReport(r.collisions) &
     renderTransitions(r.transitions)
+  if r.floorIntroduced.len > 0:
+    # Units installed without the floor that it now changes (§10.1): each
+    # is in the transition list as a restart too.
+    result.add("service floor newly applied (installed without it; the " &
+      "unit file changes and the unit restarts):\n")
+    for u in r.floorIntroduced: result.add("  " & u & "\n")
+  if r.floorExceptions.len > 0:
+    # Every weakening of the hardening floor, in every plan (§10.1, CONF-2).
+    result.add("service floor exceptions:\n")
+    for l in r.floorExceptions: result.add("  " & l & "\n")
   if r.baseIdentity.id.len > 0:
     # The base the plan was computed against (§7.4) and, after a
     # distribution upgrade, what changed since the current generation (§7.9).

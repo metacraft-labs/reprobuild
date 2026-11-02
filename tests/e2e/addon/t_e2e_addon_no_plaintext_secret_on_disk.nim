@@ -84,7 +84,7 @@ proc profile(names: seq[string]): string =
   for n in names:
     script.add("sha256sum $$CREDENTIALS_DIRECTORY/" & n &
                " | cut -c1-64 > /run/canary-proof/" & n & "; ")
-  decls & "systemd.systemUnit {\n  name = \"canary-web.service\"\n" &
+  decls & "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"canary-web.service\"\n" &
     "  content = \"[Unit]\nDescription=canary consumer\n\n[Service]\n" &
     "DynamicUser=yes\nRuntimeDirectory=canary-proof\n" &
     "RuntimeDirectoryMode=0755\n" &

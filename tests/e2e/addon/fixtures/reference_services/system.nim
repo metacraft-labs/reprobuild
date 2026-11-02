@@ -26,14 +26,15 @@
 ## name, its prefix and extra configuration) are in
 ## ``reference_pins.nim``, which the gate writes beside this file.
 ##
-## Hardening: each unit carries the floor spelled out (``Floor`` below):
-## ``ProtectSystem=strict``, private ``/tmp`` and devices, no new
-## privileges, a ``@system-service`` syscall filter without
+## Hardening: every unit asks for the add-on's ``serviceFloor``
+## (``hardening = "serviceFloor"``), which renders the same lines on both
+## realisations: ``ProtectSystem=strict``, private ``/tmp`` and devices, no
+## new privileges, a ``@system-service`` syscall filter without
 ## ``@privileged``, no capabilities, ``MemoryDenyWriteExecute=yes`` and
 ## execution confined to the unit's own store prefix (``NoExecPaths=/``,
-## ``ExecPaths=<prefix>``). It is written here rather than inherited
-## because the add-on's ``serviceFloor`` default does not exist yet; when
-## it does, these lines are what it must render.
+## ``ExecPaths=<prefix>``, derived from its command lines). On the add-on
+## host the floor is also the default; naming it keeps the full
+## realisation's unit byte-identical.
 
 import repro_profile
 
@@ -44,43 +45,17 @@ const
     ## The edges' argv: a host never builds a reference package, it
     ## substitutes it (keep it stable: it is part of the cache key).
 
-  Floor = "NoNewPrivileges=yes\n" &
-    "ProtectSystem=strict\n" &
-    "ProtectHome=yes\n" &
-    "PrivateTmp=yes\n" &
-    "PrivateDevices=yes\n" &
-    "ProtectKernelTunables=yes\n" &
-    "ProtectKernelModules=yes\n" &
-    "ProtectKernelLogs=yes\n" &
-    "ProtectControlGroups=yes\n" &
-    "ProtectClock=yes\n" &
-    "ProtectHostname=yes\n" &
-    "RestrictNamespaces=yes\n" &
-    "RestrictRealtime=yes\n" &
-    "RestrictSUIDSGID=yes\n" &
-    "LockPersonality=yes\n" &
-    "MemoryDenyWriteExecute=yes\n" &
-    "SystemCallArchitectures=native\n" &
-    "SystemCallFilter=@system-service\n" &
-    "SystemCallFilter=~@privileged\n" &
-    "CapabilityBoundingSet=\n" &
-    "AmbientCapabilities=\n" &
-    "UMask=0077\n" &
-    "NoExecPaths=/\n"
-
 const DefaultFamilies = "AF_UNIX AF_INET AF_INET6"
 
-proc confinedTo(prefix, families: string): string =
-  ## The floor, with execution allowed in ``prefix`` only and sockets of
-  ## ``families`` only.
-  Floor & "RestrictAddressFamilies=" & families & "\n" &
-    "ExecPaths=" & prefix & "\n"
-
-proc unitText(description, body, prefix: string; after = "";
+proc unitText(description, body: string; after = "";
               families = DefaultFamilies): string =
+  ## A unit for the floor to complete: its own lines, and the address
+  ## families it uses when they are not the floor's default.
   "[Unit]\nDescription=" & description & "\n" &
     (if after.len > 0: "After=" & after & "\nWants=" & after & "\n" else: "") &
-    "\n[Service]\n" & body & confinedTo(prefix, families) &
+    "\n[Service]\n" & body &
+    (if families != DefaultFamilies: "RestrictAddressFamilies=" & families &
+       "\n" else: "") &
     "\n[Install]\nWantedBy=multi-user.target\n"
 
 const
@@ -167,8 +142,8 @@ profile "referenceServices":
           "ExecStart=" & VaultwardenPrefix & "/bin/vaultwarden\n" &
           "WorkingDirectory=/var/lib/vaultwarden\n" &
           "ReadWritePaths=/var/lib/vaultwarden\n" &
-          "Restart=on-failure\n",
-          VaultwardenPrefix, after = "network-online.target"),
+          "Restart=on-failure\n", after = "network-online.target"),
+        hardening = "serviceFloor",
         credentials = @["admin-token"],
         healthCheck = "http://127.0.0.1:8000/alive",
         address = "vaultwardenUnit",
@@ -251,7 +226,8 @@ profile "referenceServices":
           "--authrpc.addr 127.0.0.1 --authrpc.port 8551 " &
           "--authrpc.jwtsecret %d/jwt\n" &
           "ReadWritePaths=/var/lib/ethereum/execution\n" &
-          "Restart=on-failure\n", GethPrefix),
+          "Restart=on-failure\n"),
+        hardening = "serviceFloor",
         credentials = @["jwt"],
         healthCheck = "tcp:127.0.0.1:8545",
         address = "gethUnit",
@@ -266,11 +242,12 @@ profile "referenceServices":
           "--genesis-state=" & TestnetPrefix &
           "/share/ethereum-testnet/genesis.ssz --jwt-secret=%d/jwt\n" &
           "ReadWritePaths=/var/lib/ethereum/beacon\n" &
-          "Restart=on-failure\n", PrysmPrefix,
+          "Restart=on-failure\n",
           after = "eth-execution.service",
           # The beacon node lists the host's interfaces at start (prysm's
           # `network.IPAddr`, through netlink) and panics without it.
           families = DefaultFamilies & " AF_NETLINK"),
+        hardening = "serviceFloor",
         credentials = @["jwt"],
         healthCheck = "http://127.0.0.1:3500/eth/v1/node/version",
         address = "beaconUnit",
@@ -289,8 +266,9 @@ profile "referenceServices":
           # Time to close the slashing-protection database on SIGTERM
           # before systemd's SIGKILL.
           "TimeoutStopSec=60\n" &
-          "Restart=on-failure\n", ValidatorPrefix,
+          "Restart=on-failure\n",
           after = "eth-beacon.service"),
+        hardening = "serviceFloor",
         exclusive = true,
         credentials = @["wallet-password"],
         healthCheck = "http://127.0.0.1:8081/healthz",

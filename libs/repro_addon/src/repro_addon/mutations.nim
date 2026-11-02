@@ -552,7 +552,26 @@ const
                           # A12 round-2 review: a consumer that failed for
                           # want of its secrets is try-restarted (left
                           # failed) once they are back.
-                          "failed-consumer-left-failed"]
+                          "failed-consumer-left-failed",
+                          # A9 (confinement): the apply unit without
+                          # ProtectSystem=strict (t_addon_units_meet_
+                          # confinement_floor); the store bind not read-only
+                          # and the flip not re-checking the store
+                          # (e2e_addon_store_is_read_only_to_everything_else);
+                          # CAP_NET_ADMIN in the apply unit's bounding set
+                          # (t_addon_agent_apply_unit_lacks_cap_net_admin);
+                          # the re-assert unit with a network
+                          # (e2e_addon_reassert_unit_has_no_network); the
+                          # serviceFloor without its exec confinement or
+                          # without MemoryDenyWriteExecute
+                          # (e2e_addon_service_cannot_exec_outside_closure).
+                          "apply-unit-without-protect-system",
+                          "store-mount-writable",
+                          "flip-skips-store-recheck",
+                          "agent-apply-has-cap-net-admin",
+                          "reassert-has-network",
+                          "floor-without-noexec",
+                          "floor-without-mdwe"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

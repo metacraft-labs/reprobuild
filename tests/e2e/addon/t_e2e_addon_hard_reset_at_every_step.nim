@@ -120,7 +120,7 @@ proc unitText(gen, desc: string): string =
     "\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n"
 
 proc unit(name, content: string; extra = ""): string =
-  "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" & content &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & name & "\"\n  content = \"" & content &
     "\"\n" & extra & "}\n\n"
 
 proc file(path, content: string; extra = ""): string =
