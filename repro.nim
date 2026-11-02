@@ -808,6 +808,11 @@ package reprobuild:
   defaultToolProvisioning "path"
 
   nativeBuildDeps:
+    # BUILD-HOST tools: what the build runs, never what it links. Under
+    # `--target` a `uses:` entry is a TARGET dependency, realized for the
+    # target, so a host tool there (nim, gcc, just, coreutils) made a cross
+    # build of reprobuild itself impossible (ReproOS-Add-On-Mode A15, the
+    # full prefix). A native build resolves both lists the same way.
     # The C toolchain of a cross build of reprobuild itself (ReproOS-Add-On-
     # Mode A15, the full prefix for the Raspberry Pi): `nim.c` threads a zig
     # `--target` through the `cross_zig` wrappers, and a zig target needs
@@ -815,8 +820,6 @@ package reprobuild:
     # declares the wrapper edge's `sh` and coreutils
     # (Reprobuild-Standard-Library.md, `cross_zig`).
     "zig >=0.13 <0.14"
-
-  uses:
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
     # are the PATH-resolvable binaries the reprobuild build needs;
     # they're sufficient for the path-mode tool resolver to succeed
@@ -869,11 +872,6 @@ package reprobuild:
     # repository's local gate, the only gate ``agents`` has, could not pass
     # in a Windows dev shell.
     "actionlint"
-    # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
-    # link/runtime closure explicitly so graph-built binaries receive
-    # OpenSSL's library channels instead of depending on ambient
-    # ``NIX_LDFLAGS`` from the shell that launched repro.
-    "openssl"
     "sh"
     "bash"
     # The version-bump regression runs the owning helper and checker.
@@ -944,6 +942,15 @@ package reprobuild:
     # So the flip has to land together with a lock pin for runquota, or
     # every checkout without a runquota develop override breaks.
     "runquotad"
+
+  uses:
+    # TARGET dependencies: what the shipped images link or compile in --
+    # OpenSSL, and the sibling Nim libraries imported as source.
+    # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
+    # link/runtime closure explicitly so graph-built binaries receive
+    # OpenSSL's library channels instead of depending on ambient
+    # ``NIX_LDFLAGS`` from the shell that launched repro.
+    "openssl"
 
     # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
     #

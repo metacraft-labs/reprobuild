@@ -4575,16 +4575,36 @@ proc bundledStdlibModuleName*(selector: string): string =
   ## generates its imports from the same mapping.
   selectorModuleName(selector)
 
+const NativeImportExcluded = "shell"
+  ## Exports of a typed-tool module that a `nativeBuildDeps:` import leaves
+  ## out because the DSL itself exports the same name (`shell`). Measured
+  ## 2026-11-01: across the 311 catalog recipes at reprobuild-packages
+  ## adb067c, `shell` was the only such name, and 10 recipes that list `sh`
+  ## in `nativeBuildDeps:` and call the DSL's `shell(...)` failed with
+  ## "ambiguous call" without this.
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
+  # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
+  # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
+  # §Lookup; operator decision 2026-11-01). A typed command is a build-host
+  # tool, and `nativeBuildDeps:` is where a build-host tool is declared:
+  # under `--target` a `uses:` entry is a TARGET dependency, so a recipe
+  # whose typed calls could only come from `uses:` could not be cross-built.
+  # The `as <name>_module` alias below keeps the module name out of scope,
+  # and `modules` holds each path once, so a tool in both lists is imported
+  # once.
   var modules: seq[string] = @[]
-  for useDef in pkg.toolUses:
+  var nativeOnlyModules: seq[string] = @[]
+  for useDef in pkg.toolUses & pkg.nativeBuildDeps:
     if isBundledStdlibSelector(useDef.packageSelector):
       let modulePath = "repro_dsl_stdlib/packages/" &
         selectorModuleName(useDef.packageSelector)
       if modules.find(modulePath) < 0:
         modules.add(modulePath)
+        if useDef notin pkg.toolUses:
+          nativeOnlyModules.add(modulePath)
   var dependencyModules: seq[string] = @[]
-  for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+  for useDef in pkg.runtimeDeps:
     if isBundledStdlibSelector(useDef.packageSelector):
       let modulePath = "repro_dsl_stdlib/packages/" &
         selectorModuleName(useDef.packageSelector)
@@ -4605,8 +4625,17 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   for modulePath in modules:
     let moduleName = modulePath.split('/')[^1]
     let moduleAlias = moduleName & "_module"
+    # A tool only `nativeBuildDeps:` names also leaves out the module's
+    # convenience procs that share a name with the DSL's own -- `sh`'s
+    # `shell`, beside `repro_project_dsl.shell` -- so a recipe that already
+    # declared the tool there, and calls the DSL's `shell(...)`, keeps
+    # compiling (Provisioning-Contributions.md §Lookup). A `uses:` import
+    # is unchanged.
+    let excluded =
+      if modulePath in nativeOnlyModules: "package, " & NativeImportExcluded
+      else: "package"
     result.add("import " & modulePath & " as " & moduleAlias &
-      " except package\n")
+      " except " & excluded & "\n")
     result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
     result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
@@ -4704,11 +4733,11 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       producerModules.add((moduleAlias, selector, producerModule & ".nim"))
   # A package named in ``nativeBuildDeps:`` / ``runtimeDeps:`` resolves from
   # the `reprobuild-packages` catalog too (Provisioning-Contributions.md,
-  # "Catalog Lookup And Provisioning": wherever a recipe names it). Like the
-  # stdlib's dependency-only imports above, it needs module initialization
-  # (to register its provisioning) but not its typed command surface, so it
-  # is imported for its selector-specific marker alone; a selector `uses:`
-  # already imported in full is not imported again. The order follows the
+  # "Catalog Lookup And Provisioning": wherever a recipe names it). As with
+  # the stdlib modules above, a `nativeBuildDeps:` tool is imported with its
+  # typed command surface and a `runtimeDeps:` entry for its selector-specific
+  # marker alone (module initialization registers its provisioning); a
+  # selector already imported in full is not imported again. The order follows the
   # `uses:` branch: an explicit ``usesImportPath`` or a workspace project of
   # that name keeps the selector, and only then is the catalog consulted.
   var dependencyOnlyAliases: seq[string] = @[]
@@ -4731,7 +4760,10 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           break
       if not catalogSeen:
         producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
-        dependencyOnlyAliases.add(catalogAlias)
+        # A `nativeBuildDeps:` tool brings its typed commands, as a stdlib
+        # one does above; a `runtimeDeps:` entry its marker alone.
+        if useDef notin pkg.nativeBuildDeps:
+          dependencyOnlyAliases.add(catalogAlias)
   # Multi-Sibling interface-extraction object-collision fix.
   #
   # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per

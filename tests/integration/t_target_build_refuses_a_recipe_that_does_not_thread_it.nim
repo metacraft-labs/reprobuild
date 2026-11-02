@@ -132,6 +132,21 @@ package hostOnly:
     discard pkg.executable("hello")
 """
 
+  # `nim` only in `nativeBuildDeps:` -- the typed `nim.c` call still
+  # compiles. `gcc` is the native backend's compiler, `zig` the target's.
+  NimCNativeDepsRecipe = """
+import repro_project_dsl
+
+package helloNimC:
+  defaultToolProvisioning "path"
+  nativeBuildDeps:
+    "nim >=2.2"
+    "gcc"
+    "zig >=0.13 <0.14"
+  build:
+    discard nim.c(source = "src/hello_nim.nim", binary = "build/bin/hello_nim")
+"""
+
   HelloC = "#include <stdio.h>\nint main(void){puts(\"hi\");return 0;}\n"
 
   # Same source natively and for the target: `compile` / `link` thread a
@@ -419,6 +434,27 @@ suite "--target refuses a recipe that does not thread it, end to end":
       check newest == (2, 38)
       check "__isoc23_strtol" in execCmdEx("readelf -WsD " &
         quoteShell(exe)).output
+
+  test "t_target_build_nim_c_with_nim_only_in_native_build_deps":
+    # Provisioning-Contributions.md §Lookup (operator decision 2026-11-01):
+    # `nativeBuildDeps:` imports the typed commands of its tools, so a recipe
+    # that calls `nim.c(...)` declares `nim` where a build-host tool belongs
+    # and builds natively AND for a target. Before, `nim.c` did not compile
+    # unless `nim` was in `uses:`, which under --target is a target
+    # dependency.
+    requirePreconditions(["zig", "nim"]):
+      let root = createTempDir("target-nim-native-deps-", "")
+      defer: removeDir(root)
+      let project = createProject(root, NimCNativeDepsRecipe)
+      writeFile(project / "src/hello_nim.nim", "echo \"hi\"\n")
+      let native = runBuild(root, project, @[])
+      checkpoint(native.output)
+      check native.code == 0
+      check isHostElf(project / "build/bin/hello_nim")
+      let cross = runBuild(root, project, @["--target=" & Triple])
+      checkpoint(cross.output)
+      check cross.code == 0
+      check isElf(project / ("build@" & Triple) / "bin/hello_nim", EmArm)
 
   test "t_target_publish_admits_target_bytes_and_refuses_host_bytes":
     # A cross build's bytes reach a cache by `repro cache publish` under an
