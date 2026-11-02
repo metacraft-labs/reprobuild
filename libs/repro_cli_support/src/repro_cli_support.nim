@@ -29409,10 +29409,19 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   var observedCheckouts: seq[string] = @[]
     ## Absolute checkout directories THIS run observed. Never a location read
     ## out of a lock.
+  let rootCheckout = os.normalizedPath(expandFilename(root))
   proc observedKey(rel: string): string =
     os.normalizedPath(absolutePath(rel, pathBase))
+  proc isRootCheckout(path: string): bool =
+    # Producer cycles can discover the invoking checkout again, including
+    # through an alias. Exclude that proven checkout BEFORE recording any
+    # sibling name: otherwise it could hide a different repository with the
+    # same name. Name-only collisions still reach strict v3 validation.
+    isGitCheckoutDir(path) and
+      cmpPaths(os.normalizedPath(expandFilename(path)), rootCheckout) == 0
   for d in nested:
     let depAbs = absolutePath(root / d.path)
+    if isRootCheckout(depAbs): continue
     let facts = committedLockRepoFacts(depAbs, refView)
     # ``d.path`` is relative to the INVOKING tree (that is what discovery
     # resolves against); the in-memory path is relative to ``pathBase``.
@@ -29433,6 +29442,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if depOpt.isNone: continue
     let dep = depOpt.get()
     let key = observedKey(dep.path)
+    if isRootCheckout(key): continue
     if dep.name in seenNames or key in observedCheckouts: continue
     siblingDeps.add(dep)
     seenNames.add(dep.name)
@@ -29451,7 +29461,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     # spelling. Relate the two in ONE spelling (``committedLockPathBase``).
     let depAbs = respelledUnderInvokingAncestor(absolutePath(repoRoot),
       absolutePath(recipeRoot))
-    if cmpPaths(depAbs, root) == 0:
+    if isRootCheckout(depAbs):
       continue
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if observedKey(rel) in observedCheckouts:
@@ -29492,6 +29502,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if depOpt.isNone: continue
     let dep = depOpt.get()
     let key = observedKey(dep.path)
+    if isRootCheckout(key): continue
     if dep.name in seenNames or key in observedCheckouts: continue
     siblingDeps.add(dep)
     seenNames.add(dep.name)
@@ -29511,6 +29522,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
+      if isRootCheckout(depAbs): continue
       let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if sib.name in seenNames or observedKey(rel) in observedCheckouts:
         continue
@@ -29557,6 +29569,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       if d.name in seenNames: continue
       let depAbs = absolutePath(pathBase / d.path)
       let key = observedKey(d.path)
+      if isRootCheckout(key): continue
       if key in observedCheckouts: continue
       if isGitCheckoutDir(depAbs):
         var observed = lockedDepFromCheckout(d.name, depAbs, pathBase,
