@@ -1365,9 +1365,16 @@ when not defined(windows) and not defined(macosx):
         ],
         sqliteNames)
 
+  # A compile for another machine (NimScript's `hostCPU`/`hostOS` name the
+  # target, `buildCPU`/`buildOS` the machine running the compiler) searches
+  # the prefix but does not remember it: under `--target` it is the sibling
+  # recipe's install mirror, a builder path, and the image takes the target
+  # system's `libsqlite3.so.0` by soname, as the images of
+  # `scripts/cross/build_linux_cross.sh` do.
+  let crossCompiling = hostCPU != buildCPU or hostOS != buildOS
   if sqliteLibDir.len > 0:
     switch("passL", "-L" & sqliteLibDir)
-    if not isHostSystemLibDir(sqliteLibDir):
+    if not isHostSystemLibDir(sqliteLibDir) and not crossCompiling:
       switch("passL", "-Wl,-rpath," & sqliteLibDir)
 
 # OpenSSL link search path for `-d:ssl` edges (POSIX).

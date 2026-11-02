@@ -24379,6 +24379,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_target_link_bakes_no_dep_prefix_rpath.nim",
+    binary: "build/test-bin/t_target_link_bakes_no_dep_prefix_rpath",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let repo = reproRoot()"),
+  TestSpec(
     source: "tests/integration/t_target_triple_drives_the_microarch_host_target.nim",
     binary: "build/test-bin/t_target_triple_drives_the_microarch_host_target",
     defines: @[],
