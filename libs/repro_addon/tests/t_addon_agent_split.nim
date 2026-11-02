@@ -99,6 +99,7 @@ suite "agent split: the apply unit's refusals":
   #   agent-management-path-ignores-install-alias  the Alias= test
   #   agent-management-path-ignores-templates the template-instance test
   #   agent-apply-skips-recheck               the prefix-widening test
+  #   agent-management-path-ignores-tmpfiles  the tmpfiles test
   let noNames: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} = @[]
 
   test "sshd drop-ins and their managed prefix are refused; other files are not":
@@ -125,6 +126,25 @@ suite "agent split: the apply unit's refusals":
       let p = SystemProfile(resources: @[SystemResource(kind: srkFsSystemFile,
         address: "systemFile:" & path, sfPath: path)])
       check managementPathRefusal(p, noNames).len > 0
+
+  test "a tmpfiles rule acting on a management path is refused":
+    # Falsifier: agent-management-path-ignores-tmpfiles. /run/nologin
+    # refuses every non-root login (pam_nologin reads it as well as
+    # /etc/nologin); the others are sshd's and the network classes'.
+    proc frag(content: string): SystemProfile =
+      SystemProfile(resources: @[SystemResource(kind: srkLinuxTmpfilesRule,
+        address: "linux.tmpfilesRule:repro-x.conf", tmpfilesName: "repro-x.conf",
+        tmpfilesContent: content)])
+    for line in ["f+ /run/nologin 0644 root root - locked",
+                 "f /run/nologin", "L+ /run/nologin - - - - /var/lib/x",
+                 "r /run/sshd", "R /run/NetworkManager/conf.d",
+                 "w /var/lib/firewalld/x - - - - y",
+                 "L /var/lib/app/link - - - - /run/nologin",
+                 "f+ /etc/nologin 0644 root root - x",
+                 "L+ /etc/ssh/sshd_config.d/x.conf - - - - /var/lib/x"]:
+      checkpoint line
+      check "management path" in managementPathRefusal(frag(line & "\n"), noNames)
+    check managementPathRefusal(frag("d /var/lib/app 0700 app app -\n"), noNames) == ""
 
   test "the PAM stacks of sshd and login, and what they include, are refused":
     # /etc/pam.d/sshd and /etc/pam.d/login on Debian 12/13 and Ubuntu
@@ -349,11 +369,40 @@ suite "a drop-in is judged by the units systemd applies it to":
       check "management path" in managementPathRefusal(state, noNames)
     check dropInDirUnits("session-5.scope") ==
       @["session-5.scope", "session-.scope", "scope"]
+  test "what logind needs to start a session is refused (decision 38)":
+    # Falsifier: agent-management-path-allows-session-units. Masking
+    # systemd-user-sessions leaves /run/nologin in place; user-runtime-dir@
+    # makes each user's /run/user/<uid>.
+    for unit in ["systemd-user-sessions.service", "user-runtime-dir@.service",
+                 "user-runtime-dir@1000.service", "user-runtime-dir@0.service"]:
+      checkpoint unit
+      check "management path" in managementPathRefusal(dropIn(unit), noNames)
+      let state = SystemProfile(resources: @[SystemResource(
+        kind: srkSystemdUnitState, address: "unitState:" & unit, usName: unit)])
+      check "management path" in managementPathRefusal(state, noNames)
+    # Their dash prefixes reach them too.
+    for unit in ["user-runtime-@.service", "user-runtime-@1000.service",
+                 "systemd-user-.service"]:
+      checkpoint unit
+      check "management path" in managementPathRefusal(dropIn(unit), noNames)
+  test "a unit whose names systemd cannot give is refused (fails closed)":
+    # Falsifier: agent-management-path-names-fail-open judges it by its own
+    # name, and app.service passes.
+    let failing: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} =
+      raise newException(UnitNamesUnavailable, "systemctl show " & u &
+        " exited 1")
+    let unit = SystemProfile(resources: @[SystemResource(
+      kind: srkSystemdSystemUnit, address: "unit:app", suName: "app.service",
+      suContent: "[Service]\nExecStart=/bin/true\n")])
+    let why = managementPathRefusal(unit, failing)
+    check "could not be learnt" in why
+    check "exited 1" in why
+    check "could not be learnt" in managementPathRefusal(dropIn("app.service"), failing)
   test "drop-ins that reach no management unit are not refused":
     for unit in ["app-.service", "app@.service", "web-api.service",
                  "app-@x.service", "system.slice", "app.slice",
                  "app-web.slice", "web-.slice", "app-1.scope",
-                 "user-runtime-dir@.service"]:
+                 "user-runtime.service", "usersessions.service"]:
       checkpoint unit
       check managementPathRefusal(dropIn(unit), noNames) == ""
   test "the lookup names are systemd's":

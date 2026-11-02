@@ -137,7 +137,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                           # user managers pam_systemd starts.
                           ("session-.scope", "Scope"), ("session-5.scope", "Scope"),
                           ("user@.service", "Service"),
-                          ("user@1000.service", "Service")]:
+                          ("user@1000.service", "Service"),
+                          # Decision 38: what logind needs to start a session.
+                          ("systemd-user-sessions.service", "Service"),
+                          ("user-runtime-dir@.service", "Service"),
+                          ("user-runtime-dir@1000.service", "Service")]:
     let content = case section
       of "Slice": "[Slice]\nTasksMax=1\n"
       of "Scope": "[Scope]\nTasksMax=1\n"
@@ -162,6 +166,43 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       step(what & ": not written", g.exec("test -e " & path).exitCode != 0, "")
     let id = identityReport(f0, g.takeFingerprint(repro))
     step(what & ": the fingerprint is unchanged", id.ok, id.text)
+  # Round 5: a tmpfiles fragment is judged by its lines. An agent apply
+  # refuses a rule on a management path (/etc/nologin, /run/nologin, an
+  # sshd drop-in through a symlink) with EAddOnManagementPath; a rule
+  # outside the tmpfiles class's directories is refused for every apply
+  # by the scope check (EAddOnOutOfScope), the operator's below included.
+  let tmpCases = @[
+    ("f+ /etc/nologin 0644 root root - a8", "/etc/nologin", "EAddOnManagementPath"),
+    ("f+ /run/nologin 0644 root root - a8", "/run/nologin", "EAddOnManagementPath"),
+    ("L+ /etc/ssh/sshd_config.d/a8.conf - - - - /var/lib/a8",
+     "/etc/ssh/sshd_config.d/a8.conf", "EAddOnManagementPath"),
+    ("d /etc/a8-tmpfiles 0755 root root -", "/etc/a8-tmpfiles", "EAddOnOutOfScope"),
+    ("d /run/systemd/system/a8.service.d 0755 root root -",
+     "/run/systemd/system/a8.service.d", "EAddOnOutOfScope")]
+  proc tmpProfile(line: string): string =
+    "addOn {\n  managedEtcPrefixes = []\n}\n\nlinux.tmpfilesRule {\n" &
+      "  name = \"repro-a8.conf\"\n  content = \"" & line & "\n\"\n}\n"
+  for (line, path, code) in tmpCases:
+    let what = "a tmpfiles rule `" & line & "`"
+    let f0 = g.takeFingerprint(repro)
+    discard producer.publish(PublishSpec(sequence: sequence,
+      profileText: tmpProfile(line)))
+    inc sequence
+    let t = g.tickUnits()
+    discard g.exec(ResetUnits)
+    step("the agent refuses " & what & " (" & code & ")",
+         t.outcome == "aoApplyFailed" and code in t.message, $t & t.applyLog)
+    step(what & ": not written", g.exec("test -e " & path).exitCode != 0 and
+         g.exec("test -e /etc/tmpfiles.d/repro-a8.conf").exitCode != 0, "")
+    let id = identityReport(f0, g.takeFingerprint(repro))
+    step(what & ": the fingerprint is unchanged", id.ok, id.text)
+  let opTmp = g.applyProfile(repro, "a8-tmpfiles",
+    tmpProfile("d /etc/a8-tmpfiles 0755 root root -"))
+  step("an operator apply of a tmpfiles rule outside the class is refused " &
+       "(EAddOnOutOfScope)", opTmp.exitCode != 0 and
+       "EAddOnOutOfScope" in opTmp.stdout & opTmp.stderr and
+       g.exec("test -e /etc/a8-tmpfiles").exitCode != 0,
+       opTmp.stdout & opTmp.stderr)
   # The operator path over SSH (an open session) applies all three.
   var bodyText = ""
   var prefixes: seq[string]
@@ -206,7 +247,8 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
   # reported none, not even its own name's).
   const session = "session-a8p.scope"
   let probes = @["a8p-gw-x@i1.service", "a8q-net.service", "a8s-1000.slice",
-                 "-.slice", "user@0.service", session]
+                 "-.slice", "user@0.service", "systemd-user-sessions.service",
+                 session]
   record["dropInProbeSession"] = %session
   var predicted: seq[(string, seq[string])]
   var candidates = @["a8p-gw-@i2.service", "a8p-gw-x@i2.service",

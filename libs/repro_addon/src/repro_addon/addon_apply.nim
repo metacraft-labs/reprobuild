@@ -78,6 +78,7 @@ import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./tmpfiles_scope
 import ./addon_secrets
 import ./base_identity
 import ./etc_write
@@ -597,6 +598,12 @@ proc checkScope*(user: SystemProfile;
         raise newAddOnOutOfScope($r.kind & ".name", "", r.address,
           "a tmpfiles fragment of the add-on is named repro-<name>.conf " &
           "(spec §4.1), got " & r.tmpfilesName)
+      # The lines decide what systemd-tmpfiles writes, as root, at once and
+      # at every boot: each path is held to the class's directories, never
+      # /etc, a class directory or another owner's tree (spec §4.1, §4.4).
+      let lines = tmpfilesScopeRefusal(r.tmpfilesContent)
+      if lines.len > 0:
+        raise newAddOnOutOfScope($r.kind & ".content", "", r.address, lines)
     of srkLinuxSysctl:
       # Spec §4.1: /etc/sysctl.d/90-repro-<name>.conf; a filename left
       # empty is derived to that form by the composition.

@@ -20,6 +20,7 @@ import ./evidence
 import ./generation0
 import ./host_exec
 import ./mutations
+import ./tmpfiles_scope
 
 proc isCanonicalProfileText*(text: string): bool =
   ## Whether ``text`` is the canonical resource text an add-on apply
@@ -113,7 +114,13 @@ const ManagementPathUnits* = [
   # ``session-.scope.d/`` or ``scope.d/`` reaches each one), matched as a
   # family (``sessionScope``); ``user@<uid>.service`` is each user's
   # service manager, which ``pam_systemd`` starts on login.
-  "session-.scope", "user@.service"]
+  "session-.scope", "user@.service",
+  # Decision 38 (2026-11-02): what logind needs to let a session start.
+  # ``systemd-user-sessions.service`` removes /run/nologin once boot is far
+  # enough (masked, /run/nologin stays and every non-root login is
+  # refused); ``user-runtime-dir@<uid>.service`` makes each user's
+  # /run/user/<uid>, which pam_systemd waits for.
+  "systemd-user-sessions.service", "user-runtime-dir@.service"]
   ## Units of the management path. A unit or drop-in is matched by every
   ## name systemd knows it under (its id and aliases), and by the aliases
   ## its own ``[Install]`` section would create, never by the text alone.
@@ -132,20 +139,36 @@ const ManagementPathUnitAliases* = [
   ## Aliases of management units, judged as those units. The aliases a host
   ## actually has are added at check time (``Names`` of each unit).
 
-type UnitNamesResolver* = proc(unit: string): seq[string] {.gcsafe.}
-  ## Every name systemd knows ``unit`` by (``Id`` and ``Names``); empty
-  ## when it is unknown. Injected so the refusal is testable off a host.
+type
+  UnitNamesResolver* = proc(unit: string): seq[string] {.gcsafe.}
+    ## Every name systemd knows ``unit`` by (``Id`` and ``Names``; for a
+    ## unit systemd has no file for, the name itself). Raises
+    ## ``UnitNamesUnavailable`` when they cannot be learnt. Injected so the
+    ## refusal is testable off a host.
+  UnitNamesUnavailable* = object of CatchableError
+    ## systemd could not be asked for a unit's names: the management-path
+    ## check then refuses (fails closed) rather than judge the unit by its
+    ## own name alone.
 
 proc systemdUnitNames*(unit: string): seq[string] {.gcsafe.} =
-  ## ``systemctl show -p Id -p Names --value <unit>``, split.
+  ## ``systemctl show -p Id -p Names --value <unit>``, split. systemd
+  ## answers for any valid name, loaded or not, so an error, a missing
+  ## systemctl or an empty answer is a failure, never "no other names".
+  var r: HostToolResult
   try:
-    let r = runSystemctl(["show", "-p", "Id", "-p", "Names", "--value", "--",
-                          unit])
-    if r.exitCode != 0: return
-    for w in r.output.splitWhitespace():
-      if w notin result: result.add(w)
-  except CatchableError:
-    discard
+    r = runSystemctl(["show", "-p", "Id", "-p", "Names", "--value", "--",
+                      unit])
+  except CatchableError as e:
+    raise newException(UnitNamesUnavailable, "systemctl show " & unit &
+      ": " & e.msg)
+  if r.exitCode != 0:
+    raise newException(UnitNamesUnavailable, "systemctl show " & unit &
+      " exited " & $r.exitCode & ": " & r.output.strip())
+  for w in r.output.splitWhitespace():
+    if w notin result: result.add(w)
+  if result.len == 0:
+    raise newException(UnitNamesUnavailable, "systemctl show " & unit &
+      " named no unit")
 
 proc templateOf(unit: string): string =
   ## ``ssh@x.service`` -> ``ssh@.service``; other names unchanged.
@@ -172,7 +195,9 @@ proc sessionScope(unit: string): bool =
   unit.startsWith("session-") and unit.endsWith(".scope") and
     unit.len > "session-.scope".len
 
-const SessionUnits = ["session-.scope", "user@.service"]
+const SessionUnits = ["session-.scope", "user@.service",
+                      "systemd-user-sessions.service",
+                      "user-runtime-dir@.service"]
   ## The decision-37 extension's names, for its falsifier.
 
 proc isManagementUnitName(n: string): bool =
@@ -182,7 +207,7 @@ proc isManagementUnitName(n: string): bool =
   when mutated("agent-management-path-allows-login-slices"):
     if n.endsWith(".slice"): return false
   when mutated("agent-management-path-allows-session-units"):
-    if n.endsWith(".scope") or templateOf(n) == "user@.service": return false
+    if n.endsWith(".scope") or templateOf(n) in SessionUnits: return false
   if n in ManagementPathUnits or n in ManagementPathUnitAliases: return true
   # An instance (``ssh@x.service``) is the template's unit.
   when not mutated("agent-management-path-ignores-templates"):
@@ -295,7 +320,8 @@ proc managementDropInDirs(unitNames: UnitNamesResolver): seq[string] =
   else:
     var kept: seq[string]
     for n in forms:
-      if n notin SessionUnits and n != "user@" & InstanceStandIn & ".service":
+      if n notin SessionUnits and n != "user@" & InstanceStandIn & ".service" and
+          n != "user-runtime-dir@" & InstanceStandIn & ".service":
         kept.add(n)
     forms = kept
   for f in forms:
@@ -333,6 +359,9 @@ proc managementPathFile(path: string): bool =
     if path.startsWith(d): return true
   false
 
+proc managementPathRefusalOf(p: SystemProfile;
+                             unitNames: UnitNamesResolver): string
+
 proc managementPathRefusal*(p: SystemProfile;
                             unitNames: UnitNamesResolver = systemdUnitNames):
     string =
@@ -341,11 +370,36 @@ proc managementPathRefusal*(p: SystemProfile;
   ## configuration, host keys, PAM and access files, ``/etc/nologin``, the
   ## firewall and network classes' files), a ``linux.firewallRule``, or a
   ## unit or drop-in that is, aliases, or would alias (``[Install]
-  ## Alias=``) a unit of the ssh, firewall or network services. Until the
-  ## management-path guard exists (§13 Q6) only an operator apply may
-  ## touch them.
+  ## Alias=``) a unit of the ssh, firewall or network services, a tmpfiles
+  ## rule acting on a management path under the tmpfiles class
+  ## (``/run/nologin``, ...), or a unit whose names systemd cannot give
+  ## (fails closed). Until the management-path guard exists (§13 Q6) only
+  ## an operator apply may touch them. Not covered (decision 39): what
+  ## other units do to a management unit by reference -- ``Conflicts=``, a
+  ## socket on port 22 -- which a signed profile could do by running a
+  ## command anyway.
   when mutated("agent-allows-management-path"):
     return ""
+  when mutated("agent-management-path-names-fail-open"):
+    # The pre-round-5 behaviour: a unit whose names cannot be learnt is
+    # judged by its own name alone.
+    let resolver: UnitNamesResolver = proc(u: string): seq[string] {.gcsafe.} =
+      try: unitNames(u)
+      except UnitNamesUnavailable: @[]
+  else:
+    let resolver = unitNames
+  try:
+    result = managementPathRefusalOf(p, resolver)
+  except UnitNamesUnavailable as e:
+    # Fail closed: a unit whose names systemd will not give could be an
+    # alias of a management unit (spec §9.1).
+    return "the names systemd knows a unit by could not be learnt (" &
+      e.msg & "), so it cannot be told apart from a unit of the " &
+      "management path"
+
+proc managementPathRefusalOf(p: SystemProfile;
+                             unitNames: UnitNamesResolver): string =
+  ## ``managementPathRefusal``'s checks; raises ``UnitNamesUnavailable``.
   var dropInDirs: seq[string]
     # Computed once, on the first drop-in: it asks systemd for the names of
     # every management unit.
@@ -390,6 +444,23 @@ proc managementPathRefusal*(p: SystemProfile;
             applied.replace(InstanceStandIn, "<instance>") & ".d/)"
     of srkLinuxFirewallRule:
       return r.address & " is of the firewall class"
+    of srkLinuxTmpfilesRule:
+      # What the lines act on, not the fragment's name: a rule on
+      # /run/nologin or the network classes' runtime state, and -- though
+      # the scope check refuses /etc for every apply -- a rule naming a
+      # management file, reported as what it is.
+      let why = tmpfilesManagementRefusal(r.tmpfilesContent)
+      if why.len > 0:
+        return r.address & ": " & why
+      when not mutated("agent-management-path-ignores-tmpfiles"):
+        var rules: seq[TmpfilesRule]
+        if tmpfilesRules(r.tmpfilesContent, rules).len == 0:
+          for rule in rules:
+            for path in [rule.path, rule.source]:
+              if path.len > 0 and managementPathFile(path):
+                return r.address & ": line `" & rule.line & "` acts on " &
+                  path & " (the management path: sshd and the login PAM " &
+                  "stack, the firewall or the network)"
     else:
       discard
   ""

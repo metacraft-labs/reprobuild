@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2586,
+    "nimTestBinaries": 2587,
     "pureUnitConsolidationGroups": 76,
-    "pureUnitTests": 719,
+    "pureUnitTests": 720,
     "staticallyDetectedRuntimeCompilerFlowTests": 133,
-    "testEntries": 2626
+    "testEntries": 2627
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -31,7 +31,8 @@
       "owner": "libs/repro_addon",
       "sources": [
         "libs/repro_addon/tests/t_addon_agent_repin.nim",
-        "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim"
+        "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
+        "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1505,7 +1506,7 @@
       "graph-fixture": 18,
       "integration": 1433,
       "platform/destructive": 161,
-      "pure unit": 719,
+      "pure unit": 720,
       "unclassified": 295
     },
     "graphOwnedTestArtifacts": [
@@ -1714,9 +1715,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2586,
+    "nimTestBinaryCount": 2587,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2626
+    "testEntryCount": 2627
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8248,7 +8249,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_agent_split.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 22,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8678,6 +8679,24 @@
       "source": "libs/repro_addon/tests/t_addon_switch_planning.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 28,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_tmpfiles_scope",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

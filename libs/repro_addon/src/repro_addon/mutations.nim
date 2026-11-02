@@ -368,7 +368,20 @@
 ##                                            ``session-<n>.scope``,
 ##                                            ``user@.service`` and its
 ##                                            instances pass (decision 37,
-##                                            extended)
+##                                            extended; decision 38 adds
+##                                            systemd-user-sessions and
+##                                            user-runtime-dir@)
+## ``tmpfiles-scope-unchecked``               a tmpfiles fragment's lines are
+##                                            not parsed: any path, /etc
+##                                            included, is written by
+##                                            systemd-tmpfiles (spec §4.1)
+## ``agent-management-path-ignores-tmpfiles`` an agent apply's tmpfiles rule
+##                                            may act on /run/nologin and the
+##                                            other management paths under
+##                                            the tmpfiles class
+## ``agent-management-path-names-fail-open``  a unit whose names systemd
+##                                            cannot give is judged by its
+##                                            own name alone
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -516,6 +529,11 @@ const
                           "agent-management-path-dropin-ignores-unit-aliases",
                           "agent-management-path-allows-login-slices",
                           "agent-management-path-allows-session-units",
+                          # A8 round 5: tmpfiles lines held to the class and
+                          # the management path; unit names fail closed.
+                          "tmpfiles-scope-unchecked",
+                          "agent-management-path-ignores-tmpfiles",
+                          "agent-management-path-names-fail-open",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",
