@@ -147,7 +147,12 @@ const PartialCatalogCoverage* = {
     "its executable.",
   "tmux": "Windows archive only; POSIX hosts use the nixPackage.",
   "sh": "Windows archive only; POSIX hosts have a system shell.",
-  "openssl": "Windows archive only; POSIX hosts use the nixPackage."
+  "openssl": "Windows archive only; POSIX hosts use the nixPackage.",
+  "ar": "binutils.nim's nixPackage is the realization on Nix-capable " &
+    "hosts; the WinLibs archive arm is the Windows half only.",
+  "install-file": "coreutils_install.nim's nixPackage is the realization " &
+    "on Nix-capable hosts; the PortableGit archive arm is the Windows half " &
+    "only."
 }
 
 const PlatformDeclarationSourceFile* =

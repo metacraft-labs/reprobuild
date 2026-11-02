@@ -294,10 +294,17 @@ suite "the decision table, unit rows":
     check dropInPath("cron.service", "") == "/etc/systemd/system/cron.service.d/50-repro-addon.conf"
     check dropInPath("cron.service", "hardening") == "/etc/systemd/system/cron.service.d/50-repro-hardening.conf"
 
+proc plantLinkedDir() =
+  ## The runner may execute any one case alone, in its own process, so each
+  ## case that needs `/etc/app/linked` plants it rather than inheriting it.
+  createDir(at("/usr/lib/app"))
+  if not symlinkExists(at("/etc/app/linked")):
+    doAssert posix.symlink(cstring(at("/usr/lib/app")),
+      cstring(at("/etc/app/linked"))) == 0
+
 suite "symbolic links on the target path":
   test "a link component is refused at plan time, naming the link":
-    createDir(at("/usr/lib/app"))
-    discard posix.symlink(cstring(at("/usr/lib/app")), cstring(at("/etc/app/linked")))
+    plantLinkedDir()
     try:
       discard d.decide(fileInputs("f", "x"), at("/etc/app/linked/x.conf"))
       check false
@@ -314,6 +321,7 @@ suite "symbolic links on the target path":
     check readFile(at("/usr/lib/app/target")) == "t"
 
   test "symlinkComponent names the first link and ignores what does not exist":
+    plantLinkedDir()
     check symlinkComponent(at("/etc/app/linked/x/y")) == at("/etc/app/linked")
     check symlinkComponent(at("/etc/app/none/x")) == ""
 

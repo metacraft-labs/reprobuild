@@ -4471,7 +4471,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 85,
+          "line": 99,
           "path": "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
           "patterns": [
             "nim-argv"

@@ -89,34 +89,51 @@ proc octal(v: int64; width: int): string =
   ## ``width-1`` octal digits and a NUL, as ustar writes numbers.
   result = toOct(v, width - 1) & "\0"
 
+proc tarHeader(name: string; typeflag: char; mode: int; size: int;
+               linkName: string): string =
+  ## One 512-byte ustar header, owners 0:0 like a real Debian build.
+  doAssert name.len <= 100 and linkName.len <= 100
+  result = newString(512)
+  for i in 0 ..< 512: result[i] = '\0'
+  result[0 ..< name.len] = name
+  result[100 ..< 108] = octal(mode, 8)
+  result[108 ..< 116] = octal(0, 8)
+  result[116 ..< 124] = octal(0, 8)
+  result[124 ..< 136] = octal(size, 12)
+  result[136 ..< 148] = octal(0, 12)
+  result[156] = typeflag
+  if linkName.len > 0: result[157 ..< 157 + linkName.len] = linkName
+  result[257 ..< 263] = "ustar\0"
+  result[263 ..< 265] = "00"
+  for i in 148 ..< 156: result[i] = ' '
+  var sum = 0
+  for c in result: sum += ord(c)
+  result[148 ..< 155] = toOct(sum, 6) & "\0"
+  result[155] = ' '
+
+proc tarPayload(content: string): string =
+  result = content
+  result.add("\0".repeat((512 - content.len mod 512) mod 512))
+
 proc tarBytes(entries: seq[TarFixtureEntry]): string =
-  ## A ustar stream (magic ``ustar\0``, version ``00``), owners 0:0 like a
-  ## real Debian build, two zero blocks at the end.
+  ## A ustar stream (magic ``ustar\0``, version ``00``), two zero blocks at
+  ## the end. A name or link target over the 100-byte ustar field is carried
+  ## in a preceding GNU ``L`` / ``K`` long-name entry, as GNU tar writes it,
+  ## so a fixture whose absolute target sits under a long scratch root
+  ## (``$TMPDIR``) is the same archive whatever that root's length.
   for e in entries:
-    var h = newString(512)
-    for i in 0 ..< 512: h[i] = '\0'
-    doAssert e.name.len <= 100 and e.linkName.len <= 100
-    h[0 ..< e.name.len] = e.name
-    h[100 ..< 108] = octal(e.mode, 8)
-    h[108 ..< 116] = octal(0, 8)
-    h[116 ..< 124] = octal(0, 8)
+    if e.name.len > 100:
+      result.add(tarHeader("././@LongLink", 'L', 0o644, e.name.len + 1, ""))
+      result.add(tarPayload(e.name & "\0"))
+    if e.linkName.len > 100:
+      result.add(tarHeader("././@LongLink", 'K', 0o644,
+        e.linkName.len + 1, ""))
+      result.add(tarPayload(e.linkName & "\0"))
     let size = if e.typeflag in {'0', 'x'}: e.content.len else: 0
-    h[124 ..< 136] = octal(size, 12)
-    h[136 ..< 148] = octal(0, 12)
-    h[156] = e.typeflag
-    if e.linkName.len > 0: h[157 ..< 157 + e.linkName.len] = e.linkName
-    h[257 ..< 263] = "ustar\0"
-    h[263 ..< 265] = "00"
-    for i in 148 ..< 156: h[i] = ' '
-    var sum = 0
-    for c in h: sum += ord(c)
-    h[148 ..< 155] = toOct(sum, 6) & "\0"
-    h[155] = ' '
-    result.add(h)
+    result.add(tarHeader(e.name[0 ..< min(e.name.len, 100)], e.typeflag,
+      e.mode, size, e.linkName[0 ..< min(e.linkName.len, 100)]))
     if size > 0:
-      result.add(e.content)
-      let pad = (512 - size mod 512) mod 512
-      result.add("\0".repeat(pad))
+      result.add(tarPayload(e.content))
   result.add("\0".repeat(1024))
 
 proc arMember(name, payload: string): string =

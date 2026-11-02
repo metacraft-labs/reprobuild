@@ -17,6 +17,13 @@ createDir(root / "etc/app")
 createDir(root / "outside")
 writeFile(root / "outside/target", "untouched\n")
 
+proc ensureLink(target, link: string) =
+  ## The runner may execute any one case alone, in its own process, so every
+  ## case plants the links it relies on instead of inheriting them from an
+  ## earlier case.
+  if not symlinkExists(link):
+    doAssert symlink(cstring(target), cstring(link)) == 0, link
+
 suite "writeFileNoFollow":
   test "a plain write lands atomically with the requested mode":
     writeFileNoFollow(root / "etc/app/a.conf", "hello\n", 0o640)
@@ -35,14 +42,14 @@ suite "writeFileNoFollow":
     check readFile(root / "etc/app/a.conf") == "second\n"
 
   test "a link as the leaf is refused and its target is byte-identical":
-    discard symlink(cstring(root / "outside/target"), cstring(root / "etc/app/leaf"))
+    ensureLink(root / "outside/target", root / "etc/app/leaf")
     expect SymlinkOnPath:
       writeFileNoFollow(root / "etc/app/leaf", "redirected\n", 0o644)
     check readFile(root / "outside/target") == "untouched\n"
     check symlinkExists(root / "etc/app/leaf")
 
   test "a link as a parent component is refused, naming the link":
-    discard symlink(cstring(root / "outside"), cstring(root / "etc/linkdir"))
+    ensureLink(root / "outside", root / "etc/linkdir")
     try:
       writeFileNoFollow(root / "etc/linkdir/target", "redirected\n", 0o644)
       check false
@@ -61,6 +68,9 @@ suite "writeFileNoFollow":
       writeFileNoFollow(root / "etc/missing/x.conf", "x", 0o644)
 
   test "symlinkComponent reports the first link on the path, or nothing":
+    ensureLink(root / "outside", root / "etc/linkdir")
+    ensureLink(root / "outside/target", root / "etc/app/leaf")
+    writeFileNoFollow(root / "etc/app/a.conf", "hello\n", 0o640)
     check symlinkComponent(root / "etc/linkdir/deeper/x") == root / "etc/linkdir"
     check symlinkComponent(root / "etc/app/leaf") == root / "etc/app/leaf"
     check symlinkComponent(root / "etc/app/a.conf") == ""
