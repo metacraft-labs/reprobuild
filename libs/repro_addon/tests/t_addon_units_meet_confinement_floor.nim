@@ -130,7 +130,8 @@ suite "t_addon_units_meet_confinement_floor":
       check "NoExecPaths=/\n" in c
       check "MemoryDenyWriteExecute=yes\n" in c
     check "ExecPaths=" & ServicePrefix & "\n" in store
-    check "ExecPaths=/usr\n" in closure
+    check "ExecPaths=/repro/store/prefixes/apt-closure-" in closure
+    check " /usr\n" in closure
     # No User= in the closure's unit: the floor makes it a dynamic user.
     check "DynamicUser=yes\n" in closure
     check "DynamicUser=yes" notin store

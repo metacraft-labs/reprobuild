@@ -13,7 +13,11 @@
 ##   every mount but the closure's ``ExecPaths=`` noexec;
 ## - ``execve`` of its own binary, in the closure, succeeds;
 ## - ``mprotect(PROT_EXEC)`` on an anonymous mapping created writable fails
-##   (``MemoryDenyWriteExecute=yes``).
+##   (``MemoryDenyWriteExecute=yes``);
+## - a copy of its own binary written into a ``memfd_create`` file and run
+##   with ``execveat(fd, "", AT_EMPTY_PATH)`` -- code on no mount, which
+##   ``ExecPaths=`` cannot see -- does not run (the floor's filter denies
+##   ``memfd_create``; the child is killed).
 ##
 ## Vacuity guard: the same probe run by root in the guest's own shell (no
 ## floor) executes ``/usr/bin/id`` and gets its ``mprotect``, so the probe
@@ -24,7 +28,9 @@
 ## Falsifying mutations (``REPRO_ADDON_MUTATION=``): ``floor-without-noexec``
 ## renders the floor without ``NoExecPaths=`` / ``ExecPaths=`` and the exec
 ## of ``/usr/bin/id`` succeeds; ``floor-without-mdwe`` renders it without
-## ``MemoryDenyWriteExecute=`` and the ``mprotect`` succeeds. Each is red.
+## ``MemoryDenyWriteExecute=`` and the ``mprotect`` succeeds;
+## ``floor-allows-memfd`` renders it without ``memfd_create`` in the deny
+## line and the memfd copy runs. Each is red.
 ##
 ## Needs a static C toolchain on the test host: the gate builds the probe
 ## with this flake's ``pkgsStatic`` gcc (musl), as
@@ -78,8 +84,9 @@ proc probeAction(): ProfileBuildAction =
     cwd: ProbePrefix, outputs: @["bin"], commandStatsId: "a9-exec-probe",
     substituteOnly: true)
 
-proc parseProbe(line: string): tuple[outside, own, prot: int; ok: bool] =
-  ## ``a9-probe exec-outside=N exec-own=N mprotect-exec=N``.
+proc parseProbe(line: string):
+    tuple[outside, own, prot, memfd: int; ok: bool] =
+  ## ``a9-probe exec-outside=N exec-own=N mprotect-exec=N memfd-exec=N``.
   var seen = 0
   for tok in line.splitWhitespace():
     let kv = tok.split('=')
@@ -88,8 +95,9 @@ proc parseProbe(line: string): tuple[outside, own, prot: int; ok: bool] =
     of "exec-outside": result.outside = parseInt(kv[1]); inc seen
     of "exec-own": result.own = parseInt(kv[1]); inc seen
     of "mprotect-exec": result.prot = parseInt(kv[1]); inc seen
+    of "memfd-exec": result.memfd = parseInt(kv[1]); inc seen
     else: discard
-  result.ok = seen == 3
+  result.ok = seen == 4
 
 proc probeLine(text: string): string =
   for l in text.splitLines():
@@ -141,12 +149,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     step("the closure's own binary runs", r.own == 0, inside)
     step("mprotect(PROT_EXEC) of a writable mapping fails", r.prot != 0,
          inside)
+    step("a memfd copy of the binary does not run", r.memfd != 0, inside)
   # Vacuity guard: outside the floor the probe can see both succeed.
   let outside = probeLine(g.exec(ProbeBin & " --once").stdout)
   record["vacuityGuard"] = %outside
   let v = parseProbe(outside)
   step("vacuity guard: without the floor the exec and the mprotect succeed",
-       v.ok and v.outside == 0 and v.own == 0 and v.prot == 0, outside)
+       v.ok and v.outside == 0 and v.own == 0 and v.prot == 0 and
+       v.memfd == 0, outside)
 
 suite Gate:
   test "a service under serviceFloor cannot execute outside its closure":

@@ -65,7 +65,6 @@ import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
 from std/posix import Statvfs, statvfs, Stat, lstat
 import std/uri
 import repro_binary_cache_client/http_pool
-from repro_binary_cache_client/in_process import prefixArchiveDigestHex
 
 import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
@@ -115,6 +114,11 @@ type
     ## when the switch did not commit, its pending marker stays (a recovery
     ## finishes it forward, never reverts it) and ``floor-hold`` records why.
   AddonRolledBack* = object of AddonApplyError
+  AddonNeedsOperator* = object of AddonApplyError
+    ## Refused for an operator to act, not to be retried: an unattended
+    ## (agent) apply that would give a running unit its first hardening
+    ## floor (spec §10.1). The deploy agent reports it as
+    ## ``aoOperatorAction`` and does not retry the sequence.
   AddonStoreSpaceError* = object of AddonApplyError
     ## The profile's apt closures would not fit on the store's filesystem
     ## with ``StoreSpaceReserveBytes`` (or a quarter of what they need)
@@ -192,6 +196,12 @@ type
     replayOf*: string
       ## A replay: the purpose of the switch it replays (a replayed revert
       ## is still a revert: it does not revert itself).
+    storedTarget*: bool
+      ## ``userProfileText`` is a stored generation's profile (a revert, a
+      ## rollback, a re-apply of the current generation), not a new one: it
+      ## is parsed under the rules it was installed with
+      ## (``parseStoredUserProfile``), so a generation from before the
+      ## hardening floor comes back byte for byte (spec §10.1).
     recordOnly*: bool
       ## Replay a failed switch's writes only to bring its ledger up to
       ## date with what it wrote, never starting or committing anything:
@@ -404,6 +414,67 @@ proc isAddonHost*(stateDir = DefaultStateDir): bool =
 proc readHostname*(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
+
+proc storeSignature*(dir: string): string =
+  ## A cheap signature of the store object at ``dir``: every entry below it
+  ## (links not followed) with its type, permissions, size, inode,
+  ## modification time and change time, in path order, hashed. No file
+  ## content is read. Any write, truncation, rename, mode or owner change
+  ## moves the change time (stat(2) ``st_ctime``), which no unprivileged
+  ## call sets and root sets only by moving the system clock; an object
+  ## replaced by another gets a new inode. Used between the switch's
+  ## realise step, which verified the object's content, and its start.
+  var lines: seq[string]
+  proc one(rel, path: string) =
+    let i = getFileInfo(path, followSymlink = false)
+    lines.add(rel & "\t" & $i.kind & "\t" & $i.permissions & "\t" & $i.size &
+      "\t" & $i.id.device & ":" & $i.id.file & "\t" &
+      $i.lastWriteTime.toUnix & "." & $i.lastWriteTime.nanosecond & "\t" &
+      $i.creationTime.toUnix & "." & $i.creationTime.nanosecond)
+  one(".", dir)
+  for rel in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+                                             pcLinkToDir},
+                        followFilter = {pcDir}, relative = true):
+    one(rel, dir / rel)
+  lines.sort()
+  sha256Hex(lines.join("\n"))
+
+proc storeChangedSince*(realised: openArray[tuple[path, signature: string]]):
+    seq[string] =
+  ## The store objects whose ``storeSignature`` differs from the one
+  ## recorded, or that are gone.
+  for (path, sig) in realised:
+    let now = if dirExists(path): storeSignature(path) else: "(gone)"
+    if now != sig: result.add(path)
+
+proc storeObjectFor*(path: string): string =
+  ## The store object a path lies in: a prefix
+  ## (``/repro/store/prefixes/<name>/<version>``) or another top-level
+  ## entry of the store; "" outside the store.
+  result = storeObjectOf(path)
+  if result.len == 0 and path.startsWith(StoreRoot & "/"):
+    let first = path[StoreRoot.len + 1 .. ^1].split('/')[0]
+    if first.len > 0 and first notin [".", ".."]:
+      result = StoreRoot & "/" & first
+
+proc parseStoredUserProfile*(text: string): SystemProfile =
+  ## A stored generation's user profile (``user.profile``, a generation's
+  ## ``addon-user.profile``, the write-ahead record's) as it was installed.
+  ## The add-on stores what it applied rendered (``renderProfileText``),
+  ## so a unit the floor reached carries ``hardening = "serviceFloor"``
+  ## explicitly and every other unit carries none: the stored text records
+  ## the rendering rules of its generation, and parsing it WITHOUT the
+  ## add-on default renders each unit as it was installed. A generation an
+  ## engine from before the floor applied has no such field and stays
+  ## floor-off; only a new profile is held to the floor (spec §10.1, *A
+  ## host upgraded to a build with the floor*).
+  when mutated("stored-profile-floored"):
+    # Falsifying build: stored generations re-rendered under today's
+    # default, which wedges a host whose installed profile the floor
+    # refuses and keeps a revert from restoring the pre-floor unit.
+    parseSystemProfile(text, addOnDefaults = true)
+  else:
+    parseSystemProfile(text)
 
 proc parseAddOnUserProfile*(text: string): SystemProfile =
   ## A user profile as the add-on realises it: parsed with the add-on's
@@ -1682,7 +1753,7 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   ## 2026-10-30): an adopt widens the scope by exactly what the adopted
   ## object needs. Raises when ``given`` does not declare an addressed
   ## resource.
-  let current = if currentText.len > 0: parseAddOnUserProfile(currentText)
+  let current = if currentText.len > 0: parseStoredUserProfile(currentText)
                 else: SystemProfile()
   result.addOn = current.addOn
   # An adopt changes no secret: the current generation's declarations stay.
@@ -2500,11 +2571,19 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var decisions = initTable[string, CollisionDecision]()
 
   var own = parseSystemProfile(ownText)
+  # A stored generation (a revert, a rollback, the current generation
+  # re-applied, or the replay of a switch that was one) keeps the rules it
+  # was installed with; a new profile is held to the floor (§10.1).
+  let storedTarget = opts.storedTarget or (replaying and
+    hasPendingMarker(stateDir) and
+    readPendingMarker(stateDir).purpose in ["revert", "rollback"])
+  let parseTarget = proc(t: string): SystemProfile =
+    if storedTarget: parseStoredUserProfile(t) else: parseAddOnUserProfile(t)
   var user =
     if adoptAddresses.len > 0:
-      scopedAdoptProfile(parseAddOnUserProfile(targetUserText),
+      scopedAdoptProfile(parseTarget(targetUserText),
                          previousUserText, adoptAddresses)
-    else: parseAddOnUserProfile(targetUserText)
+    else: parseTarget(targetUserText)
   when mutated("addon-unit-renders-differently"):
     # FALSIFYING MUTATION (e2e_addon_reproos_service_parity): the add-on
     # writes every unit with one line the full realisation does not.
@@ -3176,7 +3255,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var removed: seq[SystemResource]
   var previousUser: SystemProfile
   if previousUserText.len > 0:
-    previousUser = parseAddOnUserProfile(previousUserText)
+    previousUser = parseStoredUserProfile(previousUserText)
     var prevDropIns = initHashSet[string]()
     let previousShaped = reshape(previousUser, prevDropIns)
     when not mutated("retargeted-address-accepted"):
@@ -3752,12 +3831,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # replay or a revert of a switch already under way is not refused.
   if opts.agentSequence > 0'u64 and purpose == "apply" and not replaying and
       result.floorIntroduced.len > 0:
-    raise newException(AddonApplyError, "the hardening floor (serviceFloor) " &
-      "would change " & result.floorIntroduced.join(", ") & ", installed " &
-      "without it; an agent apply does not restart a service into its " &
-      "first floor. Review `repro system addon plan` and apply this " &
-      "profile as an operator once (or name floorExceptions); nothing was " &
-      "changed")
+    raise newException(AddonNeedsOperator, "operator action required: the " &
+      "hardening floor (serviceFloor) would change " &
+      result.floorIntroduced.join(", ") & ", installed without it; an " &
+      "agent apply does not restart a running service into its first " &
+      "floor. Review `repro system addon plan` and apply this profile once " &
+      "as an operator, or waive the unit's whole floor (floorExceptions = " &
+      "[\"serviceFloor: <why>\"]); a named exception still changes the " &
+      "unit and does not avoid this. Nothing was changed")
 
   # Step 1 recomputes the store's hold from every unit, manifest and
   # hand-back record on the host; the plan checked they can be read, but
@@ -3841,12 +3922,19 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       holdOnPendingRoot(closurePrefixes)
 
   # What the flip will make the host run, as realised: the static tree,
-  # each bound closure and each store prefix a unit's command lines run
-  # from, with the digest of its whole tree. Step 3 recomputes them just
-  # before the flip and refuses on any difference (spec §10.2, A9): a
-  # store path changed between realise and flip -- by anything that got
-  # write access to the store -- is never activated.
-  var realisedStore: seq[tuple[path, digest: string]]
+  # each bound closure, every store prefix a unit names (its commands, a
+  # second command after `;`, an argument, a launcher started through a
+  # shell, a bind source) and the program of each `exec:` health check.
+  # Each was verified when it was realised (the tree against its files,
+  # a closure against its lock, a staged output against the manifest's
+  # pin). Step 1 records a cheap signature of each -- every entry's type,
+  # mode, size, inode and modification and change times, no content read
+  # (`storeSignature`) -- and the switch recomputes it before the flip
+  # and again before step 7 starts anything (spec §10.2, A9): a store path
+  # changed in between, by anything that got write access to the store,
+  # is never flipped to or started. A store object that is missing is a
+  # refusal, not a skip.
+  var realisedStore: seq[tuple[path, signature: string]]
   block:
     var objs = @[treePath]
     for lock in closureLocks:
@@ -3854,10 +3942,21 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       if p notin objs: objs.add(p)
     for p in plans:
       if p.r.kind == srkSystemdSystemUnit:
-        for o in commandStoreObjects(renderedSystemUnitContent(p.r)):
-          if o notin objs and dirExists(o): objs.add(o)
+        for o in referencedStoreObjects(renderedSystemUnitContent(p.r)):
+          if o notin objs: objs.add(o)
+        if p.r.suHealthCheck.len > 0:
+          let hc = parseHealthCheck(p.r.suHealthCheck)
+          if hc.kind == hcExec:
+            let o = storeObjectFor(hc.argv[0])
+            if o.len > 0 and o notin objs: objs.add(o)
+    var missing: seq[string]
     for o in objs:
-      realisedStore.add((path: o, digest: prefixArchiveDigestHex(o)))
+      if not dirExists(o): missing.add(o)
+      else: realisedStore.add((path: o, signature: storeSignature(o)))
+    if missing.len > 0:
+      raise newAddOnError(adStoreChanged, "the generation runs from store " &
+        "paths that do not exist after its realise step: " &
+        missing.join(", ") & "; nothing was switched")
 
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]
@@ -4108,11 +4207,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       seamPause(stateDir, seamPrefix & "step-2")
       # Nothing the generation runs from changed since step 1 (§10.2).
       when not mutated("flip-skips-store-recheck"):
-        var changed: seq[string]
-        for (path, digest) in realisedStore:
-          let now = if dirExists(path): prefixArchiveDigestHex(path)
-                    else: "(gone)"
-          if now != digest: changed.add(path)
+        let changed = storeChangedSince(realisedStore)
         if changed.len > 0:
           raise newAddOnError(adStoreChanged, "the store changed between " &
             "the switch's realise step and its flip: " & changed.join(", ") &
@@ -4213,7 +4308,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         problems.add("replayed to record what the failed switch wrote; " &
           "not committed")
       # --- Step 7: start. Only after a clean step 4-6: a half-written
-      # generation is not started.
+      # generation is not started, and neither is one whose store objects
+      # changed since step 1 (§10.2): the flip's re-check left the window
+      # of steps 4-6, which this one closes up to the start itself.
+      when not mutated("flip-skips-store-recheck"):
+        if not opts.recordOnly:
+          let changedNow = storeChangedSince(realisedStore)
+          if changedNow.len > 0:
+            problems.add($adStoreChanged & ": the store changed after the " &
+              "flip, before step 7: " & changedNow.join(", ") & " no " &
+              "longer hold what was realised; nothing was started")
       if clean and problems.len == 0:
         try:
           runStart(stepTransitions, paused, notRunning,
@@ -4592,7 +4696,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     try:
       reverted = runAddonApply(AddonApplyOptions(stateDir: stateDir,
         hostIdentity: opts.hostIdentity, ownProfileText: back.own,
-        userProfileText: back.user, driver: opts.driver, purpose: "revert",
+        userProfileText: back.user, storedTarget: true, driver: opts.driver,
+        purpose: "revert",
         assumeActive: assume, retention: opts.retention,
         reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
         nonBlockingStarts: opts.nonBlockingStarts,
@@ -4792,7 +4897,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     " (reverted from " & backFrom & ")"
   let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: readHostname(), ownProfileText: back.own,
-    userProfileText: back.user, driver: driver, purpose: "revert",
+    userProfileText: back.user, storedTarget: true, driver: driver,
+    purpose: "revert",
     assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
     nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
   # Step 2 disabled the units the switch was removing, recording each

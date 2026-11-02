@@ -35,7 +35,8 @@ import ./errors
 import ./service_floor
 
 export service_floor.EServiceFloor, service_floor.ServiceFloorHardening,
-  service_floor.commandStoreObjects
+  service_floor.commandStoreObjects, service_floor.referencedStoreObjects,
+  service_floor.storeObjectOf
 
 const InfraAddonMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build of the add-on's gates (``repro_addon/mutations``);
@@ -927,14 +928,27 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
       "' hardening '" & r.suHardening & "' is not known (the one value is " &
       "\"" & ServiceFloorHardening & "\")")
-  if not hasServiceSection(result):
-    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
-      "' asks for the serviceFloor but has no [Service] section")
   try:
     let ex = parseFloorExceptions(r.suName, r.suFloorExceptions)
+    var wholeWaiver = false
+    for e in ex:
+      if e.setting == WholeFloorException: wholeWaiver = true
+    if not hasServiceSection(result):
+      # A `.socket` (or any other unit) with command lines runs them with
+      # no [Service] the floor could confine; without either there is
+      # nothing to harden, and asking for the floor is a mistake.
+      if wholeWaiver: return
+      if hasExecLines(result):
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' runs command lines outside a [Service] section, which the " &
+          "serviceFloor cannot confine; move them into a service, or name " &
+          "the exception \"serviceFloor: <why>\"")
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        "' asks for the serviceFloor but has no [Service] section")
     let lines = renderServiceFloorLines(r.suName, result, ex,
       dropExec = InfraAddonMutation == "floor-without-noexec",
-      dropMdwe = InfraAddonMutation == "floor-without-mdwe")
+      dropMdwe = InfraAddonMutation == "floor-without-mdwe",
+      allowMemfd = InfraAddonMutation == "floor-allows-memfd")
     result = appendToServiceSection(result, lines)
   except EServiceFloor as e:
     raiseSystemProfileInvalid(e.msg)
@@ -945,8 +959,37 @@ proc floorAppliesByDefault*(r: SystemResource): bool =
   ## the add-on's to define. A `collision = "dropIn"` unit is not: its
   ## content is a drop-in over a distribution package's unit, whose
   ## command lines are the package's (spec §10.1, amended with A9).
+  ## A unit without a `[Service]` section that carries command lines (a
+  ## `.socket`'s `ExecStartPre=`) is selected too, so the floor refuses it
+  ## rather than letting it run commands unconfined.
   r.kind == srkSystemdSystemUnit and r.suHardening.len == 0 and
-    r.suCollision != "dropIn" and hasServiceSection(r.suContent)
+    r.suCollision != "dropIn" and
+    (hasServiceSection(r.suContent) or hasExecLines(r.suContent))
+
+proc checkFloorDropIns*(p: SystemProfile) =
+  ## A `systemd.systemDropIn` of a unit under the floor is judged by the
+  ## effective unit (spec §10.1): systemd reads it after the floor's lines,
+  ## so any floor setting it assigns, a command outside the unit's closure
+  ## or a guarded weakening needs the unit's named exception
+  ## (`service_floor.dropInFloorRefusal`). Refused as
+  ## `ESystemProfileInvalid`.
+  when InfraAddonMutation == "floor-ignores-drop-ins":
+    return
+  for d in p.resources:
+    if d.kind != srkSystemdSystemDropIn: continue
+    for u in p.resources:
+      if u.kind != srkSystemdSystemUnit or u.suName != d.diUnit or
+          u.suHardening != ServiceFloorHardening:
+        continue
+      try:
+        let ex = parseFloorExceptions(u.suName, u.suFloorExceptions)
+        let why = dropInFloorRefusal(u.suName, renderedUnitBeforeFloor(u),
+                                     d.diContent, ex)
+        if why.len > 0:
+          raiseSystemProfileInvalid("systemd.systemDropIn '" & d.address &
+            "' of the floored unit " & u.suName & ": " & why)
+      except EServiceFloor as e:
+        raiseSystemProfileInvalid(e.msg)
 
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
@@ -956,6 +999,7 @@ proc applyAddOnServiceFloor*(p: var SystemProfile) =
     if floorAppliesByDefault(r):
       r.suHardening = ServiceFloorHardening
       discard renderedSystemUnitContent(r)
+  checkFloorDropIns(p)
 
 proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
   ## Every floor exception of the profile's units under the floor, one
@@ -2449,6 +2493,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
   checkUnitStateConflicts(result.resources)
   checkPasswdPrimaryGroups(result.resources)
   checkSecretDeclarations(result)
+  checkFloorDropIns(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------

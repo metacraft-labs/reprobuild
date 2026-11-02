@@ -179,7 +179,7 @@ proc runAgentRepinCli*(args: seq[string]): int =
                    readFile(userProfilePath(DefaultStateDir)) else: ""
   let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
     hostIdentity: readHostname(), userProfileText: userText,
-    ownProfileText: plan.ownText))
+    storedTarget: true, ownProfileText: plan.ownText))
   stdout.write("re-pinned the deploy agent's origins: add-on generation " &
     r.generationId & "\n")
   0

@@ -33,6 +33,19 @@
 ## attributed by journal time, so a record received late can land in the
 ## next unit's window. The check above has neither weakness.
 ##
+## The work: deploy-agent ticks over a profile as wide as the add-on's
+## classes -- a secret an operator put, materialised for a unit's
+## credential; an apt closure realised from the ``.deb`` cache; a package
+## conffile diverted; a system account, tmpfiles and sysctl fragments --
+## seven generations (past the retention policy's five), a generation that
+## fails its confirm and is reverted by the apply unit, a switch killed
+## after step 4 (seam build) and recovered by the re-assert unit, and the
+## boot secrets and re-assert units run again.
+##
+## Falsifying mutation (``REPRO_ADDON_MUTATION=privileged-filter-without-mount-chown``):
+## the root units' filter without the traced ``@mount`` and ``@chown``;
+## the apply unit is killed at its first store write or ``fchown``: red.
+##
 ## Vacuity guards: a transient unit that logs ``uname`` produces a record
 ## naming syscall 63 (``uname`` on x86_64), and one whose filter denies
 ## ``uname`` is killed with a record naming it, so both paths reach the
@@ -50,8 +63,20 @@ import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, unitt
 
 import repro_test_support/reasoned_skip
 
+import repro_dsl_stdlib/packages/apt_closure
+import repro_addon/generation0
+
 import ./addon_testbed
 import ./agent_e2e_support
+import ./deb_fixture_support
+
+proc fixtureDeb(work, name: string): tuple[path: string; lock: AptClosureLock] =
+  ## A one-file .deb and its closure lock (the closure gates' fixture).
+  result.path = work / (name & ".deb")
+  writeDeb(result.path, @[dir("./"), dir("./usr/"), dir("./usr/share/"),
+    dir("./usr/share/" & name & "/"),
+    ("./usr/share/" & name & "/ok.txt", '0', 0o644, name & "\n", "")])
+  result.lock = fixtureLock(name, result.path)
 
 const
   Gate = "e2e_addon_unit_syscall_filters_cover_their_traces"
@@ -203,35 +228,105 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
 
   # The work. Each window is attributed to the unit that ran in it.
   var windows: seq[tuple[unit: string; a, b: float]]
-  let prod = producer   # a ref: the closure below may capture it
-  proc tick(seqNo: uint64; text: string) =
+  let prod = producer   # a ref: the closures below may capture it
+  proc runTick(seqNo: uint64; text: string): TickResult =
     discard prod.publish(PublishSpec(sequence: seqNo, profileText: text))
     let a = g.now()
-    let t = g.tickUnits()
+    result = g.tickUnits()
     let fetchExit = parseFloat(g.run("systemctl show -p " &
       "ExecMainExitTimestamp --timestamp=unix --value " &
       "repro-agent-fetch.service").strip().strip(chars = {'@'}))
     windows.add((unit: "repro-agent-fetch.service", a: a, b: fetchExit + 0.5))
     windows.add((unit: "repro-agent-apply.service", a: fetchExit + 0.5,
                  b: g.now()))
+  proc tick(seqNo: uint64; text: string) =
+    let t = runTick(seqNo, text)
     step("tick " & $seqNo & " applies", t.outcome == "aoApplied",
          $t & "\n" & t.fetchLog & t.applyLog)
-  let v1 = canonicalFile("/etc/repro/a9-trace", "one\n") &
-    unitProfile("a9-trace.service", "/bin/sleep infinity") &
+  proc restartUnit(u: string) =
+    let a = g.now()
+    let r = g.exec("systemctl restart " & u)
+    windows.add((unit: u, a: a, b: g.now()))
+    step(u & " runs", r.exitCode == 0, r.stdout & r.stderr)
+
+  # What the apply unit has to do, as wide as the add-on's classes go:
+  # an operator-provided secret it materialises for a unit's credential;
+  # an apt closure it realises from the .deb cache (a fixture .deb, the
+  # realiser's own tar reader); a package conffile it diverts (dpkg-divert,
+  # an equivs package); a system account, tmpfiles and sysctl fragments.
+  let put = g.exec("printf 'a9-trace-secret' > /root/a9s && chmod 0400 " &
+    "/root/a9s && " & repro & " system addon secret put --service a9-trace " &
+    "--name tok < /root/a9s; rc=$?; rm -f /root/a9s; exit $rc")
+  step("an operator puts the secret", put.exitCode == 0, put.stdout & put.stderr)
+  let deb = fixtureDeb(g.runDir, "a9-trace-closure")
+  discard g.run("mkdir -p " & AddOnAptDebCacheDir & " && chmod 0700 " &
+                AddOnAptDebCacheDir)
+  g.copyTo(deb.path, AddOnAptDebCacheDir & "/" & deb.lock.debs[0].sha256 &
+           ".deb")
+  g.installEquivs()
+  let conf = g.buildEquivsPackage("repro-a9-trace-conf", "1.0",
+    @[(name: "pkg.conf", content: "pkg\n", destDir: "/etc/a9-trace-pkg")])
+  discard g.run("export DEBIAN_FRONTEND=noninteractive; dpkg -i " & conf &
+                " >/dev/null < /dev/null")
+  let lockText = renderAptClosureLock(deb.lock)
+  let common = "addOn {\n  managedEtcPrefixes = [\"/etc/a9-trace-pkg/\"]\n" &
+    "  confirmTimeout = 15\n}\n" &
+    "secrets.secretFile {\n  service = \"a9-trace\"\n  name = \"tok\"\n}\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver &
+      "  name = \"a9-trace.service\"\n  content = \"[Service]\n" &
+      "ExecStart=/bin/sh -c 'cat $$CREDENTIALS_DIRECTORY/tok >/dev/null; " &
+      "exec sleep infinity'\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
+      "  credentials = [\"tok\"]\n}\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver &
+      "  name = \"a9-closure.service\"\n  content = \"[Service]\n" &
+      "Type=oneshot\nExecStart=/usr/bin/true\n\"\n  enabled = false\n" &
+      "  aptClosureLock = \"" & lockText & "\"\n}\n" &
+    "fs.systemFile {\n  path = \"/etc/a9-trace-pkg/pkg.conf\"\n  content = " &
+      "\"ours\n\"\n  collision = \"divert\"\n}\n" &
     "linux.sysusersEntry {\n  name = \"a9trace\"\n  kind = \"user\"\n" &
       "  description = \"A9 trace\"\n}\n" &
     "linux.tmpfilesRule {\n  name = \"repro-a9-trace.conf\"\n  content = " &
       "\"d /var/lib/a9-trace 0750 a9trace a9trace -\n\"\n}\n" &
     "linux.sysctl {\n  key = \"vm.swappiness\"\n  value = \"33\"\n}\n"
-  tick(1, v1)
-  let v2 = canonicalFile("/etc/repro/a9-trace", "two\n") &
-    unitProfile("a9-trace.service", "/bin/sleep 3600")
-  tick(2, v2)
-  for u in ["repro-addon-secrets.service", "repro-addon-reassert.service"]:
-    let a = g.now()
-    let r = g.exec("systemctl restart " & u)
-    windows.add((unit: u, a: a, b: g.now()))
-    step(u & " runs", r.exitCode == 0, r.stdout & r.stderr)
+  proc gen(n: int): string =
+    common & canonicalFile("/etc/repro/a9-trace", "gen " & $n & "\n")
+  tick(1, gen(1))
+  # Generations past the retention policy's five: the apply releases the
+  # store roots of those it drops (§5.2).
+  for n in 2 .. 7: tick(uint64(n), gen(n))
+  # A confirm failure: a unit whose health check cannot pass; the apply
+  # unit reverts to the previous generation and the agent quarantines it.
+  let failing = gen(8) & "systemd.systemUnit {\n" & FixtureFloorWaiver &
+    "  name = \"a9-fails.service\"\n  content = \"[Service]\n" &
+    "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target" &
+    "\n\"\n  healthCheck = \"tcp:127.0.0.1:18997\"\n}\n"
+  let tf = runTick(8, failing)
+  step("tick 8 fails its confirm and is reverted", tf.outcome == "aoRolledBack",
+       $tf & "\n" & tf.applyLog)
+  # A recovery: the apply unit is killed half-way through a switch (seam
+  # build, after step 4), and the re-assert unit finishes or reverts it.
+  g.armApplySeam("step-4")
+  discard prod.publish(PublishSpec(sequence: 9, profileText: gen(9)))
+  let a9 = g.now()
+  g.startFetchNoWait()
+  let paused = g.waitSeam(ApplySeamDir, "step-4")
+  step("the switch paused after step 4", paused, "")
+  discard g.exec("systemctl kill -s KILL repro-agent-apply.service; " &
+    "for i in $(seq 1 60); do s=$(systemctl show -p ActiveState --value " &
+    "repro-agent-apply.service); [ \"$s\" != active ] && " &
+    "[ \"$s\" != activating ] && [ \"$s\" != deactivating ] && break; " &
+    "sleep 1; done; rm -f " & ApplySeamDir & "/test-paused-at " &
+    ApplySeamDir & "/test-resume")
+  windows.add((unit: "repro-agent-apply.service", a: a9, b: g.now()))
+  step("the switch left its pending marker",
+       g.exec("test -e /var/lib/repro/system/addon/pending").exitCode == 0, "")
+  restartUnit("repro-addon-reassert.service")
+  step("the recovery resolved the switch",
+       g.exec("test -e /var/lib/repro/system/addon/pending").exitCode != 0,
+       g.exec("cat " & ReassertReportPath).stdout)
+  restartUnit("repro-addon-secrets.service")
+  restartUnit("repro-addon-reassert.service")
+  tick(10, gen(10))
 
   var observed = initTable[string, HashSet[string]]()
   var unattributed: seq[string]
@@ -265,7 +360,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   for u in Units:
     discard g.run("rm -f /run/systemd/system/" & u & ".d/" & DropInName)
   discard g.run("systemctl daemon-reload")
-  tick(3, canonicalFile("/etc/repro/a9-trace", "three\n"))
+  tick(11, gen(11))
 
 suite Gate:
   test "the add-on's units stay inside their syscall filters":

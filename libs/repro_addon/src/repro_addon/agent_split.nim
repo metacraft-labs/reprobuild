@@ -732,6 +732,8 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
           result = runAddonApply(o2)
         except AddonRolledBack as e:
           raise newException(EApplyRolledBack, e.msg)
+        except AddonNeedsOperator as e:
+          raise newException(EApplyNeedsOperator, e.msg)
         except AddonFailedAtFloor as e:
           # Not committed, not reverted: the floor kept the switch in place.
           raise newException(EApplyFailedAtFloor, e.msg)

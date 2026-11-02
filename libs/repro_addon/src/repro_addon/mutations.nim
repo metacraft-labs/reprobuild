@@ -586,6 +586,17 @@ const
                           "reassert-has-network",
                           "floor-without-noexec",
                           "floor-without-mdwe",
+                          # A9 review: memfd_create left allowed (the
+                          # exec gate's memfd step); stored generations
+                          # parsed under today's floor default (the
+                          # upgrade gate); drop-ins of floored units not
+                          # judged (t_addon_service_floor); the root units'
+                          # filter without @mount and @chown (the syscall
+                          # trace gate).
+                          "floor-allows-memfd",
+                          "stored-profile-floored",
+                          "floor-ignores-drop-ins",
+                          "privileged-filter-without-mount-chown",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

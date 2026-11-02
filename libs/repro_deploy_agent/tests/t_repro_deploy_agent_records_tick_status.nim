@@ -314,6 +314,8 @@ suite "deploy agent records every tick's outcome durably":
     # A frozen mirror and a quarantined deployment: no retry fixes either.
     check deployAgentExitCode(aoStale) == 2
     check deployAgentExitCode(aoRolledBack) == 2
+    # A running unit's first hardening floor waits for an operator.
+    check deployAgentExitCode(aoOperatorAction) == 2
     # An operator's own pause is not a failure.
     check deployAgentExitCode(aoPaused) == 0
 
@@ -322,7 +324,7 @@ suite "deploy agent records every tick's outcome durably":
     for kind in AgentOutcomeKind:
       check deployAgentExitCode(kind) in [0, 1, 2]
       inc seen
-    check seen == 12
+    check seen == 13
 
   test "a converged tick refreshes the record even with nothing to do":
     let f = newFixture("converged")

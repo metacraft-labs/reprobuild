@@ -159,10 +159,13 @@ const
     ##   mode checking"). The ``@debug`` system calls (``ptrace``,
     ##   ``process_vm_readv``/``writev``) are filtered out, so it is no
     ##   more than that check.
-  PrivilegedWritablePaths* = "/etc /var /run -" & "/repro/store"
+  PrivilegedWritablePaths* = "/etc /var /run -/usr/local/etc -" &
+    "/repro/store"
     ## ``ReadWritePaths=`` of the add-on's root units under
     ## ``ProtectSystem=strict`` (spec §9.1, §10.1): what an apply writes --
-    ## ``/etc`` (managed files, units, accounts, fragments), ``/var`` (its
+    ## ``/etc`` (managed files, units, accounts, fragments) and
+    ## ``/usr/local/etc`` (the other managed root, spec §4.4; ``-``
+    ## because a base need not have it), ``/var`` (its
     ## state, the ``.deb`` cache, tmpfiles targets), ``/run`` (the pending
     ## marker's lock, the secrets tmpfs) -- and the store, which stays a
     ## read-only bind there too: a writer enters its private writable view
@@ -171,10 +174,19 @@ const
     ## ``/opt``, ``/srv`` and the rest of the base are read-only to them;
     ## ``ProtectHome=yes`` hides ``/home`` and ``/root``.
 
-  PrivilegedSyscallFilter* = "SystemCallFilter=@system-service @mount\n" &
-    "SystemCallFilter=~@privileged @resources @obsolete @clock " &
-    "@cpu-emulation @debug @module @raw-io @reboot @swap\n" &
-    "SystemCallFilter=@chown capset\n"
+  PrivilegedSyscallFilter* =
+    when mutated("privileged-filter-without-mount-chown"):
+      # Falsifying build of the syscall-trace gate: the traced additions
+      # left out, so the store view's mount and tmpfiles' fchown are denied.
+      "SystemCallFilter=@system-service\n" &
+      "SystemCallFilter=~@privileged @resources @obsolete @clock " &
+      "@cpu-emulation @debug @module @raw-io @reboot @swap\n" &
+      "SystemCallFilter=capset\n"
+    else:
+      "SystemCallFilter=@system-service @mount\n" &
+      "SystemCallFilter=~@privileged @resources @obsolete @clock " &
+      "@cpu-emulation @debug @module @raw-io @reboot @swap\n" &
+      "SystemCallFilter=@chown capset\n"
     ## The root units' syscall filter (CONF-3): the deployment policy's
     ## recipe (``@system-service``, then ``~@privileged ~@resources
     ## ~@obsolete``) with what the trace of the units shows they use and

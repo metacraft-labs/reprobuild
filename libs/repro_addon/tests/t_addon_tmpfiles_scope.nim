@@ -107,3 +107,13 @@ suite "a tmpfiles fragment's lines are held to the class":
     check rules[0].kind == "L+" and rules[0].path == "/var/lib/a" and
       rules[0].source == "/var/lib/b c"
     check rules[1].kind == "d" and rules[1].source == ""
+
+  test "a setuid or setgid mode is refused before anything is written":
+    # The add-on writes no setuid or setgid bit, and the apply unit runs
+    # with RestrictSUIDSGID=yes (spec §10.1), where the chmod would fail
+    # half-way through a switch.
+    check "setgid" in scopeRefusal("d /var/lib/app 2770 app app -\n")
+    check "setgid" in scopeRefusal("f /var/lib/app/x 4755 root root -\n")
+    check "setgid" in scopeRefusal("d /var/lib/app ~2770 app app -\n")
+    check scopeRefusal("d /var/lib/app 1777 root root -\n") == ""
+    check "octal" in scopeRefusal("d /var/lib/app rwx app app -\n")

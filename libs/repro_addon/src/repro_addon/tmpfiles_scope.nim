@@ -83,6 +83,21 @@ proc parseTmpfilesLine*(line: string; rule: var TmpfilesRule): string =
     return "type '" & f[0] & "' is not a tmpfiles.d(5) type the add-on " &
       "applies (device nodes c and b are not)"
   rule = TmpfilesRule(line: line, kind: t, path: f[1])
+  if f.len >= 3 and f[2] != "-":
+    # The mode: the add-on writes no setuid or setgid bit (spec §7.2 step
+    # 5), and the apply unit runs with RestrictSUIDSGID=yes (§10.1), under
+    # which systemd-tmpfiles' chmod to such a mode fails half-way through a
+    # switch. Refused here, before anything is written. A `~`/`:` prefix
+    # (masked or create-only modes, tmpfiles.d(5)) is read past.
+    var m = f[2]
+    while m.len > 0 and m[0] in {'~', ':'}: m = m[1 .. ^1]
+    var bits = 0
+    try: bits = parseOctInt(m)
+    except ValueError:
+      return "mode '" & f[2] & "' is not an octal mode"
+    if (bits and 0o6000) != 0:
+      return "mode " & f[2] & " sets the setuid or setgid bit, which the " &
+        "add-on never writes and its apply cannot set (RestrictSUIDSGID=yes)"
   if base in TmpfilesSourceTypes and f.len >= 7:
     let arg = f[6 .. ^1].join(" ")
     if arg != "-": rule.source = arg

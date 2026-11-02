@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2601,
+    "nimTestBinaries": 2602,
     "pureUnitConsolidationGroups": 77,
     "pureUnitTests": 721,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2641
+    "testEntries": 2642
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1519,7 +1519,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1441,
+      "integration": 1442,
       "platform/destructive": 164,
       "pure unit": 721,
       "unclassified": 297
@@ -1730,9 +1730,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2601,
+    "nimTestBinaryCount": 2602,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2641
+    "testEntryCount": 2642
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2321,7 +2321,7 @@
           "executedVariables": [
             "src"
           ],
-          "line": 62,
+          "line": 68,
           "path": "tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim",
           "patterns": [
             "cc"
@@ -2339,7 +2339,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [],
-          "line": 68,
+          "line": 93,
           "path": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim",
           "patterns": [
             "cc"
@@ -8729,8 +8729,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_service_floor.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 12,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8805,7 +8805,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13886,7 +13886,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28605,6 +28605,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_addon_floor_upgrade_keeps_installed_generations",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_floor_upgrade_keeps_installed_generations.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_addon_gc_keeps_current_and_previous",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -29174,6 +29191,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_addon",
+        "repro_dsl_stdlib",
         "repro_test_support"
       ],
       "owner": "tests/e2e",

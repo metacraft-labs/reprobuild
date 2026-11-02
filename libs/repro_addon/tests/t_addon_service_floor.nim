@@ -43,7 +43,7 @@ suite "serviceFloor":
                  "PrivateDevices=yes", "ProtectProc=invisible",
                  "MemoryDenyWriteExecute=yes",
                  "SystemCallFilter=@system-service",
-                 "SystemCallFilter=~@privileged @obsolete",
+                 "SystemCallFilter=~@privileged @obsolete memfd_create",
                  "CapabilityBoundingSet=", "UMask=0077",
                  "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
                  "NoExecPaths=/", "ExecPaths=" & Prefix]:
@@ -145,7 +145,10 @@ suite "serviceFloor":
     let u = rendered(unitStanza("a.service",
       "ExecStart=/usr/bin/prometheus-node-exporter\n",
       "  aptClosureLock = \"" & lock & "\"\n"))
-    check "ExecPaths=/usr\n" in u
+    # The closure's own prefix (the bind's source) and the /usr it is
+    # bound over.
+    check "ExecPaths=/repro/store/prefixes/apt-closure-" in u
+    check u.contains(" /usr\n")
     check "BindReadOnlyPaths=" in u
 
   test "every exception is a plan line":
@@ -177,3 +180,103 @@ suite "a host upgraded to the floor":
       "ExecStart=/bin/sleep 5\n",
       "  floorExceptions = [\"serviceFloor: a fixture\"]\n"))
     check floorIntroducedUnits(ledger, waived.resources).len == 0
+
+proc dropInStanza(unit, content: string): string =
+  "systemd.systemDropIn {\n  unit = \"" & unit & "\"\n  name = \"x\"\n" &
+    "  content = \"" & content & "\"\n}\n"
+
+suite "what loosens the floor needs its exception (A9 review)":
+  test "a drop-in of a floored unit is judged by the effective unit":
+    let unit = unitStanza("a.service", "User=a\nExecStart=" & Prefix &
+                          "/bin/svc\n")
+    for (content, what) in [
+        ("[Service]\nExecStart=\nExecStart=/tmp/evil\n", "outside"),
+        ("[Service]\nNoExecPaths=\n", "exec confinement"),
+        ("[Service]\nProtectSystem=no\n", "ProtectSystem"),
+        ("[Service]\nUser=root\n", "root"),
+        ("[Service]\nSystemCallFilter=\n", "SystemCallFilter"),
+        ("[Service]\nMemoryDenyWriteExecute=no\n", "MemoryDenyWriteExecute"),
+        ("[Unit]\nDescription=x\n[Service]\nExecStartPost=+" & Prefix &
+           "/bin/svc\n", "'+' prefix")]:
+      checkpoint content
+      check what in refused(unit & dropInStanza("a.service", content))
+    # A drop-in that touches nothing of the floor stays accepted.
+    check refused(unit & dropInStanza("a.service",
+      "[Service]\nEnvironment=X=1\n")) == ""
+    # And a named exception lets the matching setting through.
+    let waivedUnit = unitStanza("a.service", "User=a\nExecStart=" & Prefix &
+      "/bin/svc\n", "  floorExceptions = [\"MemoryDenyWriteExecute: a JIT\"]\n")
+    check refused(waivedUnit & dropInStanza("a.service",
+      "[Service]\nMemoryDenyWriteExecute=no\n")) == ""
+
+  test "settings that loosen the floor without being floor settings":
+    for (service, what) in [
+        ("ReadWritePaths=/\n", "ReadWritePaths"),
+        ("ReadWritePaths=-/usr\n", "ReadWritePaths"),
+        ("ReadWritePaths=" & Prefix & "/bin\n", "executable path"),
+        ("TemporaryFileSystem=" & Prefix & "\n", "mounts over"),
+        ("BindPaths=/tmp/x:" & Prefix & "/bin\n", "mounts over"),
+        ("RootDirectory=/srv/root\n", "another root"),
+        ("User=root\n", "root"),
+        ("DynamicUser=no\n", "root"),
+        ("SupplementaryGroups=disk\n", "privileged group"),
+        ("Group=root\n", "root")]:
+      checkpoint service
+      check what in refused(unitStanza("a.service", service & "ExecStart=" &
+                                       Prefix & "/bin/svc\n"))
+    check "'!' prefix" in refused(unitStanza("a.service", "User=a\n" &
+      "ExecStart=!" & Prefix & "/bin/svc\n"))
+    # An optional (`-`) closure bind does not make /usr executable.
+    check "outside the unit's closure" in refused(unitStanza("a.service",
+      "BindReadOnlyPaths=-/repro/store/prefixes/c/1/usr:/usr\n" &
+      "ExecStart=/usr/bin/x\n"))
+    # Every `;`-separated command is checked.
+    check "/bin/evil" in refused(unitStanza("a.service", "User=a\n" &
+      "ExecStartPre=" & Prefix & "/bin/svc ; /bin/evil\nExecStart=" &
+      Prefix & "/bin/svc\n"))
+
+  test "a command line outside [Service] is refused, not left unconfined":
+    let sock = "systemd.systemUnit {\n  name = \"a.socket\"\n  content = \"" &
+      "[Socket]\nListenStream=1\nExecStartPre=/bin/true\n\"\n}\n"
+    check "outside a [Service]" in refused(sock)
+
+  test "the closure is every prefix the unit names, a launcher's target too":
+    # searxng's shape: a shell from the closure execs a prefix's launcher.
+    const lock = staticRead("../../repro_dsl_stdlib/tests/fixtures/" &
+      "apt_closure/debian-trixie-20261001-armhf-node-exporter.lock")
+    let u = rendered(unitStanza("a.service",
+      "ExecStart=/bin/sh -c 'exec " & Prefix & "/bin/launch'\n",
+      "  aptClosureLock = \"" & lock & "\"\n"))
+    var execLine = ""
+    for l in u.splitLines():
+      if l.startsWith("ExecPaths="): execLine = l
+    check Prefix in execLine.split({'=', ' '})
+    check execLine.endsWith(" /usr")
+
+  test "memfd_create is denied, and an exception adds back exactly":
+    let u = rendered(unitStanza("a.service", "User=a\nExecStart=" & Prefix &
+      "/bin/svc\n", "  floorExceptions = [\"SystemCallFilter+@setuid " &
+      "memfd_create: a JIT\", \"CapabilityBoundingSet+CAP_NET_RAW: ping\"]\n"))
+    check "SystemCallFilter=~@privileged @obsolete memfd_create\n" in u
+    check "SystemCallFilter=@setuid memfd_create\n" in u
+    check "CapabilityBoundingSet=CAP_NET_RAW\n" in u
+    check "AmbientCapabilities=\n" in u
+    check "NoExecPaths=/\n" in u
+    check "only SystemCallFilter" in refused(unitStanza("a.service",
+      "User=a\nExecStart=" & Prefix & "/bin/svc\n",
+      "  floorExceptions = [\"UMask+0022: x\"]\n"))
+
+  test "a unit ending in a continuation does not swallow the floor":
+    let u = rendered(unitStanza("a.service", "User=a\nExecStart=" & Prefix &
+      "/bin/svc \\\n  --flag\nEnvironment=A=1 \\\n"))
+    check "\n\n# serviceFloor" in u or "\\\n\n" in u
+    check "\nNoNewPrivileges=yes\n" in u
+
+suite "stored generations keep the rules they were installed with":
+  test "a pre-floor stored profile parses, a new one is held to the floor":
+    let preFloor = unitStanza("old.service", "ExecStart=/bin/sleep 5\n")
+    check "outside the unit's closure" in refused(preFloor)
+    for r in parseStoredUserProfile(preFloor).resources:
+      check renderedSystemUnitContent(r) ==
+        "[Unit]\nDescription=x\n\n[Service]\nExecStart=/bin/sleep 5\n" &
+        "\n[Install]\nWantedBy=multi-user.target\n"
