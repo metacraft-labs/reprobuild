@@ -3497,23 +3497,32 @@ const
     ## with only `OnBootSec=`, `OnStartupSec=` or `OnActiveSec=` fires once
     ## per activation. https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
 
+const TimerTriggerKeys = ["OnActiveSec", "OnBootSec", "OnStartupSec",
+                          "OnUnitActiveSec", "OnUnitInactiveSec",
+                          "OnCalendar"]
+  ## Every `[Timer]` trigger setting (systemd.timer(5)).
+
 proc timerRepeats*(content: string): bool =
   ## Whether the timer unit ``content`` (with its drop-ins appended in the
-  ## order systemd applies them) fires repeatedly. An empty assignment
-  ## (`OnCalendar=`) resets that setting's earlier values, as systemd reads
-  ## it (systemd.timer(5)).
+  ## order systemd applies them) fires repeatedly. An empty assignment to
+  ## any trigger setting (`OnCalendar=`, `OnBootSec=`, ...) resets the list
+  ## of ALL triggers, monotonic and calendar alike, as systemd.timer(5)
+  ## says: "If the empty string is assigned to any of these options, the
+  ## list of timers is reset (both monotonic timers and OnCalendar=
+  ## timers)". https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
   var setKeys: seq[string]
   for raw in content.splitLines():
     let line = raw.strip()
     let eq = line.find('=')
     if eq <= 0: continue
     let key = line[0 ..< eq].strip()
-    if key notin TimerRepeatingKeys: continue
+    if key notin TimerTriggerKeys: continue
     if line[eq + 1 .. ^1].strip().len == 0:
-      setKeys.keepItIf(it != key)
+      setKeys.setLen(0)
     elif key notin setKeys:
       setKeys.add(key)
-  setKeys.len > 0
+  for k in setKeys:
+    if k in TimerRepeatingKeys: return true
 
 proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
                              unitFileState, activeState,

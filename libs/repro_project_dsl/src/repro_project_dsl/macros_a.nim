@@ -4741,6 +4741,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` branch: an explicit ``usesImportPath`` or a workspace project of
   # that name keeps the selector, and only then is the catalog consulted.
   var dependencyOnlyAliases: seq[string] = @[]
+  var nativeOnlyAliases: seq[string] = @[]
   if not hasExplicitImports:
     for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
       let selector = useDef.packageSelector
@@ -4764,6 +4765,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         # one does above; a `runtimeDeps:` entry its marker alone.
         if useDef notin pkg.nativeBuildDeps:
           dependencyOnlyAliases.add(catalogAlias)
+        else:
+          nativeOnlyAliases.add(catalogAlias)
   # Multi-Sibling interface-extraction object-collision fix.
   #
   # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per
@@ -4852,8 +4855,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           moduleAlias & "_dep import " & markerName & "\n")
         result.add(markerName & "()\n")
         continue
+      # A catalog tool only `nativeBuildDeps:` names leaves out the names
+      # the DSL itself exports (`shell`), as a stdlib one does
+      # (``NativeImportExcluded``): a recipe that lists `sh` there and calls
+      # the DSL's `shell(...)` must not see an ambiguous call.
+      let excluded =
+        if moduleAlias in nativeOnlyAliases: "package, " & NativeImportExcluded
+        else: "package"
       result.add("import \"" & importedModule.replace('\\', '/') & "\" as " &
-        moduleAlias & " except package\n")
+        moduleAlias & " except " & excluded & "\n")
       result.add("when compiles(" & moduleAlias &
         ".reprobuildPackageMarker()):\n")
       result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")

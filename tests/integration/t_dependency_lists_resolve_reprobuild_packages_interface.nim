@@ -27,6 +27,17 @@ package rpCatalogNativeDepConsumer:
   nativeBuildDeps:
     "rpcatalogfixture"
 
+# The catalog module exports a `shell` of its own; named only in
+# `nativeBuildDeps:`, it is imported without it, so the DSL's `shell(...)`
+# below is not ambiguous (review of d6f04a2843: the catalog branch excluded
+# only `package`, unlike the stdlib one, and this did not compile).
+package rpCatalogShellConsumer:
+  defaultToolProvisioning "tarball"
+  nativeBuildDeps:
+    "rpcatalogshellfixture"
+  build:
+    shell("true")
+
 package rpCatalogRuntimeDepConsumer:
   defaultToolProvisioning "tarball"
   runtimeDeps:
@@ -41,6 +52,10 @@ proc dependencyUse(consumer, selector: string): seq[InterfaceToolUse] =
     return iface.toolUses.filterIt(it.packageSelector == selector)
 
 suite "dependency lists resolve a reprobuild-packages interface":
+  test "nativeBuildDeps: a catalog module's own shell does not shadow the DSL's":
+    # Compiling this file is the check; the package registered too.
+    check registeredPackages().anyIt(it.packageName == "rpcatalogshellfixture")
+
   test "nativeBuildDeps: the catalog's package is imported and its provisioning reaches the dependency":
     check registeredPackages().anyIt(it.packageName == "rpcatalogfixture")
     let uses = dependencyUse("rpCatalogNativeDepConsumer", "rpcatalogfixture")

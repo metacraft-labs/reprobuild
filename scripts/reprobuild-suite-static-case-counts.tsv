@@ -1619,7 +1619,7 @@ tests/integration/t_declared_role_does_not_fall_back_when_ref_is_absent.nim	nim	
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
 tests/integration/t_default_target_floor_is_conservative.nim	nim	7
 tests/integration/t_delegated_build_outputs_restore.nim	nim	1
-tests/integration/t_dependency_lists_resolve_reprobuild_packages_interface.nim	nim	2
+tests/integration/t_dependency_lists_resolve_reprobuild_packages_interface.nim	nim	3
 tests/integration/t_dependency_report_and_converter_paths.nim	nim	1
 tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	nim	9
 tests/integration/t_derived_daemon_ipc_trust.nim	nim	10

@@ -37195,7 +37195,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_dependency_lists_resolve_reprobuild_packages_interface.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
