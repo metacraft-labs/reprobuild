@@ -3802,6 +3802,9 @@ suite "repro_elevation: systemd.systemTimer pure surface":
                                  "inactive", "n/a") == fileDigest
     # A drop-in that adds a repeating trigger makes the timer repeating.
     check timerRepeats(oneShot & "\n[Timer]\nOnCalendar=daily\n")
+    # An empty assignment in a later drop-in resets it.
+    check not timerRepeats("[Timer]\nOnBootSec=1min\nOnCalendar=daily\n" &
+                           "[Timer]\nOnCalendar=\n")
     # Running but not enabled, and the stopped direction.
     check timerObservedDigestHex(content, true, true, "disabled", "active",
                                  "n/a") != fileDigest

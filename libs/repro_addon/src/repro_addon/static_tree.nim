@@ -318,7 +318,14 @@ proc referenceText*(dirs: seq[string]): string =
       acc.add(target & "\n")
       if not target.isAbsolute: target = parentDir(f) / target
       acc.add(os.normalizedPath(target) & "\n")
-      # `fileExists` follows the link: false when it dangles or loops.
+      # The whole chain resolved, when it resolves: a link to a link into
+      # the store (/etc/systemd/system/x -> /usr/lib/.../x -> a store
+      # prefix) names that prefix only at its last hop. A chain that
+      # dangles or loops has no end, and names what its first hop names.
+      try:
+        if fileExists(f): acc.add(expandFilename(f) & "\n")
+      except OSError:
+        discard
       if not fileExists(f): return
     try:
       acc.add(readFile(f))

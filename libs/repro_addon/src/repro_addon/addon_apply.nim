@@ -3687,6 +3687,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   if opts.planOnly:
     return
 
+  # Step 1 recomputes the store's hold from every unit, manifest and
+  # hand-back record on the host; the plan checked they can be read, but
+  # one can have become unreadable since. Checked again here, before the
+  # first byte this switch writes (the preserved bytes just below, the
+  # write-ahead plan, the pending marker), so the switch refuses with
+  # nothing written rather than failing in step 1.
+  block:
+    let why = liveReferenceRefusal(@[preservedDir(stateDir)])
+    if why.len > 0:
+      raise newException(AddonCollisionError, "refusing the switch: step 1 " &
+        "recomputes the store's hold, and " & why & "; nothing was written")
+
   # The invocation id every running managed unit has just before step 2
   # (taken in `beforeSet`, under the apply lock, after realise): one that
   # differs at the commit was started during the switch (§5.2).
