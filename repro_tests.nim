@@ -20551,8 +20551,30 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_records_a_moved_shared_policy_after_the_recipe_was_evaluated.nim",
+    binary: "build/test-bin/t_lock_refresh_records_a_moved_shared_policy_after_the_recipe_was_evaluated",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g07",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim",
     binary: "build/test-bin/t_lock_refresh_records_the_catalog_a_package_resolved_from",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g07",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_lock_refresh_records_the_edited_policy_after_the_recipe_was_evaluated.nim",
+    binary: "build/test-bin/t_lock_refresh_records_the_edited_policy_after_the_recipe_was_evaluated",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -20625,7 +20647,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim",
@@ -20636,7 +20658,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_update_node_failure_withholds_only_the_certificate.nim",
@@ -21263,7 +21285,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim",
@@ -21296,7 +21318,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_nested_lock_push_capability_security.nim",
@@ -21934,7 +21956,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim",
@@ -21967,7 +21989,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_protocol_v2_policy_regressions.nim",
@@ -22627,7 +22649,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_refuses_nested_declared_checkout.nim",
@@ -22638,7 +22660,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_refuses_unrelated_directory_at_previous_path.nim",
@@ -23309,7 +23331,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",

@@ -88835,6 +88835,40 @@ proc carriedLockFileDeclarations(sidecarPath, interfacePath: string):
   except CatchableError:
     result = @[]
 
+proc durableBinaryIsComputationOutput(durable: ProviderCompileArtifact;
+                                      computationDir: string): bool =
+  ## Whether the durable provider binary in the recipe's output directory is
+  ## the binary of the recipe-relative computation in ``computationDir``.
+  ##
+  ## WHY THIS IS NEEDED. The recipe-relative edge is keyed by the sources AS
+  ## THEY ARE NOW (``recipeRelativeProviderCompilePlan`` hashes them while
+  ## planning), so a validated hit proves that SOME computation of the
+  ## current sources exists - not that the durable copy was taken from it.
+  ## The durable copy is only rewritten when a build or certifying run
+  ## publishes into the output directory. After an edit to any source the
+  ## recipe imports (a local module, or a sibling package's at a moved pin),
+  ## any other caller that compiles the recipe publishes a record under the
+  ## new key - `repro lock refresh`'s solver-inputs probe does, a moment
+  ## before its policy probe - and the hit then vouched for a binary compiled
+  ## from the sources before the edit: the refresh recorded the previous
+  ## certificate policy and exited 0.
+  ##
+  ## The location-bound edge needs no such check: it is validated under the
+  ## durable artifact's own key, so its record is the one that produced the
+  ## durable copy, and a changed input is a miss.
+  ##
+  ## The binding is by the binary's content, which is what the provider
+  ## runs: ``publishRecipeRelativeProviderCompile`` copies the computation's
+  ## binary and records its fingerprint, so a durable copy taken from this
+  ## computation carries the same one. A mismatch is a miss, never an error,
+  ## and the caller compiles through the edge instead.
+  try:
+    let edge = readProviderCompileArtifact(
+      computationDir / "provider-compile.rbsz")
+    edge.outputBinaryFingerprint == durable.outputBinaryFingerprint
+  except CatchableError:
+    false
+
 proc tryLoadDurableSolverProviderArtifacts(
     modulePath, compileWorkDir: string):
     Option[DurableSolverProviderArtifacts] =
@@ -88939,7 +88973,8 @@ proc tryLoadDurableSolverProviderArtifacts(
             if recipeRelativeProviderLocationBound(sharedOutputs):
               validates(locationBoundAction()).validated
             else:
-              true
+              durableBinaryIsComputationOutput(durableProvider,
+                sharedOutputs)
       else:
         validated = validates(locationBoundAction()).validated
       if not validated:
