@@ -258,10 +258,12 @@ proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
     "#!/bin/sh\n" &
     "# zig " & role & " for " & t.rustTriple & ". The cc crate appends a\n" &
     "# clang-style --target=<rust triple> that zig's driver does not accept;\n" &
-    "# -target below is the authoritative one, so drop it.\n" &
+    "# -target below is the authoritative one, so drop it. -latomic is\n" &
+    "# dropped too: zig ships no libatomic, and compiler-rt, which it links,\n" &
+    "# provides the __atomic_* calls a 32-bit ARM link asks it for.\n" &
     "for a do\n" &
     "  shift\n" &
-    "  case \"$a\" in --target=*) continue;; esac\n" &
+    "  case \"$a\" in -latomic|--target=*) continue;; esac\n" &
     "  set -- \"$@\" \"$a\"\n" &
     "done\n" &
     "exec zig " & role & " " & zigDriverArgs(t) & " \"$@\"\n"

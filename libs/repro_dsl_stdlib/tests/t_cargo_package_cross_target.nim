@@ -144,6 +144,18 @@ suite "cross_zig: the target table and the environment":
       not it.strip().startsWith("#") and "-lgcc_s" in it)
     check "--target=*) continue;;" in glibc
 
+  test "the C wrappers drop -latomic, which zig's compiler-rt replaces":
+    # io-mon's config.nims links -latomic on 32-bit ARM for gcc, whose
+    # ARMv6 baseline calls the 64-bit atomics out of line. zig ships no
+    # libatomic and resolves those calls from compiler-rt, so the flag would
+    # only fail the link ("unable to find dynamic system library 'atomic'").
+    for triple in ["armv7-unknown-linux-gnueabihf",
+                   "armv7-unknown-linux-musleabihf"]:
+      for role in ["cc", "c++"]:
+        let script = zigCrossWrapperScript(role, zigCrossTarget(triple),
+          "/w/lib")
+        check "-latomic|--target=*) continue;;" in script
+
   test "an unknown triple is refused by name, with the known ones":
     expect ValueError:
       discard zigCrossTarget("mips-unknown-linux-gnu")
