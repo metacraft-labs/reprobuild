@@ -1230,11 +1230,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791938526,
-        "narHash": "sha256-yNYK2pdk3bCtJrpblrNYA6hZKdybWUeyTtx74+OEJFo=",
+        "lastModified": 1790996401,
+        "narHash": "sha256-f+kOxEmOUnQazVAmGg0i8hzwgd1kX/geY+k/Dpheye8=",
         "owner": "nix-community",
         "repo": "home-manager",
-        "rev": "32904dfe1cf86039f3c8c9f41f94e1cfd76dbb34",
+        "rev": "db7d5e2332710f5abb088f6b5de927d7f9511b35",
         "type": "github"
       },
       "original": {
@@ -1997,11 +1997,11 @@
     },
     "nixos-2605": {
       "locked": {
-        "lastModified": 1792030654,
-        "narHash": "sha256-OaQwAtPMTjQiY2sT/2/62UbSPhzP/0aDnWzMm/NCiUw=",
+        "lastModified": 1791254437,
+        "narHash": "sha256-qMSsgG+9tIdx282dMqGuJAUK3t6F36clM6efd0rXfes=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "26f4107e47e3ad0ffd0db220469ba83b6f6d96e8",
+        "rev": "b25309931cfda5f0b8805f462a29897eeae50168",
         "type": "github"
       },
       "original": {
@@ -2123,9 +2123,11 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
+        "lastModified": 1793319268,
+        "narHash": "sha256-8zj0UXa11zIWylurLeib/AOGcoX5nD+irAFagpLZ508=",
         "owner": "metacraft-labs",
         "repo": "devops-modules",
-        "rev": "8fc6d8309512676b9e1ec552b694df2620a26171",
+        "rev": "eea1109f1e3078a8e262a68d1ab9690ca3cc9eca",
         "type": "github"
       },
       "original": {
