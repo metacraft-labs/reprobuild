@@ -5,6 +5,7 @@ import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_core
 import repro_core/ambient_execution
+import repro_core/target_object_check
 import repro_test_support
 import repro_project_dsl
 import repro_dsl_stdlib/types/package_result
@@ -250,8 +251,14 @@ suite "M9.R.83 install mirror emitted action shape":
         "install").replace("\\", "/") & "\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
         "\"; : > \"" & sidecar.replace("\\", "/") in script
+      # The platform line, then the declared object-check exemptions appended
+      # one per line (CLI/build.md), then the end of the legacy branch.
+      let sidecarQ = "\"" & sidecar.replace("\\", "/") & "\""
       check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
-        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "' > " & sidecarQ & "; printf '%s\\n' \"${" &
+        TargetObjectExemptionsEnvVar & ":-}\" | while IFS= read -r l;" in script
+      check "printf '" & TargetObjectExemptionSidecarKey &
+        "=%s\\n' \"$l\"; fi; done >> " & sidecarQ & "; ;; esac" in script
     else:
       check true
 
@@ -323,8 +330,14 @@ suite "M9.R.83 install mirror emitted action shape":
       check "--version \"8.3.0\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
         "\"; : > \"" & sidecar.replace("\\", "/") in script
+      # The platform line, then the declared object-check exemptions appended
+      # one per line (CLI/build.md), then the end of the legacy branch.
+      let sidecarQ = "\"" & sidecar.replace("\\", "/") & "\""
       check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
-        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "' > " & sidecarQ & "; printf '%s\\n' \"${" &
+        TargetObjectExemptionsEnvVar & ":-}\" | while IFS= read -r l;" in script
+      check "printf '" & TargetObjectExemptionSidecarKey &
+        "=%s\\n' \"$l\"; fi; done >> " & sidecarQ & "; ;; esac" in script
     else:
       check true
 
