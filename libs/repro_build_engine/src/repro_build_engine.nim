@@ -2415,6 +2415,12 @@ type
     includeDirs*: seq[string]
     libDirs*: seq[string]
     nimPathDirs*: seq[string]
+    prefixVars*: seq[(string, string)]
+      ## `DEP_<NAME>_PREFIX` = the realized prefix of a library ref
+      ## (Package-Model.md §"Environment-provided library prefixes"):
+      ## the environment arm natively, the sibling mirror under
+      ## `--target`. Set on the action at launch; the value is covered
+      ## by the ref's profile fingerprint, which keys the action.
       ## Cross-Repo-Source-Consumption SC-11 (§4.2a) — the PARALLEL Nim
       ## language channel. Each dir is a sibling Nim ``library``'s importable
       ## source root; the engine prepends a ``--path:<dir>`` compiler FLAG onto
@@ -12985,6 +12991,12 @@ type
     includeDirs*: seq[string]
     libDirs*: seq[string]
     nimPathDirs*: seq[string]
+    prefixVars*: seq[(string, string)]
+      ## `DEP_<NAME>_PREFIX` = the realized prefix of a library ref
+      ## (Package-Model.md §"Environment-provided library prefixes"):
+      ## the environment arm natively, the sibling mirror under
+      ## `--target`. Set on the action at launch; the value is covered
+      ## by the ref's profile fingerprint, which keys the action.
       ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the accumulated Nim
       ## library source roots. Unlike the four C/C++ lists above (each threaded
       ## onto a dedicated env var), these are projected onto the action's
@@ -13054,6 +13066,9 @@ proc collectResolvedAuxPaths*(action: BuildAction;
         if d.len > 0 and d notin seenNimPath:
           seenNimPath.incl(d)
           result.nimPathDirs.add(d)
+      for kv in r.prefixVars:
+        if kv[0].len > 0 and kv notin result.prefixVars:
+          result.prefixVars.add(kv)
 
 proc isUnsafeRuntimeLibDir(path: string): bool =
   ## Dependency profiles may propagate libc or language-runtime libraries
@@ -13276,6 +13291,8 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  for (name, value) in paths.prefixVars:
+    env[name] = value
   when defined(macosx):
     # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
     # run-time counterpart needed by tools that dlopen libraries by leaf name.
@@ -13322,6 +13339,14 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  for (name, value) in paths.prefixVars:
+    var replaced = false
+    for i in 0 ..< result.len:
+      if result[i].startsWith(name & "="):
+        result[i] = name & "=" & value
+        replaced = true
+    if not replaced:
+      result.add(name & "=" & value)
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", runtimeLibDirs)
 

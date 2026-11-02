@@ -1138,6 +1138,19 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  EnvironmentPrefixProvisioningDef* = object
+    ## Package-Model.md §"Environment-provided library prefixes" (approved
+    ## by Zahary Karadjov, 2026-11-02). A library realized, natively and in
+    ## path mode only, from the prefix an environment variable names. The
+    ## files it names are what the engine checks under that prefix and
+    ## hashes into the realization's identity at every resolution; it never
+    ## applies under `--target`.
+    variable*: string        ## e.g. `SQLITE_PREFIX`
+    libraries*: seq[string]  ## `lib/<name>.so*` / `.dylib` / `.a`
+    headers*: seq[string]    ## `include/<name>`
+    sourceFile*: string
+    sourceLine*: int
+
   ProvisioningContributionDef* = object
     ## A realization supplied independently of the package that owns the
     ## public interface. ``targetInterfaceFingerprint`` pins the contribution
@@ -1357,6 +1370,8 @@ type
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]
     scoopProvisioning*: seq[ScoopProvisioningDef]
+    environmentPrefixProvisioning*: seq[EnvironmentPrefixProvisioningDef]
+      ## See ``EnvironmentPrefixProvisioningDef``.
     usesImportPaths*: seq[string]
     publicSignatureDependencies*: seq[string]
     hasDevEnv*: bool

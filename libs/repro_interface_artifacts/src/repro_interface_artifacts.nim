@@ -707,6 +707,18 @@ type
     tap*: string
     location*: SourceLocation
 
+  InterfaceEnvironmentPrefixProvisioning* = object
+    ## Package-Model.md §"Environment-provided library prefixes" (approved
+    ## 2026-11-02): the variable naming the prefix of a library already
+    ## installed for the build host, and the files the engine checks under it
+    ## and hashes into the realization's identity. Path mode only, never
+    ## under `--target`. Encoded from v30.
+    packageName*: string
+    variable*: string
+    libraries*: seq[string]
+    headers*: seq[string]
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -717,6 +729,8 @@ type
     nixProvisioning*: seq[InterfaceNixProvisioning]
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
+    environmentPrefixProvisioning*: seq[InterfaceEnvironmentPrefixProvisioning]
+      ## v30. See ``InterfaceEnvironmentPrefixProvisioning``.
     location*: SourceLocation
     provisioningPin*: ProvisioningPin
       ## Resolution-time contribution selection; see ``ProvisioningPin``.
@@ -1181,8 +1195,16 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 29'u16
-    ## v29 (current): retains ``InterfaceProvisioningContribution.imported``
+  EnvelopeVersion = 30'u16
+    ## v30 (current): ``InterfaceToolUse`` retains
+    ##                ``environmentPrefixProvisioning`` (Package-Model.md
+    ##                §"Environment-provided library prefixes"), a count and
+    ##                its records after ``scoopProvisioning``. Like every
+    ##                realization it is left out of the fingerprint
+    ##                projection, and the realization digest appends it only
+    ##                when non-empty, so an artifact without one keeps its
+    ##                v29 fingerprints to the byte.
+    ## v29: retains ``InterfaceProvisioningContribution.imported``
     ##                (one byte after ``developInterface``; ReproOS M7
     ##                deliverable 4). Introduced as "v18" on the campaign
     ##                line, it was renumbered at the landing on ``agents``
@@ -2100,6 +2122,23 @@ proc readHomebrewProvisioning(bytes: openArray[byte]; pos: var int):
   result.tap = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeEnvironmentPrefixProvisioning(outp: var seq[byte];
+    provisioning: InterfaceEnvironmentPrefixProvisioning;
+    forFingerprint = false) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.variable)
+  outp.writeStringSeq(provisioning.libraries)
+  outp.writeStringSeq(provisioning.headers)
+  outp.writeLocation(provisioning.location, forFingerprint)
+
+proc readEnvironmentPrefixProvisioning(bytes: openArray[byte]; pos: var int):
+    InterfaceEnvironmentPrefixProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.variable = readString(bytes, pos)
+  result.libraries = readStringSeq(bytes, pos)
+  result.headers = readStringSeq(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
                   version = EnvelopeVersion;
                   forFingerprint = false) =
@@ -2125,6 +2164,12 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
   if not omitRealizations:
     for provisioning in useDef.scoopProvisioning:
       outp.writeScoopProvisioning(provisioning, version, forFingerprint)
+  if version >= 30'u16:
+    outp.writeU32Le(uint32(if omitRealizations: 0 else:
+      useDef.environmentPrefixProvisioning.len))
+    if not omitRealizations:
+      for provisioning in useDef.environmentPrefixProvisioning:
+        outp.writeEnvironmentPrefixProvisioning(provisioning, forFingerprint)
   outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
@@ -2153,6 +2198,13 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
     result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
     for i in 0 ..< scoopCount:
       result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos, version)
+  if version >= 30'u16:
+    let envCount = readElementCount(bytes, pos, 4)
+    result.environmentPrefixProvisioning =
+      newSeq[InterfaceEnvironmentPrefixProvisioning](envCount)
+    for i in 0 ..< envCount:
+      result.environmentPrefixProvisioning[i] =
+        readEnvironmentPrefixProvisioning(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeProvisioningContribution(outp: var seq[byte];
@@ -2404,6 +2456,12 @@ proc toolUseRealizationDigest*(useDef: InterfaceToolUse): string =
   for provisioning in useDef.scoopProvisioning:
     payload.writeScoopProvisioning(provisioning, EnvelopeVersion,
       forFingerprint = true)
+  # Appended only when present, so a use without one keeps its digest.
+  if useDef.environmentPrefixProvisioning.len > 0:
+    payload.writeU32Le(uint32(useDef.environmentPrefixProvisioning.len))
+    for provisioning in useDef.environmentPrefixProvisioning:
+      payload.writeEnvironmentPrefixProvisioning(provisioning,
+        forFingerprint = true)
   toHex(blake3DomainDigest(payload, hdMetadataEnvelope).bytes).toLowerAscii()
 
 proc decodeInterfacePayload*(bytes: openArray[byte];
@@ -2869,6 +2927,15 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
       for provisioning in pkg.scoopProvisioning:
         result.scoopProvisioning.add(toInterfaceScoopProvisioning(
           pkg.packageName, provisioning))
+      for provisioning in pkg.environmentPrefixProvisioning:
+        result.environmentPrefixProvisioning.add(
+          InterfaceEnvironmentPrefixProvisioning(
+            packageName: pkg.packageName,
+            variable: provisioning.variable,
+            libraries: provisioning.libraries,
+            headers: provisioning.headers,
+            location: SourceLocation(file: provisioning.sourceFile,
+                                     line: provisioning.sourceLine)))
       # When the package declares an ``executable`` whose exportName
       # matches the use selector and renames the binary via ``name:``
       # (e.g. ``package foundry: executable foundry: name: "forge"``),

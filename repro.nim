@@ -945,7 +945,28 @@ package reprobuild:
 
   uses:
     # TARGET dependencies: what the shipped images link or compile in --
-    # OpenSSL, and the sibling Nim libraries imported as source.
+    # OpenSSL, the C libraries below, and the sibling Nim libraries imported
+    # as source.
+    #
+    # sqlite, libblake3 and xxhash were taken from the flake's environment
+    # (SQLITE_PREFIX / BLAKE3_PREFIX / XXHASH_PREFIX) with no declaration, so
+    # a `--target` build linked the build host's copies and failed ("libsqlite3
+    # .so is incompatible with armelf_linux_eabi"). Declared, each is realized
+    # by its package: natively in path mode from the prefix its
+    # `environmentPrefix` arm names (checked, and hashed into the cache key),
+    # under `--target` from the catalog's recipe built for the target; either
+    # way `config.nims` reads it as DEP_<NAME>_PREFIX (Package-Model.md
+    # §"Environment-provided library prefixes", approved by Zahary Karadjov,
+    # 2026-11-02).
+    #
+    # Linux only: Windows stages its own sqlite3.dll (the `firstExistingDll`
+    # probe in the apps collection) and macOS falls back to Homebrew's
+    # prefixes in `config.nims`, so neither host should be refused for an
+    # unset *_PREFIX variable it never needed.
+    when defined(linux):
+      "sqlite"
+      "libblake3"
+      "xxhash"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
     # OpenSSL's library channels instead of depending on ambient
@@ -1018,21 +1039,12 @@ package reprobuild:
     # and the same one-change rule: this line and its ``repro.lock`` entry.
     "test-certificates-tools"
 
-    # Note: the remaining system libraries (libblake3, xxhash, sqlite3) and
-    # the source-only fixed inputs that are NOT workspace repos (nimcrypto,
-    # nim-bearssl) are still NOT listed here.
-    # The path-mode resolver requires every ``uses:`` selector to be
-    # findable on ``$PATH`` as an executable file OR to resolve as a
-    # cross-repo producer, and these are shared libraries, header bundles,
-    # or third-party Nim source trees with no workspace checkout of their
-    # own. They are provisioned by ``flake.nix`` /
-    # ``nix/pkgs/by-name/re/reprobuild/package.nix`` via env vars
-    # (BLAKE3_PREFIX / XXHASH_PREFIX / SQLITE_PREFIX / NIMCRYPTO_SRC /
-    # BEARSSL_SRC) and consumed by ``config.nims``. Once the DSL grows a
-    # typed "env-provided dependency" concept (a ``provides:`` clause, or a
-    # Mode 2 catalog shape for header-only / source-only deps) the list
-    # above will grow back to capture them; until then the constraints live
-    # in ``flake.nix`` and ``config.nims``.
+    # Note: the source-only fixed inputs that are NOT workspace repos
+    # (nimcrypto, nim-bearssl) are still NOT listed here: they are third-party
+    # Nim source trees with no workspace checkout of their own, provisioned
+    # by ``flake.nix`` / ``nix/pkgs/by-name/re/reprobuild/package.nix`` via
+    # NIMCRYPTO_SRC / BEARSSL_SRC and consumed by ``config.nims``. The C
+    # libraries (sqlite, libblake3, xxhash) are declared above.
 
   devEnv:
     when not defined(windows):
@@ -2948,6 +2960,20 @@ package reprobuild:
             "build/bin/" & opensslDll, cacheable = false,
             actionId = "reprobuild.apps.stage_" &
               opensslDll.replace("-", "_").replace(".dll", "")))
+
+    when defined(linux):
+      # The images link sqlite and, in system-hash mode, libblake3 and
+      # xxhash. Naming them on every `nim c` edge is what makes the engine
+      # hand the compile `DEP_<NAME>_PREFIX` -- the environment prefix
+      # natively, the catalog's build for the target under `--target` -- and
+      # fold each library's realized identity into the edge's key
+      # (Package-Model.md §"Environment-provided library prefixes"). Without
+      # it `config.nims` falls back to the ambient prefixes, which under
+      # `--target` are the build host's libraries.
+      for appEdge in reprobuildAppsActions:
+        if appEdge.call.packageName == "nim":
+          appendRegisteredActionToolIdentityRefs(appEdge.id,
+            ["sqlite", "libblake3", "xxhash"])
 
     discard collect("apps", reprobuildAppsActions)
 

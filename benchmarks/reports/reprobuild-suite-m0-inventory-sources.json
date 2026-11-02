@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2603,
+    "nimTestBinaries": 2605,
     "pureUnitConsolidationGroups": 77,
     "pureUnitTests": 721,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2643
+    "testEntries": 2645
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1519,7 +1519,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1443,
+      "integration": 1445,
       "platform/destructive": 164,
       "pure unit": 721,
       "unclassified": 297
@@ -1730,9 +1730,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2603,
+    "nimTestBinaryCount": 2605,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2643
+    "testEntryCount": 2645
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24305,6 +24305,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_environment_prefix_provisioning",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": true,
+      "source": "libs/repro_tool_profiles/tests/t_environment_prefix_provisioning.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_n48_tool_profiles_tar_operands",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -38588,6 +38607,24 @@
       "source": "tests/integration/t_env_inheritance_census_is_reported.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_environment_prefix_library",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_environment_prefix_library.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

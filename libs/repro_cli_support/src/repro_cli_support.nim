@@ -1599,6 +1599,16 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
 ## `findExe("git") == ""` by SKIPPING itself into a green, cacheable
 ## pass (`asSucceeded exit=0`, `[SKIPPED]`, `cdHit` on the next run).
 
+proc depPrefixVarName*(selector: string): string =
+  ## `DEP_<NAME>_PREFIX` for a library selector: upper-cased, every
+  ## non-alphanumeric byte an underscore (`sqlite3` -> `DEP_SQLITE3_PREFIX`,
+  ## `nim-shm-queue` -> `DEP_NIM_SHM_QUEUE_PREFIX`). Package-Model.md
+  ## §"Environment-provided library prefixes".
+  result = "DEP_"
+  for ch in selector:
+    result.add(if ch.isAlphaNumeric: ch.toUpperAscii else: '_')
+  result.add("_PREFIX")
+
 proc actionPathEntry(actionPathPrefix: string): string =
   ## The action's `PATH`, and nothing else: the directories the solved
   ## graph resolved THIS EDGE's tool and THIS EDGE's declared
@@ -2504,6 +2514,31 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
 
   dirs.join($PathSep)
 
+proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
+                               refs: openArray[string]): string =
+  ## The realized identity of every library an action names that resolved
+  ## through an `environmentPrefix` arm, as text for the action's cache key
+  ## (Package-Model.md §"Environment-provided library prefixes": "the
+  ## realized identity ... is in addition to the observation, never instead
+  ## of it"). That identity is the prefix path plus the BLAKE3 of each
+  ## declared library and header, recomputed at every resolution, so a
+  ## changed `libsqlite3.so` under an unchanged prefix moves the key even of
+  ## an action whose own reads do not reach the file. Empty when no ref
+  ## resolved that way, which leaves every other action's key as it was.
+  var lines: seq[string] = @[]
+  for refName in refs:
+    for profile in profiles.values:
+      if profile.installMethod != "environment-prefix":
+        continue
+      if profile.executableName != refName and
+          bareToolSelector(profile.packageSelector) != refName:
+        continue
+      let line = refName & "=" & profile.lockIdentity
+      if line notin lines:
+        lines.add(line)
+  lines.sort()
+  lines.join("\n")
+
 proc actionPathEnvEntry*(profiles: openArray[PathOnlyToolProfile];
                          packageName = ""; executableName = "";
                          refs: openArray[string] = []): string =
@@ -3210,7 +3245,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       "reprobuild.localInlineExecAction.v1",
       payload.id,
       node.payload
-    ].join("\n")
+    ].join("\n") & (block:
+      let libraries = environmentPrefixKeyText(profiles,
+        payload.toolIdentityRefs)
+      if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
     # M9.R.14c.4 — inline-exec actions (autotools configure scripts,
     # from-source-custom shell rows, ...) need the same PATH +
     # extraEnv enrichment as typed-tool actions. Without this, an
@@ -3634,7 +3672,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     node.payload,
     digestHex(profile.profileFingerprint),
     invocationPrefix
-  ].join("\n")
+  ].join("\n") & (block:
+    let libraries = environmentPrefixKeyText(profiles,
+      payload.subToolRefs & payload.toolIdentityRefs)
+    if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
   var mergedEnv: seq[string] = @[]
   # The general typed-tool site — the one every `reprobuild.test_execute.*`
   # and `reprobuild.python_test.*` edge goes through, and so the one the
@@ -8570,6 +8611,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedPrefixVars: seq[(string, string)] = @[]
     var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
       let matchByName = actionIdy.executableName == name
@@ -8644,6 +8686,16 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       for path in actionIdy.libraryPathList:
         if path.len > 0 and path notin mergedLibDirs:
           mergedLibDirs.add(path)
+      # A LIBRARY realization (it carries include or library dirs) names its
+      # prefix to the consuming action as `DEP_<NAME>_PREFIX`
+      # (Package-Model.md §"Environment-provided library prefixes"): the
+      # environment arm's prefix natively, the sibling's target mirror under
+      # `--target`, so a recipe's build reads one spelling either way.
+      if actionIdy.cmakePrefixList.len > 0 and
+          (actionIdy.cpathList.len > 0 or actionIdy.libraryPathList.len > 0):
+        let varName = depPrefixVarName(name)
+        if mergedPrefixVars.allIt(it[0] != varName):
+          mergedPrefixVars.add((varName, actionIdy.cmakePrefixList[0]))
     if matched:
       var nimPathDirs: seq[string] = @[]
       {.cast(gcsafe).}:
@@ -8662,6 +8714,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         includeDirs: mergedIncludeDirs,
         libDirs: mergedLibDirs,
         nimPathDirs: nimPathDirs,
+        prefixVars: mergedPrefixVars,
         cachePlatformTag: cacheTag))
     # Cross-Repo-Source-Consumption SC-1 (§4.1) — ADDITIVE cross-repo
     # producer branch. A ref that matched NO host / nix / tarball / scoop /

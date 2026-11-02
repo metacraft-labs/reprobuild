@@ -1125,6 +1125,9 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
                           pathValue = getEnv("PATH")): PathOnlyToolProfile =
   resolvePathOnlyTool(useDef, pathValue, nil)
 
+proc environmentPrefixSignature(useDef: InterfaceToolUse): string
+  ## Defined beside `resolveEnvironmentPrefixTool`.
+
 proc pathOnlyResolutionSignature(useDef: InterfaceToolUse; pathValue: string;
                                  lookup: SidecarPathLookup): string =
   ## WHERE path-mode resolution lands for ``useDef`` under ``pathValue`` —
@@ -1151,6 +1154,14 @@ proc pathOnlyResolutionSignature(useDef: InterfaceToolUse; pathValue: string;
   ## Keep this in lockstep with ``resolvePathOnlyTool``: if that resolver
   ## grows a new way to pick an executable out of ``$PATH``, this must
   ## grow the same branch or the key stops covering it.
+  ##
+  ## A library realized through an ``environmentPrefix`` arm has no
+  ## executable to look up: its answer IS the prefix and the bytes of the
+  ## files that make it the library (Package-Model.md §"Environment-provided
+  ## library prefixes"). Without that here, the tool-identity cache would
+  ## serve the first resolution's hashes after the library was replaced.
+  if useDef.environmentPrefixProvisioning.len > 0:
+    return "environmentPrefix\x1f" & environmentPrefixSignature(useDef)
   let searchList = splitPathList(pathValue)
   let sidecarPath =
     findToolProfileSidecarOnPath(useDef.executableName, searchList, lookup)
@@ -9429,6 +9440,158 @@ proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
     cachePortability: cpLocalOnly)
   refreshProfileIdentity(result)
 
+proc environmentPrefixIgnoredNote(useDef: InterfaceToolUse): string =
+  ## Appended to a `--target` refusal of a library whose environment arm's
+  ## variable is set: that prefix is the build host's and is never used for
+  ## a target (Package-Model.md §"Environment-provided library prefixes").
+  for arm in useDef.environmentPrefixProvisioning:
+    if getEnv(arm.variable).len > 0:
+      return " (" & arm.variable & " is set, but an environment prefix is " &
+        "the build host's library and is never used for --target.)"
+  ""
+
+proc elfMachineIsHost(path: string): tuple[elf: bool, host: bool,
+                                            machine: int] =
+  ## Whether `path` is an ELF object for the build host. A non-ELF file (a
+  ## macOS dylib, a static archive) is not judged here: `elf` is false.
+  var f: File
+  if not open(f, path, fmRead):
+    return (false, false, 0)
+  defer: close(f)
+  var head: array[20, byte]
+  if readBytes(f, head, 0, head.len) < head.len or head[0] != 0x7f'u8 or
+      head[1] != byte('E') or head[2] != byte('L') or head[3] != byte('F'):
+    return (false, false, 0)
+  let machine = int(head[18]) or (int(head[19]) shl 8)
+  let expected =
+    case hostCpuToken()
+    of "x86_64": 62
+    of "aarch64": 183
+    of "arm": 40
+    of "i386": 3
+    else: -1
+  (true, expected < 0 or machine == expected, machine)
+
+proc resolveEnvironmentPrefixTool*(useDef: InterfaceToolUse):
+    PathOnlyToolProfile  ## Defined below.
+
+proc environmentPrefixSignature(useDef: InterfaceToolUse): string =
+  ## What a cache of the resolved identity must key on for a use with an
+  ## `environmentPrefix` arm: under `--target` the arm is not taken, so the
+  ## target is the answer; otherwise the realization identity (prefix and the
+  ## hash of every declared file) or, when the prefix would be refused, the
+  ## refusal -- so a repaired prefix is a different key and the cache never
+  ## hides a refusal.
+  let triple = activeTargetTripleTag()
+  if triple.len > 0:
+    return "ignored-under-target\x1f" & triple
+  try:
+    result = "realized\x1f" & resolveEnvironmentPrefixTool(useDef).lockIdentity
+  except CatchableError as e:
+    result = "refused\x1f" & e.msg
+
+proc resolveEnvironmentPrefixTool*(useDef: InterfaceToolUse):
+    PathOnlyToolProfile =
+  ## Package-Model.md §"Environment-provided library prefixes" (approved by
+  ## Zahary Karadjov, 2026-11-02): the path-mode realization of a library
+  ## from the prefix its arm's variable names. The variable is read here, at
+  ## tool resolution -- never while a recipe is evaluated, where a value
+  ## would be snapshotted with the provider. Every declared library and
+  ## header must exist under the prefix, every ELF library must be the build
+  ## host's, and the BLAKE3 of each is folded into the realization identity,
+  ## recomputed at every resolution: a changed `libsqlite3.so` under an
+  ## unchanged prefix is a different identity. Consuming actions stay
+  ## monitored; this adds identity, it never replaces observation.
+  ## Refusals name the variable or the file, before any action runs.
+  let arm = useDef.environmentPrefixProvisioning[0]
+  let who = "'" & useDef.packageSelector & "'"
+  let prefix = getEnv(arm.variable)
+  if prefix.len == 0:
+    raise newException(OSError, "tool-resolution failed: " & who &
+      " is realized in path mode from the prefix " & arm.variable &
+      " names, and " & arm.variable & " is not set. Set it to the " &
+      "library's installed prefix, or use --tool-provisioning=nix " &
+      "(Package-Model.md, \"Environment-provided library prefixes\").")
+  if not dirExists(prefix):
+    raise newException(OSError, "tool-resolution failed: " & who & ": " &
+      arm.variable & "=" & prefix & " is not a directory")
+  var libDirs: seq[string]
+  var identity = "environment-prefix:" & arm.variable & "=" & prefix
+  for name in arm.libraries:
+    var found = ""
+    var foundRank = high(int)
+    for libDir in [prefix / "lib", prefix / "lib64"]:
+      if not dirExists(libDir):
+        continue
+      for kind, entry in walkDir(libDir):
+        if kind notin {pcFile, pcLinkToFile}:
+          continue
+        let base = extractFilename(entry)
+        # The file the linker would take for `-l<name>`: a shared library
+        # before a static archive, the unversioned name before a versioned
+        # one, then the shorter name.
+        let rank =
+          if base == name & ".so": 0
+          elif base.startsWith(name & ".so."): 1
+          elif base == name & ".dylib": 2
+          elif base.startsWith(name & ".") and base.endsWith(".dylib"): 3
+          elif base == name & ".a": 4
+          else: -1
+        if rank < 0:
+          continue
+        if found.len == 0 or rank < foundRank or
+            (rank == foundRank and base.len < extractFilename(found).len):
+          found = entry
+          foundRank = rank
+      if found.len > 0:
+        if libDir notin libDirs:
+          libDirs.add(libDir)
+        break
+    if found.len == 0:
+      raise newException(OSError, "tool-resolution failed: " & who & ": " &
+        arm.variable & "=" & prefix & " holds no " & name &
+        " (looked for lib/ and lib64/ " & name & ".so*, .dylib, .a)")
+    # Through any symlink to the real file, which is what is hashed and
+    # judged (`expandFilename` also accepts a regular file; `expandSymlink`
+    # does not).
+    let target = expandFilename(found)
+    let check = elfMachineIsHost(target)
+    if check.elf and not check.host:
+      raise newException(OSError, "tool-resolution failed: " & who & ": " &
+        target & " (from " & arm.variable & ") is an ELF object for " &
+        "machine " & $check.machine & ", not this build host (" &
+        hostCpuToken() & "); a library for another architecture is never " &
+        "linked into a native build")
+    identity.add(";" & name & "=" & resolvedExecutableContentDigest(target))
+  var includeDirs: seq[string]
+  for header in arm.headers:
+    let path = prefix / "include" / header
+    if not fileExists(path):
+      raise newException(OSError, "tool-resolution failed: " & who & ": " &
+        arm.variable & "=" & prefix & " holds no include/" & header)
+    if (prefix / "include") notin includeDirs:
+      includeDirs.add(prefix / "include")
+    identity.add(";" & header & "=" & resolvedExecutableContentDigest(path))
+  var pkgConfigDirs: seq[string]
+  for libDir in libDirs:
+    if dirExists(libDir / "pkgconfig"):
+      pkgConfigDirs.add(libDir / "pkgconfig")
+  result = PathOnlyToolProfile(
+    installMethod: "environment-prefix",
+    packageSelector: useDef.packageSelector,
+    packageId: useDef.packageSelector,
+    declaredExecutablePath: useDef.executableName,
+    executableName: useDef.executableName,
+    resolvedExecutablePath: "",
+    lockIdentity: identity,
+    cpathList: includeDirs,
+    libraryPathList: libDirs,
+    pkgConfigSearchList: pkgConfigDirs,
+    cmakePrefixList: @[prefix],
+    adapterStrength: asWeak,
+    cachePortability: cpLocalOnly)
+  refreshProfileIdentity(result)
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string;
                     producerExecutableSelectors:
@@ -9492,7 +9655,8 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
           "' (" & useDef.depKind & " dependency) has no build for --target '" &
           crossTriple & "': build its sibling recipe " & sibling.recipeDir &
           " with `repro build --target=" & crossTriple & "` first. A host " &
-          "build from PATH is not used for a cross build's link inputs.")
+          "build from PATH is not used for a cross build's link inputs." &
+          environmentPrefixIgnoredNote(useDef))
       of rrSiblingMissing:
         # No source recipe to build it for the target. PATH, the tarball
         # arm and the nix arm all realize it for the BUILD HOST (the tool
@@ -9507,7 +9671,13 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
           sibling.attemptedRecipeManifest & ", and PATH, the tarball arm " &
           "and the nix arm realize it for the build host only. Add a " &
           "source recipe that builds it for the target, or move it to " &
-          "`nativeBuildDeps:` if it is a tool that runs on the build host.")
+          "`nativeBuildDeps:` if it is a tool that runs on the build host." &
+          environmentPrefixIgnoredNote(useDef))
+    if useDef.environmentPrefixProvisioning.len > 0:
+      # The environment arm is the path-mode realization of a library
+      # (Package-Model.md §"Environment-provided library prefixes"). It is
+      # never reached under --target: the branch above has answered.
+      return resolveEnvironmentPrefixTool(useDef)
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:

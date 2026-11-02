@@ -1258,7 +1258,8 @@ if not useSystemHashLibs:
 else:
   let blake3Prefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3", "/usr/local/opt/blake3"],
+      [getEnv("DEP_LIBBLAKE3_PREFIX"), getEnv("BLAKE3_PREFIX"),
+       "/opt/homebrew/opt/blake3", "/usr/local/opt/blake3"],
       "include/blake3.h",
       ["libblake3.dylib", "libblake3.so", "libblake3.a"])
     if direct.len > 0: direct
@@ -1279,7 +1280,8 @@ else:
 
   let xxhashPrefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash", "/usr/local/opt/xxhash"],
+      [getEnv("DEP_XXHASH_PREFIX"), getEnv("XXHASH_PREFIX"),
+       "/opt/homebrew/opt/xxhash", "/usr/local/opt/xxhash"],
       "include/xxhash.h",
       ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
     if direct.len > 0: direct
@@ -1319,7 +1321,12 @@ proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
   ""
 
 when not defined(windows) and not defined(macosx):
-  # SQLite link search path. Order: an explicit SQLITE_LIBDIR/SQLITE_PREFIX;
+  # SQLite link search path. Order: an explicit SQLITE_LIBDIR, then the
+  # prefix the engine realized for the `sqlite` dependency
+  # (`DEP_SQLITE_PREFIX`: the environment arm natively, the sibling's target
+  # mirror under `--target`; Package-Model.md §"Environment-provided library
+  # prefixes"), then the ambient SQLITE_PREFIX (a plain `nim c`, the Nix
+  # package build);
   # then, when a Nix toolchain is in play, the dev shell's own sqlite
   # (NIX_LDFLAGS) or a Nix store sqlite built for the target architecture
   # (`nixLibDir` filters the glob); only on a host with no Nix at all the
@@ -1337,7 +1344,8 @@ when not defined(windows) and not defined(macosx):
     getEnv("IN_NIX_SHELL").len > 0 or repoDirExists("/nix/store")
   let sqliteLibDir = block:
     let explicit = firstExistingLibDir(
-      [getEnv("SQLITE_LIBDIR"), getEnv("SQLITE_PREFIX")], sqliteNames)
+      [getEnv("SQLITE_LIBDIR"), getEnv("DEP_SQLITE_PREFIX"),
+       getEnv("SQLITE_PREFIX")], sqliteNames)
     if explicit.len > 0:
       explicit
     elif nixInPlay and nixLdflagsLibDir(sqliteNames).len > 0:
@@ -1381,7 +1389,10 @@ when not defined(windows) and not defined(macosx):
 # We add only the search path — the graph still owns `-lssl -lcrypto` per edge —
 # so this is a no-op for non-ssl edges. Windows keeps its own graph-level path.
 #
-# Resolution order: an explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev
+# Resolution order: the prefix the engine realized for the `openssl`
+# dependency (`DEP_OPENSSL_PREFIX`: under `--target` the catalog's build for
+# the target; Package-Model.md §"Environment-provided library prefixes");
+# then an explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev
 # shell sets the former to its own `pkgs.openssl`); then the dev shell's own
 # `-L` link inputs (`nixLdflagsLibDir`); then the Homebrew prefixes; and only
 # then the `/nix/store` glob. The last two are filtered by target
@@ -1392,9 +1403,23 @@ when not defined(windows) and not defined(macosx):
 # Reprobuild compiles for itself; keep the two in step.
 when not defined(windows):
   let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
+  let depOpensslPrefix = getEnv("DEP_OPENSSL_PREFIX")
   let opensslLibDir = block:
-    var dir = firstExistingLibDir(
-      [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
+    var dir = ""
+    if depOpensslPrefix.len > 0:
+      # Realized by the engine: the catalog's OpenSSL built for the target,
+      # a STATIC library (`no-shared`), so `libssl.a` counts. When the engine
+      # named a prefix and it holds no libssl, the build stops here: falling
+      # back to the ambient host OpenSSL below would link the build host's
+      # library into a target image.
+      dir = firstExistingLibDir([depOpensslPrefix],
+        @opensslNames & @["libssl.a"])
+      if dir.len == 0:
+        quit("config.nims: DEP_OPENSSL_PREFIX=" & depOpensslPrefix &
+          " holds no libssl (looked for lib/ and lib64/ libssl.so, .dylib, .a)")
+    else:
+      dir = firstExistingLibDir(
+        [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
     if dir.len == 0:
       dir = nixLdflagsLibDir(opensslNames)
     if dir.len == 0:
@@ -1412,7 +1437,10 @@ when not defined(windows):
 
   if opensslLibDir.len > 0:
     switch("passL", "-L" & opensslLibDir)
-    switch("passL", "-Wl,-rpath," & opensslLibDir)
+    # No rpath into a build tree for an engine-realized (static, target)
+    # OpenSSL: it would be a builder path inside an installed image.
+    if depOpensslPrefix.len == 0:
+      switch("passL", "-Wl,-rpath," & opensslLibDir)
 
 # macOS: reserve Mach-O header room so the release packaging step can rewrite
 # install names and add an LC_RPATH (@loader_path/../lib) with install_name_tool

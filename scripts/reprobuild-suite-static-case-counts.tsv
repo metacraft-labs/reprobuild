@@ -887,6 +887,7 @@ libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported
 libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim	nim	5
 libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim	nim	6
 libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	3
+libs/repro_tool_profiles/tests/t_environment_prefix_provisioning.nim	nim	11
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_native_and_target_outputs_are_disjoint.nim	nim	12
 libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim	nim	4
@@ -1694,6 +1695,7 @@ tests/integration/t_engine_embeds_the_trees_source_revision.nim	nim	1
 tests/integration/t_entrypoints.nim	nim	1
 tests/integration/t_enumerated_directory_evidence_producers.nim	nim	5
 tests/integration/t_env_inheritance_census_is_reported.nim	nim	5
+tests/integration/t_environment_prefix_library.nim	nim	3
 tests/integration/t_envrc_needs_no_override_env_vars.nim	nim	1
 tests/integration/t_event_log_parser_rejects_malformed.nim	nim	26
 tests/integration/t_event_log_replay_mismatch_rejected.nim	nim	10
