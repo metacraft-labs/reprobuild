@@ -66460,6 +66460,11 @@ proc parseGatewayRefUpdates*(stdinText: string): seq[GatewayRefUpdate] =
       refName: parts[2]))
 
 type
+  GatewayUnverifiedEntry* = object
+    ## One committed-lock entry the public-tier lock gate left unverified.
+    name*: string
+    reason*: string
+
   GatewayGateRecord* = object
     ## POSITIVE evidence that the gate READ a pushed object and decided on its
     ## CONTENTS, for one pushed ref.
@@ -66476,6 +66481,11 @@ type
     depCount*: int       ## locked dependencies parsed out of those bytes
     integrityChecked*: int  ## of those, entries whose integrity was recomputed
                             ## against the received objects
+    notVerified*: seq[GatewayUnverifiedEntry]
+      ## The locked entries the gate did NOT verify, each with why: an entry
+      ## pinning another repository (whose objects never reach this gateway)
+      ## or one with nothing git-native to recompute. Named so an acceptance
+      ## never reads as a claim about content the server could not see.
     trustedCerts*: int   ## certificates read off the pushed notes object and
                          ## found registered-signed (the cert gate's half)
 
@@ -66519,9 +66529,12 @@ type
 #       is tier-isolated (HL-1) carries only ``public`` deps; a dep tagged
 #       anything else (``org`` / ``team`` / ``personal``) is a private-only
 #       reference a public-only cloner cannot reproduce → REJECT.
-#   (b) ``locked-integrity-mismatch`` — recompute each locked entry's multihash
-#       against the RECEIVED content (the pushed objects, already reachable in
-#       the bare) and REJECT on mismatch. Same MO-8/MO-9 integrity model as the
+#   (b) ``locked-integrity-mismatch`` — recompute the multihash of each locked
+#       entry that designates the PUSHED repository against the RECEIVED
+#       content (the pushed objects, already reachable in the bare) and REJECT
+#       on mismatch. An entry pinning another repository is outside what the
+#       server received: it is reported as not verified server-side and left
+#       to the client gate (``gatewayLockEntryScopes``). Same MO-8/MO-9 integrity model as the
 #       client (``verifyLockedIntegrityAtCoordinates``), but sourced from the
 #       BARE repo's object store rather than a working tree.
 #
@@ -66625,32 +66638,82 @@ proc gatewayReadPushedLock*(gitBin, gatewayBareDir, commit: string;
       blobId: blobId)
   GatewayLockRead(status: glrPresent, blob: blob.output, blobId: blobId)
 
+type
+  GatewayLockEntryScope = enum
+    ## Whether a committed lock entry falls inside what the server received
+    ## (§6 Decision 3 and its boundary statement).
+    glePushedRepository
+      ## The entry designates the repository being pushed: its git-native
+      ## integrity is recomputed from the received objects, and a revision the
+      ## push did not deliver is refused.
+    gleOtherRepository
+      ## The entry pins ANOTHER repository. Its objects never reach this
+      ## gateway, so the server has no evidence about it either way; the
+      ## client pre-push gate owns it.
+    gleNotRecomputable
+      ## The entry carries no git-native integrity at a concrete revision
+      ## (no integrity, a ``blake3:`` tree hash, a store/registry pin): there
+      ## is nothing in a bare repository to recompute it from.
+
+proc gatewayLockEntryScopes(ld: LockedDependencies;
+                            pushedRepositoryUrl: string):
+    seq[GatewayLockEntryScope] =
+  ## Classify every entry of a received committed lock, index for index.
+  ##
+  ## The lock says which entry is its own repository: the ``self`` marker
+  ## (``isSelfLockedDep``). That marker is the primary answer, but it is
+  ## written by the pusher, so on its own it would let a lock describe its
+  ## own repository under an UNMARKED entry and have the gateway wave that
+  ## entry through as "another repository". So an entry also designates the
+  ## pushed repository when it names, by repository identity
+  ## (``canonicalRepositoryUrl``, the identity ``repro sync`` uses), the same
+  ## repository as the self entry or as the gateway's own upstream. Every
+  ## other VCS entry pins another repository. (A name cannot alias the self
+  ## entry: the lock parser refuses two entries with one name.)
+  var identities: seq[string]
+  let upstream = canonicalRepositoryUrl(pushedRepositoryUrl)
+  if upstream.len > 0: identities.add(upstream)
+  for d in ld.deps:
+    if not isSelfLockedDep(d): continue
+    let identity = canonicalRepositoryUrl(d.coordinates.url)
+    if identity.len > 0 and identity notin identities:
+      identities.add(identity)
+  for d in ld.deps:
+    let recomputable = d.coordinates.kind == ckVcs and
+      d.integrity.startsWith("git-sha") and d.coordinates.revision.len > 0
+    if not recomputable:
+      result.add(gleNotRecomputable)
+      continue
+    var pushed = isSelfLockedDep(d)
+    if not pushed:
+      let identity = canonicalRepositoryUrl(d.coordinates.url)
+      pushed = identity.len > 0 and identity in identities
+    result.add(if pushed: glePushedRepository else: gleOtherRepository)
+
 proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
-    ld: LockedDependencies;
+    ld: LockedDependencies; scopes: seq[GatewayLockEntryScope];
     received = ReceivedObjectStore()): seq[LockedIntegrityFailure] =
   ## Server-side analogue of ``verifyLockedIntegrityAtCoordinates`` for the
-  ## RECEIVED committed lock: recompute each locked entry's git-native multihash
+  ## RECEIVED committed lock: recompute the git-native multihash of every
+  ## entry that designates the PUSHED repository (``glePushedRepository``)
   ## against the BARE repo's object store (no working tree on the server) and
   ## report a failure on mismatch. For a git dep the integrity IS the object id
   ## at the locked revision, so verification is: the revision's object must be
   ## PRESENT in the received bare AND its self-describing object id must equal
   ## the locked integrity. A tampered ``integrity`` field, or a locked revision
-  ## whose object is absent/unreachable in the received objects, fails.
+  ## of the pushed repository whose object is absent/unreachable in the
+  ## received objects, fails.
   ##
-  ## Only ``git-sha*`` integrities pinned at a concrete revision are verified
-  ## here — those are the entries whose content the SERVER actually received.
-  ## Entries with no integrity, a non-git integrity (a pre-commit ``blake3:``
-  ## tree hash needs a working tree the bare does not have), or no concrete
-  ## revision are left to the client gate; the server makes no false claim about
-  ## content it cannot recompute.
+  ## Entries pinning other repositories are NOT checked here: their objects
+  ## live in those repositories, never in this bare, so "absent" would be a
+  ## claim about content the server cannot see. Nor are entries with no
+  ## git-native integrity at a revision. The caller reports both as not
+  ## verified server-side; the client gate owns them.
   result = @[]
   if gitBin.len == 0: return
   let objFmt = gitObjectFormatOf(gatewayBareDir)
-  for d in ld.deps:
-    if d.integrity.len == 0: continue
-    if d.coordinates.kind != ckVcs: continue
-    if not d.integrity.startsWith("git-sha"): continue
-    if d.coordinates.revision.len == 0: continue
+  for i, d in ld.deps:
+    if scopes[i] != glePushedRepository: continue
     # The locked revision's object must be present among the received objects.
     # ``preserveObjectStore`` keeps the push quarantine visible: without it the
     # objects this push delivered are unreachable and EVERY locked revision
@@ -66664,8 +66727,8 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
         revision: d.coordinates.revision,
         cause: licRevisionUnreachable,
         diagnostic: "locked revision " & d.coordinates.revision &
-          " is not present/reachable in the received objects for '" &
-          (if d.path.len > 0: d.path else: ".") & "'"))
+          " of the pushed repository is not present/reachable in the " &
+          "received objects (entry '" & d.name & "')"))
       continue
     let observed = gitObjectMultihash(objFmt, d.coordinates.revision)
     if observed != d.integrity:
@@ -66677,7 +66740,8 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
 
 proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
                               updates: seq[GatewayRefUpdate];
-                              received = ReceivedObjectStore()):
+                              received = ReceivedObjectStore();
+                              pushedRepositoryUrl = ""):
     GatewayVerifyResult =
   ## HL-5 (§6 Decision 3) — the PUBLIC-TIER lock gate. For each pushed BRANCH
   ## update, read the committed ``repro.lock`` blob from the received commit and
@@ -66694,6 +66758,12 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
   ## may wave through. This holds whether or not ``received`` was supplied —
   ## it is the property that makes the NEXT cause of an unreadable object a
   ## refusal instead of a silent pass.
+  ##
+  ## ``pushedRepositoryUrl`` is the gateway's upstream: the repository this
+  ## push is for. With the lock's own ``self`` marker it decides which
+  ## entries designate the pushed repository (``gatewayLockEntryScopes``), so
+  ## an entry spelling the pushed repository under another name is still
+  ## checked against the received objects.
   result.accepted = true
   let zeroSha = "0000000000000000000000000000000000000000"
   for u in updates:
@@ -66753,28 +66823,40 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
           "remove it from the public lock or publish it under a non-public " &
           "tier's backend"
         return
-    # (b) integrity check against the received objects.
+    # (b) integrity check against the received objects, for the entries that
+    # designate the pushed repository. Entries pinning other repositories, and
+    # entries with nothing git-native to recompute, are reported below as not
+    # verified server-side — never silently counted as checked.
+    let scopes = gatewayLockEntryScopes(ld, pushedRepositoryUrl)
     let failures = gatewayVerifyReceivedLockIntegrity(
-      gitBin, gatewayBareDir, ld, received)
+      gitBin, gatewayBareDir, ld, scopes, received)
     if failures.len > 0:
       let f = failures[0]
       result.accepted = false
       result.diagnostic = u.refName &
         ": locked-integrity-mismatch: '" &
-        (if f.path.len > 0: f.path else: f.name) & "' — " & f.diagnostic
+        (if f.name.len > 0: f.name else: f.path) & "' — " & f.diagnostic
       return
     # ACCEPTED — and say what the acceptance was based on. A verdict that only
     # ever speaks when it refuses is indistinguishable from a verdict that
-    # never looked; this record names the blob the gate read and the counts it
-    # derived from that blob's bytes.
-    var integrityChecked = 0
-    for d in ld.deps:
-      if d.integrity.startsWith("git-sha") and d.coordinates.kind == ckVcs and
-         d.coordinates.revision.len > 0:
-        inc integrityChecked
-    result.gated.add(GatewayGateRecord(refName: u.refName,
-      lockBlobId: read.blobId, depCount: ld.deps.len,
-      integrityChecked: integrityChecked))
+    # never looked; this record names the blob the gate read, the counts it
+    # derived from that blob's bytes, and every entry it did NOT verify.
+    var record = GatewayGateRecord(refName: u.refName,
+      lockBlobId: read.blobId, depCount: ld.deps.len)
+    for i, d in ld.deps:
+      case scopes[i]
+      of glePushedRepository:
+        inc record.integrityChecked
+      of gleOtherRepository:
+        record.notVerified.add(GatewayUnverifiedEntry(name: d.name,
+          reason: "pins another repository, whose objects this push does " &
+            "not carry; the client pre-push gate verifies it"))
+      of gleNotRecomputable:
+        record.notVerified.add(GatewayUnverifiedEntry(name: d.name,
+          reason: "carries no git-native integrity at a concrete revision, " &
+            "so there is nothing in the received objects to recompute; the " &
+            "client pre-push gate verifies it"))
+    result.gated.add(record)
 
 proc gatewayLockAsContentFile(read: GatewayLockRead): ContentFile =
   ## A gateway lock read in the shape ``gateRequirementFromLock`` takes.
@@ -68047,7 +68129,7 @@ proc runGatewayCommand*(args: openArray[string]): int =
     # enforcement point as the cert gate). The server gates ONLY the public
     # tier — team/personal/evidence backends are never read.
     let lockVerdict = gatewayVerifyPublicLock(gitBin, gatewayDir, updates,
-      received)
+      received, cfg.upstreamUrl)
     if lockVerdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & lockVerdict.diagnostic)
     # What the gate READ, on every accepted branch that carried a lock. This
@@ -68058,6 +68140,13 @@ proc runGatewayCommand*(args: openArray[string]): int =
         ": public-tier lock gate: read repro.lock blob " & rec.lockBlobId &
         " deps=" & $rec.depCount &
         " integrity-checked=" & $rec.integrityChecked & " verdict=ACCEPTED")
+      # The boundary, said out loud: every entry the server did not verify is
+      # named, so an acceptance never reads as a claim about content the
+      # gateway could not see (§6 Decision 3).
+      for entry in rec.notVerified:
+        stderr.writeLine("reprobuild gateway: " & rec.refName &
+          ": public-tier lock gate: '" & entry.name &
+          "' NOT verified server-side — it " & entry.reason)
     if not lockVerdict.accepted:
       stderr.writeLine("reprobuild gateway: push REJECTED — the pushed " &
         "public repro.lock failed the server-side public-tier lock gate. " &

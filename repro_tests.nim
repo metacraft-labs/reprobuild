@@ -18912,6 +18912,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_gateway_accepts_a_lock_pinning_other_repositories_and_names_them_unverified.nim",
+    binary: "build/test-bin/t_gateway_accepts_a_lock_pinning_other_repositories_and_names_them_unverified",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let fx = setupSiblingFixture(\"gateway-siblings\")"),
+  TestSpec(
     source: "tests/integration/t_gateway_accepts_one_ref_push_certified_before_push.nim",
     binary: "build/test-bin/t_gateway_accepts_one_ref_push_certified_before_push",
     defines: @[],

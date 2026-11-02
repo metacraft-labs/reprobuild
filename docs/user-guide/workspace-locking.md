@@ -1011,6 +1011,24 @@ make sense.
   the server cannot read them. Their reproducibility is enforced entirely
   by the client `pre-push` gate and by each backend's own access control.
 
+  The integrity recompute covers only the lock entries that designate the
+  **pushed repository itself**: the entry marked `self = "true"`, and any
+  other entry whose URL names the same repository (as the self entry's URL
+  or the gateway's upstream does, compared the way `repro sync` compares
+  repository identities). Such an
+  entry's revision must be among the objects the gateway holds for this
+  repository, so a self pin at a commit the push never delivered is
+  refused. An entry that pins **another repository** (a sibling) is
+  outside what the server received: the push is not refused for it, and
+  the gateway names it in its output, for example
+
+  ```text
+  remote: reprobuild gateway: refs/heads/main: public-tier lock gate: 'lib-b' NOT verified server-side — it pins another repository, whose objects this push does not carry; the client pre-push gate verifies it
+  ```
+
+  Entries with no git-native integrity at a concrete revision are named the
+  same way. Verifying them is the client `pre-push` gate's job.
+
 ## Worked example: a mixed workspace
 
 A single workspace with one public app, one team library, and one
