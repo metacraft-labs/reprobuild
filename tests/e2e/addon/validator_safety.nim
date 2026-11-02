@@ -79,6 +79,18 @@
 ##    near 30 on 32 cores, with no overflow and a validator seen in every
 ##    incarnation, and the gate went red.
 ##
+##    The monitor never drops a creation. inotify names a created
+##    directory but not its inode, so the monitor reads the inode with
+##    `stat` when it drains the event. A monitor that drains late can find
+##    the directory already removed, and then logs `cg <unit> create -`.
+##    The span is kept and paired, and no process can be attributed to it,
+##    so it counts as an incarnation without a validator. A late drain can
+##    also read the inode of a later incarnation of the same unit. That
+##    changes only attribution, which fails closed: a seen process whose
+##    incarnation was never logged is reported. The A12 falsifier
+##    `monitor-sleeps` measured the drop at 58423f4a7e: the removed
+##    renamed unit's span went unlogged.
+##
 ##    The `/proc` scan now serves coverage only: which process ran in which
 ##    incarnation, and the slashing-protection database it held. That is
 ##    decided fail-closed. When the gate stops it, the monitor drains its
@@ -373,10 +385,14 @@ dbs = set()
 def now():
     return time.clock_gettime(time.CLOCK_BOOTTIME)
 def created(u):
+    # The event names the directory, not its inode, so the inode is read
+    # now. A directory already removed again (a monitor that drains late)
+    # is still logged, with `-`: its span is what the overlap check pairs,
+    # and dropping it would hide an overlap.
     try:
         log.write('cg %s create %d\n' % (u, os.stat(SLICE + '/' + u).st_ino))
     except OSError:
-        pass   # already removed again: its delete follows in the queue
+        log.write('cg %s create -\n' % u)
 def drain():
     while True:
         try:

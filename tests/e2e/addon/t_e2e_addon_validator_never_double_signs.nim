@@ -83,8 +83,15 @@
 ##   sleeps for an hour, as a monitor starved of the CPU would): it sees
 ##   no validator in the incarnations created while it sleeps, and its
 ##   last drain on stop still logs those incarnations, so the coverage
-##   step is red. The overlap step stays green, because it never needed
-##   the scan.
+##   step is red. The overlap step stays green: it never needed the scan.
+##   Measured at 58423f4a7e: all 5 logged incarnations had no seen
+##   validator. That run also showed a late drain dropping the span of
+##   an incarnation already removed, which the monitor now logs as
+##   `create -`.
+## - ``REPRO_A12_MUTATION=monitor-sleeps`` together with
+##   ``REPRO_ADDON_MUTATION=exclusive-as-plain-restart``: the overlap must
+##   still be found with the monitor asleep for the whole run. It is
+##   decided on the cgroup events the kernel queued, not on a scan.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``, ``REPRO_ADDON_ENGINE_CLOSURE`` (the
 ## producer's compiler) and ``REPRO_A12_PACKAGES``.

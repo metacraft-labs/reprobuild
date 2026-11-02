@@ -118,6 +118,16 @@ suite "validator_safety":
     let e = cgroupOverlaps(empty)
     check e.len == 1
     check "no validator seen" in e[0]
+    # A creation drained after its directory was removed again (`-`, a
+    # monitor that drained late) is a span like any other: early, it is an
+    # overlap; it holds no attributable process, so coverage counts it.
+    let late = "cg eth-validator.service create 100\n" &
+      "seen 10 1.0 eth-validator.service 100\n" &
+      "cg eth-validator-b.service create -\n" &
+      "cg eth-validator.service delete\n" &
+      "cg eth-validator-b.service delete\n"
+    check cgroupOverlaps(late).len == 1
+    check monitorStats(late).withoutValidator == 1
     # Handed over in order, it is no overlap.
     let emptyInOrder = "cg eth-validator-b.service create 200\n" &
       "cg eth-validator-b.service delete\n" &
