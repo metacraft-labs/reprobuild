@@ -38,7 +38,9 @@
 ##
 ## Where the Python producer comes from: `RDMF_PYTHON_PRODUCER` (the script)
 ## and `RDMF_PYTHON` (an interpreter with the `cryptography` package). When
-## the producer is not available the test says so and passes, unless
+## the producer is not available -- not found, run by an interpreter that
+## cannot import `cryptography`, or too old to render v3 (its `render` lacks
+## an option the cases pass) -- the test says which and passes, unless
 ## `RDMF_CONFORMANCE_REQUIRED=1` -- set by every gate run -- in which case its
 ## absence is a failure (a conformance check that silently checked nothing
 ## would be worse than none).
@@ -187,6 +189,46 @@ if producerPath.len == 0 or not fileExists(producerPath):
     quit(1)
   echo "SKIPPED: no Python RDMF producer (set RDMF_PYTHON_PRODUCER and " &
     "RDMF_PYTHON); the cross-implementation half is NOT checked here"
+  quit(0)
+
+const RenderFlagsUsed = ["--max-age-seconds", "--issued-at",
+  "--rollback-floor", "--closure-digest", "--recipient-pubkey",
+  "--revoked-recipient-keys", "--secret", "--compiled-canonical",
+  "--compiled-actions", "--compile-platform", "--compile-arch",
+  "--compile-host", "--compiler-revision", "--compile-system-mode",
+  "--compile-system-activities", "--profile-compiler"]
+  ## Every `render` option the cases below pass. A producer whose `render`
+  ## lacks one predates the v3 surface this test grades.
+
+proc prerequisiteGap(): string =
+  ## What keeps the found producer from being run here, or "" when nothing
+  ## does: an interpreter without `cryptography` (the producer imports it at
+  ## load), or a producer -- typically a stale sibling checkout of the
+  ## deployment repository -- that does not render v3.
+  let crypto = execCmdEx(quoteShellCommand(
+    @[python, "-I", "-c", "import cryptography"]))
+  if crypto.exitCode != 0:
+    return "the interpreter `" & python & "` cannot import the " &
+      "`cryptography` module (set RDMF_PYTHON to one that can): " &
+      crypto.output.strip.splitLines()[^1]
+  let help = execCmdEx(quoteShellCommand(
+    @[python, "-I", producerPath, "render", "--help"]))
+  if help.exitCode != 0:
+    return "`" & producerPath & " render --help` failed: " & help.output.strip
+  var missing: seq[string]
+  for flag in RenderFlagsUsed:
+    if flag notin help.output: missing.add(flag)
+  if missing.len > 0:
+    return "the producer " & producerPath & " does not support RDMF v3 " &
+      "(its `render` lacks " & missing.join(", ") & "; a stale checkout? " &
+      "set RDMF_PYTHON_PRODUCER)"
+
+let gap = prerequisiteGap()
+if gap.len > 0:
+  if required:
+    echo "FAIL: RDMF_CONFORMANCE_REQUIRED=1 but " & gap
+    quit(1)
+  echo "SKIPPED: " & gap & "; the cross-implementation half is NOT checked here"
   quit(0)
 
 createDir(work)
