@@ -71,13 +71,15 @@ import ./addon_testbed
 import ./agent_e2e_support
 import ./deb_fixture_support
 
-proc fixtureDeb(work, name: string): tuple[path: string; lock: AptClosureLock] =
-  ## A one-file .deb and its closure lock (the closure gates' fixture).
+proc fixtureDeb(work, name, debArch: string):
+    tuple[path: string; lock: AptClosureLock] =
+  ## A one-file .deb and its closure lock (the closure gates' fixture) for
+  ## the guest's architecture.
   result.path = work / (name & ".deb")
   writeDeb(result.path, @[dir("./"), dir("./usr/"), dir("./usr/share/"),
     dir("./usr/share/" & name & "/"),
     ("./usr/share/" & name & "/ok.txt", '0', 0o644, name & "\n", "")])
-  result.lock = fixtureLock(name, result.path)
+  result.lock = fixtureLock(name, result.path, debArch)
 
 const
   Gate = "e2e_addon_unit_syscall_filters_cover_their_traces"
@@ -275,7 +277,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     "/root/a9s && " & repro & " system addon secret put --service a9-trace " &
     "--name tok < /root/a9s; rc=$?; rm -f /root/a9s; exit $rc")
   step("an operator puts the secret", put.exitCode == 0, put.stdout & put.stderr)
-  let deb = fixtureDeb(g.runDir, "a9-trace-closure")
+  let deb = fixtureDeb(g.runDir, "a9-trace-closure", g.base.debArch)
   discard g.run("mkdir -p " & AddOnAptDebCacheDir & " && chmod 0700 " &
                 AddOnAptDebCacheDir)
   g.copyTo(deb.path, AddOnAptDebCacheDir & "/" & deb.lock.debs[0].sha256 &

@@ -60,15 +60,17 @@ proc writeDeb*(path: string; entries: seq[TarEntry]) =
 
 proc dir*(name: string): TarEntry = (name, '5', 0o755, "", "")
 
-proc fixtureLock*(name, debPath: string): AptClosureLock =
-  ## A one-member closure lock pinning ``debPath`` by size and SHA-256.
+proc fixtureLock*(name, debPath: string; debArch = "amd64"): AptClosureLock =
+  ## A one-member closure lock pinning ``debPath`` by size and SHA-256, for
+  ## a host of ``debArch`` (the add-on refuses a lock for another
+  ## architecture before it reads a member).
   AptClosureLock(
     archive: "http://fixture.invalid/debian", suite: "fixture",
-    components: @["main"], architecture: "amd64", snapshot: "",
+    components: @["main"], architecture: debArch, snapshot: "",
     inReleaseSha256: "c".repeat(64),
-    indexes: @[AptIndexDigest(path: "main/binary-amd64/Packages.xz",
+    indexes: @[AptIndexDigest(path: "main/binary-" & debArch & "/Packages.xz",
                               sha256: "d".repeat(64))],
     roots: @[name],
-    debs: @[AptLockedDeb(name: name, version: "1.0-1", architecture: "amd64",
-      filename: "pool/main/" & name & "_1.0-1_amd64.deb",
+    debs: @[AptLockedDeb(name: name, version: "1.0-1", architecture: debArch,
+      filename: "pool/main/" & name & "_1.0-1_" & debArch & ".deb",
       size: getFileSize(debPath), sha256: sha256OfFile(debPath))])
