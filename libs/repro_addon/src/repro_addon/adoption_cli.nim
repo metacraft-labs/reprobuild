@@ -18,6 +18,7 @@
 
 import std/[os, strutils]
 
+import repro_core/source_root
 import repro_infra
 
 import ./addon_import
@@ -29,7 +30,7 @@ const
 
   backup --profile <file> --out <dir>
       Back up the profile's state set (spec §11.1): refuses unless every
-      unit of the set is stopped, holds each with a runtime mask until the
+      unit of the set is stopped, holds each (a runtime drop-in) until the
       next boot, archives each carried directory and writes the manifest.
   release --profile <file>
       Lift the hold of a backup (an abandoned conversion).
@@ -197,7 +198,9 @@ proc runStateCli*(args: seq[string]): int =
       stdout.write(treeDigest(positional[0]) & "\n")
       0
     of "unit":
-      stdout.write(stateRestoreUnitText(getAppFilename()))
+      # The path that re-enters this binary (a launcher's, when the engine
+      # runs under one), not the loader `getAppFilename` may name.
+      stdout.write(stateRestoreUnitText(publicCliImagePath()))
       0
     else:
       raise newException(ValueError, "unknown state command " & verb)

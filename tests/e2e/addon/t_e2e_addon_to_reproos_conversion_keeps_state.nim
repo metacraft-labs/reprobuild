@@ -94,6 +94,9 @@ const
               "eth-beacon.service", DefaultValidatorUnit]
   RestoreUnit = "repro-state-restore.service"
 
+type MutationStop = object of CatchableError
+  ## Raised by a gate's step under a mutation once a step is red.
+
 proc gateMutation(): string = getEnv("REPRO_A13_MUTATION")
 
 proc hexKey(k: openArray[byte]): string =
@@ -121,7 +124,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var fails: seq[string]
   proc step(name: string; ok: bool; detail: string) =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
-    if not ok: fails.add(b.name & ": " & name & ": " & detail)
+    if not ok:
+      fails.add(b.name & ": " & name & ": " & detail)
+      # Under a falsifying mutation the first red step is the verdict;
+      # the rest of the run would only spend a VM slot.
+      if mutation().len > 0 or gateMutation().len > 0:
+        raise newException(MutationStop, name)
   try:
     let engine = engineFromEnv()
     record["engine"] = %engine
@@ -211,10 +219,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
           var bytes = readFile(a)
           bytes[bytes.len div 2] = char((ord(bytes[bytes.len div 2]) + 1) mod 256)
           writeFile(a, bytes)
-    # The "conversion": the add-on host's root disk is gone.
+    # The "conversion": the add-on host is powered off and its root disk
+    # is never booted again (its run directory, which also holds the
+    # binary cache's store, is removed with the rest at the end).
     old.shutdown()
-    old.destroy()
-    old = nil
     if fails.len > 0: return fails
 
     # ------------------------------------------------------------------
@@ -333,6 +341,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          $latest & ", add-on epoch " & $oldEpoch)
     record["history"] = %*{"keys": earliest.len, "latestTarget": latest,
                            "addOnEpoch": oldEpoch, "conflicts": cs.len}
+  except MutationStop as e:
+    steps.add(%*{"step": "stopped at the first red step under the mutation",
+                 "ok": false, "detail": e.msg})
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

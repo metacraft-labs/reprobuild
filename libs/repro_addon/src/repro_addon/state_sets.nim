@@ -18,8 +18,9 @@
 ## - ``backupStateSet`` runs on the add-on host before the conversion. It
 ##   refuses unless every unit of the set is confirmed stopped by its
 ##   control group (``unitAliveness``, which fails closed), holds each one
-##   with a runtime mask so that neither a timer, a socket, a dependency
-##   nor an operator's ``start`` runs it again before the conversion, and
+##   with a runtime drop-in whose assertion fails (``holdUnits``), so that
+##   neither a timer, a socket, a dependency nor an operator's ``start``
+##   runs it again before the conversion, and
 ##   writes one archive per carried directory plus a manifest naming each
 ##   directory's digest, its archive's SHA-256 and its units. A kept
 ##   directory gets a digest and no archive.
@@ -45,6 +46,8 @@
 
 import std/[algorithm, json, os, posix, sequtils, sets, strutils, tables, times]
 
+import repro_elevation
+import repro_elevation/nofollow_write
 import repro_infra
 
 import ./fingerprint
@@ -244,24 +247,69 @@ proc requireStopped(units: seq[string]; alive: AlivenessFn; what: string) =
       " not confirmed stopped; stop " &
       (if running.len == 1: "it" else: "them") & " first")
 
+const
+  HoldDropInName* = "50-repro-state-hold.conf"
+    ## The runtime drop-in that holds a unit of a backed-up state set.
+  RuntimeUnitDir = "/run/systemd/system"
+  HoldDropInText* = "# Written by `repro system addon state backup`: the\n" &
+    "# unit's state is backed up for a conversion; it must not run again\n" &
+    "# before it (spec §11.1). Gone at the next boot; `repro system addon\n" &
+    "# state release --profile <file>` lifts it now.\n" &
+    "[Unit]\nAssertPathExists=/run/repro/state-hold/never\n"
+    ## Why an assertion and not a mask: a runtime mask
+    ## (``systemctl mask --runtime``, a link in ``/run/systemd/system``) does
+    ## not hide a unit whose file is in ``/etc/systemd/system``, which takes
+    ## precedence over ``/run`` -- and that is where every add-on unit lives
+    ## (measured on Debian 13: the masked unit still started). A drop-in in
+    ## ``/run`` applies to a unit wherever its file is, and a failing
+    ## ``AssertPathExists=`` fails every start -- by an operator, a timer, a
+    ## socket or a dependency -- before anything is executed
+    ## (https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#AssertArchitecture=).
+
+proc holdDropInPath*(unit: string): string =
+  RuntimeUnitDir / (unit & ".d") / HoldDropInName
+
 proc holdUnits*(units: seq[string]) =
-  ## A runtime mask on each unit: until the next boot (which, for a
-  ## conversion, is the converted system's) nothing starts it. Released by
-  ## ``releaseUnits``.
+  ## Hold each unit until the next boot (which, for a conversion, is the
+  ## converted system's): a runtime drop-in whose assertion fails, so no
+  ## start of it runs anything. Checked after the reload: a unit whose
+  ## loaded drop-ins do not include the hold refuses (fail closed).
+  ## Released by ``releaseUnits``.
   when mutated("state-units-not-held"):
     return
   for u in units:
-    let r = runSystemctl(["mask", "--runtime", "--", u])
-    if r.exitCode != 0:
-      raise newException(StateSetError, "cannot hold " & u &
-        " (systemctl mask --runtime): " & r.output.strip())
+    let err = systemdUnitNameError("held unit", u)
+    if err.len > 0:
+      raise newException(StateSetError, err)
+    try:
+      createDirsNoFollow(RuntimeUnitDir / (u & ".d"))
+      writeFileNoFollow(holdDropInPath(u), HoldDropInText, 0o644)
+    except CatchableError as e:
+      raise newException(StateSetError, "cannot hold " & u & ": " & e.msg)
+  let r = runSystemctl(["daemon-reload"])
+  if r.exitCode != 0:
+    raise newException(StateSetError, "systemctl daemon-reload failed: " &
+      r.output.strip())
+  for u in units:
+    let s = runSystemctl(["show", "-p", "DropInPaths", "--value", "--", u])
+    if s.exitCode != 0 or holdDropInPath(u) notin s.output.splitWhitespace():
+      raise newException(StateSetError, "the hold of " & u & " is not " &
+        "loaded (DropInPaths: " & s.output.strip() & ")")
 
 proc releaseUnits*(units: seq[string]) =
+  ## Lift the hold of ``holdUnits`` (an abandoned conversion).
   for u in units:
-    let r = runSystemctl(["unmask", "--runtime", "--", u])
-    if r.exitCode != 0:
-      raise newException(StateSetError, "cannot release " & u &
-        " (systemctl unmask --runtime): " & r.output.strip())
+    let p = holdDropInPath(u)
+    if fileExists(p) or symlinkExists(p):
+      try:
+        discard removeLeafNoFollow(p)
+        discard removeEmptyDirNoFollow(RuntimeUnitDir / (u & ".d"))
+      except CatchableError as e:
+        raise newException(StateSetError, "cannot release " & u & ": " & e.msg)
+  let r = runSystemctl(["daemon-reload"])
+  if r.exitCode != 0:
+    raise newException(StateSetError, "systemctl daemon-reload failed: " &
+      r.output.strip())
 
 proc allUnits(entries: openArray[StateSetEntry]): seq[string] =
   for e in entries:

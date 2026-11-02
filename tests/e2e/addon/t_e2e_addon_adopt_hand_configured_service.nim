@@ -114,6 +114,9 @@ WantedBy=multi-user.target
   VwTmpfiles* = "d /var/lib/vaultwarden 0700 vaultwarden vaultwarden -\n"
   VwState* = "/var/lib/vaultwarden"
 
+type MutationStop = object of CatchableError
+  ## Raised by a gate's step under a mutation once a step is red.
+
 proc gateMutation*(): string = getEnv("REPRO_A13_MUTATION")
 
 proc buildAlertmanager*(g: Guest; step: StepFn) =
@@ -304,7 +307,12 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
   var fails: seq[string]
   proc step(name: string; ok: bool; detail: string) =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
-    if not ok: fails.add(b.name & ": " & name & ": " & detail)
+    if not ok:
+      fails.add(b.name & ": " & name & ": " & detail)
+      # Under a falsifying mutation the first red step is the verdict;
+      # the rest of the run would only spend a VM slot.
+      if mutation().len > 0 or gateMutation().len > 0:
+        raise newException(MutationStop, name)
   try:
     g = newMirroredGuest(b, m, diskGiB = 10)
     g.boot()
@@ -348,12 +356,18 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let skeleton = mergeSkeletons([skAm.stdout, skVw.stdout])
     let plan = g.planProfile(repro, "skeleton", skeleton)
     let verdicts = planVerdicts(plan.stdout)
+    var declared = initHashSet[string]()
+    for r in parseSystemProfile(skeleton).resources: declared.incl(r.address)
     var nonAdopt: seq[string]
     var adopted = initHashSet[string]()
     for (v, a) in verdicts:
-      if a.len == 0: continue        # the add-on's own objects
-      if v != "adopt": nonAdopt.add(v & " " & a)
-      else: adopted.incl(a)
+      if a in declared:
+        if v != "adopt": nonAdopt.add(v & " " & a)
+        else: adopted.incl(a)
+      elif v != "no-op":
+        # The add-on's own objects (generation 0) are planned too; an
+        # adoption must leave every one of them as it is.
+        nonAdopt.add(v & " " & a)
     let wantAdopted = ["systemUnit:alertmanager.service",
       "systemFile:/etc/default/alertmanager",
       "systemFile:/etc/alertmanager/alertmanager.yml",
@@ -458,6 +472,9 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     step("after the rollback the state directories are unchanged",
          g.stateDigest(repro, AmState) == d0Am and
          g.stateDigest(repro, VwState) == d0Vw, "")
+  except MutationStop as e:
+    steps.add(%*{"step": "stopped at the first red step under the mutation",
+                 "ok": false, "detail": e.msg})
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

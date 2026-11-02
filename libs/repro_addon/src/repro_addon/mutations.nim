@@ -408,6 +408,20 @@
 ##                                            or the re-assert materialised
 ##                                            is try-restarted even when it
 ##                                            has failed (left failed)
+## ``state-units-not-checked``                a state backup or restore runs
+##                                            whatever its units' control
+##                                            groups say
+## ``state-units-not-held``                   a state backup holds none of
+##                                            its units (one can start again
+##                                            before the conversion)
+## ``state-archive-unchecked``                a restore reads an archive
+##                                            whose SHA-256 it did not check
+## ``state-restore-unverified``               a restore renames a staged
+##                                            tree into place unchecked
+## ``apply-ignores-carried-state``            an apply starts a unit whose
+##                                            carried state is not restored
+## ``import-writes-skeleton``                 the import keeps a copy of
+##                                            its skeleton under ``/etc``
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
