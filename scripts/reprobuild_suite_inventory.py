@@ -242,6 +242,11 @@ COMPILER_PATTERNS = [
     ("make", re.compile(r"(?<![\w-])make(?:\s|[\"',\]]|$)")),
     ("ninja", re.compile(r"(?<![\w-])ninja(?:\s|[\"',\]]|$)")),
     ("dynamic-c-compiler", re.compile(r"\b(?:startProcess|execProcess)\(\s*(?:ccPath|crossGcc)\b")),
+    # The add-on gates' static (musl) C toolchain for a guest architecture,
+    # resolved by ``tests/e2e/addon/addon_testbed.staticCc(debArch)`` and run
+    # by the gate itself (the exec probe's compile, the trace gate's
+    # ``<sys/syscall.h>`` preprocessor read).
+    ("static-c-compiler", re.compile(r"\bstaticCc\(")),
     ("wix-candle", re.compile(r"\bquoteShell\(candle\)")),
     ("wix-light", re.compile(r"\bquoteShell\(light\)")),
     ("inno-iscc", re.compile(r"\bquoteShell\(iscc\)")),

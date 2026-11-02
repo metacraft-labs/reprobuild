@@ -187,6 +187,27 @@ proc reproRoot*(): string =
   result = getEnv("REPROBUILD_SOURCE_ROOT")
   if result.len == 0: result = getCurrentDir()
 
+proc staticCc*(debArch: string): string =
+  ## The static (musl) gcc for a guest of ``debArch``: the same nixpkgs
+  ## attribute ``scripts/build_addon_static.sh`` builds the add-on with, so a
+  ## fixture binary and the add-on target the same machine.
+  let attr = case debArch
+    of "amd64": "pkgsStatic"
+    of "arm64": "pkgsCross.aarch64-multiplatform.pkgsStatic"
+    of "armhf": "pkgsCross.armv7l-hf-multiplatform.pkgsStatic"
+    else: raise newException(TestBedError, "no static toolchain for " & debArch)
+  let (o, c) = execCmdEx("nix build --no-link --print-out-paths " &
+    "--inputs-from " & quoteShell(reproRoot()) & " nixpkgs#" & attr &
+    ".stdenv.cc")
+  if c != 0:
+    raise newException(TestBedError, "building the static toolchain for " &
+      debArch & " failed: " & o)
+  for p in o.splitLines():
+    if p.strip().len == 0: continue
+    for g in walkFiles(p.strip() / "bin" / "*-gcc"):
+      return g
+  raise newException(TestBedError, "no gcc in the static toolchain: " & o)
+
 proc cacheDir*(): string =
   result = getEnv("REPRO_ADDON_TESTBED_CACHE")
   if result.len == 0:

@@ -33,8 +33,9 @@
 ## line and the memfd copy runs. Each is red.
 ##
 ## Needs a static C toolchain on the test host: the gate builds the probe
-## with this flake's ``pkgsStatic`` gcc (musl), as
-## ``scripts/build_addon_static.sh`` builds the add-on.
+## for the guest's architecture with this flake's static (musl) gcc for it,
+## as ``scripts/build_addon_static.sh`` builds the add-on, and publishes it
+## under the cache platform that architecture's add-on keys by.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -62,21 +63,13 @@ const
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
 
-proc staticCc(): string =
-  ## This flake's pkgsStatic gcc (musl).
-  let (o, c) = execCmdEx("nix build --no-link --print-out-paths " &
-    "--inputs-from " & quoteShell(reproRoot()) & " nixpkgs#pkgsStatic.stdenv.cc")
-  doAssert c == 0, "building the static toolchain failed: " & o
-  for p in o.splitLines():
-    for g in walkFiles(p.strip() / "bin" / "*-gcc"):
-      return g
-  raise newException(TestBedError, "no gcc in the static toolchain: " & o)
-
-proc buildProbe(dest: string) =
+proc buildProbe(dest, debArch: string) =
+  ## The probe for the guest's architecture, by the static toolchain the
+  ## add-on itself is built with (``addon_testbed.staticCc``).
   let src = reproRoot() / "tests" / "e2e" / "addon" / "fixtures" /
             "exec_probe" / "a9_exec_probe.c"
-  let (o, c) = execCmdEx(quoteShellCommand([staticCc(), "-static", "-O2",
-    "-o", dest, src]))
+  let (o, c) = execCmdEx(quoteShellCommand([staticCc(debArch), "-static",
+    "-O2", "-o", dest, src]))
   doAssert c == 0, "compiling the probe failed: " & o
 
 proc probeAction(): ProfileBuildAction =
@@ -110,9 +103,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let anchored = peerAuth.generateKeypair()
   let tree = g.runDir / "probe-tree"
   createDir(tree / "bin")
-  buildProbe(tree / "bin" / "a9-exec-probe")
+  buildProbe(tree / "bin" / "a9-exec-probe", g.base.debArch)
   let a = probeAction()
-  let digest = cache.publishTree(anchored, a, tree)
+  let digest = cache.publishTree(anchored, a, tree,
+                                 guestPlatformFor(g.base.debArch))
   let bs = g.bootstrapWithAgent(repro, step, cacheUrl = cache.guestUrl,
     cachePublishers = @[hexKey(anchored.publicKey)])
   producer = bs.producer

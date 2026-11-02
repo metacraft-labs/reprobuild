@@ -47,13 +47,14 @@
 ## the apply unit is killed at its first store write or ``fchown``: red.
 ##
 ## Vacuity guards: a transient unit that logs ``uname`` produces a record
-## naming syscall 63 (``uname`` on x86_64), and one whose filter denies
+## naming ``uname``'s number (63 on x86_64, 122 on ARM EABI), and one whose filter denies
 ## ``uname`` is killed with a record naming it, so both paths reach the
 ## kernel log on the base. After the work the drop-ins are removed and one
 ## more tick runs under the units as shipped and must apply.
 ##
-## Runs on amd64 bases (the record carries the syscall number; the names
-## come from this host's x86_64 ``<sys/syscall.h>``).
+## Runs on every base architecture: the kernel's record carries the syscall
+## number, and the names come from the ``<sys/syscall.h>`` of the static
+## toolchain for the guest's architecture.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -88,15 +89,30 @@ const
 
 proc baselineMode(): bool = getEnv("REPRO_ADDON_SYSCALL_BASELINE") == "1"
 
-proc syscallNames(): Table[int, string] =
-  ## x86_64 syscall numbers to names, from this host's C headers.
-  let (o, c) = execCmdEx("echo '#include <sys/syscall.h>' | cc -E -dM -")
+proc syscallNames(debArch: string): Table[int, string] =
+  ## The guest architecture's syscall numbers to names, from the
+  ## ``<sys/syscall.h>`` of the static toolchain the add-on is built with for
+  ## it (``addon_testbed.staticCc``): x86_64's for amd64, ARM EABI's for
+  ## armhf. ARM's private calls (``__ARM_NR_set_tls`` and its kin, spelled
+  ## in hexadecimal) are named too: the kernel logs them by number.
+  let (o, c) = execCmdEx("echo '#include <sys/syscall.h>' | " &
+    quoteShell(staticCc(debArch)) & " -E -dM -")
   doAssert c == 0, "cannot read <sys/syscall.h>: " & o
   for l in o.splitLines():
     let f = l.splitWhitespace()
-    if f.len == 3 and f[0] == "#define" and f[1].startsWith("__NR_"):
-      try: result[parseInt(f[2])] = f[1]["__NR_".len .. ^1]
-      except ValueError: discard
+    if f.len != 3 or f[0] != "#define": continue
+    for prefix in ["__NR_", "__ARM_NR_"]:
+      if f[1].startsWith(prefix):
+        try:
+          let n = if f[2].startsWith("0x"): parseHexInt(f[2])
+                  else: parseInt(f[2])
+          if n notin result: result[n] = f[1][prefix.len .. ^1]
+        except ValueError: discard
+
+proc numberOf(names: Table[int, string]; name: string): int =
+  for n, s in names:
+    if s == name: return n
+  raise newException(TestBedError, "no syscall number for " & name)
 
 proc parseGroups(text: string): Table[string, seq[string]] =
   ## ``systemd-analyze syscall-filter`` output: a ``@group`` line, then its
@@ -182,8 +198,9 @@ proc auditRecords(g: Guest; since: float):
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
-  doAssert g.base.debArch == "amd64", "this gate reads x86_64 syscall numbers"
-  let names = syscallNames()
+  let names = syscallNames(g.base.debArch)
+  let unameNr = names.numberOf("uname")
+  record["unameSyscall"] = %unameNr
   let groups = parseGroups(g.exec("systemd-analyze syscall-filter " &
                                   "--no-pager").stdout)
   var known: HashSet[string]
@@ -196,14 +213,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                  "/bin/uname")
   var sawUname = false
   for r in g.auditRecords(t0 - 1):
-    if r.nr == 63: sawUname = true
+    if r.nr == unameNr: sawUname = true
   step("vacuity guard: a logged uname reaches the kernel log", sawUname, "")
   let t1 = g.now()
   discard g.exec("systemd-run --wait --quiet -p SystemCallFilter=~uname " &
                  "/bin/uname")
   var sawKill = false
   for r in g.auditRecords(t1 - 1):
-    if r.nr == 63 and r.sig == 31: sawKill = true
+    if r.nr == unameNr and r.sig == 31: sawKill = true
   step("vacuity guard: a denied uname is killed and logged", sawKill, "")
 
   var filters = newJObject()
@@ -331,7 +348,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   var observed = initTable[string, HashSet[string]]()
   var unattributed: seq[string]
   for r in g.auditRecords(t1 + 2):
-    if r.nr == 63 and r.comm == "uname": continue   # the vacuity guards
+    if r.nr == unameNr and r.comm == "uname": continue   # the vacuity guards
     # Check mode counts kills; derive mode counts every logged call.
     if not baselineMode() and r.sig == 0: continue
     let name = names.getOrDefault(r.nr, "#" & $r.nr)

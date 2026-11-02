@@ -2321,12 +2321,12 @@
           "executedVariables": [
             "src"
           ],
-          "line": 68,
+          "line": 71,
           "path": "tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim",
           "patterns": [
-            "cc"
+            "static-c-compiler"
           ],
-          "snippet": "\"--inputs-from \" & quoteShell(reproRoot()) & \" nixpkgs#pkgsStatic.stdenv.cc\")"
+          "snippet": "let (o, c) = execCmdEx(quoteShellCommand([staticCc(debArch), \"-static\","
         }
       ],
       "source": "tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim"
@@ -2339,12 +2339,12 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [],
-          "line": 93,
+          "line": 99,
           "path": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim",
           "patterns": [
-            "cc"
+            "static-c-compiler"
           ],
-          "snippet": "let (o, c) = execCmdEx(\"echo '#include <sys/syscall.h>' | cc -E -dM -\")"
+          "snippet": "quoteShell(staticCc(debArch)) & \" -E -dM -\")"
         }
       ],
       "source": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim"
