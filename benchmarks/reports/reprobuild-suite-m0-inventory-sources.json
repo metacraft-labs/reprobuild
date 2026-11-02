@@ -2339,7 +2339,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [],
-          "line": 56,
+          "line": 68,
           "path": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim",
           "patterns": [
             "cc"

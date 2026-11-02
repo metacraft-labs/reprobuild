@@ -3,29 +3,41 @@
 ##
 ## CONF-3: a unit's syscall filter is derived from its observed trace, not
 ## guessed, and the profiling configuration is kept so it can be re-run.
-## This gate is that configuration. On a bootstrapped add-on host it gives
-## each of the add-on's own service units -- the deploy agent's fetch and
-## apply units, the re-assert and the secrets unit -- a drop-in that lifts
-## its ``SystemCallFilter=`` and logs, through ``SystemCallLog=``, every
-## system call the filter would NOT allow (systemd.exec(5); the kernel
-## writes one ``type=1326`` audit record per logged call). It then drives
-## the units through their work -- deploy-agent ticks that apply and change
-## files, a unit, a system account, tmpfiles and sysctl fragments, a
-## re-assertion and a boot secrets run -- attributes every record to the
-## unit whose run it fell in, and requires none: the trace of every unit is
-## inside its committed filter.
+## This gate is that configuration, in two modes.
 ##
-## ``REPRO_ADDON_SYSCALL_BASELINE=1`` profiles against the deployment
-## policy's recipe instead (``@system-service``, then ``~@privileged
-## ~@resources ~@obsolete``): the calls it logs are what each unit's filter
-## had to add back, which is how ``PrivilegedSyscallFilter`` and
-## ``FetchSyscallFilter`` in ``generation0.nim`` were derived. The gate then
-## records the set and does not fail on it.
+## **Check (the default).** On a bootstrapped add-on host each of the
+## add-on's own service units -- the deploy agent's fetch and apply units,
+## the re-assert and the secrets unit -- keeps its committed
+## ``SystemCallFilter=``, and a drop-in turns the filter's action from
+## failing the call (``SystemCallErrorNumber=EPERM``, what the units ship
+## with) to killing the process (``SystemCallErrorNumber=`` reset;
+## systemd.exec(5)). The kernel writes an audit record for every kill
+## (``type=1326 ... sig=31``). The gate drives the units through their work
+## -- deploy-agent ticks that apply and change files, a unit, a system
+## account, tmpfiles and sysctl fragments, a re-assertion and a boot
+## secrets run -- and requires every tick and run to succeed and no kill
+## record to appear: the trace of every unit is inside its committed
+## filter. The kill makes a call outside the filter both fail the work and
+## leave a record naming it, where EPERM could be swallowed by a caller.
 ##
-## Vacuity guard: a transient unit that logs ``uname`` produces a record
-## naming syscall 63 (``uname`` on x86_64), so the log path works on the
-## base. After profiling the drop-ins are removed and one more tick runs
-## under the enforced filters and must apply.
+## **Derive** (``REPRO_ADDON_SYSCALL_BASELINE=1``). The drop-in lifts the
+## filter instead and logs, through ``SystemCallLog=``, every call outside
+## the deployment policy's recipe (``@system-service``, then
+## ``~@privileged ~@resources ~@obsolete``). What it logs, attributed to the
+## unit whose run it fell in, is what each unit's filter had to add back:
+## how ``PrivilegedSyscallFilter`` and ``FetchSyscallFilter`` in
+## ``generation0.nim`` were derived. The record lists it and the gate does
+## not fail on it. The log also sees the calls systemd's own executor makes
+## after installing the logging filter (``capset`` when it applies the
+## capability set), which an enforced filter always allows; and it is
+## attributed by journal time, so a record received late can land in the
+## next unit's window. The check above has neither weakness.
+##
+## Vacuity guards: a transient unit that logs ``uname`` produces a record
+## naming syscall 63 (``uname`` on x86_64), and one whose filter denies
+## ``uname`` is killed with a record naming it, so both paths reach the
+## kernel log on the base. After the work the drop-ins are removed and one
+## more tick runs under the units as shipped and must apply.
 ##
 ## Runs on amd64 bases (the record carries the syscall number; the names
 ## come from this host's x86_64 ``<sys/syscall.h>``).
@@ -102,15 +114,23 @@ proc unitFilter(g: Guest; unit: string): seq[string] =
       result.add(l["SystemCallFilter=".len .. ^1].strip())
 
 proc profileDropIn(g: Guest; unit: string; logged: seq[string]) =
+  ## Derive mode: no filter, every call in ``logged`` logged.
   let dir = "/run/systemd/system/" & unit & ".d"
   discard g.run("mkdir -p " & dir & " && cat > " & dir & "/" & DropInName &
     " <<'A9EOF'\n[Service]\nSystemCallFilter=\nSystemCallLog=" &
     logged.join(" ") & "\nA9EOF\n")
 
+proc killDropIn(g: Guest; unit: string) =
+  ## Check mode: the committed filter, a call outside it kills (and so is
+  ## always logged by the kernel).
+  let dir = "/run/systemd/system/" & unit & ".d"
+  discard g.run("mkdir -p " & dir & " && printf '[Service]\\n" &
+    "SystemCallErrorNumber=\\n' > " & dir & "/" & DropInName)
+
 proc now(g: Guest): float = parseFloat(g.run("date +%s.%N").strip())
 
 proc auditRecords(g: Guest; since: float):
-    seq[tuple[at: float; nr: int; comm: string]] =
+    seq[tuple[at: float; nr: int; comm: string; sig: int]] =
   ## Every seccomp audit record since ``since``. Without auditd the kernel
   ## prints them (``audit: type=1326 ...``, the kernel transport); where
   ## journald reads the audit socket they arrive as ``SECCOMP ...`` on the
@@ -121,7 +141,7 @@ proc auditRecords(g: Guest; since: float):
   for l in text.splitLines():
     let f = l.splitWhitespace()
     if f.len < 2 or "syscall=" notin l: continue
-    var rec: tuple[at: float; nr: int; comm: string]
+    var rec: tuple[at: float; nr: int; comm: string; sig: int]
     try: rec.at = parseFloat(f[0])
     except ValueError: continue
     for tok in f:
@@ -130,6 +150,9 @@ proc auditRecords(g: Guest; since: float):
         except ValueError: rec.nr = -1
       elif tok.startsWith("comm="):
         rec.comm = tok["comm=".len .. ^1].strip(chars = {'"'})
+      elif tok.startsWith("sig="):
+        try: rec.sig = parseInt(tok["sig=".len .. ^1])
+        except ValueError: rec.sig = -1
     result.add(rec)
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
@@ -150,6 +173,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   for r in g.auditRecords(t0 - 1):
     if r.nr == 63: sawUname = true
   step("vacuity guard: a logged uname reaches the kernel log", sawUname, "")
+  let t1 = g.now()
+  discard g.exec("systemd-run --wait --quiet -p SystemCallFilter=~uname " &
+                 "/bin/uname")
+  var sawKill = false
+  for r in g.auditRecords(t1 - 1):
+    if r.nr == 63 and r.sig == 31: sawKill = true
+  step("vacuity guard: a denied uname is killed and logged", sawKill, "")
 
   var filters = newJObject()
   for u in Units:
@@ -159,11 +189,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                                     else: committed)
     step(u & " has a committed allow-list filter", committed.len > 0 and
          not committed[0].startsWith("~"), $committed)
-    var logged: seq[string]
-    for s in known:
-      if s notin allowed: logged.add(s)
-    logged.sort()
-    g.profileDropIn(u, logged)
+    if baselineMode():
+      var logged: seq[string]
+      for s in known:
+        if s notin allowed: logged.add(s)
+      logged.sort()
+      g.profileDropIn(u, logged)
+    else:
+      g.killDropIn(u)
   record["committedFilters"] = filters
   record["mode"] = %(if baselineMode(): "baseline" else: "committed")
   discard g.run("systemctl daemon-reload")
@@ -202,8 +235,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
 
   var observed = initTable[string, HashSet[string]]()
   var unattributed: seq[string]
-  for r in g.auditRecords(t0):
-    if r.nr == 63 and r.comm == "uname": continue   # the vacuity guard
+  for r in g.auditRecords(t1 + 2):
+    if r.nr == 63 and r.comm == "uname": continue   # the vacuity guards
+    # Check mode counts kills; derive mode counts every logged call.
+    if not baselineMode() and r.sig == 0: continue
     let name = names.getOrDefault(r.nr, "#" & $r.nr)
     var hit = false
     for w in windows:
@@ -221,12 +256,12 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   record["unattributed"] = %unattributed
   if not baselineMode():
     for u in Units:
-      step(u & " made no system call outside its filter",
+      step(u & " made no system call outside its filter (no kill)",
            observed.getOrDefault(u).len == 0, $obs[u])
-    step("no logged call fell outside the units' runs",
+    step("no kill fell outside the units' runs",
          unattributed.len == 0, unattributed.join(", "))
 
-  # Enforcement: the drop-ins go, the committed filters apply again.
+  # The units as shipped: the drop-ins go.
   for u in Units:
     discard g.run("rm -f /run/systemd/system/" & u & ".d/" & DropInName)
   discard g.run("systemctl daemon-reload")
