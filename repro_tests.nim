@@ -3842,6 +3842,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_installed_prefix.nim",
+    binary: "build/test-bin/t_installed_prefix",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
     binary: "build/test-bin/t_isonim_ssg_render_edge",
     defines: @[],
@@ -4114,7 +4125,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim",
