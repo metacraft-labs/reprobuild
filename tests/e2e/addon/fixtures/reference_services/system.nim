@@ -152,7 +152,11 @@ profile "referenceServices":
           "EnvironmentFile=/etc/vaultwarden/config.env\n" &
           "Environment=ADMIN_TOKEN_FILE=%d/admin-token\n" &
           "ExecStart=" & VaultwardenPrefix & "/bin/vaultwarden\n" &
-          "WorkingDirectory=/var/lib/vaultwarden\n" &
+          # No WorkingDirectory= (DATA_FOLDER is absolute): systemd gives a
+          # unit's working directory an implicit mount requirement
+          # (systemd.exec(5), "Implicit Dependencies"), which would hide
+          # whether the kept directory below gets its RequiresMountsFor=
+          # from the profile (the conversion gate's kept-disk check).
           "ReadWritePaths=/var/lib/vaultwarden\n" &
           "Restart=on-failure\n", after = "network-online.target"),
         hardening = "serviceFloor",
