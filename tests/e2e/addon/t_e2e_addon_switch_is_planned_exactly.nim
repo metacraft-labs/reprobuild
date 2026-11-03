@@ -65,7 +65,7 @@ const
           "\n[Install]\nWantedBy=multi-user.target\n"
 
 proc unit(name, content: string; extra = ""): string =
-  "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & name & "\"\n  content = \"" &
     content & "\"\n" & extra & "}\n\n"
 proc etcFile(content: string): string =
   "fs.systemFile {\n  path = \"/etc/repro-fixture/a.conf\"\n  content = \"" &

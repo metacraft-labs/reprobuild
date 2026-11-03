@@ -183,9 +183,9 @@ and a branch no rule matches has no requirement.
 `repro certificates policy` prints the policy and the rule for the current branch.
 After changing the policy or moving its pin, run `repro lock refresh`; until then
 `repro health` reports the snapshot as stale, and the next certifying run updates it
-too. If `repro health` still reports it stale after the refresh, see
-[Troubleshooting](#troubleshooting). Run `repro hooks ensure --vcs` once after adopting a policy, to install the
-gate below.
+too. The refresh records the policy as it is now, even when an earlier build,
+`repro certify` or `repro certificates` command evaluated the recipe before the change.
+Run `repro hooks ensure --vcs` once after adopting a policy, to install the gate below.
 
 ## The pre-commit gate
 
@@ -356,6 +356,14 @@ repro push: stopped repo=lib-a stage=certify-preflight
     certificates: commit be8b5ee9db3f lacks 't-unit' on linux/amd64: run 'repro certify t-unit' (…)
 ```
 
+A closure is certified one member at a time, dependency first, each at its turn
+right before its own push, because issuance requires what the member pins to be
+published already. Publishing a dependency earlier in the same run does not
+change a dependent's `repro.lock`: a pin records only the commit, never which
+branch publishes it. So one `repro push` certifies and publishes the whole
+closure under `required`. A member whose test fails stops the run before its
+dependents. What was already pushed stays published, and the retry resumes.
+
 Under `required`, then, a branch with several untested commits has to be folded
 together or certified commit by commit, which also applies after a
 `--sync --rebase` rewrites them. Alternatively, certify the tip and use
@@ -466,11 +474,6 @@ introduce commits and the `repro` servicing the hook is a build from before
 propagation, which answers the same hook contract, carries nothing and reports
 nothing. The line `repro hooks: pre-push above was produced by …` names that build;
 compare it with the `repro` you expect.
-
-**`repro lock refresh` leaves the snapshot stale.** Once `repro certify` or
-`repro certificates list` has evaluated the recipe, a refresh can go on recording the
-previous policy, and `repro health` keeps warning. Run `repro certify`: its lock-update
-step records the current policy and stages `repro.lock`.
 
 **The row says `pre-push hook MISSING`.** Run `repro hooks ensure --vcs`. Without the
 hook a plain `git push` carries no notes.

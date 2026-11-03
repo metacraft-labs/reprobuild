@@ -133,7 +133,7 @@ proc deployAgentExitCode*(kind: AgentOutcomeKind): int =
   # deployment are the same class: the timer cannot fix either. A pause is
   # an operator's own choice and reports 0.
   of aoRejected, aoAmbiguous, aoSecretsFailed, aoUnsupportedBase, aoStale,
-     aoRolledBack: 2
+     aoRolledBack, aoOperatorAction: 2
 
 proc toJsonNode*(rec: TickStatusRecord): JsonNode =
   %*{

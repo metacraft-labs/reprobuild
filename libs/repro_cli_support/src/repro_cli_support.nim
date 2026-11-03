@@ -256,7 +256,8 @@ import repro_cli_support/project_pins
 import repro_cli_support/infra
 when defined(linux):
   import repro_addon/static_tree as addon_static_tree
-  from repro_dsl_stdlib/packages/apt_closure import AddOnSystemStoreRoot
+  from repro_dsl_stdlib/packages/apt_closure import AddOnSystemStoreRoot,
+    LegacyAptAdoption
   import repro_core/host_apply_lock
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
@@ -1598,6 +1599,44 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
 ## `findExe("git") == ""` by SKIPPING itself into a green, cacheable
 ## pass (`asSucceeded exit=0`, `[SKIPPED]`, `cdHit` on the next run).
 
+proc depPrefixVarName*(selector: string): string =
+  ## `DEP_<NAME>_PREFIX` for a library selector: upper-cased, every
+  ## non-alphanumeric byte an underscore (`sqlite3` -> `DEP_SQLITE3_PREFIX`,
+  ## `nim-shm-queue` -> `DEP_NIM_SHM_QUEUE_PREFIX`). Package-Model.md
+  ## §"Environment-provided library prefixes".
+  result = "DEP_"
+  for ch in selector:
+    result.add(if ch.isAlphaNumeric: ch.toUpperAscii else: '_')
+  result.add("_PREFIX")
+
+proc holdsLibraryFile(dir: string): bool =
+  ## Whether `dir` itself (not a subdirectory) holds a shared or static
+  ## library: `lib*.so`, `lib*.so.*`, `lib*.a`, `lib*.dylib`.
+  if not dirExists(extendedPath(dir)):
+    return false
+  for kind, path in walkDir(extendedPath(dir)):
+    if kind notin {pcFile, pcLinkToFile}:
+      continue
+    let name = extractFilename(path)
+    if name.startsWith("lib") and (name.endsWith(".so") or
+        ".so." in name or name.endsWith(".a") or name.endsWith(".dylib")):
+      return true
+  false
+
+proc depLibraryPrefix*(prefixes: seq[string]): string =
+  ## The prefix `DEP_<NAME>_PREFIX` names for a library realization: the
+  ## first of its prefixes whose `lib/` or `lib64/` holds a library file,
+  ## else the first. A realization can carry several: a Nix package realizes
+  ## every output, and neither its `-bin` output nor its `-debug` output
+  ## (whose `lib/` holds only `debug/`) holds the library. Measured:
+  ## `DEP_OPENSSL_PREFIX=…-openssl-3.6.0-bin`, then `…-debug`, and
+  ## `config.nims` stopped the `-d:ssl` images both times. The environment
+  ## arm and a sibling's target mirror carry one prefix, named as it is.
+  for prefix in prefixes:
+    if holdsLibraryFile(prefix / "lib") or holdsLibraryFile(prefix / "lib64"):
+      return prefix
+  if prefixes.len > 0: prefixes[0] else: ""
+
 proc actionPathEntry(actionPathPrefix: string): string =
   ## The action's `PATH`, and nothing else: the directories the solved
   ## graph resolved THIS EDGE's tool and THIS EDGE's declared
@@ -2503,6 +2542,31 @@ proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
 
   dirs.join($PathSep)
 
+proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
+                               refs: openArray[string]): string =
+  ## The realized identity of every library an action names that resolved
+  ## through an `environmentPrefix` arm, as text for the action's cache key
+  ## (Package-Model.md §"Environment-provided library prefixes": "the
+  ## realized identity ... is in addition to the observation, never instead
+  ## of it"). That identity is the prefix path plus the BLAKE3 of each
+  ## declared library and header, recomputed at every resolution, so a
+  ## changed `libsqlite3.so` under an unchanged prefix moves the key even of
+  ## an action whose own reads do not reach the file. Empty when no ref
+  ## resolved that way, which leaves every other action's key as it was.
+  var lines: seq[string] = @[]
+  for refName in refs:
+    for profile in profiles.values:
+      if profile.installMethod != "environment-prefix":
+        continue
+      if profile.executableName != refName and
+          bareToolSelector(profile.packageSelector) != refName:
+        continue
+      let line = refName & "=" & profile.lockIdentity
+      if line notin lines:
+        lines.add(line)
+  lines.sort()
+  lines.join("\n")
+
 proc actionPathEnvEntry*(profiles: openArray[PathOnlyToolProfile];
                          packageName = ""; executableName = "";
                          refs: openArray[string] = []): string =
@@ -3209,7 +3273,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       "reprobuild.localInlineExecAction.v1",
       payload.id,
       node.payload
-    ].join("\n")
+    ].join("\n") & (block:
+      let libraries = environmentPrefixKeyText(profiles,
+        payload.toolIdentityRefs)
+      if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
     # M9.R.14c.4 — inline-exec actions (autotools configure scripts,
     # from-source-custom shell rows, ...) need the same PATH +
     # extraEnv enrichment as typed-tool actions. Without this, an
@@ -3633,7 +3700,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     node.payload,
     digestHex(profile.profileFingerprint),
     invocationPrefix
-  ].join("\n")
+  ].join("\n") & (block:
+    let libraries = environmentPrefixKeyText(profiles,
+      payload.subToolRefs & payload.toolIdentityRefs)
+    if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
   var mergedEnv: seq[string] = @[]
   # The general typed-tool site — the one every `reprobuild.test_execute.*`
   # and `reprobuild.python_test.*` edge goes through, and so the one the
@@ -8569,6 +8639,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedPrefixVars: seq[(string, string)] = @[]
     var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
       let matchByName = actionIdy.executableName == name
@@ -8643,6 +8714,17 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       for path in actionIdy.libraryPathList:
         if path.len > 0 and path notin mergedLibDirs:
           mergedLibDirs.add(path)
+      # A LIBRARY realization (it carries include or library dirs) names its
+      # prefix to the consuming action as `DEP_<NAME>_PREFIX`
+      # (Package-Model.md §"Environment-provided library prefixes"): the
+      # environment arm's prefix natively, the sibling's target mirror under
+      # `--target`, so a recipe's build reads one spelling either way.
+      if actionIdy.cmakePrefixList.len > 0 and
+          (actionIdy.cpathList.len > 0 or actionIdy.libraryPathList.len > 0):
+        let varName = depPrefixVarName(name)
+        if mergedPrefixVars.allIt(it[0] != varName):
+          mergedPrefixVars.add((varName,
+            depLibraryPrefix(actionIdy.cmakePrefixList)))
     if matched:
       var nimPathDirs: seq[string] = @[]
       {.cast(gcsafe).}:
@@ -8661,6 +8743,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         includeDirs: mergedIncludeDirs,
         libDirs: mergedLibDirs,
         nimPathDirs: nimPathDirs,
+        prefixVars: mergedPrefixVars,
         cachePlatformTag: cacheTag))
     # Cross-Repo-Source-Consumption SC-1 (§4.1) — ADDITIVE cross-repo
     # producer branch. A ref that matched NO host / nix / tarball / scoop /
@@ -28335,94 +28418,21 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
 # milestone targets.
 # ---------------------------------------------------------------------------
 
-type
-  PublishedRefView* = ref object
-    ## What a committed lock's ``ref`` selection needs to know about the
-    ## workspace a checkout belongs to: which branches its DECLARED roles name
-    ## (Workspace-Branch-Roles.md §5, Unified-Locking-And-Hooks.md §14.2).
-    ##
-    ## ``ref`` prefers the repo's resolved ``unstable`` branch, then its
-    ## resolved ``mainline`` branch. Those names come from the manifest, never
-    ## from the binary: the preference used to be the constant
-    ## ``["agents", "dev"]`` — one organisation's branch policy compiled into
-    ## a generic tool, which gave a workspace whose fresher branch is ``next``
-    ## or whose mainline is ``main`` no benefit at all.
-    ##
-    ## Resolved once per operation and asked once per checkout
-    ## (`publishedRefPreference`): a lock refresh observes many siblings of
-    ## one workspace, and resolving its membership once per sibling would
-    ## repeat the same manifest read for every one of them.
-    workspaceRoot: string
-      ## The enclosing workspace, normalised; "" when there is none.
-    rootPreference: seq[string]
-      ## The preference of the workspace ROOT repository, from the settings
-      ## file's ``[workspace]`` (§3.4).
-    membershipResolved: bool
-      ## Whether ``project`` holds a DECLARED membership (a manifest checkout
-      ## or a compositional workspace state file). A committed-lock-only
-      ## workspace has none: its membership is derived from the lock being
-      ## written, so consulting it would be circular.
-    project: ResolvedProject
-
-proc publishedRefViewFor*(startPath: string;
-    workspaceRootHint = ""): PublishedRefView
-  ## Forward declaration; defined beside ``declaredMainlineBranch``.
-
-proc publishedRefPreference*(view: PublishedRefView;
-    repoRoot: string): seq[string]
-  ## Forward declaration; defined beside ``declaredMainlineBranch``.
-
-const PolicyEphemeralBranchPrefixes* = ["agents-to-dev-"]
-  ## Branch-name prefixes of the classes the branching policy DELETES once
-  ## they have served their purpose, so a committed lock's ``ref`` must never
-  ## name one. ``agents-to-dev-<YYYY-MM-DD>`` is the stabilisation branch of
-  ## one ``agents`` -> ``dev`` promotion: published while the promotion is in
-  ## progress, then "Deleted after it lands" (metacraft-dev-guidelines
-  ## ``policies/branching-policy.md`` §"Product Repository Branches",
-  ## https://github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/branching-policy.md#product-repository-branches).
-  ##
-  ## WHY a published branch is not good enough: ``ref`` is read on other
-  ## machines and in CI long after the refresh that wrote it. A lock refreshed
-  ## while the checkout sat on a stabilisation branch recorded that branch (the
-  ## checkout's own name is a ``ref`` candidate), and once the promotion landed
-  ## the ``ref`` named nothing — ``runquota``'s self-record carried
-  ## ``agents-to-dev-2026-10-12`` after that branch was gone (reprobuild-pm
-  ## issue 2026-10-17). Published is not durable; this list is the difference
-  ## (Unified-Locking-And-Hooks.md §14.2).
-
-proc isPolicyEphemeralBranch*(name: string): bool =
-  ## Whether ``name`` (a branch name without any ``refs/…`` or remote prefix)
-  ## belongs to a class the branching policy deletes — see
-  ## `PolicyEphemeralBranchPrefixes`. Such a branch is never selected as a
-  ## committed lock's ``ref`` and never kept as one.
-  for prefix in PolicyEphemeralBranchPrefixes:
-    if name.startsWith(prefix): return true
-  false
-
-proc committedLockRepoFactsPreferring(repoRoot: string;
-    preferred: seq[string]):
-    tuple[headSha, branch, publishedRef, originUrl: string] =
+proc committedLockRepoFacts(repoRoot: string):
+    tuple[headSha, branch, originUrl: string] =
   ## Read the repo-local facts the committed-lock-derived model needs: the
-  ## current ``HEAD`` SHA, the checked-out branch (empty when detached), the
-  ## PUBLISHED branch ``HEAD`` is reachable from (``publishedRef``, see
-  ## below), and the canonical fetch URL (empty when the repo has NO remote at
-  ## all).
+  ## current ``HEAD`` SHA, the checked-out branch (empty when detached), and
+  ## the canonical fetch URL (empty when the repo has NO remote at all).
   ##
   ## ``branch`` is the local name and is right for local decisions (a trunk
-  ## to sync). It is wrong for a committed lock's ``ref``: a lock is read on
-  ## other machines and in CI, where a local-only branch (`blocktracer`,
-  ## `n3g`, a worktree's topic branch) names nothing. ``publishedRef`` is a
-  ## branch of a remote whose remote-tracking ref contains ``HEAD``: the
-  ## ``preferred`` branches first, in order — the repo's resolved
-  ## ``unstable`` then ``mainline`` (`publishedRefPreference`); empty when no
-  ## manifest or settings file declares the repo's roles — then the
-  ## checked-out branch's own name, then the remote's default branch, then
-  ## any other published branch containing it (`main` / `master` first). No
-  ## branch name is preferred because the binary knows it. A branch the policy deletes
-  ## (`isPolicyEphemeralBranch`, e.g. a stabilisation branch) is skipped at
-  ## every one of those stages, so selection falls through to the next
-  ## candidate. Empty when no other published branch contains the commit, and
-  ## a lock then records no ``ref`` rather than an unpublished or doomed one.
+  ## to sync). It is never written to a committed lock, and neither is any
+  ## branch a remote publishes the commit on: a pin records the commit only
+  ## (Unified-Locking-And-Hooks.md §14.2). Which published branch contains a
+  ## commit is a fact about this machine's remote-tracking refs — it changes
+  ## when a sibling is published or a remote is fetched, and differs between
+  ## clones — so a lock that recorded it changed bytes under a certificate
+  ## that binds them. Whether a pin is published is the pre-push gate's
+  ## question, asked at push time and never stored.
   ## Best-effort: a missing ``git`` or a non-git directory yields empty fields
   ## (sync's plan and the gate's own per-repo probes still work without them).
   ##
@@ -28443,21 +28453,18 @@ proc committedLockRepoFactsPreferring(repoRoot: string;
   ## No remotes at all → empty (unchanged graceful degradation).
   if not (dirExists(extendedPath(repoRoot / ".git")) or
       fileExists(extendedPath(repoRoot / ".git"))):
-    return ("", "", "", "")
+    return ("", "", "")
   let gitBin = findExe("git")
   if gitBin.len == 0:
-    return ("", "", "", "")
-  proc runCode(extra: openArray[string]): tuple[code: int; output: string] =
+    return ("", "", "")
+  proc run(extra: openArray[string]): string =
     var cmd = quoteShell(gitBin)
     for a in extra:
       cmd.add(" ")
       cmd.add(quoteShell(a))
     let r = execCmdEx(cmd, options = {poUsePath},
       env = scrubbedGitRepositoryEnv())
-    (code: r.exitCode, output: r.output)
-  proc run(extra: openArray[string]): string =
-    let r = runCode(extra)
-    if r.code == 0: r.output.strip() else: ""
+    if r.exitCode == 0: r.output.strip() else: ""
   proc remoteUrl(name: string): string =
     if name.len == 0: "" else: run(["-C", repoRoot, "remote", "get-url", name])
   proc resolveFetchUrl(): string =
@@ -28480,117 +28487,9 @@ proc committedLockRepoFactsPreferring(repoRoot: string;
       if u.len > 0:
         return u
     remoteUrl(remotes[0])
-  proc resolvePublishedRef(headSha, branch: string): string =
-    if headSha.len == 0: return ""
-    var remotes: seq[string] = @[]
-    for line in run(["-C", repoRoot, "remote"]).splitLines():
-      let name = line.strip()
-      if name.len > 0: remotes.add(name)
-    # `origin`, then `upstream`, then the rest in git's order.
-    var ordered: seq[string] = @[]
-    for preferred in ["origin", "upstream"]:
-      if preferred in remotes: ordered.add(preferred)
-    for r in remotes:
-      if r notin ordered: ordered.add(r)
-    var candidates: seq[string] = @[]
-    for name in preferred:
-      if name.len > 0 and name notin candidates and
-          not isPolicyEphemeralBranch(name):
-        candidates.add(name)
-    # The checkout's own branch and the remote's default are candidates only
-    # when they are durable: on a stabilisation branch the own name is exactly
-    # the one the policy is about to delete.
-    if branch.len > 0 and branch notin candidates and
-        not isPolicyEphemeralBranch(branch):
-      candidates.add(branch)
-    for r in ordered:
-      let default = run(["-C", repoRoot, "symbolic-ref", "-q", "--short",
-        "refs/remotes/" & r & "/HEAD"])
-      if default.startsWith(r & "/"):
-        let name = default[r.len + 1 .. ^1]
-        if name.len > 0 and name notin candidates and
-            not isPolicyEphemeralBranch(name):
-          candidates.add(name)
-    for name in candidates:
-      for r in ordered:
-        let tracking = "refs/remotes/" & r & "/" & name
-        if runCode(["-C", repoRoot, "rev-parse", "-q", "--verify",
-            tracking & "^{commit}"]).code != 0:
-          continue
-        if runCode(["-C", repoRoot, "merge-base", "--is-ancestor", headSha,
-            tracking]).code == 0:
-          return name
-    # No preferred name contains it (or the remote's default is unknown, as
-    # in a clone of a then-empty repository): any published branch that
-    # contains the commit, `main` / `master` first, else the first by name.
-    for r in ordered:
-      let listed = runCode(["-C", repoRoot, "for-each-ref", "--contains",
-        headSha, "--format=%(refname)", "refs/remotes/" & r & "/"])
-      if listed.code != 0: continue
-      var names: seq[string] = @[]
-      for line in listed.output.splitLines():
-        let full = line.strip()
-        let prefix = "refs/remotes/" & r & "/"
-        if not full.startsWith(prefix): continue
-        let name = full[prefix.len .. ^1]
-        if name.len == 0 or name == "HEAD": continue
-        if isPolicyEphemeralBranch(name): continue
-        names.add(name)
-      if names.len == 0: continue
-      for preferred in ["main", "master"]:
-        if preferred in names: return preferred
-      names.sort()
-      return names[0]
-    ""
   result.headSha = run(["-C", repoRoot, "rev-parse", "HEAD"])
   result.branch = run(["-C", repoRoot, "symbolic-ref", "--short", "-q", "HEAD"])
-  result.publishedRef = resolvePublishedRef(result.headSha, result.branch)
   result.originUrl = resolveFetchUrl()
-
-proc committedLockRepoFacts(repoRoot: string; view: PublishedRefView = nil):
-    tuple[headSha, branch, publishedRef, originUrl: string] =
-  ## ``committedLockRepoFactsPreferring`` with the preference the workspace
-  ## declares for the repo at ``repoRoot`` (`publishedRefPreference`).
-  ## ``view`` is the caller's already-resolved workspace, for a caller that
-  ## observes several checkouts of one workspace; without one the enclosing
-  ## workspace of ``repoRoot`` is resolved for this one call.
-  let v = if view.isNil: publishedRefViewFor(repoRoot) else: view
-  committedLockRepoFactsPreferring(repoRoot, v.publishedRefPreference(repoRoot))
-
-proc publishedRefContains(repoRoot, refName, revision: string): bool =
-  ## Whether ``refName`` is a branch of some remote of ``repoRoot`` whose
-  ## remote-tracking ref contains ``revision`` — the property a committed
-  ## lock's ``ref`` must have. A branch the policy deletes
-  ## (`isPolicyEphemeralBranch`) never has it, however many remotes still
-  ## carry it today: both callers use this to decide whether an
-  ## already-recorded ``ref`` may be KEPT (`keptPublishedRef`, and
-  ## `repro lock update` moving a pin), and keeping a stabilisation branch
-  ## would preserve exactly the ``ref`` that is about to dangle.
-  if refName.len == 0 or revision.len == 0: return false
-  if isPolicyEphemeralBranch(refName): return false
-  let gitBin = findExe("git")
-  if gitBin.len == 0: return false
-  proc code(extra: openArray[string]): tuple[code: int; output: string] =
-    var cmd = quoteShell(gitBin)
-    for a in extra:
-      cmd.add(" ")
-      cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath},
-      env = scrubbedGitRepositoryEnv())
-    (code: r.exitCode, output: r.output)
-  let listed = code(["-C", repoRoot, "remote"])
-  if listed.code != 0: return false
-  for line in listed.output.splitLines():
-    let r = line.strip()
-    if r.len == 0: continue
-    let tracking = "refs/remotes/" & r & "/" & refName
-    if code(["-C", repoRoot, "rev-parse", "-q", "--verify",
-        tracking & "^{commit}"]).code != 0:
-      continue
-    if code(["-C", repoRoot, "merge-base", "--is-ancestor", revision,
-        tracking]).code == 0:
-      return true
-  false
 
 const nestedDevelopDirs* = ["deps", "vendor", "third-party", "develop"]
   ## Workspace-Manifest-Optional MO-7 — the conventional project-local
@@ -28647,9 +28546,7 @@ proc discoverNestedDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
         leading = false, trailing = true, chars = {'/', '\\'}))
       if depName.len == 0:
         continue
-      # Only HEAD, the branch and the URL are read here, never the
-      # published ref, so no branch roles are resolved for it.
-      let facts = committedLockRepoFactsPreferring(entry, @[])
+      let facts = committedLockRepoFacts(entry)
       let revision =
         if facts.headSha.len > 0: facts.headSha
         elif facts.branch.len > 0: facts.branch
@@ -28712,9 +28609,7 @@ proc discoverSiblingDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
       continue
     if recipePath.len == 0:
       continue
-    # Only HEAD, the branch and the URL are read here, never the
-    # published ref, so no branch roles are resolved for it.
-    let facts = committedLockRepoFactsPreferring(depAbs, @[])
+    let facts = committedLockRepoFacts(depAbs)
     let revision =
       if facts.headSha.len > 0: facts.headSha
       elif facts.branch.len > 0: facts.branch
@@ -28814,15 +28709,11 @@ proc cachedProducerLockedDep(checkoutRoot, consumerRoot, pathBase: string;
     verifyLockPinnedProducerSource(pinned, checkoutRoot, consumerRoot)
     var kept = pinned
     kept.path = relativePath(checkoutRoot, pathBase).replace('\\', '/')
-    if isPolicyEphemeralBranch(kept.coordinates.gitRef):
-      kept.coordinates.gitRef = ""
     return some(kept)
   none(LockedDep)
 
 proc usesProducerLockedDep(selector, root, pathBase: string;
-                           existingDeps: seq[LockedDep];
-                           refView: PublishedRefView = nil):
-                           Option[LockedDep] =
+                           existingDeps: seq[LockedDep]): Option[LockedDep] =
   ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
   ## dependency so ``repro lock refresh`` carries the declared cross-repo
   ## producer edge in the committed lock (the bug: refresh previously dropped
@@ -28845,14 +28736,14 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
     let cached = cachedProducerLockedDep(depAbs, root, pathBase, existingDeps)
     if cached.isSome:
       return cached
-    let facts = committedLockRepoFacts(depAbs, refView)
+    let facts = committedLockRepoFacts(depAbs)
     # Discovered from the invoking tree, held relative to the committed
     # lock's frame of reference (``committedLockPathBase``).
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.publishedRef, revision: facts.headSha),
+        revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
@@ -28881,20 +28772,18 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## Forward declaration; defined beside ``developSetClosure``, whose closure it
   ## computes.
 
-proc lockedDepFromCheckout(name, depAbs, pathBase: string;
-    refView: PublishedRefView = nil): LockedDep =
+proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
   ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
   ## integrity of that commit. The in-memory ``path`` is ``depAbs`` relative
   ## to ``pathBase`` — ``committedLockPathBase`` of the project, never the
   ## invoking directory; see that proc for why the two differ. It is not
-  ## written to the lock. ``refView`` is the caller's resolved workspace
-  ## (``committedLockRepoFacts``), passed by a caller observing many siblings.
-  let facts = committedLockRepoFacts(depAbs, refView)
+  ## written to the lock.
+  let facts = committedLockRepoFacts(depAbs)
   LockedDep(
     name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
     coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-      gitRef: facts.publishedRef, revision: facts.headSha),
+      revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
     version: "", visibility: "public", participation: "",
     depends: @[], tags: @[])
@@ -28932,8 +28821,7 @@ proc catalogRootsOfToolUses*(uses: openArray[InterfaceToolUse]): seq[string] =
 
 proc catalogLockedDep*(catalogRoot, root: string;
                       existingDeps: seq[LockedDep];
-                      pathBase = "";
-                      refView: PublishedRefView = nil): Option[LockedDep] =
+                      pathBase = ""): Option[LockedDep] =
   ## The lock record of the catalog at ``catalogRoot``
   ## (Provisioning-Contributions.md, "Locks And Snapshots": a locked
   ## realization records "catalog repository coordinates and revision").
@@ -28967,7 +28855,7 @@ proc catalogLockedDep*(catalogRoot, root: string;
       else: ReprobuildPackagesRepositoryName
     return some(LockedDep(
       name: name, path: defaultLockedDepCheckoutPath(name),
-      coordinates: Coordinates(kind: ckVcs, url: marker.url, gitRef: "",
+      coordinates: Coordinates(kind: ckVcs, url: marker.url,
         revision: marker.revision),
       integrity: gitObjectMultihash(
         (if marker.revision.len == 64: "sha256" else: "sha1"),
@@ -28985,7 +28873,7 @@ proc catalogLockedDep*(catalogRoot, root: string;
     let canonTargetBase = if targetTop.len > 0: absolutePath(targetTop) else: absolutePath(targetBase)
     if cmpPaths(depAbs, canonTargetBase) == 0 or canonTargetBase.isRelativeTo(depAbs):
       return none(LockedDep)
-    let facts = committedLockRepoFacts(depAbs, refView)
+    let facts = committedLockRepoFacts(depAbs)
     let originName = repositoryNameFromUrl(facts.originUrl)
     let bareName = extractFilename(depAbs.strip(
       leading = false, trailing = true, chars = {'/', '\\'}))
@@ -29001,7 +28889,7 @@ proc catalogLockedDep*(catalogRoot, root: string;
       name: depName,
       path: depPath,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.publishedRef, revision: facts.headSha),
+        revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
@@ -29373,11 +29261,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   # The two are the same everywhere except in a linked worktree; see
   # ``committedLockPathBase``.
   let pathBase = committedLockPathBase(root)
-  # The workspace's declared branch roles, resolved once for every checkout
-  # observed below: each ``ref`` prefers its repo's resolved ``unstable``,
-  # then ``mainline`` branch (``publishedRefPreference``).
-  let refView = publishedRefViewFor(root)
-  let rootFacts = committedLockRepoFacts(root, refView)
+  let rootFacts = committedLockRepoFacts(root)
   let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
@@ -29408,18 +29292,27 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   var observedCheckouts: seq[string] = @[]
     ## Absolute checkout directories THIS run observed. Never a location read
     ## out of a lock.
+  let rootCheckout = os.normalizedPath(expandFilename(root))
   proc observedKey(rel: string): string =
     os.normalizedPath(absolutePath(rel, pathBase))
+  proc isRootCheckout(path: string): bool =
+    # Producer cycles can discover the invoking checkout again, including
+    # through an alias. Exclude that proven checkout BEFORE recording any
+    # sibling name: otherwise it could hide a different repository with the
+    # same name. Name-only collisions still reach strict v3 validation.
+    isGitCheckoutDir(path) and
+      cmpPaths(os.normalizedPath(expandFilename(path)), rootCheckout) == 0
   for d in nested:
     let depAbs = absolutePath(root / d.path)
-    let facts = committedLockRepoFacts(depAbs, refView)
+    if isRootCheckout(depAbs): continue
+    let facts = committedLockRepoFacts(depAbs)
     # ``d.path`` is relative to the INVOKING tree (that is what discovery
     # resolves against); the in-memory path is relative to ``pathBase``.
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
       name: d.name, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.publishedRef, revision: facts.headSha),
+        revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
@@ -29427,11 +29320,11 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     seenNames.add(d.name)
   for selector in usesSelectors:
     if selector in seenNames: continue
-    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps,
-      refView)
+    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     let key = observedKey(dep.path)
+    if isRootCheckout(key): continue
     if dep.name in seenNames or key in observedCheckouts: continue
     siblingDeps.add(dep)
     seenNames.add(dep.name)
@@ -29450,7 +29343,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     # spelling. Relate the two in ONE spelling (``committedLockPathBase``).
     let depAbs = respelledUnderInvokingAncestor(absolutePath(repoRoot),
       absolutePath(recipeRoot))
-    if cmpPaths(depAbs, root) == 0:
+    if isRootCheckout(depAbs):
       continue
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if observedKey(rel) in observedCheckouts:
@@ -29463,7 +29356,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
         observedCheckouts.add(observedKey(rel))
         seenNames.add(dep.name)
       continue
-    let facts = committedLockRepoFacts(depAbs, refView)
+    let facts = committedLockRepoFacts(depAbs)
     let bareName = extractFilename(depAbs.strip(
       leading = false, trailing = true, chars = {'/', '\\'}))
     let originName = repositoryNameFromUrl(facts.originUrl)
@@ -29476,7 +29369,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     siblingDeps.add(LockedDep(
       name: depName, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.publishedRef, revision: facts.headSha),
+        revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
@@ -29486,11 +29379,11 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   # from. Which catalog revision defined a package decides which realizations
   # were eligible, so it is pinned like any other source the build read.
   for catalogRoot in catalogRoots:
-    let depOpt = catalogLockedDep(catalogRoot, root, existingDeps, pathBase,
-      refView)
+    let depOpt = catalogLockedDep(catalogRoot, root, existingDeps, pathBase)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     let key = observedKey(dep.path)
+    if isRootCheckout(key): continue
     if dep.name in seenNames or key in observedCheckouts: continue
     siblingDeps.add(dep)
     seenNames.add(dep.name)
@@ -29510,12 +29403,12 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
+      if isRootCheckout(depAbs): continue
       let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if sib.name in seenNames or observedKey(rel) in observedCheckouts:
         continue
       if isGitCheckoutDir(depAbs):
-        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase,
-          refView))
+        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase))
         observedCheckouts.add(observedKey(rel))
       else:
         # Carried forward BY NAME: the existing lock's entry for this
@@ -29556,10 +29449,10 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       if d.name in seenNames: continue
       let depAbs = absolutePath(pathBase / d.path)
       let key = observedKey(d.path)
+      if isRootCheckout(key): continue
       if key in observedCheckouts: continue
       if isGitCheckoutDir(depAbs):
-        var observed = lockedDepFromCheckout(d.name, depAbs, pathBase,
-          refView)
+        var observed = lockedDepFromCheckout(d.name, depAbs, pathBase)
         observed.path = d.path
         siblingDeps.add(observed)
         observedCheckouts.add(key)
@@ -29571,12 +29464,18 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
     coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
-      gitRef: rootFacts.publishedRef, revision: rootFacts.headSha),
+      revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
     depends: rootDepends, tags: @[]))
   for d in siblingDeps:
     result.add(d)
+
+proc checkoutTrunk(facts: tuple[headSha, branch, originUrl: string]): string =
+  ## The default workspace branch of a committed-lock-only workspace: the
+  ## root checkout's own branch, else ``HEAD`` when it is detached. Nothing
+  ## declares one for such a workspace, and its lock records no branch.
+  if facts.branch.len > 0: facts.branch else: "HEAD"
 
 proc visibilityFromLockString(s: string): WorkspaceVisibility =
   case s.strip().toLowerAscii()
@@ -29634,8 +29533,6 @@ proc committedLockDerivedProject(workspaceRoot: string):
     var lockedPaths: seq[string] = @[]
     var rootIdx = -1
     var rootName = ""
-    var rootRef = ""
-    var rootRevision = ""
     for d in ld.deps:
       if d.coordinates.kind != ckVcs or d.coordinates.revision.len == 0:
         continue
@@ -29650,8 +29547,6 @@ proc committedLockDerivedProject(workspaceRoot: string):
       if isSelfLockedDep(d):
         rootIdx = repos.high
         rootName = d.name
-        rootRef = d.coordinates.gitRef
-        rootRevision = d.coordinates.revision
     # Fold in on-disk develop deps the lock does not (yet) carry — NESTED deps
     # (MO-7) and SIBLING develop-override deps one level up (MO-12).
     var extraDepends: seq[string] = @[]
@@ -29665,23 +29560,23 @@ proc committedLockDerivedProject(workspaceRoot: string):
           repos[rootIdx].depends.add(n)
     if rootName.len == 0: rootName = "workspace"
     # A committed-lock-only workspace has no settings file to declare the
-    # root's mainline, so the project's default workspace branch is the ref
-    # its own committed lock records for the root (else ``HEAD``) — what the
-    # lock says, not an inference from a remote.
+    # root's mainline, and the lock records none: a pin is a commit, never a
+    # branch (Unified-Locking-And-Hooks.md §14.2). Its default workspace
+    # branch is therefore the one the fallback below uses too — the
+    # checkout's own branch, else ``HEAD`` — and never a branch inferred
+    # from a remote.
     return some(ResolvedProject(
       projectName: rootName,
-      workspaceMainline: (if rootRef.len > 0: rootRef else: "HEAD"),
+      workspaceMainline: checkoutTrunk(committedLockRepoFacts(root)),
       repos: repos,
       projectFile: lockP))
 
   # MO-2/MO-7 HEAD-derivation fallback (no usable VCS workspace dep in lock).
-  # Only HEAD, the branch and the URL are read here, never the
-  # published ref, so no branch roles are resolved for it.
-  let facts = committedLockRepoFactsPreferring(root, @[])
+  let facts = committedLockRepoFacts(root)
   let bareName = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
   let repoName = if bareName.len > 0: bareName else: "workspace"
-  let trunk = if facts.branch.len > 0: facts.branch else: "HEAD"
+  let trunk = checkoutTrunk(facts)
   let revision =
     if facts.headSha.len > 0: facts.headSha
     elif facts.branch.len > 0: facts.branch
@@ -37148,8 +37043,7 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
   ## reset the checkout to the EXACT locked ``revision`` SHA. Two chained
   ## ``bakWorkspaceVcs`` actions run in one engine graph:
   ##   1. ``git clone`` AT THE LOCKED SHA (``executeClone``'s pinned-commit
-  ##      path: clone, fetch that object, ``checkout --detach``). The lock's
-  ##      advisory ``ref`` is NOT used — see the comment at the clone below;
+  ##      path: clone, fetch that object, ``checkout --detach``);
   ##   2. ``git reset --hard <revision>`` + ``git clean -ffdx`` so the tree
   ##      lands byte-identical to a fresh checkout at the locked SHA.
   ## The exact SHA is authoritative — there is NO branch-tip fallback, and no
@@ -37192,45 +37086,19 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
     ("develop-all-clone-" & placementSeg & ".receipt")
   let resetReceiptRel = ".repro" / "workspace" / "receipts" /
     ("develop-all-reset-" & placementSeg & ".receipt")
-  # (1) clone AT THE EXACT LOCKED REVISION. The lock's ``ref`` plays NO part
-  # here, deliberately.
-  #
-  # ``ref`` is ADVISORY — the record's own documentation says so, and
-  # ``committedLockRepoFacts`` writes it as a convenience ("which published
-  # branch was this commit reachable from when the lock was refreshed"). The
-  # authority is ``revision``, which the ``isExactLockedRevision`` gate just
-  # above has already proved to be exactly 40 lowercase hex. So the ref must
-  # never be able to decide whether a placement SUCCEEDS.
-  #
-  # It could. This passed ``ref`` to ``gitCloneAction`` as ``revision``, which
-  # ``executeClone`` turns into ``git clone --branch <ref>`` for any value that
-  # is not a 40-hex commit id, and git then REFUSES the clone outright when the
-  # remote does not advertise that branch (``clone-branch-missing``: "fatal:
-  # Remote branch <ref> not found in upstream origin"). An advisory hint had a
-  # hard veto over an obtainable pin.
-  #
-  # That is not hypothetical, and the ref need not even be wrong TODAY to do
-  # it. ``codetracer-native-recorder``'s committed ``repro.lock`` carries a
-  # self-record written on 2026-09-18 whose ``ref`` is ``reprolock-declare`` —
-  # the LOCAL, never-pushed branch the refresh happened to run on, captured
-  # before ``resolvePublishedRef`` existed (379e5dbdd, "record only published
-  # refs"). ``participatingRepoCommittedLocks`` folds that self-record into the
-  # workspace lock set, where it outranks the root repo's entry for the same
-  # repo, so reprobuild's CI ``repro develop --all --reset`` asked GitHub for a
-  # branch that exists nowhere and the whole graph made no progress — while the
-  # revision it names, ``0230480f``, is on ``dev`` and fetches fine. The writer
-  # is fixed, but every lock refreshed before that fix is still out there, and a
-  # consumer that can be broken by a stale advisory field is the defect.
-  #
-  # Passing the SHA instead takes ``executeClone``'s pinned-commit path: clone,
-  # fetch that object explicitly, ``checkout --detach`` it, and REMOVE the tree
-  # rather than leave one behind if it cannot land there. That path is both
-  # stricter and better diagnosed — it fails on ``clone-revision-fetch-failed``
-  # / ``clone-revision-missing`` naming the revision an operator can act on,
-  # instead of on a branch name nobody pinned. ``clone-branch-missing`` keeps
-  # its job for the case it was written for: a MANIFEST that declares a branch
-  # the remote does not carry, where the branch IS the pin and its absence is
-  # the true diagnosis.
+  # (1) clone AT THE EXACT LOCKED REVISION. The authority is ``revision``,
+  # which the ``isExactLockedRevision`` gate just above has already proved to
+  # be exactly 40 lowercase hex; a lock pins no branch (Unified-Locking-And-
+  # Hooks.md §14.2), and the ``ref`` an older writer recorded is not even
+  # read. Passing the SHA takes ``executeClone``'s pinned-commit path: clone,
+  # fetch that object explicitly, ``checkout --detach`` it, and REMOVE the
+  # tree rather than leave one behind if it cannot land there, failing on
+  # ``clone-revision-fetch-failed`` / ``clone-revision-missing`` naming the
+  # revision an operator can act on. (Passing a recorded branch instead let a
+  # local-only ``ref`` such as ``reprolock-declare`` veto an obtainable pin
+  # with ``clone-branch-missing``; that diagnostic keeps its job for a
+  # MANIFEST that declares a branch the remote does not carry, where the
+  # branch IS the pin.)
   # ``cacheable = false``, for the same reason ``gitForceResetAction`` is: the
   # PRODUCT of this action is a WORKING TREE at ``relTarget``, and a working
   # tree is not a declared output — only the receipt is. The clone
@@ -39234,14 +39102,14 @@ proc runStoreCommand*(args: seq[string]): int =
     defer: addonLock.release()
     if sub == "gc" and not dryRun and isAddonSystemStore(root):
       addonLock = acquireHostApplyLock("repro store gc")
-      var handBack: seq[string]
+      var legacy: LegacyAptAdoption
       try:
-        handBack = addon_static_tree.hostHandBackDirs()
+        legacy = addon_static_tree.migrateLegacyAptClosures(
+          handBack = addon_static_tree.hostHandBackDirs())
       except CatchableError as e:
-        stderr.writeLine("repro store gc: " & e.msg)
+        stderr.writeLine("repro store gc: " & e.msg & "; nothing was " &
+          "collected")
         return 1
-      let legacy = addon_static_tree.migrateLegacyAptClosures(
-        handBack = handBack)
       for r in legacy.refused:
         stderr.writeLine("repro store gc: legacy apt prefix not adopted: " &
           r.path & ": " & r.reason)
@@ -46908,7 +46776,7 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
   LockedDep(
     name: repo.name, path: repo.path,
     coordinates: Coordinates(kind: ckVcs, url: repo.fetchUrl,
-      gitRef: repo.revision, revision: rev),
+      revision: rev),
     integrity: integrity, version: "",
     visibility: lockingTierLabel(repo.visibility),
     participation: repo.participation, depends: repo.depends,
@@ -54306,6 +54174,18 @@ proc pushOutputOneLine*(output: string): string =
     if line.len > 0: kept.add(line)
   redactUrlUserinfo(kept.join(" / "))
 
+const gatewayReportPrefix* = "reprobuild gateway: "
+  ## How every line a push gateway's ``pre-receive`` writes begins.
+
+proc gatewayReportLine*(line: string): string =
+  ## ``line`` of a push transcript as the gateway wrote it, or "" when it is
+  ## not a gateway's line. Git relays a receiving hook's stderr as
+  ## ``remote: <text>`` padded with trailing blanks; both are removed.
+  var text = line.strip()
+  if not text.startsWith("remote:"): return ""
+  text = text["remote:".len .. ^1].strip()
+  if text.startsWith(gatewayReportPrefix): text else: ""
+
 proc pushOutputHookRefusalLines*(output: string): seq[string] =
   ## The lines of a failed push transcript that a REPROBUILD MANAGED HOOK
   ## wrote, rather than the transport.
@@ -58624,25 +58504,6 @@ proc splicedCommittedLockDeps(text, originalDepsLine, depsLine: string):
       break
     offset += line.len
 
-proc keptPublishedRef(depAbs: string; pinned, fresh: LockedDep): string =
-  ## The ``ref`` a re-observed entry records. A pin whose revision did not
-  ## move keeps the ``ref`` it already carries as long as that is still a
-  ## published branch containing the revision, so a later fetch that makes a
-  ## preferred branch contain it too does not churn the lock. Anything else —
-  ## a moved revision, or a recorded ``ref`` that names no published branch
-  ## containing it (a local-only name) or names a branch the policy deletes
-  ## (`isPolicyEphemeralBranch`, via `publishedRefContains`) — takes the
-  ## freshly observed
-  ## published ``ref``, which is empty when no published branch contains the
-  ## commit.
-  if pinned.coordinates.revision == fresh.coordinates.revision and
-      pinned.coordinates.gitRef.len > 0 and
-      pinned.coordinates.gitRef != fresh.coordinates.gitRef and
-      publishedRefContains(depAbs, pinned.coordinates.gitRef,
-        pinned.coordinates.revision):
-    return pinned.coordinates.gitRef
-  fresh.coordinates.gitRef
-
 # ---------------------------------------------------------------------------
 # HL-11 M2 — H1 / H2 at the hooks and in `repro check`
 # (Unified-Locking-And-Hooks.md §16.3)
@@ -59627,9 +59488,6 @@ proc planCommittedLockRepin(repoRoot: string;
   # Resolved once: the lookup costs a subprocess, and every observation below
   # shares the same base.
   let pathBase = committedLockPathBase(root)
-  # The workspace's declared branch roles, resolved once for every sibling
-  # re-observed below (``publishedRefPreference``).
-  let refView = publishedRefViewFor(root)
   var rootIdx = -1
   for i, d in ld.deps:
     if isSelfLockedDep(d): rootIdx = i
@@ -59642,7 +59500,7 @@ proc planCommittedLockRepin(repoRoot: string;
         ", which does not describe the working tree this commit was built " &
         "against")
     let depAbs = absolutePath(pathBase / o.path)
-    let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase, refView)
+    let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
     var found = false
     for i in 0 ..< ld.deps.len:
       if isSelfLockedDep(ld.deps[i]) or ld.deps[i].coordinates.kind != ckVcs:
@@ -59673,12 +59531,10 @@ proc planCommittedLockRepin(repoRoot: string;
               "could not be determined (" & o.detail & "), so the pin was " &
               "left alone")
             break
-        let freshRef = keptPublishedRef(depAbs, d, fresh)
         if d.coordinates.revision != fresh.coordinates.revision or
             d.integrity != fresh.integrity or
             (fresh.coordinates.url.len > 0 and
-             d.coordinates.url != fresh.coordinates.url) or
-            d.coordinates.gitRef != freshRef:
+             d.coordinates.url != fresh.coordinates.url):
           if d.coordinates.revision != fresh.coordinates.revision:
             result.moves.add(ReproLockMove(name: d.name, path: d.path,
               depAbs: depAbs,
@@ -59687,7 +59543,6 @@ proc planCommittedLockRepin(repoRoot: string;
               oldRev: d.coordinates.revision,
               newRev: fresh.coordinates.revision))
           d.coordinates.revision = fresh.coordinates.revision
-          d.coordinates.gitRef = freshRef
           if fresh.coordinates.url.len > 0:
             d.coordinates.url = fresh.coordinates.url
           d.integrity = fresh.integrity
@@ -66393,6 +66248,11 @@ proc parseGatewayRefUpdates*(stdinText: string): seq[GatewayRefUpdate] =
       refName: parts[2]))
 
 type
+  GatewayUnverifiedEntry* = object
+    ## One committed-lock entry the public-tier lock gate left unverified.
+    name*: string
+    reason*: string
+
   GatewayGateRecord* = object
     ## POSITIVE evidence that the gate READ a pushed object and decided on its
     ## CONTENTS, for one pushed ref.
@@ -66409,6 +66269,11 @@ type
     depCount*: int       ## locked dependencies parsed out of those bytes
     integrityChecked*: int  ## of those, entries whose integrity was recomputed
                             ## against the received objects
+    notVerified*: seq[GatewayUnverifiedEntry]
+      ## The locked entries the gate did NOT verify, each with why: an entry
+      ## pinning another repository (whose objects never reach this gateway)
+      ## or one with nothing git-native to recompute. Named so an acceptance
+      ## never reads as a claim about content the server could not see.
     trustedCerts*: int   ## certificates read off the pushed notes object and
                          ## found registered-signed (the cert gate's half)
 
@@ -66452,9 +66317,12 @@ type
 #       is tier-isolated (HL-1) carries only ``public`` deps; a dep tagged
 #       anything else (``org`` / ``team`` / ``personal``) is a private-only
 #       reference a public-only cloner cannot reproduce → REJECT.
-#   (b) ``locked-integrity-mismatch`` — recompute each locked entry's multihash
-#       against the RECEIVED content (the pushed objects, already reachable in
-#       the bare) and REJECT on mismatch. Same MO-8/MO-9 integrity model as the
+#   (b) ``locked-integrity-mismatch`` — recompute the multihash of each locked
+#       entry that designates the PUSHED repository against the RECEIVED
+#       content (the pushed objects, already reachable in the bare) and REJECT
+#       on mismatch. An entry pinning another repository is outside what the
+#       server received: it is reported as not verified server-side and left
+#       to the client gate (``gatewayLockEntryScopes``). Same MO-8/MO-9 integrity model as the
 #       client (``verifyLockedIntegrityAtCoordinates``), but sourced from the
 #       BARE repo's object store rather than a working tree.
 #
@@ -66558,32 +66426,82 @@ proc gatewayReadPushedLock*(gitBin, gatewayBareDir, commit: string;
       blobId: blobId)
   GatewayLockRead(status: glrPresent, blob: blob.output, blobId: blobId)
 
+type
+  GatewayLockEntryScope = enum
+    ## Whether a committed lock entry falls inside what the server received
+    ## (§6 Decision 3 and its boundary statement).
+    glePushedRepository
+      ## The entry designates the repository being pushed: its git-native
+      ## integrity is recomputed from the received objects, and a revision the
+      ## push did not deliver is refused.
+    gleOtherRepository
+      ## The entry pins ANOTHER repository. Its objects never reach this
+      ## gateway, so the server has no evidence about it either way; the
+      ## client pre-push gate owns it.
+    gleNotRecomputable
+      ## The entry carries no git-native integrity at a concrete revision
+      ## (no integrity, a ``blake3:`` tree hash, a store/registry pin): there
+      ## is nothing in a bare repository to recompute it from.
+
+proc gatewayLockEntryScopes(ld: LockedDependencies;
+                            pushedRepositoryUrl: string):
+    seq[GatewayLockEntryScope] =
+  ## Classify every entry of a received committed lock, index for index.
+  ##
+  ## The lock says which entry is its own repository: the ``self`` marker
+  ## (``isSelfLockedDep``). That marker is the primary answer, but it is
+  ## written by the pusher, so on its own it would let a lock describe its
+  ## own repository under an UNMARKED entry and have the gateway wave that
+  ## entry through as "another repository". So an entry also designates the
+  ## pushed repository when it names, by repository identity
+  ## (``canonicalRepositoryUrl``, the identity ``repro sync`` uses), the same
+  ## repository as the self entry or as the gateway's own upstream. Every
+  ## other VCS entry pins another repository. (A name cannot alias the self
+  ## entry: the lock parser refuses two entries with one name.)
+  var identities: seq[string]
+  let upstream = canonicalRepositoryUrl(pushedRepositoryUrl)
+  if upstream.len > 0: identities.add(upstream)
+  for d in ld.deps:
+    if not isSelfLockedDep(d): continue
+    let identity = canonicalRepositoryUrl(d.coordinates.url)
+    if identity.len > 0 and identity notin identities:
+      identities.add(identity)
+  for d in ld.deps:
+    let recomputable = d.coordinates.kind == ckVcs and
+      d.integrity.startsWith("git-sha") and d.coordinates.revision.len > 0
+    if not recomputable:
+      result.add(gleNotRecomputable)
+      continue
+    var pushed = isSelfLockedDep(d)
+    if not pushed:
+      let identity = canonicalRepositoryUrl(d.coordinates.url)
+      pushed = identity.len > 0 and identity in identities
+    result.add(if pushed: glePushedRepository else: gleOtherRepository)
+
 proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
-    ld: LockedDependencies;
+    ld: LockedDependencies; scopes: seq[GatewayLockEntryScope];
     received = ReceivedObjectStore()): seq[LockedIntegrityFailure] =
   ## Server-side analogue of ``verifyLockedIntegrityAtCoordinates`` for the
-  ## RECEIVED committed lock: recompute each locked entry's git-native multihash
+  ## RECEIVED committed lock: recompute the git-native multihash of every
+  ## entry that designates the PUSHED repository (``glePushedRepository``)
   ## against the BARE repo's object store (no working tree on the server) and
   ## report a failure on mismatch. For a git dep the integrity IS the object id
   ## at the locked revision, so verification is: the revision's object must be
   ## PRESENT in the received bare AND its self-describing object id must equal
   ## the locked integrity. A tampered ``integrity`` field, or a locked revision
-  ## whose object is absent/unreachable in the received objects, fails.
+  ## of the pushed repository whose object is absent/unreachable in the
+  ## received objects, fails.
   ##
-  ## Only ``git-sha*`` integrities pinned at a concrete revision are verified
-  ## here — those are the entries whose content the SERVER actually received.
-  ## Entries with no integrity, a non-git integrity (a pre-commit ``blake3:``
-  ## tree hash needs a working tree the bare does not have), or no concrete
-  ## revision are left to the client gate; the server makes no false claim about
-  ## content it cannot recompute.
+  ## Entries pinning other repositories are NOT checked here: their objects
+  ## live in those repositories, never in this bare, so "absent" would be a
+  ## claim about content the server cannot see. Nor are entries with no
+  ## git-native integrity at a revision. The caller reports both as not
+  ## verified server-side; the client gate owns them.
   result = @[]
   if gitBin.len == 0: return
   let objFmt = gitObjectFormatOf(gatewayBareDir)
-  for d in ld.deps:
-    if d.integrity.len == 0: continue
-    if d.coordinates.kind != ckVcs: continue
-    if not d.integrity.startsWith("git-sha"): continue
-    if d.coordinates.revision.len == 0: continue
+  for i, d in ld.deps:
+    if scopes[i] != glePushedRepository: continue
     # The locked revision's object must be present among the received objects.
     # ``preserveObjectStore`` keeps the push quarantine visible: without it the
     # objects this push delivered are unreachable and EVERY locked revision
@@ -66597,8 +66515,8 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
         revision: d.coordinates.revision,
         cause: licRevisionUnreachable,
         diagnostic: "locked revision " & d.coordinates.revision &
-          " is not present/reachable in the received objects for '" &
-          (if d.path.len > 0: d.path else: ".") & "'"))
+          " of the pushed repository is not present/reachable in the " &
+          "received objects (entry '" & d.name & "')"))
       continue
     let observed = gitObjectMultihash(objFmt, d.coordinates.revision)
     if observed != d.integrity:
@@ -66610,7 +66528,8 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
 
 proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
                               updates: seq[GatewayRefUpdate];
-                              received = ReceivedObjectStore()):
+                              received = ReceivedObjectStore();
+                              pushedRepositoryUrl = ""):
     GatewayVerifyResult =
   ## HL-5 (§6 Decision 3) — the PUBLIC-TIER lock gate. For each pushed BRANCH
   ## update, read the committed ``repro.lock`` blob from the received commit and
@@ -66627,6 +66546,12 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
   ## may wave through. This holds whether or not ``received`` was supplied —
   ## it is the property that makes the NEXT cause of an unreadable object a
   ## refusal instead of a silent pass.
+  ##
+  ## ``pushedRepositoryUrl`` is the gateway's upstream: the repository this
+  ## push is for. With the lock's own ``self`` marker it decides which
+  ## entries designate the pushed repository (``gatewayLockEntryScopes``), so
+  ## an entry spelling the pushed repository under another name is still
+  ## checked against the received objects.
   result.accepted = true
   let zeroSha = "0000000000000000000000000000000000000000"
   for u in updates:
@@ -66686,28 +66611,40 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
           "remove it from the public lock or publish it under a non-public " &
           "tier's backend"
         return
-    # (b) integrity check against the received objects.
+    # (b) integrity check against the received objects, for the entries that
+    # designate the pushed repository. Entries pinning other repositories, and
+    # entries with nothing git-native to recompute, are reported below as not
+    # verified server-side — never silently counted as checked.
+    let scopes = gatewayLockEntryScopes(ld, pushedRepositoryUrl)
     let failures = gatewayVerifyReceivedLockIntegrity(
-      gitBin, gatewayBareDir, ld, received)
+      gitBin, gatewayBareDir, ld, scopes, received)
     if failures.len > 0:
       let f = failures[0]
       result.accepted = false
       result.diagnostic = u.refName &
         ": locked-integrity-mismatch: '" &
-        (if f.path.len > 0: f.path else: f.name) & "' — " & f.diagnostic
+        (if f.name.len > 0: f.name else: f.path) & "' — " & f.diagnostic
       return
     # ACCEPTED — and say what the acceptance was based on. A verdict that only
     # ever speaks when it refuses is indistinguishable from a verdict that
-    # never looked; this record names the blob the gate read and the counts it
-    # derived from that blob's bytes.
-    var integrityChecked = 0
-    for d in ld.deps:
-      if d.integrity.startsWith("git-sha") and d.coordinates.kind == ckVcs and
-         d.coordinates.revision.len > 0:
-        inc integrityChecked
-    result.gated.add(GatewayGateRecord(refName: u.refName,
-      lockBlobId: read.blobId, depCount: ld.deps.len,
-      integrityChecked: integrityChecked))
+    # never looked; this record names the blob the gate read, the counts it
+    # derived from that blob's bytes, and every entry it did NOT verify.
+    var record = GatewayGateRecord(refName: u.refName,
+      lockBlobId: read.blobId, depCount: ld.deps.len)
+    for i, d in ld.deps:
+      case scopes[i]
+      of glePushedRepository:
+        inc record.integrityChecked
+      of gleOtherRepository:
+        record.notVerified.add(GatewayUnverifiedEntry(name: d.name,
+          reason: "pins another repository, whose objects this push does " &
+            "not carry; the client pre-push gate verifies it"))
+      of gleNotRecomputable:
+        record.notVerified.add(GatewayUnverifiedEntry(name: d.name,
+          reason: "carries no git-native integrity at a concrete revision, " &
+            "so there is nothing in the received objects to recompute; the " &
+            "client pre-push gate verifies it"))
+    result.gated.add(record)
 
 proc gatewayLockAsContentFile(read: GatewayLockRead): ContentFile =
   ## A gateway lock read in the shape ``gateRequirementFromLock`` takes.
@@ -67980,7 +67917,7 @@ proc runGatewayCommand*(args: openArray[string]): int =
     # enforcement point as the cert gate). The server gates ONLY the public
     # tier — team/personal/evidence backends are never read.
     let lockVerdict = gatewayVerifyPublicLock(gitBin, gatewayDir, updates,
-      received)
+      received, cfg.upstreamUrl)
     if lockVerdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & lockVerdict.diagnostic)
     # What the gate READ, on every accepted branch that carried a lock. This
@@ -67991,6 +67928,13 @@ proc runGatewayCommand*(args: openArray[string]): int =
         ": public-tier lock gate: read repro.lock blob " & rec.lockBlobId &
         " deps=" & $rec.depCount &
         " integrity-checked=" & $rec.integrityChecked & " verdict=ACCEPTED")
+      # The boundary, said out loud: every entry the server did not verify is
+      # named, so an acceptance never reads as a claim about content the
+      # gateway could not see (§6 Decision 3).
+      for entry in rec.notVerified:
+        stderr.writeLine("reprobuild gateway: " & rec.refName &
+          ": public-tier lock gate: '" & entry.name &
+          "' NOT verified server-side — it " & entry.reason)
     if not lockVerdict.accepted:
       stderr.writeLine("reprobuild gateway: push REJECTED — the pushed " &
         "public repro.lock failed the server-side public-tier lock gate. " &
@@ -68655,119 +68599,6 @@ proc rootDeclaredRoleBranches(settings: WorkspaceSettings):
   if mainline.isSome and mainline.get().branch.len > 0:
     result.add((role: "mainline", branch: mainline.get().branch))
   result.addDirectlyDeclaredRoles(roles)
-
-proc refPreferenceFrom(unstable, mainline: string): seq[string] =
-  ## ``unstable`` then ``mainline``, each once, never empty and never a branch
-  ## the policy deletes (`isPolicyEphemeralBranch`).
-  for name in [unstable, mainline]:
-    if name.len > 0 and name notin result and not isPolicyEphemeralBranch(name):
-      result.add(name)
-
-proc rolePreferenceOf(resolved: ResolvedProject;
-    repo: ResolvedRepo): seq[string] =
-  ## A member repo's ``ref`` preference: its resolved ``unstable`` branch,
-  ## then its resolved ``mainline`` branch. A repo of a committed-lock-only
-  ## workspace resolves no roles; it still has the mainline every other
-  ## consumer reads for it (``declaredMainlineBranch``: a branch-shaped
-  ## ``revision``, else the ref the committed lock records for the root), and
-  ## its ``unstable`` falls back to that.
-  if repo.roles.len > 0:
-    let unstable = repo.roles.findRole("unstable")
-    let mainline = repo.roles.findRole("mainline")
-    return refPreferenceFrom(
-      (if unstable.isSome: unstable.get().branch else: ""),
-      (if mainline.isSome: mainline.get().branch else: ""))
-  refPreferenceFrom("", declaredMainlineBranch(resolved, repo.name))
-
-proc rootRolePreference(workspaceRoot: string): seq[string] =
-  ## The workspace ROOT repository's ``ref`` preference (§3.4):
-  ## ``[workspace]``'s resolved ``unstable`` then ``mainline``
-  ## (``resolveRootRoles``). Empty with no settings file, or one that declares
-  ## no root roles. The root's ``origin/HEAD`` is never read as its mainline.
-  ##
-  ## ``ref`` is advisory, so a settings file that cannot be read contributes
-  ## no preference here rather than failing the lock write; every command
-  ## that DEPENDS on the root's roles still refuses that file with its own
-  ## diagnostic.
-  let path = findWorkspaceSettingsPath(workspaceRoot)
-  if path.len == 0 or not fileExists(path):
-    return
-  try:
-    let settings = readWorkspaceSettings(path)
-    let roles = resolveRootRoles(settings)
-    let unstable = roles.findRole("unstable")
-    let mainline = roles.findRole("mainline")
-    result = refPreferenceFrom(
-      (if unstable.isSome: unstable.get().branch else: ""),
-      (if mainline.isSome: mainline.get().branch else: ""))
-  except CatchableError:
-    result = @[]
-
-proc publishedRefViewFor*(startPath: string;
-    workspaceRootHint = ""): PublishedRefView =
-  ## Resolve, once, the workspace that ``startPath`` belongs to for
-  ## ``publishedRefPreference``: the root repository's declared roles and,
-  ## when the workspace DECLARES its membership (a manifest checkout or a
-  ## compositional state file), every member's. ``workspaceRootHint`` is for
-  ## a caller already told which workspace it serves.
-  ##
-  ## A committed-lock-only workspace's membership is DERIVED from the lock
-  ## being written (``committedLockDerivedProject``), which observes its repos
-  ## through ``committedLockRepoFacts`` — so it is never resolved here: that
-  ## would be circular, and would recurse. Its repos then prefer nothing by
-  ## role and ``ref`` falls through to the remaining order.
-  ##
-  ## Best-effort, like every other fact the lock writer observes: a
-  ## membership that does not resolve leaves the members without a
-  ## preference, and the commands that depend on that membership report why.
-  result = PublishedRefView()
-  let base = committedLockPathBase(absolutePath(startPath))
-  let found =
-    if workspaceRootHint.len > 0: workspaceRootHint
-    else: enclosingWorkspaceRoot(base)
-  if found.len == 0:
-    return
-  let ws = os.normalizedPath(absolutePath(found))
-  result.workspaceRoot = ws
-  result.rootPreference = rootRolePreference(ws)
-  if not hasResolvedManifestCheckout(ws) and
-      not isCompositionalWorkspaceToml(ws, ""):
-    return
-  try:
-    # The membership ladder reaches module-level `var`s (the one-time notice
-    # sets), so the compiler cannot prove it GC-safe; the lock writers run on
-    # the thread that owns them (see ``loadMembership``).
-    {.cast(gcsafe).}:
-      result.project = resolveWorkspaceProjectShared(ws, "",
-        "recording a lock's published ref").resolved
-    result.membershipResolved = true
-  except CatchableError:
-    result.membershipResolved = false
-
-proc publishedRefPreference*(view: PublishedRefView;
-    repoRoot: string): seq[string] =
-  ## The branches a committed lock's ``ref`` prefers for the checkout at
-  ## ``repoRoot``, in order: its resolved ``unstable`` branch, then its
-  ## resolved ``mainline`` branch (Workspace-Branch-Roles.md §5). The root
-  ## repository's come from the settings file, a member's from its fragment
-  ## and profiles. Empty — so ``ref`` falls through to the checkout's own
-  ## branch, the remote's default and any other containing branch — when no
-  ## declaration covers the checkout: no enclosing workspace, a
-  ## committed-lock-only workspace, or a checkout the membership does not
-  ## list. ``repoRoot`` is mapped through ``committedLockPathBase``, so a
-  ## linked worktree is the repository it belongs to.
-  if view.isNil or view.workspaceRoot.len == 0:
-    return
-  let base = os.normalizedPath(committedLockPathBase(absolutePath(repoRoot)))
-  if cmpPaths(base, view.workspaceRoot) == 0:
-    return view.rootPreference
-  if not view.membershipResolved:
-    return
-  for repo in view.project.repos:
-    if repo.path.len == 0: continue
-    if cmpPaths(os.normalizedPath(absolutePath(repo.path, view.workspaceRoot)),
-        base) == 0:
-      return rolePreferenceOf(view.project, repo)
 
 proc lockRecordTriggerSha(relPath: string): string =
   ## The commit a lock record is KEYED at — its filename stem. Handles both
@@ -73580,6 +73411,16 @@ proc executePush(args: PushArgs): PushReport =
     for line in pushRes.output.splitLines():
       if line.startsWith(certificatePropagationReportPrefix):
         entry.notices.add(redactUrlUserinfo(line))
+      else:
+        # A push gateway's report — the certificate verdict, what the public
+        # lock gate read, and the lock entries it did NOT verify server-side —
+        # is the receiving side's account of this member's push. On success
+        # git prints it and nothing else would; it is kept under the member it
+        # describes, so the boundary statement is seen in the normal flow and
+        # not only when a push is refused.
+        let report = gatewayReportLine(line)
+        if report.len > 0:
+          entry.notices.add(redactUrlUserinfo(report))
     result.repos.add(entry)
     if members.len > 0:
       # The next component member must see the prefix that actually landed,
@@ -81863,8 +81704,8 @@ proc forkRoleFor(resolved: ResolvedProject; repo: ResolvedRepo; role: string;
   ##
   ## A repo of a committed-lock-only workspace resolves no roles; it still has
   ## the mainline ``repro branch`` reads for it — a branch-shaped
-  ## ``revision``, else the ref the committed lock records for the root
-  ## (``declaredMainlineBranch``) — and every role falls back to that,
+  ## ``revision``, else the project's default workspace branch, the root
+  ## checkout's own branch (``declaredMainlineBranch``) — and every role falls back to that,
   ## through the same resolver. ``none`` when there is no mainline at all.
   if repo.roles.len > 0:
     return repo.roles.findRole(role)
@@ -88834,6 +88675,40 @@ proc carriedLockFileDeclarations(sidecarPath, interfacePath: string):
   except CatchableError:
     result = @[]
 
+proc durableBinaryIsComputationOutput(durable: ProviderCompileArtifact;
+                                      computationDir: string): bool =
+  ## Whether the durable provider binary in the recipe's output directory is
+  ## the binary of the recipe-relative computation in ``computationDir``.
+  ##
+  ## WHY THIS IS NEEDED. The recipe-relative edge is keyed by the sources AS
+  ## THEY ARE NOW (``recipeRelativeProviderCompilePlan`` hashes them while
+  ## planning), so a validated hit proves that SOME computation of the
+  ## current sources exists - not that the durable copy was taken from it.
+  ## The durable copy is only rewritten when a build or certifying run
+  ## publishes into the output directory. After an edit to any source the
+  ## recipe imports (a local module, or a sibling package's at a moved pin),
+  ## any other caller that compiles the recipe publishes a record under the
+  ## new key - `repro lock refresh`'s solver-inputs probe does, a moment
+  ## before its policy probe - and the hit then vouched for a binary compiled
+  ## from the sources before the edit: the refresh recorded the previous
+  ## certificate policy and exited 0.
+  ##
+  ## The location-bound edge needs no such check: it is validated under the
+  ## durable artifact's own key, so its record is the one that produced the
+  ## durable copy, and a changed input is a miss.
+  ##
+  ## The binding is by the binary's content, which is what the provider
+  ## runs: ``publishRecipeRelativeProviderCompile`` copies the computation's
+  ## binary and records its fingerprint, so a durable copy taken from this
+  ## computation carries the same one. A mismatch is a miss, never an error,
+  ## and the caller compiles through the edge instead.
+  try:
+    let edge = readProviderCompileArtifact(
+      computationDir / "provider-compile.rbsz")
+    edge.outputBinaryFingerprint == durable.outputBinaryFingerprint
+  except CatchableError:
+    false
+
 proc tryLoadDurableSolverProviderArtifacts(
     modulePath, compileWorkDir: string):
     Option[DurableSolverProviderArtifacts] =
@@ -88938,7 +88813,8 @@ proc tryLoadDurableSolverProviderArtifacts(
             if recipeRelativeProviderLocationBound(sharedOutputs):
               validates(locationBoundAction()).validated
             else:
-              true
+              durableBinaryIsComputationOutput(durableProvider,
+                sharedOutputs)
       else:
         validated = validates(locationBoundAction()).validated
       if not validated:
@@ -89673,8 +89549,7 @@ proc gateRefreshedSiblingPins(projectDir, lockPath: string;
   ## lock at ``lockPath`` carries now, by the same `classifySiblingPin` the
   ## commit hook uses: ahead advances; behind, diverged and unprovable are
   ## regressions, refused unless ``allowRegression`` names the sibling; a
-  ## direction git cannot compute keeps the existing pin, said out loud. An
-  ## unmoved pin keeps a ``ref`` that is still published (`keptPublishedRef`).
+  ## direction git cannot compute keeps the existing pin, said out loud.
   ## Root entries, siblings with no current pin and siblings that are not
   ## checked out (carried forward verbatim) are not examined.
   if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
@@ -89711,9 +89586,7 @@ proc gateRefreshedSiblingPins(projectDir, lockPath: string;
     let pinned = existing[pinnedIdx]
     let depAbs = os.normalizedPath(absolutePath(pathBase / d.path))
     if d.name notin result.examined: result.examined.add(d.name)
-    if pinned.coordinates.revision == d.coordinates.revision:
-      deps[i].coordinates.gitRef = keptPublishedRef(depAbs, pinned, d)
-      continue
+    if pinned.coordinates.revision == d.coordinates.revision: continue
     if not isGitCheckoutDir(depAbs): continue
     let verdict = classifySiblingPin(identity, depAbs,
       pinned.coordinates.revision, d.coordinates.revision)
@@ -90954,7 +90827,7 @@ proc runReproLockValidate(rest: openArray[string]): int =
               "' root source content could not be verified: " & comparison.output.strip())
           continue
         # Only HEAD is read, so no branch roles are resolved for the ref.
-        let observed = committedLockRepoFactsPreferring(depAbs, @[]).headSha
+        let observed = committedLockRepoFacts(depAbs).headSha
         let recomputed = computeDepIntegrity(depAbs, observed)
         if recomputed != d.integrity:
           problems.add("dep '" & d.name & "' integrity mismatch: locked '" &
@@ -98115,7 +97988,6 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
           # records it, so the next commit does not churn the entry.
           let fresh = lockedDepFromCheckout(d.name, gitDir, pathBase)
           d.coordinates.revision = fresh.coordinates.revision
-          d.coordinates.gitRef = keptPublishedRef(gitDir, d, fresh)
           if fresh.coordinates.url.len > 0 and d.coordinates.url.len == 0:
             d.coordinates.url = fresh.coordinates.url
           d.integrity = fresh.integrity
@@ -98125,14 +97997,6 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
             if gitDir.len > 0: computeDepIntegrity(gitDir, target)
             elif d.integrity.startsWith("git-sha256:"): "git-sha256:" & target
             else: "git-sha1:" & target
-          if gitDir.len > 0 and d.coordinates.gitRef.len > 0 and
-              not publishedRefContains(gitDir, d.coordinates.gitRef, target):
-            # A `ref` is a published branch containing the revision; one
-            # that does not contain the target names nothing true any more.
-            # A branch the policy deletes (`isPolicyEphemeralBranch`) never
-            # qualifies, so a recorded stabilisation branch is dropped here
-            # too rather than carried onto the new pin.
-            d.coordinates.gitRef = ""
         ld.deps[i] = d
         moved = true
         result.report.add("repro.lock '" & d.name & "': " & old & " -> " &

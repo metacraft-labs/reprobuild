@@ -46,6 +46,7 @@ const Gen1Profile = """addOn {
 }
 
 systemd.systemUnit {
+  floorExceptions = ["serviceFloor: a test fixture that runs the base's own binaries"]
   name = "repro-addon-fixture.service"
   content = "[Unit]
 Description=Reprobuild add-on test fixture service

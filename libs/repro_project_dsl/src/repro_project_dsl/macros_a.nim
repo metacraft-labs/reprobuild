@@ -2060,16 +2060,62 @@ proc parseScoopProvisioning(node: NimNode): ScoopProvisioningDef =
         "(\"scoop:\" & " & result.bucket & " & \"/\" & " & result.app &
           " & \"@\" & " & versionCode & ")"
 
+proc parseEnvironmentPrefixProvisioning(node: NimNode):
+    EnvironmentPrefixProvisioningDef =
+  ## ``environmentPrefix "SQLITE_PREFIX", libraries = @["libsqlite3"],
+  ## headers = @["sqlite3.h"]`` (Package-Model.md §"Environment-provided
+  ## library prefixes"). Literals only: the arm is data the engine checks
+  ## against the prefix, so a value computed in the recipe has no place in it.
+  let loc = lineFile(node)
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  proc strSeq(value: NimNode; what: string): seq[string] =
+    var lit = value
+    if lit.kind == nnkPrefix and lit.len == 2 and lit[0].eqIdent("@"):
+      lit = lit[1]
+    if lit.kind != nnkBracket:
+      error("environmentPrefix " & what & " expects @[\"...\"] of string " &
+        "literals", value)
+    for item in lit:
+      result.add(requireStrLit(item, "environmentPrefix " & what))
+  for i in 1 ..< node.len:
+    let arg = node[i]
+    if arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+      if result.variable.len > 0:
+        error("environmentPrefix names one variable", arg)
+      result.variable = arg.strVal
+      continue
+    let libs = namedValue(arg, "libraries")
+    if not libs.isNil:
+      result.libraries = strSeq(libs, "libraries")
+      continue
+    let headers = namedValue(arg, "headers")
+    if not headers.isNil:
+      result.headers = strSeq(headers, "headers")
+      continue
+    error("environmentPrefix accepts \"<VARIABLE>\", libraries = @[...], " &
+      "headers = @[...]; got " & arg.repr, arg)
+  if result.variable.len == 0:
+    error("environmentPrefix needs the name of the variable holding the " &
+      "prefix, e.g. environmentPrefix \"SQLITE_PREFIX\"", node)
+  if result.libraries.len == 0:
+    error("environmentPrefix needs libraries = @[...]: the files that make " &
+      "the prefix the library, which the engine checks and hashes", node)
+
 proc collectProvisioning(node: NimNode;
                          nixOutput: var seq[NixPackageProvisioningDef];
                          tarballOutput: var seq[TarballProvisioningDef];
-                         scoopOutput: var seq[ScoopProvisioningDef]) =
+                         scoopOutput: var seq[ScoopProvisioningDef];
+                         envOutput: var seq[EnvironmentPrefixProvisioningDef]) =
   case node.kind
   of nnkStmtList:
     for child in node:
-      collectProvisioning(child, nixOutput, tarballOutput, scoopOutput)
+      collectProvisioning(child, nixOutput, tarballOutput, scoopOutput,
+        envOutput)
   of nnkCall, nnkCommand:
-    if calleeName(node).normalize == "nixpackage":
+    if calleeName(node).normalize == "environmentprefix":
+      envOutput.add(parseEnvironmentPrefixProvisioning(node))
+    elif calleeName(node).normalize == "nixpackage":
       nixOutput.add(parseNixPackageProvisioning(node))
     elif calleeName(node).normalize == "tarball":
       tarballOutput.add(parseTarballProvisioning(node))
@@ -2785,7 +2831,8 @@ proc parsePackageDef(name: NimNode; body: NimNode;
       if stmt.len < 2:
         error("provisioning expects a body", stmt)
       collectProvisioning(stmt[stmt.len - 1], result.nixProvisioning,
-        result.tarballProvisioning, result.scoopProvisioning)
+        result.tarballProvisioning, result.scoopProvisioning,
+        result.environmentPrefixProvisioning)
     elif calleeName(stmt).normalize == "runtimelibrary":
       # Producer-side runtime library declaration:
       #
@@ -3158,6 +3205,19 @@ proc packageLiteral(pkg: PackageDef): string =
         $provisioning.requiresExecutionProfileChecksum &
       ", packageId: " & codeOrEmpty(provisioning.packageId) &
       ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], environmentPrefixProvisioning: @[")
+  for provisioningIndex, provisioning in pkg.environmentPrefixProvisioning:
+    if provisioningIndex > 0:
+      result.add(", ")
+    var libs, hdrs: seq[string]
+    for lib in provisioning.libraries: libs.add(escForCode(lib))
+    for hdr in provisioning.headers: hdrs.add(escForCode(hdr))
+    result.add("EnvironmentPrefixProvisioningDef(variable: " &
+      escForCode(provisioning.variable) &
+      ", libraries: @[" & libs.join(", ") & "]" &
+      ", headers: @[" & hdrs.join(", ") & "]" &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], usesImportPaths: @[")
@@ -4432,8 +4492,8 @@ const BundledStdlibSelectors* = [
   "autoconf",
   "automake",
   "bash",
-  "bpftrace",
   "bpftool",
+  "bpftrace",
   "bun",
   "cachix",
   "capnp",
@@ -4442,16 +4502,10 @@ const BundledStdlibSelectors* = [
   "circom",
   "clang",
   "clippy",
-  "ctags",
   "create-dmg",
+  "ctags",
   "curl",
   "dpkg",
-  # macOS splits debug info out of the Mach-O image in a SECOND pass that the
-  # compiler driver shells out to by bare name, so an edge compiling with
-  # ``-g`` on darwin runs ``dsymutil`` after the link and has to be able to
-  # name it. It is not in the clang-wrapper's ``bin``; see
-  # ``repro_dsl_stdlib/packages/dsymutil.nim`` for why it is a selector of its
-  # own rather than a widening of ``clang``.
   "dsymutil",
   "electron",
   "emcc",
@@ -4465,26 +4519,20 @@ const BundledStdlibSelectors* = [
   "go",
   "installer",
   "just",
+  "libblake3",
   "llvm-config",
   "make",
   "maturin",
   "mdbook",
-  # M9.P stop-gap: ``meson`` + ``ninja`` added so ``uses: "meson"``
-  # / ``uses: "ninja"`` lines on from-source recipes (e.g. the
-  # ``recipes/packages/source/dbus-broker`` family) auto-import
-  # the hand-authored ``package meson:`` / ``package ninja:``
-  # provisioning blocks. Without this entry the runner's
-  # ``isBundledStdlibSelector`` rejects the selector and the
-  # provisioning shape never reaches the tool-identity resolver.
   "meson",
   "nim",
   "nimble",
   "ninja",
   "nix",
-  "nsis",
   "node",
   "npm",
   "npx",
+  "nsis",
   "openssl",
   "pcre-config",
   "pkg-config",
@@ -4493,31 +4541,19 @@ const BundledStdlibSelectors* = [
   "pnpm",
   "pyproject-hooks",
   "pytest",
-  "python3",
-  # M7 (Windows reprobuild migration): python-build-standalone
-  # tarball provisioning (libs/python3xx.lib + include/ — the
-  # PyO3 build script's link target). Distinct from ``python3``
-  # which on Windows resolves to the official embeddable zip.
   "python-dev",
+  "python3",
   "rg",
   "ruby",
+  "runquotad",
   "rust-analyzer",
+  "rust-std",
   "rustc",
   "rustfmt",
   "rustup",
-  # M9.R.14b.1: ``runquotad`` is the RunQuota daemon binary the
-  # build engine spawns transitively for from-source recipe
-  # graphs. The root ``repro.nim``'s ``uses: "runquotad"`` line
-  # needs the auto-import here so the stdlib package definition at
-  # ``repro_dsl_stdlib/packages/runquotad.nim`` reaches the
-  # project-interface extractor; without it the from-source
-  # resolver hard-fails with "no stdlib provisioning channel
-  # declared on the tool use" on every Linux smoke.
-  "runquotad",
   "sh",
-  # `shellcheck`, `shfmt` and `prek` moved to reprobuild-packages, like
-  # `sqlite3`; see `reprobuildPackagesInterfaceModule`.
   "solc",
+  "sqlite",
   "stylus",
   "swc",
   "tmux",
@@ -4531,28 +4567,14 @@ const BundledStdlibSelectors* = [
   "wasm-pack",
   "webpack-cli",
   "wget",
-  # Cloudflare Pages/Workers CLI — an isonim static site's deploy step
-  # (`wrangler pages deploy dist/`) declares `uses: "wrangler"`; the
-  # auto-import reaches `repro_dsl_stdlib/packages/wrangler.nim`.
   "wrangler",
   "xdotool",
   "xvfb-run",
+  "xxhash",
   "yarn",
   "zstd",
-  # The CLI tool and the development channel are two selectors, exactly as
-  # ``python3`` / ``python-dev`` are. ``zstd`` realizes nixpkgs' DEFAULT
-  # output (``bin`` -- ``bin/zstd`` and nothing else); ``zstd-dev`` realizes
-  # every output, so ``zstd.h`` (``dev``) and ``libzstd`` (``out``) reach the
-  # consumer's include and library channels. A recipe that compiles against
-  # the header names ``zstd-dev``; one that runs the binary names ``zstd``.
-  # See ``repro_dsl_stdlib/packages/zstd_dev.nim`` for why the dev package
-  # declares a HEADER as its ``executablePath``.
   "zstd-dev",
-  # ReproOS-Add-On-Mode A15: the Rust standard library of a TARGET
-  # platform. Its arms are keyed by the target the build compiles for,
-  # not by the host; see ``repro_dsl_stdlib/packages/rust_std.nim``.
-  "rust-std"
-  ]
+]
   ## The stdlib package selectors a recipe's ``uses:`` reaches by name alone:
   ## ``usesImportCode`` auto-imports ``repro_dsl_stdlib/packages/<module>``
   ## for each. GM4b lifted the list out of ``usesImportCode`` so the engine's
@@ -4575,16 +4597,36 @@ proc bundledStdlibModuleName*(selector: string): string =
   ## generates its imports from the same mapping.
   selectorModuleName(selector)
 
+const NativeImportExcluded = "shell"
+  ## Exports of a typed-tool module that a `nativeBuildDeps:` import leaves
+  ## out because the DSL itself exports the same name (`shell`). Measured
+  ## 2026-11-01: across the 311 catalog recipes at reprobuild-packages
+  ## adb067c, `shell` was the only such name, and 10 recipes that list `sh`
+  ## in `nativeBuildDeps:` and call the DSL's `shell(...)` failed with
+  ## "ambiguous call" without this.
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
+  # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
+  # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
+  # §Lookup; operator decision 2026-11-01). A typed command is a build-host
+  # tool, and `nativeBuildDeps:` is where a build-host tool is declared:
+  # under `--target` a `uses:` entry is a TARGET dependency, so a recipe
+  # whose typed calls could only come from `uses:` could not be cross-built.
+  # The `as <name>_module` alias below keeps the module name out of scope,
+  # and `modules` holds each path once, so a tool in both lists is imported
+  # once.
   var modules: seq[string] = @[]
-  for useDef in pkg.toolUses:
+  var nativeOnlyModules: seq[string] = @[]
+  for useDef in pkg.toolUses & pkg.nativeBuildDeps:
     if isBundledStdlibSelector(useDef.packageSelector):
       let modulePath = "repro_dsl_stdlib/packages/" &
         selectorModuleName(useDef.packageSelector)
       if modules.find(modulePath) < 0:
         modules.add(modulePath)
+        if useDef notin pkg.toolUses:
+          nativeOnlyModules.add(modulePath)
   var dependencyModules: seq[string] = @[]
-  for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+  for useDef in pkg.runtimeDeps:
     if isBundledStdlibSelector(useDef.packageSelector):
       let modulePath = "repro_dsl_stdlib/packages/" &
         selectorModuleName(useDef.packageSelector)
@@ -4605,8 +4647,17 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   for modulePath in modules:
     let moduleName = modulePath.split('/')[^1]
     let moduleAlias = moduleName & "_module"
+    # A tool only `nativeBuildDeps:` names also leaves out the module's
+    # convenience procs that share a name with the DSL's own -- `sh`'s
+    # `shell`, beside `repro_project_dsl.shell` -- so a recipe that already
+    # declared the tool there, and calls the DSL's `shell(...)`, keeps
+    # compiling (Provisioning-Contributions.md §Lookup). A `uses:` import
+    # is unchanged.
+    let excluded =
+      if modulePath in nativeOnlyModules: "package, " & NativeImportExcluded
+      else: "package"
     result.add("import " & modulePath & " as " & moduleAlias &
-      " except package\n")
+      " except " & excluded & "\n")
     result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
     result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
@@ -4704,14 +4755,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       producerModules.add((moduleAlias, selector, producerModule & ".nim"))
   # A package named in ``nativeBuildDeps:`` / ``runtimeDeps:`` resolves from
   # the `reprobuild-packages` catalog too (Provisioning-Contributions.md,
-  # "Catalog Lookup And Provisioning": wherever a recipe names it). Like the
-  # stdlib's dependency-only imports above, it needs module initialization
-  # (to register its provisioning) but not its typed command surface, so it
-  # is imported for its selector-specific marker alone; a selector `uses:`
-  # already imported in full is not imported again. The order follows the
+  # "Catalog Lookup And Provisioning": wherever a recipe names it). As with
+  # the stdlib modules above, a `nativeBuildDeps:` tool is imported with its
+  # typed command surface and a `runtimeDeps:` entry for its selector-specific
+  # marker alone (module initialization registers its provisioning); a
+  # selector already imported in full is not imported again. The order follows the
   # `uses:` branch: an explicit ``usesImportPath`` or a workspace project of
   # that name keeps the selector, and only then is the catalog consulted.
   var dependencyOnlyAliases: seq[string] = @[]
+  var nativeOnlyAliases: seq[string] = @[]
   if not hasExplicitImports:
     for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
       let selector = useDef.packageSelector
@@ -4731,7 +4783,12 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           break
       if not catalogSeen:
         producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
-        dependencyOnlyAliases.add(catalogAlias)
+        # A `nativeBuildDeps:` tool brings its typed commands, as a stdlib
+        # one does above; a `runtimeDeps:` entry its marker alone.
+        if useDef notin pkg.nativeBuildDeps:
+          dependencyOnlyAliases.add(catalogAlias)
+        else:
+          nativeOnlyAliases.add(catalogAlias)
   # Multi-Sibling interface-extraction object-collision fix.
   #
   # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per
@@ -4820,8 +4877,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           moduleAlias & "_dep import " & markerName & "\n")
         result.add(markerName & "()\n")
         continue
+      # A catalog tool only `nativeBuildDeps:` names leaves out the names
+      # the DSL itself exports (`shell`), as a stdlib one does
+      # (``NativeImportExcluded``): a recipe that lists `sh` there and calls
+      # the DSL's `shell(...)` must not see an ambiguous call.
+      let excluded =
+        if moduleAlias in nativeOnlyAliases: "package, " & NativeImportExcluded
+        else: "package"
       result.add("import \"" & importedModule.replace('\\', '/') & "\" as " &
-        moduleAlias & " except package\n")
+        moduleAlias & " except " & excluded & "\n")
       result.add("when compiles(" & moduleAlias &
         ".reprobuildPackageMarker()):\n")
       result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")

@@ -15,7 +15,7 @@
 ## lookup model against the guest's own systemd: probe drop-ins in every
 ## directory the model derives for probe units (a template instance, a
 ## unit with an enabled alias, a dash-named slice, the root slice, root's
-## user manager and the gate's SSH session scope) and in directories it
+## user manager and a new session scope) and in directories it
 ## does not, then ``systemctl show -P DropInPaths``; systemd may apply no
 ## directory the model does not derive.
 ##
@@ -84,7 +84,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        canonicalFile("/etc/firewalld/zones/a8.xml", "<zone/>\n")),
      "/etc/firewalld/zones/a8.xml"),
     ("a unit aliasing the ssh service", "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
-       "systemd.systemUnit {\n  name = \"a8-login.service\"\n  content = \"[Service]\n" &
+       "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"a8-login.service\"\n  content = \"[Service]\n" &
        "ExecStart=/bin/true\n\n[Install]\nAlias=sshd@.service\nWantedBy=multi-user.target\n\"\n" &
        "  enabled = false\n}\n", "/etc/systemd/system/a8-login.service")]
   for (what, prof, path) in agentOnly:
@@ -137,7 +137,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                           # user managers pam_systemd starts.
                           ("session-.scope", "Scope"), ("session-5.scope", "Scope"),
                           ("user@.service", "Service"),
-                          ("user@1000.service", "Service")]:
+                          ("user@1000.service", "Service"),
+                          # Decision 38: what logind needs to start a session.
+                          ("systemd-user-sessions.service", "Service"),
+                          ("user-runtime-dir@.service", "Service"),
+                          ("user-runtime-dir@1000.service", "Service")]:
     let content = case section
       of "Slice": "[Slice]\nTasksMax=1\n"
       of "Scope": "[Scope]\nTasksMax=1\n"
@@ -162,6 +166,43 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       step(what & ": not written", g.exec("test -e " & path).exitCode != 0, "")
     let id = identityReport(f0, g.takeFingerprint(repro))
     step(what & ": the fingerprint is unchanged", id.ok, id.text)
+  # Round 5: a tmpfiles fragment is judged by its lines. An agent apply
+  # refuses a rule on a management path (/etc/nologin, /run/nologin, an
+  # sshd drop-in through a symlink) with EAddOnManagementPath; a rule
+  # outside the tmpfiles class's directories is refused for every apply
+  # by the scope check (EAddOnOutOfScope), the operator's below included.
+  let tmpCases = @[
+    ("f+ /etc/nologin 0644 root root - a8", "/etc/nologin", "EAddOnManagementPath"),
+    ("f+ /run/nologin 0644 root root - a8", "/run/nologin", "EAddOnManagementPath"),
+    ("L+ /etc/ssh/sshd_config.d/a8.conf - - - - /var/lib/a8",
+     "/etc/ssh/sshd_config.d/a8.conf", "EAddOnManagementPath"),
+    ("d /etc/a8-tmpfiles 0755 root root -", "/etc/a8-tmpfiles", "EAddOnOutOfScope"),
+    ("d /run/systemd/system/a8.service.d 0755 root root -",
+     "/run/systemd/system/a8.service.d", "EAddOnOutOfScope")]
+  proc tmpProfile(line: string): string =
+    "addOn {\n  managedEtcPrefixes = []\n}\n\nlinux.tmpfilesRule {\n" &
+      "  name = \"repro-a8.conf\"\n  content = \"" & line & "\n\"\n}\n"
+  for (line, path, code) in tmpCases:
+    let what = "a tmpfiles rule `" & line & "`"
+    let f0 = g.takeFingerprint(repro)
+    discard producer.publish(PublishSpec(sequence: sequence,
+      profileText: tmpProfile(line)))
+    inc sequence
+    let t = g.tickUnits()
+    discard g.exec(ResetUnits)
+    step("the agent refuses " & what & " (" & code & ")",
+         t.outcome == "aoApplyFailed" and code in t.message, $t & t.applyLog)
+    step(what & ": not written", g.exec("test -e " & path).exitCode != 0 and
+         g.exec("test -e /etc/tmpfiles.d/repro-a8.conf").exitCode != 0, "")
+    let id = identityReport(f0, g.takeFingerprint(repro))
+    step(what & ": the fingerprint is unchanged", id.ok, id.text)
+  let opTmp = g.applyProfile(repro, "a8-tmpfiles",
+    tmpProfile("d /etc/a8-tmpfiles 0755 root root -"))
+  step("an operator apply of a tmpfiles rule outside the class is refused " &
+       "(EAddOnOutOfScope)", opTmp.exitCode != 0 and
+       "EAddOnOutOfScope" in opTmp.stdout & opTmp.stderr and
+       g.exec("test -e /etc/a8-tmpfiles").exitCode != 0,
+       opTmp.stdout & opTmp.stderr)
   # The operator path over SSH (an open session) applies all three.
   var bodyText = ""
   var prefixes: seq[string]
@@ -184,8 +225,8 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
   ## dashed prefix (serial-getty@ttyS0), a unit with an enabled
   ## ``[Install] Alias=`` (networkd's D-Bus alias), a dashed slice
   ## (user-1000.slice), the root slice, root's user manager
-  ## (user@0.service) and the gate's own SSH session scope
-  ## (session-<n>.scope). The probe drop-ins set only an ``X-`` key, which
+  ## (user@0.service) and a session scope started after the probe drop-ins
+  ## (session-a8p.scope). The probe drop-ins set only an ``X-`` key, which
   ## systemd ignores.
   let ver = g.exec("systemctl --version | head -1").stdout.strip()
   record["systemdVersion"] = %ver
@@ -197,13 +238,17 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
   for (name, content) in Units:
     discard g.run("printf '%s' '" & content & "' > /etc/systemd/system/" & name)
   discard g.run("systemctl daemon-reload && systemctl enable a8q-net.service")
-  # The guest's own login units too: root's user manager and the gate's
-  # SSH session scope (decision 37, extended).
-  let session = g.exec("systemctl list-units --type=scope --state=active " &
-    "--no-legend --plain 'session-*.scope' | awk 'NR==1 {print $1}'").stdout.strip()
-  var probes = @["a8p-gw-x@i1.service", "a8q-net.service", "a8s-1000.slice",
-                 "-.slice", "user@0.service"]
-  if session.len > 0: probes.add(session)
+  # The guest's own login units too (decision 37, extended): root's user
+  # manager, and a session scope. The scope is a new transient one started
+  # after the probe drop-ins are in place (below), as a login after a
+  # drop-in is written would be: an already-running scope does not pick up
+  # drop-ins written after it started (measured on debian-12-amd64,
+  # systemd 252, at reprobuild 79ba6530c7: the gate's own SSH session scope
+  # reported none, not even its own name's).
+  const session = "session-a8p.scope"
+  let probes = @["a8p-gw-x@i1.service", "a8q-net.service", "a8s-1000.slice",
+                 "-.slice", "user@0.service", "systemd-user-sessions.service",
+                 session]
   record["dropInProbeSession"] = %session
   var predicted: seq[(string, seq[string])]
   var candidates = @["a8p-gw-@i2.service", "a8p-gw-x@i2.service",
@@ -228,6 +273,9 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
       " && printf '[Unit]\\nX-A8-Probe=yes\\n' > /etc/systemd/system/" &
       quoteShell(d & ".d/" & probeFile(i)))
   discard g.run("systemctl daemon-reload")
+  discard g.exec("setsid nohup systemd-run --scope --quiet --unit=" & session &
+    " sleep 600 >/dev/null 2>&1 < /dev/null & sleep 3")
+  let scopeUp = g.exec("systemctl is-active " & session).stdout.strip() == "active"
   var report = newJObject()
   var unsound: seq[string]
   for (u, dirs) in predicted:
@@ -245,13 +293,14 @@ proc dropInProbe(g: Guest; step: StepFn; record: JsonNode) =
                    "appliedNotDerived": extra, "derivedNotApplied": unused}
     if extra.len > 0: unsound.add(u & ": " & extra.join(", "))
   record["dropInProbe"] = report
+  discard g.exec("systemctl stop " & session & " 2>/dev/null; true")
   for i, d in candidates:
     discard g.run("rm -f /etc/systemd/system/" & quoteShell(d & ".d/" & probeFile(i)) &
       "; rmdir /etc/systemd/system/" & quoteShell(d & ".d") & " 2>/dev/null; true")
   discard g.run("systemctl disable a8q-net.service; rm -f " &
     "/etc/systemd/system/a8p-gw-x@.service /etc/systemd/system/a8q-net.service " &
     "/etc/systemd/system/a8s-1000.slice; systemctl daemon-reload")
-  step("a login session scope was probed", session.len > 0, "")
+  step("a new session scope (" & session & ") was probed", scopeUp, "")
   step("systemd (" & ver & ") applies no drop-in directory the model does " &
        "not derive", unsound.len == 0, unsound.join("\n") & "\n" & $report)
   # The model's own claim, measured: every derived directory is applied.

@@ -1,14 +1,16 @@
 ## `repro lock refresh` never moves a committed `repro.lock` pin BACKWARD, and
-## neither it nor the managed `pre-commit` re-pin ever records a local-only
-## branch name as a pin's `ref` (Unified-Locking-And-Hooks.md §13.3, §14.2).
+## neither it nor the managed `pre-commit` re-pin records any branch for a pin
+## (Unified-Locking-And-Hooks.md §13.3, §14.2).
 ##
 ## WHY. Both doors observe each sibling at whatever its shared checkout has
 ## checked out. A checkout left on a stale branch made a refresh roll four pins
 ## back to ANCESTORS of the pins already committed, and wrote the checkouts'
 ## local branch names (`blocktracer`, `n3g`) into `ref`, which name nothing on
-## any other machine. The commit hook already refuses a backward pin (covered by
+## any other machine. A pin now records no branch at all: which branch holds a
+## commit is a fact about the writer's remote-tracking refs, not about the
+## commit. The commit hook already refuses a backward pin (covered by
 ## `t_commit_refuses_a_backward_sibling_pin.nim`); this file holds the explicit
-## door to the same rule, and both doors to the `ref` rule.
+## door to the same rule, and both doors to the no-branch rule.
 ##
 ## Fixture: `committed_lock_siblings_fixture.nim` — a real manifest workspace
 ## (app → lib-b → lib-c, lib-d unrelated) of real git repositories cloned from
@@ -22,22 +24,18 @@
 ##   * the same refresh with `--allow-pin-regression=lib-b` (or the
 ##     `REPRO_ALLOW_PIN_REGRESSION` variable) writes the older pin and says so;
 ##   * the incident: the sibling switched to a stale LOCAL branch — refused;
-##     when allowed, the recorded `ref` is the published branch, never the
-##     local name;
+##     when allowed, the pin records the commit and never the local name;
 ##   * a DIVERGED sibling (another line of history) is refused without the
 ##     flag and written with it;
 ##   * an AHEAD sibling advances with no refusal;
-##   * `ref` is a remote-tracking branch containing the commit (the
-##     repo's resolved `unstable`, then `mainline`, first — covered by
-##     `t_published_ref_prefers_resolved_unstable.nim`; here lib-b declares
-##     only the mainline `main`, so the fallback order decides); a local-only
-##     branch is never written for a sibling or for the root; an unpublished
-##     commit records an empty `ref`;
+##   * no pin records a branch, for a sibling or for the root, whichever
+##     branches the checkouts sit on; publishing an unmoved pin on another
+##     branch changes no byte;
 ##   * through the real `pre-commit` hook: a sibling on a local-only branch is
-##     pinned with its published `ref`; a committed local-only `ref` over an
-##     unmoved revision is repaired; a still-published `ref` over an unmoved
-##     revision is kept (no churn); a sibling switched to a stale local branch
-##     refuses the commit.
+##     pinned with no branch; a `ref` an older writer committed over an
+##     unmoved revision is left alone (nothing moved), and dropped when the
+##     pin next moves; a sibling switched to a stale local branch refuses the
+##     commit.
 ##
 ## NO MOCKS. The hook file is written by hand rather than by
 ## `repro hooks ensure --vcs` so that it names the built binary by absolute
@@ -61,8 +59,11 @@ proc field(entry, key: string): string =
 proc pinOf(lockBody, name: string): string =
   field(depEntry(lockBody, name), "revision")
 
-proc refOf(lockBody, name: string): string =
-  field(depEntry(lockBody, name), "ref")
+proc noRef(lockBody, name: string): bool =
+  ## Whether the `deps` entry `name` records no branch: a pin is a commit
+  ## (Unified-Locking-And-Hooks.md §14.2).
+  let entry = depEntry(lockBody, name)
+  entry.len > 0 and field(entry, "ref") == "<absent>"
 
 proc refresh(fx: SiblingFixture; extra = ""; allowEnv = ""):
     tuple[code: int; output: string] =
@@ -231,7 +232,7 @@ suite "repro lock refresh never moves a pin backward":
       check allowed.code == 0
       let body = readFile(fx.app / "repro.lock")
       check pinOf(body, "lib-b") == s.seed
-      check refOf(body, "lib-b") == "main"
+      check noRef(body, "lib-b")
       check "\"blocktracer\"" notin body
 
   test "t_a_diverged_sibling_needs_the_explicit_flag":
@@ -258,9 +259,9 @@ suite "repro lock refresh never moves a pin backward":
       check allowed.code == 0
       let body = readFile(fx.app / "repro.lock")
       check pinOf(body, "lib-b") == sideways
-      # Not reachable from any published branch: no ref rather than a
-      # local one.
-      check refOf(body, "lib-b") == ""
+      # Not reachable from any published branch, and recorded the same way
+      # as any other commit: by revision, with no branch.
+      check noRef(body, "lib-b")
 
   test "t_an_ahead_sibling_advances":
     if findExe("git").len == 0:
@@ -277,9 +278,9 @@ suite "repro lock refresh never moves a pin backward":
       check "REFUSED" notin r.output
       check "allowed pin regression" notin r.output
 
-suite "a committed lock's ref names a published branch":
+suite "a committed lock names no branch":
 
-  test "t_refresh_records_the_published_branch_not_the_local_one":
+  test "t_refresh_records_no_branch_and_publication_changes_nothing":
     if findExe("git").len == 0:
       skip("git is not on PATH; every fixture here is a real git repository")
     else:
@@ -294,15 +295,13 @@ suite "a committed lock's ref names a published branch":
       checkpoint(r.output)
       check r.code == 0
       var body = readFile(fx.app / "repro.lock")
-      check refOf(body, "lib-b") == "main"
-      check refOf(body, ".") == "main"
+      check noRef(body, "lib-b")
+      check noRef(body, ".")
       check "\"n3g\"" notin body
       check "\"local-topic\"" notin body
 
       # lib-b sits on the local-only `n3g`, so `advance` publishes nothing to
-      # `main`: the commit is on `dev` alone, then on `agents` and `dev`. No
-      # role of lib-b names either, so the fallback order decides — the only
-      # containing branch, then the first containing branch by name.
+      # `main`: the commit is on `dev` alone, then on `agents` and `dev`.
       let next = fx.advance("lib-b")
       discard fx.git(s.libB, "push -q origin HEAD:dev")
       discard fx.git(s.libB, "fetch -q origin")
@@ -311,14 +310,14 @@ suite "a committed lock's ref names a published branch":
       check r.code == 0
       body = readFile(fx.app / "repro.lock")
       check pinOf(body, "lib-b") == next
-      check refOf(body, "lib-b") == "dev"
+      check noRef(body, "lib-b")
+      # Publishing the pinned commit on another branch changes no byte.
       discard fx.git(s.libB, "push -q origin HEAD:agents")
       discard fx.git(s.libB, "fetch -q origin")
-      # Re-observing an UNMOVED pin keeps a ref that is still published.
       r = fx.refresh()
       check r.code == 0
-      check refOf(readFile(fx.app / "repro.lock"), "lib-b") == "dev"
-      # A moved pin takes the preferred published branch.
+      check readFile(fx.app / "repro.lock") == body
+      # A moved pin records the commit and nothing else.
       let newest = fx.advance("lib-b")
       discard fx.git(s.libB, "push -q origin HEAD:agents HEAD:dev")
       discard fx.git(s.libB, "fetch -q origin")
@@ -327,9 +326,9 @@ suite "a committed lock's ref names a published branch":
       check r.code == 0
       body = readFile(fx.app / "repro.lock")
       check pinOf(body, "lib-b") == newest
-      check refOf(body, "lib-b") == "agents"
+      check noRef(body, "lib-b")
 
-  test "t_the_commit_hook_records_and_repairs_published_refs":
+  test "t_the_commit_hook_records_no_branch_and_drops_a_recorded_one":
     if findExe("git").len == 0:
       skip("git is not on PATH; every fixture here is a real git repository")
     else:
@@ -348,26 +347,19 @@ suite "a committed lock's ref names a published branch":
       check c.code == 0
       var body = fx.git(fx.app, "show HEAD:repro.lock")
       check pinOf(body, "lib-b") == next
-      check refOf(body, "lib-b") == "main"
+      check noRef(body, "lib-b")
       check "\"n3g\"" notin body
 
-      # A committed local-only ref over an unmoved revision is repaired.
+      # A lock an older writer committed carries a `ref`. Over an unmoved
+      # revision it is not a change — nothing reads it — so the hook leaves
+      # the file alone, whatever the remote now publishes.
       let lockPath = fx.app / "repro.lock"
       writeFile(lockPath, readFile(lockPath).replace(
-        "ref = \"main\", revision = \"" & next & "\"",
+        "revision = \"" & next & "\"",
         "ref = \"blocktracer\", revision = \"" & next & "\""))
-      check refOf(readFile(lockPath), "lib-b") == "blocktracer"
+      check not noRef(readFile(lockPath), "lib-b")
       discard fx.git(fx.app, "add repro.lock")
-      discard fx.git(fx.app, "commit -q --no-verify -m hand-edited-ref")
-      c = fx.tryCommit("repair-the-ref")
-      checkpoint(c.output)
-      check c.code == 0
-      body = fx.git(fx.app, "show HEAD:repro.lock")
-      check pinOf(body, "lib-b") == next
-      check refOf(body, "lib-b") == "main"
-
-      # A still-published ref over an unmoved revision is kept: a new
-      # preferred branch containing it does not churn the lock.
+      discard fx.git(fx.app, "commit -q --no-verify -m older-writer-ref")
       discard fx.git(s.libB, "push -q origin HEAD:agents")
       discard fx.git(s.libB, "fetch -q origin")
       let lockBefore = readFile(lockPath)
@@ -378,13 +370,29 @@ suite "a committed lock's ref names a published branch":
       check fx.git(fx.app, "diff --name-only HEAD~1 HEAD").strip() ==
         "nothing-moved.txt"
 
+      # The next re-pin that moves the sibling rewrites the entry, and the
+      # recorded branch goes with it. (`advance` pushes the local `main`, so
+      # bring it up to the published tip first.)
+      discard fx.git(s.libB, "branch -f main HEAD")
+      let newest = fx.advance("lib-b")
+      discard fx.git(s.libB, "push -q origin HEAD:main")
+      discard fx.git(s.libB, "fetch -q origin")
+      c = fx.tryCommit("adopt-the-newest-lib-b")
+      checkpoint(c.output)
+      check c.code == 0
+      body = fx.git(fx.app, "show HEAD:repro.lock")
+      check pinOf(body, "lib-b") == newest
+      check noRef(body, "lib-b")
+      check "\"blocktracer\"" notin body
+
       # The incident through the hook: the checkout switched to a stale
       # local branch refuses the commit and writes nothing.
+      let pinnedLock = readFile(lockPath)
       discard fx.git(s.libB, "checkout -q -b blocktracer " & s.seed)
       let headBefore = fx.headOf(fx.app)
       c = fx.tryCommit("work-against-a-stale-branch")
       checkpoint(c.output)
       check c.code != 0
       check fx.headOf(fx.app) == headBefore
-      check readFile(lockPath) == lockBefore
-      check lineWith(c.output, "lib-b", "behind by 3").len > 0
+      check readFile(lockPath) == pinnedLock
+      check lineWith(c.output, "lib-b", "behind by 4").len > 0

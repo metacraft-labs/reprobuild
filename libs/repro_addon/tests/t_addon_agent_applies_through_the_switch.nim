@@ -262,6 +262,8 @@ suite "the agent's apply goes through the add-on switch":
     # fixed 512M was most of a 1 GB Pi), and the same bounds on the fetch
     # unit, which compiles too (review of d14cd72e9f).
     check UnprivilegedCompileMemoryMax.endsWith("%")
+    check "--property=OOMScoreAdjust=500" in limits
+    check "OOMScoreAdjust=500\n" in agentCompileBounds()
     check agentCompileBounds() in agentFetchUnit("/x/repro", AgentUnitsInputs())
 
   test "the management path and an unpinned action are refused before the switch":

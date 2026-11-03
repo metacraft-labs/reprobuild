@@ -121,7 +121,7 @@ proc repoFragment(name, remote: string; participation = ""): string =
 
 proc depInline(name, path, url, sha: string): string =
   "{ name = \"" & name & "\", path = \"" & path &
-    "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
+    "\", coord_kind = \"vcs\", url = \"" & url & "\"" &
     ", revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"\", groups = \"\" }"

@@ -75,12 +75,12 @@ proc cronDropIn(gen: int; held: bool): string =
 
 proc profile(n: int; held = ""): string =
   result = "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"repro-fixture-gc.service\"\n  content = \"" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fixture-gc.service\"\n  content = \"" &
     Service & "\"\n}\n\n" &
     "fs.systemFile {\n  path = \"/etc/repro-fixture/gen.conf\"\n  content = \"generation " &
     $n & "\n\"\n}\n"
   if held.len > 0:
-    result.add("\nsystemd.systemUnit {\n  name = \"repro-fixture-held.service\"\n  content = \"" &
+    result.add("\nsystemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fixture-held.service\"\n  content = \"" &
       held & "\"\n  restartIfChanged = false\n}\n")
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
@@ -186,7 +186,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # A switch that fails in step 7: nothing is committed.
     let failed = g.applyProfile(repro, "g-failed", profile(99, HeldUnit.replace("@V@", "v2")) &
       dropInOf(99) &
-      "\nsystemd.systemUnit {\n  name = \"repro-fixture-fails.service\"\n  content = \"" &
+      "\nsystemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fixture-fails.service\"\n  content = \"" &
       FailingUnit & "\"\n}\n")
     # The attempt's id is the one the failure names; the switch is rolled
     # back (§7.5) and generation 9's content re-applied as a new, committed

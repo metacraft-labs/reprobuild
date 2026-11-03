@@ -190,7 +190,7 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
           if c.actionsJson.len > 0:
             resolved = to(parseJson(c.actionsJson), seq[ProfileBuildAction])
         var prof: SystemProfile
-        try: prof = parseSystemProfile(text)
+        try: prof = parseAddOnUserProfile(text)
         except CatchableError as e:
           return (false, "the profile does not parse: " & e.msg)
         let refusal = agentProfileRefusal(m, prof, source, stateDir, unitNames)
@@ -239,6 +239,9 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
              "actionable drift" else: ""))
       except EAddOnUnsupportedBase, EApplyFailedAtFloor:
         raise
+      except AddonNeedsOperator as e:
+        # Refused for an operator to act (§10.1): not retried.
+        raise newException(EApplyNeedsOperator, e.msg)
       except AddonRolledBack as e:
         # Attempted, failed its confirmation, reverted (§7.5): the agent's
         # quarantine outcome, as in the apply unit's hook.

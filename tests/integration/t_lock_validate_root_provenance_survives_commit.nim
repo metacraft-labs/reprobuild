@@ -107,7 +107,7 @@ suite "committed root provenance validation":
       var lock = parseLockedDependencies(readFile(project / "repro.lock"))
       lock.deps.add(LockedDep(name: "lib", path: "../lib",
         coordinates: Coordinates(kind: ckVcs, url: "file://" & sibling,
-          gitRef: "main", revision: pinned),
+          revision: pinned),
         integrity: "git-sha1:" & pinned, visibility: "public"))
       var body = serializeLockedDependencies(lock)
       # Keep this a v2 input fixture so the same test can interrogate the

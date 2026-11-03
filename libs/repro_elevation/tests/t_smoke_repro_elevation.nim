@@ -3788,12 +3788,30 @@ suite "repro_elevation: systemd.systemTimer pure surface":
       "Sun 2026-11-01 12:25:09 EET") == posixDigestHexOfText(oneShot)
     check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
       "n/a") != posixDigestHexOfText(oneShot)
-    # Linked, aliased, indirect or generated timers are not re-enabled.
-    for st in ["linked", "alias", "indirect", "generated", "static"]:
+    # Static, generated, aliased and transient timers are not re-enabled
+    # (enable does nothing for them); a linked, indirect or runtime-only
+    # one is not enabled for the next boot, so it is (review of
+    # 0a0cb3f4a3: those three counted as enabled and never were).
+    for st in ["alias", "generated", "static", "transient"]:
       check timerObservedDigestHex(content, true, true, st, "active",
                                    "n/a") == fileDigest
+    for st in ["linked", "linked-runtime", "indirect", "enabled-runtime"]:
+      check timerObservedDigestHex(content, true, true, st, "active",
+                                   "n/a") != fileDigest
     check timerObservedDigestHex(content, false, false, "linked",
                                  "inactive", "n/a") == fileDigest
+    # A drop-in that adds a repeating trigger makes the timer repeating.
+    check timerRepeats(oneShot & "\n[Timer]\nOnCalendar=daily\n")
+    # An empty assignment to ANY trigger in a later drop-in resets every
+    # trigger, monotonic and calendar (systemd.timer(5)); a drop-in that
+    # resets them and sets a lone OnBootSec= turns a repeating timer into
+    # a one-shot (review of d6f04a2843: only the same key was reset).
+    check not timerRepeats("[Timer]\nOnBootSec=1min\nOnCalendar=daily\n" &
+                           "[Timer]\nOnCalendar=\n")
+    check not timerRepeats("[Timer]\nOnUnitActiveSec=10min\n" &
+                           "[Timer]\nOnBootSec=\nOnBootSec=5min\n")
+    check timerRepeats("[Timer]\nOnBootSec=1min\n" &
+                       "[Timer]\nOnBootSec=\nOnCalendar=hourly\n")
     # Running but not enabled, and the stopped direction.
     check timerObservedDigestHex(content, true, true, "disabled", "active",
                                  "n/a") != fileDigest

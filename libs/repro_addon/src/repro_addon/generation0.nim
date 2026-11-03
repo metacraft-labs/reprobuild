@@ -159,12 +159,110 @@ const
     ##   mode checking"). The ``@debug`` system calls (``ptrace``,
     ##   ``process_vm_readv``/``writev``) are filtered out, so it is no
     ##   more than that check.
-  AgentApplyConfinement* = "RestrictNamespaces=mnt\n" &
-    "SystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete " &
-    "@raw-io @reboot @swap\n" &
-    "LockPersonality=yes\n"
-    ## What bounds the two capabilities above (systemd.exec(5)
-    ## ``RestrictNamespaces=``, ``SystemCallFilter=``).
+  PrivilegedWritablePaths* = "/etc /var /run -/usr/local/etc -" &
+    "/repro/store"
+    ## ``ReadWritePaths=`` of the add-on's root units under
+    ## ``ProtectSystem=strict`` (spec §9.1, §10.1): what an apply writes --
+    ## ``/etc`` (managed files, units, accounts, fragments) and
+    ## ``/usr/local/etc`` (the other managed root, spec §4.4; ``-``
+    ## because a base need not have it), ``/var`` (its
+    ## state, the ``.deb`` cache, tmpfiles targets), ``/run`` (the pending
+    ## marker's lock, the secrets tmpfs) -- and the store, which stays a
+    ## read-only bind there too: a writer enters its private writable view
+    ## (``store_view``). ``-`` because the re-assert unit must still run,
+    ## and report ``degraded``, when the store is gone. ``/usr``, ``/boot``,
+    ## ``/opt``, ``/srv`` and the rest of the base are read-only to them;
+    ## ``ProtectHome=yes`` hides ``/home`` and ``/root``.
+
+  PrivilegedSyscallFilter* =
+    when mutated("privileged-filter-without-mount-chown"):
+      # Falsifying build of the syscall-trace gate: the traced additions
+      # left out, so the store view's mount and tmpfiles' fchown are denied.
+      "SystemCallFilter=@system-service\n" &
+      "SystemCallFilter=~@privileged @resources @obsolete @clock " &
+      "@cpu-emulation @debug @module @raw-io @reboot @swap\n" &
+      "SystemCallFilter=capset\n"
+    else:
+      "SystemCallFilter=@system-service @mount\n" &
+      "SystemCallFilter=~@privileged @resources @obsolete @clock " &
+      "@cpu-emulation @debug @module @raw-io @reboot @swap\n" &
+      "SystemCallFilter=@chown capset\n"
+    ## The root units' syscall filter (CONF-3): the deployment policy's
+    ## recipe (``@system-service``, then ``~@privileged ~@resources
+    ## ~@obsolete``) with what the trace of the units shows they use and
+    ## the recipe takes away: ``@mount`` (the store's private writable
+    ## view; ``unshare`` is in ``@process``, the bind remount is
+    ## ``mount``), and ``@chown`` and ``capset`` from ``@privileged``
+    ## (tmpfiles and account ownership, and the tools the apply runs
+    ## setting their capabilities). systemd reads the lines in order: the
+    ## first is the allow-list, a ``~`` line removes, a later plain line
+    ## adds back (systemd.exec(5)). Derived with
+    ## ``t_e2e_addon_unit_syscall_filters_cover_their_traces`` under
+    ## ``REPRO_ADDON_SYSCALL_BASELINE=1``, which logs every call outside the
+    ## recipe: on Debian 13 the apply unit made ``capset``, ``fchown`` and
+    ## ``mount``, the re-assert, secrets and fetch units none. The groups
+    ## are named rather than the calls, so the 32-bit spellings
+    ## (``fchown32``) an armhf host makes are covered too.
+
+  FetchSyscallFilter* = "SystemCallFilter=@system-service\n" &
+    "SystemCallFilter=~@privileged @resources @obsolete\n"
+    ## The fetch unit's filter (CONF-3): the policy recipe as it stands.
+    ## Its trace (the fetch, the substitution and a profile compile with
+    ## the host's C compiler) uses nothing it takes away; see
+    ## ``PrivilegedSyscallFilter`` for how it is derived.
+
+proc privilegedConfinement*(network: bool): string =
+  ## The CONF-1 floor of the add-on's root units -- the apply unit, and the
+  ## re-assert and secrets units, which run "the apply unit's confinement"
+  ## (spec §7.7, §9.1). Root, but a bounded capability set
+  ## (``AgentApplyCapabilities``), a read-only base outside
+  ## ``PrivilegedWritablePaths``, private ``/tmp`` and devices, the kernel,
+  ## clock and host-name protections, mount namespaces only, no realtime,
+  ## no setuid creation, no write-and-execute memory, a native-only syscall
+  ## filter whose denials fail the call (``EPERM``) instead of killing a
+  ## switch half-way, and -- unless ``network`` -- no network at all.
+  ##
+  ## Not set, and why: ``UMask=0077`` (the apply creates directories under
+  ## ``/etc`` and ``/var`` that the services it runs must read; their
+  ## modes come from the umask); ``ProcSubset=pid`` (the units read
+  ## ``/proc/1/root`` and mount tables only, but the tools they run --
+  ## ``useradd``, ``systemd-tmpfiles`` -- read ``/proc`` beyond PIDs).
+  ## systemd ignores a key starting ``X-`` (systemd.syntax(7)), so the
+  ## reasons are carried in the unit itself (CONF-1: "document per setting,
+  ## in the unit, why it cannot").
+  let caps = when mutated("agent-apply-has-cap-net-admin"):
+               AgentApplyCapabilities.join(" ") & " CAP_NET_ADMIN"
+             else: AgentApplyCapabilities.join(" ")
+  let protectSystem = when mutated("apply-unit-without-protect-system"): ""
+                      else: "ProtectSystem=strict\n" &
+                            "ReadWritePaths=" & PrivilegedWritablePaths & "\n"
+  result = "NoNewPrivileges=yes\n" &
+    "CapabilityBoundingSet=" & caps & "\n" &
+    protectSystem &
+    "ProtectHome=yes\n" &
+    "PrivateTmp=yes\n" &
+    "PrivateDevices=yes\n" &
+    "ProtectKernelTunables=yes\n" &
+    "ProtectKernelModules=yes\n" &
+    "ProtectKernelLogs=yes\n" &
+    "ProtectControlGroups=yes\n" &
+    "ProtectClock=yes\n" &
+    "ProtectHostname=yes\n" &
+    "ProtectProc=invisible\n" &
+    "RestrictNamespaces=mnt\n" &
+    "RestrictRealtime=yes\n" &
+    "RestrictSUIDSGID=yes\n" &
+    "LockPersonality=yes\n" &
+    "MemoryDenyWriteExecute=yes\n" &
+    "SystemCallArchitectures=native\n" &
+    PrivilegedSyscallFilter &
+    "SystemCallErrorNumber=EPERM\n" &
+    "X-Repro-Floor-Unset=UMask: the directories it creates for services " &
+      "take their modes from it; ProcSubset: the tools it runs read /proc " &
+      "beyond PIDs\n"
+  if not network:
+    result.add("PrivateNetwork=yes\nIPAddressDeny=any\n" &
+               "RestrictAddressFamilies=AF_UNIX AF_NETLINK\n")
 
 proc unitPath*(name: string): string =
   ## The unit file the driver writes for ``name``: the driver's own
@@ -216,6 +314,23 @@ proc storeMountUnit(): string =
   # A bind mount of the store over itself, read-only. ``DefaultDependencies``
   # stays on: this is not needed early, and leaving it on keeps the mount out
   # of the base's local-fs.target.
+  when mutated("store-mount-writable"):
+    # The falsifying mutation (e2e_addon_store_is_read_only_to_everything_else):
+    # the bind without `ro`, so every root process can write the store.
+    return """[Unit]
+Description=Reprobuild add-on store, read-only
+RequiresMountsFor=/repro
+Before=repro-addon.target
+
+[Mount]
+What=/repro/store
+Where=/repro/store
+Type=none
+Options=bind
+
+[Install]
+WantedBy=repro-addon.target
+"""
   """[Unit]
 Description=Reprobuild add-on store, read-only
 RequiresMountsFor=/repro
@@ -287,10 +402,8 @@ proc reassertUnit(reproExe: string): string =
     "degraded: the add-on binary " & reproExe & " is unavailable, the " &
     "store is missing or unreadable; echo repro-addon reassert: degraded, " &
     "the store is missing or unreadable > " & ReassertReportPath & "; fi'\n" &
-  "PrivateNetwork=yes\n" &
-  "NoNewPrivileges=yes\n" &
-  "ProtectHome=yes\n" &
-  "PrivateTmp=yes\n" &
+  # The apply unit's confinement, and no network (§7.7; threat model G16).
+  privilegedConfinement(network = mutated("reassert-has-network")) &
   NoSwapLine &
   "\n" &
   "[Install]\n" &
@@ -340,10 +453,8 @@ proc secretsUnit(reproExe: string): string =
   "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " & reproExe &
     " system addon secrets --boot; else echo repro-addon secrets: " &
     "degraded: the add-on binary " & reproExe & " is unavailable; fi'\n" &
-  "PrivateNetwork=yes\n" &
-  "NoNewPrivileges=yes\n" &
-  "ProtectHome=yes\n" &
-  "PrivateTmp=yes\n" &
+  # The re-assert unit's confinement: the apply unit's, no network.
+  privilegedConfinement(network = false) &
   NoSwapLine &
   "\n" &
   "[Install]\n" &
@@ -492,6 +603,12 @@ const
     ## ``CPUWeight=`` / ``IOWeight=`` (``AgentCompileWeight``) to every
     ## default-weight (100) unit.
   AgentCompileWeight* = 20
+  AgentCompileOomScoreAdjust* = 500
+    ## ``MemoryMax=`` bounds the compile's own control group; it does not
+    ## keep the host's global OOM killer off the host's services when the
+    ## whole host runs short. A positive ``OOMScoreAdjust=`` makes the
+    ## compile the killer's first choice instead (systemd.exec(5)).
+    ## https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#OOMScoreAdjust=
 
 proc agentCompileBounds*(): string =
   ## The resource lines of a unit that compiles a profile.
@@ -499,7 +616,8 @@ proc agentCompileBounds*(): string =
   "MemorySwapMax=0\n" &
   "Nice=" & $AgentCompileNice & "\n" &
   "CPUWeight=" & $AgentCompileWeight & "\n" &
-  "IOWeight=" & $AgentCompileWeight & "\n"
+  "IOWeight=" & $AgentCompileWeight & "\n" &
+  "OOMScoreAdjust=" & $AgentCompileOomScoreAdjust & "\n"
 
 proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   ## ``repro-agent-fetch.service`` (spec §9.1): a dynamic user with no
@@ -544,6 +662,7 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   "TimeoutStartSec=30min\n" &
   # It compiles a source profile (when the manifest ships one).
   agentCompileBounds() &
+  # The CONF-1 floor, whole: the unit that parses what the network brings.
   "CapabilityBoundingSet=\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
@@ -553,7 +672,27 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   "PrivateDevices=yes\n" &
   "ProtectKernelTunables=yes\n" &
   "ProtectKernelModules=yes\n" &
+  "ProtectKernelLogs=yes\n" &
   "ProtectControlGroups=yes\n" &
+  "ProtectClock=yes\n" &
+  "ProtectHostname=yes\n" &
+  "ProtectProc=invisible\n" &
+  "RestrictNamespaces=yes\n" &
+  "RestrictRealtime=yes\n" &
+  "RestrictSUIDSGID=yes\n" &
+  "LockPersonality=yes\n" &
+  "MemoryDenyWriteExecute=yes\n" &
+  "SystemCallArchitectures=native\n" &
+  FetchSyscallFilter &
+  "SystemCallErrorNumber=EPERM\n" &
+  # UMask= stays systemd's 0022: the outputs the fetch materialises keep
+  # the modes the cache archive records only through it, and the archive
+  # digest the manifest pins covers them (a 0077 umask made every staged
+  # executable hash differently, measured on Debian 13). The staging area
+  # is private anyway: the state directory of a dynamic user is 0700.
+  "X-Repro-Floor-Unset=UMask: materialised outputs take the archive's " &
+    "modes through it, and the pinned digest covers them; ProcSubset: the " &
+    "profile compile and the C compiler read /proc/cpuinfo and /proc/meminfo\n" &
   "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
   stateHidden & noResolver & compileExec & egress & hostsBind
 
@@ -589,9 +728,7 @@ proc agentApplyUnit*(reproExe: string): string =
   ## swap (§10.3, decision 25). It reads the fetch unit's staging only
   ## through descriptors, into its own copy.
   let net = when mutated("agent-apply-has-network"): ""
-            else: "PrivateNetwork=yes\nIPAddressDeny=any\n" &
-                  "RestrictAddressFamilies=AF_UNIX AF_NETLINK\n" &
-                  ResolverSocketsHidden
+            else: ResolverSocketsHidden
   "[Unit]\n" &
   "Description=Reprobuild add-on deploy agent: apply\n" &
   "After=repro-store.mount " & AgentFetchUnit & "\n" &
@@ -600,11 +737,7 @@ proc agentApplyUnit*(reproExe: string): string =
   "Type=oneshot\n" &
   "ExecStart=" & reproExe & " system addon agent-apply\n" &
   "TimeoutStartSec=3h\n" &
-  "NoNewPrivileges=yes\n" &
-  "CapabilityBoundingSet=" & AgentApplyCapabilities.join(" ") & "\n" &
-  AgentApplyConfinement &
-  "ProtectHome=yes\n" &
-  "PrivateTmp=yes\n" &
+  privilegedConfinement(network = mutated("agent-apply-has-network")) &
   "MemoryMax=" & AgentApplyMemoryMax & "\n" &
   net & NoSwapLine
 

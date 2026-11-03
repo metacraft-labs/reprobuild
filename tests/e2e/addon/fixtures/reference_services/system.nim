@@ -26,14 +26,15 @@
 ## name, its prefix and extra configuration) are in
 ## ``reference_pins.nim``, which the gate writes beside this file.
 ##
-## Hardening: each unit carries the floor spelled out (``Floor`` below):
-## ``ProtectSystem=strict``, private ``/tmp`` and devices, no new
-## privileges, a ``@system-service`` syscall filter without
+## Hardening: every unit asks for the add-on's ``serviceFloor``
+## (``hardening = "serviceFloor"``), which renders the same lines on both
+## realisations: ``ProtectSystem=strict``, private ``/tmp`` and devices, no
+## new privileges, a ``@system-service`` syscall filter without
 ## ``@privileged``, no capabilities, ``MemoryDenyWriteExecute=yes`` and
 ## execution confined to the unit's own store prefix (``NoExecPaths=/``,
-## ``ExecPaths=<prefix>``). It is written here rather than inherited
-## because the add-on's ``serviceFloor`` default does not exist yet; when
-## it does, these lines are what it must render.
+## ``ExecPaths=<prefix>``, derived from its command lines). On the add-on
+## host the floor is also the default; naming it keeps the full
+## realisation's unit byte-identical.
 
 import repro_profile
 
@@ -44,43 +45,17 @@ const
     ## The edges' argv: a host never builds a reference package, it
     ## substitutes it (keep it stable: it is part of the cache key).
 
-  Floor = "NoNewPrivileges=yes\n" &
-    "ProtectSystem=strict\n" &
-    "ProtectHome=yes\n" &
-    "PrivateTmp=yes\n" &
-    "PrivateDevices=yes\n" &
-    "ProtectKernelTunables=yes\n" &
-    "ProtectKernelModules=yes\n" &
-    "ProtectKernelLogs=yes\n" &
-    "ProtectControlGroups=yes\n" &
-    "ProtectClock=yes\n" &
-    "ProtectHostname=yes\n" &
-    "RestrictNamespaces=yes\n" &
-    "RestrictRealtime=yes\n" &
-    "RestrictSUIDSGID=yes\n" &
-    "LockPersonality=yes\n" &
-    "MemoryDenyWriteExecute=yes\n" &
-    "SystemCallArchitectures=native\n" &
-    "SystemCallFilter=@system-service\n" &
-    "SystemCallFilter=~@privileged\n" &
-    "CapabilityBoundingSet=\n" &
-    "AmbientCapabilities=\n" &
-    "UMask=0077\n" &
-    "NoExecPaths=/\n"
-
 const DefaultFamilies = "AF_UNIX AF_INET AF_INET6"
 
-proc confinedTo(prefix, families: string): string =
-  ## The floor, with execution allowed in ``prefix`` only and sockets of
-  ## ``families`` only.
-  Floor & "RestrictAddressFamilies=" & families & "\n" &
-    "ExecPaths=" & prefix & "\n"
-
-proc unitText(description, body, prefix: string; after = "";
+proc unitText(description, body: string; after = "";
               families = DefaultFamilies): string =
+  ## A unit for the floor to complete: its own lines, and the address
+  ## families it uses when they are not the floor's default.
   "[Unit]\nDescription=" & description & "\n" &
     (if after.len > 0: "After=" & after & "\nWants=" & after & "\n" else: "") &
-    "\n[Service]\n" & body & confinedTo(prefix, families) &
+    "\n[Service]\n" & body &
+    (if families != DefaultFamilies: "RestrictAddressFamilies=" & families &
+       "\n" else: "") &
     "\n[Install]\nWantedBy=multi-user.target\n"
 
 const
@@ -109,7 +84,17 @@ const
     "suggested-fee-recipient: \"0x0000000000000000000000000000000000000001\"\n" &
     "interop-eth1data-votes: true\n" &
     "monitoring-host: 127.0.0.1\n" &
-    "monitoring-port: 8080\n"
+    "monitoring-port: 8080\n" &
+    # Resume from the head this node last stored, not from its justified
+    # checkpoint. Without it, prysm (beacon-chain/blockchain/
+    # setup_forkchoice.go, `startupHeadRoot`) rebuilds fork choice from the
+    # justified checkpoint at every start, behind the head the execution
+    # client already holds: the execution client then ignores the beacon
+    # node's fork-choice updates while it syncs, no block is built, and the
+    # validator is asked for votes that surround its own earlier ones,
+    # which its slashing protection refuses (a stall, not a slashing).
+    # Spec §11.1, the operator requirement for consensus clients.
+    "sync-from: head\n"
 
   ValidatorConfig = "datadir: " & ValidatorStateDir & "\n" &
     "wallet-dir: /var/lib/ethereum/validator/wallet\n" &
@@ -138,7 +123,9 @@ profile "referenceServices":
   activity vaultwarden:
     resources:
       # Its store package: an activity's edge, realised only on a host
-      # that selects the activity.
+      # that selects the activity. The accounts below pin their ids: a
+      # carried state directory keeps its numeric owners, so a converted
+      # host must give each account the source host's id (spec §11.1).
       inlineExecCall(
         argv = @["/bin/sh", "-c", CannotBuildHere],
         cwd = VaultwardenPrefix,
@@ -148,7 +135,7 @@ profile "referenceServices":
         commandStatsId = "inlineExecCall",
         substituteOnly = true,
         expectedOutputDigest = VaultwardenDigest)
-      linuxSysusersEntry(name = "vaultwarden", kind = "user",
+      linuxSysusersEntry(name = "vaultwarden", kind = "user", id = "921",
         description = "Vaultwarden", home = "/var/lib/vaultwarden",
         address = "vaultwardenUser")
       linuxTmpfilesRule(name = "repro-vaultwarden.conf",
@@ -167,9 +154,11 @@ profile "referenceServices":
           "ExecStart=" & VaultwardenPrefix & "/bin/vaultwarden\n" &
           "WorkingDirectory=/var/lib/vaultwarden\n" &
           "ReadWritePaths=/var/lib/vaultwarden\n" &
-          "Restart=on-failure\n",
-          VaultwardenPrefix, after = "network-online.target"),
+          "Restart=on-failure\n", after = "network-online.target"),
+        hardening = "serviceFloor",
         credentials = @["admin-token"],
+        # Its data: on a disk a conversion keeps (spec §11.1).
+        stateDirectories = @["keep:/var/lib/vaultwarden"],
         healthCheck = "http://127.0.0.1:8000/alive",
         address = "vaultwardenUnit",
         dependsOn = @["fs.systemFile:/etc/vaultwarden/config.env", "linux.tmpfilesRule:repro-vaultwarden.conf",
@@ -202,13 +191,13 @@ profile "referenceServices":
         cwd = ValidatorPrefix, outputs = @["bin"], requiresElevation = true,
         address = "validator-prefix", commandStatsId = "inlineExecCall",
         substituteOnly = true, expectedOutputDigest = ValidatorDigest)
-      linuxSysusersEntry(name = "eth-execution", kind = "user",
+      linuxSysusersEntry(name = "eth-execution", kind = "user", id = "922",
         description = "Ethereum execution client",
         home = "/var/lib/ethereum/execution", address = "ethExecutionUser")
-      linuxSysusersEntry(name = "eth-beacon", kind = "user",
+      linuxSysusersEntry(name = "eth-beacon", kind = "user", id = "923",
         description = "Ethereum consensus client",
         home = "/var/lib/ethereum/beacon", address = "ethBeaconUser")
-      linuxSysusersEntry(name = "eth-validator", kind = "user",
+      linuxSysusersEntry(name = "eth-validator", kind = "user", id = "924",
         description = "Ethereum validator client",
         home = "/var/lib/ethereum/validator", address = "ethValidatorUser")
       # The state directories. The validator's holds the slashing-protection
@@ -251,8 +240,13 @@ profile "referenceServices":
           "--authrpc.addr 127.0.0.1 --authrpc.port 8551 " &
           "--authrpc.jwtsecret %d/jwt\n" &
           "ReadWritePaths=/var/lib/ethereum/execution\n" &
-          "Restart=on-failure\n", GethPrefix),
+          # Time to flush the chain database on SIGTERM before systemd's
+          # SIGKILL (the directory is carried).
+          "TimeoutStopSec=60\n" &
+          "Restart=on-failure\n"),
+        hardening = "serviceFloor",
         credentials = @["jwt"],
+        stateDirectories = @["carry:/var/lib/ethereum/execution"],
         healthCheck = "tcp:127.0.0.1:8545",
         address = "gethUnit",
         dependsOn = @["linux.tmpfilesRule:repro-ethereum.conf", "linux.sysusersEntry:eth-execution"])
@@ -266,12 +260,17 @@ profile "referenceServices":
           "--genesis-state=" & TestnetPrefix &
           "/share/ethereum-testnet/genesis.ssz --jwt-secret=%d/jwt\n" &
           "ReadWritePaths=/var/lib/ethereum/beacon\n" &
-          "Restart=on-failure\n", PrysmPrefix,
+          # Time to close the beacon database on SIGTERM before systemd's
+          # SIGKILL (the directory is carried).
+          "TimeoutStopSec=60\n" &
+          "Restart=on-failure\n",
           after = "eth-execution.service",
           # The beacon node lists the host's interfaces at start (prysm's
           # `network.IPAddr`, through netlink) and panics without it.
           families = DefaultFamilies & " AF_NETLINK"),
+        hardening = "serviceFloor",
         credentials = @["jwt"],
+        stateDirectories = @["carry:/var/lib/ethereum/beacon"],
         healthCheck = "http://127.0.0.1:3500/eth/v1/node/version",
         address = "beaconUnit",
         dependsOn = @["linux.tmpfilesRule:repro-ethereum.conf", "linux.sysusersEntry:eth-beacon", "fs.systemFile:/etc/ethereum/beacon.yaml"])
@@ -289,10 +288,14 @@ profile "referenceServices":
           # Time to close the slashing-protection database on SIGTERM
           # before systemd's SIGKILL.
           "TimeoutStopSec=60\n" &
-          "Restart=on-failure\n", ValidatorPrefix,
+          "Restart=on-failure\n",
           after = "eth-beacon.service"),
+        hardening = "serviceFloor",
         exclusive = true,
         credentials = @["wallet-password"],
+        # The slashing-protection database and the wallet: carried across
+        # a conversion, restored before the client first starts (§11.1).
+        stateDirectories = @["carry:" & ValidatorStateDir],
         healthCheck = "http://127.0.0.1:8081/healthz",
         # Empty: the default address, which names the unit, so a rename is
         # a removal and an addition. The validator gate sets it to show a

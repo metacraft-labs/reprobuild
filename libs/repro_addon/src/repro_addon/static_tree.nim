@@ -294,26 +294,44 @@ const LiveReferenceDirs* = @["/etc/systemd/system", "/run/systemd/system",
   ## `repro-addon-reassert.service`), their drop-ins (`<unit>.d/*.conf`),
   ## transient and runtime units, and launcher manifests.
 
-proc referenceText(dirs: seq[string]): string =
+proc referenceText*(dirs: seq[string]): string =
   ## What the files in ``dirs`` say, concatenated: every regular file
-  ## directly in each directory and in its ``*.d`` drop-in directories, and
-  ## for each symbolic link there (a unit file linked from elsewhere, maybe
-  ## from the store) the path it resolves to as well as the file's text.
-  ## Raises ``StaticTreeError`` when one cannot be read: then nothing can
-  ## say what it binds, and a collection that went ahead could take a
-  ## prefix a unit runs from.
+  ## directly in each directory and in its ``*.d`` drop-in directories. For
+  ## a symbolic link there (a unit file linked from elsewhere, maybe from
+  ## the store, or a Debian alias) its link text and that text resolved
+  ## against the link's directory -- read with `readlink`, never followed
+  ## to the end -- and, when it leads to a file, that file's text. A link
+  ## that dangles or loops names its target and nothing more: it is a
+  ## common, harmless state (an alias left by a removed package), and
+  ## refusing over it would stop every collection and every switch.
+  ## Raises ``StaticTreeError`` only when a file that exists cannot be read
+  ## (or a link's own text cannot): then nothing can say what it binds, and
+  ## a collection that went ahead could take a prefix a unit runs from.
+  proc fail(f, why: string) {.noreturn.} =
+    raise newException(StaticTreeError, "cannot read " & f & " (" & why &
+      "), so what it binds in the store cannot be held")
   proc addFile(f: string; acc: var string) =
+    if symlinkExists(f):
+      var target = ""
+      try: target = expandSymlink(f)
+      except OSError as e: fail(f, e.msg)
+      acc.add(target & "\n")
+      if not target.isAbsolute: target = parentDir(f) / target
+      acc.add(os.normalizedPath(target) & "\n")
+      # The whole chain resolved, when it resolves: a link to a link into
+      # the store (/etc/systemd/system/x -> /usr/lib/.../x -> a store
+      # prefix) names that prefix only at its last hop. A chain that
+      # dangles or loops has no end, and names what its first hop names.
+      try:
+        if fileExists(f): acc.add(expandFilename(f) & "\n")
+      except OSError:
+        discard
+      if not fileExists(f): return
     try:
-      if symlinkExists(f):
-        acc.add(expandFilename(f) & "\n")
-      if fileExists(f):
-        acc.add(readFile(f))
-        acc.add("\n")
+      acc.add(readFile(f))
+      acc.add("\n")
     except IOError, OSError:
-      let e = getCurrentException()
-      raise newException(StaticTreeError, "cannot read " & f & " (" &
-        e.msg & "), so what it binds in the store cannot be held; " &
-        "nothing was collected or recovered")
+      fail(f, getCurrentExceptionMsg())
   for d in dirs:
     if not dirExists(d): continue
     for kind, f in walkDir(d):
@@ -324,6 +342,17 @@ proc referenceText(dirs: seq[string]): string =
           for k2, g in walkDir(f):
             if k2 in {pcFile, pcLinkToFile}: addFile(g, result)
       else: discard
+
+proc liveReferenceRefusal*(handBack: seq[string];
+                           live: seq[string] = LiveReferenceDirs): string =
+  ## Why the store's hold could not be computed now (``referenceText``), or
+  ## "". A plan runs it, so that a plan is never clean while the switch's
+  ## step 1 (which recomputes the hold) would refuse.
+  try:
+    discard referenceText(handBack & live)
+    ""
+  except StaticTreeError as e:
+    e.msg
 
 proc names(text, path: string): bool =
   ## Whether ``text`` names the prefix ``path``: followed by `/` (a bind of

@@ -46,7 +46,7 @@ import ./addon_secrets_support
 
 proc profile(version: string): string =
   "secrets.secretFile {\n  service = \"nm-web\"\n  name = \"token\"\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"nm-web.service\"\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"nm-web.service\"\n" &
     "  content = \"[Unit]\nDescription=nm reader " & version & "\n\n[Service]\n" &
     "RuntimeDirectory=nm-web\nRuntimeDirectoryMode=0755\n" &
     "ExecStart=/bin/sh -c 'cat $$CREDENTIALS_DIRECTORY/token > /run/nm-web/seen; " &

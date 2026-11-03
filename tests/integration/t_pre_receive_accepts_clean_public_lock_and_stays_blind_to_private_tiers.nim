@@ -154,7 +154,7 @@ proc cleanPublicLock(objFmt, selfRev: string): string =
     schema: "reprobuild.solved-graph-lock.v2",
     deps: @[LockedDep(
       name: "self", path: ".",
-      coordinates: Coordinates(kind: ckVcs, gitRef: "main", revision: selfRev),
+      coordinates: Coordinates(kind: ckVcs, revision: selfRev),
       integrity: gitObjectMultihash(objFmt, selfRev),
       visibility: "public")]))
 

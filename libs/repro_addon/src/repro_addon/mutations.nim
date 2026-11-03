@@ -368,7 +368,20 @@
 ##                                            ``session-<n>.scope``,
 ##                                            ``user@.service`` and its
 ##                                            instances pass (decision 37,
-##                                            extended)
+##                                            extended; decision 38 adds
+##                                            systemd-user-sessions and
+##                                            user-runtime-dir@)
+## ``tmpfiles-scope-unchecked``               a tmpfiles fragment's lines are
+##                                            not parsed: any path, /etc
+##                                            included, is written by
+##                                            systemd-tmpfiles (spec §4.1)
+## ``agent-management-path-ignores-tmpfiles`` an agent apply's tmpfiles rule
+##                                            may act on /run/nologin and the
+##                                            other management paths under
+##                                            the tmpfiles class
+## ``agent-management-path-names-fail-open``  a unit whose names systemd
+##                                            cannot give is judged by its
+##                                            own name alone
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -395,6 +408,49 @@
 ##                                            or the re-assert materialised
 ##                                            is try-restarted even when it
 ##                                            has failed (left failed)
+## ``state-units-not-checked``                a state backup or restore runs
+##                                            whatever its units' control
+##                                            groups say
+## ``state-units-not-held``                   a state backup holds none of
+##                                            its units (one can start again
+##                                            before the conversion)
+## ``state-archive-unchecked``                a restore reads an archive
+##                                            whose SHA-256 it did not check
+## ``state-restore-unverified``               a restore renames a staged
+##                                            tree into place unchecked
+## ``apply-ignores-carried-state``            an apply starts a unit whose
+##                                            carried state is not restored
+## ``import-writes-skeleton``                 the import keeps a copy of
+##                                            its skeleton under ``/etc``
+## ``pending-by-receipt-only``                carried state counts as
+##                                            restored by the receipt
+##                                            alone, whatever root it names
+## ``carried-reach-by-unit-name``             the carried-state wait matches
+##                                            units by name, not by what
+##                                            they can reach
+## ``owner-ids-unchecked``                    a carried tree's owner ids
+##                                            are not compared with the
+##                                            accounts the apply uses
+## ``apply-ignores-hold``                     an apply runs while a state
+##                                            backup holds the host
+## ``hold-runtime-only``                      the hold is written in /run
+##                                            (lost at a reboot)
+## ``hardlinks-unchecked``                    the tree digest passes a file
+##                                            with several hard links
+## ``restore-leaves-staging``                 a retried restore leaves an
+##                                            earlier staging directory
+## ``restore-writes-dense``                   a restore writes zero blocks
+##                                            (the file is not sparse)
+## ``keep-without-mount-requirement``         a unit with a kept directory
+##                                            gets no RequiresMountsFor=
+## ``restore-after-start``                    the switch restores preserved
+##                                            bytes after step 7 starts
+##                                            the units (the old order)
+## ``revert-refuses-restored``                a revert refuses a file the
+##                                            failed switch restored
+## ``import-copies-env-secret``               the import copies a secret
+##                                            Environment= value into the
+##                                            skeleton
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -516,6 +572,11 @@ const
                           "agent-management-path-dropin-ignores-unit-aliases",
                           "agent-management-path-allows-login-slices",
                           "agent-management-path-allows-session-units",
+                          # A8 round 5: tmpfiles lines held to the class and
+                          # the management path; unit names fail closed.
+                          "tmpfiles-scope-unchecked",
+                          "agent-management-path-ignores-tmpfiles",
+                          "agent-management-path-names-fail-open",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",
@@ -534,7 +595,68 @@ const
                           # A12 round-2 review: a consumer that failed for
                           # want of its secrets is try-restarted (left
                           # failed) once they are back.
-                          "failed-consumer-left-failed"]
+                          "failed-consumer-left-failed",
+                          # A9 (confinement): the apply unit without
+                          # ProtectSystem=strict (t_addon_units_meet_
+                          # confinement_floor); the store bind not read-only
+                          # and the flip not re-checking the store
+                          # (e2e_addon_store_is_read_only_to_everything_else);
+                          # CAP_NET_ADMIN in the apply unit's bounding set
+                          # (t_addon_agent_apply_unit_lacks_cap_net_admin);
+                          # the re-assert unit with a network
+                          # (e2e_addon_reassert_unit_has_no_network); the
+                          # serviceFloor without its exec confinement or
+                          # without MemoryDenyWriteExecute
+                          # (e2e_addon_service_cannot_exec_outside_closure).
+                          "apply-unit-without-protect-system",
+                          "store-mount-writable",
+                          "flip-skips-store-recheck",
+                          "agent-apply-has-cap-net-admin",
+                          "reassert-has-network",
+                          "floor-without-noexec",
+                          "floor-without-mdwe",
+                          # A9 review: memfd_create left allowed (the
+                          # exec gate's memfd step); stored generations
+                          # parsed under today's floor default (the
+                          # upgrade gate); drop-ins of floored units not
+                          # judged (t_addon_service_floor); the root units'
+                          # filter without @mount and @chown (the syscall
+                          # trace gate).
+                          "floor-allows-memfd",
+                          "stored-profile-floored",
+                          "floor-ignores-drop-ins",
+                          "privileged-filter-without-mount-chown",
+                          # A13: a state backup or restore runs while a
+                          # unit of the set may run.
+                          "state-units-not-checked",
+                          # A13: the backup does not hold the set's units,
+                          # so one can start again before the conversion.
+                          "state-units-not-held",
+                          # A13: a restore reads an archive whose SHA-256
+                          # it did not check against the manifest.
+                          "state-archive-unchecked",
+                          # A13: a restore renames a staged tree into place
+                          # without checking its digest.
+                          "state-restore-unverified",
+                          # A13: an apply starts a unit whose carried state
+                          # is not restored yet.
+                          "apply-ignores-carried-state",
+                          # A13: the import writes its skeleton on the host.
+                          "import-writes-skeleton",
+                          # A13 review: the falsifiers of the review's
+                          # fixes (see the table above).
+                          "pending-by-receipt-only",
+                          "carried-reach-by-unit-name",
+                          "owner-ids-unchecked",
+                          "apply-ignores-hold",
+                          "hold-runtime-only",
+                          "hardlinks-unchecked",
+                          "restore-leaves-staging",
+                          "restore-writes-dense",
+                          "keep-without-mount-requirement",
+                          "import-copies-env-secret",
+                          "restore-after-start",
+                          "revert-refuses-restored"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

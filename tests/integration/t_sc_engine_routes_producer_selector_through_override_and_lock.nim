@@ -71,7 +71,7 @@ proc writeLock(workspaceRoot: string; withProducerDep: bool) =
       name: producerName,
       path: "../prod",
       coordinates: Coordinates(kind: ckVcs, url: siblingUrl,
-        gitRef: "main", revision: siblingRev),
+        revision: siblingRev),
       integrity: siblingIntegrity,
       visibility: "public"))
   writeFile(committedLockPath(workspaceRoot),
@@ -115,12 +115,12 @@ suite "SC-1: engine routes producer selector through override + lock":
     lock.deps.add(LockedDep(
       name: "nim", path: SelfLockedDepPath,
       coordinates: Coordinates(kind: ckVcs, url: "https://vcs.invalid/nim.git",
-        gitRef: "main", revision: siblingRev),
+        revision: siblingRev),
       integrity: siblingIntegrity, depends: @[producerName]))
     lock.deps.add(LockedDep(
       name: producerName, path: "../prod",
       coordinates: Coordinates(kind: ckVcs, url: siblingUrl,
-        gitRef: "main", revision: siblingRev),
+        revision: siblingRev),
       integrity: siblingIntegrity))
     writeFile(committedLockPath(workspace), serializeLockedDependencies(lock))
 
@@ -159,7 +159,7 @@ suite "SC-1: engine routes producer selector through override + lock":
       inputsDigest: inputsDigestOf("sc1-self-override-fixture"),
       deps: @[LockedDep(name: "nim", path: SelfLockedDepPath,
         coordinates: Coordinates(kind: ckVcs, url: "https://vcs.invalid/nim.git",
-          gitRef: "main", revision: siblingRev), integrity: siblingIntegrity)])
+          revision: siblingRev), integrity: siblingIntegrity)])
     writeFile(committedLockPath(workspace), serializeLockedDependencies(lock))
     writeDevelopOverridesFile(workspace,
       newDevelopOverrides().addOverride(DevelopOverrideEntry(

@@ -4,7 +4,9 @@
 ## that are each clean but disagree are a conflict, a malformed or foreign
 ## file is an error rather than "clean", and the lifetime check finds an
 ## overlap, an instance started inside the polling window and one still
-## alive at the end, and passes a clean hand-over. The VM gate's own
+## alive at the end, and passes a clean hand-over. The cgroup order pairs
+## an incarnation in which no validator was seen, and the monitor's
+## coverage (overflow, `end`, incarnations without a validator) is counted. The VM gate's own
 ## positive control (a second instance with a fresh database double-signs
 ## for real and the check finds it) is in the gate.
 ##
@@ -106,12 +108,32 @@ suite "validator_safety":
       "cg eth-validator-b.service create 200\n" &
       "seen 11 2.0 eth-validator-b.service 200\n"
     check cgroupOverlaps(open).len == 1
-    # An incarnation that held no validator never counts.
+    # An incarnation in which no validator was seen is paired too: its span
+    # contains whatever ran in it, seen or not (validator_safety, *What the
+    # order cannot see*).
     let empty = "cg eth-validator-b.service create 200\n" &
       "cg eth-validator.service create 100\n" &
       "seen 10 1.0 eth-validator.service 100\n" &
       "cg eth-validator-b.service delete\n"
-    check cgroupOverlaps(empty).len == 0
+    let e = cgroupOverlaps(empty)
+    check e.len == 1
+    check "no validator seen" in e[0]
+    # A creation drained after its directory was removed again (`-`, a
+    # monitor that drained late) is a span like any other: early, it is an
+    # overlap; it holds no attributable process, so coverage counts it.
+    let late = "cg eth-validator.service create 100\n" &
+      "seen 10 1.0 eth-validator.service 100\n" &
+      "cg eth-validator-b.service create -\n" &
+      "cg eth-validator.service delete\n" &
+      "cg eth-validator-b.service delete\n"
+    check cgroupOverlaps(late).len == 1
+    check monitorStats(late).withoutValidator == 1
+    # Handed over in order, it is no overlap.
+    let emptyInOrder = "cg eth-validator-b.service create 200\n" &
+      "cg eth-validator-b.service delete\n" &
+      "cg eth-validator.service create 100\n" &
+      "seen 10 1.0 eth-validator.service 100\n"
+    check cgroupOverlaps(emptyInOrder).len == 0
 
   test "cgroups: two instances in one incarnation, an unseen incarnation, a stray":
     check cgroupOverlaps("cg u.service create 1\nseen 10 1.0 u.service 1\n" &
@@ -124,7 +146,7 @@ suite "validator_safety":
     check cgroupOverlaps(stray).len == 1
     expect ValueError: discard cgroupOverlaps("cg u.service frozen\n")
 
-  test "monitor coverage: an overflow fails closed; scan gaps and empty incarnations are counted":
+  test "monitor coverage: an overflow fails closed; scan gaps, empty incarnations and the end are counted":
     let clean = "cg u.service create 1\nscan 0.006\nseen 10 1.0 u.service 1\n" &
       "scan 0.012\ncg u.service delete\ncg u.service create 2\n" &
       "cg u.service delete\n"
@@ -134,6 +156,23 @@ suite "validator_safety":
     check st.longestScanGapSec == 0.012
     check st.incarnations == 2
     check st.withoutValidator == 1
+    check not st.ended                      # killed, not stopped: no `end`
+    # A monitor stopped with SIGTERM drains its queue and writes `end`;
+    # the lifetimes and the cgroup order read past it.
+    let ended = clean & "end\n"
+    check monitorStats(ended).ended
+    check parseLifetimes(ended).len == 1
+    check cgroupOverlaps(ended).len == 0
+    # Nothing may follow `end`: a second writer, or a log appended to.
+    expect ValueError: discard monitorStats(ended & "cg u.service create 3\n")
+    # A long gap between two scans decides nothing by itself: the run that
+    # turned round 2's bound red (0.549 s at 877b33a825), every incarnation
+    # seen, is clean.
+    let slow = "cg u.service create 1\nscan 0.548571\nseen 10 1.0 u.service 1\n" &
+      "cg u.service delete\nend\n"
+    let ss = monitorStats(slow)
+    check ss.ended and ss.withoutValidator == 0 and ss.overflows == 0
+    check cgroupOverlaps(slow).len == 0
     # Events were dropped between two incarnations that look handed over in
     # order: the order no longer shows it, so it is reported.
     let lost = "cg u.service create 1\nseen 10 1.0 u.service 1\n" &

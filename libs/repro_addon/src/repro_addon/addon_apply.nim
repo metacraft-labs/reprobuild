@@ -60,9 +60,11 @@
 ## The plan's three add-on sections (spec §7.1) are in the result: the
 ## ledger diff, the collision report, and the service transition list.
 
-import std/[algorithm, json, options, os, sets, strutils, tables, times]
+import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
+            times]
 from std/posix import Statvfs, statvfs, Stat, lstat
-import std/httpclient
+import std/uri
+import repro_binary_cache_client/http_pool
 
 import repro_core/host_apply_lock
 import repro_dsl_stdlib/packages/apt_closure
@@ -76,6 +78,7 @@ import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./tmpfiles_scope
 import ./addon_secrets
 import ./base_identity
 import ./etc_write
@@ -110,6 +113,11 @@ type
     ## when the switch did not commit, its pending marker stays (a recovery
     ## finishes it forward, never reverts it) and ``floor-hold`` records why.
   AddonRolledBack* = object of AddonApplyError
+  AddonNeedsOperator* = object of AddonApplyError
+    ## Refused for an operator to act, not to be retried: an unattended
+    ## (agent) apply that would give a running unit its first hardening
+    ## floor (spec §10.1). The deploy agent reports it as
+    ## ``aoOperatorAction`` and does not retry the sequence.
   AddonStoreSpaceError* = object of AddonApplyError
     ## The profile's apt closures would not fit on the store's filesystem
     ## with ``StoreSpaceReserveBytes`` (or a quarter of what they need)
@@ -128,6 +136,10 @@ type
 
   AddonApplyOptions* = object
     stateDir*: string
+    carriedStateDir*: string
+      ## Test seams: where carried state is looked for and the root its
+      ## directories are under ("": ``CarriedStateDir`` and ``/``).
+    carriedStateRoot*: string
     probeArchives*: bool
       ## A plan (the migration plan) asks the archive for every closure
       ## member it would fetch (``httpDebProbe``) and refuses the ones not
@@ -187,6 +199,12 @@ type
     replayOf*: string
       ## A replay: the purpose of the switch it replays (a replayed revert
       ## is still a revert: it does not revert itself).
+    storedTarget*: bool
+      ## ``userProfileText`` is a stored generation's profile (a revert, a
+      ## rollback, a re-apply of the current generation), not a new one: it
+      ## is parsed under the rules it was installed with
+      ## (``parseStoredUserProfile``), so a generation from before the
+      ## hardening floor comes back byte for byte (spec §10.1).
     recordOnly*: bool
       ## Replay a failed switch's writes only to bring its ledger up to
       ## date with what it wrote, never starting or committing anything:
@@ -280,6 +298,15 @@ type
     baseIdentity*: BaseIdentity    ## the base observed at plan time (§7.4)
     previousBase*: BaseIdentity    ## the one the current generation recorded
     baseChanges*: seq[string]      ## what changed between the two (§7.9)
+    floorIntroduced*: seq[string]
+      ## Units installed without the hardening floor that this generation
+      ## gives it (``floorIntroducedUnits``): each is a changed unit file
+      ## and a restart, listed apart in the plan; an agent apply refuses
+      ## them (spec §10.1).
+    floorExceptions*: seq[string]
+      ## The target profile's hardening-floor exceptions (spec §10.1,
+      ## CONF-2): ``<unit>: <Setting>: <reason>`` each, printed in every
+      ## plan (``floorExceptionPlanLines``).
     failedAtFloor*: seq[string]
       ## Non-empty when the switch failed after its flip and the rollback
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
@@ -390,6 +417,102 @@ proc isAddonHost*(stateDir = DefaultStateDir): bool =
 proc readHostname*(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
+
+proc storeSignature*(dir: string): string =
+  ## A cheap signature of the store object at ``dir``: every entry below it
+  ## (links not followed) with its type, permissions, size, inode,
+  ## modification time and change time, in path order, hashed. No file
+  ## content is read. Any write, truncation, rename, mode or owner change
+  ## moves the change time (stat(2) ``st_ctime``), which no unprivileged
+  ## call sets and root sets only by moving the system clock; an object
+  ## replaced by another gets a new inode. Used between the switch's
+  ## realise step, which verified the object's content, and its start.
+  var lines: seq[string]
+  proc one(rel, path: string) =
+    let i = getFileInfo(path, followSymlink = false)
+    lines.add(rel & "\t" & $i.kind & "\t" & $i.permissions & "\t" & $i.size &
+      "\t" & $i.id.device & ":" & $i.id.file & "\t" &
+      $i.lastWriteTime.toUnix & "." & $i.lastWriteTime.nanosecond & "\t" &
+      $i.creationTime.toUnix & "." & $i.creationTime.nanosecond)
+  one(".", dir)
+  for rel in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+                                             pcLinkToDir},
+                        followFilter = {pcDir}, relative = true):
+    one(rel, dir / rel)
+  lines.sort()
+  sha256Hex(lines.join("\n"))
+
+proc storeChangedSince*(realised: openArray[tuple[path, signature: string]]):
+    seq[string] =
+  ## The store objects whose ``storeSignature`` differs from the one
+  ## recorded, or that are gone.
+  for (path, sig) in realised:
+    let now = if dirExists(path): storeSignature(path) else: "(gone)"
+    if now != sig: result.add(path)
+
+proc storeObjectFor*(path: string): string =
+  ## The store object a path lies in: a prefix
+  ## (``/repro/store/prefixes/<name>/<version>``) or another top-level
+  ## entry of the store; "" outside the store.
+  result = storeObjectOf(path)
+  if result.len == 0 and path.startsWith(StoreRoot & "/"):
+    let first = path[StoreRoot.len + 1 .. ^1].split('/')[0]
+    if first.len > 0 and first notin [".", ".."]:
+      result = StoreRoot & "/" & first
+
+proc parseStoredUserProfile*(text: string): SystemProfile =
+  ## A stored generation's user profile (``user.profile``, a generation's
+  ## ``addon-user.profile``, the write-ahead record's) as it was installed.
+  ## The add-on stores what it applied rendered (``renderProfileText``),
+  ## so a unit the floor reached carries ``hardening = "serviceFloor"``
+  ## explicitly and every other unit carries none: the stored text records
+  ## the rendering rules of its generation, and parsing it WITHOUT the
+  ## add-on default renders each unit as it was installed. A generation an
+  ## engine from before the floor applied has no such field and stays
+  ## floor-off; only a new profile is held to the floor (spec §10.1, *A
+  ## host upgraded to a build with the floor*).
+  when mutated("stored-profile-floored"):
+    # Falsifying build: stored generations re-rendered under today's
+    # default, which wedges a host whose installed profile the floor
+    # refuses and keeps a revert from restoring the pre-floor unit.
+    parseSystemProfile(text, addOnDefaults = true)
+  else:
+    parseSystemProfile(text)
+
+proc parseAddOnUserProfile*(text: string): SystemProfile =
+  ## A user profile as the add-on realises it: parsed with the add-on's
+  ## defaults (``parseSystemProfile(..., addOnDefaults = true)``), so every
+  ## unit with a ``[Service]`` section that is not a ``collision = dropIn``
+  ## gets the hardening floor unless it names an exception (spec §10.1).
+  ## Every add-on path that plans, applies or compares a user profile --
+  ## the target, the current and the previous generation's -- parses
+  ## through here, so a unit renders the same bytes wherever the add-on
+  ## renders it, and a unit a pre-floor generation installed without the
+  ## floor is planned as a change of its file (a restart in the transition
+  ## list), never applied silently.
+  parseSystemProfile(text, addOnDefaults = true)
+
+proc floorIntroducedUnits*(previous: Ledger;
+                           units: openArray[SystemResource]): seq[string] =
+  ## The units the hardening floor is about to change on a host that
+  ## installed them without it (an upgrade to a build with the floor, spec
+  ## §10.1): a unit under the floor whose ledgered file holds exactly the
+  ## bytes the unit renders WITHOUT the floor. Its file changes and it
+  ## restarts only because of the floor, which every plan says
+  ## (``AddonApplyResult.floorIntroduced``) and an agent apply refuses
+  ## (``runAddonApply``): the first floor a running service gets is an
+  ## operator's reviewed apply, never an unattended restart.
+  for r in units:
+    if r.kind != srkSystemdSystemUnit or
+        r.suHardening != ServiceFloorHardening: continue
+    let path = unitPath(r.suName)
+    for e in previous.entries:
+      if e.class != lcUnit or e.path != path or e.sha256.len == 0: continue
+      let before = sha256Hex(renderedUnitBeforeFloor(r))
+      if e.sha256 == before and
+          before != sha256Hex(renderedSystemUnitContent(r)):
+        result.add(r.suName)
+      break
 
 # ---------------------------------------------------------------------------
 # Scope (spec §4.1, §4.4; threat model G8).
@@ -595,6 +718,12 @@ proc checkScope*(user: SystemProfile;
         raise newAddOnOutOfScope($r.kind & ".name", "", r.address,
           "a tmpfiles fragment of the add-on is named repro-<name>.conf " &
           "(spec §4.1), got " & r.tmpfilesName)
+      # The lines decide what systemd-tmpfiles writes, as root, at once and
+      # at every boot: each path is held to the class's directories, never
+      # /etc, a class directory or another owner's tree (spec §4.1, §4.4).
+      let lines = tmpfilesScopeRefusal(r.tmpfilesContent)
+      if lines.len > 0:
+        raise newAddOnOutOfScope($r.kind & ".content", "", r.address, lines)
     of srkLinuxSysctl:
       # Spec §4.1: /etc/sysctl.d/90-repro-<name>.conf; a filename left
       # empty is derived to that form by the composition.
@@ -778,7 +907,7 @@ proc targetFor(address: string; inp: DecisionInputs; path: string;
     verdict: dec.verdict, diversion: saved.plan.diversion, unitClass: cls,
     replay: true)
 
-proc alreadyRestored(e: LedgerEntry): bool =
+proc alreadyRestored*(e: LedgerEntry): bool =
   ## A replay finds the removals the interrupted switch already made:
   ## an object that had preserved bytes now carries exactly them (its
   ## restore ran), or is gone when it was the add-on's creation.
@@ -1627,7 +1756,7 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   ## 2026-10-30): an adopt widens the scope by exactly what the adopted
   ## object needs. Raises when ``given`` does not declare an addressed
   ## resource.
-  let current = if currentText.len > 0: parseSystemProfile(currentText)
+  let current = if currentText.len > 0: parseStoredUserProfile(currentText)
                 else: SystemProfile()
   result.addOn = current.addOn
   # An adopt changes no secret: the current generation's declarations stay.
@@ -2237,23 +2366,50 @@ proc httpDebProbe*(timeoutMs = 10_000; deadlineMs = 300_000): DebProbe =
   ## answer, an error (no TLS in this build, no network) or a probe begun
   ## after ``deadlineMs`` since the first is ``dsUnknown``: a plan of a
   ## host with hundreds of members ends in bounded time.
-  var started = -1.0
+  var started: MonoTime
+  var begun = false
   result = proc (url: string): tuple[verdict: DebServed; detail: string] =
-    let now = epochTime()
-    if started < 0: started = now
-    if (now - started) * 1000 > float(deadlineMs):
+    # A monotonic clock: a wall clock stepped by NTP mid-plan (a Pi boots
+    # without one) would stretch or cut the deadline.
+    let now = getMonoTime()
+    if not begun:
+      started = now
+      begun = true
+    if (now - started).inMilliseconds > deadlineMs:
       return (dsUnknown, "the plan's probe deadline of " &
         $(deadlineMs div 1000) & " s had passed")
     try:
-      let c = newHttpClient(timeout = timeoutMs, maxRedirects = 5)
-      defer: c.close()
-      var code = c.request(url, httpMethod = HttpHead).code.int
+      let pool = newHttpPool(maxConnections = 1, receiveTimeoutMs = timeoutMs)
+      defer: pool.close()
+      proc ask(meth: string; headers: seq[(string, string)]):
+          tuple[code: int; final: string] =
+        ## Status and headers only, never a body (a mirror that ignores
+        ## ``Range`` would send the whole archive). Redirects are followed
+        ## by hand, at most five, so that only the configured archive's own
+        ## 404/410 reads as "not served", as the realiser's fetch reads it
+        ## (``downloadBounded``).
+        var current = url
+        for _ in 0 .. 5:
+          let r = pool.requestStatusOnly(meth, current, headers)
+          if r.statusCode in [301, 302, 303, 307, 308] and r.location.len > 0:
+            let next = $combine(parseUri(current), parseUri(r.location))
+            if parseUri(current).scheme == "https" and
+                parseUri(next).scheme != "https":
+              return (-1, "a redirect to " & next & " drops TLS")
+            current = next
+            continue
+          return (r.statusCode, current)
+        (-1, "more than five redirects")
+      var (code, final) = ask("HEAD", @[])
       var how = "HEAD"
       if code in [403, 405, 501]:
-        c.headers = newHttpHeaders({"Range": "bytes=0-0"})
-        code = c.request(url, httpMethod = HttpGet).code.int
+        (code, final) = ask("GET", @[("Range", "bytes=0-0")])
         how = "GET bytes=0-0"
-      (probeVerdict(code), how & " " & $code)
+      if code < 0: return (dsUnknown, final)
+      var verdict = probeVerdict(code)
+      if verdict == dsUnserved and originOf(final) != originOf(url):
+        verdict = dsUnknown
+      (verdict, how & " " & $code & (if final != url: " at " & final else: ""))
     except CatchableError as e:
       (dsUnknown, e.msg)
 
@@ -2296,6 +2452,17 @@ proc revertMayKeep*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     plannedSha.len > 0 and currentSha == plannedSha
 
+proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
+                               currentSha, preservedPath: string): bool =
+  ## Whether a revert writes over a ledger-owned file that holds exactly
+  ## the bytes the ledger preserved for it: what the failed switch's
+  ## restore (spec §7.2, before step 7) put there before it failed. Its
+  ## preserved file is named by the bytes' SHA-256.
+  when mutated("revert-refuses-restored"):
+    return false
+  purpose == "revert" and ledgerOwns and regularFile and
+    preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -2311,6 +2478,26 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       $opts.agentRecord.sequence & " is not the apply's sequence " &
       $opts.agentSequence)
   if not opts.planOnly:
+    # Carried state a conversion brought is restored before any apply
+    # reaches it, and nothing is applied under a state backup's hold
+    # (spec §11.1), whichever path asked for the apply (an operator, the
+    # deploy agent, an adopt, a rollback). Decided by the library both
+    # apply paths share (`carried_state`); first, before anything else is
+    # looked at or written.
+    # A stored generation (a revert, a rollback, a replay) is read under the
+    # rules it was installed with, as the switch below reads it (§10.1): a
+    # pre-floor generation parsed with today's floor default would throw
+    # here, and a revert to it could never start.
+    let carriedFrom =
+      if opts.storedTarget or opts.replay:
+        parseStoredUserProfile(opts.userProfileText)
+      else: parseAddOnUserProfile(opts.userProfileText)
+    let why = carriedStateRefusal(carriedFrom,
+      (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+       else: CarriedStateDir),
+      (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+    if why.len > 0:
+      raise newException(AddonApplyError, why)
     # The before-each-write re-check runs on the in-process apply path,
     # which is the one an add-on apply takes: as root, in this process. A
     # process that would hand the privileged set to a broker would apply
@@ -2412,11 +2599,19 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var decisions = initTable[string, CollisionDecision]()
 
   var own = parseSystemProfile(ownText)
+  # A stored generation (a revert, a rollback, the current generation
+  # re-applied, or the replay of a switch that was one) keeps the rules it
+  # was installed with; a new profile is held to the floor (§10.1).
+  let storedTarget = opts.storedTarget or (replaying and
+    hasPendingMarker(stateDir) and
+    readPendingMarker(stateDir).purpose in ["revert", "rollback"])
+  let parseTarget = proc(t: string): SystemProfile =
+    if storedTarget: parseStoredUserProfile(t) else: parseAddOnUserProfile(t)
   var user =
     if adoptAddresses.len > 0:
-      scopedAdoptProfile(parseSystemProfile(targetUserText),
+      scopedAdoptProfile(parseTarget(targetUserText),
                          previousUserText, adoptAddresses)
-    else: parseSystemProfile(targetUserText)
+    else: parseTarget(targetUserText)
   when mutated("addon-unit-renders-differently"):
     # FALSIFYING MUTATION (e2e_addon_reproos_service_parity): the add-on
     # writes every unit with one line the full realisation does not.
@@ -2563,9 +2758,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var prevSha = initTable[string, string]()   # target path -> ledger digest
   var prevObs = initTable[string, string]()   # target path -> its observation
   var prevOwned = initHashSet[string]()
+  var prevPreserved = initTable[string, string]()  # path -> preserved bytes
   for e in previous.entries:
     if e.class in {lcEtcFile, lcUnit, lcDropIn} and e.resource.len > 0:
       prevSha[e.path] = e.sha256
+      if e.preserved.len > 0: prevPreserved[e.path] = e.preserved
       prevObs[e.path] = e.observation
       prevOwned.incl(e.path)
     elif e.class == lcDiversion:
@@ -2605,6 +2802,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## (the drift stays visible), and reported. Any other purpose refuses.
     let regular = fileExists(p.targetPath) and not symlinkExists(p.targetPath)
     let current = if regular: readFile(p.targetPath) else: ""
+    # Bytes the failed switch itself put back: it restored this object's
+    # preserved bytes before it failed (spec §7.2, the restore before step
+    # 7), and its ledger kept the entry because the switch did not commit.
+    # The revert writes its own generation's bytes over them, as the
+    # owner of the object; the preserved bytes stay recorded.
+    if revertOverwritesRestored(purpose, inp.ledgerOwns, regular,
+        sha256Hex(current), prevPreserved.getOrDefault(p.targetPath)):
+      let o = observeTarget(driver, p.targetPath, inp.unit)
+      return (CollisionDecision(verdict: cvUpdate,
+        observation: observationText(o, inp.kind), observedSha256: o.sha256,
+        reason: "the failed switch restored its preserved bytes; the " &
+          "revert writes its generation's bytes again"), o)
     # Only bytes the failed switch found there and left alone: the same
     # digest its plan observed before the flip. Anything else -- a file it
     # wrote, or one that changed since -- is refused as before.
@@ -3003,6 +3212,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           "switch: realising its apt closures needs more of " &
           AddOnSystemStoreRoot & "'s filesystem than is free: " &
           result.storeSpace))
+  # Step 1 recomputes the store's hold from every unit, manifest and
+  # hand-back record on the host (``migrateLegacyAptClosures``); one that
+  # cannot be read stops it there. The plan reads them the same way, so it
+  # is not clean while the switch would refuse, and the switch refuses
+  # before it writes anything.
+  block:
+    let why = liveReferenceRefusal(@[preservedDir(stateDir)])
+    if why.len > 0:
+      refusals.add(newException(AddonCollisionError, "refusing the " &
+        "switch: step 1 recomputes the store's hold, and " & why))
   # A tool's driver writes its wrapper only with the sandbox launcher
   # beside the engine that applies it (``addOnToolLauncherPath``); without
   # it the apply would fail after the flip.
@@ -3078,7 +3297,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var removed: seq[SystemResource]
   var previousUser: SystemProfile
   if previousUserText.len > 0:
-    previousUser = parseSystemProfile(previousUserText)
+    previousUser = parseStoredUserProfile(previousUserText)
     var prevDropIns = initHashSet[string]()
     let previousShaped = reshape(previousUser, prevDropIns)
     when not mutated("retargeted-address-accepted"):
@@ -3645,8 +3864,35 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       treeFiles.add(StaticFile(path: e.path, content: readFile(e.path)))
   result.staticTree = staticTreePath(treeFiles)
 
+  result.floorExceptions = floorExceptionPlanLines(user)
+  result.floorIntroduced = floorIntroducedUnits(previous, user.resources)
   if opts.planOnly:
     return
+  # An unattended (agent) apply never gives a running service its first
+  # floor: the change is reviewed in an operator's plan (spec §10.1). A
+  # replay or a revert of a switch already under way is not refused.
+  if opts.agentSequence > 0'u64 and purpose == "apply" and not replaying and
+      result.floorIntroduced.len > 0:
+    raise newException(AddonNeedsOperator, "operator action required: the " &
+      "hardening floor (serviceFloor) would change " &
+      result.floorIntroduced.join(", ") & ", installed without it; an " &
+      "agent apply does not restart a running service into its first " &
+      "floor. Review `repro system addon plan` and apply this profile once " &
+      "as an operator, or waive the unit's whole floor (floorExceptions = " &
+      "[\"serviceFloor: <why>\"]); a named exception still changes the " &
+      "unit and does not avoid this. Nothing was changed")
+
+  # Step 1 recomputes the store's hold from every unit, manifest and
+  # hand-back record on the host; the plan checked they can be read, but
+  # one can have become unreadable since. Checked again here, before the
+  # first byte this switch writes (the preserved bytes just below, the
+  # write-ahead plan, the pending marker), so the switch refuses with
+  # nothing written rather than failing in step 1.
+  block:
+    let why = liveReferenceRefusal(@[preservedDir(stateDir)])
+    if why.len > 0:
+      raise newException(AddonCollisionError, "refusing the switch: step 1 " &
+        "recomputes the store's hold, and " & why & "; nothing was written")
 
   # The invocation id every running managed unit has just before step 2
   # (taken in `beforeSet`, under the apply lock, after realise): one that
@@ -3716,6 +3962,43 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
             closurePrefixes.add(id)
       st.close()
       holdOnPendingRoot(closurePrefixes)
+
+  # What the flip will make the host run, as realised: the static tree,
+  # each bound closure, every store prefix a unit names (its commands, a
+  # second command after `;`, an argument, a launcher started through a
+  # shell, a bind source) and the program of each `exec:` health check.
+  # Each was verified when it was realised (the tree against its files,
+  # a closure against its lock, a staged output against the manifest's
+  # pin). Step 1 records a cheap signature of each -- every entry's type,
+  # mode, size, inode and modification and change times, no content read
+  # (`storeSignature`) -- and the switch recomputes it before the flip
+  # and again before step 7 starts anything (spec §10.2, A9): a store path
+  # changed in between, by anything that got write access to the store,
+  # is never flipped to or started. A store object that is missing is a
+  # refusal, not a skip.
+  var realisedStore: seq[tuple[path, signature: string]]
+  block:
+    var objs = @[treePath]
+    for lock in closureLocks:
+      let p = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+      if p notin objs: objs.add(p)
+    for p in plans:
+      if p.r.kind == srkSystemdSystemUnit:
+        for o in referencedStoreObjects(renderedSystemUnitContent(p.r)):
+          if o notin objs: objs.add(o)
+        if p.r.suHealthCheck.len > 0:
+          let hc = parseHealthCheck(p.r.suHealthCheck)
+          if hc.kind == hcExec:
+            let o = storeObjectFor(hc.argv[0])
+            if o.len > 0 and o notin objs: objs.add(o)
+    var missing: seq[string]
+    for o in objs:
+      if not dirExists(o): missing.add(o)
+      else: realisedStore.add((path: o, signature: storeSignature(o)))
+    if missing.len > 0:
+      raise newAddOnError(adStoreChanged, "the generation runs from store " &
+        "paths that do not exist after its realise step: " &
+        missing.join(", ") & "; nothing was switched")
 
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]
@@ -3964,6 +4247,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       marker.step = ssPreStop
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-2")
+      # Nothing the generation runs from changed since step 1 (§10.2).
+      when not mutated("flip-skips-store-recheck"):
+        let changed = storeChangedSince(realisedStore)
+        if changed.len > 0:
+          raise newAddOnError(adStoreChanged, "the store changed between " &
+            "the switch's realise step and its flip: " & changed.join(", ") &
+            " no longer hold" & (if changed.len == 1: "s" else: "") &
+            " what was realised; nothing was switched")
       # The flip is durable (its directory is synced) before the marker
       # says it happened; recovery never trusts the step anyway.
       flipStatic(treePath)
@@ -4052,6 +4343,63 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       marker.step = ssFragmentTools
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-6")
+      proc restorePreservedObjects() =
+        ## Objects a removed resource adopted, replaced or reconciled go
+        ## back to what they were (the rest were destroyed by the infra
+        ## apply); a restored unit file is reloaded and its base state put
+        ## back. Before step 7 (spec §7.2): a unit of this generation may
+        ## read a restored object -- a rollback to a generation whose unit
+        ## reads a file the newer one reconciled -- so it starts on it.
+        var needReload = needReloadAfterRemoval
+        var unitsToRestore: seq[LedgerEntry]
+        for e in restore:
+          # Changed meanwhile: left, as drift. Not a change: the flip of
+          # step 3 moved the static tree from under a link-form object the
+          # new generation no longer carries, so the add-on's own link now
+          # dangles; that is the removal in progress, and the restore (or
+          # the deletion) replaces the link.
+          if replaying and alreadyRestored(e):
+            hookRestored.add(e.path)
+            continue
+          let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
+          if d.len > 0:
+            hookKept.incl(e.resource)
+            hookKeptDrift.add(e.path & ": " & d & " (changed after the " &
+              "plan; left in place, --reconcile-drift removes it)")
+            continue
+          try:
+            if restorePreserved(e):
+              hookRestored.add(e.path)
+            elif e.class == lcUnit and e.collision == "replace":
+              # Nothing to put back: the package's file is below /usr; the
+              # shadowing copy goes away.
+              if removeOwnedUnitFile(e):
+                hookRestored.add(e.path)
+            if e.class in {lcUnit, lcDropIn}:
+              needReload = true
+              if e.class == lcUnit:
+                unitsToRestore.add(e)
+                # The install links the add-on made for it go too (a
+                # package's own link was never ledgered, so it stays).
+                for li in previous.entries:
+                  if li.resource == e.resource and li.class == lcInstallLink:
+                    discard removeLeafNoFollow(li.path)
+          except CatchableError as ex:
+            problems.add("restoring " & e.path & ": " & ex.msg)
+        if needReload:
+          try: daemonReload()
+          except CatchableError as ex:
+            problems.add(ex.msg)
+        for e in unitsToRestore:
+          try: restoreUnitState(e, driver,
+                                othersChanged = e.unit in loudHandBack)
+          except CatchableError as ex:
+            problems.add(ex.msg)
+        # Directories the removed resources had created.
+        removeEmptyDirs(removedEntries)
+      when not mutated("restore-after-start"):
+        restorePreservedObjects()
+      seamPause(stateDir, seamPrefix & "step-6-restore")
       if opts.recordOnly:
         # Only the record of what the failed switch wrote is wanted: no
         # start, no confirm, no commit.
@@ -4059,7 +4407,16 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         problems.add("replayed to record what the failed switch wrote; " &
           "not committed")
       # --- Step 7: start. Only after a clean step 4-6: a half-written
-      # generation is not started.
+      # generation is not started, and neither is one whose store objects
+      # changed since step 1 (§10.2): the flip's re-check left the window
+      # of steps 4-6, which this one closes up to the start itself.
+      when not mutated("flip-skips-store-recheck"):
+        if not opts.recordOnly:
+          let changedNow = storeChangedSince(realisedStore)
+          if changedNow.len > 0:
+            problems.add($adStoreChanged & ": the store changed after the " &
+              "flip, before step 7: " & changedNow.join(", ") & " no " &
+              "longer hold what was realised; nothing was started")
       if clean and problems.len == 0:
         try:
           runStart(stepTransitions, paused, notRunning,
@@ -4093,55 +4450,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
             failureSummary(hookConfirm, confirmTimeout))
       marker.step = ssConfirm
       writePendingMarker(stateDir, marker)
-      # Objects a removed resource adopted or replaced go back to what they
-      # were; the rest were destroyed by the infra apply.
-      var needReload = needReloadAfterRemoval
-      var unitsToRestore: seq[LedgerEntry]
-      for e in restore:
-        # Changed meanwhile: left, as drift. Not a change: the flip of
-        # step 3 moved the static tree from under a link-form object the
-        # new generation no longer carries, so the add-on's own link now
-        # dangles; that is the removal in progress, and the restore (or
-        # the deletion) replaces the link.
-        if replaying and alreadyRestored(e):
-          hookRestored.add(e.path)
-          continue
-        let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
-        if d.len > 0:
-          hookKept.incl(e.resource)
-          hookKeptDrift.add(e.path & ": " & d & " (changed after the " &
-            "plan; left in place, --reconcile-drift removes it)")
-          continue
-        try:
-          if restorePreserved(e):
-            hookRestored.add(e.path)
-          elif e.class == lcUnit and e.collision == "replace":
-            # Nothing to put back: the package's file is below /usr; the
-            # shadowing copy goes away.
-            if removeOwnedUnitFile(e):
-              hookRestored.add(e.path)
-          if e.class in {lcUnit, lcDropIn}:
-            needReload = true
-            if e.class == lcUnit:
-              unitsToRestore.add(e)
-              # The install links the add-on made for it go too (a
-              # package's own link was never ledgered, so it stays).
-              for li in previous.entries:
-                if li.resource == e.resource and li.class == lcInstallLink:
-                  discard removeLeafNoFollow(li.path)
-        except CatchableError as ex:
-          problems.add("restoring " & e.path & ": " & ex.msg)
-      if needReload:
-        try: daemonReload()
-        except CatchableError as ex:
-          problems.add(ex.msg)
-      for e in unitsToRestore:
-        try: restoreUnitState(e, driver,
-                              othersChanged = e.unit in loudHandBack)
-        except CatchableError as ex:
-          problems.add(ex.msg)
-      # Directories the removed resources had created.
-      removeEmptyDirs(removedEntries)
+      when mutated("restore-after-start"):
+        # FALSIFYING MUTATION: the order before the A13 review -- objects
+        # a removed resource preserved are put back after the start.
+        restorePreservedObjects()
       # The new ledger: what is on the host now, whether or not the
       # generation commits (an uncommitted attempt's objects are still the
       # add-on's to remove).
@@ -4210,7 +4522,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           # ledger like drift found at plan time.
           put(e)
           continue
+        if e.path in hookRestored and clean and problems.len == 0:
+          continue
         if e.path in hookRestored:
+          # Restored, but the switch is not committing: the object stays
+          # in the ledger (its preserved bytes named), so the revert that
+          # follows recognises them as the failed switch's restore and
+          # writes its own generation's bytes over them
+          # (``revertOverwritesRestored``).
+          put(e)
           continue
         let stillOurs = case e.class
           of lcEtcFile, lcUnit, lcDropIn, lcInstallLink: observeDrift(e).len == 0
@@ -4278,6 +4598,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   try:
     result.infra = runInfraApply(composedText, ApplyOptions(
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
+      carriedStateChecked: true,
       noPreview: true, elevationMode: emBroker,
       buildActions: opts.buildActions,
       buildActionDispatcher: opts.buildActionDispatcher,
@@ -4438,7 +4759,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     try:
       reverted = runAddonApply(AddonApplyOptions(stateDir: stateDir,
         hostIdentity: opts.hostIdentity, ownProfileText: back.own,
-        userProfileText: back.user, driver: opts.driver, purpose: "revert",
+        userProfileText: back.user, storedTarget: true, driver: opts.driver,
+        purpose: "revert",
         assumeActive: assume, retention: opts.retention,
         reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
         nonBlockingStarts: opts.nonBlockingStarts,
@@ -4622,8 +4944,13 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
       recordError = e.msg
     tracked = ledgerRecordsAttempt(stateDir, fromGen)
     if not tracked and recordError.len > 0:
-      return FailedReplayRevert(why: "recording the interrupted switch's " &
-        "writes failed: " & recordError)
+      # Spec §7.2 (recovery), cause 3: the report names the cause, the
+      # write-ahead record (what it names could not be planned from), not
+      # only the error the record-only replay raised.
+      return FailedReplayRevert(why: "the write-ahead record cannot be " &
+        "planned from (recording the interrupted switch's writes failed: " &
+        recordError & ") and the switch had passed step 2 (" & $prior.step &
+        "); no revert can tell those writes apart")
   if not tracked:
     return FailedReplayRevert(why: "the write-ahead record is " &
       (if planUsable: "usable but its writes could not be recorded"
@@ -4638,7 +4965,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     " (reverted from " & backFrom & ")"
   let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: readHostname(), ownProfileText: back.own,
-    userProfileText: back.user, driver: driver, purpose: "revert",
+    userProfileText: back.user, storedTarget: true, driver: driver,
+    purpose: "revert",
     assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
     nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
   # Step 2 disabled the units the switch was removing, recording each

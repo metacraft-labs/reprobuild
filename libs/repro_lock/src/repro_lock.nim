@@ -27,7 +27,7 @@
 ## inputs_digest = "fnv1a64:0123abcd..."
 ## variants = [{ name = "compiler", value = "clang" }]
 ## packages = [{ name = "nim", version = "2.2.0", source = "nim", selection = "selected" }]
-## deps = [{ name = "app", self = "true", coord_kind = "vcs", url = "...", ref = "main", revision = "<sha>", integrity = "git-sha1:<sha>", ... }, { name = "lib", coord_kind = "vcs", ... }]
+## deps = [{ name = "app", self = "true", coord_kind = "vcs", url = "...", revision = "<sha>", integrity = "git-sha1:<sha>", ... }, { name = "lib", coord_kind = "vcs", ... }]
 ## ```
 ##
 ## **There is exactly one schema every writer emits, and it is v3.**
@@ -140,6 +140,15 @@ const SolvedGraphLockSchemaV3* = "reprobuild.solved-graph-lock.v3"
   ## The lock's own repository is marked ``self = "true"`` instead of
   ## ``path = "."``. The reader accepts v3 and v2 and is LOUD on any other
   ## schema (including the old ``…v1``).
+  ##
+  ## A VCS ``deps`` record carries no ``ref`` (2026-11-02). Writers before
+  ## then recorded one, a published branch containing the pin; it is read and
+  ## discarded, and the next write of the lock drops it. The schema tag stays
+  ## v3: every v3 reader — this one, older ``repro`` binaries and the CI
+  ## readers of a committed lock — already reads an absent ``ref`` as the
+  ## empty, advisory value it always allowed, so dropping it is not a
+  ## breaking change, and a version bump would only make those readers
+  ## refuse locks they can read.
 
 const SelfLockedDepPath* = "."
   ## The in-memory ``LockedDep.path`` of the lock's OWN repository: the
@@ -227,8 +236,13 @@ type
     case kind*: CoordKind
     of ckVcs:
       url*: string        ## fetch URL.
-      gitRef*: string     ## advisory ref (branch/tag); ``ref`` is reserved.
       revision*: string   ## exact pinned revision (commit id).
+      ## No branch is recorded. A pin's bytes depend only on the pinned
+      ## commit, never on which published branch contains it: that is a fact
+      ## about the writer's remote-tracking refs, it changes when a sibling is
+      ## published or a remote is fetched, and a certificate binds the lock's
+      ## bytes (Unified-Locking-And-Hooks.md §14.2). Whether the revision is
+      ## published is the pre-push gate's question, asked at push time.
     of ckStore:
       storeHash*: string  ## repro-store content hash.
     of ckRegistry:
@@ -960,7 +974,6 @@ proc serializeDepInline(d: LockedDep): string =
   case d.coordinates.kind
   of ckVcs:
     result.add(", url = \"" & tomlEscape(d.coordinates.url) & "\"")
-    result.add(", ref = \"" & tomlEscape(d.coordinates.gitRef) & "\"")
     result.add(", revision = \"" & tomlEscape(d.coordinates.revision) & "\"")
   of ckStore:
     result.add(", store_hash = \"" & tomlEscape(d.coordinates.storeHash) & "\"")
@@ -1195,8 +1208,9 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
           foreignCoordinates: f.getOrDefault("foreign_coords", ""))
       else:
         coords = Coordinates(kind: ckVcs,
+          # A `ref` an older writer recorded is not read: see
+          # ``SolvedGraphLockSchemaV3``.
           url: f.getOrDefault("url", ""),
-          gitRef: f.getOrDefault("ref", ""),
           revision: f.getOrDefault("revision", ""))
       let name = f.getOrDefault("name", "")
       # The self entry: v3 marks it; v2 spelled it as the path `.` — or left

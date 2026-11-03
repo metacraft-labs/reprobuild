@@ -71,37 +71,47 @@ proc inReleaseSha(inRelease, path: string): string =
       if f.len == 3 and f[2] == path: return f[0]
   ""
 
-proc busyboxClosure*(m: SnapshotMirror; b: BaseImage): ClosureFixture =
-  ## A lock for the ``busybox-static`` closure (no Essential set: the binary
-  ## is static and needs nothing else) at the mirror's current timestamp.
-  let (url, suite, comp) = archiveOf(b)
+proc aptClosureFixture*(m: SnapshotMirror; b: BaseImage; roots: seq[string];
+                        components: seq[string] = @[]): ClosureFixture =
+  ## A lock for the closure of ``roots`` (no Essential set) at the mirror's
+  ## current timestamp, resolved over ``components`` of the base's suite
+  ## (default: the base's own component), every index and ``.deb`` checked
+  ## against the archive's ``InRelease`` on the way.
+  let (url, suite, comp0) = archiveOf(b)
+  let comps = if components.len > 0: components else: @[comp0]
   let inRel = readFile(m.fetchThrough(url & "/dists/" & suite & "/InRelease"))
-  let idxPath = comp & "/binary-" & b.debArch & "/Packages.xz"
-  let want = inReleaseSha(inRel, idxPath)
-  if want.len == 0:
-    raise newException(TestBedError, "InRelease names no " & idxPath)
-  let idxFile = m.fetchThrough(url & "/dists/" & suite & "/" & idxPath)
-  if sha256File(idxFile) != want:
-    raise newException(TestBedError, idxPath & " does not match InRelease")
-  let (text, rc) = execCmdEx("xz -dc " & quoteShell(idxFile))
-  if rc != 0: raise newException(TestBedError, "xz -dc failed: " & idxFile)
+  var text = ""
+  var digests: seq[AptIndexDigest]
+  for comp in comps:
+    let idxPath = comp & "/binary-" & b.debArch & "/Packages.xz"
+    let want = inReleaseSha(inRel, idxPath)
+    if want.len == 0:
+      raise newException(TestBedError, "InRelease names no " & idxPath)
+    let idxFile = m.fetchThrough(url & "/dists/" & suite & "/" & idxPath)
+    if sha256File(idxFile) != want:
+      raise newException(TestBedError, idxPath & " does not match InRelease")
+    let (t, rc) = execCmdEx("xz -dc " & quoteShell(idxFile))
+    if rc != 0: raise newException(TestBedError, "xz -dc failed: " & idxFile)
+    text.add(t)
+    if not text.endsWith("\n\n"): text.add("\n")
+    digests.add(AptIndexDigest(path: idxPath, sha256: want))
   let index = buildAptIndex(parsePackagesIndex(text))
-  let members = resolveAptClosureRecords(index, @["busybox-static"],
+  let members = resolveAptClosureRecords(index, roots,
                                          includeEssential = false)
-  var inRelSha = ""
-  block:
-    var f = m.fetchThrough(url & "/dists/" & suite & "/InRelease")
-    inRelSha = sha256File(f)
+  let inRelSha = sha256File(m.fetchThrough(url & "/dists/" & suite & "/InRelease"))
   let lock = buildAptClosureLock(snapshotArchive(b, m.timestamp), suite,
-    @[comp], b.debArch, m.timestamp, inRelSha,
-    @[AptIndexDigest(path: idxPath, sha256: want)], @["busybox-static"],
-    members)
+    comps, b.debArch, m.timestamp, inRelSha, digests, roots, members)
   result.lockText = renderAptClosureLock(lock)
   for d in lock.debs:
     let local = m.fetchThrough(url & "/" & d.filename)
     if sha256File(local) != d.sha256:
       raise newException(TestBedError, d.filename & " does not match its index")
     result.debs.add((d.sha256, local))
+
+proc busyboxClosure*(m: SnapshotMirror; b: BaseImage): ClosureFixture =
+  ## A lock for the ``busybox-static`` closure (no Essential set: the binary
+  ## is static and needs nothing else) at the mirror's current timestamp.
+  aptClosureFixture(m, b, @["busybox-static"])
 
 proc seedClosureCache*(g: Guest; c: ClosureFixture) =
   ## Put the closure's ``.deb`` files where the realiser looks first
@@ -120,11 +130,11 @@ proc fixtureProfile*(c: ClosureFixture; page = "fixture-a"): string =
       "ProtectSystem=strict\nDynamicUser=yes\n\n" &
       "[Install]\nWantedBy=multi-user.target\n"
   "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n}\n\n" &
-  "systemd.systemUnit {\n  name = \"" & FixtureUnits[0] & "\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & FixtureUnits[0] & "\"\n" &
   "  content = \"" & unit("A10 fixture web", WebPort) & "\"\n" &
   "  aptClosureLock = \"" & c.lockText & "\"\n" &
   "  healthCheck = \"http://127.0.0.1:" & $WebPort & "/copyright\"\n}\n\n" &
-  "systemd.systemUnit {\n  name = \"" & FixtureUnits[1] & "\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & FixtureUnits[1] & "\"\n" &
   "  content = \"" & unit("A10 fixture docs", DocsPort) & "\"\n" &
   "  aptClosureLock = \"" & c.lockText & "\"\n}\n\n" &
   "fs.systemFile {\n  path = \"/etc/repro-fixture/a.conf\"\n" &

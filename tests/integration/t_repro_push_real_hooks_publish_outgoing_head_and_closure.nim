@@ -738,7 +738,7 @@ suite "protocol v2 real-hook repro push closure":
     proc row(name, path, sha, depends, url: string): string =
       "{ name = \"" & name & "\", path = \"" & path &
         "\", coord_kind = \"vcs\", url = \"" & url &
-        "\", ref = \"main\", revision = \"" & sha &
+        "\", revision = \"" & sha &
         "\", integrity = \"git-sha1:" & sha &
         "\", version = \"\", visibility = \"public\", participation = \"\", " &
         "depends = \"" & depends & "\", groups = \"\" }"
@@ -840,7 +840,7 @@ suite "protocol v2 real-hook repro push closure":
           "platform = \"x86_64-linux\"\noptimal = true\n" &
           "inputs_digest = \"fixture\"\nvariants = []\npackages = []\n" &
           "deps = [{name = \"lib\", path = \"../lib\", coord_kind = \"vcs\", " &
-          "url = \"" & fileUrl(fx.libBare) & "\", ref = \"main\", revision = \"" &
+          "url = \"" & fileUrl(fx.libBare) & "\", revision = \"" &
           libSha & "\", integrity = \"git-sha1:" & libSha &
           "\", version = \"\", visibility = \"public\", participation = \"\", " &
           "depends = \"\", groups = \"\"}]\n")

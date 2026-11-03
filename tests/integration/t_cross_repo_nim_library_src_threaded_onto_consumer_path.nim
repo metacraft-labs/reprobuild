@@ -303,8 +303,7 @@ proc writeLock(root, url, revision: string; path = ""; integrity = "") =
     inputsDigest: inputsDigestOf("sc11-fixture"))
   ld.deps.add(LockedDep(
     name: "greetlib", path: path,
-    coordinates: Coordinates(kind: ckVcs, url: url, gitRef: "main",
-      revision: revision),
+    coordinates: Coordinates(kind: ckVcs, url: url, revision: revision),
     integrity: (if integrity.len > 0: integrity
       else: gitObjectMultihash("sha1", revision)),
     visibility: "public"))

@@ -12,7 +12,7 @@
 ##
 ##   1. ``repro.lock`` (end to end): the ``lock_update_node_fixture`` workspace
 ##      with a ``required`` policy and the managed hooks; ``repro.lock``
-##      records a ``ref`` for lib-c that names no published branch. The
+##      records a fetch ``url`` for lib-c that is not its checkout's. The
 ##      predicate names exactly ``repro.lock``; ``repro test`` brings it
 ##      current and stages it; the certificate covers the content; and
 ##      ``git commit -a`` leaves the lock byte-identical and passes the gate.
@@ -88,9 +88,9 @@ suite "HL-10 — every commit-time writer is applied by the node":
         let ws = fx.cf.sib.ws
         fx.ensureHooks()
         writeFile(fx.app / "repro.lock",
-          fx.lockText().withRef("lib-c", "never-published"))
+          fx.lockText().withUrl("lib-c", "file:///never-published/lib-c.git"))
         discard fx.mustGitApp("commit", "--no-verify", "-q", "-a", "-m",
-          "plant a stale ref")
+          "plant a stale url")
         let plan = planCommitTimeLockWriters(ws, fx.app, tpmPathOnly,
           PinRegressionAllowance())
         checkpoint("repro.lock plan: " & $plan.wouldWrite & " failures: " &

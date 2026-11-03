@@ -111,7 +111,7 @@ proc committedLock(url, sha: string): string =
   "variants = []\n" &
   "packages = []\n" &
   "deps = [{ name = \"shared\", path = \"shared\", coord_kind = \"vcs\"" &
-  ", url = \"" & url & "\", ref = \"main\", revision = \"" & sha &
+  ", url = \"" & url & "\", revision = \"" & sha &
   "\", integrity = \"git-sha1:" & sha &
   "\", version = \"\", visibility = \"public\", participation = \"\"" &
   ", depends = \"\", groups = \"\" }]\n"

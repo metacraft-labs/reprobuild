@@ -776,6 +776,9 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
                             exclusive: bool = false;
                             healthCheck: string = "";
                             credentials: seq[string] = @[];
+                            hardening: string = "";
+                            floorExceptions: seq[string] = @[];
+                            stateDirectories: seq[string] = @[];
                             address: string = "";
                             dependsOn: seq[string] = @[]) =
   ## A system unit under `/etc/systemd/system/`.
@@ -805,6 +808,13 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
   ## `LoadCredential=<name>:/run/repro/secrets/<service>/<name>`, so the
   ## service reads it from `$CREDENTIALS_DIRECTORY`.
   ##
+  ## `stateDirectories` declares the directories holding the service's
+  ## state, each written `"keep:<path>"` (on a disk a conversion to
+  ## ReproOS keeps) or `"carry:<path>"` (backed up before the conversion,
+  ## restored before the service first starts, verified by digest);
+  ## ReproOS Add-On Mode spec §11.1. Paths are below /var/lib, /var/cache,
+  ## /var/spool, /var/log or /srv. Nothing is rendered into the unit.
+  ##
   ## `collision` is add-on mode's opt-in when a distribution package
   ## already provides a unit of this name (ReproOS Add-On Mode spec §4.3):
   ## `"dropIn"` writes `content` as a drop-in of the package's unit
@@ -829,6 +839,19 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
   ## so `ExecStart=/usr/bin/<daemon>` runs the closure's binary natively
   ## and `AmbientCapabilities=`, `DynamicUser=`, `LoadCredential=` and
   ## `DeviceAllow=` keep their meaning. ReproOS Add-On Mode spec §8.3.
+  ##
+  ## `hardening = "serviceFloor"` appends the hardening floor to the
+  ## unit's `[Service]` section: `ProtectSystem=strict`, private `/tmp`
+  ## and devices, no new privileges or capabilities, a `@system-service`
+  ## syscall filter without `@privileged`, `MemoryDenyWriteExecute=yes`,
+  ## and execution confined to the unit's closure (`NoExecPaths=/`,
+  ## `ExecPaths=` the store prefixes its command lines run from, and
+  ## `/usr` when an apt closure is bound there). On an add-on host the
+  ## floor is the default for every unit with a `[Service]` section
+  ## except a `collision = "dropIn"` one. `floorExceptions` weakens it,
+  ## one `"<Setting>: <reason>"` entry per setting (`"serviceFloor:
+  ## <reason>"` waives it all); every exception is printed in every plan.
+  ## ReproOS Add-On Mode spec §10.1.
   block:
     var fields = initTable[string, FieldValue]()
     fields["name"] = strField(name)
@@ -851,6 +874,12 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
       fields["healthCheck"] = strField(healthCheck)
     if credentials.len > 0:
       fields["credentials"] = listField(credentials)
+    if hardening.len > 0:
+      fields["hardening"] = strField(hardening)
+    if floorExceptions.len > 0:
+      fields["floorExceptions"] = listField(floorExceptions)
+    if stateDirectories.len > 0:
+      fields["stateDirectories"] = listField(stateDirectories)
     let addr0 = if address.len > 0: address
                 else: autoAddress("systemd.systemUnit", name)
     pushResource(targetResources, "systemd.systemUnit", addr0, fields,

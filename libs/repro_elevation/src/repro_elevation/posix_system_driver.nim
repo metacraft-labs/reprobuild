@@ -45,7 +45,7 @@
 ##     genuinely differs.
 ##   * `passwd.user`          wholly new — no home-scope analogue.
 
-import std/[os, strutils]
+import std/[algorithm, os, sequtils, strutils, tables]
 
 import blake3
 
@@ -3474,26 +3474,55 @@ proc applyLinuxNixDaemonSetting*(op: PrivilegedOperation):
 # ===========================================================================
 
 const
-  TimerEnabledStates = ["enabled", "enabled-runtime", "linked",
-    "linked-runtime", "alias", "indirect", "generated", "static",
+  TimerEnabledStates = ["enabled", "static", "generated", "alias",
     "transient"]
-    ## `UnitFileState` values under which a timer is armed or pulled in
-    ## without `systemctl enable` making a difference: re-enabling one on
-    ## every apply would be churn (systemctl(1), "is-enabled" output).
+    ## `UnitFileState` values under which a timer declared enabled is armed
+    ## for the next boot, or cannot be enabled at all, per the
+    ## `systemctl is-enabled` table:
     ## https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#is-enabled%20UNIT%E2%80%A6
+    ##
+    ## * `enabled`: enabled through `.wants/` or `.requires/` symlinks.
+    ## * `static`: the unit has no `[Install]` section; it is pulled in by
+    ##   something else, and `enable` does nothing.
+    ## * `generated`: written by a generator at boot; `enable` does nothing.
+    ## * `alias`: the name is an alias of another unit, whose state decides.
+    ## * `transient`: created at runtime; it cannot be enabled.
+    ##
+    ## Not counted: `enabled-runtime` (only under /run, gone at reboot),
+    ## `linked`/`linked-runtime` (made available, not enabled) and
+    ## `indirect` (not enabled itself, only its `Also=` units); `enable`
+    ## then makes it enabled for the next boot.
   TimerRepeatingKeys = ["OnUnitActiveSec", "OnUnitInactiveSec", "OnCalendar"]
     ## `[Timer]` settings that make a timer fire again and again; a timer
     ## with only `OnBootSec=`, `OnStartupSec=` or `OnActiveSec=` fires once
     ## per activation. https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
 
+const TimerTriggerKeys = ["OnActiveSec", "OnBootSec", "OnStartupSec",
+                          "OnUnitActiveSec", "OnUnitInactiveSec",
+                          "OnCalendar"]
+  ## Every `[Timer]` trigger setting (systemd.timer(5)).
+
 proc timerRepeats*(content: string): bool =
-  ## Whether the timer unit ``content`` fires repeatedly.
+  ## Whether the timer unit ``content`` (with its drop-ins appended in the
+  ## order systemd applies them) fires repeatedly. An empty assignment to
+  ## any trigger setting (`OnCalendar=`, `OnBootSec=`, ...) resets the list
+  ## of ALL triggers, monotonic and calendar alike, as systemd.timer(5)
+  ## says: "If the empty string is assigned to any of these options, the
+  ## list of timers is reset (both monotonic timers and OnCalendar=
+  ## timers)". https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
+  var setKeys: seq[string]
   for raw in content.splitLines():
     let line = raw.strip()
     let eq = line.find('=')
-    if eq > 0 and line[0 ..< eq].strip() in TimerRepeatingKeys and
-        line[eq + 1 .. ^1].strip().len > 0:
-      return true
+    if eq <= 0: continue
+    let key = line[0 ..< eq].strip()
+    if key notin TimerTriggerKeys: continue
+    if line[eq + 1 .. ^1].strip().len == 0:
+      setKeys.setLen(0)
+    elif key notin setKeys:
+      setKeys.add(key)
+  for k in setKeys:
+    if k in TimerRepeatingKeys: return true
 
 proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
                              unitFileState, activeState,
@@ -3507,9 +3536,9 @@ proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
   ## at 76f0f4f7a9 and never active) planned as a no-op on every apply, and
   ## was never started.
   ##
-  ## Enabled means any of ``TimerEnabledStates`` (a linked, aliased,
-  ## indirect or generated timer is not re-enabled); disabled means not
-  ## `enabled`/`enabled-runtime`. A repeating timer (``timerRepeats``) is
+  ## Enabled means any of ``TimerEnabledStates``; disabled means not
+  ## `enabled`/`enabled-runtime`. ``content`` is the unit file with its
+  ## drop-ins appended, so a repeating trigger a drop-in adds counts. A repeating timer (``timerRepeats``) is
   ## running only while systemd has it active or activating: one that fired
   ## and then stopped is not. A timer that fires once per activation also
   ## counts as running when it is inactive after having triggered
@@ -3550,6 +3579,25 @@ proc observeSystemdSystemTimer*(op: PrivilegedOperation):
     result.present = true
     result.digestHex = posixDigestHexOfText(content)
     if op.stDestroy: return
+    # Its drop-ins may add triggers (`OnCalendar=` in a `.d/*.conf`), which
+    # decide whether it repeats; the digest stays the file's own.
+    # systemd applies a unit's drop-ins sorted by file name across its
+    # directories, a name in a higher-priority directory (/etc over /run
+    # over /usr/lib) hiding the same name below it (systemd.unit(5)).
+    var dropIns = initTable[string, string]()
+    for dir in ["/usr/lib/systemd/system/" & op.stName & ".d",
+                "/lib/systemd/system/" & op.stName & ".d",
+                "/run/systemd/system/" & op.stName & ".d", path & ".d"]:
+      if dirExists(dir):
+        for kind, f in walkDir(dir):
+          if kind in {pcFile, pcLinkToFile} and f.endsWith(".conf"):
+            dropIns[extractFilename(f)] = f
+    var names = toSeq(dropIns.keys)
+    names.sort()
+    var withDropIns = content
+    for n in names:
+      try: withDropIns.add("\n" & readFile(dropIns[n]))
+      except IOError, OSError: discard
     # A disabled or inactive timer is a valid state, so the exit code is
     # not an error; an answer without the properties judges nothing.
     let (o, code) = execCmdEx("systemctl show " & quoteShell(op.stName) &
@@ -3564,8 +3612,12 @@ proc observeSystemdSystemTimer*(op: PrivilegedOperation):
       of "ActiveState": activeState = line[eq + 1 .. ^1].strip()
       of "LastTriggerUSec": lastTrigger = line[eq + 1 .. ^1].strip()
       else: discard
-    result.digestHex = timerObservedDigestHex(content, op.stEnabled,
+    let observed = timerObservedDigestHex(withDropIns, op.stEnabled,
       op.stRunning, fileState, activeState, lastTrigger)
+    # As converged it reports the file's own digest; otherwise the state
+    # sentinel, whatever the drop-ins say.
+    if observed != posixDigestHexOfText(withDropIns):
+      result.digestHex = observed
   else:
     raiseNotImplementedPlatform("systemd.systemTimer observe")
 

@@ -390,6 +390,35 @@ proc drainUntilClose(sock: Socket;
 # Public GET — the streaming entry point
 # ---------------------------------------------------------------------------
 
+proc requestStatusOnly*(pool: HttpPool; meth, url: string;
+                        extraHeaders: seq[(string, string)] = @[]):
+    tuple[statusCode: int; location: string] =
+  ## Issue ``meth url`` (``HEAD``, or a ``GET`` with a ``Range``) and read
+  ## the status line and headers only: the body is never read, and the
+  ## connection is dropped, not reused, so a server that ignores ``Range``
+  ## and sends a whole file costs nothing. For a probe of whether a URL is
+  ## served.
+  let parsed = parseTarget(url)
+  let conn = pool.leaseConnection(parsed.host, parsed.port, parsed.secure)
+  try:
+    var req = meth & " " & parsed.path & " HTTP/1.1\r\n" &
+              "Host: " & parsed.host
+    if int(parsed.port) != (if parsed.secure: 443 else: 80):
+      req.add(":" & $int(parsed.port))
+    req.add("\r\nUser-Agent: repro-binary-cache-client/0.1\r\n" &
+            "Accept: */*\r\nConnection: close\r\n")
+    for (name, value) in extraHeaders:
+      req.add(name & ": " & value & "\r\n")
+    req.add("\r\n")
+    try:
+      conn.sock.send(req)
+    except OSError as e:
+      raise newException(HttpError, "send request failed: " & e.msg)
+    let (statusCode, headers) = readHeaders(conn.sock, pool.receiveTimeoutMs)
+    result = (statusCode, headerValue(headers, "location"))
+  finally:
+    pool.releaseConnection(conn, reusable = false)
+
 proc streamGet*(pool: HttpPool; url: string;
                 callback: StreamChunkCallback;
                 reuseBuffer: var seq[byte];

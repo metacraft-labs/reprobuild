@@ -704,7 +704,7 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
           if actions.len == 0 and actionsJson.len > 0:
             actions = actionsFromJson(actionsJson)
       var prof: SystemProfile
-      try: prof = parseSystemProfile(text)
+      try: prof = parseAddOnUserProfile(text)
       except CatchableError as e:
         return (false, "the profile does not parse: " & e.msg)
       let refusal = agentProfileRefusal(m, prof, not canonical,
@@ -732,6 +732,8 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
           result = runAddonApply(o2)
         except AddonRolledBack as e:
           raise newException(EApplyRolledBack, e.msg)
+        except AddonNeedsOperator as e:
+          raise newException(EApplyNeedsOperator, e.msg)
         except AddonFailedAtFloor as e:
           # Not committed, not reverted: the floor kept the switch in place.
           raise newException(EApplyFailedAtFloor, e.msg)

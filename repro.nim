@@ -65,6 +65,10 @@ import repro_dsl_stdlib/monitor_shim_artifacts
               # call in the ``build:`` block below.
 import repro_dsl_stdlib/openssl_layout
 import repro_dsl_stdlib/source_only_packages
+              # A15: the monitor shim's version script, merged with the
+              # `cross_zig` compiler-rt node under a zig target (below).
+import repro_dsl_stdlib/adapters/cross_zig
+import repro_dsl_stdlib/operations/zig_c
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -531,6 +535,17 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/test-bin/repro_catalog_harvester",
         actionId: "reprobuild.test_helpers.repro_catalog_harvester")]),
+    # The launcher test executes both helpers. Without this row its execute
+    # edge fingerprinted neither, so a focused run of the test served a
+    # stale `repro_trampoline` built from an older tree.
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "t_the_resolving_launcher_execs_the_pinned_image.nim",
+      artifacts: @[
+        TestGraphArtifact(path: "build/test-bin/repro_trampoline",
+          actionId: "reprobuild.test_helpers.repro_trampoline"),
+        TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
+          actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
   ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
     (when defined(linux) or defined(macosx): @[
     TestGraphArtifacts(
@@ -808,6 +823,11 @@ package reprobuild:
   defaultToolProvisioning "path"
 
   nativeBuildDeps:
+    # BUILD-HOST tools: what the build runs, never what it links. Under
+    # `--target` a `uses:` entry is a TARGET dependency, realized for the
+    # target, so a host tool there (nim, gcc, just, coreutils) made a cross
+    # build of reprobuild itself impossible (ReproOS-Add-On-Mode A15, the
+    # full prefix). A native build resolves both lists the same way.
     # The C toolchain of a cross build of reprobuild itself (ReproOS-Add-On-
     # Mode A15, the full prefix for the Raspberry Pi): `nim.c` threads a zig
     # `--target` through the `cross_zig` wrappers, and a zig target needs
@@ -815,8 +835,6 @@ package reprobuild:
     # declares the wrapper edge's `sh` and coreutils
     # (Reprobuild-Standard-Library.md, `cross_zig`).
     "zig >=0.13 <0.14"
-
-  uses:
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
     # are the PATH-resolvable binaries the reprobuild build needs;
     # they're sufficient for the path-mode tool resolver to succeed
@@ -869,11 +887,6 @@ package reprobuild:
     # repository's local gate, the only gate ``agents`` has, could not pass
     # in a Windows dev shell.
     "actionlint"
-    # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
-    # link/runtime closure explicitly so graph-built binaries receive
-    # OpenSSL's library channels instead of depending on ambient
-    # ``NIX_LDFLAGS`` from the shell that launched repro.
-    "openssl"
     "sh"
     "bash"
     # The version-bump regression runs the owning helper and checker.
@@ -945,6 +958,36 @@ package reprobuild:
     # every checkout without a runquota develop override breaks.
     "runquotad"
 
+  uses:
+    # TARGET dependencies: what the shipped images link or compile in --
+    # OpenSSL, the C libraries below, and the sibling Nim libraries imported
+    # as source.
+    #
+    # sqlite, libblake3 and xxhash were taken from the flake's environment
+    # (SQLITE_PREFIX / BLAKE3_PREFIX / XXHASH_PREFIX) with no declaration, so
+    # a `--target` build linked the build host's copies and failed ("libsqlite3
+    # .so is incompatible with armelf_linux_eabi"). Declared, each is realized
+    # by its package: natively in path mode from the prefix its
+    # `environmentPrefix` arm names (checked, and hashed into the cache key),
+    # under `--target` from the catalog's recipe built for the target; either
+    # way `config.nims` reads it as DEP_<NAME>_PREFIX (Package-Model.md
+    # §"Environment-provided library prefixes", approved by Zahary Karadjov,
+    # 2026-11-02).
+    #
+    # Linux only: Windows stages its own sqlite3.dll (the `firstExistingDll`
+    # probe in the apps collection) and macOS falls back to Homebrew's
+    # prefixes in `config.nims`, so neither host should be refused for an
+    # unset *_PREFIX variable it never needed.
+    when defined(linux):
+      "sqlite"
+      "libblake3"
+      "xxhash"
+    # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
+    # link/runtime closure explicitly so graph-built binaries receive
+    # OpenSSL's library channels instead of depending on ambient
+    # ``NIX_LDFLAGS`` from the shell that launched repro.
+    "openssl"
+
     # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
     #
     # Each of the four names a workspace PROJECT whose ``repro.nim``
@@ -1011,21 +1054,12 @@ package reprobuild:
     # and the same one-change rule: this line and its ``repro.lock`` entry.
     "test-certificates-tools"
 
-    # Note: the remaining system libraries (libblake3, xxhash, sqlite3) and
-    # the source-only fixed inputs that are NOT workspace repos (nimcrypto,
-    # nim-bearssl) are still NOT listed here.
-    # The path-mode resolver requires every ``uses:`` selector to be
-    # findable on ``$PATH`` as an executable file OR to resolve as a
-    # cross-repo producer, and these are shared libraries, header bundles,
-    # or third-party Nim source trees with no workspace checkout of their
-    # own. They are provisioned by ``flake.nix`` /
-    # ``nix/pkgs/by-name/re/reprobuild/package.nix`` via env vars
-    # (BLAKE3_PREFIX / XXHASH_PREFIX / SQLITE_PREFIX / NIMCRYPTO_SRC /
-    # BEARSSL_SRC) and consumed by ``config.nims``. Once the DSL grows a
-    # typed "env-provided dependency" concept (a ``provides:`` clause, or a
-    # Mode 2 catalog shape for header-only / source-only deps) the list
-    # above will grow back to capture them; until then the constraints live
-    # in ``flake.nix`` and ``config.nims``.
+    # Note: the source-only fixed inputs that are NOT workspace repos
+    # (nimcrypto, nim-bearssl) are still NOT listed here: they are third-party
+    # Nim source trees with no workspace checkout of their own, provisioned
+    # by ``flake.nix`` / ``nix/pkgs/by-name/re/reprobuild/package.nix`` via
+    # NIMCRYPTO_SRC / BEARSSL_SRC and consumed by ``config.nims``. The C
+    # libraries (sqlite, libblake3, xxhash) are declared above.
 
   devEnv:
     when not defined(windows):
@@ -2942,6 +2976,20 @@ package reprobuild:
             actionId = "reprobuild.apps.stage_" &
               opensslDll.replace("-", "_").replace(".dll", "")))
 
+    when defined(linux):
+      # The images link sqlite and, in system-hash mode, libblake3 and
+      # xxhash. Naming them on every `nim c` edge is what makes the engine
+      # hand the compile `DEP_<NAME>_PREFIX` -- the environment prefix
+      # natively, the catalog's build for the target under `--target` -- and
+      # fold each library's realized identity into the edge's key
+      # (Package-Model.md §"Environment-provided library prefixes"). Without
+      # it `config.nims` falls back to the ambient prefixes, which under
+      # `--target` are the build host's libraries.
+      for appEdge in reprobuildAppsActions:
+        if appEdge.call.packageName == "nim":
+          appendRegisteredActionToolIdentityRefs(appEdge.id,
+            ["sqlite", "libblake3", "xxhash"])
+
     discard collect("apps", reprobuildAppsActions)
 
     # Bootstrap-And-Self-Build B2: per-helper typed-tool build edges +
@@ -3850,8 +3898,28 @@ package reprobuild:
       # io-mon's ``build_shim.sh`` passes it via ``--version-script``; mirror it
       # here or the fixture link fails with "version node not found for symbol
       # dlsym@GLIBC_2.2.5 / failed to set dynamic section sizes".
-      let linuxShimVersionScript =
+      let ioMonShimVersionScript =
         ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map"
+      # Under a zig target whose shared libraries would export zig's
+      # compiler-rt (the 32-bit ARM rows), io-mon's script is merged with
+      # the `cross_zig` node that makes it local. zig takes one version
+      # script per link, and the wrappers refuse a shared link whose own
+      # script leaves compiler-rt exported. A preloaded shim exporting it
+      # would offer every monitored process zig's `__aeabi_*` helpers,
+      # unwinder entry points included (reprobuild-pm issue
+      # 2026-11-02-zig-built-shared-libraries-export-compiler-rt-and-armv7-images-import-it).
+      let shimZigTarget = activeZigCrossTarget()
+      var shimVersionScriptEdge: seq[BuildActionDef]
+      let linuxShimVersionScript =
+        if shimZigTarget != nil and zigCrossCompilerRtMap(
+            zigCrossTarget(shimZigTarget.triple)).len > 0:
+          shimVersionScriptEdge.add(emitZigCrossVersionScriptAction(
+            activeProviderProjectRoot(), currentOwningPackage(),
+            shimZigTarget.triple, ioMonShimVersionScript,
+            targetKeyedPath("build/lib/librepro_monitor_shim.versions.map")))
+          shimVersionScriptEdge[0].outputs[0]
+        else:
+          ioMonShimVersionScript
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "linux_preload.nim",
         # ``-d:useMalloc``: io-mon's shim entry points REFUSE to compile
@@ -3866,6 +3934,9 @@ package reprobuild:
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
         passL = @["-Wl,--version-script=" & linuxShimVersionScript],
+        extraInputs = (if shimVersionScriptEdge.len > 0:
+          @[linuxShimVersionScript] else: @[]),
+        after = shimVersionScriptEdge,
         # ``NIX_DONT_SET_RPATH`` is as load-bearing here as ``-static-libgcc``
         # is on the Windows arm above, and for the same reason: this library is
         # injected into processes NOBODY HERE BUILT, so it must resolve with no

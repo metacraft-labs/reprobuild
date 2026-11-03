@@ -211,8 +211,7 @@ suite "MO-13: evidence-publish verb + --lock on test sharding + gate integrity":
         proc ldWith(integrity: string): LockedDependencies =
           LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[
             LockedDep(name: "precommit", path: "precommit",
-              coordinates: Coordinates(kind: ckVcs, url: "", gitRef: "",
-                revision: ""),  # empty revision: lock predates first commit
+              coordinates: Coordinates(kind: ckVcs, url: "", revision: ""),  # empty revision: lock predates first commit
               integrity: integrity, visibility: "personal")])
 
         # Untampered pre-commit integrity now VERIFIES (and passes) even though

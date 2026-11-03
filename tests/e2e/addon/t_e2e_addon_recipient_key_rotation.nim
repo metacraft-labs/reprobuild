@@ -43,7 +43,7 @@ import ./addon_secrets_support
 const Target = "addon-tb"
 
 const Profile = "secrets.secretFile {\n  service = \"rot-web\"\n  name = \"value\"\n}\n\n" &
-  "systemd.systemUnit {\n  name = \"rot-web.service\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"rot-web.service\"\n" &
   "  content = \"[Unit]\nDescription=rotation probe\n\n[Service]\n" &
   "DynamicUser=yes\nRuntimeDirectory=rot-web\nRuntimeDirectoryMode=0755\n" &
   "ExecStart=/bin/sh -c 'cat $$CREDENTIALS_DIRECTORY/value > /run/rot-web/seen; " &

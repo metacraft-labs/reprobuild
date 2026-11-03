@@ -144,6 +144,18 @@ suite "cross_zig: the target table and the environment":
       not it.strip().startsWith("#") and "-lgcc_s" in it)
     check "--target=*) continue;;" in glibc
 
+  test "the C wrappers drop -latomic, which zig's compiler-rt replaces":
+    # io-mon's config.nims links -latomic on 32-bit ARM for gcc, whose
+    # ARMv6 baseline calls the 64-bit atomics out of line. zig ships no
+    # libatomic and resolves those calls from compiler-rt, so the flag would
+    # only fail the link ("unable to find dynamic system library 'atomic'").
+    for triple in ["armv7-unknown-linux-gnueabihf",
+                   "armv7-unknown-linux-musleabihf"]:
+      for role in ["cc", "c++"]:
+        let script = zigCrossWrapperScript(role, zigCrossTarget(triple),
+          "/w/lib")
+        check "-latomic|--target=*) continue;;" in script
+
   test "an unknown triple is refused by name, with the known ones":
     expect ValueError:
       discard zigCrossTarget("mips-unknown-linux-gnu")
@@ -193,9 +205,20 @@ suite "cross_zig: the target table and the environment":
     check "-lgcc_s" in ld
     check "-L\"/w/lib\"" in ld
     check zigCrossWrapperScript("ar", t, "/w/lib") == "#!/bin/sh\nexec zig ar \"$@\"\n"
-    # No path of the emitting machine: zig is found on the edge's PATH.
+    # No path of the emitting machine: zig is found on the edge's PATH. The
+    # C wrappers name `/nix/store/` as a PATTERN (they map every store
+    # directory a compile reads to its name), so the check is for a
+    # concrete store path: the prefix followed by a 32-character hash.
     for role in ["cc", "c++", "ar", "ranlib", "rust-linker"]:
-      check "/nix/store" notin zigCrossWrapperScript(role, t, "/w/lib")
+      let text = zigCrossWrapperScript(role, t, "/w/lib")
+      var concrete = false
+      var at = text.find("/nix/store/")
+      while at >= 0:
+        let rest = text[at + "/nix/store/".len .. ^1]
+        if rest.len > 32 and rest[0 ..< 32].allIt(it in {'0'..'9', 'a'..'z'}):
+          concrete = true
+        at = text.find("/nix/store/", at + 1)
+      check not concrete
 
   test "the wrapper action writes the five roles and the empty libatomic":
     resetBuildActionRegistry()

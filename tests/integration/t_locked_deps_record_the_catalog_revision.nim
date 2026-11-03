@@ -135,7 +135,7 @@ suite "the lock records the catalog revision":
     let head = git(source, "rev-parse", "HEAD")
     let pin = LockedDep(name: "reprobuild-packages", path: "../reprobuild-packages",
       coordinates: Coordinates(kind: ckVcs, url: source,
-        gitRef: "main", revision: head), integrity: "git-sha1:" & head,
+        revision: head), integrity: "git-sha1:" & head,
       visibility: "public")
     writeFile(app / "repro.lock",
       serializeLockedDependencies(LockedDependencies(deps: @[pin])))
@@ -157,20 +157,9 @@ suite "the lock records the catalog revision":
           check entry.depends == @[pin.name]
       if dep.isSome:
         check dep.get.coordinates.url == pin.coordinates.url
-        check dep.get.coordinates.gitRef == pin.coordinates.gitRef
         check dep.get.coordinates.revision == head
         check dep.get.integrity == pin.integrity
       discard serializeLockedDependencies(LockedDependencies(deps: deps))
-    var ephemeral = pin
-    ephemeral.coordinates.gitRef = "agents-to-dev-2026-10-03"
-    writeFile(app / "repro.lock",
-      serializeLockedDependencies(LockedDependencies(deps: @[ephemeral])))
-    let normalized = catalogDep(lockedDepsForWorkspace(app,
-      catalogRoots = @[fetched]))
-    require normalized.isSome
-    check normalized.get.coordinates.gitRef == ""
-    writeFile(app / "repro.lock",
-      serializeLockedDependencies(LockedDependencies(deps: @[pin])))
     # The directory's spelling alone is not proof of the pin: an altered
     # cached checkout must fail instead of being certified with old metadata.
     discard git(fetched, "-c", "user.name=Tester", "-c",
@@ -182,7 +171,7 @@ suite "the lock records the catalog revision":
           sourceRecipeRoots = (if route == 0: @[fetched / "packages"] else: @[]),
           catalogRoots = (if route == 1: @[fetched] else: @[]))
 
-  test "a detached sibling at the pinned commit preserves its advisory ref":
+  test "a detached sibling at the pinned commit keeps its pinned coordinates":
     let temp = createTempDir("repro-detached-catalog-", "")
     defer: removeDir(temp)
     let app = temp / "app"
@@ -197,7 +186,7 @@ suite "the lock records the catalog revision":
     let pin = LockedDep(name: "reprobuild-packages", path: "../reprobuild-packages",
       coordinates: Coordinates(kind: ckVcs,
         url: "https://example.invalid/reprobuild-packages.git",
-        gitRef: "main", revision: head),
+        revision: head),
       integrity: "git-sha1:" & head, visibility: "public")
     writeFile(app / "repro.lock",
       serializeLockedDependencies(LockedDependencies(deps: @[pin])))
@@ -205,7 +194,6 @@ suite "the lock records the catalog revision":
     discard git(catalog, "fetch", ".", "main:refs/remotes/origin/main")
     let dep = catalogDep(lockedDepsForWorkspace(app, catalogRoots = @[catalog]))
     require dep.isSome
-    check dep.get.coordinates.gitRef == pin.coordinates.gitRef
     check dep.get.coordinates.url == pin.coordinates.url
     check dep.get.coordinates.revision == head
 

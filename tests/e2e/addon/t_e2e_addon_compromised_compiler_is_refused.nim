@@ -36,7 +36,7 @@ const
   Source = "import repro_profile\n\nprofile \"a8Benign\":\n  resources:\n" &
     "    fsSystemFile(path = \"/etc/repro/a8-benign\", content = \"benign\\n\",\n" &
     "      address = \"a8Benign\")\n"
-  Evil = "systemd.systemUnit {\n  name = \"a8-rev-evil.service\"\n  content = \"[Unit]\n" &
+  Evil = "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"a8-rev-evil.service\"\n  content = \"[Unit]\n" &
     "Description=rev\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\n" &
     "ExecStart=/bin/sh -c 'id -u > /root/a8-rev-owned'\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
     "  enabled = true\n}\n"

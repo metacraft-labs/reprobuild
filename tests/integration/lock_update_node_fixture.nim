@@ -157,14 +157,19 @@ proc lastLinesSince*(log: string; offset: int): string =
   ## What was appended to a log after it was ``offset`` bytes long.
   if offset >= log.len: "" else: log[offset .. ^1]
 
-proc withRef*(lockBody, name, newRef: string): string =
-  ## ``lockBody`` with the ``ref`` of the ``deps`` entry named ``name``
-  ## replaced (`"."` for the lock's own entry; see ``depEntry``).
+proc urlOf*(lockBody, name: string): string =
+  ## The fetch ``url`` the ``deps`` entry named ``name`` records (`"."` for
+  ## the lock's own entry; see ``depEntry``).
   let entry = depEntry(lockBody, name)
   doAssert entry.len > 0, "no deps entry for " & name
-  let at = entry.find("ref = \"")
-  doAssert at >= 0, "the entry for " & name & " records no ref"
-  let close = entry.find('"', at + "ref = \"".len)
-  let replaced = entry[0 ..< at] & "ref = \"" & newRef & "\"" &
-    entry[close + 1 .. ^1]
-  lockBody.replace(entry, replaced)
+  let at = entry.find("url = \"")
+  doAssert at >= 0, "the entry for " & name & " records no url"
+  entry[at + "url = \"".len ..< entry.find('"', at + "url = \"".len)]
+
+proc withUrl*(lockBody, name, newUrl: string): string =
+  ## ``lockBody`` with the fetch ``url`` of the ``deps`` entry named ``name``
+  ## replaced: a coordinate the commit-time re-pin rewrites over an unmoved
+  ## revision (Unified-Locking-And-Hooks.md §13.3).
+  let entry = depEntry(lockBody, name)
+  lockBody.replace(entry, entry.replace("url = \"" & urlOf(lockBody, name) &
+    "\"", "url = \"" & newUrl & "\""))

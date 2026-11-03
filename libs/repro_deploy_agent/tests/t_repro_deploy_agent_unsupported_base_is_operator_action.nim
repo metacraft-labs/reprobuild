@@ -79,6 +79,22 @@ suite "an unsupported base is an operator action":
     check again.kind == aoApplied
     check readLastAppliedSequence(h.cfg) == 7'u64
 
+  test "EApplyNeedsOperator -> aoOperatorAction, exit 2, sequence not recorded":
+    # The add-on refuses an agent apply that would give a running unit its
+    # first hardening floor (spec §10.1): an operator must apply once.
+    let h = setup("operator")
+    publish(h.source, h.producer, h.cfg.target, 5)
+    let needsOperator: ApplyHook = proc(m: DeployManifest):
+        tuple[ok: bool; message: string] {.gcsafe.} =
+      raise newException(EApplyNeedsOperator, "operator action required: " &
+        "the hardening floor would change a.service")
+    let o = runAgentTick(h.cfg, AgentDeps(apply: needsOperator))
+    check o.kind == aoOperatorAction
+    check deployAgentExitCode(o.kind) == 2
+    check o.errorCode == "operator_action_required"
+    check readLastAppliedSequence(h.cfg) == 0'u64
+    check tickEventId($o.kind) == EventIdTickOperatorAction
+
   test "any other refused apply stays retryable":
     let h = setup("other")
     publish(h.source, h.producer, h.cfg.target, 3)

@@ -1059,6 +1059,11 @@ proc serveCanned(port: int) {.thread.} =
       status = "302 Found"
       extra = "Location: /ok\r\n"
     of "/ok": body = "hello"
+    of "/gone": status = "410 Gone"
+    of "/redir-other":
+      # Another origin (another host spelling of this loopback server).
+      status = "302 Found"
+      extra = "Location: http://localhost:" & $port & "/missing\r\n"
     of "/err":
       status = "404 Not Found"
       body = "E".repeat(200_000)
@@ -1109,6 +1114,23 @@ suite "Add-On apt closure: bounded download (spec §8.3 item 2)":
     check downloadBounded(base & "/big", root / "d", maxBytes = 1 shl 20,
       expectedSize = 4096) == 4096
     check getFileSize(root / "d") == 4096
+    # The configured archive's own 404/410 says "not served"; a 404 from
+    # another origin a redirect led to does not (review of 0a0cb3f4a3).
+    expect EAptDebUnserved:
+      discard downloadBounded(base & "/gone", root / "g", maxBytes = 100)
+    expect EAptDebUnserved:
+      discard downloadBounded(base & "/missing", root / "h", maxBytes = 100)
+    try:
+      discard downloadBounded(base & "/redir-other", root / "i", maxBytes = 100)
+      check false
+    except EAptDebUnserved:
+      check false
+    except IOError:
+      # Refused as a failed fetch (another origin's 404, or no answer from
+      # it), never as the archive's "not served".
+      discard
+    check originOf("https://Example.org/x") == "https://example.org:443"
+    check originOf("http://a:8080/x") == "http://a:8080"
     # A redirect is followed, and the production fetcher caps at the size.
     check downloadBounded(base & "/redir", root / "e", maxBytes = 100) == 5
     check readFile(root / "e") == "hello"

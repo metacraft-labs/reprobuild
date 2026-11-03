@@ -25,11 +25,16 @@
 ##   of the A12 review: the former clock check counted a plain restart's
 ##   successor as overlapping), every instance ran in a validator unit's
 ##   cgroup, and there were at least six instances (one per step, the
-##   vacuity guard); the monitor lost no cgroup event (`IN_Q_OVERFLOW`)
-##   and never went longer than ``MaxScanGapSec`` between two scans, so an
-##   incarnation in which it saw no validator held none that could sign
-##   (both, and the count of such incarnations, are in the record's
-##   `monitor`);
+##   vacuity guard). Every incarnation of a validator unit is paired on
+##   its cgroup's create-to-delete span, whether or not a validator was
+##   seen in it, so the overlap verdict depends on no scan and no
+##   scheduling (``validator_safety``, *What the order cannot see*). The
+##   monitor's coverage is decided fail-closed. It lost no cgroup event
+##   (`IN_Q_OVERFLOW`), it drained its queue when stopped (`end`), and it
+##   saw a validator, and the database it held, in every incarnation. The
+##   longest gap between two of its scans is recorded in the record's
+##   `monitor` with these counts, but it decides nothing. The monitor runs
+##   at a real-time priority in the guest;
 ## - **every instance held the same database**, the declared state
 ##   directory's ``validator.db`` (one device and inode);
 ## - the database's history, exported at the end as an EIP-3076
@@ -74,6 +79,19 @@
 ## - ``REPRO_A12_MUTATION=validator-state-follows-unit-name`` (the profile
 ##   puts the validator's database in a directory named after its unit):
 ##   the renamed instance holds a different database: red.
+## - ``REPRO_A12_MUTATION=monitor-sleeps`` (the monitor scans once and then
+##   sleeps for an hour, as a monitor starved of the CPU would): it sees
+##   no validator in the incarnations created while it sleeps, and its
+##   last drain on stop still logs those incarnations, so the coverage
+##   step is red. The overlap step stays green: it never needed the scan.
+##   Measured at 58423f4a7e: all 5 logged incarnations had no seen
+##   validator. That run also showed a late drain dropping the span of
+##   an incarnation already removed, which the monitor now logs as
+##   `create -`.
+## - ``REPRO_A12_MUTATION=monitor-sleeps`` together with
+##   ``REPRO_ADDON_MUTATION=exclusive-as-plain-restart``: the overlap must
+##   still be found with the monitor asleep for the whole run. It is
+##   decided on the cgroup events the kernel queued, not on a scan.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``, ``REPRO_ADDON_ENGINE_CLOSURE`` (the
 ## producer's compiler) and ``REPRO_A12_PACKAGES``.
@@ -109,10 +127,11 @@ proc validatorCmd(prysm, extra: string): string =
     "--chain-config-file=" & extra
 
 proc waitSigning(g: Guest; epochs: int) =
-  ## Let the validators sign for ``epochs`` more epochs (six two-second
-  ## slots each) past the current head.
+  ## Let the validators sign for ``epochs`` more epochs (``SlotsPerEpoch``
+  ## slots of ``SecondsPerSlot`` each) past the current head.
   let start = g.headSlot()
-  discard g.waitHeadSlot(max(start, 0) + 6 * epochs, 60 + 12 * epochs * 3)
+  discard g.waitHeadSlot(max(start, 0) + SlotsPerEpoch * epochs,
+                         60 + SecondsPerEpoch * epochs * 3)
 
 proc exportHistory(g: Guest; prysm, datadir, outDir: string): JsonNode =
   ## The EIP-3076 interchange of the database in ``datadir`` (the client
@@ -159,9 +178,15 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
                       "a12-admin-" & jwtHex()[0 ..< 24],
                       [DefaultValidatorUnit, RenamedUnit], step)
   provisionWallet(g, net)
-  writeFile(work / "monitor.py", MonitorScript)
+  # The monitor at a real-time priority (SCHED_FIFO 10): the guest's own
+  # load never delays a scan (validator_safety, module header).
+  var monitor = MonitorScript
+  if gateMutation() == "monitor-sleeps":
+    doAssert "time.sleep(PAUSE)" in monitor
+    monitor = monitor.replace("time.sleep(PAUSE)", "time.sleep(3600)")
+  writeFile(work / "monitor.py", monitor)
   g.copyTo(work / "monitor.py", "/root/validator-monitor.py")
-  discard g.run("setsid nohup python3 /root/validator-monitor.py " &
+  discard g.run("setsid nohup chrt -f 10 python3 /root/validator-monitor.py " &
     LifetimeLog & " " & DefaultValidatorUnit & " " & RenamedUnit &
     " >/dev/null 2>&1 < /dev/null &")
   var sequence = 1'u64
@@ -192,7 +217,7 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     # The epoch the validators began signing in: the chain starts when the
     # activity does, whatever the genesis time (empty slots before it).
     let guestNow = parseInt(g.run("date +%s").strip())
-    let startEpoch = max(guestNow - net.genesisTime, 0) div 12
+    let startEpoch = max(guestNow - net.genesisTime, 0) div SecondsPerEpoch
     record["startEpoch"] = %startEpoch
     step("the chain justifies an epoch",
          g.waitJustified(startEpoch + 2, 900),
@@ -200,7 +225,7 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     # By the time an epoch is justified, at least two thirds of the keys have
     # attested; every key's history must reach back at least this far.
     justifiedAt = max(parseInt(g.run("date +%s").strip()) - net.genesisTime,
-                          0) div 12
+                          0) div SecondsPerEpoch
     record["justifiedAtEpoch"] = %justifiedAt
     # 1. restart
     discard g.run("systemctl restart " & pins.validatorUnit)
@@ -261,26 +286,30 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     g.waitSigning(3)
   section("lifetimes and databases"):
     # The lifetimes and databases of the five steps.
-    discard g.exec("pkill -f validator-monitor.py")
+    # SIGTERM: the monitor drains its queue once more and writes `end`.
+    # ([v]: the pattern must not match this shell's own command line.)
+    discard g.exec("pkill -TERM -f '[v]alidator-monitor.py'; for i in $(seq 60); do " &
+      "pgrep -f '[v]alidator-monitor.py' >/dev/null || break; sleep 0.5; done")
     let lifeLog = g.run("cat " & LifetimeLog)
     record["lifetimes"] = %lifeLog
     let ls = parseLifetimes(lifeLog)
     let ov = cgroupOverlaps(lifeLog)
     step("no two validator lifetimes overlap", ov.len == 0, ov.join("\n"))
-    # The monitor's own coverage (validator_safety, A12 round-2 review): no
-    # cgroup event lost to IN_Q_OVERFLOW, and no gap between two scans of
-    # /proc long enough for an unseen validator to sign.
+    # The monitor's own coverage (validator_safety, module header): no
+    # cgroup event lost to IN_Q_OVERFLOW, its queue drained when stopped,
+    # and a validator seen in every incarnation. The longest gap between
+    # two scans is recorded; no verdict depends on it.
     let ms = monitorStats(lifeLog)
     record["monitor"] = %*{"inotifyOverflows": ms.overflows,
       "longestScanGapSec": ms.longestScanGapSec,
-      "maxScanGapSec": MaxScanGapSec,
       "unitIncarnations": ms.incarnations,
-      "incarnationsWithoutValidator": ms.withoutValidator}
+      "incarnationsWithoutValidator": ms.withoutValidator,
+      "ended": ms.ended}
     step("the monitor lost no cgroup event (no IN_Q_OVERFLOW)",
          ms.overflows == 0, $ms)
-    step("the monitor scanned for validators at least every " &
-         $MaxScanGapSec & " s", ms.longestScanGapSec > 0 and
-         ms.longestScanGapSec < MaxScanGapSec, $ms)
+    step("the monitor drained its queue and saw a validator in every " &
+         "incarnation", ms.ended and ms.incarnations > 0 and
+         ms.withoutValidator == 0, $ms)
     var inUnits = 0
     for inst in ls:
       if inst.unit.len > 0: inc inUnits
