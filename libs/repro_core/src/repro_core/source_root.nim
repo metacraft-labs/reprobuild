@@ -53,14 +53,19 @@ const
     ## trampoline (`apps/repro-trampoline`) export it; the thin client only
     ## reads it. Same spelling as `repro_selfhost/handover.PublicCliEnvVar`.
 
-  CompiledSourceRoot* = currentSourcePath().parentDir.parentDir.parentDir.
-    parentDir.parentDir
+  CompiledSourceRoot* =
+    when defined(reproInstalledPrefix): ""
+    else: currentSourcePath().parentDir.parentDir.parentDir.
+      parentDir.parentDir
     ## The tree this file was compiled from:
     ## `libs/repro_core/src/repro_core/source_root.nim` is five levels below
     ## it. Right for a binary built in, and run from, a source checkout; a
     ## dead path for any packaged build, which is why it is the LAST arm --
     ## and why that arm is taken only by an image that really runs from it
-    ## (`runningImageIsUnder`).
+    ## (`runningImageIsUnder`). Empty in an image built as an installed
+    ## prefix for another machine (`-d:reproInstalledPrefix`,
+    ## Distribution-And-Packaging §5.3): the build tree is a path of the
+    ## build host, and the image must not carry it.
 
 # ---------------------------------------------------------------------------
 # The installed layout.
@@ -375,7 +380,10 @@ proc reprobuildSourceRootCandidates*(): seq[SourceRootCandidate] =
     origin: "the checkout this repro was built in",
     path: CompiledSourceRoot,
     skipReason:
-      (if runningImageIsUnder(CompiledSourceRoot): ""
+      (if CompiledSourceRoot.len == 0:
+         "not used: this repro was built as an installed prefix and " &
+           "records no build checkout"
+       elif runningImageIsUnder(CompiledSourceRoot): ""
        else: "not used: this repro does not run from that checkout"))
 
 proc resolveReprobuildSourceRootCandidate*(): SourceRootCandidate =

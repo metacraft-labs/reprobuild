@@ -3028,6 +3028,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_core_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_core/tests/t_installed_prefix_anchors.nim",
+    binary: "build/test-bin/t_installed_prefix_anchors",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "per-file config libs/repro_core/tests/t_installed_prefix_anchors.nim.cfg"),
+  TestSpec(
     source: "libs/repro_core/tests/t_jsts_dep_scanner.nim",
     binary: "build/test-bin/t_jsts_dep_scanner",
     defines: @[],

@@ -126,6 +126,13 @@ proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## leaving its dev shell; embedding the store paths also keeps those inputs
   ## in the installed closure. Runtime overrides and live sibling checkouts
   ## still take precedence at resolution time.
+  # An image built as an installed prefix for another machine
+  # (`-d:reproInstalledPrefix`, Distribution-And-Packaging §5.3) bakes in
+  # none of these: every one is a path of the build host. It seeds the same
+  # variables from its installed layout at start-up instead
+  # (`ensureInstalledSourcePackageEnvironment`).
+  when defined(reproInstalledPrefix):
+    return ""
   let root = getEnv(name)
   if root.len == 0 or root.isAbsolute:
     root

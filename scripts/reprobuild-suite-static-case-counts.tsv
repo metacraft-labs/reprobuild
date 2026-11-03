@@ -282,6 +282,7 @@ libs/repro_core/tests/t_ambient_execution_external_import.nim	nim	1
 libs/repro_core/tests/t_bounded_lock_refuses_at_its_deadline_on_every_platform.nim	nim	4
 libs/repro_core/tests/t_deps_refresh_check.nim	nim	5
 libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
+libs/repro_core/tests/t_installed_prefix_anchors.nim	nim	2
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_link_target_reads_reparse_points.nim	nim	15
 libs/repro_core/tests/t_n51_drain_process_stream.nim	nim	7

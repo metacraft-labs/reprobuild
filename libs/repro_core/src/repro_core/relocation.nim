@@ -254,13 +254,28 @@ proc rebasedName*(name, base: string): string =
   else:
     joined
 
+proc importPathName*(file: string): string =
+  ## `file` named by its import path: the part after the last `/src/` (or
+  ## `\src\`), else its bare name. `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/
+  ## packages/zig.nim` becomes `repro_dsl_stdlib/packages/zig.nim`.
+  let s = file.replace('\\', '/')
+  let at = s.rfind("/src/")
+  if at >= 0: s[at + "/src/".len .. ^1]
+  else: s.extractFilename
+
 proc recipeSourceName*(file: string): string {.compileTime.} =
   ## A DSL source site (`lineInfoObj().filename`, always absolute) as the
   ## compiled program records it. In a recipe-relative provider compile
   ## (`reproRecipeRelative`) a file outside the anchors is named relative to
   ## the main module's directory - the recipe - which is the provider's
   ## working directory when it runs (Provider-Runtime-Protocol-v1.md, "Paths
-  ## in responses"). Everywhere else the name is unchanged.
+  ## in responses"). In an image built as an installed prefix for another
+  ## machine (`reproInstalledPrefix`, Distribution-And-Packaging §5.3) the
+  ## name is the file's import path -- everything after the last `/src/`,
+  ## `repro_dsl_stdlib/packages/zig.nim` -- because the absolute path is a
+  ## build-host path the image must not carry (the builder-path gate), and
+  ## the installed sources sit under the same import paths. Everywhere else
+  ## the name is unchanged.
   when reproRecipeRelative:
     let base = getProjectPath()
     var anchors: seq[string] = @[]
@@ -268,5 +283,7 @@ proc recipeSourceName*(file: string): string {.compileTime.} =
       if anchor.len > 0:
         anchors.add(anchor)
     relocatableName(file, base, effectiveAnchors(base, anchors))
+  elif defined(reproInstalledPrefix):
+    importPathName(file)
   else:
     file

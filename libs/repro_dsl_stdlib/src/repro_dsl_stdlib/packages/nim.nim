@@ -774,9 +774,18 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     else:
       relativePath(path, runDir, '/')
 
+  # Under a zig target the compile names the triple as a define, so the
+  # project's own configuration can tell a build for another machine from a
+  # native one: reprobuild's `config.nims` then compiles images that name
+  # no build-host path (Distribution-And-Packaging §5.3, the builder-path
+  # gate). A define, not a new flag, so the typed tool's interface is
+  # unchanged.
+  let effectiveDefines =
+    if threadZig: defines & @["reproZigTarget=" & zigTarget.triple]
+    else: defines
   result = c(pkg = pkg, source = fromRunDir(source),
     output = fromRunDir(outBinary),
-    defines = defines,
+    defines = effectiveDefines,
     cpu = (if threadZig: cross.cpu else: cpu),
     os = (if threadZig: cross.os else: ""),
     cc = (if threadZig: "clang" else: cc),
@@ -971,4 +980,4 @@ proc nimRepropathsConfig*(pkg: NimPackage;
     closeSearch = closeSearch,
     snippet = snippet,
     actionId = "ensure_snippet_config_nims_" & currentOwningPackage())
-  result.add(snippetAction)
+  result.add(snippetAction)

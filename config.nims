@@ -19,6 +19,29 @@ import std/[algorithm, os, strutils, compilesettings]
 # denote a location in THIS repository has to be anchored here instead.
 let reproRepoRoot = currentSourcePath().parentDir()
 
+# A compile for another machine. `nim.c` under a zig target defines
+# `reproZigTarget=<triple>` (repro_dsl_stdlib/packages/nim). Its image is
+# installed elsewhere, as a prefix (Distribution-And-Packaging §5.3), and
+# must name no path of this build host:
+# * `--filenames:canonical`: the file names Nim plants in messages and
+#   stack traces are package-relative, not absolute.
+# * `reproInstalledPrefix`: the compiled-in source anchors
+#   (`currentSourcePath()` constants such as
+#   `repro_core/source_root.CompiledSourceRoot`) are empty, and the image
+#   finds its sources through the installed layout beside it, which §5.1
+#   already ranks ahead of them.
+# * `reproBuiltCCompiler=` (empty): the C compiler this image was built with
+#   is a build-host path that means nothing on the target
+#   (`repro_core/c_compiler`).
+# * `--strip-debug` at link: debug info names every source directory, and
+#   zig compiles its own start-up objects with none of the cross wrapper's
+#   path maps, so a shipped image carries no DWARF at all.
+when defined(reproZigTarget):
+  switch("filenames", "canonical")
+  switch("passL", "-Wl,--strip-debug")
+  switch("define", "reproInstalledPrefix")
+  switch("define", "reproBuiltCCompiler=")
+
 # Every existence probe below goes through these, never through a bare
 # `fileExists` / `dirExists`. Those resolve a relative path against the
 # compiler's WORKING DIRECTORY, while a relative `switch("path", ...)` is
