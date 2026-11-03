@@ -7,8 +7,12 @@
 ## (``tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure``).
 ##
 ## Mocks: none. Real profile text through the real parser and renderer.
+## The floor-version fixtures (``fixtures/floor_versions/v1`` and ``v2``)
+## are what the engines of those versions -- reprobuild 1a598170c0 and
+## d03bb6759e -- stored and installed for the same sample units, rendered by
+## those engines themselves (never written by hand).
 
-import std/[strutils, unittest]
+import std/[os, sets, strutils, unittest]
 
 import repro_infra/profile
 import repro_infra/errors
@@ -16,6 +20,8 @@ import repro_addon/addon_apply
 import repro_addon/fingerprint
 import repro_addon/generation0
 import repro_addon/ledger
+import repro_addon/pending_plan
+import repro_infra/intent
 
 const Prefix = "/repro/store/prefixes/svc/1.0"
 
@@ -43,7 +49,8 @@ suite "serviceFloor":
                  "PrivateDevices=yes", "ProtectProc=invisible",
                  "MemoryDenyWriteExecute=yes",
                  "SystemCallFilter=@system-service",
-                 "SystemCallFilter=~@privileged @obsolete memfd_create",
+                 "SystemCallFilter=~@privileged @obsolete memfd_create " &
+                   "shmget shmat shmdt shmctl",
                  "CapabilityBoundingSet=", "UMask=0077",
                  "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
                  "NoExecPaths=/", "ExecPaths=" & Prefix]:
@@ -161,25 +168,31 @@ suite "serviceFloor":
       "a.service: UMask: shares files"]
 
 suite "a host upgraded to the floor":
-  test "a unit installed without the floor is named, one with it is not":
-    let text = unitStanza("a.service", "User=a\nExecStart=" & Prefix &
-      "/bin/svc\n") & unitStanza("b.service", "User=b\nExecStart=" &
-      Prefix & "/bin/svc\n")
-    let p = parseAddOnUserProfile(text)
-    var ledger = Ledger(generation: "g1")
-    for r in p.resources:
-      # a.service was written by a build without the floor; b.service
-      # already carries it.
-      let bytes = if r.suName == "a.service": renderedUnitBeforeFloor(r)
-                  else: renderedSystemUnitContent(r)
-      ledger.entries.add(LedgerEntry(class: lcUnit, path: unitPath(r.suName),
-        resource: r.address, sha256: sha256Hex(bytes)))
-    check floorIntroducedUnits(ledger, p.resources) == @["a.service"]
+  test "a unit whose floor changes is named, whatever else changes":
+    # The previous generation, as an engine stored it: a.service installed
+    # before the floor, b.service under version 2, c.service under today's.
+    let previous = parseStoredUserProfile(
+      unitStanza("a.service", "User=a\nExecStart=" & Prefix & "/bin/svc --v1\n") &
+      unitStanza("b.service", "User=b\nExecStart=" & Prefix & "/bin/svc\n",
+        "  hardening = \"serviceFloor\"\n  floorVersion = \"2\"\n") &
+      unitStanza("c.service", "User=c\nExecStart=" & Prefix & "/bin/svc\n",
+        "  hardening = \"serviceFloor\"\n  floorVersion = \"" & FloorVersion &
+        "\"\n"))
+    # The target: a.service's command line changes in the same generation
+    # (A9 review round 2, finding 5: the ledger-bytes rule missed this).
+    let target = parseAddOnUserProfile(
+      unitStanza("a.service", "User=a\nExecStart=" & Prefix & "/bin/svc --v2\n") &
+      unitStanza("b.service", "User=b\nExecStart=" & Prefix & "/bin/svc\n") &
+      unitStanza("c.service", "User=c\nExecStart=" & Prefix & "/bin/svc\n") &
+      unitStanza("new.service", "User=n\nExecStart=" & Prefix & "/bin/svc\n"))
+    check floorIntroducedUnits(previous, Ledger(), target.resources) == @[
+      "a.service (no floor -> floor version " & FloorVersion & ")",
+      "b.service (floor version 2 -> floor version " & FloorVersion & ")"]
     # A unit the floor does not reach (waived) is never named.
     let waived = parseAddOnUserProfile(unitStanza("a.service",
       "ExecStart=/bin/sleep 5\n",
       "  floorExceptions = [\"serviceFloor: a fixture\"]\n"))
-    check floorIntroducedUnits(ledger, waived.resources).len == 0
+    check floorIntroducedUnits(previous, Ledger(), waived.resources).len == 0
 
 proc dropInStanza(unit, content: string): string =
   "systemd.systemDropIn {\n  unit = \"" & unit & "\"\n  name = \"x\"\n" &
@@ -257,7 +270,8 @@ suite "what loosens the floor needs its exception (A9 review)":
     let u = rendered(unitStanza("a.service", "User=a\nExecStart=" & Prefix &
       "/bin/svc\n", "  floorExceptions = [\"SystemCallFilter+@setuid " &
       "memfd_create: a JIT\", \"CapabilityBoundingSet+CAP_NET_RAW: ping\"]\n"))
-    check "SystemCallFilter=~@privileged @obsolete memfd_create\n" in u
+    check "SystemCallFilter=~@privileged @obsolete memfd_create shmget " &
+      "shmat shmdt shmctl\n" in u
     check "SystemCallFilter=@setuid memfd_create\n" in u
     check "CapabilityBoundingSet=CAP_NET_RAW\n" in u
     check "AmbientCapabilities=\n" in u
@@ -280,3 +294,165 @@ suite "stored generations keep the rules they were installed with":
       check renderedSystemUnitContent(r) ==
         "[Unit]\nDescription=x\n\n[Service]\nExecStart=/bin/sleep 5\n" &
         "\n[Install]\nWantedBy=multi-user.target\n"
+
+suite "A9 review round 2: floor version 3":
+  test "the private mounts and the unit's directories are noexec":
+    # Red under floor-private-mounts-exec.
+    let u = rendered(unitStanza("a.service", "RuntimeDirectory=a-rt\n" &
+      "StateDirectory=a-st:a-link\nCacheDirectory=a-c\nLogsDirectory=a-l\n" &
+      "ConfigurationDirectory=a-cf\nExecStart=" & Prefix & "/bin/svc\n"))
+    check "NoExecPaths=/\nNoExecPaths=-/tmp -/var/tmp -/dev/shm " &
+      "-/dev/hugepages -/dev/mqueue -/run -/run/a-rt -/var/lib/a-st -/var/cache/a-c " &
+      "-/var/log/a-l -/etc/a-cf\n" in u
+
+  test "/proc is read-only and SysV shared memory is denied":
+    # Red under floor-proc-writable and floor-allows-sysv-shm.
+    let u = rendered(unitStanza("a.service", "User=a\nExecStart=" & Prefix &
+                                "/bin/svc\n"))
+    check "\nReadOnlyPaths=/proc\n" in u
+    check "SystemCallFilter=~@privileged @obsolete memfd_create shmget " &
+      "shmat shmdt shmctl\n" in u
+    # An exception adds the calls back after the deny line, or waives /proc.
+    let x = rendered(unitStanza("a.service", "User=a\nExecStart=" & Prefix &
+      "/bin/svc\n", "  floorExceptions = [\"SystemCallFilter+shmget shmat " &
+      "shmdt shmctl: an interlock segment\", \"ReadOnlyPaths: writes " &
+      "/proc/self/oom_score_adj\"]\n"))
+    check "SystemCallFilter=shmget shmat shmdt shmctl\n" in x
+    check "ReadOnlyPaths=/proc" notin x
+
+  test "paths are judged as systemd reads them":
+    # Red under floor-paths-unnormalised: each was accepted in round 1.
+    for service in [
+        "BindPaths=/var/lib/a/x:/repro/./store/prefixes/svc/1.0/bin\n",
+        "BindPaths=/var/lib/a/x://repro/store/prefixes/svc/1.0/bin\n",
+        "TemporaryFileSystem=/repro/./store/prefixes/svc/1.0\n",
+        "ReadWritePaths=/repro/./store/prefixes/svc/1.0/bin\n",
+        "ReadWritePaths=/var/lib/a/../../../usr\n",
+        "BindPaths=/var/lib/a/x:/repro/store/prefixes/%N/1.0/bin\n"]:
+      checkpoint service
+      check refused(unitStanza("svc.service", "User=a\n" & service &
+        "ExecStart=" & Prefix & "/bin/svc\n")).len > 0
+    check "'..' component" in refused(unitStanza("svc.service",
+      "User=a\nExecStart=" & Prefix & "/bin/../../../../../tmp/x\n"))
+    # The merged-/usr alias: /bin/x is /usr/bin/x, the apt closure's /usr.
+    const lock = staticRead("../../repro_dsl_stdlib/tests/fixtures/" &
+      "apt_closure/debian-trixie-20261001-armhf-node-exporter.lock")
+    check refused(unitStanza("svc.service", "User=a\n" &
+      "BindPaths=/var/lib/a/x:/bin/x\nExecStart=/usr/bin/true\n",
+      "  aptClosureLock = \"" & lock & "\"\n")).len > 0
+
+  test "images and extensions are refused unless named":
+    # Red under floor-allows-images.
+    for k in ["MountImages=/var/lib/a/img.raw:" & Prefix & "/bin",
+              "ExtensionImages=/var/lib/a/ext.raw",
+              "ExtensionDirectories=/var/lib/a/ext"]:
+      checkpoint k
+      let key = k.split('=')[0]
+      check ("name the exception \"" & key) in refused(unitStanza(
+        "svc.service", "User=a\n" & k & "\nExecStart=" & Prefix & "/bin/svc\n"))
+      check refused(unitStanza("svc.service", "User=a\n" & k &
+        "\nExecStart=" & Prefix & "/bin/svc\n",
+        "  floorExceptions = [\"" & key & ": a fixture\"]\n")) == ""
+      # ... and in a drop-in of the floored unit.
+      check refused(unitStanza("svc.service", "User=a\nExecStart=" & Prefix &
+        "/bin/svc\n") & dropInStanza("svc.service", "[Service]\n" & k &
+        "\n")).len > 0
+
+  test "drop-ins systemd applies by name prefix are judged too":
+    # Red under floor-ignores-prefix-dropins.
+    let pfx = "/repro/store/prefixes/svc-a/1.0"
+    let u = unitStanza("svc-a.service", "User=a\nExecStart=" & pfx & "/bin/svc\n")
+    for target in ["svc-a.service", "svc-.service"]:
+      checkpoint target
+      check refused(u & dropInStanza(target,
+        "[Service]\nMemoryDenyWriteExecute=no\n")).len > 0
+    let inst = unitStanza("job@x.service", "User=a\nExecStart=" & pfx & "/bin/svc\n")
+    check refused(inst & dropInStanza("job@.service",
+      "[Service]\nMemoryDenyWriteExecute=no\n")).len > 0
+    # A drop-in of another unit's prefix is not this unit's.
+    check refused(u & dropInStanza("other-.service",
+      "[Service]\nMemoryDenyWriteExecute=no\n")) == ""
+    check dropInApplies("a-b-.service", "a-b-c.service")
+    check dropInApplies("a-.service", "a-b-c.service")
+    check not dropInApplies("a-b.service", "a-b-c.service")
+    check not dropInApplies("a-.socket", "a-b.service")
+
+  test "a drop-in that resets ReadOnlyPaths= drops /proc and is refused":
+    check "ReadOnlyPaths" in refused(unitStanza("a.service", "User=a\n" &
+      "ExecStart=" & Prefix & "/bin/svc\n") & dropInStanza("a.service",
+      "[Service]\nReadOnlyPaths=\n"))
+
+  test "a new profile cannot ask for an older floor version":
+    check "floorVersion 2" in refused(unitStanza("a.service", "User=a\n" &
+      "ExecStart=" & Prefix & "/bin/svc\n", "  floorVersion = \"2\"\n"))
+
+suite "A9 review round 2: stored generations keep their floor version":
+  const Fixtures = currentSourcePath().parentDir / "fixtures" / "floor_versions"
+
+  proc storedWith(version, stateDir: string): SystemProfile =
+    parseStoredUserProfile(readFile(Fixtures / version / "stored.profile"),
+                           stateDir)
+
+  proc ledgerDir(version: string): string =
+    ## A state directory whose ledger records the units the engine of
+    ## ``version`` installed (their fixture bytes).
+    result = getTempDir() / ("a9r2-floor-" & version & "-" & $getCurrentProcessId())
+    createDir(result)
+    var l = Ledger(generation: "g-" & version)
+    for kind, f in walkDir(Fixtures / version):
+      if f.endsWith(".service"):
+        l.entries.add(LedgerEntry(class: lcUnit,
+          path: unitPath(extractFilename(f)), resource: "systemUnit:" &
+          extractFilename(f), sha256: sha256Hex(readFile(f))))
+    writeFile(result / "addon-ledger", render(l))
+
+  test "every unit an earlier engine stored renders byte for byte":
+    # Red under stored-floor-unversioned (today's floor) and
+    # stored-profile-floored.
+    for version in ["v1", "v2"]:
+      let sd = ledgerDir(version)
+      for r in storedWith(version, sd).resources:
+        if r.kind != srkSystemdSystemUnit: continue
+        checkpoint version & " " & r.suName
+        check r.suFloorVersion == version[1 .. ^1]
+        check renderedSystemUnitContent(r) ==
+          readFile(Fixtures / version / r.suName)
+
+  test "without a ledger, a unit only version 1 accepted is still version 1":
+    for r in storedWith("v1", "").resources:
+      if r.suName == "root.service":
+        check r.suFloorVersion == "1"
+        check renderedSystemUnitContent(r) ==
+          readFile(Fixtures / "v1" / "root.service")
+
+  test "a generation stored today records its version and renders the same":
+    let src = unitStanza("a.service", "User=a\nExecStart=" & Prefix &
+                         "/bin/svc\n")
+    let p = parseAddOnUserProfile(src)
+    let stored = renderProfileText(p)
+    check ("floorVersion = \"" & FloorVersion & "\"") in stored
+    for r in parseStoredUserProfile(stored).resources:
+      check renderedSystemUnitContent(r) == rendered(src)
+
+suite "A9 review round 2: the switch's records":
+  test "a replay knows whether its target was a stored generation":
+    # Red under replay-forgets-stored-target.
+    let sd = getTempDir() / ("a9r2-plan-" & $getCurrentProcessId())
+    createDir(sd)
+    for flag in [true, false]:
+      writePendingPlan(sd, PendingPlan(targetUserText: "u", fromUserText: "",
+        fromLedgerText: "", storedTarget: flag))
+      let back = readPendingPlan(sd)
+      check back.storedTargetRecorded
+      check back.storedTarget == flag
+
+  test "a drop-in's store prefixes are re-checked before the flip":
+    # Red under recheck-skips-dropin-prefixes.
+    let p = parseAddOnUserProfile(unitStanza("a.service", "User=a\n" &
+      "ExecStart=" & Prefix & "/bin/svc\n") & dropInStanza("a.service",
+      "[Service]\nEnvironment=HELPER=/repro/store/prefixes/helper/2/bin/h\n"))
+    var named: seq[string]
+    for r in p.resources:
+      for o in switchStoreObjects(r): named.add(o)
+    check "/repro/store/prefixes/helper/2" in named
+    check Prefix in named

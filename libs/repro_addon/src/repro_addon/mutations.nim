@@ -626,6 +626,19 @@ const
                           "stored-profile-floored",
                           "floor-ignores-drop-ins",
                           "privileged-filter-without-mount-chown",
+                          # A9 review round 2 (each the round-1 behaviour
+                          # its finding names):
+                          "floor-private-mounts-exec",
+                          "floor-allows-sysv-shm",
+                          "floor-proc-writable",
+                          "floor-paths-unnormalised",
+                          "floor-allows-images",
+                          "floor-ignores-prefix-dropins",
+                          "stored-floor-unversioned",
+                          "floor-change-by-ledger-bytes",
+                          "replay-forgets-stored-target",
+                          "recheck-skips-dropin-prefixes",
+                          "trace-attributes-by-window",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

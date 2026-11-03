@@ -569,8 +569,9 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   if r.floorIntroduced.len > 0:
     # Units installed without the floor that it now changes (§10.1): each
     # is in the transition list as a restart too.
-    result.add("service floor newly applied (installed without it; the " &
-      "unit file changes and the unit restarts):\n")
+    result.add("service floor changed (installed without it, or under an " &
+      "older floor version; the unit file changes and the unit " &
+      "restarts):\n")
     for u in r.floorIntroduced: result.add("  " & u & "\n")
   if r.floorExceptions.len > 0:
     # Every weakening of the hardening floor, in every plan (§10.1, CONF-2).

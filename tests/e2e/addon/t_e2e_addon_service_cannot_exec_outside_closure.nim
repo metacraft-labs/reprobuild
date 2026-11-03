@@ -19,13 +19,28 @@
 ##   ``ExecPaths=`` cannot see -- does not run (the floor's filter denies
 ##   ``memfd_create``; the child is killed).
 ##
+## A9 review round 2 (floor version 3) adds, each from inside the service:
+## a copy of the probe written to ``/tmp``, ``/var/tmp``, ``/dev/shm`` and
+## the unit's ``RuntimeDirectory=``, ``StateDirectory=``, ``CacheDirectory=``
+## and ``LogsDirectory=`` does not run (``EACCES``: the floor's second
+## ``NoExecPaths=`` line); code written into a SysV shared-memory segment
+## does not run through an ``SHM_EXEC`` attachment (the filter denies the
+## SysV shm calls); a write to ``/proc/self/mem`` cannot patch the probe's
+## code (``EROFS``: ``ReadOnlyPaths=/proc``); and no mount in its
+## namespace is left executable but the closure's.
+##
 ## Vacuity guard: the same probe run by root in the guest's own shell (no
-## floor) executes ``/usr/bin/id`` and gets its ``mprotect``, so the probe
-## can see both succeed. The rendered unit is also read back from the
+## floor) executes ``/usr/bin/id``, gets its ``mprotect``, runs its copies
+## from ``/tmp``, ``/var/tmp`` and ``/dev/shm``, executes from SysV shared
+## memory and patches itself through ``/proc/self/mem``, so the probe can
+## see every one of them succeed. The rendered unit is also read back from the
 ## guest: it carries ``NoExecPaths=/``, ``ExecPaths=<the probe's prefix>``
 ## and ``MemoryDenyWriteExecute=yes``.
 ##
-## Falsifying mutations (``REPRO_ADDON_MUTATION=``): ``floor-without-noexec``
+## Falsifying mutations (``REPRO_ADDON_MUTATION=``): ``floor-private-mounts-exec``
+## (no second ``NoExecPaths=``: the copies run), ``floor-allows-sysv-shm``
+## (the shm code runs), ``floor-proc-writable`` (the patch runs);
+## ``floor-without-noexec``
 ## renders the floor without ``NoExecPaths=`` / ``ExecPaths=`` and the exec
 ## of ``/usr/bin/id`` succeeds; ``floor-without-mdwe`` renders it without
 ## ``MemoryDenyWriteExecute=`` and the ``mprotect`` succeeds;
@@ -42,7 +57,7 @@
 ## *Mocking.* None: the real cache daemon, the real units, the guest's own
 ## systemd applying the floor.
 
-import std/[json, os, osproc, strutils, unittest]
+import std/[json, os, osproc, strutils, tables, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_profile
@@ -59,6 +74,7 @@ const
   ProbeBin = ProbePrefix & "/bin/a9-exec-probe"
   ProbeUnit = "a9-exec-probe.service"
   EACCES = 13
+  EROFS = 30
 
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
@@ -77,20 +93,22 @@ proc probeAction(): ProfileBuildAction =
     cwd: ProbePrefix, outputs: @["bin"], commandStatsId: "a9-exec-probe",
     substituteOnly: true)
 
+const ProbeFields = ["exec-outside", "exec-own", "mprotect-exec", "memfd-exec",
+  "tmp-exec", "vartmp-exec", "devshm-exec", "run-exec", "state-exec",
+  "cache-exec", "logs-exec", "shm-exec", "procmem"]
+
 proc parseProbe(line: string):
-    tuple[outside, own, prot, memfd: int; ok: bool] =
-  ## ``a9-probe exec-outside=N exec-own=N mprotect-exec=N memfd-exec=N``.
-  var seen = 0
+    tuple[f: Table[string, int]; mounts: string; ok: bool] =
+  ## ``a9-probe <field>=<n> ... exec-mounts=<list>`` (the probe's header).
   for tok in line.splitWhitespace():
-    let kv = tok.split('=')
-    if kv.len != 2: continue
-    case kv[0]
-    of "exec-outside": result.outside = parseInt(kv[1]); inc seen
-    of "exec-own": result.own = parseInt(kv[1]); inc seen
-    of "mprotect-exec": result.prot = parseInt(kv[1]); inc seen
-    of "memfd-exec": result.memfd = parseInt(kv[1]); inc seen
-    else: discard
-  result.ok = seen == 4
+    let eq = tok.find('=')
+    if eq <= 0: continue
+    let k = tok[0 ..< eq]
+    if k == "exec-mounts": result.mounts = tok[eq + 1 .. ^1]
+    elif k in ProbeFields:
+      try: result.f[k] = parseInt(tok[eq + 1 .. ^1])
+      except ValueError: discard
+  result.ok = result.f.len == ProbeFields.len
 
 proc probeLine(text: string): string =
   for l in text.splitLines():
@@ -114,7 +132,8 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # The unit names no hardening: the add-on's default puts it under the
   # floor (no User=, so a dynamic user too).
   let profile = unitProfile(ProbeUnit, ProbeBin, health = "active",
-                            floorWaiver = false)
+    extra = "RuntimeDirectory=a9-rt\nStateDirectory=a9-st\n" &
+            "CacheDirectory=a9-ca\nLogsDirectory=a9-lg\n", floorWaiver = false)
   discard producer.publish(PublishSpec(sequence: 1, profileText: profile,
     buildActions: @[a],
     closureDigests: @[ClosureDigest(actionId: a.id, digest: digest)]))
@@ -138,19 +157,41 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let r = parseProbe(inside)
   step("the probe reported from inside the service", r.ok, inside)
   if r.ok:
-    step("execve of /usr/bin/id fails with EACCES", r.outside == EACCES,
+    let f = r.f
+    step("execve of /usr/bin/id fails with EACCES",
+         f["exec-outside"] == EACCES, inside)
+    step("the closure's own binary runs", f["exec-own"] == 0, inside)
+    step("mprotect(PROT_EXEC) of a writable mapping fails",
+         f["mprotect-exec"] != 0, inside)
+    step("a memfd copy of the binary does not run", f["memfd-exec"] != 0,
          inside)
-    step("the closure's own binary runs", r.own == 0, inside)
-    step("mprotect(PROT_EXEC) of a writable mapping fails", r.prot != 0,
-         inside)
-    step("a memfd copy of the binary does not run", r.memfd != 0, inside)
-  # Vacuity guard: outside the floor the probe can see both succeed.
+    for k in ["tmp-exec", "vartmp-exec", "devshm-exec", "run-exec",
+              "state-exec", "cache-exec", "logs-exec"]:
+      step("a copy written to the place " & k & " names does not run " &
+           "(EACCES)", f[k] == EACCES, inside)
+    step("code in SysV shared memory does not run (shmat SHM_EXEC)",
+         f["shm-exec"] != 0, inside)
+    step("a write to /proc/self/mem cannot patch the binary (EROFS)",
+         f["procmem"] == 1000 + EROFS, inside)
+    var execMounts: seq[string]
+    for m in r.mounts.split(','):
+      if m.len > 0 and m != ProbePrefix: execMounts.add(m)
+    step("no mount in the namespace is executable but the closure's",
+         execMounts.len == 0, r.mounts)
+  # Vacuity guard: outside the floor the probe can see each of them succeed.
   let outside = probeLine(g.exec(ProbeBin & " --once").stdout)
   record["vacuityGuard"] = %outside
   let v = parseProbe(outside)
-  step("vacuity guard: without the floor the exec and the mprotect succeed",
-       v.ok and v.outside == 0 and v.own == 0 and v.prot == 0 and
-       v.memfd == 0, outside)
+  var vacuous = v.ok
+  if v.ok:
+    for k in ["exec-outside", "exec-own", "mprotect-exec", "memfd-exec",
+              "tmp-exec", "vartmp-exec", "devshm-exec", "procmem"]:
+      if v.f[k] != 0: vacuous = false
+    # debian-12's systemd-less root shell has no MDWE either: the SysV
+    # shm path succeeds everywhere outside the floor.
+    if v.f["shm-exec"] != 0: vacuous = false
+  step("vacuity guard: without the floor every one of them succeeds",
+       vacuous, outside)
 
 suite Gate:
   test "a service under serviceFloor cannot execute outside its closure":

@@ -299,10 +299,10 @@ type
     previousBase*: BaseIdentity    ## the one the current generation recorded
     baseChanges*: seq[string]      ## what changed between the two (§7.9)
     floorIntroduced*: seq[string]
-      ## Units installed without the hardening floor that this generation
-      ## gives it (``floorIntroducedUnits``): each is a changed unit file
-      ## and a restart, listed apart in the plan; an agent apply refuses
-      ## them (spec §10.1).
+      ## Units whose floor this generation changes -- installed without it
+      ## or under an older floor version (``floorIntroducedUnits``): each
+      ## is a changed unit file and a restart, listed apart in the plan;
+      ## an agent apply refuses them (spec §10.1).
     floorExceptions*: seq[string]
       ## The target profile's hardening-floor exceptions (spec §10.1,
       ## CONF-2): ``<unit>: <Setting>: <reason>`` each, printed in every
@@ -460,24 +460,75 @@ proc storeObjectFor*(path: string): string =
     if first.len > 0 and first notin [".", ".."]:
       result = StoreRoot & "/" & first
 
-proc parseStoredUserProfile*(text: string): SystemProfile =
+proc knownUnitDigests(stateDir, path: string): HashSet[string] =
+  ## Every digest a ledger in ``stateDir`` -- the current copy and each
+  ## generation's -- records for the unit file ``path``: the bytes some
+  ## generation installed there.
+  if stateDir.len == 0: return
+  var ledgers: seq[string]
+  if fileExists(ledgerCopyPath(stateDir)): ledgers.add(ledgerCopyPath(stateDir))
+  let gens = stateDir / "generations"
+  if dirExists(gens):
+    for kind, d in walkDir(gens):
+      if kind == pcDir and fileExists(d / "addon-ledger"):
+        ledgers.add(d / "addon-ledger")
+  for lp in ledgers:
+    try:
+      for e in readLedger(lp).entries:
+        if e.class == lcUnit and e.path == path and e.sha256.len > 0:
+          result.incl(e.sha256)
+    except CatchableError:
+      discard   # an unreadable ledger records nothing to match
+
+proc unrecordedFloorVersion(r: SystemResource;
+                            known: HashSet[string]): string =
+  ## The floor version of a stored floored unit that names none: one of
+  ## the two engines before version 3 stored it (1: 1a598170c0; 2:
+  ## aa72782154 to d03bb6759e). The version whose rendering the
+  ## generation's ledger recorded is the one it was installed with; when
+  ## no ledger records either (a generation retention released), the
+  ## newer version that renders it at all.
+  var renderable = ""
+  for v in ["2", "1"]:
+    var c = r
+    c.suFloorVersion = v
+    try:
+      let bytes = renderedSystemUnitContent(c)
+      if sha256Hex(bytes) in known: return v
+      if renderable.len == 0: renderable = v
+    except CatchableError:
+      discard
+  if renderable.len > 0: renderable else: "2"
+
+proc parseStoredUserProfile*(text: string; stateDir = ""): SystemProfile =
   ## A stored generation's user profile (``user.profile``, a generation's
   ## ``addon-user.profile``, the write-ahead record's) as it was installed.
-  ## The add-on stores what it applied rendered (``renderProfileText``),
-  ## so a unit the floor reached carries ``hardening = "serviceFloor"``
-  ## explicitly and every other unit carries none: the stored text records
-  ## the rendering rules of its generation, and parsing it WITHOUT the
-  ## add-on default renders each unit as it was installed. A generation an
-  ## engine from before the floor applied has no such field and stays
-  ## floor-off; only a new profile is held to the floor (spec §10.1, *A
-  ## host upgraded to a build with the floor*).
+  ## The add-on stores what it applied rendered (``renderProfileText``):
+  ## a unit the floor reached carries ``hardening = "serviceFloor"`` and,
+  ## from floor version 3, the ``floorVersion`` it was rendered with, and
+  ## every other unit carries neither. Parsing it WITHOUT the add-on
+  ## default and with the stored generation's own floor version renders
+  ## each unit exactly as it was installed: a generation an engine from
+  ## before the floor applied stays floor-off, and one an earlier floor
+  ## version applied keeps that floor (spec §10.1, *Stored generations and
+  ## floor versions*). A floored unit stored without a version gets the
+  ## one its ledger records (``unrecordedFloorVersion``; the ledgers of
+  ## ``stateDir``). Nothing the engine that stored it accepted is judged
+  ## again under today's rules (``parseSystemProfile(..., stored = true)``).
   when mutated("stored-profile-floored"):
     # Falsifying build: stored generations re-rendered under today's
     # default, which wedges a host whose installed profile the floor
     # refuses and keeps a revert from restoring the pre-floor unit.
-    parseSystemProfile(text, addOnDefaults = true)
-  else:
-    parseSystemProfile(text)
+    return parseSystemProfile(text, addOnDefaults = true)
+  result = parseSystemProfile(text, stored = true)
+  when not mutated("stored-floor-unversioned"):
+    # (The falsifying build renders a stored floored unit without a
+    # version under today's floor, as versions 1 and 2 did not exist.)
+    for r in result.resources.mitems:
+      if r.kind == srkSystemdSystemUnit and
+          r.suHardening == ServiceFloorHardening and r.suFloorVersion.len == 0:
+        r.suFloorVersion = unrecordedFloorVersion(r,
+          knownUnitDigests(stateDir, unitPath(r.suName)))
 
 proc parseAddOnUserProfile*(text: string): SystemProfile =
   ## A user profile as the add-on realises it: parsed with the add-on's
@@ -489,30 +540,69 @@ proc parseAddOnUserProfile*(text: string): SystemProfile =
   ## through here, so a unit renders the same bytes wherever the add-on
   ## renders it, and a unit a pre-floor generation installed without the
   ## floor is planned as a change of its file (a restart in the transition
-  ## list), never applied silently.
-  parseSystemProfile(text, addOnDefaults = true)
+  ## list), never applied silently. A new profile renders with today's
+  ## floor version: naming an older one would ask for a weaker floor, and
+  ## is refused (spec §10.1, *Stored generations and floor versions*).
+  result = parseSystemProfile(text, addOnDefaults = true)
+  for r in result.resources:
+    if r.kind == srkSystemdSystemUnit and r.suFloorVersion.len > 0 and
+        r.suFloorVersion != FloorVersion:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        "' names floorVersion " & r.suFloorVersion & ": a new profile " &
+        "renders with today's floor (version " & FloorVersion & "); only " &
+        "a stored generation keeps an older one")
 
-proc floorIntroducedUnits*(previous: Ledger;
+proc effectiveFloor*(r: SystemResource): string =
+  ## The floor a unit renders with: "" for none (no ``hardening``, or the
+  ## whole floor waived), else its floor version (``FloorVersion`` when the
+  ## unit names none: a new profile's).
+  if r.kind != srkSystemdSystemUnit or
+      r.suHardening != ServiceFloorHardening:
+    return ""
+  for e in r.suFloorExceptions:
+    if e.strip().startsWith(WholeFloorException & ":"): return ""
+  if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
+
+proc floorIntroducedUnits*(previousUser: SystemProfile; previous: Ledger;
                            units: openArray[SystemResource]): seq[string] =
-  ## The units the hardening floor is about to change on a host that
-  ## installed them without it (an upgrade to a build with the floor, spec
-  ## §10.1): a unit under the floor whose ledgered file holds exactly the
-  ## bytes the unit renders WITHOUT the floor. Its file changes and it
-  ## restarts only because of the floor, which every plan says
-  ## (``AddonApplyResult.floorIntroduced``) and an agent apply refuses
-  ## (``runAddonApply``): the first floor a running service gets is an
-  ## operator's reviewed apply, never an unattended restart.
+  ## The units whose floor this generation changes on a host that runs
+  ## them: a unit the previous generation installed without the floor, or
+  ## under an older floor version, that the target renders under today's
+  ## floor (spec §10.1). Decided from the two profiles' floors -- the
+  ## stored generation's (``parseStoredUserProfile``) against the target's
+  ## -- whatever else changes in the unit: a unit whose command line
+  ## changes in the same generation gets its first floor all the same.
+  ## Each entry reads ``<unit> (<from> -> floor version <n>)``. Every plan
+  ## lists them (``AddonApplyResult.floorIntroduced``) and an agent apply
+  ## refuses them (``runAddonApply``): a running service's floor changes
+  ## in an operator's reviewed apply, never in an unattended restart.
+  when mutated("floor-change-by-ledger-bytes"):
+    # Falsifying build: the round-1 rule -- a unit whose ledgered file
+    # holds exactly its floor-less rendering -- which misses a first floor
+    # that comes with any other change to the unit.
+    for r in units:
+      if r.kind != srkSystemdSystemUnit or
+          r.suHardening != ServiceFloorHardening: continue
+      for e in previous.entries:
+        if e.class != lcUnit or e.path != unitPath(r.suName) or
+            e.sha256.len == 0: continue
+        let before = sha256Hex(renderedUnitBeforeFloor(r))
+        if e.sha256 == before and
+            before != sha256Hex(renderedSystemUnitContent(r)):
+          result.add(r.suName)
+        break
+    return
+  var before = initTable[string, string]()
+  for r in previousUser.resources:
+    if r.kind == srkSystemdSystemUnit: before[r.suName] = effectiveFloor(r)
   for r in units:
-    if r.kind != srkSystemdSystemUnit or
-        r.suHardening != ServiceFloorHardening: continue
-    let path = unitPath(r.suName)
-    for e in previous.entries:
-      if e.class != lcUnit or e.path != path or e.sha256.len == 0: continue
-      let before = sha256Hex(renderedUnitBeforeFloor(r))
-      if e.sha256 == before and
-          before != sha256Hex(renderedSystemUnitContent(r)):
-        result.add(r.suName)
-      break
+    let now = effectiveFloor(r)
+    if now.len == 0 or r.suName notin before: continue
+    let was = before[r.suName]
+    if was == now: continue
+    result.add(r.suName & " (" &
+      (if was.len == 0: "no floor" else: "floor version " & was) &
+      " -> floor version " & now & ")")
 
 # ---------------------------------------------------------------------------
 # Scope (spec §4.1, §4.4; threat model G8).
@@ -1055,6 +1145,21 @@ proc desiredBytes*(r: SystemResource): string =
   of srkLinuxTmpfilesRule: r.tmpfilesContent
   of srkLinuxSysusersEntry: sysusersEntryContent(r)
   else: ""
+
+proc switchStoreObjects*(r: SystemResource): seq[string] =
+  ## The store prefixes a resource makes systemd run once the switch flips
+  ## (spec §10.2): every one a unit, a ``collision = "dropIn"`` unit's
+  ## drop-in or a ``systemDropIn`` names in the bytes it installs. The
+  ## switch re-checks each before the flip and before step 7.
+  when mutated("recheck-skips-dropin-prefixes"):
+    # Falsifying build: round 1's collection, which read a unit's rendered
+    # file and nothing a drop-in installs.
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+      return referencedStoreObjects(renderedSystemUnitContent(r))
+    return @[]
+  if r.kind in {srkSystemdSystemUnit, srkSystemdSystemDropIn}:
+    referencedStoreObjects(desiredBytes(r))
+  else: @[]
 
 proc targetPathOf*(r: SystemResource): string =
   ## The file a resource materialises, "" for a kind without one.
@@ -1744,7 +1849,8 @@ proc pinToBytes(r: var SystemResource; p: var ResourcePlan;
   p.content = bytes
 
 proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
-                         addresses: openArray[string]): SystemProfile =
+                         addresses: openArray[string];
+                         stateDir = ""): SystemProfile =
   ## The profile ``repro system adopt <address> --profile <file>`` applies
   ## (spec §11.2 step 3): the current generation's operator profile with
   ## the addressed resources taken from ``given`` -- added, or in place of
@@ -1756,7 +1862,8 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   ## 2026-10-30): an adopt widens the scope by exactly what the adopted
   ## object needs. Raises when ``given`` does not declare an addressed
   ## resource.
-  let current = if currentText.len > 0: parseStoredUserProfile(currentText)
+  let current = if currentText.len > 0:
+                  parseStoredUserProfile(currentText, stateDir)
                 else: SystemProfile()
   result.addOn = current.addOn
   # An adopt changes no secret: the current generation's declarations stay.
@@ -2490,7 +2597,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # here, and a revert to it could never start.
     let carriedFrom =
       if opts.storedTarget or opts.replay:
-        parseStoredUserProfile(opts.userProfileText)
+        parseStoredUserProfile(opts.userProfileText, stateDir)
       else: parseAddOnUserProfile(opts.userProfileText)
     let why = carriedStateRefusal(carriedFrom,
       (if opts.carriedStateDir.len > 0: opts.carriedStateDir
@@ -2602,15 +2709,20 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # A stored generation (a revert, a rollback, the current generation
   # re-applied, or the replay of a switch that was one) keeps the rules it
   # was installed with; a new profile is held to the floor (§10.1).
-  let storedTarget = opts.storedTarget or (replaying and
-    hasPendingMarker(stateDir) and
-    readPendingMarker(stateDir).purpose in ["revert", "rollback"])
+  # A replay parses the target as the interrupted switch did: the
+  # write-ahead plan records it; an older build's plan does not, and the
+  # switch's purpose decides.
+  let storedTarget =
+    if replaying and replayPlan.storedTargetRecorded: replayPlan.storedTarget
+    else: opts.storedTarget or (replaying and hasPendingMarker(stateDir) and
+      readPendingMarker(stateDir).purpose in ["revert", "rollback"])
   let parseTarget = proc(t: string): SystemProfile =
-    if storedTarget: parseStoredUserProfile(t) else: parseAddOnUserProfile(t)
+    if storedTarget: parseStoredUserProfile(t, stateDir)
+    else: parseAddOnUserProfile(t)
   var user =
     if adoptAddresses.len > 0:
       scopedAdoptProfile(parseTarget(targetUserText),
-                         previousUserText, adoptAddresses)
+                         previousUserText, adoptAddresses, stateDir)
     else: parseTarget(targetUserText)
   when mutated("addon-unit-renders-differently"):
     # FALSIFYING MUTATION (e2e_addon_reproos_service_parity): the add-on
@@ -3297,7 +3409,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var removed: seq[SystemResource]
   var previousUser: SystemProfile
   if previousUserText.len > 0:
-    previousUser = parseStoredUserProfile(previousUserText)
+    previousUser = parseStoredUserProfile(previousUserText, stateDir)
     var prevDropIns = initHashSet[string]()
     let previousShaped = reshape(previousUser, prevDropIns)
     when not mutated("retargeted-address-accepted"):
@@ -3865,7 +3977,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   result.staticTree = staticTreePath(treeFiles)
 
   result.floorExceptions = floorExceptionPlanLines(user)
-  result.floorIntroduced = floorIntroducedUnits(previous, user.resources)
+  result.floorIntroduced = floorIntroducedUnits(previousUser, previous,
+                                                user.resources)
   if opts.planOnly:
     return
   # An unattended (agent) apply never gives a running service its first
@@ -3875,9 +3988,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       result.floorIntroduced.len > 0:
     raise newException(AddonNeedsOperator, "operator action required: the " &
       "hardening floor (serviceFloor) would change " &
-      result.floorIntroduced.join(", ") & ", installed without it; an " &
-      "agent apply does not restart a running service into its first " &
-      "floor. Review `repro system addon plan` and apply this profile once " &
+      result.floorIntroduced.join(", ") & "; an agent apply does not " &
+      "restart a running service into a floor it was not installed with. " &
+      "Review `repro system addon plan` and apply this profile once " &
       "as an operator, or waive the unit's whole floor (floorExceptions = " &
       "[\"serviceFloor: <why>\"]); a named exception still changes the " &
       "unit and does not avoid this. Nothing was changed")
@@ -3983,9 +4096,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       let p = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
       if p notin objs: objs.add(p)
     for p in plans:
+      for o in switchStoreObjects(p.r):
+        if o notin objs: objs.add(o)
       if p.r.kind == srkSystemdSystemUnit:
-        for o in referencedStoreObjects(renderedSystemUnitContent(p.r)):
-          if o notin objs: objs.add(o)
         if p.r.suHealthCheck.len > 0:
           let hc = parseHealthCheck(p.r.suHealthCheck)
           if hc.kind == hcExec:
@@ -4046,7 +4159,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       targetUserText: targetUserText, fromUserText: previousUserText,
       fromOwnText: previousOwnText,
       fromLedgerText: previous.render(), reconcileDrift: reconcileDrift,
-      adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved))
+      adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved,
+      storedTarget: storedTarget, storedTargetRecorded: true))
   var secretsFailure = ""
   if not opts.planOnly:
     writeSecretsSource(stateDir, secretsSource)

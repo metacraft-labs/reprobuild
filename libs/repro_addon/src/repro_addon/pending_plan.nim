@@ -33,6 +33,7 @@ import std/[os, strutils]
 
 import ./etc_write
 import ./fingerprint
+import ./mutations
 
 type
   PendingPlanError* = object of CatchableError
@@ -77,6 +78,14 @@ type
       ## treats them as running (step 2 may have stopped them), so its
       ## transitions restart rather than leave them down.
     plans*: seq[SavedPlan]
+    storedTarget*: bool
+      ## The switch's target is a stored generation (a revert, a rollback,
+      ## a re-pin of the current generation), parsed under the floor
+      ## version it was installed with; a new profile is not (spec §10.1).
+      ## A replay parses the target exactly as the switch did.
+    storedTargetRecorded*: bool
+      ## The plan records ``storedTarget`` (an older build's plan does not;
+      ## a replay of one falls back to the switch's purpose).
 
 const
   PendingPlanHeader* = "# repro-addon-pending-plan v1"
@@ -94,6 +103,8 @@ proc renderPlanFile(p: PendingPlan): string =
   result.add("reconcile-drift\t" & (if p.reconcileDrift: "1" else: "0") & "\n")
   result.add("adopt\t" & escapeField(joinList(p.adopt)) & "\n")
   result.add("active-units\t" & escapeField(joinList(p.activeUnits)) & "\n")
+  when not mutated("replay-forgets-stored-target"):
+    result.add("stored-target\t" & (if p.storedTarget: "1" else: "0") & "\n")
   for s in p.plans:
     let fields = [s.address, s.targetPath, s.replaced, joinList(s.newDirs),
       joinList(s.preLinks), s.baseUnitState, s.baseActiveState,
@@ -122,6 +133,11 @@ proc parsePlanFile(text: string; into: var PendingPlan) =
       if f.len != 2: raise newException(PendingPlanError,
         "malformed pending plan line " & $(i + 1))
       into.adopt = splitList(unescapeField(f[1]))
+    of "stored-target":
+      if f.len != 2: raise newException(PendingPlanError,
+        "malformed pending plan line " & $(i + 1))
+      into.storedTarget = f[1] == "1"
+      into.storedTargetRecorded = true
     of "active-units":
       if f.len != 2: raise newException(PendingPlanError,
         "malformed pending plan line " & $(i + 1))

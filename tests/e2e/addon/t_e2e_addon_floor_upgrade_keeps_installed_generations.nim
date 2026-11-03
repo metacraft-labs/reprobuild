@@ -1,40 +1,47 @@
 ## Gate ``e2e_addon_floor_upgrade_keeps_installed_generations`` (milestone
-## A9, review findings H1 and H2; spec §10.1 *A host upgraded to a build
-## with the floor*, §7.5).
+## A9, review findings H1 and H2 of round 1 and finding 3 of round 2; spec
+## §10.1 *A host upgraded to a build with the floor* and *Stored generations
+## and floor versions*, §7.5).
 ##
-## A real engine upgrade across the hardening floor. The guest is
-## bootstrapped and its first generation applied by the add-on binary from
-## BEFORE the floor (``REPRO_ADDON_PRE_FLOOR_ARTEFACT``, a static build of
-## the commit A9 started from): a web service that runs the base's own
-## ``python3`` -- outside every closure, which the floor refuses in a new
-## profile. Then the binary under test takes over:
+## Every engine that has stored add-on generations installs one, and then
+## the engine under test takes over. Two chains, each on its own guest,
+## because the first floored engine cannot follow the pre-floor one (it
+## parsed a stored pre-floor generation under its floor and wedged: round
+## 1's H1, which is why no host carries both):
 ##
-## 1. the stored pre-floor generation does not wedge it (H1): ``repro infra
-##    plan`` of a fixed profile (the unit naming the exception it needs)
-##    succeeds, while a plan of the unfixed profile is refused naming the
-##    floor, not the stored generation;
-## 2. a floored generation that fails its confirm is reverted (H2), and the
-##    revert restores the pre-floor unit file byte for byte, the service
-##    serving again -- the stored generation is rendered under the rules it
-##    was installed with, not re-rendered with today's floor;
-## 3. the fixed profile is applied (the floor with its named exception);
-## 4. ``repro system rollback`` to the pre-floor generation restores its
-##    unit file byte for byte too.
+## - ``prefloor`` (9d5ce19e07, no floor) then ``v2`` (d03bb6759e, floor
+##   version 2);
+## - ``v1`` (1a598170c0, floor version 1) then ``v2``.
 ##
-## Falsifying mutation (``REPRO_ADDON_MUTATION=stored-profile-floored``):
-## stored generations are parsed with today's floor default; the stored
-## pre-floor profile no longer parses, so the plan, the revert and the
-## rollback fail: red.
+## Each engine installs a generation of a web service that runs the base's
+## own ``python3`` (the floored ones naming the exception it needs). Then
+## the engine under test:
 ##
-## Needs ``REPRO_ADDON_PRE_FLOOR_ARTEFACT`` (a static add-on ``repro`` built
-## from the pre-floor commit, ``scripts/build_addon_static.sh --out`` in a
-## worktree of it); a missing artefact is a failure, never a skip.
+## - plans a profile over the stored generations without wedging, and its
+##   plan names the unit's floor change (version 2 -> today's); the unfixed
+##   profile is refused for its own unit, by the floor;
+## - a floored generation that fails its confirm is reverted, and the revert
+##   restores the newest stored generation's unit byte for byte;
+## - the fixed profile applies under today's floor;
+## - ``repro system rollback`` to each stored generation, newest first,
+##   restores each one's unit byte for byte, and the service serves each
+##   one's page.
+##
+## Falsifying mutations: ``stored-profile-floored`` (stored generations
+## parsed with today's floor default) and ``stored-floor-unversioned``
+## (a stored floored unit rendered with today's floor version): a revert
+## or a rollback no longer restores the stored bytes, red.
+##
+## Needs ``REPRO_ADDON_OLD_ENGINES``: ``prefloor:<dir>;v1:<dir>;v2:<dir>``,
+## each a ``scripts/build_addon_static.sh --out`` directory of a worktree at
+## that engine's commit (``<dir>/<debArch>/repro``); a missing engine is a
+## failure, never a skip.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
-## *Mocking.* None: two real builds of the add-on, real switches.
+## *Mocking.* None: four real builds of the add-on, real switches.
 
-import std/[json, os, strutils, times, unittest]
+import std/[json, os, strutils, tables, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -70,7 +77,21 @@ proc served(g: Guest): string =
 proc unitSha(g: Guest): string =
   g.exec("sha256sum " & UnitPath & " | cut -d' ' -f1").stdout.strip()
 
-proc runBase(b: BaseImage; record: JsonNode): seq[string] =
+proc oldEngine(name, debArch: string): string =
+  ## ``<dir>/<debArch>/repro`` of engine ``name`` in REPRO_ADDON_OLD_ENGINES.
+  for item in getEnv("REPRO_ADDON_OLD_ENGINES").split(';'):
+    let kv = item.split(':', 1)
+    if kv.len == 2 and kv[0] == name:
+      let p = kv[1] / debArch / "repro"
+      if fileExists(p): return p
+      raise newException(TestBedError, "REPRO_ADDON_OLD_ENGINES: no " & p)
+  raise newException(TestBedError, "REPRO_ADDON_OLD_ENGINES names no " &
+    name & " engine: the gate needs prefloor, v1 and v2")
+
+proc generationNow(g: Guest): string =
+  extractFilename(g.run("readlink /var/lib/repro/system/current").strip())
+
+proc runBase(b: BaseImage; chain: seq[string]; record: JsonNode): seq[string] =
   var g: Guest
   let steps = newJArray()
   var fails: seq[string]
@@ -78,47 +99,65 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
   try:
-    let old = getEnv("REPRO_ADDON_PRE_FLOOR_ARTEFACT")
-    if old.len == 0 or not fileExists(old):
-      raise newException(TestBedError, "REPRO_ADDON_PRE_FLOOR_ARTEFACT " &
-        "names no file: the gate needs the add-on binary from before the floor")
+    var engines = newJObject()
+    var installed: seq[tuple[name, path: string]]
+    for name in chain:
+      installed.add((name: name, path: oldEngine(name, b.debArch)))
     g = newGuest(b)
     g.boot()
     g.prepareBase()
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
-    g.copyTo(old, "/root/repro-pre-floor")
-    discard g.run("chmod 0755 /root/repro-pre-floor")
-    let oldRepro = "/root/repro-pre-floor"
-    record["preFloorArtefactSha256"] =
-      %g.run("sha256sum " & oldRepro & " | cut -d' ' -f1").strip()
+    var guestEngine = initTable[string, string]()
+    for (name, path) in installed:
+      let at = "/root/repro-" & name
+      g.copyTo(path, at)
+      discard g.run("chmod 0755 " & at)
+      guestEngine[name] = at
+      engines[name] = %g.run("sha256sum " & at & " | cut -d' ' -f1").strip()
+    record["oldEngines"] = engines
     let good = "http://127.0.0.1:" & $Port & "/"
-    # The pre-floor engine bootstraps and applies the first generation.
-    if not g.bootstrapAddon(oldRepro, step): return fails
-    var r = g.applyProfile(oldRepro, "pre", profile(service("page-pre"), good))
-    step("the pre-floor engine applies generation 1", r.exitCode == 0,
-         r.stdout & r.stderr)
-    step("generation 1 serves its page", g.served() == "page-pre", "")
-    let shaPre = g.unitSha()
-    let genPre = g.run("readlink /var/lib/repro/system/current").strip()
-    record["preFloorUnitSha256"] = %shaPre
-    step("the pre-floor unit carries no floor",
-         "NoExecPaths" notin g.run("cat " & UnitPath), "")
-    # 1. H1: no wedge.
-    let fixed = profile(service("page-fixed"), good,
-      "  floorExceptions = [\"" & PythonException & "\"]\n")
+    let floored = "  floorExceptions = [\"" & PythonException & "\"]\n"
+    # 1. The chain's first engine bootstraps; each installs a generation.
+    if not g.bootstrapAddon(guestEngine[chain[0]], step): return fails
+    var r: ExecOut
+    var gens: seq[tuple[name, id, sha, page: string]]
+    for i, name in chain:
+      let page = "page-" & name
+      let text = if name == "prefloor": profile(service(page), good)
+                 else: profile(service(page), good, floored)
+      r = g.applyProfile(guestEngine[name], "g-" & name, text)
+      step("the " & name & " engine applies its generation", r.exitCode == 0,
+           r.stdout & r.stderr)
+      step("the " & name & " generation serves its page",
+           g.served() == page, "")
+      if name == "prefloor":
+        step("the pre-floor unit carries no floor",
+             "NoExecPaths" notin g.run("cat " & UnitPath), "")
+      gens.add((name: name, id: g.generationNow(), sha: g.unitSha(),
+                page: page))
+    step("each engine installed a different unit",
+         gens[0].sha != gens[1].sha, $gens)
+    var shas = newJObject()
+    for x in gens: shas[x.name] = %x.sha
+    record["storedUnitSha256"] = shas
+    # 4. No wedge: the engine under test plans over the stored generation.
+    let fixed = profile(service("page-fixed"), good, floored)
     let pf = g.exec(repro & " infra plan --profile " &
       g.putProfile("fixed", fixed), timeoutSec = 1200)
-    step("the upgraded engine plans the fixed profile over the stored " &
-         "pre-floor generation", pf.exitCode == 0, pf.stdout & pf.stderr)
+    step("the engine under test plans over the stored generations",
+         pf.exitCode == 0, pf.stdout & pf.stderr)
+    step("its plan names the unit's floor change",
+         "a9-up.service (floor version 2 -> floor version" in
+           pf.stdout & pf.stderr, pf.stdout & pf.stderr)
     let pu = g.exec(repro & " infra plan --profile " &
-      g.putProfile("unfixed", profile(service("page-pre"), good)),
+      g.putProfile("unfixed", profile(service("page-x"), good)),
       timeoutSec = 1200)
     step("the unfixed profile is refused for its own unit, by the floor",
          pu.exitCode != 0 and "outside the unit's closure" in
            pu.stdout & pu.stderr, pu.stdout & pu.stderr)
-    # 2. H2: a floored generation fails its confirm; the revert restores
-    # the pre-floor unit exactly.
+    # 5. A floored generation that fails its confirm is reverted to
+    # generation 3, byte for byte.
     let addonBin = g.run("ls -d /repro/store/prefixes/repro-addon/*/bin/repro " &
                          "| head -1").strip()
     let failing = profile("[Unit]\nDescription=A9 upgrade fixture\n" &
@@ -129,27 +168,29 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("a floored generation that fails its confirm is reverted",
          r.exitCode != 0 and "rolled back" in r.stdout & r.stderr,
          r.stdout & r.stderr)
-    step("the revert restores the pre-floor unit byte for byte",
-         g.unitSha() == shaPre, g.run("cat " & UnitPath))
-    step("the pre-floor service serves again", g.served() == "page-pre", "")
-    # 3. The fixed profile applies, with its exception.
+    step("the revert restores the " & gens[^1].name & " unit byte for byte",
+         g.unitSha() == gens[^1].sha, g.run("cat " & UnitPath))
+    step("the " & gens[^1].name & " service serves again",
+         g.served() == gens[^1].page, "")
+    # 6. The fixed profile applies under today's floor.
     r = g.applyProfile(repro, "fixed", fixed)
-    step("the fixed profile applies under the floor", r.exitCode == 0,
+    step("the fixed profile applies under today's floor", r.exitCode == 0,
          r.stdout & r.stderr)
-    step("its unit carries the floor and the exception",
-         "ProtectSystem=strict" in g.run("cat " & UnitPath) and
-         "# serviceFloor exception: NoExecPaths" in g.run("cat " & UnitPath),
-         "")
+    let unitNow = g.run("cat " & UnitPath)
+    step("its unit carries today's floor and the exception",
+         "ReadOnlyPaths=/proc" in unitNow and
+         "# serviceFloor exception: NoExecPaths" in unitNow, unitNow)
     step("the fixed service serves", g.served() == "page-fixed", "")
     step("the plan names the exception", PythonException in r.stdout, "")
-    # 4. Rollback to the pre-floor generation.
-    let rb = g.exec(repro & " system rollback " & extractFilename(genPre),
-                    timeoutSec = 1200)
-    step("rollback to the pre-floor generation succeeds", rb.exitCode == 0,
-         rb.stdout & rb.stderr)
-    step("the rollback restores the pre-floor unit byte for byte",
-         g.unitSha() == shaPre, g.run("cat " & UnitPath))
-    step("and its service serves", g.served() == "page-pre", "")
+    # 7. Rollback to each stored generation, newest first.
+    for i in countdown(gens.high, 0):
+      let x = gens[i]
+      let rb = g.exec(repro & " system rollback " & x.id, timeoutSec = 1200)
+      step("rollback to the " & x.name & " generation succeeds",
+           rb.exitCode == 0, rb.stdout & rb.stderr)
+      step("the rollback restores the " & x.name & " unit byte for byte",
+           g.unitSha() == x.sha, g.run("cat " & UnitPath))
+      step("and its service serves " & x.page, g.served() == x.page, "")
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})
@@ -168,15 +209,16 @@ suite Gate:
     else:
       var failures: seq[string]
       for b in selectedBases():
-        let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
-          "backend": (if useIncus(): "incus" else: "qemu"),
-          "mutation": mutation(), "reprobuild": gitHead(),
-          "preFloorArtefact": getEnv("REPRO_ADDON_PRE_FLOOR_ARTEFACT"),
-          "started": $now().utc}
-        let f = runBase(b, record)
-        record["verdict"] = %(if f.len == 0: "green" else: "red")
-        record["finished"] = %($now().utc)
-        echo "record: ", writeRecord(Gate, record)
-        failures.add(f)
+        for chain in [@["prefloor", "v2"], @["v1", "v2"]]:
+          let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
+            "backend": (if useIncus(): "incus" else: "qemu"),
+            "mutation": mutation(), "reprobuild": gitHead(),
+            "chain": chain, "oldEngineDirs": getEnv("REPRO_ADDON_OLD_ENGINES"),
+            "started": $now().utc}
+          let f = runBase(b, chain, record)
+          record["verdict"] = %(if f.len == 0: "green" else: "red")
+          record["finished"] = %($now().utc)
+          echo "record: ", writeRecord(Gate, record)
+          failures.add(f)
       for f in failures: echo "FAIL ", f
       check failures.len == 0

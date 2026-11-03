@@ -2336,7 +2336,7 @@
           "executedVariables": [
             "src"
           ],
-          "line": 71,
+          "line": 87,
           "path": "tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim",
           "patterns": [
             "static-c-compiler"
@@ -2354,7 +2354,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [],
-          "line": 101,
+          "line": 114,
           "path": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim",
           "patterns": [
             "static-c-compiler"
@@ -4540,7 +4540,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 99,
+          "line": 85,
           "path": "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
           "patterns": [
             "nim-argv"
@@ -8762,8 +8762,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_service_floor.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 19,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
