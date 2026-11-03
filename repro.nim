@@ -535,6 +535,17 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/test-bin/repro_catalog_harvester",
         actionId: "reprobuild.test_helpers.repro_catalog_harvester")]),
+    # The launcher test executes both helpers. Without this row its execute
+    # edge fingerprinted neither, so a focused run of the test served a
+    # stale `repro_trampoline` built from an older tree.
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "t_the_resolving_launcher_execs_the_pinned_image.nim",
+      artifacts: @[
+        TestGraphArtifact(path: "build/test-bin/repro_trampoline",
+          actionId: "reprobuild.test_helpers.repro_trampoline"),
+        TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
+          actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
   ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
     (when defined(linux) or defined(macosx): @[
     TestGraphArtifacts(
