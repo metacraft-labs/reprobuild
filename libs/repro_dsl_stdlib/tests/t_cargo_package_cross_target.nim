@@ -205,9 +205,20 @@ suite "cross_zig: the target table and the environment":
     check "-lgcc_s" in ld
     check "-L\"/w/lib\"" in ld
     check zigCrossWrapperScript("ar", t, "/w/lib") == "#!/bin/sh\nexec zig ar \"$@\"\n"
-    # No path of the emitting machine: zig is found on the edge's PATH.
+    # No path of the emitting machine: zig is found on the edge's PATH. The
+    # C wrappers name `/nix/store/` as a PATTERN (they map every store
+    # directory a compile reads to its name), so the check is for a
+    # concrete store path: the prefix followed by a 32-character hash.
     for role in ["cc", "c++", "ar", "ranlib", "rust-linker"]:
-      check "/nix/store" notin zigCrossWrapperScript(role, t, "/w/lib")
+      let text = zigCrossWrapperScript(role, t, "/w/lib")
+      var concrete = false
+      var at = text.find("/nix/store/")
+      while at >= 0:
+        let rest = text[at + "/nix/store/".len .. ^1]
+        if rest.len > 32 and rest[0 ..< 32].allIt(it in {'0'..'9', 'a'..'z'}):
+          concrete = true
+        at = text.find("/nix/store/", at + 1)
+      check not concrete
 
   test "the wrapper action writes the five roles and the empty libatomic":
     resetBuildActionRegistry()

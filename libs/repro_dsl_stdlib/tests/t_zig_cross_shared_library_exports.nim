@@ -258,3 +258,29 @@ suite "cross_zig: a shared library exports none of compiler-rt":
       checkpoint("listed, not in the archive: " &
         toSeq(listed - actual).join(" "))
       check actual == listed
+
+suite "cross_zig: a link finds the libraries LIBRARY_PATH names":
+  ## The engine hands a consumer its `buildDeps:` libraries through
+  ## `LIBRARY_PATH` (and their headers through `CPATH`). `zig cc` honours
+  ## `CPATH` and ignores `LIBRARY_PATH` (measured, zig 0.13.0: "unable to
+  ## find dynamic system library 'zz' ... searched paths: none"), so the
+  ## wrappers turn each entry into `-L` on a link. Measured first on
+  ## catalog zstd for armv7, whose `zstd` program links the target zlib.
+
+  test "a library only LIBRARY_PATH names is linked":
+    requireTools:
+      let dir = createTempDir("zig-library-path-", "")
+      defer: removeDir(dir)
+      writeWrappers(dir / "w", Glibc)
+      createDir(dir / "lib")
+      writeFile(dir / "zz.c", "int zz(void) { return 3; }\n")
+      writeFile(dir / "m.c", "int zz(void);\nint main(void) { return zz(); }\n")
+      let cc = quoteShell(dir / "w" / "cc")
+      require run(cc & " -c -o zz.o zz.c", dir).code == 0
+      require run("zig ar rc lib/libzz.a zz.o", dir).code == 0
+      require run(cc & " -c -o m.o m.c", dir).code == 0
+      let link = run("LIBRARY_PATH=" & quoteShell(dir / "lib") & ":/nonexistent " &
+        cc & " -o m m.o -lzz", dir)
+      checkpoint(link.output)
+      check link.code == 0
+      check fileExists(dir / "m")

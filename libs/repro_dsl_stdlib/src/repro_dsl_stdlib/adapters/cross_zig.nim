@@ -238,6 +238,54 @@ const
     ## this line or makes every unlisted symbol local (`local: *;`), and
     ## refuse it otherwise.
 
+const PrefixMapPrelude = """
+# No build-host path in what this compile writes (Distribution-And-Packaging
+# §5.3, the builder-path gate): __FILE__ names a store directory by its
+# name without the hash, zig's prefix as `zig`, and the directory of every
+# other absolute source file or `-I` directory -- and the working
+# directory -- as `.`. Compiles only (-c / -S / -E): a link reads no source
+# file, and clang warns about an unused -ffile-prefix-map. Debug info is a
+# separate matter: zig compiles its own start-up objects with no flag of
+# ours, so a build that ships its images links them without debug info.
+compiling=0
+maps=
+addmap() {
+  case " $maps " in *" $1 "*) ;; *) maps="$maps $1";; esac
+}
+storemap() {
+  r="${1#/nix/store/}"
+  top="${r%%/*}"
+  addmap "-ffile-prefix-map=/nix/store/$top=${top#*-}"
+}
+"""
+
+const PrefixMapScan =
+  "  case \"$a\" in\n" &
+  "    -c|-S|-E) compiling=1;;\n" &
+  "    /nix/store/*) storemap \"$a\";;\n" &
+  "    -I/nix/store/*) storemap \"${a#-I}\";;\n" &
+  "    -isystem/nix/store/*) storemap \"${a#-isystem}\";;\n" &
+  "    /*.c|/*.cc|/*.cpp|/*.cxx|/*.S|/*.s) addmap \"-ffile-prefix-map=${a%/*}=.\";;\n" &
+  "    -I/*) addmap \"-ffile-prefix-map=${a#-I}=.\";;\n" &
+  "  esac\n"
+
+const PrefixMapApply = """
+if [ $compiling = 1 ]; then
+  z=$(command -v zig)
+  set -- "$@" "-ffile-prefix-map=$PWD=." "-ffile-prefix-map=${z%/bin/zig}=zig" $maps
+else
+  # A link: zig ignores LIBRARY_PATH, which is how the engine hands a
+  # consumer its `buildDeps:` libraries (it honours CPATH, their headers),
+  # so each entry becomes a -L.
+  rest="${LIBRARY_PATH:-}"
+  while [ -n "$rest" ]; do
+    d="${rest%%:*}"
+    case "$rest" in *:*) rest="${rest#*:}";; *) rest=;; esac
+    [ -n "$d" ] && set -- "$@" "-L$d"
+  done
+fi
+"""
+
 const CompilerRtWrapperTemplate = """
 # A shared library would export zig's compiler-rt (weak, default
 # visibility). A link without a version script of its own gets @MAP@;
@@ -257,7 +305,7 @@ for a do
     -Wl,--version-script|-Wl,-version-script) next=1;;
     *version-script*) opaque=1;;
   esac
-  set -- "$@" "$a"
+@SCAN@  set -- "$@" "$a"
 done
 covers() {
   inlocal=0
@@ -363,10 +411,12 @@ proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
     "# -target below is the authoritative one, so drop it. -latomic is\n" &
     "# dropped too: zig ships no libatomic, and compiler-rt, which it links,\n" &
     "# provides the __atomic_* calls a 32-bit ARM link asks it for.\n" &
+    PrefixMapPrelude &
     (if zigCrossCompilerRtMap(t).len == 0:
       "for a do\n" &
       "  shift\n" &
       "  case \"$a\" in -latomic|--target=*) continue;; esac\n" &
+      PrefixMapScan &
       "  set -- \"$@\" \"$a\"\n" &
       "done\n"
     else:
@@ -384,7 +434,8 @@ proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
       CompilerRtWrapperTemplate.multiReplace(
         ("@MAP@", libDir.parentDir / ZigCrossCompilerRtMapName),
         ("@MARKER@", ZigCrossCompilerRtMarker),
-        ("@TRIPLE@", t.rustTriple))) &
+        ("@TRIPLE@", t.rustTriple), ("@SCAN@", PrefixMapScan))) &
+    PrefixMapApply &
     "exec zig " & role & " " & zigDriverArgs(t) & " \"$@\"\n"
   of "rust-linker":
     "#!/bin/sh\n" &
