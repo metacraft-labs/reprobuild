@@ -19406,6 +19406,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       reads, probes, enumerations, portableStaticFieldsOf(action),
       observedEnv, graphViewIdentifier(action))
     if fp.portable:
+      # An input the volatile-path fold KEPT under `/dev` (the project's own
+      # file, or one in a directory under `/dev/shm`) that the untracked
+      # `/dev` system root claims would be left out of the portable key, and
+      # a record keyed without it would be served after it changed. A
+      # tracked root claims a project at `/dev/shm/<name>` (longest root
+      # wins); this is what no tracked root claims, such as the project
+      # reached through a symlink whose resolved spelling is under `/dev/shm`
+      # (portable roots carry the declared spelling only), or a dependency
+      # checkout there. Such a record is not portable, as an input outside
+      # every root is not.
+      let scope = actionVolatileScope(action, config.filesystemRoots)
+      let roots = portableRecordRoots()
+      for path in reads & probes & enumerations:
+        if path.isVolatileRuntimeStatePath() and
+            not path.dropsAsVolatileRuntimeState(scope) and
+            toLogicalPath(roots, path).kind == lpkUntracked:
+          fp.portable = false
+          fp.reason = "input " & path & " is under a volatile runtime " &
+            "prefix that no tracked root names, so it cannot be named " &
+            "portably"
+          fp.strongHex = ""
+          break
+    if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
       let outs = portableOutputs(config.portableRoots,
         portablePhysicalOutputsOf(action).filterIt(
