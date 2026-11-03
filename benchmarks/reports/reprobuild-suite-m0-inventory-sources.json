@@ -8781,7 +8781,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_state_sets.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -333,6 +333,34 @@ suite "state sets":
     for _ in walkDirRec(state): inc written
     check written == 0
 
+  test "a stored generation is read under its own rules before the refusal":
+    # A revert or rollback target is a stored generation: one installed
+    # before the floor names no hardening and runs /bin/true, which today's
+    # floor default refuses. The carried-state check reads it the way the
+    # switch does (``parseStoredUserProfile``), so it reaches its own
+    # refusal instead of throwing on the floor. Red under the
+    # ``stored-profile-floored`` build (stored generations parsed with the
+    # floor).
+    let src = fresh("st-src")
+    populate(src)
+    discard backupStateSet(parseSystemProfile(Profile), src / "out", "h1",
+                           stopped(), hold = false, root = src)
+    let dst = fresh("st-dst")
+    let state = fresh("st-state")
+    var why = ""
+    try:
+      discard runAddonApply(AddonApplyOptions(stateDir: state,
+        hostIdentity: "h", userProfileText: OnlyApp, storedTarget: true,
+        carriedStateDir: src / "out", carriedStateRoot: dst))
+    except AddonApplyError as e:
+      why = e.msg
+    except CatchableError as e:
+      why = "not the carried-state refusal: " & e.msg
+    check why.startsWith("ECarriedStatePending")
+    var written = 0
+    for _ in walkDirRec(state): inc written
+    check written == 0
+
   test "carried owners must keep their ids in the profile that uses them":
     let src = fresh("ids-src")
     createDir(src / "var/lib/ethereum/validator")

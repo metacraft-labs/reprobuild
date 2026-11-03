@@ -2484,7 +2484,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     # deploy agent, an adopt, a rollback). Decided by the library both
     # apply paths share (`carried_state`); first, before anything else is
     # looked at or written.
-    let why = carriedStateRefusal(parseAddOnUserProfile(opts.userProfileText),
+    # A stored generation (a revert, a rollback, a replay) is read under the
+    # rules it was installed with, as the switch below reads it (§10.1): a
+    # pre-floor generation parsed with today's floor default would throw
+    # here, and a revert to it could never start.
+    let carriedFrom =
+      if opts.storedTarget or opts.replay:
+        parseStoredUserProfile(opts.userProfileText)
+      else: parseAddOnUserProfile(opts.userProfileText)
+    let why = carriedStateRefusal(carriedFrom,
       (if opts.carriedStateDir.len > 0: opts.carriedStateDir
        else: CarriedStateDir),
       (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
