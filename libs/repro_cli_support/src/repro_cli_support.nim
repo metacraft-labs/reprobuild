@@ -72864,11 +72864,22 @@ proc interruptIsolatedPins() {.noconv.} =
   ## the certifying child SIGTERM (a terminal's Ctrl-C reaches it anyway, a
   ## signal sent to this process alone does not). The child then ends, the
   ## parent's read of its output ends, and the ordinary exit path removes the
-  ## scratch tree before the process exits with 130.
+  ## scratch tree before the process ends of SIGINT (``exitInterrupted``).
   isolatedCertifyInterrupted = true
   when defined(posix):
     if activeCertifyChildPid > 0:
       discard posix.kill(Pid(activeCertifyChildPid), SIGTERM)
+
+proc exitInterrupted() {.noreturn.} =
+  ## End the process the way an interrupted command ends: on POSIX by dying of
+  ## SIGINT, which a shell reports as 130 and which stops a calling loop. Not
+  ## ``quit(130)``: this Nim clamps an exit code above 127 to 127 on POSIX, so
+  ## that exits 127, the status of a command that was not found.
+  stderr.flushFile()
+  when defined(posix):
+    discard posix.signal(posix.SIGINT, posix.SIG_DFL)
+    discard posix.kill(posix.getpid(), posix.SIGINT)
+  quit(130)
 
 proc mirrorWorkspaceEntries(source, target: string;
                             replaced: seq[string]) =
@@ -73031,6 +73042,10 @@ proc runCertifyChild(args: PushArgs; workspaceRoot, repoAbs: string;
   let child = uncontrolledStartProcess(publicCliImagePath(), workingDir = repoAbs,
     args = argv, options = {poStdErrToStdOut})
   activeCertifyChildPid = child.processID
+  when defined(posix):
+    # An interrupt that arrived before the pid was recorded found no child.
+    if isolatedCertifyInterrupted:
+      discard posix.kill(Pid(child.processID), SIGTERM)
   defer:
     activeCertifyChildPid = 0
     child.close()
@@ -73075,7 +73090,7 @@ proc certifyPushedWorktree(identity: GitToolIdentity; args: PushArgs;
     if isolatedCertifyInterrupted:
       stderr.writeLine("repro push: interrupted; the temporary workspace " &
         "was removed and nothing was pushed by this step")
-      quit(130)
+      exitInterrupted()
   if pinned.len > 0:
     isolatedCertifyInterrupted = false
     setControlCHook(interruptIsolatedPins)

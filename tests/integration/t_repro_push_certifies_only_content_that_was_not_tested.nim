@@ -1311,9 +1311,9 @@ suite "repro push publishes a certified dependency cycle through every member's 
       let code = push.waitForExit(60_000)
       let transcript = push.outputStream.readAll()
       checkpoint("interrupted push:\n" & transcript)
-      # Non-zero; the push reports the interrupt and removes the temporary
-      # workspace before it exits.
-      check code != 0
+      # 130, as for any interrupted command; the push reports the interrupt
+      # and removes the temporary workspace before it exits.
+      check code == 130
       check "interrupted; the temporary workspace was removed" in transcript
       check isolatedScratchDirs() == scratchBefore
       check checkoutState(fx.app) == before.a
