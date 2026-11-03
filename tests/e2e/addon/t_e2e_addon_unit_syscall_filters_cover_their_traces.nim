@@ -33,13 +33,18 @@
 ##
 ## **Attribution** (A9 review round 2, issue
 ## 2026-11-03-syscall-trace-baseline-attributes-seccomp-records-by-time-window):
-## a record belongs to a unit when the process that made the call was in
-## the unit's control group. A sampler in the guest reads each unit's
-## ``cgroup.procs`` every 20 ms for the whole run; a record's ``pid=`` is
-## looked up there, and its ``arch=`` must be the base's native one. A
-## record whose process the sampler never saw (one shorter than a sample),
-## or of another architecture, is unattributed: listed, never folded into
-## a unit's set, and in check mode a failure. While the units work, a
+## a record belongs to a unit when it falls inside the lifetime of exactly
+## one process -- identified by (pid, start time), so a reused pid is
+## another process -- that was in the unit's control group
+## (``repro_test_support/syscall_attribution``). A static sampler in the
+## guest (``fixtures/cgroup_sampler/a9_cgroup_sampler.c``) reads each
+## unit's ``cgroup.procs`` and each process's ``/proc/<pid>/stat`` start
+## time every millisecond for the whole run; a record's time is the
+## kernel's own audit time stamp, and its ``arch=`` must be the base's
+## native one. A record that falls in no sampled lifetime of its pid, or in
+## more than one, is unattributed: never folded into a unit's set, and a
+## failure when it lies inside an add-on unit's run (where an unseen
+## process of the unit could have made it). While the units work, a
 ## foreign unit logs its own calls (``a9-foreign.service``); none of its
 ## records may be attributed to an add-on unit. Falsifying mutation
 ## (``REPRO_ADDON_MUTATION=trace-attributes-by-window``): attribution by
@@ -76,6 +81,7 @@
 import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, unittest]
 
 import repro_test_support/reasoned_skip
+import repro_test_support/syscall_attribution
 
 import repro_dsl_stdlib/packages/apt_closure
 import repro_addon/generation0
@@ -219,6 +225,9 @@ proc auditRecords(g: Guest; since: float): seq[AuditRecord] =
     var rec: AuditRecord
     try: rec.at = parseFloat(f[0])
     except ValueError: continue
+    # The kernel's own stamp, not the journal's receive time.
+    let k = auditTime(l)
+    if k >= 0: rec.at = k
     for tok in f:
       if tok.startsWith("syscall="):
         try: rec.nr = parseInt(tok["syscall=".len .. ^1])
@@ -236,7 +245,6 @@ proc auditRecords(g: Guest; since: float): seq[AuditRecord] =
     result.add(rec)
 
 const
-  PidMapPath = "/run/a9-pidmap"
   ForeignUnit = "a9-foreign.service"
 
 proc nativeAuditArch(debArch: string): string =
@@ -248,24 +256,29 @@ proc nativeAuditArch(debArch: string): string =
   of "armhf": "40000028"
   else: raise newException(TestBedError, "no audit arch for " & debArch)
 
-proc startPidSampler(g: Guest; units: openArray[string]) =
-  ## Every 20 ms, ``<unit> <pid>`` for each process in each unit's control
-  ## group, appended to ``PidMapPath`` until ``stopPidSampler``.
-  var list = ""
-  for u in units: list.add(" " & u)
-  discard g.run("rm -f " & PidMapPath & "; nohup sh -c 'while :; do " &
-    "for u in" & list & "; do f=/sys/fs/cgroup/system.slice/$u/cgroup.procs; " &
-    "[ -r $f ] && sed \"s/^/$u /\" $f; done; sleep 0.02; done' >> " &
-    PidMapPath & " 2>/dev/null & echo $! > /run/a9-sampler.pid")
+const
+  SamplerPeriodUs = 1000
+  SamplerOut = "/run/a9-lifetimes"
 
-proc stopPidSampler(g: Guest): Table[int, HashSet[string]] =
-  ## The units each pid was seen in.
-  discard g.run("kill $(cat /run/a9-sampler.pid) 2>/dev/null; true")
-  for l in g.run("sort -u " & PidMapPath).splitLines():
-    let f = l.splitWhitespace()
-    if f.len != 2: continue
-    try: result.mgetOrPut(parseInt(f[1]), initHashSet[string]()).incl(f[0])
-    except ValueError: discard
+proc startSampler(g: Guest; units: openArray[string]) =
+  ## The process-lifetime sampler (header), built for the guest's
+  ## architecture with the static toolchain the add-on is built with.
+  let src = reproRoot() / "tests" / "e2e" / "addon" / "fixtures" /
+            "cgroup_sampler" / "a9_cgroup_sampler.c"
+  let bin = g.runDir / "a9-cgroup-sampler"
+  let (o, c) = execCmdEx(quoteShellCommand([staticCc(g.base.debArch),
+    "-static", "-O2", "-o", bin, src]))
+  doAssert c == 0, "compiling the sampler failed: " & o
+  g.copyTo(bin, "/root/a9-cgroup-sampler")
+  discard g.run("chmod 0755 /root/a9-cgroup-sampler; rm -f " & SamplerOut &
+    "; nohup /root/a9-cgroup-sampler " & SamplerOut & " " & $SamplerPeriodUs &
+    " " & units.join(" ") & " >/dev/null 2>&1 & echo $! > /run/a9-sampler.pid")
+
+proc stopSampler(g: Guest): seq[ProcLifetime] =
+  ## What it saw (it writes on SIGTERM).
+  discard g.run("kill -TERM $(cat /run/a9-sampler.pid); for i in $(seq 1 " &
+    "100); do [ -s " & SamplerOut & " ] && break; sleep 0.2; done; true")
+  parseLifetimes(g.run("cat " & SamplerOut & " 2>/dev/null"))
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
@@ -388,7 +401,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # Attribution (header): which process was in which unit, sampled from
   # here to the end of the work; and a foreign unit that logs its own
   # calls the whole time.
-  g.startPidSampler(@Units & @[ForeignUnit])
+  g.startSampler(@Units & @[ForeignUnit])
   discard g.run("systemd-run --quiet --unit=" & ForeignUnit &
     " -p SystemCallLog=clock_nanosleep -p SystemCallLog=nanosleep " &
     "/bin/sh -c 'while :; do sleep 0.05; done'")
@@ -431,33 +444,32 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   tick(10, gen(10))
 
   discard g.run("systemctl stop " & ForeignUnit & " 2>/dev/null; true")
-  let pidUnits = g.stopPidSampler()
+  let lifetimes = g.stopSampler()
   let native = nativeAuditArch(g.base.debArch)
-  proc attribute(r: AuditRecord): string =
-    ## The add-on unit a record belongs to, or "".
+  proc attributeRec(r: AuditRecord): Attribution =
+    ## The unit a record belongs to (header).
     if mutation() == "trace-attributes-by-window":
       # Falsifying build of the attribution: by journal time (round 1).
       for w in windows:
-        if r.at >= w.a and r.at <= w.b: return w.unit
-      return ""
-    if r.arch.len > 0 and r.arch != native: return ""
-    let seen = pidUnits.getOrDefault(r.pid)
-    var candidates: seq[string]
-    for u in Units:
-      if u in seen: candidates.add(u)
-    if candidates.len == 1: return candidates[0]
-    # A pid seen in two units (reused): the one whose run the record is in.
+        if r.at >= w.a and r.at <= w.b:
+          return Attribution(kind: akUnit, unit: w.unit)
+      return Attribution(kind: akNone)
+    if r.arch.len > 0 and r.arch != native:
+      return Attribution(kind: akNone)
+    attribute(lifetimes, r.pid, r.at, SamplerPeriodUs / 1_000_000)
+  proc inUnitRun(at: float): bool =
     for w in windows:
-      if w.unit in candidates and r.at >= w.a and r.at <= w.b: return w.unit
-    ""
+      if at >= w.a and at <= w.b: return true
   var observed = initTable[string, HashSet[string]]()
   var unattributed: seq[string]
   var foreignAttributed: seq[string]
   var foreignSeen = 0
+  var unattributedInRun: seq[string]
   for r in g.auditRecords(t1 + 2):
     if r.nr == unameNr and r.comm == "uname": continue   # the vacuity guards
     let name = names.getOrDefault(r.nr, "#" & $r.nr)
-    let unit = attribute(r)
+    let a = attributeRec(r)
+    let unit = if a.kind == akUnit and a.unit in Units: a.unit else: ""
     if r.comm == "sleep":
       # The foreign unit's records (a9-foreign.service runs `sleep`; no
       # add-on unit does): never an add-on unit's.
@@ -468,9 +480,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     if not baselineMode() and r.sig == 0: continue
     if unit.len > 0:
       observed.mgetOrPut(unit, initHashSet[string]()).incl(name)
+    elif a.kind == akUnit:
+      discard   # another sampled unit's (the foreign one): not the add-on's
     else:
-      unattributed.add(name & " (" & r.comm & ", pid " & $r.pid & ", arch " &
-                       r.arch & ")")
+      let what = name & " (" & r.comm & ", pid " & $r.pid & ", arch " &
+                 r.arch & ", " & $a.kind & ")"
+      unattributed.add(what)
+      if inUnitRun(r.at): unattributedInRun.add(what)
   var obs = newJObject()
   for u in Units:
     var s = toSeq(observed.getOrDefault(u))
@@ -479,7 +495,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   record["outsideFilter"] = obs
   record["unattributed"] = %unattributed
   record["foreignRecords"] = %foreignSeen
-  record["pidsSampled"] = %pidUnits.len
+  record["processesSampled"] = %lifetimes.len
+  record["unattributedInUnitRuns"] = %unattributedInRun
+  step("no record inside an add-on unit's run is left unattributed " &
+       "(no lifetime, or several)", unattributedInRun.len == 0,
+       unattributedInRun.join(", "))
   step("the foreign unit's calls were logged (the attribution has " &
        "something to refuse)", foreignSeen > 0, $foreignSeen)
   step("no record of the foreign unit is attributed to an add-on unit",

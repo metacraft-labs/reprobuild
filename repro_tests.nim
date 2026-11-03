@@ -575,6 +575,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_trace_attribution.nim",
+    binary: "build/test-bin/t_addon_trace_attribution",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let lifetimes = parseLifetimes("),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
     binary: "build/test-bin/t_addon_uninstall_keeps_pre_bootstrap_inputs",
     defines: @[],

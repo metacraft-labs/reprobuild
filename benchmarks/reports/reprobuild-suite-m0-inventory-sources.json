@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2613,
+    "nimTestBinaries": 2614,
     "pureUnitConsolidationGroups": 78,
-    "pureUnitTests": 725,
+    "pureUnitTests": 726,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2653
+    "testEntries": 2654
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1536,7 +1536,7 @@
       "graph-fixture": 18,
       "integration": 1449,
       "platform/destructive": 164,
-      "pure unit": 725,
+      "pure unit": 726,
       "unclassified": 297
     },
     "graphOwnedTestArtifacts": [
@@ -1745,9 +1745,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2613,
+    "nimTestBinaryCount": 2614,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2653
+    "testEntryCount": 2654
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2353,13 +2353,31 @@
           "assignedCommandVariable": "",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
-          "executedVariables": [],
-          "line": 114,
+          "executedVariables": [
+            "bin",
+            "src"
+          ],
+          "line": 120,
           "path": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim",
           "patterns": [
             "static-c-compiler"
           ],
           "snippet": "quoteShell(staticCc(debArch)) & \" -E -dM -\")"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "bin",
+            "src"
+          ],
+          "line": 269,
+          "path": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim",
+          "patterns": [
+            "static-c-compiler"
+          ],
+          "snippet": "let (o, c) = execCmdEx(quoteShellCommand([staticCc(g.base.debArch),"
         }
       ],
       "source": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim"
@@ -8839,6 +8857,23 @@
       "source": "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_trace_attribution",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_trace_attribution.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
