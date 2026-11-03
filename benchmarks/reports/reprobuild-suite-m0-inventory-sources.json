@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2618,
-    "pureUnitConsolidationGroups": 78,
+    "nimTestBinaries": 2621,
+    "pureUnitConsolidationGroups": 77,
     "pureUnitTests": 728,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2658
+    "testEntries": 2661
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -90,21 +90,6 @@
         "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
         "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
         "libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "io_mon",
-        "repro_build_engine",
-        "repro_test_support"
-      ],
-      "owner": "libs/repro_build_engine",
-      "sources": [
-        "libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim",
-        "libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1536,7 +1521,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1450,
+      "integration": 1453,
       "platform/destructive": 164,
       "pure unit": 728,
       "unclassified": 297
@@ -1747,9 +1732,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2618,
+    "nimTestBinaryCount": 2621,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2658
+    "testEntryCount": 2661
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4763,7 +4748,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 528,
+          "line": 531,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4785,7 +4770,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 530,
+          "line": 533,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4809,7 +4794,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 366,
+          "line": 369,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4827,7 +4812,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 368,
+          "line": 371,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -5122,7 +5107,7 @@
             "f",
             "workRoot"
           ],
-          "line": 269,
+          "line": 272,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -5138,7 +5123,7 @@
             "f",
             "workRoot"
           ],
-          "line": 270,
+          "line": 273,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -9715,6 +9700,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_an_input_kept_under_dev_shm_is_never_left_out_of_a_portable_key",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_an_input_kept_under_dev_shm_is_never_left_out_of_a_portable_key.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_annotation_perturbs_no_fingerprint",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -11259,13 +11265,15 @@
       "localDependencyShape": [
         "io_mon",
         "repro_build_engine",
+        "repro_core",
+        "repro_local_store",
         "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34827,6 +34835,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_project_under_a_volatile_prefix_keeps_its_reads",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_project_under_a_volatile_prefix_keeps_its_reads.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_pushed_sibling_is_still_recorded",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -34855,6 +34880,24 @@
       "source": "tests/integration/t_a_refreshed_flake_pin_carries_what_nix_would_write.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_refused_volatile_root_is_never_certified",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_refused_volatile_root_is_never_certified.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
