@@ -127,6 +127,14 @@ package python3:
       sha256 = "f9c09f5ed6f796fd1a8bc5ddfa41715a494b453c4781f0e35d5077cf9fa58f6d",
       archiveType = "installer-nsis",
       executablePath = "python.exe",
+      # python.org's Windows builds ship `python.exe` and no
+      # `python3.exe`, so without this alias a realized prefix
+      # contributes only `python.exe`, and `python3` -- the name this
+      # package is DECLARED under, and the name every recipe asks for
+      # -- resolves to whatever the host happens to have. The 3.12
+      # entry above carries the same alias, with the measurement that
+      # found it.
+      executableAlias = "python3.exe",
       version = "3.14.5",
       packageId = "python3@3.14.5",
       installMethod = "installer-nsis-bundle",
@@ -137,9 +145,18 @@ package python3:
       sha256 = "f4a7df6ab4fa375cd7296127ff6b9a14fbd1313f51864ce020185deba10144fa",
       archiveType = "installer-nsis",
       executablePath = "python.exe",
+      # python.org's Windows builds ship `python.exe` and no
+      # `python3.exe`, so without this alias a realized prefix
+      # contributes only `python.exe`, and `python3` -- the name this
+      # package is DECLARED under, and the name every recipe asks for
+      # -- resolves to whatever the host happens to have. The 3.12
+      # entry above carries the same alias, with the measurement that
+      # found it.
+      executableAlias = "python3.exe",
       version = "3.14.5",
       packageId = "python3@3.14.5",
       installMethod = "installer-nsis-bundle",
       extractPath = "SourceDir",
       cpu = "aarch64",
-      os = "windows"
+      os = "windows"
+
