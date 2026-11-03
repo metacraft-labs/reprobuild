@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2615,
+    "nimTestBinaries": 2617,
     "pureUnitConsolidationGroups": 78,
-    "pureUnitTests": 727,
+    "pureUnitTests": 728,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2655
+    "testEntries": 2657
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -203,13 +203,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_core"
       ],
       "owner": "libs/repro_core",
       "sources": [
+        "libs/repro_core/tests/t_engine_build_info.nim",
         "libs/repro_core/tests/t_installed_prefix_anchors.nim",
         "libs/repro_core/tests/t_nix_store_references_scan.nim",
         "libs/repro_core/tests/t_target_object_check.nim"
@@ -1535,9 +1536,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1449,
+      "integration": 1450,
       "platform/destructive": 164,
-      "pure unit": 727,
+      "pure unit": 728,
       "unclassified": 297
     },
     "graphOwnedTestArtifacts": [
@@ -1746,9 +1747,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2615,
+    "nimTestBinaryCount": 2617,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2655
+    "testEntryCount": 2657
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13079,6 +13080,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_engine_build_info",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_engine_build_info.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_go_dep_scanner",
       "class": "unclassified",
       "classificationReason": "imports `fmt`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
@@ -14501,7 +14519,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_installed_prefix.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15295,6 +15313,23 @@
       "source": "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_reprobuild_nim_fork_guard",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

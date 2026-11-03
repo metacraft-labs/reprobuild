@@ -31,7 +31,8 @@
 # the defect this script exists to prevent. `verify_release.sh` re-checks the
 # result from the other side.
 #
-# Run from the reprobuild checkout root.
+# Run from the reprobuild checkout root. With $STAGE_RELEASE_SOURCES_MANIFEST
+# set, each staged input's `<ENV_VAR> <dest> <root>` is appended to that file.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -131,6 +132,12 @@ stage() {
   # A `<package>/src` destination also gets the package's nimble file beside
   # it: a module may read it at compile time (scripts/lib/stage_package_nimble.sh).
   stage_package_nimble "$root" "$src_root/$dest"
+  # Which tree each input came from, for a caller that records it (the
+  # installed prefix's `cross-build-info`, Distribution-And-Packaging
+  # §5.3): one `<ENV_VAR> <dest> <root>` line per staged input.
+  if [[ -n "${STAGE_RELEASE_SOURCES_MANIFEST:-}" ]]; then
+    printf '%s %s %s\n' "$env_name" "$dest" "$root" >> "$STAGE_RELEASE_SOURCES_MANIFEST"
+  fi
 }
 
 stage REPRO_TEST_ADAPTERS_SRC reprobuild-test-adapters/src \

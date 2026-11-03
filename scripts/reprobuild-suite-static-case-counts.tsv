@@ -281,6 +281,7 @@ libs/repro_cmake_trycompile/tests/test_envelope_v3.nim	nim	3
 libs/repro_core/tests/t_ambient_execution_external_import.nim	nim	1
 libs/repro_core/tests/t_bounded_lock_refuses_at_its_deadline_on_every_platform.nim	nim	4
 libs/repro_core/tests/t_deps_refresh_check.nim	nim	5
+libs/repro_core/tests/t_engine_build_info.nim	nim	3
 libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
 libs/repro_core/tests/t_installed_prefix_anchors.nim	nim	2
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
@@ -359,7 +360,7 @@ libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_is_enrolled_for_conforma
 libs/repro_dsl_stdlib/tests/t_expand_archive_zip_extraction_cost.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_go_nix_toolchain_embeds_no_store_paths.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_go_package_extra_binaries_and_static_cgo.nim	nim	12
-libs/repro_dsl_stdlib/tests/t_installed_prefix.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_installed_prefix.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim	nim	3
@@ -404,6 +405,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_pinned_fetch.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
+libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2

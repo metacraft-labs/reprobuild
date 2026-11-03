@@ -24,7 +24,8 @@
 # dev-exec smoke test is the dynamic half (it runs the real binary, which also
 # exercises how the image FINDS these trees).
 #
-# Needs `nim` on PATH. NIM_CHECK_OS overrides the target OS (default: host).
+# Needs `nim` on PATH. NIM_CHECK_OS and NIM_CHECK_CPU override the target OS
+# and CPU (default: the host's).
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -75,6 +76,9 @@ EOF
 
 os_flag=()
 [[ -n "${NIM_CHECK_OS:-}" ]] && os_flag=("--os:${NIM_CHECK_OS}")
+# A prefix built for another machine is checked for its CPU too
+# (Distribution-And-Packaging §5.3: the installed compile on the target).
+[[ -n "${NIM_CHECK_CPU:-}" ]] && os_flag+=("--cpu:${NIM_CHECK_CPU}")
 
 echo "=== nim check of the installed-compile closure against $share ==="
 log="$work/check.log"

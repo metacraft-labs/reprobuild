@@ -38,7 +38,7 @@
 
 {.experimental: "callOperator".}
 
-import std/[os, osproc, strutils]
+import std/[os, osproc, sequtils, strutils]
 # Ambient-execution hatches. Every call below is bootstrap tier: the recipe has
 # to locate a host tool BEFORE any engine-provisioned prefix exists, so a typed
 # execution profile is not available to it. Naming the hatch says so at the
@@ -69,6 +69,45 @@ import repro_dsl_stdlib/source_only_packages
               # `cross_zig` compiler-rt node under a zig target (below).
 import repro_dsl_stdlib/adapters/cross_zig
 import repro_dsl_stdlib/operations/zig_c
+              # A15: the installed prefix (`.#prefix`, below).
+import repro_dsl_stdlib/operations/pinned_fetch
+import repro_dsl_stdlib/operations/compile
+import repro_dsl_stdlib/operations/link
+import repro_dsl_stdlib/types/options
+import repro_dsl_stdlib/packaging/producers/installed_prefix
+from repro_dsl_stdlib/packaging/types import toLinux
+from repro_dsl_stdlib/packaging/runtime_contract import
+  reprobuildDlopenLeafNames
+from repro_dsl_stdlib/packaging/reprobuild_dist import
+  reprobuildNimDlopenLeafNames, nimForkGuardScript, NimForkGuardTools
+from repro_tool_profiles import fromSourceRecipeRoot
+from repro_project_dsl/install_mirror_resolver import installMirrorSubpathFor
+
+const ReprobuildPrefixDebs = [
+  ## The runtime libraries an installed prefix for a triple takes from the
+  ## target distribution (reprobuild-pm Distribution-And-Packaging.md §5.3,
+  ## decision C): `(triple, library directory inside the package, the .deb)`,
+  ## each pinned to the `SHA256` of the distribution's `Packages` index.
+  ## Debian trixie armhf, `main`, read from
+  ## https://deb.debian.org/debian/dists/trixie/main/binary-armhf/Packages.xz
+  ## on 2026-11-03. Both need glibc 2.38 at most, the `cross_zig` row's.
+  ("armv7-unknown-linux-gnueabihf", "usr/lib/arm-linux-gnueabihf",
+    PinnedArchive(name: "libsqlite3-0", kind: pakDeb,
+      url: "https://deb.debian.org/debian/pool/main/s/sqlite3/" &
+        "libsqlite3-0_3.46.1-7+deb13u2_armhf.deb",
+      sha256: "15d6a91264010e8ee439d0b3e95782dd87e31fea71aee379deca53fbb99ea957")),
+  ("armv7-unknown-linux-gnueabihf", "usr/lib/arm-linux-gnueabihf",
+    PinnedArchive(name: "libzstd1", kind: pakDeb,
+      url: "https://deb.debian.org/debian/pool/main/libz/libzstd/" &
+        "libzstd1_1.5.7+dfsg-1_armhf.deb",
+      sha256: "da5238dd84fc51f782f39d435821bff556409b3dbc82d232e4e81f427fb1ca65")),
+]
+
+proc glibcOfZigTarget(zigTarget: string): string =
+  ## The glibc version a zig glibc target names (`arm-linux-gnueabihf.2.38`
+  ## -> `2.38`), or "" for a target without one.
+  let at = zigTarget.find('.')
+  if at < 0: "" else: zigTarget[at + 1 .. ^1]
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -957,6 +996,31 @@ package reprobuild:
     # So the flip has to land together with a lock pin for runquota, or
     # every checkout without a runquota develop override breaks.
     "runquotad"
+    # What the installed prefix's edges run (`.#prefix`, Distribution-And-
+    # Packaging §5.3): the pinned `.deb` fetches (`operations/pinned_fetch`),
+    # the assembly and closure (`packaging/producers/installed_prefix`), the
+    # Nim guard (`reprobuild_dist.nimForkGuardScript`) and the archive. A
+    # tool an edge names but the recipe does not declare is not on the
+    # edge's PATH in path mode.
+    when defined(linux):
+      "curl"
+      "sha256sum"
+      "ar"
+      "tar"
+      "xz"
+      "gzip"
+      "readelf"
+      "patchelf"
+      "awk"
+      "sort"
+      "diff"
+      "find"
+      "head"
+      "tail"
+      "ln"
+      "ls"
+      "touch"
+      "readlink"
 
   uses:
     # TARGET dependencies: what the shipped images link or compile in --
@@ -3928,12 +3992,27 @@ package reprobuild:
         # freed on a host thread other than its allocator's is returned through
         # a TLS block the loader already discarded. io-mon's ``build_shim.sh``
         # sets it; every shim edge here mirrors it.
-        defines = @["useMalloc"],
+        #
+        # Under a zig target the shim ships in an installed prefix, built in
+        # release mode as the cross script built it: an unoptimized `zig cc`
+        # compile instruments undefined behaviour, and the checks' source
+        # locations are build-host paths no file-name map rewrites.
+        defines = @["useMalloc"] &
+          (if shimZigTarget != nil: @["release"] else: @[]),
         binary = "build/lib/librepro_monitor_shim.so",
         appLib = true,
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
-        passL = @["-Wl,--version-script=" & linuxShimVersionScript],
+        # Under a zig target the shim ships in an installed prefix: no debug
+        # info, whose directory names are build-host paths (this edge reads
+        # no `config.nims`, which says the same for every other image).
+        # A soname, too: a shared library with a version script and none
+        # names its base version definition after the `-o` path, which is
+        # a path of this build host (lld; measured, one `.dynstr` entry).
+        passL = @["-Wl,--version-script=" & linuxShimVersionScript] &
+          (if shimZigTarget != nil:
+             @["-Wl,--strip-debug", "-Wl,-soname,librepro_monitor_shim.so"]
+           else: @[]),
         extraInputs = (if shimVersionScriptEdge.len > 0:
           @[linuxShimVersionScript] else: @[]),
         after = shimVersionScriptEdge,
@@ -3961,7 +4040,12 @@ package reprobuild:
         # ``build_apps.sh`` publish step refuses a shim that violates it, and
         # ``tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim``
         # gates it on the artifact this edge produces.
-        extraEnv = @[("NIX_DONT_SET_RPATH", "1")],
+        extraEnv = @[("NIX_DONT_SET_RPATH", "1")] &
+          # The one Nim switch an image in an installed prefix needs, which
+          # no project config can give this edge (the file says why).
+          (if shimZigTarget != nil:
+             @[("XDG_CONFIG_HOME", "scripts/cross/nim-user-config")]
+           else: @[]),
         nimcache = monitorShimNimcache,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
@@ -4016,11 +4100,23 @@ package reprobuild:
       appLib = true,
       threadsOn = true,
       mm = "orc",
-      defines = @["reproProviderMode", "reproProviderRuntimeDll"],
+      # Release mode under a zig target, as the cross script built it: see
+      # the monitor shim edge (an unoptimized `zig cc` compile names
+      # build-host paths in its undefined-behaviour checks).
+      defines = @["reproProviderMode", "reproProviderRuntimeDll"] &
+        (if activeZigCrossTarget() != nil: @["release"] else: @[]),
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-project-dsl-runtime-dll",
       actionId = "reprobuild.test_fixtures.project_dsl_runtime_dll"))
+    when defined(linux):
+      # `config.nims` links this library against the same hash libraries as
+      # the images, so it needs the same `DEP_<NAME>_PREFIX` hand-off as the
+      # `apps` edges. Without it an armv7 build inside the dev shell took the
+      # shell's x86_64 libblake3 and xxhash (`ld.lld: ... is incompatible with
+      # armelf_linux_eabi`, measured 2026-11-03).
+      appendRegisteredActionToolIdentityRefs(
+        reprobuildTestFixturesActions[^1].id, ["sqlite", "libblake3", "xxhash"])
     reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
 
     # No publish edge is added here on purpose. ``build/lib/librepro_monitor_shim.<ext>``
@@ -4049,3 +4145,202 @@ package reprobuild:
     # ``test-fixtures``; collecting an action twice groups it under both names,
     # it does not create a second graph node or a second owner of its output.
     discard collect("release", reprobuildAppsActions & reprobuildLibActions)
+
+    # ReproOS-Add-On-Mode A15: the installed prefix, built for another
+    # machine (reprobuild-pm Distribution-And-Packaging.md §5.3, approved by
+    # Zahary Karadjov, 2026-11-03). `repro build --target=<triple> .#prefix`
+    # lays the cross-built images out as `scripts/cross/build_linux_cross.sh`
+    # did -- the engine and the two providers it spawns, the sandbox
+    # launcher, the monitor shim and the DSL runtime, the Nim fork under
+    # `nim/`, and the sources an installed compile builds against -- with
+    # its own runtime libraries, the builder-path gate and the build record.
+    # It is assembled where `repro build --publish` reads a target build
+    # (the install mirror), and `.#prefix-archive` packs it.
+    when defined(linux):
+      let prefixTarget = activeZigCrossTarget()
+      if prefixTarget == nil:
+        # Natively there is no prefix to assemble from the graph yet (the
+        # native release is packaged by its own workflow): one edge that
+        # says so by name, rather than a target that silently builds
+        # nothing.
+        let refuse = buildAction(id = "reprobuild.prefix.native",
+          call = inlineExecCall(@["sh", "-c",
+            "echo 'repro build .#prefix: the installed prefix is built for " &
+            "another machine; name it with --target=<triple> " &
+            "(Distribution-And-Packaging 5.3)' >&2; exit 2"],
+            activeProviderProjectRoot()),
+          cacheable = false, toolIdentityRefs = @["sh"])
+        discard collect("prefix", @[refuse])
+        discard collect("prefix-archive", @[refuse])
+      else:
+        let triple = prefixTarget.triple
+        let projectRoot = activeProviderProjectRoot()
+        let catalog = fromSourceRecipeRoot(projectRoot)
+        proc catalogMirror(recipe: string): string =
+          catalog / recipe / installMirrorSubpathFor(triple) / "usr"
+        let prefixDir = projectRoot / installMirrorSubpathFor(triple)
+        let keyed = targetKeyedPath("build")
+
+        # The sandbox launcher: plain C, optimized (an unoptimized `zig cc`
+        # compile instruments undefined behaviour with build-host source
+        # locations) and linked without debug info.
+        let launcherObject = compile(CompileOptions(
+          source: "apps/reprobuild-sandbox-launcher/launcher.c",
+          target: keyed & "/obj/reprobuild-sandbox-launcher/launcher.o",
+          standard: "c11", extra: @["-O2"]))
+        let launcher = link(LinkOptions(objects: @[launcherObject],
+          kind: lokExecutable,
+          target: keyed & "/bin/reprobuild-sandbox-launcher",
+          extra: @["-Wl,--strip-debug"]))
+
+        # The sources an installed compile builds against, staged by the
+        # release archives' own script, with the tree of each input
+        # recorded.
+        let sourcesStage = projectRoot / keyed / "prefix-sources"
+        let sourcesManifest = sourcesStage & ".manifest"
+        let stageSources = buildAction(
+          id = "reprobuild.prefix.sources@" & triple,
+          call = inlineExecCall(@["bash", "-c",
+            "set -e; rm -f " & quoteShell(sourcesManifest) & "; " &
+            "rm -rf " & quoteShell(sourcesStage) & "; mkdir -p " &
+            quoteShell(sourcesStage) & "; STAGE_RELEASE_SOURCES_MANIFEST=" &
+            quoteShell(sourcesManifest) &
+            " bash scripts/release/stage_release_sources.sh " &
+            quoteShell(sourcesStage)], projectRoot),
+          inputs = @["scripts/release/stage_release_sources.sh",
+            "scripts/release/stage_release_catalog.sh", "config.nims",
+            ".github/sibling-repos"],
+          outputs = @[sourcesStage, sourcesManifest],
+          cacheable = false,
+          dependencyPolicy = automaticMonitorPolicy(),
+          commandStatsId = "reprobuild.prefix.sources",
+          toolIdentityRefs = @["bash", "git", "tar", "find", "cp", "mkdir",
+            "rm", "chmod", "sed", "tr", "head", "wc", "dirname"])
+
+        # Decision C: the runtime libraries the target distribution ships,
+        # pinned to the `SHA256` of its `Packages` index, and the catalog's
+        # builds where it ships none (clingo, pcre).
+        var librarySources: seq[PrefixLibrarySource]
+        var debFetches: seq[BuildActionDef]
+        var debFound = false
+        for (debTriple, libDir, archive) in ReprobuildPrefixDebs:
+          if debTriple != triple: continue
+          debFound = true
+          let dir = projectRoot / ".repro" / ("prefix-debs@" & triple) /
+            archive.name
+          let fetch = emitPinnedFetchAction(projectRoot, "reprobuild-prefix",
+            archive, dir)
+          debFetches.add(fetch)
+          librarySources.add(PrefixLibrarySource(dir: dir / libDir,
+            origin: "deb:" & archive.url.extractFilename & " sha256:" &
+              archive.sha256, producer: fetch.id))
+        if not debFound:
+          raise newException(ValueError, "repro build .#prefix: no " &
+            "distribution packages are pinned for " & triple &
+            " (ReprobuildPrefixDebs in repro.nim, Distribution-And-" &
+            "Packaging 5.3 decision C)")
+        for recipe in ["clingo", "pcre"]:
+          librarySources.add(PrefixLibrarySource(
+            dir: catalogMirror(recipe) / "lib",
+            origin: "catalog:" & recipe))
+
+        let image = proc (name: string): PrefixEntry =
+          PrefixEntry(source: projectRoot / keyed / "bin" / name,
+            dest: "bin/" & name)
+        let spec = InstalledPrefixSpec(name: "reprobuild", triple: triple,
+          output: prefixDir,
+          entries: @[image("reprobuild"), image("repro"),
+            image("repro-standard-provider"),
+            image("repro-cmake-trycompile-provider"),
+            PrefixEntry(source: projectRoot / keyed / "bin" /
+              "reprobuild-sandbox-launcher",
+              dest: "bin/reprobuild-sandbox-launcher", producer: launcher.id),
+            PrefixEntry(source: projectRoot / keyed / "lib" /
+              "librepro_monitor_shim.so", dest: "lib/librepro_monitor_shim.so"),
+            PrefixEntry(source: projectRoot / keyed / "lib" /
+              "librepro_project_dsl_runtime.so",
+              dest: "lib/librepro_project_dsl_runtime.so"),
+            PrefixEntry(source: catalogMirror("nim-fork") / "nim", dest: "nim"),
+            PrefixEntry(source: sourcesStage / "share" / "repro" / "source",
+              dest: "share/repro/source", producer: stageSources.id),
+            PrefixEntry(source: sourcesStage / "share" / "repro" / "src",
+              dest: "share/repro/src", producer: stageSources.id),
+            PrefixEntry(source: sourcesStage / "share" / "repro" /
+              "reprobuild-packages", dest: "share/repro/reprobuild-packages",
+              producer: stageSources.id)],
+          symlinks: @[("bin/nim", "../nim/bin/nim")],
+          librarySources: librarySources,
+          systemSonames: @GlibcSonames,
+          dlopenNames: reprobuildDlopenLeafNames(toLinux) &
+            reprobuildNimDlopenLeafNames(toLinux),
+          recordLines: @["zig_target=" & zigCrossTarget(triple).zigTarget,
+            "mcpu=" & zigCrossTarget(triple).mcpu,
+            "build_mode=release",
+            # The glibc the images link against (the `cross_zig` row's
+            # `arm-linux-gnueabihf.2.38`), which bootstrap's preflight
+            # compares with the host's (ReproOS-Add-On-Mode §"The glibc
+            # exception").
+            "sysroot_glibc_version=" & glibcOfZigTarget(
+              zigCrossTarget(triple).zigTarget)],
+          recordCommands: @[
+            "printf 'source_revision=%s\\n' \"$(bash scripts/source_revision.sh)\"",
+            "cat .repro/build/engine-build-info",
+            "printf 'zig=%s\\n' \"$(zig version)\"",
+            "printf 'nim_fork=%s\\n' \"$(cat " &
+              quoteShell(catalogMirror("nim-fork") / "nim" /
+                ".nim-fork-revision") & ")\"",
+            "sed -n 's/^revision=/catalog=reprobuild-packages@/p' " &
+              quoteShell(sourcesStage / "share/repro/reprobuild-packages/" &
+                "catalog-revision"),
+            # One `source <ENV>=<dest> <origin>` line per staged input: a git
+            # checkout by revision (`-dirty` when its tracked files differ),
+            # a store copy by its store name.
+            "while read -r env dest root; do case \"$root\" in " &
+              "/nix/store/*) r=${root#/nix/store/}; origin=store:${r%%/*};; " &
+              "*) origin=$(git -C \"$root\" rev-parse HEAD)$(git -C \"$root\" " &
+              "diff --quiet HEAD -- 2>/dev/null || echo -dirty);; esac; " &
+              "printf 'source %s=%s %s\\n' \"$env\" \"$dest\" \"$origin\"; " &
+              "done < " & quoteShell(sourcesManifest)],
+          # The engine running this build names itself in this file
+          # (repro_core/engine_build_info): a declared input, so another
+          # engine is another key, and the record's `engine=` is the one
+          # that built the prefix.
+          extraInputs: @["flake.lock", sourcesManifest,
+            ".repro/build/engine-build-info"],
+          extraDeps: (reprobuildAppsActions & reprobuildLibActions &
+            @[launcher, stageSources] & debFetches).mapIt(it.id),
+          extraTools: @["bash", "git", "zig", "cat", "nim"] &
+            @NimForkGuardTools,
+          # §5.3, "The sources": the installed compile's imports close over
+          # the shipped share/repro alone, type-checked for the target.
+          gateChecks: @["NIM_CHECK_OS=linux NIM_CHECK_CPU=" &
+            nimCpuOf(triple) & " bash scripts/release/" &
+            "check_release_source_closure.sh \"$O\""],
+          gateTools: @["bash", "nim", "mktemp", "cat", "grep", "head", "tail",
+            "rm", "mkdir"],
+          # The catalog's source builds carry debug info naming this host's
+          # directories; zig's own objcopy reads the target's objects.
+          debugStripCommand: "zig objcopy --strip-debug",
+          preChecks: @[
+            # The catalog builds the prefix takes, built for this target.
+            "for r in nim-fork pcre clingo; do [ -d " &
+              quoteShell(catalog) & "/$r/" &
+              quoteShell(installMirrorSubpathFor(triple)) & "/usr ] || { " &
+              "echo \"repro build .#prefix: the catalog's $r is not built " &
+              "for " & triple & "; build it: (cd " & catalog &
+              "/$r && repro build --target=" & triple & ")\" >&2; " &
+              "exit 1; }; done",
+            # Decision N (amended 2026-11-03): the prefix ships the catalog
+            # fork under nim/, so the images must have been compiled by that
+            # fork -- refused, naming the compiler, when the `nim` the edges
+            # resolve is not it (path mode falls back to the stock tarball
+            # Nim when the fork is not on PATH).
+            nimForkGuardScript(catalogMirror("nim-fork") / "nim",
+              projectRoot / "flake.lock")])
+        let prefix = installedPrefix(spec, projectRoot)
+        discard collect("prefix", @[prefix.assemble, prefix.gate])
+        let archive = installedPrefixArchive(prefix,
+          projectRoot / keyed / ("reprobuild-" & triple & ".tar.gz"),
+          "reprobuild-" & triple, projectRoot)
+        discard collect("prefix-archive",
+          @[prefix.assemble, prefix.gate, archive])

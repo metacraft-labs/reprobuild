@@ -79,6 +79,12 @@ type
       ## producers (every image of a collection, say)
     extraTools*: seq[string]
       ## tools the pre-checks and record commands run
+    gateChecks*: seq[string]
+      ## shell fragments the gate edge runs after the builder-path search,
+      ## each exiting non-zero, with a message, to refuse the prefix (a
+      ## type-check of the shipped sources, say); `$O` is the prefix
+    gateTools*: seq[string]
+      ## the tools `gateChecks` run
     debugStripCommand*: string
       ## `<command> <in> <out>` that copies an object without its debug
       ## info (`zig objcopy --strip-debug` for a zig target, whose own
@@ -252,8 +258,9 @@ proc gateStamp*(prefix: string): string =
   ## The file the gate writes beside the prefix when it passes.
   prefix & PrefixGateStampName
 
-proc gateScript*(prefix: string): string =
-  ## The builder-path gate's shell program. Exposed for the tests.
+proc gateScript*(prefix: string; checks: seq[string] = @[]): string =
+  ## The builder-path gate's shell program, then `checks`. Exposed for the
+  ## tests.
   var s = "set -e; O=" & q(prefix) & "; hits=$(mktemp); "
   s.add("""
 for f in $(find "$O/bin" "$O/lib" "$O/nim/bin" -type f 2>/dev/null); do
@@ -277,6 +284,8 @@ if [ -s "$hits" ]; then
 fi
 rm -f "$hits"
 """)
+  for check in checks:
+    s.add("( " & check & " ); ")
   s.add("touch " & q(gateStamp(prefix)))
   s
 
@@ -312,7 +321,8 @@ proc installedPrefix*(spec: InstalledPrefixSpec; projectRoot: string):
     toolIdentityRefs = tools)
   result.gate = buildAction(
     id = "installed-prefix-gate-" & idPart(spec.name) & "@" & idPart(spec.triple),
-    call = inlineExecCall(@["sh", "-c", gateScript(spec.output)], projectRoot),
+    call = inlineExecCall(@["sh", "-c", gateScript(spec.output,
+      spec.gateChecks)], projectRoot),
     deps = @[result.assemble.id],
     inputs = @[spec.output],
     outputs = @[gateStamp(spec.output)],
@@ -322,7 +332,7 @@ proc installedPrefix*(spec: InstalledPrefixSpec; projectRoot: string):
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "installed-prefix.gate",
     toolIdentityRefs = @["sh", "find", "head", "printf", "grep", "sed", "rm",
-      "mktemp", "touch"])
+      "mktemp", "touch"] & spec.gateTools)
 
 proc installedPrefixArchive*(prefix: InstalledPrefix; archive,
                              topLevel: string; projectRoot: string;

@@ -233,3 +233,20 @@ suite "an installed prefix":
       check readFile(log).splitLines().filterIt(it.len > 0) == @["libbar.so.1"]
       check sh("readelf -S " & quoteShell(root / "prefix" / "lib" /
         "libbar.so.1") & " | grep -c '\\.debug'", root).output.strip() == "0"
+
+  test "a gate check that fails refuses the prefix; one that passes does not":
+    requireTools:
+      let root = createTempDir("prefix-gate-check-", "")
+      defer: removeDir(root)
+      let f = makeFixture(root, portableInterp = true)
+      require sh(assemblyScript(spec(f, @[f.libs])), root).code == 0
+      let o = root / "prefix"
+      let refused = sh(gateScript(o, @["echo 'sources do not close' >&2; exit 1"]), root)
+      checkpoint(refused.output)
+      check refused.code != 0
+      check "sources do not close" in refused.output
+      check not fileExists(gateStamp(o))
+      let passed = sh(gateScript(o, @["test -f \"$O/bin/app\""]), root)
+      checkpoint(passed.output)
+      check passed.code == 0
+      check fileExists(gateStamp(o))

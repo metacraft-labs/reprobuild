@@ -18,6 +18,7 @@ else:
     SIGTERM, Pid,
     ENOENT
 from repro_core/target_object_check import objectCheckTripleFromVariants
+import repro_core/engine_build_info
 import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
@@ -11719,6 +11720,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let outDir = outputDirForTarget(parsedTarget, workRoot)
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
+  # The engine names itself to the build: an edge that records which engine
+  # produced it declares this file as an input (repro_core/engine_build_info).
+  writeEngineBuildInfo(result.projectRoot)
   result.outDir = outDir
   # Local copy: the failure-report closure below must not capture ``result``.
   let reportProjectRoot = result.projectRoot
