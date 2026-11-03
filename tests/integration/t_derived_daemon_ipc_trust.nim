@@ -349,13 +349,16 @@ type LiveDaemon = object
   stopped: bool
 
 proc isVolatilePrefix(path: string): bool =
-  ## Mirrors the engine's `isVolatileMonitorPath`. A fixture under one of these
-  ## has every recorded path dropped before any arm sees it, which makes the
+  ## The engine's volatile prefixes. A fixture under one of them may have
+  ## its recorded paths dropped before any arm sees it, which makes the
   ## whole suite vacuous in the quietest possible way.
-  for prefix in ["/run", "/proc", "/sys", "/dev"]:
-    if path == prefix or path.startsWith(prefix & "/"):
-      return true
-  false
+  ##
+  ## The engine's own prefix classification, not a copy of it
+  ## (`repro_core/paths.isVolatileRuntimeStatePath`). Whether a read under
+  ## one of these prefixes is dropped also depends on the invocation's roots
+  ## (`dropsAsVolatileRuntimeState`), which this fixture does not arrange, so
+  ## it stays out of all of them.
+  isVolatileRuntimeStatePath(path)
 
 proc nonVolatileTempBase(): string =
   result = getTempDir()
