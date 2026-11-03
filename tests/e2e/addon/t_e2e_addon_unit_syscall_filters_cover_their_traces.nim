@@ -29,9 +29,22 @@
 ## ``generation0.nim`` were derived. The record lists it and the gate does
 ## not fail on it. The log also sees the calls systemd's own executor makes
 ## after installing the logging filter (``capset`` when it applies the
-## capability set), which an enforced filter always allows; and it is
-## attributed by journal time, so a record received late can land in the
-## next unit's window. The check above has neither weakness.
+## capability set), which an enforced filter always allows.
+##
+## **Attribution** (A9 review round 2, issue
+## 2026-11-03-syscall-trace-baseline-attributes-seccomp-records-by-time-window):
+## a record belongs to a unit when the process that made the call was in
+## the unit's control group. A sampler in the guest reads each unit's
+## ``cgroup.procs`` every 20 ms for the whole run; a record's ``pid=`` is
+## looked up there, and its ``arch=`` must be the base's native one. A
+## record whose process the sampler never saw (one shorter than a sample),
+## or of another architecture, is unattributed: listed, never folded into
+## a unit's set, and in check mode a failure. While the units work, a
+## foreign unit logs its own calls (``a9-foreign.service``); none of its
+## records may be attributed to an add-on unit. Falsifying mutation
+## (``REPRO_ADDON_MUTATION=trace-attributes-by-window``): attribution by
+## journal time, as before; the foreign unit's records land in the add-on
+## units' windows: red.
 ##
 ## The work: deploy-agent ticks over a profile as wide as the add-on's
 ## classes -- a secret an operator put, materialised for a unit's
@@ -116,11 +129,28 @@ proc numberOf(names: Table[int, string]; name: string): int =
     if s == name: return n
   raise newException(TestBedError, "no syscall number for " & name)
 
+proc withoutEscapes(s: string): string =
+  ## ``s`` without ANSI control sequences (``ESC [ ... <letter>``).
+  var i = 0
+  while i < s.len:
+    if s[i] == '\e' and i + 1 < s.len and s[i + 1] == '[':
+      var j = i + 2
+      while j < s.len and s[j] notin {'A'..'Z', 'a'..'z'}: inc j
+      i = j + 1
+    else:
+      result.add(s[i])
+      inc i
+
 proc parseGroups(text: string): Table[string, seq[string]] =
   ## ``systemd-analyze syscall-filter`` output: a ``@group`` line, then its
-  ## members (names or nested groups), indented; ``#`` comments.
+  ## members (names or nested groups), indented; ``#`` comments. systemd 255
+  ## writes an ANSI reset before each nested group name even with no
+  ## terminal (A9 review round 2: the derivation then read ``\e[0m@basic-io``
+  ## as a call name and logged what the recipe allows); escapes are
+  ## removed, and the command runs with ``SYSTEMD_COLORS=0``.
   var cur = ""
-  for raw in text.splitLines():
+  for raw0 in text.splitLines():
+    let raw = withoutEscapes(raw0)
     let l = raw.strip()
     if l.len == 0 or l.startsWith("#"): continue
     if not raw.startsWith(" ") and l.startsWith("@"):
@@ -172,8 +202,10 @@ proc killDropIn(g: Guest; unit: string) =
 
 proc now(g: Guest): float = parseFloat(g.run("date +%s.%N").strip())
 
-proc auditRecords(g: Guest; since: float):
-    seq[tuple[at: float; nr: int; comm: string; sig: int]] =
+type AuditRecord = tuple[at: float; nr: int; comm: string; sig: int;
+                         pid: int; arch: string]
+
+proc auditRecords(g: Guest; since: float): seq[AuditRecord] =
   ## Every seccomp audit record since ``since``. Without auditd the kernel
   ## prints them (``audit: type=1326 ...``, the kernel transport); where
   ## journald reads the audit socket they arrive as ``SECCOMP ...`` on the
@@ -184,7 +216,7 @@ proc auditRecords(g: Guest; since: float):
   for l in text.splitLines():
     let f = l.splitWhitespace()
     if f.len < 2 or "syscall=" notin l: continue
-    var rec: tuple[at: float; nr: int; comm: string; sig: int]
+    var rec: AuditRecord
     try: rec.at = parseFloat(f[0])
     except ValueError: continue
     for tok in f:
@@ -196,19 +228,63 @@ proc auditRecords(g: Guest; since: float):
       elif tok.startsWith("sig="):
         try: rec.sig = parseInt(tok["sig=".len .. ^1])
         except ValueError: rec.sig = -1
+      elif tok.startsWith("pid="):
+        try: rec.pid = parseInt(tok["pid=".len .. ^1])
+        except ValueError: rec.pid = -1
+      elif tok.startsWith("arch="):
+        rec.arch = tok["arch=".len .. ^1].toLowerAscii()
     result.add(rec)
+
+const
+  PidMapPath = "/run/a9-pidmap"
+  ForeignUnit = "a9-foreign.service"
+
+proc nativeAuditArch(debArch: string): string =
+  ## The ``arch=`` of a native call on the base (linux/audit.h
+  ## ``AUDIT_ARCH_*``).
+  case debArch
+  of "amd64": "c000003e"
+  of "arm64": "c00000b7"
+  of "armhf": "40000028"
+  else: raise newException(TestBedError, "no audit arch for " & debArch)
+
+proc startPidSampler(g: Guest; units: openArray[string]) =
+  ## Every 20 ms, ``<unit> <pid>`` for each process in each unit's control
+  ## group, appended to ``PidMapPath`` until ``stopPidSampler``.
+  var list = ""
+  for u in units: list.add(" " & u)
+  discard g.run("rm -f " & PidMapPath & "; nohup sh -c 'while :; do " &
+    "for u in" & list & "; do f=/sys/fs/cgroup/system.slice/$u/cgroup.procs; " &
+    "[ -r $f ] && sed \"s/^/$u /\" $f; done; sleep 0.02; done' >> " &
+    PidMapPath & " 2>/dev/null & echo $! > /run/a9-sampler.pid")
+
+proc stopPidSampler(g: Guest): Table[int, HashSet[string]] =
+  ## The units each pid was seen in.
+  discard g.run("kill $(cat /run/a9-sampler.pid) 2>/dev/null; true")
+  for l in g.run("sort -u " & PidMapPath).splitLines():
+    let f = l.splitWhitespace()
+    if f.len != 2: continue
+    try: result.mgetOrPut(parseInt(f[1]), initHashSet[string]()).incl(f[0])
+    except ValueError: discard
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
   let names = syscallNames(g.base.debArch)
   let unameNr = names.numberOf("uname")
   record["unameSyscall"] = %unameNr
-  let groups = parseGroups(g.exec("systemd-analyze syscall-filter " &
+  let groups = parseGroups(g.exec("SYSTEMD_COLORS=0 systemd-analyze syscall-filter " &
                                   "--no-pager").stdout)
   var known: HashSet[string]
   expand(groups, "@known", known)
   step("the base's systemd lists its syscall groups",
        known.len > 200 and "@system-service" in groups, $known.len)
+  # The groups are read right (the derivation rests on it): the recipe
+  # allows the basic calls every program makes, and denies @privileged.
+  let recipe = allowedBy(groups, BaselineFilter)
+  step("the recipe's groups expand (read, close, openat, mmap allowed; " &
+       "mount denied)", "read" in recipe and "close" in recipe and
+       "openat" in recipe and "mmap" in recipe and "mount" notin recipe,
+       $recipe.len)
   # Vacuity guard: the log path reaches the kernel log on this base.
   let t0 = g.now()
   discard g.exec("systemd-run --wait --quiet -p SystemCallLog=uname " &
@@ -309,6 +385,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     "linux.sysctl {\n  key = \"vm.swappiness\"\n  value = \"33\"\n}\n"
   proc gen(n: int): string =
     common & canonicalFile("/etc/repro/a9-trace", "gen " & $n & "\n")
+  # Attribution (header): which process was in which unit, sampled from
+  # here to the end of the work; and a foreign unit that logs its own
+  # calls the whole time.
+  g.startPidSampler(@Units & @[ForeignUnit])
+  discard g.run("systemd-run --quiet --unit=" & ForeignUnit &
+    " -p SystemCallLog=clock_nanosleep -p SystemCallLog=nanosleep " &
+    "/bin/sh -c 'while :; do sleep 0.05; done'")
   tick(1, gen(1))
   # Generations past the retention policy's five: the apply releases the
   # store roots of those it drops (§5.2).
@@ -347,20 +430,47 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   restartUnit("repro-addon-reassert.service")
   tick(10, gen(10))
 
+  discard g.run("systemctl stop " & ForeignUnit & " 2>/dev/null; true")
+  let pidUnits = g.stopPidSampler()
+  let native = nativeAuditArch(g.base.debArch)
+  proc attribute(r: AuditRecord): string =
+    ## The add-on unit a record belongs to, or "".
+    if mutation() == "trace-attributes-by-window":
+      # Falsifying build of the attribution: by journal time (round 1).
+      for w in windows:
+        if r.at >= w.a and r.at <= w.b: return w.unit
+      return ""
+    if r.arch.len > 0 and r.arch != native: return ""
+    let seen = pidUnits.getOrDefault(r.pid)
+    var candidates: seq[string]
+    for u in Units:
+      if u in seen: candidates.add(u)
+    if candidates.len == 1: return candidates[0]
+    # A pid seen in two units (reused): the one whose run the record is in.
+    for w in windows:
+      if w.unit in candidates and r.at >= w.a and r.at <= w.b: return w.unit
+    ""
   var observed = initTable[string, HashSet[string]]()
   var unattributed: seq[string]
+  var foreignAttributed: seq[string]
+  var foreignSeen = 0
   for r in g.auditRecords(t1 + 2):
     if r.nr == unameNr and r.comm == "uname": continue   # the vacuity guards
+    let name = names.getOrDefault(r.nr, "#" & $r.nr)
+    let unit = attribute(r)
+    if r.comm == "sleep":
+      # The foreign unit's records (a9-foreign.service runs `sleep`; no
+      # add-on unit does): never an add-on unit's.
+      inc foreignSeen
+      if unit.len > 0: foreignAttributed.add(unit & ": " & name)
+      continue
     # Check mode counts kills; derive mode counts every logged call.
     if not baselineMode() and r.sig == 0: continue
-    let name = names.getOrDefault(r.nr, "#" & $r.nr)
-    var hit = false
-    for w in windows:
-      if r.at >= w.a and r.at <= w.b:
-        observed.mgetOrPut(w.unit, initHashSet[string]()).incl(name)
-        hit = true
-        break
-    if not hit: unattributed.add(name & " (" & r.comm & ")")
+    if unit.len > 0:
+      observed.mgetOrPut(unit, initHashSet[string]()).incl(name)
+    else:
+      unattributed.add(name & " (" & r.comm & ", pid " & $r.pid & ", arch " &
+                       r.arch & ")")
   var obs = newJObject()
   for u in Units:
     var s = toSeq(observed.getOrDefault(u))
@@ -368,6 +478,12 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     obs[u] = %s
   record["outsideFilter"] = obs
   record["unattributed"] = %unattributed
+  record["foreignRecords"] = %foreignSeen
+  record["pidsSampled"] = %pidUnits.len
+  step("the foreign unit's calls were logged (the attribution has " &
+       "something to refuse)", foreignSeen > 0, $foreignSeen)
+  step("no record of the foreign unit is attributed to an add-on unit",
+       foreignAttributed.len == 0, foreignAttributed.join(", "))
   if not baselineMode():
     for u in Units:
       step(u & " made no system call outside its filter (no kill)",

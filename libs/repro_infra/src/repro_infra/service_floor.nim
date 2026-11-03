@@ -61,10 +61,55 @@
 ##
 ## The rendered lines are appended at the end of the unit's ``[Service]``
 ## section; the unit's own text is never rewritten.
+##
+## **Floor version 3** (A9 review round 2) closes what versions 1 and 2
+## left open, each measured on systemd 252, 255, 257 and 259:
+##
+## * ``NoExecPaths=/`` does not reach the mounts systemd creates for the
+##   unit after it (``PrivateTmp=``'s ``/tmp`` and ``/var/tmp``,
+##   ``PrivateDevices=``'s ``/dev/shm``, ``/dev/hugepages``,
+##   ``/dev/mqueue``, and -- on systemd 259 -- ``/run`` and a
+##   ``RuntimeDirectory=``), so
+##   a service could write a binary there and run it. The floor names each
+##   of them in a second ``NoExecPaths=`` line (``-`` prefixed: a missing
+##   one is skipped), with every ``RuntimeDirectory=``, ``StateDirectory=``,
+##   ``CacheDirectory=``, ``LogsDirectory=`` and ``ConfigurationDirectory=``
+##   path the unit declares (``floorNoExecMounts``).
+## * ``MemoryDenyWriteExecute=yes`` is the kernel's MDWE ``prctl`` from
+##   systemd 255 on, which does not cover ``shmat(..., SHM_EXEC)``: a SysV
+##   shared-memory segment written through one mapping executes through
+##   another. The filter denies ``shmget``, ``shmat``, ``shmdt`` and
+##   ``shmctl`` (a service that needs SysV shared memory names
+##   ``"SystemCallFilter+shmget shmat shmdt shmctl: <why>"``).
+## * A write to ``/proc/self/mem`` patches the process's own code whatever
+##   the page protection (the kernel writes through ``FOLL_FORCE``).
+##   ``ReadOnlyPaths=/proc`` makes the ``open(O_RDWR)`` fail with ``EROFS``;
+##   no per-unit setting stops the write otherwise on these kernels
+##   (``proc_mem.force_override=`` is a boot parameter, 6.12+ only).
+## * Paths are compared the way systemd reads them: ``.`` components,
+##   repeated and trailing ``/`` removed, the merged-``/usr`` aliases
+##   (``/bin`` is ``/usr/bin`` ...) folded, and a ``..`` component or a
+##   specifier refused (``normalisedPath``).
+## * ``MountImages=``, ``ExtensionImages=`` and ``ExtensionDirectories=``
+##   put another file system's contents into the unit's namespace and are
+##   refused unless an exception names them.
+##
+## A stored generation keeps the floor version it was rendered with
+## (``floorVersion`` in the stored profile, ``FloorVersion`` today); the
+## frozen ``service_floor_v1`` and ``service_floor_v2`` render the units
+## the engines of those versions stored, byte for byte.
 
 import std/[algorithm, strutils, tables]
 
+const FloorMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
+  ## never set in a product build.
+
 const
+  FloorVersion* = "3"
+    ## The floor version this module renders (see the header). A stored
+    ## generation records the version it was rendered with; 1 and 2 are
+    ## the frozen ``service_floor_v1`` / ``service_floor_v2``.
   ServiceFloorHardening* = "serviceFloor"
     ## The one value of the ``hardening`` field.
   WholeFloorException* = "serviceFloor"
@@ -94,7 +139,8 @@ const
     ("MemoryDenyWriteExecute", "yes"),
     ("SystemCallArchitectures", "native"),
     ("SystemCallFilter", "@system-service"),
-    ("SystemCallFilter", "~@privileged @obsolete memfd_create"),
+    ("SystemCallFilter", "~@privileged @obsolete memfd_create shmget " &
+                         "shmat shmdt shmctl"),
     ("CapabilityBoundingSet", ""),
     ("AmbientCapabilities", ""),
     ("UMask", "0077")]
@@ -120,12 +166,39 @@ const
 
   FloorGuardedKeys* = ["RestrictAddressFamilies", "DynamicUser", "User",
                        "SupplementaryGroups", "ReadWritePaths",
-                       "RootDirectory"]
+                       "RootDirectory", "MountImages", "ExtensionImages",
+                       "ExtensionDirectories", "ReadOnlyPaths"]
     ## Settings the floor does not render but whose weakening values need a
     ## named exception: an all-but-a-few address family list; running as
     ## root (``User=root``, ``DynamicUser=no`` without an account, a ``!``
     ## command, ``Group=root``); a privileged supplementary group; a
-    ## writable path over the closure or the system; another root.
+    ## writable path over the closure or the system; another root; an
+    ## image or extension mounted into the namespace; a drop-in's reset of
+    ## ``ReadOnlyPaths=`` (which would drop the floor's ``/proc``).
+
+  FloorPrivateMounts* = ["/tmp", "/var/tmp", "/dev/shm", "/dev/hugepages",
+                         "/dev/mqueue", "/run"]
+    ## The mounts systemd makes for the unit after ``NoExecPaths=/`` applies
+    ## (``PrivateTmp=``, ``PrivateDevices=``; and ``/run`` itself, which
+    ## systemd 259 leaves executable in the unit's namespace), each made
+    ## ``noexec`` by name.
+
+  FloorDirectoryKeys* = [("RuntimeDirectory", "/run"),
+                         ("StateDirectory", "/var/lib"),
+                         ("CacheDirectory", "/var/cache"),
+                         ("LogsDirectory", "/var/log"),
+                         ("ConfigurationDirectory", "/etc")]
+    ## The directories systemd creates (and, under ``DynamicUser=``, binds)
+    ## for the unit, and where each lives.
+
+  ProcReadOnly* = "/proc"
+    ## The floor's ``ReadOnlyPaths=`` (``/proc/self/mem`` writes; header).
+
+  MergedUsrAliases* = [("/bin", "/usr/bin"), ("/sbin", "/usr/sbin"),
+                       ("/lib", "/usr/lib"), ("/lib64", "/usr/lib64"),
+                       ("/lib32", "/usr/lib32"), ("/libx32", "/usr/libx32")]
+    ## Debian 12+ and Ubuntu are merged-``/usr``: each is a link into
+    ## ``/usr``, so ``/bin/x`` and ``/usr/bin/x`` name one file.
 
   PrivilegedGroups* = ["root", "0", "sudo", "wheel", "adm", "admin", "disk",
     "shadow", "kmem", "docker", "lxd", "incus", "incus-admin", "libvirt",
@@ -365,6 +438,37 @@ proc commandStoreObjects*(content: string): seq[string] =
   ## the switch re-verifies before its flip.
   referencedStoreObjects(content)
 
+proc hasDotDot*(path: string): bool =
+  ## Whether ``path`` has a ``..`` component: systemd resolves it against
+  ## the file system at run time, so its lexical form says nothing about
+  ## where it leads (a link below it moves it).
+  for c in path.split('/'):
+    if c == "..": return true
+
+proc normalisedPath*(path: string): string =
+  ## ``path`` as systemd reads a path setting: repeated ``/`` collapsed,
+  ## ``.`` components and a trailing ``/`` removed (systemd's
+  ## ``path_simplify``, https://github.com/systemd/systemd/blob/v257/src/basic/path-util.c),
+  ## and the merged-``/usr`` aliases folded into ``/usr`` (``/bin/x`` is
+  ## ``/usr/bin/x``). A relative path is returned as it is; callers refuse
+  ## a ``..`` component first (``hasDotDot``).
+  if not path.startsWith("/"): return path
+  when FloorMutation == "floor-paths-unnormalised":
+    # Falsifying build: versions 1 and 2 compared the string, trailing
+    # slashes trimmed, nothing else.
+    result = path
+    while result.len > 1 and result.endsWith("/"): result.setLen(result.len - 1)
+    return
+  var parts: seq[string]
+  for c in path.split('/'):
+    if c.len == 0 or c == ".": continue
+    parts.add(c)
+  result = "/" & parts.join("/")
+  for (alias, real) in MergedUsrAliases:
+    if result == alias or result.startsWith(alias & "/"):
+      result = real & result[alias.len .. ^1]
+      break
+
 proc bindEntries(value: string): seq[tuple[optional: bool; src, dst: string]] =
   for tok in value.splitWhitespace():
     var t = tok
@@ -397,15 +501,13 @@ proc insideBoundUsr(path: string): bool =
   ## bare name (systemd searches its fixed ``PATH``, all of which is under
   ## ``/usr`` on a merged-``/usr`` base).
   if '/' notin path: return true
-  for p in ["/usr/", "/bin/", "/sbin/", "/lib/", "/lib64/", "/lib32/"]:
-    if path.startsWith(p): return true
+  normalisedPath(path).startsWith("/usr/")
 
 proc under(path, root: string): bool =
-  ## ``path`` is ``root`` or below it.
-  var p = path
-  var r = root
-  while p.len > 1 and p.endsWith("/"): p.setLen(p.len - 1)
-  while r.len > 1 and r.endsWith("/"): r.setLen(r.len - 1)
+  ## ``path`` is ``root`` or below it, both as systemd reads them
+  ## (``normalisedPath``).
+  let p = normalisedPath(path)
+  let r = normalisedPath(root)
   r == "/" or p == r or p.startsWith(r & "/")
 
 proc overlaps(a, b: string): bool = under(a, b) or under(b, a)
@@ -435,6 +537,12 @@ proc floorExecPaths*(unitName, content: string;
           "specifier or variable: the floor cannot tell whether it is " &
           "inside the unit's closure (name the exception \"" &
           ExecConfinementException & ": <why>\")")
+      when FloorMutation != "floor-paths-unnormalised":
+        if hasDotDot(path):
+          raiseFloor(unitName, k & " runs '" & path & "', which has a " &
+            "'..' component: where it leads depends on the file system, " &
+            "not on the closure (name the exception \"" &
+            ExecConfinementException & ": <why>\")")
       var inside = usrBound and insideBoundUsr(path)
       for p in result:
         if path.startsWith("/") and under(path, p): inside = true
@@ -445,6 +553,31 @@ proc floorExecPaths*(unitName, content: string;
           "from the store (or bind its package's closure with " &
           "aptClosureLock), or name the exception \"" &
           ExecConfinementException & ": <why>\"")
+
+proc pathCannotBeJudged(path: string): bool =
+  ## A path whose place the floor cannot decide from its text: a ``..``
+  ## component, a specifier (``%``) or a variable (``$``).
+  when FloorMutation == "floor-paths-unnormalised":
+    false
+  else:
+    hasDotDot(path) or '%' in path or '$' in path
+
+proc floorNoExecMounts*(directives: openArray[tuple[key, value: string]]):
+    seq[string] =
+  ## The mounts the floor's second ``NoExecPaths=`` names (``-`` prefixed):
+  ## systemd's own (``FloorPrivateMounts``) and every directory the unit
+  ## asks systemd to create (``FloorDirectoryKeys``). A directory value is
+  ## ``name`` or, from systemd 254, ``name:link``; the first part is the
+  ## directory.
+  for m in FloorPrivateMounts: result.add("-" & m)
+  for (k, v) in directives:
+    for (dk, root) in FloorDirectoryKeys:
+      if k != dk: continue
+      for tok in v.splitWhitespace():
+        let name = tok.split(':')[0]
+        if name.len == 0 or hasDotDot(name): continue
+        let p = "-" & root & "/" & name
+        if p notin result: result.add(p)
 
 proc floorRefusal*(unitName: string;
                    directives: openArray[tuple[key, value: string]];
@@ -493,6 +626,10 @@ proc floorRefusal*(unitName: string;
           let p = tok.strip(leading = true, trailing = false,
                             chars = {'-', '+'})
           if p.len == 0: continue
+          if pathCannotBeJudged(p):
+            return what & " names " & p & ", which the floor cannot place " &
+              "(a '..' component or a specifier); name the exception " &
+              "\"ReadWritePaths: <why>\""
           for root in @ProtectedRoots & execPaths:
             if under(root, p) or (root in execPaths and under(p, root)):
               return what & " makes " & p & " writable, which " &
@@ -513,11 +650,26 @@ proc floorRefusal*(unitName: string;
                       else: bindEntries(v)
         for b in entries:
           if k == "BindReadOnlyPaths" and isClosureUsrBind(b): continue
+          if pathCannotBeJudged(b.dst):
+            return what & " mounts over " & b.dst & ", which the floor " &
+              "cannot place (a '..' component or a specifier); name the " &
+              "exception \"" & ExecConfinementException & ": <why>\""
           for x in execPaths:
             if overlaps(b.dst, x):
               return what & " mounts over " & b.dst & ", which overlaps the " &
                 "executable path " & x & "; name the exception \"" &
                 ExecConfinementException & ": <why>\""
+    of "MountImages", "ExtensionImages", "ExtensionDirectories":
+      when FloorMutation != "floor-allows-images":
+        if v.len > 0 and not waived(ex, k):
+          return what & " mounts another file system's contents into the " &
+            "unit's namespace, which the floor's paths do not describe; " &
+            "name the exception \"" & k & ": <why>\""
+    of "ReadOnlyPaths":
+      if dropIn and v.len == 0 and not waived(ex, k):
+        return what & " (empty) resets ReadOnlyPaths=, dropping the " &
+          "floor's read-only " & ProcReadOnly & "; name the exception " &
+          "\"ReadOnlyPaths: <why>\""
     of "RootDirectory", "RootImage", "RootEphemeral", "RootImageOptions":
       if not waived(ex, "RootDirectory"):
         return what & " runs the service in another root, where the " &
@@ -543,6 +695,10 @@ proc floorRefusal*(unitName: string;
               "change; name the exception \"User: <why>\""
           if dropIn and not waived(ex, ExecConfinementException) and
               c.path.len > 0:
+            if pathCannotBeJudged(c.path):
+              return what & " runs " & c.path & ", which the floor cannot " &
+                "place (a '..' component, a specifier or a variable); name " &
+                "the exception \"" & ExecConfinementException & ": <why>\""
             var inside = false
             for p in execPaths:
               if c.path.startsWith("/") and under(c.path, p): inside = true
@@ -576,7 +732,10 @@ proc renderServiceFloorLines*(unitName, content: string;
     if dropMdwe and k == "MemoryDenyWriteExecute": continue
     var value = v
     if allowMemfd and k == "SystemCallFilter" and v.startsWith("~"):
-      value = v.replace(" memfd_create", "")
+      value = value.replace(" memfd_create", "")
+    when FloorMutation == "floor-allows-sysv-shm":
+      if k == "SystemCallFilter" and v.startsWith("~"):
+        value = value.replace(" shmget shmat shmdt shmctl", "")
     if k in ["CapabilityBoundingSet", "AmbientCapabilities"]:
       value = additions(ex, k).join(" ")
     result.add(k & "=" & value)
@@ -589,8 +748,13 @@ proc renderServiceFloorLines*(unitName, content: string;
     result.add("DynamicUser=yes")
   if not waived(ex, ExecConfinementException) and not dropExec:
     result.add("NoExecPaths=/")
+    when FloorMutation != "floor-private-mounts-exec":
+      result.add("NoExecPaths=" & floorNoExecMounts(directives).join(" "))
     if execPaths.len > 0:
       result.add("ExecPaths=" & execPaths.join(" "))
+  when FloorMutation != "floor-proc-writable":
+    if not waived(ex, "ReadOnlyPaths"):
+      result.add("ReadOnlyPaths=" & ProcReadOnly)
   for e in ex:
     let head = if e.adds.len > 0: e.setting & "+" & e.adds.join(" ")
                else: e.setting

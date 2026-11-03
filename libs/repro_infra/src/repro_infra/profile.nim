@@ -33,8 +33,11 @@ import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
 import ./service_floor
+from ./service_floor_v1 as floorV1 import nil
+from ./service_floor_v2 as floorV2 import nil
 
 export service_floor.EServiceFloor, service_floor.ServiceFloorHardening,
+  service_floor.FloorVersion, service_floor.WholeFloorException,
   service_floor.commandStoreObjects, service_floor.referencedStoreObjects,
   service_floor.storeObjectOf
 
@@ -257,6 +260,15 @@ type
         ## unit gets the hardening floor (`service_floor`). "" means the
         ## realisation's default: the floor on an add-on host (the parse
         ## with `addOnDefaults`, `applyAddOnServiceFloor`), none elsewhere.
+      suFloorVersion*: string
+        ## `floorVersion = "<n>"`: the floor version the unit was rendered
+        ## with (`service_floor.FloorVersion` today). Written into every
+        ## stored generation (`renderProfileText`); "" in a new profile and
+        ## in a generation an engine before version 3 stored (1 or 2, which
+        ## the add-on decides from the generation's ledger,
+        ## `addon_apply.parseStoredUserProfile`). A new add-on profile
+        ## cannot name an older version (spec §10.1, *Stored generations
+        ## and floor versions*).
       suFloorExceptions*: seq[string]
         ## `floorExceptions = ["<Setting>: <reason>", ...]`: the floor
         ## settings this unit weakens, each with its reason (CONF-2);
@@ -954,6 +966,40 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
       "' hardening '" & r.suHardening & "' is not known (the one value is " &
       "\"" & ServiceFloorHardening & "\")")
+  case r.suFloorVersion
+  of "", FloorVersion:
+    discard
+  of "2":
+    # A generation the engines from aa72782154 to d03bb6759e stored:
+    # exactly their rendering (the frozen `service_floor_v2`).
+    try:
+      let ex = floorV2.parseFloorExceptions(r.suName, r.suFloorExceptions)
+      var whole = false
+      for e in ex:
+        if e.setting == floorV2.WholeFloorException: whole = true
+      if not floorV2.hasServiceSection(result):
+        if whole: return
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' (floor version 2) has no [Service] section")
+      return floorV2.appendToServiceSection(result,
+        floorV2.renderServiceFloorLines(r.suName, result, ex))
+    except floorV2.EServiceFloor as e:
+      raiseSystemProfileInvalid(e.msg)
+  of "1":
+    # A generation the first floored engine (1a598170c0) stored.
+    try:
+      if not floorV1.hasServiceSection(result):
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' (floor version 1) has no [Service] section")
+      let ex = floorV1.parseFloorExceptions(r.suName, r.suFloorExceptions)
+      return floorV1.appendToServiceSection(result,
+        floorV1.renderServiceFloorLines(r.suName, result, ex))
+    except floorV1.EServiceFloor as e:
+      raiseSystemProfileInvalid(e.msg)
+  else:
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+      "' floorVersion '" & r.suFloorVersion & "' is not known (versions 1 " &
+      "to " & FloorVersion & ")")
   try:
     let ex = parseFloorExceptions(r.suName, r.suFloorExceptions)
     var wholeWaiver = false
@@ -992,6 +1038,35 @@ proc floorAppliesByDefault*(r: SystemResource): bool =
     r.suCollision != "dropIn" and
     (hasServiceSection(r.suContent) or hasExecLines(r.suContent))
 
+proc dropInApplies*(dropInUnit, unitName: string): bool =
+  ## Whether systemd reads the drop-ins of `dropInUnit` for `unitName`
+  ## (systemd.unit(5), "Description"): the unit's own `<name>.d/`, a
+  ## template's `<prefix>@.<type>.d/` for its instances, and the dashed
+  ## prefixes -- for `foo-bar-baz.service`, `foo-bar-.service.d/` and
+  ## `foo-.service.d/` -- of the name and, for an instance, of its
+  ## template's name. (The type-level `service.d/` is not a unit name the
+  ## profile can name.)
+  when InfraAddonMutation == "floor-ignores-prefix-dropins":
+    return dropInUnit == unitName
+  if dropInUnit == unitName: return true
+  let dot = unitName.rfind('.')
+  if dot <= 0: return false
+  let typ = unitName[dot .. ^1]
+  if not dropInUnit.endsWith(typ): return false
+  var stems = @[unitName[0 ..< dot]]
+  let at = stems[0].find('@')
+  if at >= 0:
+    stems.add(stems[0][0 .. at])     # `foo@` -- the template `foo@.type`
+  for stem in stems:
+    if dropInUnit == stem & typ: return true
+    # every dashed prefix: `a-b-c` -> `a-b-`, `a-`
+    var i = stem.len - 1
+    while i > 0:
+      if stem[i - 1] == '-' and i < stem.len:
+        if dropInUnit == stem[0 ..< i] & typ: return true
+      dec i
+  false
+
 proc checkFloorDropIns*(p: SystemProfile) =
   ## A `systemd.systemDropIn` of a unit under the floor is judged by the
   ## effective unit (spec §10.1): systemd reads it after the floor's lines,
@@ -1004,7 +1079,8 @@ proc checkFloorDropIns*(p: SystemProfile) =
   for d in p.resources:
     if d.kind != srkSystemdSystemDropIn: continue
     for u in p.resources:
-      if u.kind != srkSystemdSystemUnit or u.suName != d.diUnit or
+      if u.kind != srkSystemdSystemUnit or
+          not dropInApplies(d.diUnit, u.suName) or
           u.suHardening != ServiceFloorHardening:
         continue
       try:
@@ -1645,7 +1721,8 @@ proc systemProfileStanzaLineSpans*(text: string;
     let e = lineOf(span.close)
     result.add((startLine: s, endLine: e))
 
-proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
+proc parseSystemProfile*(text: string; addOnDefaults = false;
+                         stored = false): SystemProfile =
   ## Parse the declarative `system.nim` text into a `SystemProfile`.
   ## Raises `ESystemProfileInvalid` on any structural error or an
   ## unknown / deferred resource kind. Brace-aware: a stanza body may
@@ -1655,6 +1732,11 @@ proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
   ## each resource is read (`applyAddOnServiceFloor`): what every add-on
   ## path that reads a user profile parses with, so a unit is rendered the
   ## same way wherever the add-on renders it.
+  ##
+  ## With `stored` the text is a generation the add-on stored, which the
+  ## engine that applied it already judged under its floor version: its
+  ## drop-ins are not judged again under today's (`checkFloorDropIns`),
+  ## which would wedge a host on a generation it installed (§10.1).
   # Strip comments globally (quote state carried across lines), then walk
   # by `{` / `}` braces. The bytes of a quoted value reach `unquote`
   # unchanged: no line splitting, so a `\r` inside a value survives too.
@@ -2043,6 +2125,8 @@ proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
           else: @[],
         suHardening:
           if "hardening" in fields: fields["hardening"] else: "",
+        suFloorVersion:
+          if "floorVersion" in fields: fields["floorVersion"] else: "",
         suFloorExceptions:
           if "floorExceptions" in rawFields:
             parseListLiteral(rawFields["floorExceptions"])
@@ -2062,8 +2146,11 @@ proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
           "' dropInName '" & res.suDropInName & "' must be one path " &
           "segment of letters, digits, '.', '-' or '_'")
       # Refuse an unbindable unit or a malformed lock at parse time, not
-      # at apply time on the host.
-      discard renderedSystemUnitContent(res)
+      # at apply time on the host. A stored generation's floor is rendered
+      # under the version it records, which its reader decides
+      # (`addon_apply.parseStoredUserProfile`), never under today's here.
+      if stored: discard renderedUnitBeforeFloor(res)
+      else: discard renderedSystemUnitContent(res)
     of srkLaunchdSystemDaemon:
       let programArgs =
         if "programArgs" in rawFields:
@@ -2519,7 +2606,8 @@ proc parseSystemProfile*(text: string; addOnDefaults = false): SystemProfile =
   checkUnitStateConflicts(result.resources)
   checkPasswdPrimaryGroups(result.resources)
   checkSecretDeclarations(result)
-  checkFloorDropIns(result)
+  if not stored:
+    checkFloorDropIns(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------

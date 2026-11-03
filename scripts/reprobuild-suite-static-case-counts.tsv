@@ -54,7 +54,7 @@ libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
-libs/repro_addon/tests/t_addon_service_floor.nim	nim	19
+libs/repro_addon/tests/t_addon_service_floor.nim	nim	31
 libs/repro_addon/tests/t_addon_state_sets.nim	nim	17
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
