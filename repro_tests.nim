@@ -3193,6 +3193,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_core_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_core/tests/t_zig_target_vendored_hash.nim",
+    binary: "build/test-bin/t_zig_target_vendored_hash",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_core_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim",
     binary: "build/test-bin/t_auto_started_daemon_does_not_hold_callers_pipe",
     defines: @[],

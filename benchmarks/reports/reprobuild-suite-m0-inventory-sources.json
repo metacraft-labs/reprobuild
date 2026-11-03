@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2617,
+    "nimTestBinaries": 2618,
     "pureUnitConsolidationGroups": 78,
     "pureUnitTests": 728,
-    "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2657
+    "staticallyDetectedRuntimeCompilerFlowTests": 136,
+    "testEntries": 2658
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1535,7 +1535,7 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 18,
+      "graph-fixture": 19,
       "integration": 1450,
       "platform/destructive": 164,
       "pure unit": 728,
@@ -1747,9 +1747,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2617,
+    "nimTestBinaryCount": 2618,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2657
+    "testEntryCount": 2658
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1827,6 +1827,26 @@
         }
       ],
       "source": "libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "r",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "probe"
+          ],
+          "line": 32,
+          "path": "libs/repro_core/tests/t_zig_target_vendored_hash.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "let r = execCmdEx(findExe(\"nim\") & \" check --hints:off --warnings:off \" &"
+        }
+      ],
+      "source": "libs/repro_core/tests/t_zig_target_vendored_hash.nim"
     },
     {
       "class": "graph-fixture",
@@ -13356,6 +13376,21 @@
       "sourceSuiteCount": 11,
       "staticCaseCount": 32,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_zig_target_vendored_hash",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_zig_target_vendored_hash.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

@@ -4183,14 +4183,16 @@ package reprobuild:
 
         # The sandbox launcher: plain C, optimized (an unoptimized `zig cc`
         # compile instruments undefined behaviour with build-host source
-        # locations) and linked without debug info.
+        # locations) and linked without debug info. `compile` and `link`
+        # key their targets under `--target` themselves, so they are named
+        # unkeyed here and land in `keyed`.
         let launcherObject = compile(CompileOptions(
           source: "apps/reprobuild-sandbox-launcher/launcher.c",
-          target: keyed & "/obj/reprobuild-sandbox-launcher/launcher.o",
+          target: "build/obj/reprobuild-sandbox-launcher/launcher.o",
           standard: "c11", extra: @["-O2"]))
         let launcher = link(LinkOptions(objects: @[launcherObject],
           kind: lokExecutable,
-          target: keyed & "/bin/reprobuild-sandbox-launcher",
+          target: "build/bin/reprobuild-sandbox-launcher",
           extra: @["-Wl,--strip-debug"]))
 
         # The sources an installed compile builds against, staged by the

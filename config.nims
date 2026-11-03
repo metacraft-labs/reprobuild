@@ -36,6 +36,11 @@ let reproRepoRoot = currentSourcePath().parentDir()
 # * `--strip-debug` at link: debug info names every source directory, and
 #   zig compiles its own start-up objects with none of the cross wrapper's
 #   path maps, so a shipped image carries no DWARF at all.
+# * the vendored blake3 / xxhash (`useSystemHashLibs` below): the dev shell
+#   exports REPROBUILD_USE_SYSTEM_HASH_LIBS=1, and what a prefix image links
+#   must not depend on the shell it was built from. Under it the providers
+#   needed `libblake3.so.0` and `libxxhash.so.0`, which the prefix does not
+#   ship (measured 2026-11-03).
 when defined(reproZigTarget):
   switch("filenames", "canonical")
   switch("passL", "-Wl,--strip-debug")
@@ -1244,7 +1249,7 @@ proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
   ""
 
 let useSystemHashLibs =
-  not defined(reproVendoredHash) and
+  not defined(reproVendoredHash) and not defined(reproZigTarget) and
   getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
     ["1", "true", "yes", "on"]
 
