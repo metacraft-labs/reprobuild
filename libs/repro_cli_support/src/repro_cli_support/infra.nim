@@ -792,6 +792,19 @@ proc runInfraCacheKeys(args: openArray[string]): int =
   stdout.write(renderCacheKeys(actions, platform))
   return 0
 
+proc prefixRecordDirtyLines*(prefix: string): seq[string] =
+  ## The lines of an installed prefix's build record
+  ## (`share/repro/cross-build-info`) that say it was built from a modified
+  ## tree (`-dirty`); empty when it has no record or none does. A prefix
+  ## built from uncommitted changes is fine to run and is not published
+  ## (Distribution-And-Packaging §5.3).
+  let record = prefix / "share" / "repro" / "cross-build-info"
+  if not fileExists(record):
+    return
+  for line in readFile(record).splitLines():
+    if "-dirty" in line:
+      result.add(line)
+
 proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
                                  stateDir: string): int =
   ## `repro build --publish=<profile>#<edge>` (CLI/build.md §"Publishing for
@@ -856,6 +869,13 @@ proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
     stderr.writeLine(who & ": the build's install mirror " & mirrorRoot &
       " does not hold edge '" & edgeId & "''s outputs (" & rels.join(", ") &
       ") at the mirror or under its usr/")
+    return 2
+  let dirty = prefixRecordDirtyLines(prefix)
+  if dirty.len > 0:
+    stderr.writeLine(who & ": the prefix at " & prefix & " was built from " &
+      "a modified tree, and is not published (Distribution-And-Packaging " &
+      "5.3); commit and build again. Its record says:\n  " &
+      dirty.join("\n  "))
     return 2
   let platform =
     if targetTriple.len > 0: consumerPlatformForTarget(targetTriple)

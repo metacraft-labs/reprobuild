@@ -2563,7 +2563,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g02",
+    group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",
@@ -2763,6 +2763,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "module-level statement runs at every start-up: let Host = currentPlatformId()"),
+  TestSpec(
+    source: "libs/repro_cli_support/tests/t_publish_refuses_a_dirty_prefix.nim",
+    binary: "build/test-bin/t_publish_refuses_a_dirty_prefix",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g02",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim",
     binary: "build/test-bin/t_refresh_flake_lock_text_writes_the_fields_nix_reports",

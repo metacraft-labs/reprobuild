@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2612,
+    "nimTestBinaries": 2613,
     "pureUnitConsolidationGroups": 78,
-    "pureUnitTests": 724,
+    "pureUnitTests": 725,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2652
+    "testEntries": 2653
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -126,7 +126,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 7,
+      "count": 8,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
@@ -138,6 +138,7 @@
         "libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim",
         "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
         "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
+        "libs/repro_cli_support/tests/t_publish_refuses_a_dirty_prefix.nim",
         "libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim",
         "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim"
       ],
@@ -1535,7 +1536,7 @@
       "graph-fixture": 18,
       "integration": 1449,
       "platform/destructive": 164,
-      "pure unit": 724,
+      "pure unit": 725,
       "unclassified": 297
     },
     "graphOwnedTestArtifacts": [
@@ -1744,9 +1745,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2612,
+    "nimTestBinaryCount": 2613,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2652
+    "testEntryCount": 2653
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12637,6 +12638,23 @@
       "source": "libs/repro_cli_support/tests/t_provisioning_lock_reselect_and_diff.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_publish_refuses_a_dirty_prefix",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_publish_refuses_a_dirty_prefix.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
