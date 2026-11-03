@@ -135,7 +135,7 @@ reason and the remedy:
 | Any untracked file exists (`untracked_inputs = "strict"`) | `git add`, ignore or delete each one |
 | The lock-update step refused to move a pin backward | Bring the sibling forward, or name it in `REPRO_ALLOW_PIN_REGRESSION` |
 | A sibling repository is dirty, or not at the revision the tested lock pins | Commit, or check out that sibling |
-| A dependency has unpushed commits | Run `repro push` in it, then certify again. A repository in the same dependency cycle as yours is not refused for this when its checkout is at the commit your tested lock pins: it is published together with yours |
+| A dependency has unpushed commits | Run `repro push` in it, then certify again. A repository in the same dependency cycle as yours is not refused for this when its checkout is at the commit your tested lock pins for that repository: it is published together with yours |
 
 Files that `.gitignore` covers are not untracked inputs: build outputs do not count.
 

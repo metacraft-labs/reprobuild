@@ -852,6 +852,12 @@ suite "protocol v2 real-hook repro push closure":
           "deps = [" & vcsPin("lib", fx.libBare, libSha) & ", " &
           vcsPin("core", fx.coreBare, coreSha) & "]\n")
       else:
+        # The flake that lock belongs to: its input is what binds the pin to
+        # lib's checkout (by canonical URL), so the pin is lib's own.
+        writeFile(fx.app / "flake.nix", "{\n  inputs.lib = {\n    url = \"git+" &
+          fileUrl(fx.libBare) & "\";\n    flake = false;\n  };\n" &
+          "  outputs = _: { };\n}\n")
+        discard require(q(gitBin) & " -C " & q(fx.app) & " add flake.nix")
         writeFile(fx.app / "flake.lock", $(%*{
           "version": 7, "root": "root", "nodes": {
             "root": {"inputs": {"lib": "lib"}},

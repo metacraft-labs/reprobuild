@@ -45788,13 +45788,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_test_support"
+        "repro_test_support",
+        "repro_tool_profiles"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_push_certifies_only_content_that_was_not_tested.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 27,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 29,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

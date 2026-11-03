@@ -59676,6 +59676,76 @@ proc committedLockRevisions(repoRoot: string):
     except CatchableError:
       result.ok = false
 
+proc committedLockRevisionsOf(repoRoot, workspaceRoot: string;
+    repos: seq[ResolvedRepo]; sibling: string):
+    tuple[ok: bool; revs: HashSet[string]] =
+  ## The revisions the in-tree locks committed in ``repoRoot`` record for the
+  ## workspace repository ``sibling`` itself, lower-cased: the ``revision`` of
+  ## its ``repro.lock`` entry, which names it by its declared name (a v3 lock
+  ## records no path; ``lockedDepCheckoutPath`` derives the checkout from the
+  ## name, as ``siblingsOffTheirPins`` does), and the ``rev`` of each
+  ## ``flake.lock`` root input bound to its checkout by the hooks' identity
+  ## binding (``hookDevelopSetOf``: canonical URL or checkout path). A revision
+  ## the locks record for ANOTHER entry is not one of them, even when it is the
+  ## same commit: the tests ran against what each entry names, and a
+  ## committed pin is obtainable from the repository its entry names.
+  ##
+  ## ``ok`` is false when a lock that exists cannot be read, or when the
+  ## binding of a ``flake.lock`` that exists cannot be computed (no workspace
+  ## root, ``sibling`` not a workspace repository, no readable ``flake.nix``):
+  ## "nothing is recorded for it" would then be a guess. Every caller treats
+  ## that conservatively (issuance: not exempt; the component gate: refused).
+  ## A repository checked out at the workspace root is never bound to a flake
+  ## input (``hookDevelopSetOf``), so nothing is recorded for it there.
+  ##
+  ## This is the one rule for "the tested lock pins this peer": issuance's
+  ## cycle exemption, the component publication gate
+  ## (`source-component-unpublished-pin`) and ``repro push``'s transport order
+  ## inside a component, which anticipates that gate, all ask it.
+  result.ok = true
+  result.revs = initHashSet[string]()
+  let root = absolutePath(repoRoot)
+  let lockPath = root / CommittedLockFileName
+  if fileExists(extendedPath(lockPath)):
+    try:
+      for d in parseLockedDependencies(readFile(extendedPath(lockPath))).deps:
+        if d.name == sibling and d.coordinates.kind == ckVcs and
+            d.coordinates.revision.len > 0:
+          result.revs.incl(d.coordinates.revision.toLowerAscii())
+    except CatchableError:
+      result.ok = false
+  let flakeLock = root / "flake.lock"
+  if fileExists(extendedPath(flakeLock)):
+    var declared = false
+    var checkout = ""
+    for r in repos:
+      if r.name == sibling and r.path.len > 0:
+        declared = true
+        if r.path != "." and workspaceRoot.len > 0:
+          checkout = os.normalizedPath(absolutePath(workspaceRoot / r.path))
+    if not declared or workspaceRoot.len == 0 or
+        not fileExists(extendedPath(root / "flake.nix")) or
+        not readFlakeRecipeConstraints(root).ok:
+      result.ok = false
+      return
+    if checkout.len == 0:
+      return
+    try:
+      let pinned = flakeLockPinnedRevisions(readFile(extendedPath(flakeLock)))
+      if not pinned.ok:
+        result.ok = false
+      let develop = hookDevelopSetOf(root, workspaceRoot, repos)
+      var inputs: seq[string]
+      for m in develop.flakeMembers:
+        if m.path == checkout: inputs.add(m.input)
+      for p in develop.pinnedByRecipe:
+        if p.path == checkout and p.input.len > 0: inputs.add(p.input)
+      for input in inputs:
+        if input in pinned.pins:
+          result.revs.incl(pinned.pins[input].rev.toLowerAscii())
+    except CatchableError:
+      result.ok = false
+
 proc overrideAwaitsThisPush(view: PushCycleView; override: string;
     overrideHeadUnpublished, overrideHeadPinnedHere, selfIsOverride: bool):
     bool =
@@ -69567,14 +69637,19 @@ proc executeCheckPrePush(parsed: CheckArgs;
         evidence: "publication component changed after preflight"))
       result.exitCode = 2
       return
-    let pins = committedLockRevisions(parsed.currentRepo)
     for member in publicationMembers:
       if member.name != currentRepoName and
           flakeClassifyPublication(identity, member.worktree,
             member.headOid).unpublished:
         # Future publication is not proof that an exact committed pin can be
         # obtained now. Retain the lock stages' remote-availability invariant
-        # even when the current checkout already agrees with that pin.
+        # even when the current checkout already agrees with that pin. The
+        # pin is the one recorded for the member's own entry
+        # (``committedLockRevisionsOf``): the same commit under another entry
+        # is obtained from that entry's repository, whose checkout the lock
+        # stages hold at it and stage 2 holds published.
+        let pins = committedLockRevisionsOf(parsed.currentRepo,
+          parsed.workspaceRoot, resolved.repos, member.name)
         if not pins.ok or member.headOid.toLowerAscii() in pins.revs:
           result.failures.add(CheckFailure(repo: member.name,
             property: "source-component-unpublished-pin",
@@ -69600,11 +69675,13 @@ proc executeCheckPrePush(parsed: CheckArgs;
   #
   # The exemption has the source publication authority's exact-commit shape:
   # only a peer whose HEAD is the commit the tested content's committed lock
-  # pins. The certificate binds the content, and that content names the
-  # peer's commit, so a later verifier reconstructs exactly the peer the
-  # tests ran against; publishing that commit stays the push's job, and the
-  # pre-push gate still refuses a committed pin that is not obtainable
-  # (`source-component-unpublished-pin`). Content with no committed lock names
+  # pins for that peer, in its own entry (``committedLockRevisionsOf``): the
+  # same commit recorded under another entry names another repository's
+  # checkout, not this one. The certificate binds the content, and that
+  # content names the peer's commit, so a later verifier reconstructs
+  # exactly the peer the tests ran against; publishing that commit stays the
+  # push's job, and the pre-push gate still refuses a committed pin that is
+  # not obtainable (`source-component-unpublished-pin`). Content with no committed lock names
   # no peer commit, so its peer is not exempt: that needs a project with no
   # policy snapshot (the snapshot lives in the tracked `repro.lock`, whose
   # managed refresh pins every develop-set sibling), and no gate asks such a
@@ -69614,13 +69691,14 @@ proc executeCheckPrePush(parsed: CheckArgs;
   var issuanceCyclePeersOffPin = initHashSet[string]()
   if parsed.issuingForCurrentHead and currentRepoName.len > 0 and
       parsed.currentRepo.len > 0:
-    let pins = committedLockRevisions(parsed.currentRepo)
     let ownClosure = developSetClosure(resolved.repos, currentRepoName)
     for obs in observations:
       if not obs.hasGit or obs.name == currentRepoName or
           obs.name notin ownClosure or obs.headSha.len == 0 or
           currentRepoName notin developSetClosure(resolved.repos, obs.name):
         continue
+      let pins = committedLockRevisionsOf(parsed.currentRepo,
+        parsed.workspaceRoot, resolved.repos, obs.name)
       if pins.ok and obs.headSha.toLowerAscii() in pins.revs:
         issuanceCyclePeers.incl(obs.name)
       else:
@@ -69679,7 +69757,7 @@ proc executeCheckPrePush(parsed: CheckArgs;
           # peer the tested lock does not name.
           "'" & obs.name & "' is in the same dependency cycle as '" &
           currentRepoName & "', and its checkout is at " & obs.headSha &
-          ", which the tested lock does not pin: check '" & obs.name &
+          ", which the tested lock does not pin for it: check '" & obs.name &
           "' out at the revision the lock pins, or pin its checkout here " &
           "('repro lock refresh'), then certify again; for a committed state, " &
           "'repro push' certifies it against the revision the lock pins, in " &
@@ -73350,6 +73428,17 @@ proc executePush(args: PushArgs): PushReport =
   # defers its own published, older pin of this member (Unified-Locking-And-
   # Hooks.md §13.5). Two locks cannot each name the other's newest commit, so
   # such an order always exists; declaration order breaks ties.
+  #
+  # "Pins" is the gate's own rule (``committedLockRevisionsOf``): the revision
+  # recorded for the peer's own entry. A commit recorded only under another
+  # entry orders nothing. Counting it (any revision any entry records) adds an
+  # edge only where this member's own entry for the peer names another commit
+  # or none, and such an edge never helps: transported after the peer, the
+  # member meets it published at a HEAD its own entry does not pin, which the
+  # lock stages refuse (`committed_lock_sibling_pin_stale`; the mutual-pin
+  # deferral needs that peer unpublished), and with no entry for the peer the
+  # order is immaterial to the member's gate. Where the own entry names the
+  # peer's HEAD both rules give the same edge.
   block orderComponentsByPins:
     var reordered: seq[string]
     for component in pushComponents(resolved.repos, closure, extraDepends):
@@ -73358,10 +73447,15 @@ proc executePush(args: PushArgs): PushReport =
         continue
       var after = initTable[string, HashSet[string]]()
       for name in component:
-        let pins = committedLockRevisions(args.workspaceRoot / byName[name].path)
         var preceding = initHashSet[string]()
         for peer in component:
-          if peer != name and not preflight[peer].published and pins.ok and
+          if peer == name or preflight[peer].published: continue
+          let pins = committedLockRevisionsOf(
+            args.workspaceRoot / byName[name].path, args.workspaceRoot,
+            resolved.repos, peer)
+          # Exactly the gate's condition: a lock it cannot attribute is
+          # refused while the peer is unpublished, so that member goes after.
+          if not pins.ok or
               preflight[peer].headSha.toLowerAscii() in pins.revs:
             preceding.incl(peer)
         after[name] = preceding

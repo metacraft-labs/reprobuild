@@ -28,6 +28,9 @@
 ## peer's new commit is pushed after that peer; a test failure in either
 ## member publishes neither. `repro certify` on a cycle member accepts its
 ## peer, and still refuses an unpublished dependency outside the cycle.
+## Issuance accepts a peer only at the commit the lock records for that peer,
+## in its `repro.lock` entry or a `flake.lock` input bound to it: one at a
+## commit the lock records for another entry or input is refused.
 ##
 ## The rule's ``commit_gate`` is ``off``: with the default, the pre-commit gate
 ## refuses an uncovered commit, so the states under test could not be committed
@@ -37,6 +40,7 @@
 import std/[posix, sequtils, streams, strtabs, unittest]
 
 import repro_test_support/reasoned_skip
+from repro_tool_profiles import tpmPathOnly
 
 include certificate_push_fixture
 from test_certificates/notes as tcnotes import nil
@@ -1322,3 +1326,136 @@ suite "repro push publishes a certified dependency cycle through every member's 
       check fx.git("status --porcelain").len == 0
       check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bBefore
       check upstreamTip(fx.sf) == a0
+
+proc publishOnly(fx: PushFixture; sibling: Sibling; file, body: string): string =
+  ## Someone else's commit on ``sibling``'s upstream, fast-forwarded into its
+  ## checkout: published, and a commit no other repository's upstream has.
+  let other = fx.sf.scratch / ("other-" & extractFilename(sibling.path))
+  discard gitOut(fx.sf.scratch, "clone", "-q", fileUrl(sibling.bare), other)
+  discard gitOut(other, "config", "user.email", "other@example.invalid")
+  discard gitOut(other, "config", "user.name", "Someone Else")
+  writeFile(other / file, body)
+  discard gitOut(other, "add", "-A")
+  discard gitOut(other, "commit", "-q", "-m", "published elsewhere")
+  result = gitOut(other, "rev-parse", "HEAD")
+  discard gitOut(other, "push", "-q", "origin", "HEAD:main")
+  discard gitOut(sibling.path, "fetch", "-q", "origin")
+  discard gitOut(sibling.path, "merge", "-q", "--ff-only", "origin/main")
+
+suite "issuance accepts a cycle peer only at its own pin":
+  test "a cycle peer at a commit the tested lock pins for ANOTHER entry is " &
+      "refused, with the cycle's remedy":
+    guarded:
+      let fx = setupPush("issuance-cycle-own-entry", "required", gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      # lib-a <-> lib-b is a cycle; lib-c is an ordinary, published dependency
+      # of lib-a, at a commit only lib-c's upstream has.
+      let members = fx.addMembers([(name: "lib-b", depends: @["lib-a"]),
+        (name: "lib-c", depends: newSeq[string]())], @["lib-b", "lib-c"],
+        gateways = false)
+      let (libB, libC) = (members[0], members[1])
+      let cTip = fx.publishOnly(libC, "notes.txt", "lib-c\n")
+      let bTip = fx.commitIn(libB, "unit b\n", "lib-b, not published")
+      writeFile(fx.app / "src" / "unit.txt", "unit a\n")
+      let refreshed = fx.repro(@["lock", "refresh"])
+      check refreshed.code == 0
+      let lock = readFile(fx.app / "repro.lock")
+      checkpoint("lib-a's lock:\n" & lock)
+      doAssert bTip in lock and cTip in lock
+
+      # Control: lib-b at the commit lib-a's lock records for lib-b is accepted.
+      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
+        tpmPathOnly)
+      checkpoint("at its own pin: " & $accepted.kind & " " & accepted.offender &
+        ": " & accepted.remedy)
+      check accepted.kind == ipOk
+
+      # lib-b's checkout moves, clean, to the commit the lock records for
+      # lib-c. It is unpublished in lib-b, and the lock names it, but not for
+      # lib-b: lib-a's tests would not have run against the lib-b it names.
+      discard gitOut(libB.path, "fetch", "-q", libC.bare, "main")
+      discard gitOut(libB.path, "checkout", "-q", "-B", "main", cTip)
+      check gitOut(libB.path, "status", "--porcelain").len == 0
+      check gitOut(libB.path, "rev-parse", "HEAD") == cTip
+      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
+        tpmPathOnly)
+      checkpoint("at another entry's pin: " & $refused.kind & " " &
+        refused.offender & ": " & refused.remedy)
+      check refused.kind == ipUnpublished
+      check "lib-b" in refused.offender
+      check "is in the same dependency cycle as 'lib-a'" in refused.remedy
+      check "its checkout is at " & cTip & ", which the tested lock does not " &
+        "pin for it" in refused.remedy
+
+  test "flake.lock: a cycle peer at the commit an input bound to it pins is " &
+      "accepted; at the commit another input pins it is refused":
+    guarded:
+      let fx = setupPush("issuance-cycle-own-flake-input", "required",
+        gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      # lib-a <-> lib-b is a cycle. lib-c is a workspace repository lib-a does
+      # not depend on, so its `repro.lock` has no entry for it: only the
+      # flake.lock names lib-c's commit, through an input bound to lib-c.
+      let members = fx.addMembers([(name: "lib-b", depends: @["lib-a"]),
+        (name: "lib-c", depends: newSeq[string]())], @["lib-b"],
+        gateways = false)
+      let (libB, libC) = (members[0], members[1])
+      let cTip = fx.publishOnly(libC, "notes.txt", "lib-c\n")
+      let bTip = fx.commitIn(libB, "unit b\n", "lib-b, not published")
+      writeFile(fx.app / "src" / "unit.txt", "unit a\n")
+      check fx.repro(@["lock", "refresh"]).code == 0
+      let lock = readFile(fx.app / "repro.lock")
+      checkpoint("lib-a's lock:\n" & lock)
+      doAssert bTip in lock and cTip notin lock
+      # A second lib-b commit, which only the flake.lock names: its input for
+      # lib-b pins it, while repro.lock still pins bTip.
+      let zTip = fx.commitIn(libB, "unit b, again\n", "lib-b, flake pin only")
+      doAssert zTip notin lock
+      proc node(input, bare, rev: string): string =
+        "    \"" & input & "\": {\n      \"flake\": false,\n" &
+        "      \"locked\": {\n        \"lastModified\": 1787946353,\n" &
+        "        \"narHash\": \"sha256-fv2PzTwKsfeBptF8u/G0w9eh6GDsib/62l5cyuKNGYM=\",\n" &
+        "        \"rev\": \"" & rev & "\",\n        \"revCount\": 1,\n" &
+        "        \"type\": \"git\",\n        \"url\": \"" & fileUrl(bare) &
+        "\"\n      },\n      \"original\": {\n        \"ref\": \"main\",\n" &
+        "        \"type\": \"git\",\n        \"url\": \"" & fileUrl(bare) &
+        "\"\n      }\n    }"
+      writeFile(fx.app / "flake.nix", "{\n  inputs = {\n" &
+        "    lib-b-src = {\n      url = \"git+" & fileUrl(libB.bare) &
+        "?ref=main\";\n      flake = false;\n    };\n" &
+        "    lib-c-src = {\n      url = \"git+" & fileUrl(libC.bare) &
+        "?ref=main\";\n      flake = false;\n    };\n" &
+        "  };\n  outputs = _: { };\n}\n")
+      writeFile(fx.app / "flake.lock", "{\n  \"nodes\": {\n" &
+        node("lib-b-src", libB.bare, zTip) & ",\n" &
+        node("lib-c-src", libC.bare, cTip) & ",\n" &
+        "    \"root\": {\n      \"inputs\": {\n" &
+        "        \"lib-b-src\": \"lib-b-src\",\n" &
+        "        \"lib-c-src\": \"lib-c-src\"\n      }\n    }\n  },\n" &
+        "  \"root\": \"root\",\n  \"version\": 7\n}\n")
+
+      # lib-b at the commit the flake input bound to it pins: the cycle
+      # exemption accepts it, so what refuses is the stale repro.lock pin, not
+      # lib-b's publication.
+      check gitOut(libB.path, "rev-parse", "HEAD") == zTip
+      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
+        tpmPathOnly)
+      checkpoint("at its own flake pin: " & $accepted.kind & " " &
+        accepted.offender & ": " & accepted.remedy)
+      check accepted.kind != ipUnpublished
+      check "same dependency cycle" notin accepted.remedy
+
+      # lib-b at the commit the flake records for lib-c's input: unpublished
+      # in lib-b, named by the flake, but not for lib-b.
+      discard gitOut(libB.path, "fetch", "-q", libC.bare, "main")
+      discard gitOut(libB.path, "checkout", "-q", "-B", "main", cTip)
+      check gitOut(libB.path, "status", "--porcelain").len == 0
+      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
+        tpmPathOnly)
+      checkpoint("at another input's pin: " & $refused.kind & " " &
+        refused.offender & ": " & refused.remedy)
+      check refused.kind == ipUnpublished
+      check "lib-b" in refused.offender
+      check "is in the same dependency cycle as 'lib-a'" in refused.remedy
+      check "its checkout is at " & cTip & ", which the tested lock does not " &
+        "pin for it" in refused.remedy
