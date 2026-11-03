@@ -112,6 +112,13 @@ const
   SetUnits = ["vaultwarden.service", "eth-execution.service",
               "eth-beacon.service", DefaultValidatorUnit]
   RestoreUnit = "repro-state-restore.service"
+  # The chain clients' lines that say where each resumed and whether they
+  # agree on the head: geth's loaded and repaired heads and its fork-choice
+  # refusals, prysm's start head and its errors.
+  ChainLogPattern = "Loaded most recent|repairing|Rewound|Rewinding|" &
+    "Ignoring beacon update|Skipping beacon update|Refusing too deep|" &
+    "Blockchain stopped|Persisted|Writing cached state|Using Head root|" &
+    "starting with justified|Synced new block|level=error|ERROR|WARN"
 
 type MutationStop = object of CatchableError
   ## Raised by a gate's step under a mutation once a step is red.
@@ -194,10 +201,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "\n" & old.serviceJournal(SetUnits))
     if fails.len > 0: return fails
     let guestNow = parseInt(old.run("date +%s").strip())
-    let startEpoch = max(guestNow - net.genesisTime, 0) div 12
+    let startEpoch = max(guestNow - net.genesisTime, 0) div SecondsPerEpoch
     # The validators must have signed before the backup, so there is a
     # history to carry. Justification shows it directly, but on a loaded
-    # host a one-host network with two-second slots can run for long
+    # host a one-host network with short slots can run for long
     # stretches without justifying (late attestations miss inclusion;
     # measured at load 150 on the 32-core host, 2026-11-02). Every
     # validator still attests once per epoch, so four epochs of head
@@ -208,7 +215,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let deadline = epochTime() + 1800
     while epochTime() < deadline:
       if old.justifiedEpoch() >= startEpoch + 2: justifiedOk = true
-      if old.headSlot() >= (startEpoch + 4) * 6: headMoved = true
+      if old.headSlot() >= (startEpoch + 4) * SlotsPerEpoch: headMoved = true
       if justifiedOk or headMoved: break
       discard old.exec("sleep 10")
     record["signedBy"] = %(if justifiedOk: "justification" elif headMoved:
@@ -218,9 +225,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "justified " & $old.justifiedEpoch() & ", head " & $old.headSlot() &
          ", started at epoch " & $startEpoch)
     # Let the validators attest in a few more epochs before the backup.
-    discard old.waitHeadSlot(old.headSlot() + 12, 300)
+    discard old.waitHeadSlot(old.headSlot() + 2 * SlotsPerEpoch,
+                         60 + 4 * SecondsPerEpoch)
     let oldHead = old.headSlot()
-    let oldEpoch = oldHead div 6
+    let oldEpoch = oldHead div SlotsPerEpoch
     record["addOnHead"] = %oldHead
     step("vaultwarden is healthy on the add-on host, on the kept disk",
          old.exec(repro & " system addon probe http://127.0.0.1:8000/alive").exitCode == 0 and
@@ -236,6 +244,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "/root/ref.profile --out /root/carry")
     step("the state set is backed up", bk.exitCode == 0, bk.stdout & bk.stderr)
     record["backup"] = %bk.stdout
+    # How each chain client stopped for the backup (its last head and
+    # whether it shut down cleanly): what the converted host resumes from.
+    record["addOnStop"] = %old.exec("journalctl -b -q --no-pager " &
+      "-u eth-execution.service -u eth-beacon.service | grep -E " &
+      quoteShell(ChainLogPattern) & " | tail -n 40").stdout
     let tryStart = old.exec("systemctl start " & DefaultValidatorUnit)
     discard old.exec("sleep 5")
     let started = old.exec("journalctl -u " & DefaultValidatorUnit &
@@ -343,7 +356,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          ver2.stdout.count("ok ") == 4, ver2.stdout & ver2.stderr)
     let restoredDone = nw.monotonicOf(RestoreUnit, "ExecMainExitTimestampMonotonic")
     let restoreEpoch = max(parseInt(nw.run("date +%s").strip()) -
-                           net.genesisTime, 0) div 12
+                           net.genesisTime, 0) div SecondsPerEpoch
     record["restoreEpoch"] = %restoreEpoch
     # The falsifiers of the post-conversion checks: the carried state is
     # broken after it was restored and verified, before the apply.
@@ -404,11 +417,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let deadline2 = epochTime() + 1500
     while epochTime() < deadline2:
       if nw.justifiedEpoch() > restoreEpoch or
-          nw.headSlot() >= (restoreEpoch + 4) * 6:
+          nw.headSlot() >= (restoreEpoch + 4) * SlotsPerEpoch:
         progressed = true
         break
       discard nw.exec("sleep 10")
-    discard nw.waitHeadSlot(nw.headSlot() + 12, 300)
+    discard nw.waitHeadSlot(nw.headSlot() + 2 * SlotsPerEpoch,
+                        60 + 4 * SecondsPerEpoch)
     record["afterConversion"] = %*{"head": nw.headSlot(),
       "justified": nw.justifiedEpoch(), "restoreEpoch": restoreEpoch}
     discard nw.run("systemctl stop " & DefaultValidatorUnit)
@@ -437,6 +451,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          cs.len == 0 and carriedHistory and attestationCount([hist]) > 0,
          "conflicts " & $cs.len & ", earliest " & $earliest & ", latest " &
          $latest & ", add-on epoch " & $oldEpoch)
+    let chainStart = nw.exec("journalctl -b -q --no-pager " &
+      "-u eth-execution.service -u eth-beacon.service | grep -E " &
+      quoteShell(ChainLogPattern) & " | head -n 60").stdout
+    record["convertedStart"] = %chainStart
     var latestPerKey = initTable[string, int]()
     for rec in hist{"data"}.getElems():
       for a in rec{"signed_attestations"}.getElems():
@@ -450,7 +468,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "for an epoch past the one the restore ran in",
          progressed and allSignedAfter,
          "chain progressed " & $progressed & ", latest per key " &
-         $latestPerKey & ", restore epoch " & $restoreEpoch)
+         $latestPerKey & ", restore epoch " & $restoreEpoch &
+         (if progressed: "" else: "\n" & chainStart))
 
     # --- 6. The kept disk is required.
     discard nw.run("systemctl stop vaultwarden.service; umount " & KeepDir &

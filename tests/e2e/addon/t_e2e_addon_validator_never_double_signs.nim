@@ -127,10 +127,11 @@ proc validatorCmd(prysm, extra: string): string =
     "--chain-config-file=" & extra
 
 proc waitSigning(g: Guest; epochs: int) =
-  ## Let the validators sign for ``epochs`` more epochs (six two-second
-  ## slots each) past the current head.
+  ## Let the validators sign for ``epochs`` more epochs (``SlotsPerEpoch``
+  ## slots of ``SecondsPerSlot`` each) past the current head.
   let start = g.headSlot()
-  discard g.waitHeadSlot(max(start, 0) + 6 * epochs, 60 + 12 * epochs * 3)
+  discard g.waitHeadSlot(max(start, 0) + SlotsPerEpoch * epochs,
+                         60 + SecondsPerEpoch * epochs * 3)
 
 proc exportHistory(g: Guest; prysm, datadir, outDir: string): JsonNode =
   ## The EIP-3076 interchange of the database in ``datadir`` (the client
@@ -216,7 +217,7 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     # The epoch the validators began signing in: the chain starts when the
     # activity does, whatever the genesis time (empty slots before it).
     let guestNow = parseInt(g.run("date +%s").strip())
-    let startEpoch = max(guestNow - net.genesisTime, 0) div 12
+    let startEpoch = max(guestNow - net.genesisTime, 0) div SecondsPerEpoch
     record["startEpoch"] = %startEpoch
     step("the chain justifies an epoch",
          g.waitJustified(startEpoch + 2, 900),
@@ -224,7 +225,7 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     # By the time an epoch is justified, at least two thirds of the keys have
     # attested; every key's history must reach back at least this far.
     justifiedAt = max(parseInt(g.run("date +%s").strip()) - net.genesisTime,
-                          0) div 12
+                          0) div SecondsPerEpoch
     record["justifiedAtEpoch"] = %justifiedAt
     # 1. restart
     discard g.run("systemctl restart " & pins.validatorUnit)

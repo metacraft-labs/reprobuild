@@ -1,7 +1,13 @@
 # The local test network of the reference-service gates (reference_services.nim).
 # Prysm's interop config: every fork through Electra at epoch 0 (post-merge
-# from genesis), Fulu and Gloas never; two-second slots and six-slot epochs
-# so a gate sees epochs justify within a minute. No peers, no discovery.
+# from genesis), Fulu and Gloas never; six-second slots and six-slot epochs
+# so a gate sees epochs justify within a few minutes. Six seconds, not two:
+# after a conversion's downtime the one beacon node replays every missed
+# slot before its first proposal, and on a shared host two seconds was not
+# enough (the late proposal hit a prysm defect that leaves the node stuck;
+# A13, 2026-11-03). The gates derive their timing from these two values
+# (reference_services.nim SecondsPerSlot, SlotsPerEpoch). No peers, no
+# discovery.
 # genesis.json beside it is geth's genesis: chain 32382, every fork at 0,
 # and the four system contracts Prague needs (EIP-2935, EIP-4788, EIP-7002,
 # EIP-7251), their code copied from go-ethereum v1.17.10 params/protocol_params.go.
@@ -21,7 +27,7 @@ ELECTRA_FORK_EPOCH: 0
 ELECTRA_FORK_VERSION: 0x20000094
 FULU_FORK_EPOCH: 18446744073709551615
 FULU_FORK_VERSION: 0x20000095
-SECONDS_PER_SLOT: 2
+SECONDS_PER_SLOT: 6
 SLOTS_PER_EPOCH: 6
 SECONDS_PER_ETH1_BLOCK: 2
 MIN_GENESIS_ACTIVE_VALIDATOR_COUNT: 8
