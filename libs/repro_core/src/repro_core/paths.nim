@@ -177,6 +177,31 @@ func trimmedRuntimePath(path: string): string =
 func isAtOrUnder(path, root: string): bool =
   path == root or path.startsWith(if root == "/": root else: root & "/")
 
+func isOrdinaryFileUnderRuntimeMount*(normalized: string): bool =
+  ## True for the two places under a volatile prefix that hold ordinary files
+  ## whoever's they are. `normalized` must already use forward slashes.
+  ##
+  ## * A path in a DIRECTORY under `/dev/shm`. POSIX shared-memory objects and
+  ##   named semaphores are flat entries of `/dev/shm`, because a shm_open(3)
+  ##   name may not contain a further slash
+  ##   (https://man7.org/linux/man-pages/man3/shm_open.3.html). Anything in a
+  ##   subdirectory was put there as a file: a build tree moved to `/dev/shm`
+  ##   for speed, a workspace with its sibling repositories, a dependency
+  ##   checkout.
+  ## * `/run/media/<user>/<volume>`, where desktop hosts automount removable
+  ##   and secondary disks, projects and their dependencies included.
+  ##
+  ## Kept whether or not the path is inside the invocation's own trees
+  ## (`dropsAsVolatileRuntimeState`), because those trees are not every tree
+  ## a build reads: a sibling repository of the workspace, a dependency
+  ## checkout, an input named by absolute path are under none of them, and
+  ## dropping their reads serves a stale result when they change.
+  const shmRoot = "/dev/shm/"
+  if normalized.startsWith(shmRoot):
+    let slash = normalized.find('/', shmRoot.len)
+    return slash > shmRoot.len and slash < normalized.high
+  normalized.startsWith("/run/media/")
+
 func isVolatileRuntimeStatePath*(path: string): bool =
   ## True for a path under a prefix that holds the running kernel's or the
   ## host's live runtime state: `/dev`, `/proc`, `/sys` and `/run`, less the
@@ -259,21 +284,30 @@ func dropsAsVolatileRuntimeState*(path: string; scope: VolatileScope): bool =
   ## THE decision: whether a recorded read, write, probe or enumeration of
   ## `path` is left out of an action's evidence and cache record as runtime
   ## state. True exactly when the path is under a volatile prefix
-  ## (`isVolatileRuntimeStatePath`) and at or under none of the
-  ## invocation's own trees (`scope`).
+  ## (`isVolatileRuntimeStatePath`), is not in a place that holds only
+  ## ordinary files (`isOrdinaryFileUnderRuntimeMount`), and is at or under
+  ## none of the invocation's own trees (`scope`).
   ##
   ## THIS IS A SILENT DROP, and a wrong one is a stale SERVE: the action is
   ## fingerprinted as though it had never read the file. The decision used
-  ## to be the prefix alone, with carve-outs for the places projects had
-  ## been found living (a directory under `/dev/shm`, `/run/media`). Every
-  ## layout the list did not name still lost its reads: the listing of a
-  ## project at `/dev/shm/<name>`, a mount at `/run/<dir>`. A list of mounts
-  ## cannot promise soundness; the invocation's own roots can. Whatever the
-  ## prefix, a path inside them is the project's and is kept, and a root
-  ## that cannot be told apart from the runtime state around it is refused
-  ## (`volatileRootRefusal`).
+  ## to be the prefix less those places alone. Every layout they did not
+  ## name still lost its reads: the listing of a project at
+  ## `/dev/shm/<name>`, a project on a mount at `/run/<dir>`. The
+  ## invocation's own roots close those: whatever the prefix, a path inside
+  ## them is the project's and is kept, and a root that cannot be told apart
+  ## from the runtime state around it is refused (`volatileRootRefusal`).
+  ##
+  ## The places stay kept OUTSIDE the scope as well. The scope is the
+  ## invocation's own roots, not every tree it reads: a workspace sibling or
+  ## a dependency checkout under `/dev/shm/<dir>` is in none of them, and
+  ## dropping its reads was the original stale serve. What is left dropped
+  ## outside the scope is what a path cannot tell from runtime state: a flat
+  ## entry of `/dev/shm`, the rest of `/dev`, `/proc`, `/sys`, and `/run`
+  ## less `/run/user/<uid>` and `/run/media`.
   let normalized = path.replace('\\', '/')
   if not normalized.isVolatileRuntimeStatePath():
+    return false
+  if normalized.isOrdinaryFileUnderRuntimeMount():
     return false
   for root in scope.exempt:
     if normalized.isAtOrUnder(root):

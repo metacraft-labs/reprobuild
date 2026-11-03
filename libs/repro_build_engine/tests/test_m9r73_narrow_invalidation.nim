@@ -256,7 +256,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     check evidence.monitorWrites == @[outputPath]
     check evidence.monitorProbes == @[probedPath]
 
-  test "under a volatile prefix, the project's own reads and listings are kept and everything else is dropped":
+  test "under a volatile prefix, the project's own reads and listings and ordinary-file places are kept, runtime state is dropped":
     ## A project's tree can sit under a prefix that otherwise holds runtime
     ## state: moved to `/dev/shm` for speed, or on a disk an administrator
     ## mounted at `/run/<dir>`. Dropping its reads made an edited input a
@@ -271,6 +271,8 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     let inputPath = project / "input.txt"
     let outputPath = project / "build" / "output.txt"
     let mountedInput = mounted / "src" / "input.txt"
+    let siblingInput = "/dev/shm/workspace/sibling/src/lib.txt"
+    let mediaInput = "/run/media/someone/disk/dep/input.txt"
     let records = @[
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: inputPath),
@@ -282,19 +284,23 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
         osPid: 1, threadId: 1, path: outputPath),
       # Outside both trees, so still runtime state: a POSIX semaphore, the
-      # listing of `/dev/shm` itself, a directory under `/dev/shm` that is
-      # not the project's, a device, and the rest of `/run`.
+      # listing of `/dev/shm` itself, a device, and the rest of `/run`.
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/dev/shm/sem.mp-1234"),
       MonitorRecord(kind: mrDirectoryEnumerate,
         observationKind: moDirectoryEnumerate,
         osPid: 1, threadId: 1, path: "/dev/shm"),
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
-        osPid: 1, threadId: 1, path: "/dev/shm/build-scratch-2/input.txt"),
-      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/dev/urandom"),
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/run/admin-mount/state"),
+      # Outside both trees too, but in places that hold only ordinary files:
+      # a directory under `/dev/shm` (a sibling repository, a dependency
+      # checkout) and an automounted disk. Kept whatever the scope.
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: siblingInput),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: mediaInput),
     ]
     writeFile(rmdfPath, encodeCanonical(records))
 
@@ -304,19 +310,21 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
 
     check status == mesComplete
-    check evidence.monitorReads == @[inputPath, mountedInput]
+    check evidence.monitorReads ==
+      @[inputPath, siblingInput, mountedInput, mediaInput]
     check evidence.monitorWrites == @[outputPath]
     check evidence.monitorProbes == @[project]
     check evidence.monitorDirectoryEnumerations == @[project]
 
     # With no scope (an invocation that has none) the same records keep
-    # nothing under either prefix: the prefix alone is the classification,
-    # never the decision.
+    # only what is in a directory under `/dev/shm` or on `/run/media` (the
+    # project's files among them). The listing of the project root and the
+    # mount at `/run/<dir>` need the scope.
     var bare: PathSetEvidence
     var bareSeen: EvidenceSeenSets
     check foldMonitorDepFileEvidence(rmdfPath, "", bare, bareSeen) ==
       mesComplete
-    check bare.monitorReads.len == 0
+    check bare.monitorReads == @[inputPath, siblingInput, mediaInput]
     check bare.monitorDirectoryEnumerations.len == 0
 
   test "a root the fold cannot tell from runtime state is refused, naming it and why":

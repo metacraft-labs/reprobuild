@@ -9,9 +9,12 @@
 ## so a file added there was a cache hit, and a project on a mount at
 ## `/run/<dir>` had no inputs at all, so an edit was a hit too. Now the
 ## invocation's own roots decide: a read inside them is kept whatever the
-## prefix, a read outside them under a volatile prefix is still dropped, and a
-## root such as `/dev/shm` itself, where a project file and a shared-memory
-## object are the same shape of path, is refused before anything runs.
+## prefix, and a root such as `/dev/shm` itself, where a project file and a
+## shared-memory object are the same shape of path, is refused before anything
+## runs. Outside the roots, the places that hold only ordinary files (a
+## directory under `/dev/shm`, `/run/media`) stay inputs: a dependency
+## checkout or a sibling repository there is under none of the build's roots.
+## The rest of the volatile prefixes is still dropped there.
 ##
 ## NO MOCKS: the built `repro`, a real provider compile, the real monitor and
 ## action cache. The edge's tool is a shell script on `PATH`, the ordinary
@@ -26,7 +29,8 @@
 ## prefix-only fold) fails the added-file case on `/dev/shm` and both
 ## `/run/<dir>` checks; making it drop nothing fails the shared-memory-object
 ## case; removing the `volatileRootRefusals` call from `runBuild` fails the
-## refusal case.
+## refusal case; dropping the ordinary-file places outside the scope fails the
+## dependency-checkout case (an edit there is a stale hit).
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
@@ -73,10 +77,12 @@ proc runs(fx: Fixture): int =
     if line == "ran":
       inc result
 
-proc newFixture(project: string; runtimeObject = ""): Fixture =
+proc newFixture(project: string; runtimeObject = "";
+                 read = "src/input.txt"): Fixture =
   ## One edge, run in the project root: it lists the project ROOT itself,
-  ## reads `src/input.txt`, and reads `runtimeObject` (when given) the way a
-  ## tool touches a shared-memory object.
+  ## reads `read` (`src/input.txt`, or a file outside the project), and reads
+  ## `runtimeObject` (when given) the way a tool touches a shared-memory
+  ## object.
   result.scratch = createTempDir("repro-volatile-tool-", "")
   result.binDir = result.scratch / "bin"
   result.project = project
@@ -117,7 +123,7 @@ proc newFixture(project: string; runtimeObject = ""): Fixture =
     "  build:\n" &
     "    discard shmLister(actionId = \"listing\",\n" &
     "      dir = \".\",\n" &
-    "      read = \"src/input.txt\",\n" &
+    "      read = " & escape(read) & ",\n" &
     "      runtime = " & escape(runtimeArg) & ",\n" &
     "      output = \"build/listing.txt\",\n" &
     "      marker = \".repro/runs.log\")\n")
@@ -235,6 +241,37 @@ suite "a project under a volatile runtime prefix":
       fx.requireBuilt("input edited", fx.build())
       check fx.runs == 3
       check "input v2" in readFile(fx.output)
+
+  test "a file the build reads from a dependency checkout under /dev/shm/<dir>, outside every root of the build, is an input":
+    # A sibling repository of the workspace, or a dependency checkout, is
+    # under none of THIS build's roots (project, repository, work, store,
+    # output). It is still a directory of ordinary files: dropping its reads
+    # made an edit there a cache hit.
+    if not defined(linux) or not devShmUsable():
+      skip("needs a writable /dev/shm; this case reads a dependency " &
+        "checkout on that tmpfs")
+    else:
+      let checkout = createTempDir("repro-volatile-dep-", "", "/dev/shm")
+      let project = createTempDir("repro-volatile-consumer-", "")
+      let depInput = checkout / "lib" / "input.txt"
+      createDir(depInput.parentDir)
+      writeFile(depInput, "dep v1\n")
+      let fx = newFixture(project, read = depInput)
+      defer:
+        removeDir(fx.scratch)
+        removeDir(project)
+        removeDir(checkout)
+
+      fx.requireBuilt("first build", fx.build())
+      check fx.runs == 1
+      fx.requireBuilt("nothing changed", fx.build())
+      check fx.runs == 1
+
+      # An edit of the same length in the dependency checkout.
+      writeFile(depInput, "dep v2\n")
+      fx.requireBuilt("dependency input edited", fx.build())
+      check fx.runs == 2
+      check "dep v2" in readFile(fx.output)
 
   test "a project on a mount at /run/<dir> re-runs on an edit and on a file added to its listed root":
     let reason = namespaceReason()
