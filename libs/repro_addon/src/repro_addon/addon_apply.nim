@@ -4936,8 +4936,13 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
       recordError = e.msg
     tracked = ledgerRecordsAttempt(stateDir, fromGen)
     if not tracked and recordError.len > 0:
-      return FailedReplayRevert(why: "recording the interrupted switch's " &
-        "writes failed: " & recordError)
+      # Spec §7.2 (recovery), cause 3: the report names the cause, the
+      # write-ahead record (what it names could not be planned from), not
+      # only the error the record-only replay raised.
+      return FailedReplayRevert(why: "the write-ahead record cannot be " &
+        "planned from (recording the interrupted switch's writes failed: " &
+        recordError & ") and the switch had passed step 2 (" & $prior.step &
+        "); no revert can tell those writes apart")
   if not tracked:
     return FailedReplayRevert(why: "the write-ahead record is " &
       (if planUsable: "usable but its writes could not be recorded"
