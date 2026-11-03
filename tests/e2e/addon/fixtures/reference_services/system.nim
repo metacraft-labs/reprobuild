@@ -84,7 +84,17 @@ const
     "suggested-fee-recipient: \"0x0000000000000000000000000000000000000001\"\n" &
     "interop-eth1data-votes: true\n" &
     "monitoring-host: 127.0.0.1\n" &
-    "monitoring-port: 8080\n"
+    "monitoring-port: 8080\n" &
+    # Resume from the head this node last stored, not from its justified
+    # checkpoint. Without it, prysm (beacon-chain/blockchain/
+    # setup_forkchoice.go, `startupHeadRoot`) rebuilds fork choice from the
+    # justified checkpoint at every start, behind the head the execution
+    # client already holds: the execution client then ignores the beacon
+    # node's fork-choice updates while it syncs, no block is built, and the
+    # validator is asked for votes that surround its own earlier ones,
+    # which its slashing protection refuses (a stall, not a slashing).
+    # Spec §11.1, the operator requirement for consensus clients.
+    "sync-from: head\n"
 
   ValidatorConfig = "datadir: " & ValidatorStateDir & "\n" &
     "wallet-dir: /var/lib/ethereum/validator/wallet\n" &
@@ -230,6 +240,9 @@ profile "referenceServices":
           "--authrpc.addr 127.0.0.1 --authrpc.port 8551 " &
           "--authrpc.jwtsecret %d/jwt\n" &
           "ReadWritePaths=/var/lib/ethereum/execution\n" &
+          # Time to flush the chain database on SIGTERM before systemd's
+          # SIGKILL (the directory is carried).
+          "TimeoutStopSec=60\n" &
           "Restart=on-failure\n"),
         hardening = "serviceFloor",
         credentials = @["jwt"],
@@ -247,6 +260,9 @@ profile "referenceServices":
           "--genesis-state=" & TestnetPrefix &
           "/share/ethereum-testnet/genesis.ssz --jwt-secret=%d/jwt\n" &
           "ReadWritePaths=/var/lib/ethereum/beacon\n" &
+          # Time to close the beacon database on SIGTERM before systemd's
+          # SIGKILL (the directory is carried).
+          "TimeoutStopSec=60\n" &
           "Restart=on-failure\n",
           after = "eth-execution.service",
           # The beacon node lists the host's interfaces at start (prysm's
