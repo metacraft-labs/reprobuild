@@ -106,6 +106,8 @@ chmod -R u+w "$SOURCE"
 # consume, because that is the only thing a `--path:` entry is for: the
 # unfiltered trees are 113 MB of which 56 MB is web assets, test
 # fixtures and vendored binaries no compile can open.
+# shellcheck source=scripts/lib/stage_package_nimble.sh
+. "$(dirname "$0")/lib/stage_package_nimble.sh"
 stage_src() {
   var="$1"; dest="$2"
   from=$(wrapper_value "$var")
@@ -120,6 +122,10 @@ stage_src() {
     mkdir -p "$PRE/tree/share/repro/src/$dest/$(dirname "$f")"
     cp -L "$from/$f" "$PRE/tree/share/repro/src/$dest/$f"
   done
+  # A `<package>/src` tree also gets the package's nimble file beside it,
+  # from beside the store path's `src`: a module may read it at compile time
+  # (scripts/lib/stage_package_nimble.sh).
+  stage_package_nimble "$from" "$PRE/tree/share/repro/src/$dest"
 }
 stage_src NIMCRYPTO_SRC                  nimcrypto
 stage_src BEARSSL_SRC                    bearssl

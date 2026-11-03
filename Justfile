@@ -736,6 +736,13 @@ lint:
     # and --os:windows and refuses a Linux-only module in either closure;
     # no macOS runner, about a minute a target. See the script header.
     bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
+    # The other closure a green sweep says nothing about: what an INSTALLED
+    # reprobuild compiles against. The sweep reads the checkout; a release
+    # archive carries only what stage_release_sources.sh copies, and v0.2.19
+    # failed its release on a file the checkout had and the archive did not.
+    # Stages share/repro into a scratch directory and type-checks against it
+    # alone -- the release job's gate, without the build in front of it.
+    bash ./scripts/release/check_staged_release_sources.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
@@ -3169,6 +3176,12 @@ repomix *args:
 
 check-repo-requirements:
     bash ./scripts/check_repo_requirements.sh
+
+# Stage share/repro as a release archive does and prove it alone closes an
+# installed reprobuild's compiles. The release job's gate, with no build; run
+# it before tagging. Also part of `just lint`.
+release-source-closure:
+    bash ./scripts/release/check_staged_release_sources.sh
 
 # Verify the Nim toolchain can complete a compile while the io-monitor shim is
 # interposed. Requires a built shim (`just test` bootstraps one); this is the

@@ -106,6 +106,8 @@ fi
 cp config.nims "$source_root/config.nims"
 
 # ---- source-only inputs ------------------------------------------------------
+# shellcheck source=scripts/lib/stage_package_nimble.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/stage_package_nimble.sh"
 # stage <ENV_VAR> <dest under share/repro/src> <marker> <candidate>...
 # The destination names are repro_interface_artifacts.InstalledSourcePackageTrees
 # (and the native packages' wrapper values); the marker is relative to the
@@ -126,6 +128,9 @@ stage() {
   fi
   echo "stage_release_sources: $dest <- $root"
   copy_tree "$root" "$src_root/$dest"
+  # A `<package>/src` destination also gets the package's nimble file beside
+  # it: a module may read it at compile time (scripts/lib/stage_package_nimble.sh).
+  stage_package_nimble "$root" "$src_root/$dest"
 }
 
 stage REPRO_TEST_ADAPTERS_SRC reprobuild-test-adapters/src \

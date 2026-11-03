@@ -145,6 +145,8 @@ while IFS= read -r f; do
 done
 
 # ---- 4. tree/share/repro/src/<input> -------------------------------
+# shellcheck source=scripts/lib/stage_package_nimble.sh
+. "$(dirname "$0")/lib/stage_package_nimble.sh"
 stage_src() { # stage_src <source-dir> <dest-rel>
   from="$1"; dest="$2"
   if [ ! -d "$from" ]; then echo "MISSING SOURCE TREE: $from" >&2; return 1; fi
@@ -168,6 +170,9 @@ stage_src() { # stage_src <source-dir> <dest-rel>
     mkdir -p "$PRE/tree/share/repro/src/$dest/$(dirname "$f")"
     cp "$from/$f" "$PRE/tree/share/repro/src/$dest/$f"
   done
+  # A `<package>/src` tree also gets the package's nimble file beside it: a
+  # module may read it at compile time (scripts/lib/stage_package_nimble.sh).
+  stage_package_nimble "$from" "$PRE/tree/share/repro/src/$dest"
 }
 stage_src "$WS/nimcrypto"                     nimcrypto
 stage_src "$DEVDEPS/nim-bearssl"              bearssl
