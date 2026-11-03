@@ -30,7 +30,10 @@
 ## peer, and still refuses an unpublished dependency outside the cycle.
 ## Issuance accepts a peer only at the commit the lock records for that peer,
 ## in its `repro.lock` entry or a `flake.lock` input bound to it: one at a
-## commit the lock records for another entry or input is refused.
+## commit the lock records for another entry or input is refused. A member
+## certified against its pins has the submodules the user initialized, nested
+## ones included, at the committed commits, populated from the user's
+## checkouts with nothing fetched; one the user did not initialize stays empty.
 ##
 ## The rule's ``commit_gate`` is ``off``: with the default, the pre-commit gate
 ## refuses an uncovered commit, so the states under test could not be committed
@@ -1459,3 +1462,187 @@ suite "issuance accepts a cycle peer only at its own pin":
       check "is in the same dependency cycle as 'lib-a'" in refused.remedy
       check "its checkout is at " & cTip & ", which the tested lock does not " &
         "pin for it" in refused.remedy
+
+const subToolInterface = "import repro_project_dsl\n\n" &
+  "defineCliInterface subTool, \"sub-tool\":\n" &
+  "  call:\n" &
+  "    flag input is string, alias = \"--input\", role = input, required = true\n" &
+  "    flag output is string, alias = \"--output\", role = output, required = true\n" &
+  "    flag record is string, alias = \"--record\", required = true\n" &
+  "    flag probe is string, alias = \"--probe\", required = true\n" &
+  "    outputs output\n"
+
+  ## Records what it read and what ``--probe`` (a directory) holds, in a file
+  ## outside the temporary workspace, so the case can read it after the push
+  ## removed that workspace. An input starting with FAIL makes it fail.
+const subToolScript = """#!/bin/sh
+set -eu
+if [ "${1:-}" = "--version" ]; then echo 'sub-tool 1.0.0'; exit 0; fi
+input= output= record= probe=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --input) input=$2; shift 2 ;;
+    --output) output=$2; shift 2 ;;
+    --record) record=$2; shift 2 ;;
+    --probe) probe=$2; shift 2 ;;
+    *) echo "unknown arg $1" >&2; exit 64 ;;
+  esac
+done
+mkdir -p "$(dirname "$output")" "$(dirname "$record")"
+printf '%s in %s: %s; %s holds [%s]\n' "$input" "$(pwd)" "$(cat "$input")" \
+  "$probe" "$(ls -A "$probe" | tr '\n' ' ')" >> "$record"
+case "$(head -c 4 "$input")" in
+  FAIL) echo "$input says FAIL" >&2; exit 1 ;;
+esac
+cp "$input" "$output"
+"""
+
+proc subRecipe(record: string): string =
+  ## lib-b's recipe: lib-a's, with two more tests in ``t-unit`` that read a
+  ## file of submodule ``sub`` and of its nested submodule ``sub/nested``.
+  "import repro_project_dsl\n" &
+    "import \"policy/team_policy\"\n\n" &
+    "package lib_a:\n" &
+    "  usesImportPath \"reprobuild/packages\"\n" &
+    "  enactCertificatePolicy teamPolicy\n" &
+    "  uses:\n" &
+    "    \"cert-tool >=1.0 <2.0\"\n" &
+    "    \"sub-tool >=1.0 <2.0\"\n\n" &
+    "  build:\n" &
+    "    let unit = certTool(actionId = \"unit\",\n" &
+    "      input = \"src/unit.txt\",\n" &
+    "      output = \"build/unit-out\",\n" &
+    "      marker = \".repro/runs.log\")\n" &
+    "    let sub = subTool(actionId = \"sub\",\n" &
+    "      input = \"sub/unit.txt\",\n" &
+    "      output = \"build/sub-out\",\n" &
+    "      record = \"" & record & "\",\n" &
+    "      probe = \"uninit\")\n" &
+    "    let nested = subTool(actionId = \"nested\",\n" &
+    "      input = \"sub/nested/unit.txt\",\n" &
+    "      output = \"build/nested-out\",\n" &
+    "      record = \"" & record & "\",\n" &
+    "      probe = \"uninit\")\n" &
+    "    certificate \"t-unit\", aggregate(\"t-unit\", @[unit, sub, nested])\n"
+
+proc sourceRepo(dir, body: string): string =
+  ## A repository with ``unit.txt``; its HEAD.
+  discard gitOut(parentDir(dir), "init", "-q", "-b", "main", dir)
+  discard gitOut(dir, "config", "user.email", "tester@example.invalid")
+  discard gitOut(dir, "config", "user.name", "Submodule Tester")
+  writeFile(dir / "unit.txt", body)
+  discard gitOut(dir, "add", "-A")
+  discard gitOut(dir, "commit", "-q", "-m", "unit")
+  gitOut(dir, "rev-parse", "HEAD")
+
+suite "a member certified against its pins has the submodules it initialized":
+  test "required: the temporary checkout has the initialized submodules, " &
+      "nested ones too, at the committed commits, fetched from nowhere; an " &
+      "uninitialized one stays empty":
+    guarded:
+      let fx = setupPush("push-cycle-submodules", "required")
+      defer: removeDir(fx.sf.scratch)
+      writeFile(fx.binDir / "sub-tool", subToolScript)
+      setFilePermissions(fx.binDir / "sub-tool",
+        {fpUserRead, fpUserWrite, fpUserExec})
+      let libB = fx.addMembers([(name: "lib-b", depends: @["lib-a"])],
+        @["lib-b"], gateways = true)[0]
+      let record = fx.sf.scratch / "sub-reads.log"
+      # Every submodule URL names a location that does not exist, and the
+      # repositories the user initialized them from are removed below:
+      # population must take everything from the user's checkouts.
+      let nowhere = fx.sf.scratch / "nowhere" & "/"
+      let s = fx.sf.scratch / "submodule-sources"
+      createDir(s)
+      discard sourceRepo(s / "nested", "nested, committed\n")
+      discard sourceRepo(s / "sub", "sub, committed\n")
+      discard gitOut(s / "sub", "-c", "protocol.file.allow=always", "submodule",
+        "add", "-q", s / "nested", "nested")
+      discard gitOut(s / "sub", "config", "-f", ".gitmodules",
+        "submodule.nested.url", nowhere & "nested.git")
+      discard gitOut(s / "sub", "add", "-A")
+      discard gitOut(s / "sub", "commit", "-q", "-m", "nested")
+      discard sourceRepo(s / "uninit", "never initialized\n")
+
+      # lib-b: two submodules, `sub` (with `sub/nested`) initialized and
+      # `uninit` not, and a recipe whose tests read `sub` and `sub/nested`.
+      discard gitOut(libB.path, "-c", "protocol.file.allow=always", "submodule",
+        "add", "-q", s / "sub", "sub")
+      discard gitOut(libB.path / "sub", "config", "submodule.nested.url",
+        s / "nested")
+      discard gitOut(libB.path / "sub", "-c", "protocol.file.allow=always",
+        "submodule", "update", "-q", "--init")
+      discard gitOut(libB.path, "-c", "protocol.file.allow=always", "submodule",
+        "add", "-q", s / "uninit", "uninit")
+      discard gitOut(libB.path, "submodule", "deinit", "-q", "-f", "uninit")
+      for name in ["sub", "uninit"]:
+        discard gitOut(libB.path, "config", "-f", ".gitmodules",
+          "submodule." & name & ".url", nowhere & name & ".git")
+      discard gitOut(libB.path, "submodule", "sync", "-q", "--recursive")
+      removeDir(s)
+      check gitOut(libB.path / "sub", "config", "submodule.nested.url") ==
+        nowhere & "nested.git"
+      check readFile(libB.path / "sub" / "nested" / "unit.txt") ==
+        "nested, committed\n"
+      check toSeq(walkDir(libB.path / "uninit")).len == 0
+      writeFile(libB.path / "repro.nim", subRecipe(record))
+      writeFile(libB.path / "reprobuild" / "packages" / "sub_tool.nim",
+        subToolInterface)
+      let refreshedB = fx.reproIn(libB.path, @["lock", "refresh"])
+      check refreshedB.code == 0
+      let a0 = upstreamTip(fx.sf)
+      let bTip = fx.commitIn(libB, "unit b\n", "lib-b, with submodules")
+      let committedSub = gitOut(libB.path, "rev-parse", bTip & ":sub")
+      check committedSub == gitOut(libB.path / "sub", "rev-parse", "HEAD")
+      let aTip = fx.commitEdit("unit a\n", "lib-a, not tested yet")
+      doAssert bTip in fx.git("show " & aTip & ":repro.lock")
+      doAssert a0 in gitOut(libB.path, "show", bTip & ":repro.lock")
+
+      # The user's checkout of `sub` moves past the committed commit, to
+      # content the tests refuse. The pushed commit names the committed one,
+      # so that is the one the tests must read.
+      #
+      # `ignore = all` is what makes this state reachable, and it hides no
+      # defect. Without it the moved submodule is an uncommitted change, and
+      # `repro push` stops at lib-b's clean preflight ("working tree has
+      # uncommitted changes"), which is right: in place the tests would read
+      # content no commit names. With it git calls the checkout clean; a
+      # member certified IN PLACE then tests the moved submodule, but the
+      # content id names the checked-out submodule commit
+      # (`--ignore-submodules=none`), so the certificate is for that content,
+      # not for the pushed commit, and the push refuses the commit as
+      # uncovered (checked by hand on a single-repository push). Only a
+      # member certified against its pins, as here, is certified for the
+      # pushed commit, and there the tests must read the committed submodule.
+      writeFile(libB.path / "sub" / "unit.txt", "FAIL: the user's checkout\n")
+      discard gitOut(libB.path / "sub", "-c", "user.email=t@example.invalid",
+        "-c", "user.name=T", "commit", "-q", "-am", "moved on")
+      discard gitOut(libB.path, "config", "submodule.sub.ignore", "all")
+      check gitOut(libB.path, "status", "--porcelain").len == 0
+      let scratchBefore = isolatedScratchDirs()
+
+      let pushed = fx.push()
+      checkpoint("repro push:\n" & pushed.output)
+      let reads = if fileExists(record): readFile(record) else: ""
+      checkpoint("the tests read:\n" & reads)
+      check pushed.code == 0
+      let bReport = memberReport(pushed.output, "lib-b")
+      check "certified: t-unit" in bReport
+      check "certified against 'lib-a' at its pinned commit " & a0 in bReport
+      # Read in the temporary workspace, from the committed submodule commits;
+      # `uninit` held nothing there.
+      var inScratch = 0
+      for line in reads.splitLines():
+        if line.len == 0: continue
+        check "/repro-push-pins-" in line
+        check "holds []" in line
+        if "/repro-push-pins-" in line: inc inScratch
+      check inScratch == 2
+      check "sub/unit.txt in " in reads and ": sub, committed;" in reads
+      check "sub/nested/unit.txt in " in reads and
+        ": nested, committed;" in reads
+      check "FAIL" notin reads
+      check isolatedScratchDirs() == scratchBefore
+      check gitOut(libB.path / "sub", "rev-parse", "HEAD") != committedSub
+      fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
+        libB.bare, bTip)
