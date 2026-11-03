@@ -1,23 +1,34 @@
 ## Declared state sets (ReproOS Add-On Mode §11.1 step 2,
 ## ``repro_addon/state_sets``): the set a profile declares, the tree digest
-## a directory is verified by, and backup, verify and restore over real
-## directories and the host's real ``tar``.
+## a directory is verified by, backup, verify and restore over real
+## directories with Reprobuild's own state archive, and the carried-state
+## check every apply makes (``repro_infra/carried_state``).
 ##
 ## Falsifying mutations (``scripts/run_addon_unit_mutation.sh
-## t_addon_state_sets <mutation>``): ``state-units-not-checked`` (a backup
-## or restore runs while a unit of the set runs), ``state-archive-unchecked``
-## (a restore reads an archive the manifest does not name) and
-## ``state-restore-unverified`` (a staged tree is renamed into place without
-## its digest checked) and ``apply-ignores-carried-state`` (an apply starts
-## a unit whose carried state is not restored) each turn this test red.
+## t_addon_state_sets <mutation>``), each turning this test red:
+## ``state-units-not-checked`` (a backup or restore runs while a unit of the
+## set runs), ``state-archive-unchecked`` (a restore reads an archive the
+## manifest does not name), ``state-restore-unverified`` (a staged tree is
+## renamed into place without its digest checked),
+## ``apply-ignores-carried-state`` (an apply reaches carried state that is
+## not restored), ``pending-by-receipt-only`` (a receipt for another root
+## clears the wait), ``carried-reach-by-unit-name`` (a renamed unit that
+## keeps the directory is not held up), ``owner-ids-unchecked`` (a carried
+## tree's owners are not compared with the accounts the apply uses),
+## ``apply-ignores-hold`` (an apply runs under a backup's hold),
+## ``hardlinks-unchecked`` (a hard link passes the digest),
+## ``restore-leaves-staging`` (a retried restore leaves the old staging
+## directory) and ``restore-writes-dense`` (a restored file is not sparse).
 ##
 ## *Mocking.* Two seams, both justified:
 ## - the unit liveness (``AlivenessFn``): the production check reads a
 ##   unit's cgroup through systemd, which a unit test has no unit for. The
 ##   real check runs in the VM gates ``e2e_addon_adopt_hand_configured_service``
 ##   and the conversion gate, against real units;
-## - the hold (``hold = false``): ``systemctl mask --runtime`` needs root
-##   and a running systemd; the VM gates run it.
+## - the hold (``hold = false``): writing the drop-in and asking systemd
+##   whether it loaded it needs root and a running systemd; the VM gates
+##   run it. The apply's refusal under a hold is tested here over a hold
+##   file under a temporary root.
 ## The directories live under a temporary ``root`` instead of ``/``
 ## (the same parameter a conversion uses for a mounted target root).
 
@@ -25,7 +36,7 @@ import std/[json, os, posix, strutils, unittest]
 
 import repro_infra
 from repro_test_support import testCaseScratchSlug
-import repro_addon/[state_sets, transitions]
+import repro_addon/[addon_apply, state_sets, transitions]
 
 const Profile = """systemd.systemUnit {
   name = "app.service"
@@ -43,6 +54,31 @@ ExecStart=/bin/true
   stateDirectories = ["carry:/var/lib/app"]
 }
 """
+
+const
+  OldValidator = """systemd.systemUnit {
+  name = "eth-validator.service"
+  content = "[Service]
+ProtectSystem=strict
+ExecStart=/bin/true
+"
+  stateDirectories = ["carry:/var/lib/ethereum/validator"]
+}
+"""
+  RenamedValidator = OldValidator.replace("eth-validator.service",
+                                          "validator.service")
+  OnlyApp = """systemd.systemUnit {
+  name = "app.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+  stateDirectories = ["carry:/var/lib/app"]
+}
+"""
+
+proc confined(name, extra: string): string =
+  "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"[Service]\n" &
+    "ProtectSystem=strict\n" & extra & "ExecStart=/bin/true\n\"\n}\n"
 
 proc stopped(): AlivenessFn =
   result = proc (u: string): UnitAliveness = uaEmpty
@@ -141,13 +177,16 @@ suite "state sets":
 
     let dst = fresh("dst")
     createDir(dst / "var/lib")
-    check pendingCarriedState(src / "out").len == 1
+    check pendingCarriedState(src / "out", dst).len == 1
     expect StateSetError:
       discard restoreStateSet(src / "out", running("app.service"), root = dst)
     check not dirExists(dst / "var/lib/app")
     check restoreStateSet(src / "out", stopped(), root = dst) == @["/var/lib/app"]
     check treeDigest(dst / "var/lib/app") == treeDigest(src / "var/lib/app")
-    check pendingCarriedState(src / "out").len == 0
+    check pendingCarriedState(src / "out", dst).len == 0
+    # The receipt is tied to the root it was restored under: the live
+    # host ("/") still has the state pending.
+    check pendingCarriedState(src / "out", "/").len == 1
     for kind, path in walkDir(dst / "var/lib"):
       check not extractFilename(path).startsWith(".repro-restore-")
     # Idempotent: a second restore finds the tree there and restores none.
@@ -209,7 +248,7 @@ suite "state sets":
     expect StateSetError:
       discard restoreStateSet(src / "out", stopped(), root = d2)
     check not dirExists(d2 / "var/lib/app")
-    check pendingCarriedState(src / "out").len == 1
+    check pendingCarriedState(src / "out", d2).len == 1
 
   test "an apply waits for carried state: refused until it is restored":
     let src = fresh("pend-src")
@@ -217,24 +256,168 @@ suite "state sets":
     let p = parseSystemProfile(Profile)
     discard backupStateSet(p, src / "out", "h1", stopped(), hold = false,
                            root = src)
-    let why = carriedStateRefusal(p, src / "out")
+    let dst = fresh("pend-dst")
+    let why = carriedStateRefusal(p, src / "out", dst)
     check why.startsWith("ECarriedStatePending")
-    check "/var/lib/app (app.service)" in why
-    # A profile that declares none of the set's units is not held up.
-    check carriedStateRefusal(parseSystemProfile("""systemd.systemUnit {
-  name = "other.service"
-  content = "x"
-}
-"""), src / "out") == ""
+    check "/var/lib/app (systemUnit:app.service" in why
+    # A unit confined to paths of its own does not reach the set.
+    check carriedStateRefusal(parseSystemProfile(confined("other.service",
+      "ReadWritePaths=/var/lib/other\n")), src / "out", dst) == ""
+    # ... one whose paths reach it does, whatever its name.
+    for extra in ["ReadWritePaths=/var/lib/app\n", "ReadWritePaths=/var/lib\n",
+                  "StateDirectory=app\n", "WorkingDirectory=/var/lib/app/db\n",
+                  "BindPaths=/var/lib/app:/data\n",
+                  "ReadWritePaths=%S/app\n"]:
+      checkpoint extra
+      check carriedStateRefusal(parseSystemProfile(confined("x.service",
+        extra)), src / "out", dst).startsWith("ECarriedStatePending")
     # No manifest at all: nothing pending.
-    check carriedStateRefusal(p, fresh("no-manifest")) == ""
+    check carriedStateRefusal(p, fresh("no-manifest"), dst) == ""
     # An unreadable manifest refuses (fail closed).
     let broken = fresh("broken")
     writeFile(broken / ManifestFileName, "{")
-    check carriedStateRefusal(p, broken).len > 0
-    let dst = fresh("pend-dst")
+    check carriedStateRefusal(p, broken, dst).len > 0
     discard restoreStateSet(src / "out", stopped(), root = dst)
-    check carriedStateRefusal(p, src / "out") == ""
+    check carriedStateRefusal(p, src / "out", dst) == ""
+    # A restore under another root does not clear the wait here.
+    check carriedStateRefusal(p, src / "out", fresh("pend-live")).
+      startsWith("ECarriedStatePending")
+    # Nor does a receipt whose directory was since replaced (same path,
+    # another directory): only the restored one, or the manifest's tree.
+    removeDir(dst / "var/lib/app")
+    createDir(dst / "var/lib/app")
+    check carriedStateRefusal(p, src / "out", dst).
+      startsWith("ECarriedStatePending")
+
+  test "a renamed unit that keeps the carried directory is held up":
+    let src = fresh("ren-src")
+    createDir(src / "var/lib/ethereum/validator")
+    writeFile(src / "var/lib/ethereum/validator/validator.db", "history")
+    discard backupStateSet(parseSystemProfile(OldValidator), src / "out", "h",
+                           stopped(), hold = false, root = src)
+    let dst = fresh("ren-dst")
+    check carriedStateRefusal(parseSystemProfile(OldValidator), src / "out",
+      dst).startsWith("ECarriedStatePending")
+    check carriedStateRefusal(parseSystemProfile(RenamedValidator),
+      src / "out", dst).startsWith("ECarriedStatePending")
+
+  test "nothing is applied while a backup holds the host":
+    let r = fresh("held")
+    let p = parseSystemProfile(confined("other.service", ""))
+    check carriedStateRefusal(p, fresh("held-none"), r) == ""
+    createDir(r / "etc/systemd/system/app.service.d")
+    writeFile(r / "etc/systemd/system/app.service.d" / HoldDropInName, "x")
+    check heldUnits(r) == @["app.service"]
+    let why = carriedStateRefusal(p, fresh("held-none2"), r)
+    check why.startsWith("ECarriedStatePending") and "app.service" in why
+
+  test "the add-on's apply refuses first, before anything else":
+    let src = fresh("aa-src")
+    populate(src)
+    let p = parseSystemProfile(Profile)
+    discard backupStateSet(p, src / "out", "h1", stopped(), hold = false,
+                           root = src)
+    let dst = fresh("aa-dst")
+    let state = fresh("aa-state")
+    var why = ""
+    try:
+      discard runAddonApply(AddonApplyOptions(stateDir: state,
+        hostIdentity: "h", userProfileText: OnlyApp.replace(
+          "  stateDirectories", "  floorExceptions = [\"serviceFloor: a " &
+          "fixture\"]\n  stateDirectories"),
+        carriedStateDir: src / "out", carriedStateRoot: dst))
+    except AddonApplyError as e:
+      why = e.msg
+    check why.startsWith("ECarriedStatePending")
+    var written = 0
+    for _ in walkDirRec(state): inc written
+    check written == 0
+
+  test "carried owners must keep their ids in the profile that uses them":
+    let src = fresh("ids-src")
+    createDir(src / "var/lib/ethereum/validator")
+    writeFile(src / "var/lib/ethereum/validator/validator.db", "history")
+    createDir(src / "etc")
+    let me = $getuid()
+    let grp = $getgid()
+    writeFile(src / "etc/passwd", "eth-validator:x:" & me & ":" & grp &
+      "::/:/usr/sbin/nologin\n")
+    writeFile(src / "etc/group", "eth-validator:x:" & grp & ":\n")
+    discard backupStateSet(parseSystemProfile(OldValidator), src / "out", "h",
+                           stopped(), hold = false, root = src)
+    let dst = fresh("ids-dst")
+    discard restoreStateSet(src / "out", stopped(), root = dst)
+    proc withAccount(id: string): SystemProfile =
+      parseSystemProfile(OldValidator & "\nlinux.sysusersEntry {\n" &
+        "  name = \"eth-validator\"\n" &
+        (if id.len > 0: "  id = \"" & id & "\"\n" else: "") & "}\n")
+    # Pinned to the source's id (users and groups share it here): fine.
+    if me == grp:
+      check carriedStateRefusal(withAccount(me), src / "out", dst) == ""
+    # Created with a dynamic id: its id would differ, refused.
+    check "without a pinned id" in
+      carriedStateRefusal(withAccount(""), src / "out", dst)
+    # Pinned to another id: refused.
+    check "pinned to" in carriedStateRefusal(
+      withAccount($(getuid().int + 7)), src / "out", dst)
+    # The live account of that name has another id (a target whose
+    # dynamic ids differ): refused.
+    createDir(dst / "etc")
+    writeFile(dst / "etc/passwd", "eth-validator:x:" & $(getuid().int + 3) &
+      ":" & grp & "::/:/bin/sh\n")
+    check " here but owns " in
+      carriedStateRefusal(withAccount(me), src / "out", dst)
+
+  test "hard links are refused, not carried as copies":
+    let src = fresh("hl-src")
+    createDir(src / "var/lib/ethereum/validator")
+    writeFile(src / "var/lib/ethereum/validator/a", "x")
+    check link(cstring(src / "var/lib/ethereum/validator/a"),
+               cstring(src / "var/lib/ethereum/validator/b")) == 0
+    var why = ""
+    try:
+      discard backupStateSet(parseSystemProfile(OldValidator), src / "out",
+                             "h", stopped(), hold = false, root = src)
+    except StateSetError as e:
+      why = e.msg
+    check "hard links" in why
+
+  test "a retried restore removes a dead restore's staging directory":
+    let src = fresh("st-src")
+    populate(src)
+    discard backupStateSet(parseSystemProfile(Profile), src / "out", "h1",
+                           stopped(), hold = false, root = src)
+    let dst = fresh("st-dst")
+    createDir(dst / "var/lib/.repro-restore-app-99999/junk")
+    discard restoreStateSet(src / "out", stopped(), root = dst)
+    check not dirExists(dst / "var/lib/.repro-restore-app-99999")
+
+  test "a sparse file comes back sparse":
+    let src = fresh("sp-src")
+    createDir(src / "var/lib/app")
+    block:
+      var f = open(src / "var/lib/app/sparse", fmWrite)
+      f.write("head")
+      f.setFilePos(64 * 1024 * 64)
+      f.write("tail")
+      f.close()
+    discard backupStateSet(parseSystemProfile(OnlyApp), src / "out", "h",
+                           stopped(), hold = false, root = src)
+    # Restored onto tmpfs, which allocates every byte written (a file
+    # system that compresses, ZFS here, turns written zeros into holes
+    # itself and could not tell a sparse restore from a dense one).
+    let dst = (if dirExists("/dev/shm"): "/dev/shm" else: getTempDir()) /
+      ("t_addon_state_sets-sparse-" & $getpid())
+    removeDir(dst)
+    createDir(dst)
+    defer: removeDir(dst)
+    discard restoreStateSet(src / "out", stopped(), root = dst)
+    var st: Stat
+    check stat(cstring(dst / "var/lib/app/sparse"), st) == 0
+    check st.st_size == 64 * 1024 * 64 + 4
+    check st.st_blocks * 512 < 1024 * 1024
+    check readFile(dst / "var/lib/app/sparse") ==
+      readFile(src / "var/lib/app/sparse")
 
   test "owners: recorded by name, and a host that disagrees refuses":
     let src = fresh("own-src")

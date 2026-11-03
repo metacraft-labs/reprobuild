@@ -22,18 +22,22 @@
 ## The rehearsal:
 ##
 ## 1. On the add-on guest, once the validators have signed (the chain
-##    justified, or its head moved four epochs), the operator stops the set's units and runs ``repro system addon state
-##    backup``. Every unit of the set is then held: an operator's ``systemctl
-##    start`` of the validator fails. ``state verify`` against the manifest
-##    passes immediately before the "conversion" (the guest is powered off;
-##    its root disk is discarded).
+##    justified, or its head moved four epochs), the operator stops the
+##    set's units and runs ``repro system addon state backup``. Every unit
+##    of the set is then held: an operator's ``systemctl start`` of the
+##    validator fails, the deploy agent's next tick is refused (nothing is
+##    applied under a hold), and after a reboot of the add-on guest the
+##    hold is still there. ``state verify --source`` against the manifest
+##    passes immediately before the "conversion" (it also checks every
+##    hold is loaded); the guest is powered off and its root disk
+##    discarded.
 ## 2. A new guest boots a fresh overlay of the same stock image with the
 ##    kept disk attached, mounts it as the old host did, gets the engine
 ##    and the carried directory (``/var/lib/repro/system/carried``), and is
 ##    re-identified as ReproOS for the engine's commands only (decision
-##    32). An apply before the restore is refused with
-##    ``ECarriedStatePending`` and writes no unit (the validator cannot
-##    start on an empty directory).
+##    32). ``repro infra apply`` and ``repro system sync`` before the
+##    restore are each refused with ``ECarriedStatePending`` and write no
+##    unit (the validator cannot start on an empty directory).
 ## 3. The first-boot unit (``repro system state unit``) is installed and
 ##    the guest rebooted: the unit restores the carried directories before
 ##    ``sysinit.target``, and ``state verify`` finds every directory --
@@ -44,30 +48,34 @@
 ## 5. The validator never ran between backup and restore: on the add-on
 ##    guest no validator start after the backup; on the new guest its first
 ##    start is after the restore unit finished (the same boot's monotonic
-##    clock). Its slashing-protection history, exported as EIP-3076, holds
-##    every key's history from the epochs it signed on the add-on host and
-##    records no conflicting signature.
-##
-## What this gate does not ask: that the test network makes progress after
-## the conversion. It is one host holding every validator, so the chain
-## halts while the host is down, and resuming means the beacon node
-## processing every missed slot before it can propose, which prysm gives
-## up on within a slot (measured: "could not process slots ... context
-## canceled") after a reinstall's downtime. The validator meanwhile proves
-## its carried history the other way: it refuses, by its local slashing
-## protection, an attestation that would surround one it signed on the
-## add-on host. Progress after downtime is the network's property, not the
-## conversion's.
+##    clock). It signs again: its slashing-protection history, exported as
+##    EIP-3076, holds every key's history from the epochs it signed on the
+##    add-on host *and* attestations whose target is past the epoch the
+##    restore ran in, with no conflicting signature.
+## 6. The kept disk is required: with it missing (its fstab line naming a
+##    disk that does not exist, ``nofail``), vaultwarden does not start and
+##    writes nothing on the root file system (``RequiresMountsFor=``).
 ##
 ## Falsifying mutations:
 ## - add-on build ``state-units-not-held`` (the backup holds nothing): the
 ##   operator's start of the validator after the backup succeeds; red;
-## - engine build ``apply-ignores-carried-state``: the apply before the
-##   restore goes ahead; red;
-## - ``REPRO_A13_MUTATION=carried-archive-tampered`` (gate-level: one byte
-##   of the validator's archive is changed in transit): the restore unit
-##   refuses it, the carried state stays pending and the apply is refused;
-##   red.
+## - add-on build ``hold-runtime-only`` (the hold in ``/run``): after the
+##   reboot the validator starts; red;
+## - engine build ``apply-ignores-carried-state``: the apply and the sync
+##   before the restore go ahead; red;
+## - engine build ``keep-without-mount-requirement``: vaultwarden starts
+##   with its kept disk missing; red;
+## - ``REPRO_A13_MUTATION=carried-archive-tampered`` (one byte of the
+##   validator's archive changed in transit): the restore unit refuses it;
+##   red;
+## - ``REPRO_A13_MUTATION=rev-execution-dropped`` (the restored execution
+##   client's directory emptied before the apply): the node cannot extend
+##   its carried chain and the validator signs nothing new; red at the
+##   post-conversion signing check;
+## - ``REPRO_A13_MUTATION=rev-beacon-dropped`` (the beacon directory
+##   emptied): the node starts at genesis; red;
+## - ``REPRO_A13_MUTATION=rev-slashing-db-reset`` (``validator.db``
+##   deleted): the carried history is gone; red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``, ``REPRO_ADDON_ENGINE_CLOSURE`` (the
 ## full engine built from this tree) and ``REPRO_A12_PACKAGES``. Bases:
@@ -238,9 +246,25 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          old.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip() != "active",
          "start exit " & $tryStart.exitCode & ", starts since backup " & started &
          "\n" & tryStart.stderr)
-    let ver = old.exec(repro & " system addon state verify --from /root/carry")
-    step("immediately before the conversion the source matches the manifest",
-         ver.exitCode == 0, ver.stdout & ver.stderr)
+    # The hold survives a reboot of the source host.
+    old.rebootGuest()
+    let tryAgain = old.exec("systemctl start " & DefaultValidatorUnit)
+    step("after a reboot the validator is still held",
+         tryAgain.exitCode != 0 and
+         old.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip() != "active",
+         "start exit " & $tryAgain.exitCode & "\n" & tryAgain.stderr)
+    # Nothing is applied under the hold: the deploy agent's next tick is
+    # refused (the same profile, a new sequence).
+    discard bs.producer.publish(PublishSpec(sequence: 2,
+      profileText: addC.canonical, buildActions: addC.actions,
+      closureDigests: digests))
+    let t2 = old.tickUnits()
+    step("under the hold the deploy agent's tick is refused",
+         t2.outcome != "aoApplied" and "holds" in t2.applyLog & t2.fetchLog &
+           $t2, $t2 & "\n" & t2.applyLog)
+    let ver = old.exec(repro & " system addon state verify --source --from /root/carry")
+    step("immediately before the conversion the source matches the manifest " &
+         "and every unit is held", ver.exitCode == 0, ver.stdout & ver.stderr)
     old.copyFrom("/root/carry", work / "carry")
     let manifest = parseJson(readFile(work / "carry" / "state-set.json"))
     record["manifest"] = manifest
@@ -294,6 +318,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          nw.exec("test -e /etc/systemd/system/" & DefaultValidatorUnit).exitCode != 0 and
          nw.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip() != "active",
          "")
+    let sync = nw.exec(env & eng & " system sync --profile " & RefDir &
+      "/system.nim --host " & AgentTarget, timeoutSec = 3600)
+    step("`repro system sync` before the restore is refused " &
+         "(ECarriedStatePending) and wrote no unit",
+         sync.exitCode != 0 and "ECarriedStatePending" in
+           sync.stdout & sync.stderr and
+         nw.exec("test -e /etc/systemd/system/" & DefaultValidatorUnit).exitCode != 0,
+         sync.stdout & sync.stderr)
 
     # --- 3. The first-boot unit restores before anything starts.
     let unitText = nw.exec(eng & " system state unit")
@@ -310,6 +342,19 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          ver2.exitCode == 0 and "DIFFERS" notin ver2.stdout and
          ver2.stdout.count("ok ") == 4, ver2.stdout & ver2.stderr)
     let restoredDone = nw.monotonicOf(RestoreUnit, "ExecMainExitTimestampMonotonic")
+    let restoreEpoch = max(parseInt(nw.run("date +%s").strip()) -
+                           net.genesisTime, 0) div 12
+    record["restoreEpoch"] = %restoreEpoch
+    # The falsifiers of the post-conversion checks: the carried state is
+    # broken after it was restored and verified, before the apply.
+    case gateMutation()
+    of "rev-execution-dropped":
+      discard nw.run("find /var/lib/ethereum/execution -mindepth 1 -delete")
+    of "rev-beacon-dropped":
+      discard nw.run("find /var/lib/ethereum/beacon -mindepth 1 -delete")
+    of "rev-slashing-db-reset":
+      discard nw.run("find /var/lib/ethereum/validator -name validator.db -delete")
+    else: discard
 
     # --- 4. The full realisation.
     let applied = nw.exec(applyCmd, timeoutSec = 3600)
@@ -353,9 +398,19 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          restoredDone > 0 and firstStart > restoredDone and starts == "1",
          "restore done " & $restoredDone & ", validator start " & $firstStart &
          ", starts this boot " & starts)
-    # Let the validator run for a few epochs on the carried database
-    # before its history is read.
-    discard nw.exec("sleep 60")
+    # It signs again: the chain moves past the restore's epoch (the
+    # validators hold every key, so no epoch is justified without them).
+    var progressed = false
+    let deadline2 = epochTime() + 1500
+    while epochTime() < deadline2:
+      if nw.justifiedEpoch() > restoreEpoch or
+          nw.headSlot() >= (restoreEpoch + 4) * 6:
+        progressed = true
+        break
+      discard nw.exec("sleep 10")
+    discard nw.waitHeadSlot(nw.headSlot() + 12, 300)
+    record["afterConversion"] = %*{"head": nw.headSlot(),
+      "justified": nw.justifiedEpoch(), "restoreEpoch": restoreEpoch}
     discard nw.run("systemctl stop " & DefaultValidatorUnit)
     let hist = block:
       let r = nw.exec("rm -rf /var/tmp/a13-hist && mkdir -p /var/tmp/a13-hist && chown " &
@@ -382,8 +437,38 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          cs.len == 0 and carriedHistory and attestationCount([hist]) > 0,
          "conflicts " & $cs.len & ", earliest " & $earliest & ", latest " &
          $latest & ", add-on epoch " & $oldEpoch)
+    var latestPerKey = initTable[string, int]()
+    for rec in hist{"data"}.getElems():
+      for a in rec{"signed_attestations"}.getElems():
+        let k = rec{"pubkey"}.getStr()
+        latestPerKey[k] = max(latestPerKey.getOrDefault(k),
+                              parseInt(a{"target_epoch"}.getStr("0")))
+    var allSignedAfter = latestPerKey.len == InteropValidators
+    for k, ep in latestPerKey:
+      if ep <= restoreEpoch: allSignedAfter = false
+    step("the validator signs on the converted host: every key attested " &
+         "for an epoch past the one the restore ran in",
+         progressed and allSignedAfter,
+         "chain progressed " & $progressed & ", latest per key " &
+         $latestPerKey & ", restore epoch " & $restoreEpoch)
+
+    # --- 6. The kept disk is required.
+    discard nw.run("systemctl stop vaultwarden.service; umount " & KeepDir &
+      "; sed -i 's#^LABEL=repro-keep .*#LABEL=repro-missing " & KeepDir &
+      " ext4 defaults,nofail,x-systemd.device-timeout=5s 0 2#' /etc/fstab; " &
+      "systemctl daemon-reload")
+    let vwStart = nw.exec("systemctl start vaultwarden.service", timeoutSec = 120)
+    discard nw.exec("sleep 5")
+    let vwState = nw.exec("systemctl is-active vaultwarden.service").stdout.strip()
+    let onRoot = nw.exec("ls -A " & KeepDir).stdout.strip()
+    step("with its kept disk missing vaultwarden does not start and writes " &
+         "nothing on the root file system",
+         vwStart.exitCode != 0 and vwState != "active" and onRoot.len == 0,
+         "start exit " & $vwStart.exitCode & ", state " & vwState &
+         ", on the root file system: " & onRoot)
     record["history"] = %*{"keys": earliest.len, "latestTarget": latest,
-                           "addOnEpoch": oldEpoch, "conflicts": cs.len}
+                           "addOnEpoch": oldEpoch, "restoreEpoch": restoreEpoch,
+                           "conflicts": cs.len}
   except MutationStop as e:
     steps.add(%*{"step": "stopped at the first red step under the mutation",
                  "ok": false, "detail": e.msg})

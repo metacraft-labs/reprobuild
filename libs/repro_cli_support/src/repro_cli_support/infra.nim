@@ -47,7 +47,6 @@ when defined(linux):
   import repro_addon/mutations as addon_mutations
   import repro_addon/secrets_ops as addon_secrets_ops
   import repro_addon/switch as addon_switch
-  import repro_addon/state_sets as addon_state_sets
 import repro_infra/host_base
 import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
@@ -958,15 +957,15 @@ proc runInfraApply(args: openArray[string]): int =
 
   when defined(linux):
     # A host a conversion brought carried state to applies nothing that
-    # would start a unit of it before the restore (ReproOS Add-On Mode
-    # §11.1): refused here, before anything is written, on a full host and
-    # an add-on host alike.
+    # could reach it before the restore (ReproOS Add-On Mode §11.1). The
+    # library's apply refuses it too (every entry point reaches that); it
+    # is asked here as well because this command writes the full host's
+    # secrets before it calls the library.
     try:
-      let why = addon_state_sets.carriedStateRefusal(
-        parseSystemProfile(profileText))
-      if why.len > 0:
-        stderr.writeLine("repro infra apply: " & why)
-        return 2
+      requireCarriedStateReady(parseSystemProfile(profileText))
+    except ECarriedStatePending as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
     except ESystemProfileInvalid as e:
       stderr.writeLine("repro infra apply: " & e.msg)
       return 2

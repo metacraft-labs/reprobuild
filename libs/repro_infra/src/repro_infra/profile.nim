@@ -828,6 +828,32 @@ proc credentialLines*(unitName: string; credentials: openArray[string]):
     result.add("LoadCredential=" & c & ":" & SecretsRunRoot & "/" & svc &
                "/" & c)
 
+proc withKeepMounts(r: SystemResource; content: string): string =
+  ## A unit whose state directories include a *kept* one (on a disk a
+  ## conversion keeps, ReproOS-Add-On-Mode §11.1) gets
+  ## `RequiresMountsFor=` on each kept path in its `[Unit]` section, so it
+  ## does not start while the disk is not mounted: with the disk missing
+  ## (an fstab line with `nofail`), the service would otherwise start on an
+  ## empty directory of the root file system and write fresh state there
+  ## (https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#RequiresMountsFor=).
+  var kept: seq[string]
+  for d in r.suStateDirectories:
+    if d.disposition == sdKeep: kept.add(d.path)
+  if kept.len == 0: return content
+  when InfraAddonMutation == "keep-without-mount-requirement":
+    return content
+  let line = "RequiresMountsFor=" & kept.join(" ")
+  var outLines: seq[string]
+  var done = false
+  for l in content.split('\n'):
+    outLines.add(l)
+    if not done and l.strip() == "[Unit]":
+      outLines.add(line)
+      done = true
+  if not done:
+    outLines = @["[Unit]", line, ""] & outLines
+  outLines.join("\n")
+
 proc renderedUnitBeforeFloor*(r: SystemResource): string =
   ## The unit-file bytes a `systemd.systemUnit` resource installs, before
   ## the hardening floor (`renderedSystemUnitContent`). Without
@@ -852,7 +878,7 @@ proc renderedUnitBeforeFloor*(r: SystemResource): string =
       raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
         getCurrentExceptionMsg())
   if r.suCredentials.len == 0:
-    return content
+    return withKeepMounts(r, content)
   if credentialServiceOf(r.suName).len == 0:
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
       "' names credentials, but only a plain `<service>.service` unit " &
@@ -903,7 +929,7 @@ proc renderedUnitBeforeFloor*(r: SystemResource): string =
   if not unitSeen:
     outLines = @["[Unit]", "Wants=" & SecretsOrderingUnit,
                  "After=" & SecretsOrderingUnit, ""] & outLines
-  outLines.join("\n")
+  withKeepMounts(r, outLines.join("\n"))
 
 proc effectiveHardening*(r: SystemResource): string =
   ## The hardening the unit is rendered with: its `hardening` field, which

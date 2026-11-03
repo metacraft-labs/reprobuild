@@ -7,7 +7,7 @@
 ##   repro system addon import --unit <name>
 ##   repro system addon state backup --profile <file> --out <dir>
 ##   repro system addon state release --profile <file>
-##   repro system addon state verify --from <dir> [--root R] [--only keep|carry]
+##   repro system addon state verify --from <dir> [--root R] [--only keep|carry] [--source]
 ##   repro system addon state restore [--from <dir>] [--root R] [--boot]
 ##   repro system addon state digest <path>
 ##   repro system addon state unit
@@ -30,13 +30,16 @@ const
 
   backup --profile <file> --out <dir>
       Back up the profile's state set (spec §11.1): refuses unless every
-      unit of the set is stopped, holds each (a runtime drop-in) until the
-      next boot, archives each carried directory and writes the manifest.
+      unit of the set is stopped, holds each (a drop-in in /etc that
+      fails every start; while one exists every apply refuses), archives
+      each carried directory and writes the manifest.
   release --profile <file>
       Lift the hold of a backup (an abandoned conversion).
-  verify --from <dir> [--root R] [--only keep|carry]
+  verify --from <dir> [--root R] [--only keep|carry] [--source]
       Recompute every directory's digest against the manifest in <dir>;
-      exit 1 on a difference.
+      exit 1 on a difference. --source (on the host the backup was taken
+      on, just before the conversion): also exit 1 when a unit of the set
+      is no longer held.
   restore [--from <dir>] [--root R] [--boot]
       Restore the carried directories (default dir /var/lib/repro/system/carried);
       --boot (the first-boot unit): nothing to do when there is no manifest.
@@ -65,7 +68,7 @@ proc stateRestoreUnitText*(repro: string): string =
     "\n[Service]\n" &
     "Type=oneshot\n" &
     "RemainAfterExit=yes\n" &
-    "ExecStart=" & repro & " system addon state restore --boot\n" &
+    "ExecStart=" & repro & " system state restore --boot\n" &
     "\n[Install]\n" &
     "WantedBy=sysinit.target\n"
 
@@ -114,6 +117,7 @@ proc runStateCli*(args: seq[string]): int =
   let rest = args[1 .. ^1]
   var profile, outDir, fromDir, root, only = ""
   var boot = false
+  var source = false
   var positional: seq[string]
   try:
     var i = 0
@@ -131,6 +135,8 @@ proc runStateCli*(args: seq[string]): int =
         only = takeArg(rest, i, "--only")
       elif a == "--boot":
         boot = true
+      elif a == "--source":
+        source = true
       elif a.startsWith("-"):
         raise newException(ValueError, "unknown option " & a)
       else:
@@ -174,9 +180,20 @@ proc runStateCli*(args: seq[string]): int =
         of "keep": {sdKeep}
         of "carry": {sdCarry}
         else: raise newException(ValueError, "--only is keep or carry")
-      let r = verifyEntries(readStateManifest(fromDir), root, set)
+      let m = readStateManifest(fromDir)
+      let r = verifyEntries(m, root, set)
       for p in r.matched: stdout.write("ok " & p & "\n")
       for d in r.differing: stdout.write("DIFFERS " & d & "\n")
+      if source:
+        # On the source host just before the conversion: every unit of the
+        # set must still be held (`systemctl revert` deletes drop-ins).
+        var units: seq[string]
+        for e in m.entries:
+          for u in e.units:
+            if u notin units: units.add(u)
+        for u in holdsNotLoaded(units):
+          stdout.write("HOLD MISSING " & u & "\n")
+          return 1
       (if r.differing.len == 0: 0 else: 1)
     of "restore":
       let dir = if fromDir.len > 0: fromDir else: CarriedStateDir
@@ -187,7 +204,7 @@ proc runStateCli*(args: seq[string]): int =
         raise newException(ValueError, "no manifest at " & dir)
       let done = restoreStateSet(dir, root = root)
       for p in done: stdout.write("restored " & p & "\n")
-      let left = pendingCarriedState(dir)
+      let left = pendingCarriedState(dir, root)
       if left.len > 0:
         raise newException(StateSetError, $left.len &
           " carried directory(ies) still pending")

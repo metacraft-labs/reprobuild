@@ -422,6 +422,30 @@
 ##                                            carried state is not restored
 ## ``import-writes-skeleton``                 the import keeps a copy of
 ##                                            its skeleton under ``/etc``
+## ``pending-by-receipt-only``                carried state counts as
+##                                            restored by the receipt
+##                                            alone, whatever root it names
+## ``carried-reach-by-unit-name``             the carried-state wait matches
+##                                            units by name, not by what
+##                                            they can reach
+## ``owner-ids-unchecked``                    a carried tree's owner ids
+##                                            are not compared with the
+##                                            accounts the apply uses
+## ``apply-ignores-hold``                     an apply runs while a state
+##                                            backup holds the host
+## ``hold-runtime-only``                      the hold is written in /run
+##                                            (lost at a reboot)
+## ``hardlinks-unchecked``                    the tree digest passes a file
+##                                            with several hard links
+## ``restore-leaves-staging``                 a retried restore leaves an
+##                                            earlier staging directory
+## ``restore-writes-dense``                   a restore writes zero blocks
+##                                            (the file is not sparse)
+## ``keep-without-mount-requirement``         a unit with a kept directory
+##                                            gets no RequiresMountsFor=
+## ``import-copies-env-secret``               the import copies a secret
+##                                            Environment= value into the
+##                                            skeleton
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -613,7 +637,19 @@ const
                           # is not restored yet.
                           "apply-ignores-carried-state",
                           # A13: the import writes its skeleton on the host.
-                          "import-writes-skeleton"]
+                          "import-writes-skeleton",
+                          # A13 review: the falsifiers of the review's
+                          # fixes (see the table above).
+                          "pending-by-receipt-only",
+                          "carried-reach-by-unit-name",
+                          "owner-ids-unchecked",
+                          "apply-ignores-hold",
+                          "hold-runtime-only",
+                          "hardlinks-unchecked",
+                          "restore-leaves-staging",
+                          "restore-writes-dense",
+                          "keep-without-mount-requirement",
+                          "import-copies-env-secret"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

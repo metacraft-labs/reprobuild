@@ -12,21 +12,29 @@
 ##   through the API, snapshotted by a restart;
 ## - ``vaultwarden``: a binary copied to ``/usr/local/bin`` by hand, an
 ##   account made with ``useradd``, a tmpfiles fragment for its data
-##   directory, an environment file holding the admin token, and its unit.
+##   directory (named ``repro-vaultwarden.conf``, as the add-on's tmpfiles
+##   class names its own), an environment file holding the admin token,
+##   and its unit;
+## - a local drop-in over the package's own ``prometheus-alertmanager``
+##   unit, ``50-repro-nice.conf``.
 ##
 ## Then, on a bootstrapped add-on host:
 ##
 ## 1. **Describe.** ``repro system addon import --unit`` for each. The host
 ##    fingerprint is identical before and after (the import wrote nothing),
 ##    and each skeleton flags what it must: the distribution binary and its
-##    package, the hand-installed binary, the admin token as a secret, the
-##    accounts and the state directories.
+##    package, the hand-installed binary, the admin token as a secret (the
+##    environment file holding it is not declared, and the token is in no
+##    skeleton), the package unit, the accounts and the state directories.
 ## 2. **Plan and adopt.** The two skeletons, as one profile, plan as
 ##    adoptions only (no create, update or reconcile), and the apply
 ##    commits a generation whose ledger records every pre-existing object
-##    with the digest it had and ``collision = adopt``. The fingerprint is
-##    unchanged but for the static tree link the commit moves, and neither
-##    service was restarted (its ``InvocationID`` is the same).
+##    with the digest it had and ``collision = adopt`` -- the units, the
+##    configuration files, the tmpfiles fragment (whose adoption runs
+##    ``systemd-tmpfiles --create``) and the drop-in. The fingerprint is
+##    unchanged but for the static tree link the commit moves, neither
+##    service was restarted (its ``InvocationID`` is the same), and neither
+##    state directory changed.
 ## 3. **Converge.** The hardened definitions: each service from a store
 ##    closure (alertmanager's apt closure from the archive; vaultwarden's
 ##    binary as a fixture ``.deb``, one-member closure), confinement, the
@@ -112,6 +120,8 @@ WantedBy=multi-user.target
   VwEnvBase* = "DATA_FOLDER=/var/lib/vaultwarden\nROCKET_ADDRESS=127.0.0.1\n" &
     "ROCKET_PORT=8000\nWEB_VAULT_ENABLED=false\n"
   VwTmpfiles* = "d /var/lib/vaultwarden 0700 vaultwarden vaultwarden -\n"
+  AmDropInDir* = "/etc/systemd/system/prometheus-alertmanager.service.d"
+  AmDropIn* = "[Service]\nNice=5\n"
   VwState* = "/var/lib/vaultwarden"
 
 type MutationStop = object of CatchableError
@@ -126,6 +136,13 @@ proc buildAlertmanager*(g: Guest; step: StepFn) =
   step("operator: apt installs prometheus-alertmanager", inst.exitCode == 0,
        inst.stdout.splitLines()[^min(5, inst.stdout.splitLines().len) .. ^1].join("\n"))
   discard g.run("systemctl disable --now prometheus-alertmanager.service")
+  # A local drop-in over the package's own unit, named as the add-on
+  # names its drop-ins (adopted as a `systemd.systemDropIn`).
+  writeFile(g.runDir / "am.dropin", AmDropIn)
+  discard g.run("mkdir -p " & AmDropInDir)
+  g.copyTo(g.runDir / "am.dropin", AmDropInDir & "/50-repro-nice.conf")
+  discard g.run("chmod 0644 " & AmDropInDir & "/50-repro-nice.conf && " &
+    "systemctl daemon-reload")
   writeFile(g.runDir / "am.service", AmUnit)
   writeFile(g.runDir / "am.default", AmDefault)
   writeFile(g.runDir / "am.yml", AmConfig)
@@ -163,11 +180,11 @@ proc buildVaultwarden*(g: Guest; adminToken: string; step: StepFn) =
     "vaultwarden && mkdir -p /etc/vaultwarden")
   g.copyTo(g.runDir / "vw.service", "/etc/systemd/system/vaultwarden.service")
   g.copyTo(g.runDir / "vw.env", "/etc/vaultwarden/vaultwarden.env")
-  g.copyTo(g.runDir / "vw.tmpfiles", "/etc/tmpfiles.d/vaultwarden.conf")
+  g.copyTo(g.runDir / "vw.tmpfiles", "/etc/tmpfiles.d/repro-vaultwarden.conf")
   discard g.run("chmod 0644 /etc/systemd/system/vaultwarden.service " &
-    "/etc/tmpfiles.d/vaultwarden.conf && chmod 0600 " &
+    "/etc/tmpfiles.d/repro-vaultwarden.conf && chmod 0600 " &
     "/etc/vaultwarden/vaultwarden.env && systemd-tmpfiles --create " &
-    "/etc/tmpfiles.d/vaultwarden.conf && systemctl daemon-reload && " &
+    "/etc/tmpfiles.d/repro-vaultwarden.conf && systemctl daemon-reload && " &
     "systemctl enable --now vaultwarden.service")
   let up = g.exec("for i in $(seq 1 60); do curl -sf -o /dev/null " &
     "http://127.0.0.1:8000/alive && exit 0; sleep 1; done; exit 1")
@@ -261,6 +278,8 @@ WantedBy=multi-user.target
   "addOn {\n  managedEtcPrefixes = [\"/etc/alertmanager/alertmanager.yml\", " &
     "\"/etc/default/alertmanager\", \"/etc/vaultwarden/vaultwarden.env\"]\n}\n\n" &
   "secrets.secretFile {\n  service = \"vaultwarden\"\n  name = \"admin-token\"\n}\n\n" &
+  "systemd.systemDropIn {\n  unit = \"prometheus-alertmanager.service\"\n" &
+    "  name = \"nice\"\n  content = " & q(AmDropIn) & "\n}\n\n" &
   "fs.systemFile {\n  path = \"/etc/default/alertmanager\"\n  content = " &
     q(AmDefault) & "\n}\n\n" &
   "fs.systemFile {\n  path = \"/etc/alertmanager/alertmanager.yml\"\n  content = " &
@@ -329,13 +348,20 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let f0 = g.takeFingerprint(repro)
     let skAm = g.exec(repro & " system addon import --unit alertmanager.service")
     let skVw = g.exec(repro & " system addon import --unit vaultwarden.service")
+    let skPk = g.exec(repro & " system addon import --unit " &
+                      "prometheus-alertmanager.service")
     let f1 = g.takeFingerprint(repro)
-    step("import describes both units", skAm.exitCode == 0 and
-         skVw.exitCode == 0, skAm.stderr & skVw.stderr)
+    step("import describes the three units", skAm.exitCode == 0 and
+         skVw.exitCode == 0 and skPk.exitCode == 0,
+         skAm.stderr & skVw.stderr & skPk.stderr)
     let same = identityReport(f0, f1)
     step("import wrote nothing (fingerprint identical)", same.ok, same.text)
     record["skeletons"] = %*{"alertmanager": skAm.stdout,
-                             "vaultwarden": skVw.stdout}
+                             "vaultwarden": skVw.stdout,
+                             "prometheus-alertmanager": skPk.stdout}
+    step("the admin token is in no skeleton (its file is shown with a " &
+         "placeholder)", adminToken notin skVw.stdout and
+         "ADMIN_TOKEN=<secret" in skVw.stdout, "")
     for (sk, needles) in [
         (skAm.stdout, @["# FLAG: binary:", "/usr/bin/prometheus-alertmanager",
                         "package prometheus-alertmanager"]),
@@ -345,7 +371,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
                         "no package"]),
         (skVw.stdout, @["# FLAG: secret:", "ADMIN_TOKEN"]),
         (skVw.stdout, @["# FLAG: state: " & VwState]),
-        (skVw.stdout, @["# FLAG: tmpfiles: /etc/tmpfiles.d/vaultwarden.conf"])]:
+        (skPk.stdout, @["# FLAG: unit: prometheus-alertmanager.service"])]:
       var all = true
       for n in needles:
         if n notin sk: all = false
@@ -353,7 +379,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     if fails.len > 0: return fails
 
     # --- 2. Plan and adopt: adoptions only, zero writes, no restart.
-    let skeleton = mergeSkeletons([skAm.stdout, skVw.stdout])
+    let skeleton = mergeSkeletons([skAm.stdout, skVw.stdout, skPk.stdout])
     let plan = g.planProfile(repro, "skeleton", skeleton)
     let verdicts = planVerdicts(plan.stdout)
     var declared = initHashSet[string]()
@@ -372,7 +398,8 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "systemFile:/etc/default/alertmanager",
       "systemFile:/etc/alertmanager/alertmanager.yml",
       "systemUnit:vaultwarden.service",
-      "systemFile:/etc/vaultwarden/vaultwarden.env"]
+      "tmpfilesRule:repro-vaultwarden.conf",
+      "systemDropIn:prometheus-alertmanager.service/nice"]
     var missing: seq[string]
     for a in wantAdopted:
       if a notin adopted: missing.add(a)
@@ -382,7 +409,16 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          plan.stdout & plan.stderr)
     let shas = g.run("sha256sum /etc/systemd/system/alertmanager.service " &
       "/etc/default/alertmanager /etc/alertmanager/alertmanager.yml " &
-      "/etc/systemd/system/vaultwarden.service /etc/vaultwarden/vaultwarden.env")
+      "/etc/systemd/system/vaultwarden.service " &
+      "/etc/tmpfiles.d/repro-vaultwarden.conf " & AmDropInDir & "/50-repro-nice.conf")
+    # Adopting the tmpfiles fragment runs `systemd-tmpfiles --create` on
+    # it; the state it names must not change. (Taken with the services
+    # stopped, as alertmanager snapshots on shutdown; started again before
+    # their invocations are read.)
+    discard g.run("systemctl stop alertmanager.service vaultwarden.service")
+    let a0Am = g.stateDigest(repro, AmState)
+    let a0Vw = g.stateDigest(repro, VwState)
+    discard g.run("systemctl start alertmanager.service vaultwarden.service")
     let invAm = g.invocation("alertmanager.service")
     let invVw = g.invocation("vaultwarden.service")
     let ledgerBefore = g.ledgerOf()
@@ -395,6 +431,11 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     step("adoption restarted nothing", g.invocation("alertmanager.service") ==
          invAm and g.invocation("vaultwarden.service") == invVw,
          invAm & " " & invVw)
+    discard g.run("systemctl stop alertmanager.service vaultwarden.service")
+    step("adoption changed neither service's state directory",
+         g.stateDigest(repro, AmState) == a0Am and
+         g.stateDigest(repro, VwState) == a0Vw, "")
+    discard g.run("systemctl start alertmanager.service vaultwarden.service")
     let led = parseLedger(g.ledgerOf())
     var unmatched: seq[string]
     for line in shas.splitLines():
@@ -430,7 +471,11 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let mode = if gateMutation() == "converge-touches-state": "0700" else: "0750"
     let conv = convergedProfile(amClosure.lockText,
                                 renderAptClosureLock(vw.lock), mode)
-    let ca = g.applyProfile(repro, "converged", conv)
+    # The environment file held the admin token, so the skeleton did not
+    # adopt it: it is still the operator's, and the converged profile
+    # replaces it with its token-free form (its bytes are kept for
+    # rollback and uninstall).
+    let ca = g.applyProfile(repro, "converged", conv, " --reconcile-drift")
     step("the converged definitions apply", ca.exitCode == 0,
          ca.stdout & ca.stderr & "\n" &
          g.exec("journalctl -u alertmanager -u vaultwarden --no-pager -n 40").stdout)

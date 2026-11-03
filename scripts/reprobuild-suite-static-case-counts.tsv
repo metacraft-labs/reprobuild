@@ -40,7 +40,7 @@ libs/repro_addon/tests/t_addon_engine_agent_route.nim	nim	4
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
-libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	7
+libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
 libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	9
@@ -54,7 +54,7 @@ libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_service_floor.nim	nim	19
-libs/repro_addon/tests/t_addon_state_sets.nim	nim	9
+libs/repro_addon/tests/t_addon_state_sets.nim	nim	16
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
@@ -474,6 +474,7 @@ libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
+libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim	nim	2
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	207
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
@@ -656,7 +657,7 @@ libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	96
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	41
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim	nim	8
-libs/repro_profile_compile/tests/t_system_unit_state_directories.nim	nim	7
+libs/repro_profile_compile/tests/t_system_unit_state_directories.nim	nim	8
 libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim	nim	5
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	35

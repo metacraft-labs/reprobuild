@@ -188,6 +188,53 @@ proc statePathOf(key, value: string): seq[string] =
       else: continue
     result.add(p)
 
+const SecretPlaceholder* = "<secret: not copied; move it to a credential>"
+
+proc environmentAssignments*(value: string): seq[(string, string)] =
+  ## The ``KEY=value`` assignments of one ``Environment=`` line (several
+  ## per line, each optionally quoted;
+  ## https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment=).
+  for w in commandTokens(value):
+    let eq = w.find('=')
+    if eq > 0: result.add((w[0 ..< eq], w[eq + 1 .. ^1]))
+
+proc secretKeysOfUnitText*(text: string): seq[string] =
+  ## The secret-looking names an ``Environment=`` of ``text`` sets.
+  for (section, key, value) in unitDirectives(text):
+    if section == "Service" and key == "Environment":
+      for (k, v) in environmentAssignments(value):
+        if looksSecret(k) and k notin result: result.add(k)
+
+proc redacted*(text: string; keys: seq[string]): string =
+  ## ``text`` with the value of each secret assignment replaced by
+  ## ``SecretPlaceholder`` (``KEY=value`` in an environment file or an
+  ## ``Environment=`` line); for the commented placeholder the skeleton
+  ## shows instead of the object.
+  var lines: seq[string]
+  for l in text.splitLines():
+    var line = l
+    for k in keys:
+      let i = line.find(k & "=")
+      if i >= 0 and (i == 0 or line[i - 1] in {' ', '"', '\'', '\t', '='}):
+        var j = i + k.len + 1
+        var quote = '\0'
+        if i > 0 and line[i - 1] in {'"', '\''}:
+          quote = line[i - 1]            # "KEY=value" quoted as a whole
+        elif j < line.len and line[j] in {'"', '\''}:
+          quote = line[j]                # KEY="value"
+          inc j
+        var e = j
+        while e < line.len and (if quote != '\0': line[e] != quote
+                                 else: line[e] notin Whitespace):
+          inc e
+        line = line[0 ..< j] & SecretPlaceholder & line[e .. ^1]
+    lines.add(line)
+  lines.join("\n")
+
+proc commentedStanza(r: SystemResource): string =
+  for l in renderStanza(r).join("\n").split('\n'):
+    result.add("#   " & l & "\n")
+
 proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
   ## Describe ``unit`` (see the module comment). Raises ``ImportError``
   ## when the unit cannot be described at all.
@@ -204,22 +251,46 @@ proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
   var prefixes: seq[string]
   var seenFiles = initHashSet[string]()
   var texts: seq[string]            # the unit's own text and its drop-ins
+  var placeholders: seq[string]     # commented stanzas for secret holders
+  proc holdsSecrets(path, text: string; envFile: bool): seq[string] =
+    ## The secret-looking names ``text`` (at ``path``) sets, each flagged.
+    if envFile:
+      for (k, v) in envFileAssignments(text):
+        if looksSecret(k) and k notin result: result.add(k)
+    else:
+      result = secretKeysOfUnitText(text)
+    for k in result:
+      flags.add("secret: " & path & " sets " & k & ", which looks like a " &
+        "secret: its value is not copied; at convergence move it to a " &
+        "credential (`secrets.secretFile` and the unit's `credentials`, " &
+        "spec §10.3) and out of the file")
+    when mutated("import-copies-env-secret"):
+      result = @[]
   let fragment = prov.fragmentPath
   let etcUnit = "/etc/systemd/system/" & unit
   var unitDeclared = false
   if fragment == etcUnit:
     let content = o.readHostFile(fragment)
     texts.add(content)
+    let secrets = holdsSecrets(fragment, content, envFile = false)
     # The add-on puts every unit it defines under the service floor by
     # default (spec §10.1), which would render bytes other than the
     # operator's and turn the adoption into a write. The skeleton waives
     # it, by name and with its reason, so adopting writes nothing; putting
     # the unit under the floor is convergence (step 4).
-    resources.add(SystemResource(kind: srkSystemdSystemUnit, suName: unit,
+    let unitRes = SystemResource(kind: srkSystemdSystemUnit, suName: unit,
       suContent: content, suEnabled: prov.unitFileState == "enabled",
       suFloorExceptions: @[AdoptedFloorWaiver],
-      address: "systemUnit:" & unit))
-    unitDeclared = true
+      address: "systemUnit:" & unit)
+    if secrets.len > 0:
+      # The unit holds a secret: it is not declared (its bytes would put
+      # the secret in the profile); the placeholder shows its shape.
+      var ph = unitRes
+      ph.suContent = redacted(content, secrets)
+      placeholders.add(commentedStanza(ph))
+    else:
+      resources.add(unitRes)
+      unitDeclared = true
     flags.add("floor: " & unit & " waives the service floor so that " &
       "adopting it writes nothing; converge it to the floor (remove the " &
       "waiver, name only the exceptions it needs, spec §10.1)")
@@ -233,6 +304,7 @@ proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
         "neither /etc/systemd/system nor a package unit directory " &
         "(a transient, generated, local or aliased unit is not adopted)")
     texts.add(o.readHostFile(fragment))
+    discard holdsSecrets(fragment, texts[^1], envFile = false)
     let owner = o.driver.ownerText(fragment)
     flags.add("unit: " & unit & " is " & fragment &
       (if owner.len > 0: " from " & owner else: "") & "; the skeleton " &
@@ -240,10 +312,32 @@ proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
       "`collision = \"dropIn\"` (your lines as a drop-in) or " &
       "`collision = \"replace\"` (spec §4.3)")
   for d in prov.dropInPaths:
-    texts.add(o.readHostFile(d))
+    let text = o.readHostFile(d)
+    texts.add(text)
+    let secrets = holdsSecrets(d, text, envFile = false)
+    let base = extractFilename(d)
+    let dropInDir = "/etc/systemd/system/" & unit & ".d/"
+    let named = base.startsWith("50-repro-") and base.endsWith(".conf") and
+      d == dropInDir & base
+    let name = if named: base["50-repro-".len ..< base.len - ".conf".len]
+               else: ""
+    if not unitDeclared and fragment != etcUnit and named and
+        name.len > 0 and isSafeDropInName(name):
+      # A drop-in, named as the add-on's drop-in class names its own, over
+      # a distribution unit: adopted as a `systemd.systemDropIn`.
+      let r = SystemResource(kind: srkSystemdSystemDropIn, diUnit: unit,
+        diName: name, diContent: text,
+        address: "systemDropIn:" & unit & "/" & name)
+      if secrets.len > 0:
+        var ph = r
+        ph.diContent = redacted(text, secrets)
+        placeholders.add(commentedStanza(ph))
+      else:
+        resources.add(r)
+      continue
     flags.add("drop-in: " & d & " stays unmanaged: the add-on owns drop-ins " &
-      "only as `50-repro-<name>.conf`; fold its lines into the unit at " &
-      "convergence")
+      "only as `50-repro-<name>.conf` over a distribution unit; fold its " &
+      "lines into the unit at convergence")
   # Every directive systemd reads for the unit, its own file first.
   var directives: seq[(string, string, string)]
   for t in texts: directives.add(unitDirectives(t))
@@ -295,11 +389,6 @@ proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
     if e notin referenced: referenced.insert(e, 0)
     if o.isRegularHostFile(e):
       for (k, v) in envFileAssignments(o.readHostFile(e)):
-        if looksSecret(k):
-          flags.add("secret: " & e & " sets " & k & ", which looks like " &
-            "a secret: at convergence move it to a credential " &
-            "(`secrets.secretFile` and the unit's `credentials`, spec " &
-            "§10.3) and out of the file")
         for tok in commandTokens(v):
           if tok.startsWith("/etc/") and tok notin referenced:
             referenced.add(tok)
@@ -331,8 +420,18 @@ proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
     if perr.len > 0:
       flags.add("file: " & path & " cannot be managed: " & perr)
       continue
-    resources.add(SystemResource(kind: srkFsSystemFile, sfPath: path,
-      sfContent: o.readHostFile(path), address: "systemFile:" & path))
+    let content = o.readHostFile(path)
+    let fileRes = SystemResource(kind: srkFsSystemFile, sfPath: path,
+      sfContent: content, address: "systemFile:" & path)
+    let secrets = if path in envFiles:
+                    holdsSecrets(path, content, envFile = true)
+                  else: @[]
+    if secrets.len > 0:
+      var ph = fileRes
+      ph.sfContent = redacted(content, secrets)
+      placeholders.add(commentedStanza(ph))
+      continue
+    resources.add(fileRes)
     if prefix notin prefixes: prefixes.add(prefix)
   # The tmpfiles fragments that create a state location.
   if statePaths.len > 0 and dirExists(o.hostPath(TmpfilesDir)):
@@ -388,6 +487,10 @@ proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
     "<this file>` and review every FLAG.\n"
   for f in flags:
     head.add("# FLAG: " & f & "\n")
+  if placeholders.len > 0:
+    head.add("#\n# Not declared, because each holds a secret (its value is " &
+      "replaced here):\n")
+    for ph in placeholders: head.add(ph)
   result.text = head & "\n" & renderProfileText(result.profile)
   # The skeleton must be a profile the parser accepts as printed.
   discard parseSystemProfile(result.text)

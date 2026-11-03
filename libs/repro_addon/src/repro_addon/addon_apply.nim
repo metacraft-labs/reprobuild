@@ -95,7 +95,6 @@ import ./static_tree
 import ./store_root
 import ./switch
 import ./evidence
-import ./state_sets
 import ./sysctl_precedence
 import ./transitions
 
@@ -137,6 +136,10 @@ type
 
   AddonApplyOptions* = object
     stateDir*: string
+    carriedStateDir*: string
+      ## Test seams: where carried state is looked for and the root its
+      ## directories are under ("": ``CarriedStateDir`` and ``/``).
+    carriedStateRoot*: string
     probeArchives*: bool
       ## A plan (the migration plan) asks the archive for every closure
       ## member it would fetch (``httpDebProbe``) and refuses the ones not
@@ -2464,6 +2467,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       $opts.agentRecord.sequence & " is not the apply's sequence " &
       $opts.agentSequence)
   if not opts.planOnly:
+    # Carried state a conversion brought is restored before any apply
+    # reaches it, and nothing is applied under a state backup's hold
+    # (spec §11.1), whichever path asked for the apply (an operator, the
+    # deploy agent, an adopt, a rollback). Decided by the library both
+    # apply paths share (`carried_state`); first, before anything else is
+    # looked at or written.
+    let why = carriedStateRefusal(parseAddOnUserProfile(opts.userProfileText),
+      (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+       else: CarriedStateDir),
+      (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+    if why.len > 0:
+      raise newException(AddonApplyError, why)
     # The before-each-write re-check runs on the in-process apply path,
     # which is the one an add-on apply takes: as root, in this process. A
     # process that would hand the privileged set to a broker would apply
@@ -2474,12 +2489,6 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         "there); re-run as root" &
         (if getEnv(ForceBrokerEnvVar).len > 0: " without " & ForceBrokerEnvVar
          else: ""))
-    # Carried state a conversion brought is restored before any apply
-    # starts a unit of it (spec §11.1), whichever path asked for the apply
-    # (an operator, the deploy agent, an adopt).
-    let why = carriedStateRefusal(parseSystemProfile(opts.userProfileText))
-    if why.len > 0:
-      raise newException(AddonApplyError, why)
   # One apply at a time per HOST, whatever its state directory
   # (``repro_core/host_apply_lock``), taken before the first write and
   # before the state directory's own lock, and held across the whole
@@ -4536,6 +4545,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   try:
     result.infra = runInfraApply(composedText, ApplyOptions(
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
+      carriedStateChecked: true,
       noPreview: true, elevationMode: emBroker,
       buildActions: opts.buildActions,
       buildActionDispatcher: opts.buildActionDispatcher,

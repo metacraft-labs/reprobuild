@@ -26,8 +26,6 @@ import repro_profile
 
 import ./manifest
 import ./agent
-when defined(linux):
-  from repro_addon/state_sets import carriedStateRefusal
 
 type
   ProfileResolver* = proc(profileText: string;
@@ -190,13 +188,6 @@ proc mkRunInfraApplyHook*(stateDir: string;
           buildActions: effectiveActions,
           buildActionDispatcher:
             mkBuildActionDispatcher(capturedCacheRoot, ctx))
-        when defined(linux):
-          # A converted host applies nothing that starts a unit of carried
-          # state before the restore (ReproOS Add-On Mode §11.1); the
-          # tick fails and the next one tries again.
-          let why = carriedStateRefusal(parseSystemProfile(applyText))
-          if why.len > 0:
-            return (ok: false, message: why)
         let res = runInfraApply(applyText, opts)
         if res.errorCount > 0 or res.driftCount > 0:
           return (ok: false,

@@ -10,6 +10,11 @@
 ## builds by hand (decision 40): ``alertmanager`` from apt's
 ## ``prometheus-alertmanager`` and a hand-installed ``vaultwarden``.
 ##
+## Falsifying mutations: ``import-writes-skeleton`` (the import keeps a
+## copy of its skeleton on the host) and ``import-copies-env-secret`` (a
+## secret in an environment file or an ``Environment=`` line is copied
+## into the skeleton) each turn this test red.
+##
 ## *Mocking.* The host is a fixture tree (``ImportObserver.root``) with a
 ## dpkg database of its own, read by the production dpkg driver; the one
 ## seam is the unit provision (``systemctl show``), which needs the
@@ -85,10 +90,13 @@ proc fixture() =
   put("/var/lib/dpkg/status", "")
   createDir(root & "/var/lib/alertmanager")
 
-proc observer(): ImportObserver =
+proc observer(extra: seq[(string, UnitProvision)] = @[]): ImportObserver =
   let r = root
+  let more = extra
   ImportObserver(root: r, driver: newDpkgDriver(r,
     proc(u: string): UnitProvision {.gcsafe.} =
+      for (n, prov) in more:
+        if n == u: return prov
       case u
       of "alertmanager.service":
         UnitProvision(loadState: "loaded",
@@ -149,11 +157,16 @@ suite "import skeleton":
     fixture()
     let sk = importUnit(observer(), "vaultwarden.service")
     let p = parseSystemProfile(sk.text)
-    check p.addOn.managedEtcPrefixes == @["/etc/vaultwarden/vaultwarden.env"]
+    # The environment file holds the admin token: it is not declared, and
+    # its value is in no line of the skeleton; a commented placeholder
+    # shows its shape.
+    check p.addOn.managedEtcPrefixes.len == 0
     var kinds: seq[string]
     for r in p.resources: kinds.add($r.kind & " " & r.address)
-    check kinds == @["systemd.systemUnit systemUnit:vaultwarden.service",
-                     "fs.systemFile systemFile:/etc/vaultwarden/vaultwarden.env"]
+    check kinds == @["systemd.systemUnit systemUnit:vaultwarden.service"]
+    check "s3cret" notin sk.text
+    check ("ADMIN_TOKEN=" & SecretPlaceholder) in sk.text
+    check "#   fs.systemFile {" in sk.text
     check not p.resources[0].suEnabled
     check sk.flagged("tmpfiles: /etc/tmpfiles.d/vaultwarden.conf",
                      "cannot be adopted", "repro-")
@@ -173,6 +186,39 @@ suite "import skeleton":
     check p.resources[^1].kind == srkLinuxTmpfilesRule
     check p.resources[^1].tmpfilesName == "repro-vaultwarden.conf"
     check p.resources[^1].tmpfilesContent == VwTmpfiles
+
+  test "a secret in Environment= is flagged and never copied":
+    fixture()
+    put("/etc/systemd/system/vw2.service", "[Service]\nUser=vw\n" &
+      "Environment=\"ADMIN_TOKEN=s3cret\" PORT=80\nExecStart=/usr/local/bin/vaultwarden\n")
+    put("/etc/systemd/system/vw2.service.d/10-local.conf",
+        "[Service]\nEnvironment=DB_PASSWORD=hunter2\n")
+    let sk = importUnit(observer(@{"vw2.service": UnitProvision(
+      loadState: "loaded", fragmentPath: "/etc/systemd/system/vw2.service",
+      dropInPaths: @["/etc/systemd/system/vw2.service.d/10-local.conf"],
+      unitFileState: "enabled")}), "vw2.service")
+    check sk.flagged("secret:", "vw2.service", "ADMIN_TOKEN")
+    check sk.flagged("secret:", "10-local.conf", "DB_PASSWORD")
+    check "s3cret" notin sk.text and "hunter2" notin sk.text
+    for r in sk.profile.resources:
+      check r.kind != srkSystemdSystemUnit
+    check ("ADMIN_TOKEN=" & SecretPlaceholder) in sk.text
+
+  test "a 50-repro drop-in over a package unit is adopted":
+    fixture()
+    put("/etc/systemd/system/prometheus-alertmanager.service.d/50-repro-nice.conf",
+        "[Service]\nNice=5\n")
+    let sk = importUnit(observer(@{"prometheus-alertmanager.service":
+      UnitProvision(loadState: "loaded",
+        fragmentPath: "/usr/lib/systemd/system/prometheus-alertmanager.service",
+        dropInPaths: @["/etc/systemd/system/prometheus-alertmanager.service.d/50-repro-nice.conf"],
+        unitFileState: "disabled")}), "prometheus-alertmanager.service")
+    let p = parseSystemProfile(sk.text)
+    check p.resources.len == 1
+    check p.resources[0].kind == srkSystemdSystemDropIn
+    check p.resources[0].diUnit == "prometheus-alertmanager.service"
+    check p.resources[0].diName == "nice"
+    check p.resources[0].diContent == "[Service]\nNice=5\n"
 
   test "a package's file and a package's unit are flagged, not adopted":
     fixture()

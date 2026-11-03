@@ -18,9 +18,10 @@
 ## - ``backupStateSet`` runs on the add-on host before the conversion. It
 ##   refuses unless every unit of the set is confirmed stopped by its
 ##   control group (``unitAliveness``, which fails closed), holds each one
-##   with a runtime drop-in whose assertion fails (``holdUnits``), so that
-##   neither a timer, a socket, a dependency nor an operator's ``start``
-##   runs it again before the conversion, and
+##   with a persistent drop-in whose assertion fails (``holdUnits``), so
+##   that neither a timer, a socket, a dependency nor an operator's
+##   ``start`` runs it again before the conversion, even across a reboot,
+##   and
 ##   writes one archive per carried directory plus a manifest naming each
 ##   directory's digest, its archive's SHA-256 and its units. A kept
 ##   directory gets a digest and no archive.
@@ -35,9 +36,10 @@
 ##   only then renames it into place. A target that already holds exactly
 ##   the manifest's tree is left as it is (a restore that ran already); one
 ##   that holds anything else refuses. Each restored directory is recorded
-##   in a receipt, which ``pendingCarriedState`` reads: a host whose
-##   carried state is not all restored has pending state, and the apply
-##   refuses to start a unit of it.
+##   in a receipt with the root it was restored under and the restored
+##   directory's identity; what is still pending, and the apply's refusal,
+##   are decided in ``repro_infra/carried_state``. Files are restored
+##   sparse: a block of zeros is a hole.
 ##
 ## What this does not establish: the manifest's own authenticity (it
 ## travels with the conversion's payload, whose digest the conversion
@@ -50,178 +52,10 @@ import repro_elevation
 import repro_elevation/nofollow_write
 import repro_infra
 
-import ./fingerprint
 import ./host_exec
 import ./mutations
 import ./switch
 import ./transitions
-
-type
-  StateSetError* = object of CatchableError
-    ## A state-set operation refused, or failed, before it changed the
-    ## state it was asked to move.
-
-  StateSetEntry* = object
-    path*: string
-    disposition*: StateDisposition
-    units*: seq[string]          ## every unit naming the directory, sorted
-
-  ManifestEntry* = object
-    path*: string
-    disposition*: StateDisposition
-    units*: seq[string]
-    digest*: string              ## ``treeDigest`` at backup time
-    archive*: string             ## carry: the archive's file name, else ""
-    archiveSha256*: string
-    owners*: seq[(string, string)]
-      ## ``("uid:<n>", name)`` and ``("gid:<n>", name)`` for every numeric
-      ## owner and group in the tree, as the source host names them. The
-      ## tree is restored with its numeric ids (the digest covers them), so
-      ## the accounts must have the same ids on the converted host; a
-      ## restore refuses a host whose account of that name has another id,
-      ## or whose id belongs to another name (``ownerConflicts``).
-
-  StateManifest* = object
-    host*: string
-    createdAt*: string
-    entries*: seq[ManifestEntry]
-
-const
-  ManifestSchema* = "repro-state-set/1"
-  ManifestFileName* = "state-set.json"
-  CarriedStateDir* = "/var/lib/repro/system/carried"
-    ## Where a conversion leaves the backup on the converted host (the
-    ## manifest and the archives), for ``restoreStateSet``.
-  RestoredReceipt* = "restored.json"
-    ## Beside the manifest: the directories restored, with their digests.
-
-proc stateSetOf*(p: SystemProfile): seq[StateSetEntry] =
-  ## The profile's state set, ordered by path. The parser already refused
-  ## nested directories and conflicting dispositions
-  ## (``checkStateDirectories``).
-  var byPath = initOrderedTable[string, StateSetEntry]()
-  for r in p.resources:
-    if r.kind != srkSystemdSystemUnit: continue
-    for d in r.suStateDirectories:
-      if d.path notin byPath:
-        byPath[d.path] = StateSetEntry(path: d.path,
-                                       disposition: d.disposition)
-      if r.suName notin byPath[d.path].units:
-        byPath[d.path].units.add(r.suName)
-  for _, e in byPath:
-    var e2 = e
-    e2.units.sort()
-    result.add(e2)
-  result.sort(proc (a, b: StateSetEntry): int = cmp(a.path, b.path))
-
-# ---------------------------------------------------------------------------
-# The tree digest.
-# ---------------------------------------------------------------------------
-
-proc entryLine(full, rel: string): string =
-  var st: Stat
-  if lstat(full.cstring, st) != 0:
-    raise newException(StateSetError, "cannot stat " & full & ": " &
-      $strerror(errno))
-  let perm = toOct(int(st.st_mode) and 0o7777, 4)
-  let owner = $st.st_uid & ":" & $st.st_gid
-  if S_ISDIR(st.st_mode):
-    "d " & perm & " " & owner & " - " & rel
-  elif S_ISREG(st.st_mode):
-    "f " & perm & " " & owner & " " & $st.st_size & ":" &
-      sha256OfFile(full) & " " & rel
-  elif S_ISLNK(st.st_mode):
-    "l " & perm & " " & owner & " " & escapeField(expandSymlink(full)) &
-      " " & rel
-  else:
-    raise newException(StateSetError, full & " is a device, FIFO or " &
-      "socket, which a state directory cannot carry")
-
-proc walkSorted(dir, rel: string; lines: var seq[string]) =
-  var names: seq[string]
-  for kind, path in walkDir(dir, relative = true, checkDir = true):
-    names.add(path)
-  names.sort(system.cmp)
-  for n in names:
-    let full = dir / n
-    let r = (if rel.len == 0: n else: rel & "/" & n)
-    lines.add(entryLine(full, escapeField(r)))
-    var st: Stat
-    if lstat(full.cstring, st) == 0 and S_ISDIR(st.st_mode):
-      walkSorted(full, r, lines)
-
-proc treeLines*(dir: string): seq[string] =
-  ## The digest's input, one line per entry; for diagnostics and tests.
-  var st: Stat
-  if lstat(dir.cstring, st) != 0 or not S_ISDIR(st.st_mode):
-    raise newException(StateSetError, dir & " is not a directory")
-  result.add(entryLine(dir, "."))
-  walkSorted(dir, "", result)
-
-proc treeDigest*(dir: string): string =
-  ## ``sha256:<hex>`` over ``treeLines(dir)``, newline-terminated.
-  "sha256:" & sha256Hex(treeLines(dir).join("\n") & "\n")
-
-# ---------------------------------------------------------------------------
-# The manifest.
-# ---------------------------------------------------------------------------
-
-proc toJson*(m: StateManifest): JsonNode =
-  result = %*{"schema": ManifestSchema, "host": m.host,
-              "createdAt": m.createdAt, "entries": newJArray()}
-  for e in m.entries:
-    result["entries"].add(%*{"path": e.path, "disposition": $e.disposition,
-      "units": e.units, "digest": e.digest, "archive": e.archive,
-      "archiveSha256": e.archiveSha256, "owners": newJObject()})
-    for (k, v) in e.owners:
-      result["entries"][^1]["owners"][k] = %v
-
-proc parseStateManifest*(text: string): StateManifest =
-  ## Refuses anything but this schema, and every entry whose path the
-  ## profile parser would refuse (a manifest is input like a profile).
-  let j = try: parseJson(text)
-          except JsonParsingError, ValueError:
-            raise newException(StateSetError, "the state manifest is not JSON")
-  if j.kind != JObject or j{"schema"}.getStr() != ManifestSchema:
-    raise newException(StateSetError, "not a " & ManifestSchema & " manifest")
-  result.host = j{"host"}.getStr()
-  result.createdAt = j{"createdAt"}.getStr()
-  var seen = initHashSet[string]()
-  for e in j{"entries"}.getElems():
-    var m = ManifestEntry(path: e{"path"}.getStr(),
-      digest: e{"digest"}.getStr(), archive: e{"archive"}.getStr(),
-      archiveSha256: e{"archiveSha256"}.getStr())
-    let err = stateDirectoryError(m.path)
-    if err.len > 0:
-      raise newException(StateSetError, "manifest: " & err)
-    if m.path in seen:
-      raise newException(StateSetError, "manifest names " & m.path & " twice")
-    seen.incl(m.path)
-    case e{"disposition"}.getStr()
-    of $sdKeep: m.disposition = sdKeep
-    of $sdCarry: m.disposition = sdCarry
-    else:
-      raise newException(StateSetError, "manifest: " & m.path &
-        " has no keep/carry disposition")
-    for u in e{"units"}.getElems(): m.units.add(u.getStr())
-    for k, v in e{"owners"}.getFields():
-      if not (k.startsWith("uid:") or k.startsWith("gid:")) or
-          v.getStr().len == 0:
-        raise newException(StateSetError, "manifest: " & m.path &
-          " has a malformed owner " & k)
-      m.owners.add((k, v.getStr()))
-    if not m.digest.startsWith("sha256:"):
-      raise newException(StateSetError, "manifest: " & m.path &
-        " has no digest")
-    if m.disposition == sdCarry:
-      if m.archive.len == 0 or m.archive != extractFilename(m.archive) or
-          m.archive.startsWith(".") or m.archiveSha256.len != 64:
-        raise newException(StateSetError, "manifest: " & m.path &
-          " has no valid archive")
-    result.entries.add(m)
-
-proc readStateManifest*(dir: string): StateManifest =
-  parseStateManifest(readFile(dir / ManifestFileName))
 
 # ---------------------------------------------------------------------------
 # Units.
@@ -247,34 +81,46 @@ proc requireStopped(units: seq[string]; alive: AlivenessFn; what: string) =
       " not confirmed stopped; stop " &
       (if running.len == 1: "it" else: "them") & " first")
 
+proc holdPath(unit: string): string =
+  ## Where the hold of ``unit`` is written (``carried_state``'s path).
+  when mutated("hold-runtime-only"):
+    # FALSIFYING MUTATION: the hold in /run, gone at the next boot.
+    "/run/systemd/system" / (unit & ".d") / HoldDropInName
+  else:
+    holdDropInPath(unit)
+
+proc holdsNotLoaded*(units: seq[string]): seq[string] =
+  ## The units whose hold systemd does not have loaded (removed, e.g. by
+  ## ``systemctl revert``, or never written).
+  for u in units:
+    let s = runSystemctl(["show", "-p", "DropInPaths", "--value", "--", u])
+    if s.exitCode != 0 or holdPath(u) notin s.output.splitWhitespace():
+      result.add(u)
+
 const
-  HoldDropInName* = "50-repro-state-hold.conf"
-    ## The runtime drop-in that holds a unit of a backed-up state set.
-  RuntimeUnitDir = "/run/systemd/system"
   HoldDropInText* = "# Written by `repro system addon state backup`: the\n" &
     "# unit's state is backed up for a conversion; it must not run again\n" &
-    "# before it (spec §11.1). Gone at the next boot; `repro system addon\n" &
-    "# state release --profile <file>` lifts it now.\n" &
+    "# before it (spec §11.1). `repro system addon state release\n" &
+    "# --profile <file>` lifts it.\n" &
     "[Unit]\nAssertPathExists=/run/repro/state-hold/never\n"
-    ## Why an assertion and not a mask: a runtime mask
-    ## (``systemctl mask --runtime``, a link in ``/run/systemd/system``) does
-    ## not hide a unit whose file is in ``/etc/systemd/system``, which takes
-    ## precedence over ``/run`` -- and that is where every add-on unit lives
-    ## (measured on Debian 13: the masked unit still started). A drop-in in
-    ## ``/run`` applies to a unit wherever its file is, and a failing
-    ## ``AssertPathExists=`` fails every start -- by an operator, a timer, a
-    ## socket or a dependency -- before anything is executed
+    ## A drop-in whose assertion always fails: every start of the unit --
+    ## by an operator, a timer, a socket or a dependency -- fails before
+    ## anything is executed
     ## (https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#AssertArchitecture=).
-
-proc holdDropInPath*(unit: string): string =
-  RuntimeUnitDir / (unit & ".d") / HoldDropInName
+    ## Not a runtime mask: a mask in ``/run/systemd/system`` does not hide
+    ## a unit whose file is in ``/etc/systemd/system``, which takes
+    ## precedence (measured on Debian 13: the masked unit still started).
+    ## In ``/etc``, not ``/run``, so the hold survives a reboot of the
+    ## source host before the conversion. While any hold exists every
+    ## apply refuses (``carried_state.carriedStateRefusal``), so neither
+    ## an operator nor the deploy agent changes the host under a backup.
+    ## Residual: ``systemctl revert <unit>`` deletes drop-ins, the hold
+    ## with them; ``repro system addon state verify --from`` checks every
+    ## hold is still loaded (spec §11.1).
 
 proc holdUnits*(units: seq[string]) =
-  ## Hold each unit until the next boot (which, for a conversion, is the
-  ## converted system's): a runtime drop-in whose assertion fails, so no
-  ## start of it runs anything. Checked after the reload: a unit whose
-  ## loaded drop-ins do not include the hold refuses (fail closed).
-  ## Released by ``releaseUnits``.
+  ## Hold each unit (``HoldDropInText``) and check, after the reload, that
+  ## systemd loaded every hold (fail closed). Released by ``releaseUnits``.
   when mutated("state-units-not-held"):
     return
   for u in units:
@@ -282,28 +128,27 @@ proc holdUnits*(units: seq[string]) =
     if err.len > 0:
       raise newException(StateSetError, err)
     try:
-      createDirsNoFollow(RuntimeUnitDir / (u & ".d"))
-      writeFileNoFollow(holdDropInPath(u), HoldDropInText, 0o644)
+      createDirsNoFollow(parentDir(holdPath(u)))
+      writeFileNoFollow(holdPath(u), HoldDropInText, 0o644)
     except CatchableError as e:
       raise newException(StateSetError, "cannot hold " & u & ": " & e.msg)
   let r = runSystemctl(["daemon-reload"])
   if r.exitCode != 0:
     raise newException(StateSetError, "systemctl daemon-reload failed: " &
       r.output.strip())
-  for u in units:
-    let s = runSystemctl(["show", "-p", "DropInPaths", "--value", "--", u])
-    if s.exitCode != 0 or holdDropInPath(u) notin s.output.splitWhitespace():
-      raise newException(StateSetError, "the hold of " & u & " is not " &
-        "loaded (DropInPaths: " & s.output.strip() & ")")
+  let missing = holdsNotLoaded(units)
+  if missing.len > 0:
+    raise newException(StateSetError, "the hold is not loaded for " &
+      missing.join(", "))
 
 proc releaseUnits*(units: seq[string]) =
   ## Lift the hold of ``holdUnits`` (an abandoned conversion).
   for u in units:
-    let p = holdDropInPath(u)
+    let p = holdPath(u)
     if fileExists(p) or symlinkExists(p):
       try:
         discard removeLeafNoFollow(p)
-        discard removeEmptyDirNoFollow(RuntimeUnitDir / (u & ".d"))
+        discard removeEmptyDirNoFollow(parentDir(p))
       except CatchableError as e:
         raise newException(StateSetError, "cannot release " & u & ": " & e.msg)
   let r = runSystemctl(["daemon-reload"])
@@ -320,18 +165,6 @@ proc allUnits(entries: openArray[StateSetEntry]): seq[string] =
 # ---------------------------------------------------------------------------
 # Owners.
 # ---------------------------------------------------------------------------
-
-proc accountTable(root, file: string): Table[string, string] =
-  ## ``<root>/etc/passwd`` or ``/etc/group`` as both ``"id:<n>" -> name``
-  ## and ``"name:<name>" -> n``. A missing file is an empty table.
-  let p = (if root == "/" or root.len == 0: "" else: root) & "/etc/" & file
-  if not fileExists(p): return
-  for line in readFile(p).splitLines():
-    if line.len == 0 or line[0] == '#': continue
-    let f = line.split(':')
-    if f.len < 3: continue
-    result["id:" & f[2]] = f[0]
-    result["name:" & f[0]] = f[2]
 
 proc treeOwners(dir: string): (seq[int], seq[int]) =
   var uids, gids: seq[int]
@@ -408,7 +241,7 @@ var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
 
 proc archiveNameFor(path: string): string =
   ## A stable, flat file name for a directory's archive.
-  "carry-" & sha256Hex(path)[0 ..< 16] & ".rsa"
+  "carry-" & sha256Text(path)[0 ..< 16] & ".rsa"
 
 proc archiveEntry(f: File; full, rel: string) =
   var st: Stat
@@ -573,10 +406,27 @@ proc extractStateArchive*(archive, staging: string) =
           let n = f.readBuffer(addr buf[0], int(min(int64(buf.len), left)))
           if n <= 0:
             raise newException(StateSetError, "archive: truncated content")
-          if posix.write(fd, addr buf[0], n) != n:
+          # A block of zeros becomes a hole (the file is restored sparse);
+          # the size is fixed by the truncate below.
+          var zero = true
+          when not mutated("restore-writes-dense"):
+            for i in 0 ..< n:
+              if buf[i] != '\0':
+                zero = false
+                break
+          else:
+            zero = false
+          if zero:
+            if lseek(fd, Off(n), SEEK_CUR) < 0:
+              raise newException(StateSetError, "seek " & full & ": " &
+                $strerror(errno))
+          elif posix.write(fd, addr buf[0], n) != n:
             raise newException(StateSetError, "write " & full & ": " &
               $strerror(errno))
           left -= n
+        if ftruncate(fd, Off(dlen)) != 0:
+          raise newException(StateSetError, "truncate " & full & ": " &
+            $strerror(errno))
         # Owner first: chown clears set-id bits, so the mode follows it.
         if fchown(fd, Uid(uid), Gid(gid)) != 0 and getuid() == 0:
           raise newException(StateSetError, "fchown " & full & ": " &
@@ -602,11 +452,6 @@ proc extractStateArchive*(archive, staging: string) =
     if chmod(full.cstring, Mode(mode)) != 0:
       raise newException(StateSetError, "chmod " & full & ": " &
         $strerror(errno))
-
-proc under(root, path: string): string =
-  ## ``path`` (absolute) as seen below ``root``: the live host when
-  ## ``root`` is "/", or a mounted target root during a conversion.
-  if root == "/" or root.len == 0: path else: root & path
 
 proc backupStateSet*(p: SystemProfile; outDir, host: string;
                      alive: AlivenessFn = defaultAliveness();
@@ -644,7 +489,7 @@ proc backupStateSet*(p: SystemProfile; outDir, host: string;
       m.archive = archiveNameFor(e.path)
       let dest = outDir / m.archive
       writeStateArchive(under(root, e.path), dest)
-      m.archiveSha256 = sha256OfFile(dest)
+      m.archiveSha256 = sha256File(dest)
       # The digest is taken again after the archive: a directory that
       # changed while it was read (a unit the hold did not cover, an
       # operator) is not a consistent backup.
@@ -673,19 +518,8 @@ proc verifyEntries*(m: StateManifest; root = "/";
     if d == e.digest: result.matched.add(e.path)
     else: result.differing.add(e.path & ": " & d & " (manifest " & e.digest & ")")
 
-proc receiptPath(dir: string): string = dir / RestoredReceipt
-
-proc readReceipt(dir: string): Table[string, string] =
-  if not fileExists(receiptPath(dir)): return
-  let j = parseJson(readFile(receiptPath(dir)))
-  for k, v in j{"restored"}.getFields(): result[k] = v.getStr()
-
-proc writeReceipt(dir: string; r: Table[string, string]) =
-  var o = newJObject()
-  for k in toSeq(r.keys).sorted(): o[k] = %r[k]
-  let tmp = receiptPath(dir) & ".tmp"
-  writeFile(tmp, $(%*{"restored": o}) & "\n")
-  moveFile(tmp, receiptPath(dir))
+proc rootOf(root: string): string =
+  if root.len == 0: "/" else: root
 
 proc isEmptyDir(path: string): bool =
   for _ in walkDir(path): return false
@@ -712,7 +546,9 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
     if dirExists(target) and not symlinkExists(target) and
         not isEmptyDir(target):
       if treeDigest(target) == e.digest:
-        receipt[e.path] = e.digest
+        let id = dirIdentity(target)
+        receipt[e.path] = ReceiptEntry(digest: e.digest, root: rootOf(root),
+                                       dev: id[0], ino: id[1])
         continue
       raise newException(StateSetError, e.path & " already holds " &
         "something other than the carried state; refusing to replace it")
@@ -725,13 +561,20 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
         " would be owned by the wrong accounts: " & conflicts.join("; ") &
         " (declare the accounts with the source host's ids)")
     when not mutated("state-archive-unchecked"):
-      if not fileExists(archive) or sha256OfFile(archive) != e.archiveSha256:
+      if not fileExists(archive) or sha256File(archive) != e.archiveSha256:
         raise newException(StateSetError, "the archive of " & e.path &
           " does not match the manifest")
     let parent = parentDir(target)
     createDir(parent)
-    let staging = parent / ".repro-restore-" & extractFilename(target) &
-      "-" & $getCurrentProcessId()
+    # A restore that died left its staging directory behind (it is never
+    # renamed into place unverified); any such leftover of this target is
+    # removed before a new one is made.
+    let stagingPrefix = ".repro-restore-" & extractFilename(target) & "-"
+    when not mutated("restore-leaves-staging"):
+      for kind, q in walkDir(parent, relative = true):
+        if q.startsWith(stagingPrefix) and kind == pcDir:
+          removeDir(parent / q)
+    let staging = parent / (stagingPrefix & $getCurrentProcessId())
     if dirExists(staging): removeDir(staging)
     createDir(staging)
     try:
@@ -747,47 +590,9 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
     except CatchableError:
       if dirExists(staging): removeDir(staging)
       raise
-    receipt[e.path] = e.digest
+    let id = dirIdentity(target)
+    receipt[e.path] = ReceiptEntry(digest: e.digest, root: rootOf(root),
+                                   dev: id[0], ino: id[1])
     result.add(e.path)
   writeReceipt(dir, receipt)
 
-proc pendingCarriedState*(dir = CarriedStateDir): seq[StateSetEntry] =
-  ## The carried directories of the manifest in ``dir`` that no restore
-  ## has recorded. Empty when there is no manifest. An unreadable manifest
-  ## or receipt raises: carried state that cannot be read is not "none".
-  if not fileExists(dir / ManifestFileName): return
-  let m = readStateManifest(dir)
-  let receipt = readReceipt(dir)
-  for e in m.entries:
-    if e.disposition == sdCarry and receipt.getOrDefault(e.path) != e.digest:
-      result.add(StateSetEntry(path: e.path, disposition: e.disposition,
-                               units: e.units))
-
-proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir): string =
-  ## Why an apply of ``p`` must not run yet, or "": the profile declares a
-  ## unit whose carried state a conversion brought here and no restore
-  ## has recorded (spec §11.1 "The apply waits for it"). The apply would
-  ## otherwise start that unit on an empty directory -- for a validator, a
-  ## client with no slashing-protection history. Fails closed: a manifest
-  ## or receipt that cannot be read refuses too.
-  when mutated("apply-ignores-carried-state"):
-    return ""
-  var pending: seq[StateSetEntry]
-  try:
-    pending = pendingCarriedState(dir)
-  except CatchableError as e:
-    return "the carried state at " & dir & " cannot be read: " & e.msg
-  if pending.len == 0: return ""
-  var declared: seq[string]
-  for r in p.resources:
-    if r.kind == srkSystemdSystemUnit: declared.add(r.suName)
-  var hits: seq[string]
-  for e in pending:
-    for u in e.units:
-      if u in declared:
-        hits.add(e.path & " (" & u & ")")
-        break
-  if hits.len == 0: return ""
-  "ECarriedStatePending: carried state is not restored yet: " &
-    hits.join(", ") & "; run `repro system state restore` (the first-boot " &
-    "unit " & "repro-state-restore.service does) before the first apply"

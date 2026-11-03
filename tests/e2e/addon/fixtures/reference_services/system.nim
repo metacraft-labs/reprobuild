@@ -113,7 +113,9 @@ profile "referenceServices":
   activity vaultwarden:
     resources:
       # Its store package: an activity's edge, realised only on a host
-      # that selects the activity.
+      # that selects the activity. The accounts below pin their ids: a
+      # carried state directory keeps its numeric owners, so a converted
+      # host must give each account the source host's id (spec §11.1).
       inlineExecCall(
         argv = @["/bin/sh", "-c", CannotBuildHere],
         cwd = VaultwardenPrefix,
@@ -123,7 +125,7 @@ profile "referenceServices":
         commandStatsId = "inlineExecCall",
         substituteOnly = true,
         expectedOutputDigest = VaultwardenDigest)
-      linuxSysusersEntry(name = "vaultwarden", kind = "user",
+      linuxSysusersEntry(name = "vaultwarden", kind = "user", id = "921",
         description = "Vaultwarden", home = "/var/lib/vaultwarden",
         address = "vaultwardenUser")
       linuxTmpfilesRule(name = "repro-vaultwarden.conf",
@@ -179,13 +181,13 @@ profile "referenceServices":
         cwd = ValidatorPrefix, outputs = @["bin"], requiresElevation = true,
         address = "validator-prefix", commandStatsId = "inlineExecCall",
         substituteOnly = true, expectedOutputDigest = ValidatorDigest)
-      linuxSysusersEntry(name = "eth-execution", kind = "user",
+      linuxSysusersEntry(name = "eth-execution", kind = "user", id = "922",
         description = "Ethereum execution client",
         home = "/var/lib/ethereum/execution", address = "ethExecutionUser")
-      linuxSysusersEntry(name = "eth-beacon", kind = "user",
+      linuxSysusersEntry(name = "eth-beacon", kind = "user", id = "923",
         description = "Ethereum consensus client",
         home = "/var/lib/ethereum/beacon", address = "ethBeaconUser")
-      linuxSysusersEntry(name = "eth-validator", kind = "user",
+      linuxSysusersEntry(name = "eth-validator", kind = "user", id = "924",
         description = "Ethereum validator client",
         home = "/var/lib/ethereum/validator", address = "ethValidatorUser")
       # The state directories. The validator's holds the slashing-protection

@@ -5140,6 +5140,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_infra_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
+    binary: "build/test-bin/t_every_apply_waits_for_carried_state",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_infra_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim",
     binary: "build/test-bin/t_smoke_phase_g_runinfraapply_dispatch",
     defines: @[],

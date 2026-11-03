@@ -10,6 +10,10 @@
 ## state, a non-canonical path, the same directory twice in one unit, one
 ## directory with two dispositions, and nested directories.
 ##
+## A kept directory (on a disk a conversion keeps) adds
+## ``RequiresMountsFor=`` to the unit's ``[Unit]`` section; the falsifying
+## mutation ``keep-without-mount-requirement`` turns that case red.
+##
 ## *Mocking.* None: the production constructors, adapter and parser.
 
 import std/[strutils, unittest]
@@ -62,6 +66,20 @@ suite "stateDirectories":
     check renderedSystemUnitContent(sp.resources[0]) ==
       renderedSystemUnitContent(bare)
     check renderSystemProfileToText(back) == text
+
+  test "a kept directory makes the unit require its mount":
+    let p = parseSystemProfile("systemd.systemUnit {\n  name = \"a.service\"\n" &
+      "  content = \"[Unit]\nDescription=a\n\n[Service]\nExecStart=/bin/true\n\"\n" &
+      "  stateDirectories = [\"keep:/var/lib/a\", \"carry:/var/lib/b\", " &
+      "\"keep:/srv/c\"]\n}\n")
+    let u = renderedSystemUnitContent(p.resources[0])
+    check "[Unit]\nRequiresMountsFor=/var/lib/a /srv/c\nDescription=a\n" in u
+    # Without a [Unit] section one is added.
+    let q = parseSystemProfile("systemd.systemUnit {\n  name = \"b.service\"\n" &
+      "  content = \"[Service]\nExecStart=/bin/true\n\"\n" &
+      "  stateDirectories = [\"keep:/var/lib/k\"]\n}\n")
+    check renderedSystemUnitContent(q.resources[0]).startsWith(
+      "[Unit]\nRequiresMountsFor=/var/lib/k\n")
 
   test "a disposition is required and must be keep or carry":
     check refused(unitText("\"/var/lib/x\""))
