@@ -45,11 +45,16 @@
 ##    byte-identical (``repro system addon state digest``, every entry's
 ##    content, mode and owner) to what it was before the converge.
 ## 4. **Rollback.** ``repro system rollback`` to the adopted generation
-##    puts the operator's own unit bytes back (the ledger kept them), the
-##    services are healthy again, and the data directories are still the
-##    same.
+##    puts the operator's own unit bytes back (the ledger kept them) and
+##    the environment file the converge reconciled (its preserved bytes,
+##    restored before the operator's unit starts), the services are
+##    healthy again, and the data directories are still the same.
 ##
 ## Falsifying mutations:
+## - ``REPRO_ADDON_MUTATION=restore-after-start`` (the switch puts the
+##   operator's environment file back only after it started the units, the
+##   order before the A13 review): the rollback's start of the operator's
+##   vaultwarden fails with the file missing; red;
 ## - ``REPRO_ADDON_MUTATION=import-writes-skeleton`` (the import keeps a copy
 ##   of its skeleton under ``/etc``): step 1's fingerprint differs; red.
 ## - ``REPRO_A13_MUTATION=converge-touches-state`` (gate-level: the converged
@@ -506,10 +511,15 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "/etc/systemd/system/vaultwarden.service").splitLines()
     var origUnits = ""
     for line in shas.splitLines():
-      if "/etc/systemd/system/" in line: origUnits.add(line & "\n")
+      if line.endsWith("/etc/systemd/system/alertmanager.service") or
+          line.endsWith("/etc/systemd/system/vaultwarden.service"):
+        origUnits.add(line & "\n")
     step("rollback restores the operator's unit bytes",
          rb.exitCode == 0 and back.join("\n").strip() == origUnits.strip(),
          rb.stdout & rb.stderr & "\n" & back.join("\n") & "\n" & origUnits)
+    step("rollback puts the operator's environment file back (the bytes " &
+         "the converge reconciled)", ("ADMIN_TOKEN=" & adminToken) in
+         g.exec("cat /etc/vaultwarden/vaultwarden.env").stdout, "")
     step("after the rollback both services are healthy",
          g.healthy("http://127.0.0.1:9093/-/healthy") and
          g.healthy("http://127.0.0.1:8000/alive"), "")

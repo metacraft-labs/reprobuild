@@ -907,7 +907,7 @@ proc targetFor(address: string; inp: DecisionInputs; path: string;
     verdict: dec.verdict, diversion: saved.plan.diversion, unitClass: cls,
     replay: true)
 
-proc alreadyRestored(e: LedgerEntry): bool =
+proc alreadyRestored*(e: LedgerEntry): bool =
   ## A replay finds the removals the interrupted switch already made:
   ## an object that had preserved bytes now carries exactly them (its
   ## restore ran), or is gone when it was the add-on's creation.
@@ -2452,6 +2452,17 @@ proc revertMayKeep*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     plannedSha.len > 0 and currentSha == plannedSha
 
+proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
+                               currentSha, preservedPath: string): bool =
+  ## Whether a revert writes over a ledger-owned file that holds exactly
+  ## the bytes the ledger preserved for it: what the failed switch's
+  ## restore (spec §7.2, before step 7) put there before it failed. Its
+  ## preserved file is named by the bytes' SHA-256.
+  when mutated("revert-refuses-restored"):
+    return false
+  purpose == "revert" and ledgerOwns and regularFile and
+    preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -2739,9 +2750,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var prevSha = initTable[string, string]()   # target path -> ledger digest
   var prevObs = initTable[string, string]()   # target path -> its observation
   var prevOwned = initHashSet[string]()
+  var prevPreserved = initTable[string, string]()  # path -> preserved bytes
   for e in previous.entries:
     if e.class in {lcEtcFile, lcUnit, lcDropIn} and e.resource.len > 0:
       prevSha[e.path] = e.sha256
+      if e.preserved.len > 0: prevPreserved[e.path] = e.preserved
       prevObs[e.path] = e.observation
       prevOwned.incl(e.path)
     elif e.class == lcDiversion:
@@ -2781,6 +2794,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## (the drift stays visible), and reported. Any other purpose refuses.
     let regular = fileExists(p.targetPath) and not symlinkExists(p.targetPath)
     let current = if regular: readFile(p.targetPath) else: ""
+    # Bytes the failed switch itself put back: it restored this object's
+    # preserved bytes before it failed (spec §7.2, the restore before step
+    # 7), and its ledger kept the entry because the switch did not commit.
+    # The revert writes its own generation's bytes over them, as the
+    # owner of the object; the preserved bytes stay recorded.
+    if revertOverwritesRestored(purpose, inp.ledgerOwns, regular,
+        sha256Hex(current), prevPreserved.getOrDefault(p.targetPath)):
+      let o = observeTarget(driver, p.targetPath, inp.unit)
+      return (CollisionDecision(verdict: cvUpdate,
+        observation: observationText(o, inp.kind), observedSha256: o.sha256,
+        reason: "the failed switch restored its preserved bytes; the " &
+          "revert writes its generation's bytes again"), o)
     # Only bytes the failed switch found there and left alone: the same
     # digest its plan observed before the flip. Anything else -- a file it
     # wrote, or one that changed since -- is refused as before.
@@ -4310,6 +4335,63 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       marker.step = ssFragmentTools
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-6")
+      proc restorePreservedObjects() =
+        ## Objects a removed resource adopted, replaced or reconciled go
+        ## back to what they were (the rest were destroyed by the infra
+        ## apply); a restored unit file is reloaded and its base state put
+        ## back. Before step 7 (spec §7.2): a unit of this generation may
+        ## read a restored object -- a rollback to a generation whose unit
+        ## reads a file the newer one reconciled -- so it starts on it.
+        var needReload = needReloadAfterRemoval
+        var unitsToRestore: seq[LedgerEntry]
+        for e in restore:
+          # Changed meanwhile: left, as drift. Not a change: the flip of
+          # step 3 moved the static tree from under a link-form object the
+          # new generation no longer carries, so the add-on's own link now
+          # dangles; that is the removal in progress, and the restore (or
+          # the deletion) replaces the link.
+          if replaying and alreadyRestored(e):
+            hookRestored.add(e.path)
+            continue
+          let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
+          if d.len > 0:
+            hookKept.incl(e.resource)
+            hookKeptDrift.add(e.path & ": " & d & " (changed after the " &
+              "plan; left in place, --reconcile-drift removes it)")
+            continue
+          try:
+            if restorePreserved(e):
+              hookRestored.add(e.path)
+            elif e.class == lcUnit and e.collision == "replace":
+              # Nothing to put back: the package's file is below /usr; the
+              # shadowing copy goes away.
+              if removeOwnedUnitFile(e):
+                hookRestored.add(e.path)
+            if e.class in {lcUnit, lcDropIn}:
+              needReload = true
+              if e.class == lcUnit:
+                unitsToRestore.add(e)
+                # The install links the add-on made for it go too (a
+                # package's own link was never ledgered, so it stays).
+                for li in previous.entries:
+                  if li.resource == e.resource and li.class == lcInstallLink:
+                    discard removeLeafNoFollow(li.path)
+          except CatchableError as ex:
+            problems.add("restoring " & e.path & ": " & ex.msg)
+        if needReload:
+          try: daemonReload()
+          except CatchableError as ex:
+            problems.add(ex.msg)
+        for e in unitsToRestore:
+          try: restoreUnitState(e, driver,
+                                othersChanged = e.unit in loudHandBack)
+          except CatchableError as ex:
+            problems.add(ex.msg)
+        # Directories the removed resources had created.
+        removeEmptyDirs(removedEntries)
+      when not mutated("restore-after-start"):
+        restorePreservedObjects()
+      seamPause(stateDir, seamPrefix & "step-6-restore")
       if opts.recordOnly:
         # Only the record of what the failed switch wrote is wanted: no
         # start, no confirm, no commit.
@@ -4360,55 +4442,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
             failureSummary(hookConfirm, confirmTimeout))
       marker.step = ssConfirm
       writePendingMarker(stateDir, marker)
-      # Objects a removed resource adopted or replaced go back to what they
-      # were; the rest were destroyed by the infra apply.
-      var needReload = needReloadAfterRemoval
-      var unitsToRestore: seq[LedgerEntry]
-      for e in restore:
-        # Changed meanwhile: left, as drift. Not a change: the flip of
-        # step 3 moved the static tree from under a link-form object the
-        # new generation no longer carries, so the add-on's own link now
-        # dangles; that is the removal in progress, and the restore (or
-        # the deletion) replaces the link.
-        if replaying and alreadyRestored(e):
-          hookRestored.add(e.path)
-          continue
-        let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
-        if d.len > 0:
-          hookKept.incl(e.resource)
-          hookKeptDrift.add(e.path & ": " & d & " (changed after the " &
-            "plan; left in place, --reconcile-drift removes it)")
-          continue
-        try:
-          if restorePreserved(e):
-            hookRestored.add(e.path)
-          elif e.class == lcUnit and e.collision == "replace":
-            # Nothing to put back: the package's file is below /usr; the
-            # shadowing copy goes away.
-            if removeOwnedUnitFile(e):
-              hookRestored.add(e.path)
-          if e.class in {lcUnit, lcDropIn}:
-            needReload = true
-            if e.class == lcUnit:
-              unitsToRestore.add(e)
-              # The install links the add-on made for it go too (a
-              # package's own link was never ledgered, so it stays).
-              for li in previous.entries:
-                if li.resource == e.resource and li.class == lcInstallLink:
-                  discard removeLeafNoFollow(li.path)
-        except CatchableError as ex:
-          problems.add("restoring " & e.path & ": " & ex.msg)
-      if needReload:
-        try: daemonReload()
-        except CatchableError as ex:
-          problems.add(ex.msg)
-      for e in unitsToRestore:
-        try: restoreUnitState(e, driver,
-                              othersChanged = e.unit in loudHandBack)
-        except CatchableError as ex:
-          problems.add(ex.msg)
-      # Directories the removed resources had created.
-      removeEmptyDirs(removedEntries)
+      when mutated("restore-after-start"):
+        # FALSIFYING MUTATION: the order before the A13 review -- objects
+        # a removed resource preserved are put back after the start.
+        restorePreservedObjects()
       # The new ledger: what is on the host now, whether or not the
       # generation commits (an uncommitted attempt's objects are still the
       # add-on's to remove).
@@ -4477,7 +4514,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           # ledger like drift found at plan time.
           put(e)
           continue
+        if e.path in hookRestored and clean and problems.len == 0:
+          continue
         if e.path in hookRestored:
+          # Restored, but the switch is not committing: the object stays
+          # in the ledger (its preserved bytes named), so the revert that
+          # follows recognises them as the failed switch's restore and
+          # writes its own generation's bytes over them
+          # (``revertOverwritesRestored``).
+          put(e)
           continue
         let stillOurs = case e.class
           of lcEtcFile, lcUnit, lcDropIn, lcInstallLink: observeDrift(e).len == 0

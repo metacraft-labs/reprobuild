@@ -443,6 +443,11 @@
 ##                                            (the file is not sparse)
 ## ``keep-without-mount-requirement``         a unit with a kept directory
 ##                                            gets no RequiresMountsFor=
+## ``restore-after-start``                    the switch restores preserved
+##                                            bytes after step 7 starts
+##                                            the units (the old order)
+## ``revert-refuses-restored``                a revert refuses a file the
+##                                            failed switch restored
 ## ``import-copies-env-secret``               the import copies a secret
 ##                                            Environment= value into the
 ##                                            skeleton
@@ -649,7 +654,9 @@ const
                           "restore-leaves-staging",
                           "restore-writes-dense",
                           "keep-without-mount-requirement",
-                          "import-copies-env-secret"]
+                          "import-copies-env-secret",
+                          "restore-after-start",
+                          "revert-refuses-restored"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

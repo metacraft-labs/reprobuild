@@ -465,6 +465,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_restore_before_start.nim",
+    binary: "build/test-bin/t_addon_restore_before_start",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: var scratch = getTempDir() / (\"t_addon_restore_before_start\"..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
     binary: "build/test-bin/t_addon_retargeted_address_is_refused",
     defines: @[],

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2607,
-    "pureUnitConsolidationGroups": 77,
-    "pureUnitTests": 721,
+    "nimTestBinaries": 2609,
+    "pureUnitConsolidationGroups": 78,
+    "pureUnitTests": 723,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2647
+    "testEntries": 2649
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -398,6 +398,19 @@
       "sources": [
         "libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim",
         "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_infra"
+      ],
+      "owner": "libs/repro_infra",
+      "sources": [
+        "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
+        "libs/repro_infra/tests/t_system_profile_addon_fields.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1521,7 +1534,7 @@
       "graph-fixture": 18,
       "integration": 1447,
       "platform/destructive": 164,
-      "pure unit": 721,
+      "pure unit": 723,
       "unclassified": 297
     },
     "graphOwnedTestArtifacts": [
@@ -1730,9 +1743,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2607,
+    "nimTestBinaryCount": 2609,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2647
+    "testEntryCount": 2649
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8481,7 +8494,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_import_skeleton.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8641,6 +8654,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_restore_before_start",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_restore_before_start.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_retargeted_address_is_refused",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -8749,7 +8780,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_state_sets.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16617,6 +16648,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_every_apply_waits_for_carried_state",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_infra"
+      ],
+      "owner": "libs/repro_infra",
+      "requiresReproBinary": false,
+      "source": "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_smoke_phase_g_runinfraapply_dispatch",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -19961,7 +20009,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_system_unit_state_directories.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
