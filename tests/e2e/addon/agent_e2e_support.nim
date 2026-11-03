@@ -243,6 +243,10 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   ## to finish, and read the tick status record it wrote.
   discard g.exec("rm -f " & TickStatus)
   let since = g.run("date +%s").strip()
+  # The apply unit's invocation before this tick, so a failure left over
+  # from the previous tick is not taken for this tick's.
+  let before = g.run("systemctl show -p InvocationID --value " &
+                     "repro-agent-apply.service").strip()
   let f = g.exec("systemctl start repro-agent-fetch.service", timeoutSec)
   result.fetchLog = g.exec("journalctl -q -o cat --since @" & since &
     " -u repro-agent-fetch.service").stdout
@@ -251,11 +255,16 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
     result.message = f.stdout & f.stderr & result.fetchLog
     return
   # The apply job OnSuccess queued: wait until the unit is inactive again
-  # and the record exists.
+  # and the record exists -- or until this tick's apply has ended failed
+  # without one (killed by its syscall filter, say), which no amount of
+  # waiting turns into a record; the caller then sees "no-record".
   discard g.exec("for i in $(seq 1 " & $timeoutSec & "); do " &
     "s=$(systemctl show -p ActiveState --value repro-agent-apply.service); " &
     "[ -e " & TickStatus & " ] && [ \"$s\" != activating ] && " &
-    "[ \"$s\" != active ] && break; sleep 1; done", timeoutSec + 30)
+    "[ \"$s\" != active ] && break; " &
+    "[ \"$s\" = failed ] && [ \"$(systemctl show -p InvocationID --value " &
+    "repro-agent-apply.service)\" != " & quoteShell(before) & " ] && break; " &
+    "sleep 1; done", timeoutSec + 30)
   result.applyLog = g.exec("journalctl -q -o cat --since @" & since &
     " -u repro-agent-apply.service").stdout
   let st = g.exec("cat " & TickStatus)
