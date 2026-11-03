@@ -155,10 +155,10 @@ func isXdgRuntimeDirPath*(normalized: string): bool =
   ## fingerprint exactly like files under `/tmp`. It is also the default
   ## `TMPDIR` on a systemd host and the `TMPDIR` this repository's own
   ## agent instructions hand out (short socket paths), so build actions
-  ## routinely read and write their real inputs and outputs here.
-  ##
-  ## It is carved out of `isVolatileRuntimeStatePath` below because the
-  ## blanket `/run` prefix was silently emptying those actions' evidence.
+  ## routinely read and write their real inputs and outputs here, inside a
+  ## project or not. That is why it is classified here, by what the subtree
+  ## IS, and not left to `VolatileScope`, which only knows where the
+  ## invocation's own trees are.
   if not normalized.startsWith("/run/user/"):
     return false
   let rest = normalized["/run/user/".len .. ^1]
@@ -169,54 +169,28 @@ func isXdgRuntimeDirPath*(normalized: string): bool =
   # `/run/userland`, and never a non-numeric component.
   uidLen > 0 and (uidLen == rest.len or rest[uidLen] == '/')
 
-func isOrdinaryFileUnderRuntimeMount*(normalized: string): bool =
-  ## True for two more places under a volatile prefix that hold ordinary files,
-  ## for the reason `isXdgRuntimeDirPath` gives. `normalized` must already use
-  ## forward slashes.
-  ##
-  ## * A path in a DIRECTORY under `/dev/shm`. POSIX shared-memory objects and
-  ##   named semaphores are flat entries of `/dev/shm`, because shm_open(3)
-  ##   names may not contain a further slash
-  ##   (https://man7.org/linux/man-pages/man3/shm_open.3.html). Those stay
-  ##   volatile, and they are what tools touch there by accident. Anything in a
-  ##   subdirectory was put there as a file, typically a build tree someone moved
-  ##   to `/dev/shm` for speed. A project directly at `/dev/shm/<name>` has its
-  ##   files covered and only the enumeration of `<name>` itself still dropped,
-  ##   because the path alone cannot tell that directory from an object.
-  ## * `/run/media/<user>/<volume>`, where desktop hosts automount removable and
-  ##   secondary disks, projects on them included.
-  ##
-  ## Dropping these reads made an edited input look unchanged, so a stale result
-  ## was served and a test certificate was issued for content that fails.
-  const shmRoot = "/dev/shm/"
-  if normalized.startsWith(shmRoot):
-    let slash = normalized.find('/', shmRoot.len)
-    return slash > shmRoot.len and slash < normalized.high
-  normalized.startsWith("/run/media/")
+func trimmedRuntimePath(path: string): string =
+  result = path.replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+
+func isAtOrUnder(path, root: string): bool =
+  path == root or path.startsWith(if root == "/": root else: root & "/")
 
 func isVolatileRuntimeStatePath*(path: string): bool =
-  ## True for paths that describe the running kernel or the host's live
-  ## runtime state at one instant. Such a path cannot be reopened and
-  ## fingerprinted reliably after the action has finished, so it must
-  ## never become a cache input.
+  ## True for a path under a prefix that holds the running kernel's or the
+  ## host's live runtime state: `/dev`, `/proc`, `/sys` and `/run`, less the
+  ## per-user `/run/user/<uid>` (`isXdgRuntimeDirPath`). Such state cannot be
+  ## reopened and fingerprinted reliably after the action has finished.
   ##
-  ## `/dev`, `/proc` and `/sys` are kernel pseudo-filesystems and qualify
-  ## outright. `/run` is a tmpfs of ordinary files and qualifies only
-  ## because most of it holds host runtime state (pid files, `nscd`,
-  ## `systemd`, dbus). Its `/run/user/<uid>` subtree does not — see
-  ## `isXdgRuntimeDirPath`. `isOrdinaryFileUnderRuntimeMount` carves out the two
-  ## other places a project's files can really be.
-  ##
-  ## THIS IS A SILENT DROP, so it is deliberately narrow. A path that
-  ## lands here leaves no diagnostic behind: the monitor records the read
-  ## and the fold discards it, and the action is then fingerprinted as
-  ## though it had never read anything. That direction is a stale SERVE,
-  ## not a spurious miss, which is why the prefix set must cover only
-  ## paths that genuinely cannot be re-read — and why the XDG runtime
-  ## directory, which can, is excluded.
+  ## THIS IS A CLASSIFICATION BY PREFIX, NOT THE DECISION. The same prefixes
+  ## also hold ordinary files: a build tree on `/dev/shm/<dir>`, a disk an
+  ## administrator mounted under `/run/<dir>`. The path alone cannot tell
+  ## those apart, so nothing drops a read on this answer alone:
+  ## `dropsAsVolatileRuntimeState` asks it together with the invocation's
+  ## `VolatileScope`, and a read inside the invocation's own trees is never
+  ## dropped.
   let normalized = path.replace('\\', '/')
-  if normalized.isOrdinaryFileUnderRuntimeMount():
-    return false
   if normalized == "/dev" or normalized.startsWith("/dev/") or
      normalized == "/proc" or normalized.startsWith("/proc/") or
      normalized == "/sys" or normalized.startsWith("/sys/"):
@@ -224,6 +198,87 @@ func isVolatileRuntimeStatePath*(path: string): bool =
   if normalized == "/run" or normalized.startsWith("/run/"):
     return not normalized.isXdgRuntimeDirPath()
   false
+
+func volatileRootRefusal*(root: string): string =
+  ## Why `root`, a directory whose files an invocation reads as its own (its
+  ## project, repository, work, store or output root, or an action's working
+  ## directory when none is declared), cannot be told apart from the runtime
+  ## state the fold drops; "" when it can.
+  ##
+  ## A root strictly inside a volatile prefix is fine: everything at or under
+  ## it is the invocation's, so `VolatileScope` keeps it, and everything
+  ## outside it is still dropped. What is left are the roots where keeping
+  ## and dropping are both wrong. Keeping every flat entry of `/dev/shm`
+  ## makes every action that touches a POSIX semaphore miss on every run;
+  ## dropping them drops the project's own files with them, which serves a
+  ## stale result and certifies content nobody tested. Such a root is
+  ## REFUSED, loudly, rather than resolved either way in silence.
+  let r = trimmedRuntimePath(root)
+  if r == "/":
+    return "it contains /dev, /proc, /sys and /run, whose reads are " &
+      "runtime state and never a cache input, so the project's own files " &
+      "there could not be fingerprinted"
+  if r in ["/dev", "/dev/shm", "/run"]:
+    return "it is a flat namespace of runtime objects (device nodes, POSIX " &
+      "shared-memory objects, pid files, sockets) whose reads are never a " &
+      "cache input, and a project file there cannot be told apart from one " &
+      "of them by its path; move the project into a directory of its own, " &
+      "such as " & r & "/<name>"
+  if r.isAtOrUnder("/proc") or r.isAtOrUnder("/sys"):
+    return "it is on a kernel pseudo-filesystem, whose reads describe the " &
+      "running kernel and are never a cache input"
+  ""
+
+type
+  VolatileScope* = object
+    ## The trees an invocation reads as its OWN, for the one purpose of
+    ## deciding which reads under a volatile prefix are dropped. Only roots
+    ## that lie under such a prefix and pass `volatileRootRefusal` are held,
+    ## so the default value exempts nothing, and a root elsewhere, which
+    ## needs no exemption, is not carried around.
+    exempt: seq[string]
+
+func volatileScope*(roots: openArray[string]): VolatileScope =
+  ## The scope of an invocation whose own trees are `roots` (absolute). A
+  ## root that `volatileRootRefusal` refuses is LEFT OUT here, which drops
+  ## its files: refusing such a root is the caller's job, before anything
+  ## runs (the build engine's `volatileRootRefusals`).
+  for root in roots:
+    let r = trimmedRuntimePath(root)
+    if r.len == 0 or not r.startsWith("/"):
+      continue
+    if not r.isVolatileRuntimeStatePath() or r.volatileRootRefusal().len > 0:
+      continue
+    if r notin result.exempt:
+      result.exempt.add(r)
+
+func exemptRoots*(scope: VolatileScope): seq[string] =
+  scope.exempt
+
+func dropsAsVolatileRuntimeState*(path: string; scope: VolatileScope): bool =
+  ## THE decision: whether a recorded read, write, probe or enumeration of
+  ## `path` is left out of an action's evidence and cache record as runtime
+  ## state. True exactly when the path is under a volatile prefix
+  ## (`isVolatileRuntimeStatePath`) and at or under none of the
+  ## invocation's own trees (`scope`).
+  ##
+  ## THIS IS A SILENT DROP, and a wrong one is a stale SERVE: the action is
+  ## fingerprinted as though it had never read the file. The decision used
+  ## to be the prefix alone, with carve-outs for the places projects had
+  ## been found living (a directory under `/dev/shm`, `/run/media`). Every
+  ## layout the list did not name still lost its reads: the listing of a
+  ## project at `/dev/shm/<name>`, a mount at `/run/<dir>`. A list of mounts
+  ## cannot promise soundness; the invocation's own roots can. Whatever the
+  ## prefix, a path inside them is the project's and is kept, and a root
+  ## that cannot be told apart from the runtime state around it is refused
+  ## (`volatileRootRefusal`).
+  let normalized = path.replace('\\', '/')
+  if not normalized.isVolatileRuntimeStatePath():
+    return false
+  for root in scope.exempt:
+    if normalized.isAtOrUnder(root):
+      return false
+  true
 
 func tarOperand*(path: string): string =
   ## W16/N48: a path about to be handed to ``tar`` as a COMMAND-LINE OPERAND.

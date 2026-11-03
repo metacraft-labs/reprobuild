@@ -11,9 +11,9 @@
 ## monitor. Skip rule: Linux only (``/dev/shm`` writable), ``git`` and
 ## ``ssh-keygen`` present.
 ##
-## Falsifiability: removing ``isOrdinaryFileUnderRuntimeMount`` from
-## ``isVolatileRuntimeStatePath`` fails the re-execution check and the withheld
-## certificate check below.
+## Falsifiability: making ``dropsAsVolatileRuntimeState`` ignore its
+## ``VolatileScope`` (the prefix-only fold) fails the re-execution check and
+## the withheld certificate check below.
 
 import std/[os, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
