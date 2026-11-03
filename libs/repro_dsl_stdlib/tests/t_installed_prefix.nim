@@ -234,6 +234,27 @@ suite "an installed prefix":
       check sh("readelf -S " & quoteShell(root / "prefix" / "lib" /
         "libbar.so.1") & " | grep -c '\\.debug'", root).output.strip() == "0"
 
+  test "a debug strip that fails refuses the prefix, naming the library":
+    # zig 0.13's objcopy failed on an armv7 library ("error: Unexpected"),
+    # left a truncated `<lib>.stripped` beside it, and the assembly went on
+    # with the unstripped library (measured 2026-11-03).
+    requireTools:
+      let root = createTempDir("prefix-strip-fails-", "")
+      defer: removeDir(root)
+      let f = makeFixture(root)
+      cc(root, "-g -shared -fPIC -Wl,-soname,libbar.so.1 -o libs/libbar.so.1 bar.c")
+      var s = spec(f, @[f.libs])
+      writeFile(root / "strip.sh", "#!/bin/sh\nhead -c 100 \"$1\" > \"$2\"\n" &
+        "echo 'error: Unexpected' >&2; exit 1\n")
+      setFilePermissions(root / "strip.sh", {fpUserRead, fpUserWrite, fpUserExec})
+      s.debugStripCommand = root / "strip.sh"
+      let r = sh(assemblyScript(s), root)
+      checkpoint(r.output)
+      check r.code != 0
+      check "libbar.so.1" in r.output
+      check "error: Unexpected" in r.output
+      check not fileExists(root / "prefix" / "lib" / "libbar.so.1.stripped")
+
   test "a gate check that fails refuses the prefix; one that passes does not":
     requireTools:
       let root = createTempDir("prefix-gate-check-", "")

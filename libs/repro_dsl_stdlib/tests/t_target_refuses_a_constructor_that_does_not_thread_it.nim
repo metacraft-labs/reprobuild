@@ -289,6 +289,24 @@ suite "a zig target is threaded into the C operations":
         discard c_executable("hello2", @["src/hello.c"])
         check registeredBuildActions().len > before))
 
+  test "compile and link pass their extra flags to zig cc, last":
+    # `CompileOptions.extra` / `LinkOptions.extra` were dropped under a zig
+    # target, so the installed prefix's launcher, asked for `-O2` and
+    # `-Wl,--strip-debug`, was built with the debug build type's DWARF
+    # naming zig's store path (measured 2026-11-03).
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let o = compile(CompileOptions(source: "src/extra.c",
+          target: "build/extra.o", extra: @["-O2", "-g0"]))
+        check "extra=-O2 -g0" in argStrings(o)
+        let exe = link(LinkOptions(objects: @[o], kind: lokExecutable,
+          target: "build/stripped", extra: @["-Wl,--strip-debug"]))
+        check "extra=-Wl,--strip-debug" in argStrings(exe)
+        let plain = compile("src/plain.c", "build/plain.o")
+        # No extra flags: the argument is empty, so the argv is unchanged.
+        check not argStrings(plain).anyIt(
+          it.startsWith("extra=") and it != "extra=")))
+
   test "a static library is a zig ar archive":
     withTarget(ZigTriple, proc() =
       inBuild(proc() =

@@ -1439,7 +1439,14 @@ when not defined(windows) and not defined(macosx):
 when not defined(windows):
   let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
   let depOpensslPrefix = getEnv("DEP_OPENSSL_PREFIX")
-  let opensslLibDir = block:
+  # A compile for another machine that the engine handed no OpenSSL needs
+  # none (it is not a `-d:ssl` edge), and every ambient OpenSSL below is the
+  # build host's: its `-L` and rpath would only plant a build-host path in
+  # the image (the armv7 DSL runtime carried the dev shell's openssl rpath,
+  # measured 2026-11-03).
+  let ambientOpensslOnly = depOpensslPrefix.len == 0 and
+    defined(reproZigTarget)
+  let opensslFound = block:
     var dir = ""
     if depOpensslPrefix.len > 0:
       # Realized by the engine: the catalog's OpenSSL built for the target,
@@ -1469,6 +1476,7 @@ when not defined(windows):
     if dir.len == 0:
       dir = nixLibDir("*-openssl-*", opensslNames)
     dir
+  let opensslLibDir = if ambientOpensslOnly: "" else: opensslFound
 
   if opensslLibDir.len > 0:
     switch("passL", "-L" & opensslLibDir)

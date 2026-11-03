@@ -172,7 +172,14 @@ bundle() {  # bundle <soname> <wanted-by>
   [ -n "$src" ] || { echo "installed prefix: $2 needs $1, which no library source holds:" >&2; printf '  %s\n' "$SOURCES" >&2; exit 1; }
   cp -L "$src" "$O/lib/$1"; chmod u+w "$O/lib/$1"
   if [ -n "$STRIP" ] && readelf -S "$O/lib/$1" | grep -q '\.debug'; then
-    $STRIP "$O/lib/$1" "$O/lib/$1.stripped" && mv "$O/lib/$1.stripped" "$O/lib/$1"
+    # A strip that fails can leave a truncated output: never ship it, and
+    # never ship the unstripped library in its place.
+    if ! $STRIP "$O/lib/$1" "$O/lib/$1.stripped"; then
+      rm -f "$O/lib/$1.stripped"
+      echo "installed prefix: stripping the debug info of lib/$1 failed ($STRIP)" >&2
+      exit 1
+    fi
+    mv "$O/lib/$1.stripped" "$O/lib/$1"
   fi
   echo "$O/lib/$1" >> "$WORK"
 }

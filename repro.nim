@@ -51,6 +51,7 @@ import repro_core/ambient_execution
 import repro_project_dsl
 import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
+import repro_dsl_stdlib/packages/llvm_objcopy
 import repro_dsl_stdlib/packages/gcc as gcc_module
 import repro_dsl_stdlib/fs as dslfs
 import repro_dsl_stdlib/types
@@ -1011,6 +1012,7 @@ package reprobuild:
       "gzip"
       "readelf"
       "patchelf"
+      "llvm-objcopy"
       "awk"
       "sort"
       "diff"
@@ -4189,7 +4191,7 @@ package reprobuild:
         let launcherObject = compile(CompileOptions(
           source: "apps/reprobuild-sandbox-launcher/launcher.c",
           target: "build/obj/reprobuild-sandbox-launcher/launcher.o",
-          standard: "c11", extra: @["-O2"]))
+          standard: "c11", extra: @["-O2", "-g0"]))
         let launcher = link(LinkOptions(objects: @[launcherObject],
           kind: lokExecutable,
           target: "build/bin/reprobuild-sandbox-launcher",
@@ -4311,7 +4313,7 @@ package reprobuild:
             ".repro/build/engine-build-info"],
           extraDeps: (reprobuildAppsActions & reprobuildLibActions &
             @[launcher, stageSources] & debFetches).mapIt(it.id),
-          extraTools: @["bash", "git", "zig", "cat", "nim"] &
+          extraTools: @["bash", "git", "zig", "cat", "nim", "llvm-objcopy"] &
             @NimForkGuardTools,
           # §5.3, "The sources": the installed compile's imports close over
           # the shipped share/repro alone, type-checked for the target.
@@ -4321,8 +4323,10 @@ package reprobuild:
           gateTools: @["bash", "nim", "mktemp", "cat", "grep", "head", "tail",
             "rm", "mkdir"],
           # The catalog's source builds carry debug info naming this host's
-          # directories; zig's own objcopy reads the target's objects.
-          debugStripCommand: "zig objcopy --strip-debug",
+          # directories. LLVM's objcopy reads every target; the host's GNU
+          # objcopy and zig 0.13's do not read an armv7 library
+          # (packages/llvm_objcopy).
+          debugStripCommand: "llvm-objcopy --strip-debug",
           preChecks: @[
             # The catalog builds the prefix takes, built for this target.
             "for r in nim-fork pcre clingo; do [ -d " &

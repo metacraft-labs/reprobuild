@@ -149,6 +149,11 @@ package zig:
           position = 1,
           role = input,
           repeated = true
+        # `CompileOptions.extra` / `LinkOptions.extra`, verbatim and last,
+        # so a recipe's own `-O` / `-g` win over the build type's.
+        pos extra is seq[string],
+          position = 2,
+          repeated = true
 
         outputs output
 

@@ -3201,8 +3201,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_core_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let sslDir = createTempDir(\"zig-target-libssl-\", \"\")"),
   TestSpec(
     source: "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim",
     binary: "build/test-bin/t_auto_started_daemon_does_not_hold_callers_pipe",
