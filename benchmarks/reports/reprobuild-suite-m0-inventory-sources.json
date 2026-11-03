@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2609,
+    "nimTestBinaries": 2610,
     "pureUnitConsolidationGroups": 78,
-    "pureUnitTests": 723,
+    "pureUnitTests": 724,
     "staticallyDetectedRuntimeCompilerFlowTests": 135,
-    "testEntries": 2649
+    "testEntries": 2650
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -126,6 +126,24 @@
       "targetOs": "soAny"
     },
     {
+      "count": 7,
+      "defines": [],
+      "dependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "sources": [
+        "libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim",
+        "libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim",
+        "libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim",
+        "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
+        "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
+        "libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim",
+        "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 3,
       "defines": [],
       "dependencyShape": [
@@ -180,23 +198,6 @@
       "sources": [
         "libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim",
         "libs/repro_cli_support/tests/t_l9_a_typed_service_is_supervised_without_a_placeholder.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 6,
-      "defines": [],
-      "dependencyShape": [
-        "repro_cli_support"
-      ],
-      "owner": "libs/repro_cli_support",
-      "sources": [
-        "libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim",
-        "libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim",
-        "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
-        "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
-        "libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim",
-        "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1534,7 +1535,7 @@
       "graph-fixture": 18,
       "integration": 1447,
       "platform/destructive": 164,
-      "pure unit": 723,
+      "pure unit": 724,
       "unclassified": 297
     },
     "graphOwnedTestArtifacts": [
@@ -1743,9 +1744,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2609,
+    "nimTestBinaryCount": 2610,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2649
+    "testEntryCount": 2650
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11786,6 +11787,23 @@
       "source": "libs/repro_cli_support/tests/t_data_file_row_selection_fixtures.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dep_prefix_names_the_library_prefix",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

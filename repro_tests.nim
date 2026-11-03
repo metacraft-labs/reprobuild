@@ -2269,6 +2269,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim",
+    binary: "build/test-bin/t_dep_prefix_names_the_library_prefix",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_deploy_agent_keygen_cli.nim",
     binary: "build/test-bin/t_deploy_agent_keygen_cli",
     defines: @[],
@@ -2552,7 +2563,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g01",
+    group: "t_group_libs_repro_cli_support_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",

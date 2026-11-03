@@ -1609,6 +1609,34 @@ proc depPrefixVarName*(selector: string): string =
     result.add(if ch.isAlphaNumeric: ch.toUpperAscii else: '_')
   result.add("_PREFIX")
 
+proc holdsLibraryFile(dir: string): bool =
+  ## Whether `dir` itself (not a subdirectory) holds a shared or static
+  ## library: `lib*.so`, `lib*.so.*`, `lib*.a`, `lib*.dylib`.
+  if not dirExists(extendedPath(dir)):
+    return false
+  for kind, path in walkDir(extendedPath(dir)):
+    if kind notin {pcFile, pcLinkToFile}:
+      continue
+    let name = extractFilename(path)
+    if name.startsWith("lib") and (name.endsWith(".so") or
+        ".so." in name or name.endsWith(".a") or name.endsWith(".dylib")):
+      return true
+  false
+
+proc depLibraryPrefix*(prefixes: seq[string]): string =
+  ## The prefix `DEP_<NAME>_PREFIX` names for a library realization: the
+  ## first of its prefixes whose `lib/` or `lib64/` holds a library file,
+  ## else the first. A realization can carry several: a Nix package realizes
+  ## every output, and neither its `-bin` output nor its `-debug` output
+  ## (whose `lib/` holds only `debug/`) holds the library. Measured:
+  ## `DEP_OPENSSL_PREFIX=…-openssl-3.6.0-bin`, then `…-debug`, and
+  ## `config.nims` stopped the `-d:ssl` images both times. The environment
+  ## arm and a sibling's target mirror carry one prefix, named as it is.
+  for prefix in prefixes:
+    if holdsLibraryFile(prefix / "lib") or holdsLibraryFile(prefix / "lib64"):
+      return prefix
+  if prefixes.len > 0: prefixes[0] else: ""
+
 proc actionPathEntry(actionPathPrefix: string): string =
   ## The action's `PATH`, and nothing else: the directories the solved
   ## graph resolved THIS EDGE's tool and THIS EDGE's declared
@@ -8695,7 +8723,8 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
           (actionIdy.cpathList.len > 0 or actionIdy.libraryPathList.len > 0):
         let varName = depPrefixVarName(name)
         if mergedPrefixVars.allIt(it[0] != varName):
-          mergedPrefixVars.add((varName, actionIdy.cmakePrefixList[0]))
+          mergedPrefixVars.add((varName,
+            depLibraryPrefix(actionIdy.cmakePrefixList)))
     if matched:
       var nimPathDirs: seq[string] = @[]
       {.cast(gcsafe).}:
