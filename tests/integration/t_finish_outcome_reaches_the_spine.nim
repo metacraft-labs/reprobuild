@@ -80,14 +80,11 @@ proc startSpineDaemon(root: string): SpineDaemon =
   ## default) and its own observation database, so the rows read back are
   ## this test's and only this test's.
   ##
-  ## THE ENDPOINT DIRECTORY IS CREATED 0700 BY THIS TEST: `runquotad`
-  ## refuses a rendezvous directory whose mode it did not verify as
-  ## created, so inheriting the umask's would be a startup failure rather
-  ## than a permission it silently tightened.
+  ## THE ENDPOINT DIRECTORY COMES FROM `runquotaRendezvousDir`: RunQuota
+  ## provisions and verifies it (owner, mode), and it moves to a short
+  ## private directory when `root` would put the socket past `sun_path`.
   let daemonBin = requireRunQuotaDaemonBin(repoRoot())
-  let endpointDir = root / "ep"
-  createDir(endpointDir)
-  setFilePermissions(endpointDir, {fpUserRead, fpUserWrite, fpUserExec})
+  let endpointDir = runquotaRendezvousDir(root)
   let socketPath = endpointDir / "d.sock"
   let stateDir = root / "state"
   createDir(stateDir)
@@ -132,8 +129,9 @@ proc startSpineDaemon(root: string): SpineDaemon =
   var diagnostic = ""
   if not process.running:
     try: diagnostic = process.outputStream.readAll() except CatchableError: discard
-  process.terminate()
-  discard process.waitForExit(5000)
+  else:
+    process.terminate()
+    discard process.waitForExit(5000)
   process.close()
   raise newException(OSError,
     "runquotad socket did not appear at " & socketPath &
