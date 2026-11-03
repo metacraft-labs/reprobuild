@@ -370,15 +370,14 @@ suite "a committed lock does not depend on which worktree refreshed it":
       # ---- (4) the sibling's committed record is writer-independent. ----
       check wtEntry == rootEntry
 
-      # ---- (5) the root entry's ref names a PUBLISHED branch. ----
-      # `feature` is the worktree's local branch and the consumer's remote has
-      # never been fetched, so no published branch contains the commit: the
-      # lock records no ref rather than a name no other checkout can resolve
+      # ---- (5) the root entry records no branch. ----
+      # `feature` is the worktree's local branch, which no other checkout can
+      # resolve; a pin records the commit and never a branch at all
       # (Unified-Locking-And-Hooks.md §14.2).
       let wtRootEntry = depEntryFor(wtBody, ".")
       check entryCarriesNoPath(wtRootEntry)
       check wtRootEntry.len > 0
-      check "ref = \"\"" in wtRootEntry
+      check "ref = " notin wtRootEntry
       check "feature" notin wtRootEntry
 
   test "t_manifest_develop_set_survives_a_worktree_refresh":

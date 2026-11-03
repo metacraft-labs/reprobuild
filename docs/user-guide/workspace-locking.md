@@ -516,18 +516,15 @@ brings it forward (`git -C <sibling> merge --ff-only …`, `repro ws sync
 line of the sibling's history, is spelled out:
 `repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
 (or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
-`pre-commit` re-pin honors). Each pin's `ref` is a published branch that
-contains the pinned commit — the branch of the repo's `unstable` role
-first, then the branch of its `mainline` role, as the workspace manifest
-and settings file declare them (no branch name is built into `repro`),
-then the checkout's branch, the remote's default, or any other published
-branch containing it — and is empty when no published branch contains it; a
-local-only branch name is never recorded. Neither is a branch the
-branching policy deletes after use: a stabilisation branch
-`agents-to-dev-<date>` is skipped, so a refresh run on one records the
-next durable branch containing the commit, or an empty `ref` when only
-the stabilisation branch contains it, and a lock that already records
-one has it replaced on the next refresh or commit.
+`pre-commit` re-pin honors). A pin records the commit and nothing about
+branches: no `ref`, so neither a local-only branch name nor which published
+branch contains the commit. Which branches a remote publishes is a fact
+about your clone's remote-tracking refs, and recording it made two clones
+write different bytes for the same pins and made publishing a sibling
+rewrite its dependents' locks. Whether a pinned commit is published is
+checked when you push. A lock written by an older `repro` may still carry a
+`ref` for each entry; it is ignored, and dropped the next time a pin in that
+lock is rewritten.
 
 Refresh also names every sibling pin it removes, including pins in HEAD's
 committed lock that a previous working-copy refresh already removed. The

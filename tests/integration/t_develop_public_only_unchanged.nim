@@ -95,7 +95,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 proc depInline(name, path, url, sha, depends: string;
                tags = ""): string =
   "{ name = \"" & name & "\", path = \"" & path &
-    "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
+    "\", coord_kind = \"vcs\", url = \"" & url & "\"" &
     ", revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"" & depends & "\", tags = \"" & tags & "\" }"

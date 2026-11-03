@@ -224,8 +224,7 @@ proc requiredCertificateLock(depRevision, depUrl: string): string =
   replaceCertificatePolicySection(serializeLockedDependencies(
     LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[
       LockedDep(name: "dep", path: "../dep",
-        coordinates: Coordinates(kind: ckVcs, url: depUrl, gitRef: "main",
-          revision: depRevision),
+        coordinates: Coordinates(kind: ckVcs, url: depUrl, revision: depRevision),
         integrity: "git-sha1:" & depRevision, visibility: "public")])),
     everyBranchSnapshot(pmRequired, ["t-unit"],
     [hostOS & "/" & hostCPU], name = "app"))

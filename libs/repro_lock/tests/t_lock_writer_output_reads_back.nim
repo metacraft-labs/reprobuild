@@ -69,7 +69,7 @@ proc sameCoordinates(a, b: Coordinates): bool =
   if a.kind != b.kind: return false
   case a.kind
   of ckVcs:
-    a.url == b.url and a.gitRef == b.gitRef and a.revision == b.revision
+    a.url == b.url and a.revision == b.revision
   of ckStore:
     a.storeHash == b.storeHash
   of ckRegistry:
@@ -116,7 +116,6 @@ proc depsOfEveryCoordinateKind(): seq[LockedDep] =
     LockedDep(name: "alpha", path: defaultLockedDepCheckoutPath("alpha"),
       coordinates: Coordinates(kind: ckVcs,
         url: "https://example.invalid/alpha.git",
-        gitRef: "refs/heads/main",
         revision: "1111111111111111111111111111111111111111"),
       integrity: "blake3:aa01", version: "1.2.3", visibility: "public",
       participation: "source", depends: @["beta", "gamma"],
@@ -281,7 +280,6 @@ suite "the unified lock document reads back":
     var b = a
     b.deps[0].coordinates = Coordinates(kind: ckVcs,
       url: "https://example.invalid/alpha.git",
-      gitRef: "refs/heads/main",
       revision: "2222222222222222222222222222222222222222")
     check serializeLockedDependencies(a) != serializeLockedDependencies(b)
     check not sameLockedDependencies(
@@ -306,12 +304,12 @@ suite "a lock records identity, never a checkout path":
     written.deps = @[
       LockedDep(name: "app", path: SelfLockedDepPath,
         coordinates: Coordinates(kind: ckVcs, url: "https://example.invalid/app.git",
-          gitRef: "main", revision: "3333333333333333333333333333333333333333"),
+          revision: "3333333333333333333333333333333333333333"),
         integrity: "git-sha1:3333333333333333333333333333333333333333",
         visibility: "public", depends: @["lib"]),
       LockedDep(name: "lib", path: "../dev/somewhere-else/lib",
         coordinates: Coordinates(kind: ckVcs, url: "https://example.invalid/lib.git",
-          gitRef: "main", revision: "4444444444444444444444444444444444444444"),
+          revision: "4444444444444444444444444444444444444444"),
         integrity: "git-sha1:4444444444444444444444444444444444444444",
         visibility: "public")]
     let document = serializeLockedDependencies(written)
@@ -393,3 +391,35 @@ suite "a lock records identity, never a checkout path":
       discard serializeLockedDependencies(LockedDependencies(deps: @[
         LockedDep(name: "pkg", path: SelfLockedDepPath,
           coordinates: Coordinates(kind: ckStore, storeHash: "h"))]))
+
+suite "a lock pins a commit, never a branch":
+
+  test "no ref is written, and a ref an older writer recorded is dropped":
+    # Unified-Locking-And-Hooks.md §14.2: a pin's bytes depend only on the
+    # pinned commit. A `ref` (the published branch containing it) was a fact
+    # about the writer's remote-tracking refs, so two clones wrote different
+    # bytes for one pin and publishing a sibling rewrote a dependent's lock.
+    let entry = "{ name = \"app\", self = \"true\", coord_kind = \"vcs\", " &
+      "url = \"https://example.invalid/app.git\", REF" &
+      "revision = \"5555555555555555555555555555555555555555\", " &
+      "integrity = \"git-sha1:5555555555555555555555555555555555555555\", " &
+      "version = \"\", visibility = \"public\", participation = \"\", " &
+      "depends = \"\", tags = \"\" }"
+    proc document(refField: string): string =
+      "schema = \"" & SolvedGraphLockSchemaV3 & "\"\n\n[lock]\n" &
+        "platform = \"amd64-linux\"\noptimal = true\n" &
+        "inputs_digest = \"fnv1a64:0\"\nvariants = []\npackages = []\n" &
+        "deps = [" & entry.replace("REF", refField) & "]\n"
+    let current = document("")
+    # What the writer emits has no `ref`, and it reads back byte-identically.
+    check serializeLockedDependencies(parseLockedDependencies(current)) ==
+      current
+    # A lock written before carries one, published or not: it reads as the
+    # same lock, and its next write drops it.
+    for recorded in ["ref = \"main\", ", "ref = \"\", ",
+                     "ref = \"agents-to-dev-2026-10-12\", "]:
+      let legacy = document(recorded)
+      check sameLockedDependencies(parseLockedDependencies(legacy),
+        parseLockedDependencies(current))
+      check serializeLockedDependencies(parseLockedDependencies(legacy)) ==
+        current

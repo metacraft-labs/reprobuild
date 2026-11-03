@@ -134,7 +134,7 @@ proc otherLock(fx: Nf2Fixture; otherRev: string;
   proc dep(name, path, sha, depends: string): string =
     "{ name = \"" & name & "\", path = \"" & path &
     "\", coord_kind = \"vcs\", url = \"" & originUrl(fx, name) &
-    "\", ref = \"main\", revision = \"" & sha &
+    "\", revision = \"" & sha &
     "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"" & depends & "\", groups = \"\" }"
@@ -154,7 +154,7 @@ proc ownLock(fx: Nf2Fixture; name, rev: string): string =
   "inputs_digest = \"not-substituted-fixture\"\nvariants = []\n" &
   "packages = []\ndeps = [{ name = \"" & name & "\", path = \".\", " &
   "coord_kind = \"vcs\", url = \"" & originUrl(fx, name) &
-  "\", ref = \"main\", revision = \"" & rev & "\", integrity = " &
+  "\", revision = \"" & rev & "\", integrity = " &
   "\"git-sha1:" & rev & "\", version = \"\", visibility = \"public\", " &
   "participation = \"\", depends = \"\", groups = \"\" }]\n"
 

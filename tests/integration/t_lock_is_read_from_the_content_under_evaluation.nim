@@ -70,8 +70,7 @@ proc committedLock(revision: string): string =
     schema: "reprobuild.solved-graph-lock.v2",
     deps: @[LockedDep(
       name: "lib-a", path: ".",
-      coordinates: Coordinates(kind: ckVcs, gitRef: "main",
-        revision: revision),
+      coordinates: Coordinates(kind: ckVcs, revision: revision),
       integrity: "git-sha1:" & revision,
       visibility: "public")]))
 

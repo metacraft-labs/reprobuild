@@ -157,7 +157,7 @@ proc committedLockToml(libBUrl, libBHead: string): string =
   "variants = []\n" &
   "packages = []\n" &
   "deps = [{ name = \"lib-b\", path = \"lib-b\", coord_kind = \"vcs\", url = \"" &
-  libBUrl & "\", ref = \"main\", revision = \"" & libBHead &
+  libBUrl & "\", revision = \"" & libBHead &
   "\", integrity = \"git-sha1:" & libBHead &
   "\", version = \"\", visibility = \"public\", participation = \"\", " &
   "depends = \"\", tags = \"\" }]\n"

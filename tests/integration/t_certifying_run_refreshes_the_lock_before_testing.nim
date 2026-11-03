@@ -10,8 +10,9 @@
 ## for each a plain ``repro test`` followed by a plain ``git commit -a``:
 ##
 ##   A. lib-b advanced after the lock was written (a REVISION moved);
-##   B. every revision matches, but lib-c's entry records a ``ref`` that
-##      names no published branch (§14.2: a re-observation replaces it);
+##   B. every revision matches, but lib-c's entry records a fetch ``url``
+##      that is not its checkout's canonical one (§13.3: a re-observation
+##      rewrites it);
 ##   C. every revision matches, but the manifest now declares lib-d in app's
 ##      develop set and the lock does not carry it (§13.3: it is added).
 ##
@@ -90,11 +91,13 @@ suite "HL-10 — the certifying run refreshes the lock before testing":
       check libBNext notin fx.lockText()
       fx.certifyAndCommit("A", "repro-lock re-pinned lib-b", libBNext)
 
-      # ---- B. only a ref is stale ------------------------------------------
-      let planted = fx.lockText().withRef("lib-c", "never-published")
+      # ---- B. only a url is stale ------------------------------------------
+      let realUrl = urlOf(fx.lockText(), "lib-c")
+      let planted = fx.lockText().withUrl("lib-c",
+        "file:///never-published/lib-c.git")
       writeFile(fx.app / "repro.lock", planted)
       writeFile(fx.app / "README.md", "app fixture, edited for B\n")
-      # Committed past the hooks, so the stale ref is what HEAD records.
+      # Committed past the hooks, so the stale url is what HEAD records.
       discard fx.mustGitApp("commit", "--no-verify", "-a", "-m", "plant B")
       check "never-published" in fx.lockText()
       let planB = planCommitTimeLockWriters(ws, fx.app, tpmPathOnly,
@@ -103,7 +106,7 @@ suite "HL-10 — the certifying run refreshes the lock before testing":
       check planB.refused.len == 0
       writeFile(fx.app / "README.md", "app fixture, edited again for B\n")
       fx.certifyAndCommit("B", "repro-lock refreshed sibling coordinates",
-        "ref = \"main\"")
+        "url = \"" & realUrl & "\"")
       check "never-published" notin fx.lockText()
 
       # ---- C. a declared develop-set sibling is not carried ----------------

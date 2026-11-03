@@ -736,7 +736,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
         "inputs_digest = \"fnv1a64:0000000000000000\"\n" &
         "variants = []\npackages = []\n" &
         "deps = [{ name = \"dep\", path = \"./.\", coord_kind = \"vcs\", " &
-        "url = \"" & fileUrl(depOrigin) & "\", ref = \"main\", " &
+        "url = \"" & fileUrl(depOrigin) & "\", " &
         "revision = \"../../victim\", integrity = \"git-sha1:" & depSha &
         "\", version = \"\", visibility = \"public\", " &
         "participation = \"\", depends = \"\", groups = \"\" }]\n")

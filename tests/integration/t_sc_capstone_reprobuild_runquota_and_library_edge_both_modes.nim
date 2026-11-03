@@ -265,14 +265,12 @@ proc writeConsumerLock(consumerRoot, exeUrl, exeRev, libUrl, libRev: string;
     inputsDigest: inputsDigestOf("sc7-fixture-" & tag))
   ld.deps.add(LockedDep(
     name: "exeprod", path: "",
-    coordinates: Coordinates(kind: ckVcs, url: exeUrl, gitRef: "main",
-      revision: exeRev),
+    coordinates: Coordinates(kind: ckVcs, url: exeUrl, revision: exeRev),
     integrity: gitObjectMultihash("sha1", exeRev),
     visibility: "public"))
   ld.deps.add(LockedDep(
     name: "libprod", path: "",
-    coordinates: Coordinates(kind: ckVcs, url: libUrl, gitRef: "main",
-      revision: libRev),
+    coordinates: Coordinates(kind: ckVcs, url: libUrl, revision: libRev),
     integrity: gitObjectMultihash("sha1", libRev),
     visibility: "public"))
   writeFile(consumerRoot / "repro.lock", serializeLockedDependencies(ld))

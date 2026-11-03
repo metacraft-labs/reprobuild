@@ -114,7 +114,9 @@ suite "MO-8: committed lock carries coordinates + self-describing integrity":
       # is why it went unseen. Escaping here rather than weakening the check
       # keeps it exact: a lock recording the wrong URL, or ``""``, still fails.
       check ("url = \"" & tomlBasicString(originUrl) & "\"") in lockBody
-      check "ref = \"main\"" in lockBody
+      # A pin records the commit, never the branch a remote publishes it on
+      # (Unified-Locking-And-Hooks.md §14.2).
+      check "ref = " notin lockBody
       # The repo's own entry is MARKED, not located: a lock records identity
       # and never a checkout path (schema v3).
       check "self = \"true\"" in lockBody

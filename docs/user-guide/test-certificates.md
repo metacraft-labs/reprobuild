@@ -356,6 +356,14 @@ repro push: stopped repo=lib-a stage=certify-preflight
     certificates: commit be8b5ee9db3f lacks 't-unit' on linux/amd64: run 'repro certify t-unit' (…)
 ```
 
+A closure is certified one member at a time, dependency first, each at its turn
+right before its own push, because issuance requires what the member pins to be
+published already. Publishing a dependency earlier in the same run does not
+change a dependent's `repro.lock`: a pin records only the commit, never which
+branch publishes it. So one `repro push` certifies and publishes the whole
+closure under `required`. A member whose test fails stops the run before its
+dependents. What was already pushed stays published, and the retry resumes.
+
 Under `required`, then, a branch with several untested commits has to be folded
 together or certified commit by commit, which also applies after a
 `--sync --rebase` rewrites them. Alternatively, certify the tip and use

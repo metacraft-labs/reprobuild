@@ -17,9 +17,11 @@
 ## repo's entry for the same repo, so reprobuild's CI step "Reconcile CodeTracer
 ## source dependencies" (``repro develop --all --reset``) asked GitHub for a
 ## branch that exists nowhere and the graph made no progress — while the
-## revision that same record names is on ``dev`` and fetches fine. The writer is
-## fixed; every lock refreshed before that fix still carries the stale field,
-## which is why the CONSUMER must not be breakable by it.
+## revision that same record names is on ``dev`` and fetches fine. Writers now
+## record no ``ref`` at all (Unified-Locking-And-Hooks.md §14.2) and the
+## reader discards one; every lock written before that still carries the
+## field until its next write, which is why the CONSUMER must not be
+## breakable by it.
 ##
 ## Spec: CLI/develop.md ("A revision comes from a lock record or not at all");
 ## Unified-Locking-And-Hooks.md §3 (the public row: a repo publishes its own

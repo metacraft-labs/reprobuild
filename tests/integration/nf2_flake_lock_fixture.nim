@@ -148,7 +148,7 @@ proc lockPath*(fx: Nf2Fixture): string = fx.app / "flake.lock"
 proc lockDep(scratch, name, path, sha, depends, origin: string): string =
   "{ name = \"" & name & "\", path = \"" & path &
   "\", coord_kind = \"vcs\", url = \"file://" & scratch / ("origin-" & origin & ".git") &
-  "\", ref = \"main\", revision = \"" & sha &
+  "\", revision = \"" & sha &
   "\", integrity = \"git-sha1:" & sha &
   "\", version = \"\", visibility = \"public\", participation = \"\"" &
   ", depends = \"" & depends & "\", groups = \"\" }"

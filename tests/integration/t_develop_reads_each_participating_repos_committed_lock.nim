@@ -136,7 +136,7 @@ proc selfPinnedLock(name, url, sha: string): string =
   "variants = []\n" &
   "packages = []\n" &
   "deps = [{ name = \"" & name & "\", path = \".\", coord_kind = \"vcs\"" &
-  ", url = \"" & url & "\", ref = \"main\", revision = \"" & sha &
+  ", url = \"" & url & "\", revision = \"" & sha &
   "\", integrity = \"git-sha1:" & sha & "\", version = \"\"" &
   ", visibility = \"public\", participation = \"\", depends = \"\"" &
   ", tags = \"\" }]\n"

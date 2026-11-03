@@ -172,7 +172,7 @@ proc twoEntryLock(fx: Nf2Fixture; owner, ownerRev, sibling,
   proc dep(name, path, sha, depends, origin: string): string =
     "{ name = \"" & name & "\", path = \"" & path &
     "\", coord_kind = \"vcs\", url = \"" & originUrl(fx, origin) &
-    "\", ref = \"main\", revision = \"" & sha &
+    "\", revision = \"" & sha &
     "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"" & depends & "\", groups = \"\" }"
@@ -194,7 +194,7 @@ proc recordOwnLock(fx: Nf2Fixture; name: string): string =
     "inputs_digest = \"own-deps-fixture\"\nvariants = []\n" &
     "packages = []\ndeps = [{ name = \"" & name & "\", path = \".\", " &
     "coord_kind = \"vcs\", url = \"" & originUrl(fx, name) &
-    "\", ref = \"main\", revision = \"" & rev & "\", integrity = " &
+    "\", revision = \"" & rev & "\", integrity = " &
     "\"git-sha1:" & rev & "\", version = \"\", visibility = \"public\", " &
     "participation = \"\", depends = \"\", groups = \"\" }]\n")
   discard gitIn(fx, dir, "add -A")
