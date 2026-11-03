@@ -20,12 +20,21 @@
 ## gateway; a member whose test fails stops the run before its dependents,
 ## and what was already published stays published.
 ##
+## Another suite pushes a dependency cycle lib-a <-> lib-b with new commits in
+## both, each member behind its own gateway, in ONE `repro push`, under
+## `required` and under `advisory`. Issuance accepts the unpublished peer whose
+## commit the tested lock pins; the member whose lock keeps the peer's older,
+## published commit is decided before anything runs; the member pinning its
+## peer's new commit is pushed after that peer; a test failure in either
+## member publishes neither. `repro certify` on a cycle member accepts its
+## peer, and still refuses an unpublished dependency outside the cycle.
+##
 ## The rule's ``commit_gate`` is ``off``: with the default, the pre-commit gate
 ## refuses an uncovered commit, so the states under test could not be committed
 ## with hooks on. ``advisory`` is the other way to arrive at them, and has a case
 ## of its own.
 
-import std/unittest
+import std/[posix, sequtils, streams, strtabs, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -41,8 +50,8 @@ const certToolInterface = "import repro_project_dsl\n\n" &
   "    flag marker is string, alias = \"--marker\", required = true\n" &
   "    outputs output\n"
 
-  ## Copies ``--input`` to ``--output`` and logs the output to ``--marker``, so a
-  ## case can tell that a test ran. An input starting with FAIL makes it fail.
+  ## case can tell that a test ran. An input starting with FAIL makes it fail;
+  ## one starting with SLOW takes two minutes, long enough to interrupt.
 const certToolScript = """#!/bin/sh
 set -eu
 if [ "${1:-}" = "--version" ]; then echo 'cert-tool 1.0.0'; exit 0; fi
@@ -57,7 +66,10 @@ while [ "$#" -gt 0 ]; do
 done
 mkdir -p "$(dirname "$output")" "$(dirname "$marker")"
 printf '%s\n' "$output" >> "$marker"
-case "$(head -c 4 "$input")" in FAIL) echo "$input says FAIL" >&2; exit 1 ;; esac
+case "$(head -c 4 "$input")" in
+  FAIL) echo "$input says FAIL" >&2; exit 1 ;;
+  SLOW) sleep 120 ;;
+esac
 cp "$input" "$output"
 """
 
@@ -716,43 +728,6 @@ suite "repro push certifies only content that was not tested":
       check older[0 ..< 12] in refused.output
       check gitOut(dep.bare, "rev-parse", "refs/heads/main") == depBefore
 
-  test "a cycle member with an unpublished peer is stopped by issuance, and says so":
-    guarded:
-      let fx = setupPush("push-cycle", "required", gateway = false)
-      defer: removeDir(fx.sf.scratch)
-      let peer = fx.addSibling("lib-b", cycle = true)
-      installHooks(fx.sf)
-      let peerBefore = gitOut(peer.bare, "rev-parse", "refs/heads/main")
-      let before = upstreamTip(fx.sf)
-      discard fx.commitIn(peer, "unit peer\n", "peer, not tested yet")
-      discard fx.commitEdit("unit cycle\n", "member, not tested yet")
-      let stopped = fx.push()
-      checkpoint(stopped.output)
-      check stopped.code == 2
-      check "dependency has unpushed commits" in stopped.output
-      check "is still not covered" in stopped.output
-      check "stage=certify\n" in (stopped.output & "\n")
-      check gitOut(peer.bare, "rev-parse", "refs/heads/main") == peerBefore
-      check upstreamTip(fx.sf) == before
-
-  test "advisory: the certify step lets a cycle through to the pin rule":
-    guarded:
-      let fx = setupPush("push-cycle-advisory", "advisory", gateway = false)
-      defer: removeDir(fx.sf.scratch)
-      let peer = fx.addSibling("lib-b", cycle = true)
-      installHooks(fx.sf)
-      discard fx.commitIn(peer, "unit peer\n", "peer, not tested yet")
-      discard fx.commitEdit("unit cycle\n", "member, not tested yet")
-      let pushed = fx.push()
-      checkpoint(pushed.output)
-      # Issuance could not run, and under advisory that is a report. What stops
-      # this push is another rule: each commit's lock, refreshed by its hook, pins
-      # the peer's unpublished commit.
-      check "still not covered after certifying" in pushed.output
-      check "stage=certify" notin pushed.output
-      check "stage=source-push" in pushed.output
-      check "source-component-unpublished-pin" in pushed.output
-
 proc addGatewayedChain(fx: PushFixture): seq[Sibling] =
   ## lib-a -> lib-b -> lib-c, each with the same recipe and policy, its own
   ## upstream bare and its own gateway. lib-a's gateway is the fixture's.
@@ -950,3 +925,400 @@ suite "repro push publishes a certified closure through every member's gateway":
       check "(lib-c) → already-published" in retried.output
       check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bFixed
       check upstreamTip(fx.sf) == aFixed
+
+proc addMembers(fx: PushFixture;
+                members: openArray[tuple[name: string; depends: seq[string]]];
+                libADepends: seq[string]; gateways: bool): seq[Sibling] =
+  ## Repositories beside lib-a, each with the same recipe and policy and its own
+  ## upstream bare, behind its own gateway when ``gateways``. lib-a depends on
+  ## ``libADepends``; a member that depends on lib-a closes a cycle with it.
+  let ws = fx.sf.workspaceRoot
+  proc quoted(names: seq[string]): string =
+    names.mapIt("\"" & it & "\"").join(", ")
+  var remotes = "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
+    fileUrl(fx.sf.upstreamBare) & "\"\n\n"
+  var includes = "  \"repos/lib-a.toml\",\n"
+  for member in members:
+    var s = Sibling(bare: fx.sf.scratch / ("upstream-" & member.name & ".git"),
+      path: ws / member.name)
+    discard gitOut(fx.sf.scratch, "clone", "-q", "--bare", fx.sf.upstreamBare,
+      s.bare)
+    discard gitOut(fx.sf.scratch, "clone", "-q", fileUrl(s.bare), s.path)
+    discard gitOut(s.path, "config", "user.email", "tester@example.invalid")
+    discard gitOut(s.path, "config", "user.name", "Cycle Tester")
+    if gateways:
+      let wired = wirePushGateway("git", s.path,
+        fx.sf.scratch / ("gateway-" & member.name & ".git"), fileUrl(s.bare),
+        GatewayConfig(
+          registeredKeysPath: registeredKeyStorePath(fx.sf.workspaceRoot)))
+      doAssert wired.ok, wired.diagnostic
+    writeFile(ws / "repos" / (member.name & ".toml"),
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" &
+      member.name & "\"\npath = \"" & member.name & "\"\nremote = \"" &
+      member.name & "-origin\"\nmainline = \"main\"\n" &
+      (if member.depends.len > 0: "depends = [" & quoted(member.depends) & "]\n"
+       else: ""))
+    remotes.add("[[remote]]\nname = \"" & member.name & "-origin\"\nfetch = \"" &
+      fileUrl(s.bare) & "\"\n\n")
+    includes.add("  \"repos/" & member.name & ".toml\",\n")
+    result.add(s)
+  writeFile(ws / "repos" / "lib-a.toml", storeLibAFragment &
+    "depends = [" & quoted(libADepends) & "]\n")
+  writeFile(ws / "projects" / "lib-a.toml",
+    "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\nname = \"lib-a\"\n\n" &
+    remotes & "includes = [\n" & includes & "]\n")
+  for s in result:
+    let hooks = runArgv(@[fx.sf.reproBin, "hooks", "ensure", "--vcs", s.path],
+      env = @[(name: "REPROBUILD_REPRO", value: fx.sf.reproBin)])
+    doAssert hooks.code == 0, hooks.output
+  installHooks(fx.sf)
+
+proc reproIn(fx: PushFixture; dir: string; args: seq[string]):
+    tuple[code: int; output: string] =
+  ## ``repro`` run in another member's checkout, with the fixture's key and tools.
+  result = runArgv(@[fx.sf.reproBin] & args, dir,
+    daemonKeyEnv(fx.sf.daemonKey, storeKeyId) &
+    @[(name: "PATH", value: fx.binDir & $PathSep & pathWithoutTool()),
+      (name: "REPROBUILD_REPRO", value: fx.sf.reproBin)])
+  checkpoint("repro " & args.join(" ") & " in " & dir & ":\n" & result.output)
+
+proc lagFirstCycle(fx: PushFixture; bBody = "unit b\n"):
+    tuple[b: Sibling; a0, aTip, bTip: string] =
+  ## lib-a <-> lib-b, each behind its own gateway, with a new commit in each.
+  ## lib-b is committed first, so its lock keeps lib-a's published commit; lib-a
+  ## is committed second, so its lock pins lib-b's new, unpublished commit. Two
+  ## locks cannot each name the other's newest commit; this is the shape a
+  ## cycle with new work on both sides takes. Neither commit is tested.
+  result.b = fx.addMembers([(name: "lib-b", depends: @["lib-a"])], @["lib-b"],
+    gateways = true)[0]
+  result.a0 = upstreamTip(fx.sf)
+  result.bTip = fx.commitIn(result.b, bBody, "lib-b, not tested yet")
+  result.aTip = fx.commitEdit("unit a\n", "lib-a, not tested yet")
+  let aLock = fx.git("show " & result.aTip & ":repro.lock")
+  let lockOfB = gitOut(result.b.path, "show", result.bTip & ":repro.lock")
+  checkpoint("lib-a's lock:\n" & aLock & "\nlib-b's lock:\n" & lockOfB)
+  doAssert result.bTip in aLock
+  doAssert result.a0 in lockOfB and result.aTip notin lockOfB
+
+proc checkPublishedThroughGateway(fx: PushFixture; output, name, path, bare,
+                                  tip: string) =
+  ## The member went through its own gateway, which reported it covered, read
+  ## the certificate for the pushed tree from the notes, and forwarded it.
+  let report = memberReport(output, name)
+  checkpoint(name & "'s report:\n" & report)
+  check (name & " (" & name & ") → pushed") in report
+  check "reprobuild gateway: refs/heads/main: certificate gate: COVERED" in report
+  let gateway = fx.gatewayOf(name)
+  check gitOut(gateway, "rev-parse", "refs/heads/main") == tip
+  check remoteHasNotes(gateway)
+  let tree = gitOut(path, "rev-parse", tip & "^{tree}")
+  check noteOnRemote(gateway, tree).count("# --- test-certificate ---") >= 1
+  check gitOut(bare, "rev-parse", "refs/heads/main") == tip
+
+proc checkoutState(path: string): string =
+  ## What a push must leave as it found it: HEAD, the branch, and the worktrees
+  ## registered in the repository.
+  gitOut(path, "rev-parse", "HEAD") & "\n" &
+    gitOut(path, "symbolic-ref", "-q", "HEAD") & "\n" &
+    gitOut(path, "worktree", "list", "--porcelain")
+
+proc isolatedScratchDirs(): seq[string] =
+  ## Temporary workspaces a push certified in and left behind.
+  for kind, path in walkDir(getTempDir()):
+    if kind == pcDir and extractFilename(path).startsWith("repro-push-pins-"):
+      result.add(path)
+
+suite "repro push publishes a certified dependency cycle through every member's gateway":
+  test "required: one run certifies and publishes a cycle with new commits in " &
+      "both members, each through its own gateway":
+    guarded:
+      let fx = setupPush("push-cycle-required", "required")
+      defer: removeDir(fx.sf.scratch)
+      let (libB, a0, aTip, bTip) = fx.lagFirstCycle()
+      let before = (a: checkoutState(fx.app), b: checkoutState(libB.path))
+      let scratchBefore = isolatedScratchDirs()
+
+      # ---- one repro push from a fully untested state. lib-b's commit names
+      # lib-a's published commit while lib-a's checkout is past it, so lib-b is
+      # certified against that commit in temporary worktrees. lib-a is
+      # certified here, against lib-b's unpublished commit, which its lock pins
+      # exactly. lib-b is pushed first, since lib-a's lock names its new commit.
+      let pushed = fx.push()
+      checkpoint("repro push:\n" & pushed.output)
+      check pushed.code == 0
+      check "push order: lib-b → lib-a" in pushed.output
+      check "dependency has unpushed commits" notin pushed.output
+      check "source-component-unpublished-pin" notin pushed.output
+      check "certifying changed the working tree" notin pushed.output
+      let bReport = memberReport(pushed.output, "lib-b")
+      check "certified: t-unit" in bReport
+      check "certified against 'lib-a' at its pinned commit " & a0 in bReport
+      check "certified: t-unit" in memberReport(pushed.output, "lib-a")
+      check "certified against" notin memberReport(pushed.output, "lib-a")
+      # The user's checkouts were never touched, and nothing is left behind.
+      check checkoutState(fx.app) == before.a
+      check checkoutState(libB.path) == before.b
+      check gitOut(libB.path, "status", "--porcelain").len == 0
+      check fx.git("status --porcelain").len == 0
+      check isolatedScratchDirs() == scratchBefore
+      check gitOut(libB.path, "rev-parse", "HEAD") == bTip
+      check fx.git("rev-parse HEAD") == aTip
+      fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
+        libB.bare, bTip)
+      fx.checkPublishedThroughGateway(pushed.output, "lib-a", fx.app,
+        fx.sf.upstreamBare, aTip)
+
+  test "advisory: one run certifies and publishes a cycle with new commits in " &
+      "both members":
+    guarded:
+      let fx = setupPush("push-cycle-advisory", "advisory")
+      defer: removeDir(fx.sf.scratch)
+      let (libB, a0, aTip, bTip) = fx.lagFirstCycle()
+      let pushed = fx.push()
+      checkpoint("repro push:\n" & pushed.output)
+      check pushed.code == 0
+      check "push order: lib-b → lib-a" in pushed.output
+      check "source-component-unpublished-pin" notin pushed.output
+      check "dependency has unpushed commits" notin pushed.output
+      check "certified against 'lib-a' at its pinned commit " & a0 in
+        memberReport(pushed.output, "lib-b")
+      fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
+        libB.bare, bTip)
+      fx.checkPublishedThroughGateway(pushed.output, "lib-a", fx.app,
+        fx.sf.upstreamBare, aTip)
+
+  test "required: a sibling already at the commit the lagging member's lock " &
+      "pins is mirrored into the temporary workspace, not cloned":
+    guarded:
+      # lib-c, a published dependency of lib-b outside the cycle, is at the
+      # commit lib-b's lock pins, so the temporary workspace links the user's
+      # checkout of it. The test must run against it there without the lock
+      # code seeing another path or revision for it (it would re-pin, and the
+      # certification would refuse a changed working tree).
+      let fx = setupPush("push-cycle-shared-sibling", "required")
+      defer: removeDir(fx.sf.scratch)
+      let members = fx.addMembers([(name: "lib-b", depends: @["lib-a", "lib-c"]),
+        (name: "lib-c", depends: newSeq[string]())], @["lib-b"],
+        gateways = true)
+      let (libB, libC) = (members[0], members[1])
+      # Someone else's commit on lib-c's upstream, so that its pin names lib-c
+      # alone (the fixture's repositories share their first commits).
+      let other = fx.sf.scratch / "other-lib-c"
+      discard gitOut(fx.sf.scratch, "clone", "-q", fileUrl(libC.bare), other)
+      discard gitOut(other, "config", "user.email", "other@example.invalid")
+      discard gitOut(other, "config", "user.name", "Someone Else")
+      writeFile(other / "notes.txt", "lib-c\n")
+      discard gitOut(other, "add", "-A")
+      discard gitOut(other, "commit", "-q", "-m", "lib-c, published")
+      let cTip = gitOut(other, "rev-parse", "HEAD")
+      discard gitOut(other, "push", "-q", "origin", "HEAD:main")
+      discard gitOut(libC.path, "fetch", "-q", "origin")
+      discard gitOut(libC.path, "merge", "-q", "--ff-only", "origin/main")
+      let a0 = upstreamTip(fx.sf)
+      let bTip = fx.commitIn(libB, "unit b\n", "lib-b, not tested yet")
+      let aTip = fx.commitEdit("unit a\n", "lib-a, not tested yet")
+      let lockOfB = gitOut(libB.path, "show", bTip & ":repro.lock")
+      checkpoint("lib-b's lock:\n" & lockOfB)
+      doAssert a0 in lockOfB and cTip in lockOfB and aTip notin lockOfB
+      let cBefore = checkoutState(libC.path)
+      let scratchBefore = isolatedScratchDirs()
+
+      let pushed = fx.push()
+      checkpoint("repro push:\n" & pushed.output)
+      check pushed.code == 0
+      check "certifying changed the working tree" notin pushed.output
+      let bReport = memberReport(pushed.output, "lib-b")
+      check "certified: t-unit" in bReport
+      check "certified against 'lib-a' at its pinned commit " & a0 in bReport
+      check "'lib-c' at" notin pushed.output
+      check checkoutState(libC.path) == cBefore
+      check gitOut(libC.path, "status", "--porcelain").len == 0
+      check isolatedScratchDirs() == scratchBefore
+      fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
+        libB.bare, bTip)
+      fx.checkPublishedThroughGateway(pushed.output, "lib-a", fx.app,
+        fx.sf.upstreamBare, aTip)
+
+  test "required: a member certified against its pins whose test fails stops " &
+      "the run, publishes nothing and leaves the checkouts as they were":
+    guarded:
+      let fx = setupPush("push-cycle-isolated-failing", "required")
+      defer: removeDir(fx.sf.scratch)
+      let (libB, a0, aTip, bTip) = fx.lagFirstCycle("FAIL on purpose\n")
+      let before = (a: checkoutState(fx.app), b: checkoutState(libB.path))
+      let bBefore = gitOut(libB.bare, "rev-parse", "refs/heads/main")
+      let scratchBefore = isolatedScratchDirs()
+      let stopped = fx.push()
+      checkpoint("repro push:\n" & stopped.output)
+      check stopped.code == 2
+      check "stopped repo=lib-b stage=certify" in stopped.output
+      check "against 'lib-a' at " & a0[0 ..< 12] in stopped.output
+      check "this run pushed no member of the dependency cycle" in stopped.output
+      check checkoutState(fx.app) == before.a
+      check checkoutState(libB.path) == before.b
+      check isolatedScratchDirs() == scratchBefore
+      check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bBefore
+      check upstreamTip(fx.sf) == a0
+      for (name, commit) in [("lib-b", bTip), ("lib-a", aTip)]:
+        check execCmdEx(quoteShellCommand(@["git", "-C", fx.gatewayOf(name),
+          "cat-file", "-e", commit & "^{commit}"])).exitCode != 0
+      check fx.storedFor(gitOut(libB.path, "rev-parse", bTip & "^{tree}")) == 0
+
+  test "required: a cycle member whose test fails stops the run before any " &
+      "member of the cycle is published, and the retry publishes both":
+    guarded:
+      let fx = setupPush("push-cycle-failing", "required")
+      defer: removeDir(fx.sf.scratch)
+      let libB = fx.addMembers([(name: "lib-b", depends: @["lib-a"])],
+        @["lib-b"], gateways = true)[0]
+      let aBefore = upstreamTip(fx.sf)
+      let bBefore = gitOut(libB.bare, "rev-parse", "refs/heads/main")
+      # lib-b: test, then commit, against lib-a's published commit.
+      writeFile(libB.path / "src" / "unit.txt", "unit b\n")
+      check fx.reproIn(libB.path, @["certify", "t-unit",
+        "--tool-provisioning=path"]).code == 0
+      discard gitOut(libB.path, "add", "-A")
+      discard gitOut(libB.path, "commit", "-q", "-m", "lib-b, tested")
+      let bTip = gitOut(libB.path, "rev-parse", "HEAD")
+      let failing = fx.commitEdit("FAIL on purpose\n", "lib-a, breaks")
+      check bTip in fx.git("show " & failing & ":repro.lock")
+
+      let stopped = fx.push()
+      checkpoint("repro push:\n" & stopped.output)
+      check stopped.code == 2
+      check "stopped repo=lib-a stage=certify" in stopped.output
+      check "this run pushed no member of the dependency cycle" in stopped.output
+      check "retry: repro push" in stopped.output
+      # lib-b would be transported first, and is not: the cycle's members are
+      # certified before the first of them is pushed.
+      check "(lib-b) → pushed" notin stopped.output
+      for (name, commit) in [("lib-b", bTip), ("lib-a", failing)]:
+        check execCmdEx(quoteShellCommand(@["git", "-C", fx.gatewayOf(name),
+          "cat-file", "-e", commit & "^{commit}"])).exitCode != 0
+      check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bBefore
+      check upstreamTip(fx.sf) == aBefore
+      check fx.storedFor(fx.tree(failing)) == 0
+
+      # The fix, folded into lib-a's commit; its lock still pins lib-b's.
+      writeFile(fx.app / "src" / "unit.txt", "unit a fixed\n")
+      discard fx.git("add -A")
+      discard fx.git("commit -q --amend -m " & quoteShell("lib-a, fixed"))
+      let aFixed = fx.git("rev-parse HEAD")
+      let retried = fx.push()
+      checkpoint("retry:\n" & retried.output)
+      check retried.code == 0
+      check "push order: lib-b → lib-a" in retried.output
+      fx.checkPublishedThroughGateway(retried.output, "lib-b", libB.path,
+        libB.bare, bTip)
+      fx.checkPublishedThroughGateway(retried.output, "lib-a", fx.app,
+        fx.sf.upstreamBare, aFixed)
+
+  test "'repro certify' on a cycle member accepts its unpublished peer, and " &
+      "still refuses a dependency outside the cycle with a remedy that works":
+    guarded:
+      let fx = setupPush("certify-cycle-member", "required", gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      # lib-a <-> lib-b is a cycle; lib-c is an ordinary dependency of lib-a.
+      let members = fx.addMembers([(name: "lib-b", depends: @["lib-a"]),
+        (name: "lib-c", depends: newSeq[string]())], @["lib-b", "lib-c"],
+        gateways = false)
+      let (libB, libC) = (members[0], members[1])
+      let bBefore = gitOut(libB.bare, "rev-parse", "refs/heads/main")
+      let cTip = fx.commitIn(libC, "unit c\n", "lib-c, not published")
+      let bTip = fx.commitIn(libB, "unit b\n", "lib-b, not published")
+      writeFile(fx.app / "src" / "unit.txt", "unit a\n")
+
+      let refused = fx.repro(@["certify", "t-unit", "--tool-provisioning=path"])
+      check refused.code == 0
+      check "issued test-certificate" notin refused.output
+      check "no certificate — dependency has unpushed commits (lib-c)" in
+        refused.output
+      check "publish it first: run 'repro push' in lib-c" in refused.output
+      check "(lib-b)" notin refused.output
+
+      # The remedy, as printed.
+      let published = fx.reproIn(libC.path, @["push", "--tool-provisioning=path"])
+      check published.code == 0
+      check gitOut(libC.bare, "rev-parse", "refs/heads/main") == cTip
+
+      # lib-b is still unpublished; its commit is the one lib-a's tested lock
+      # pins, and it publishes together with lib-a, so issuance accepts it.
+      let issued = fx.repro(@["certify", "t-unit", "--tool-provisioning=path"])
+      check issued.code == 0
+      check "issued test-certificate.v1 for 't-unit'" in issued.output
+      check "dependency has unpushed commits" notin issued.output
+      check bTip in readFile(fx.app / "repro.lock")
+      check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bBefore
+
+  test "a record-store cycle with new commits in both members is certified " &
+      "and published by one run":
+    guarded:
+      # A record-store project's lock is the record the pre-push gate writes,
+      # but its tracked repro.lock carries the policy snapshot, and the managed
+      # refresh pins every develop-set sibling there too: the cycle takes the
+      # same path as a committed-lock one, the lagging member included.
+      let fx = setupPush("push-cycle-record-store", "required",
+        recordStore = true, gateway = false)
+      defer: removeDir(fx.sf.scratch)
+      let libB = fx.addMembers([(name: "lib-b", depends: @["lib-a"])],
+        @["lib-b"], gateways = false)[0]
+      let bTip = fx.commitIn(libB, "unit b\n", "lib-b, not tested yet")
+      let aTip = fx.commitEdit("unit a\n", "lib-a, not tested yet")
+      checkpoint("lib-a's tracked lock:\n" & fx.git("show " & aTip & ":repro.lock"))
+      let pushed = fx.push()
+      checkpoint("repro push:\n" & pushed.output)
+      check pushed.code == 0
+      check "dependency has unpushed commits" notin pushed.output
+      check "certified: t-unit" in memberReport(pushed.output, "lib-a")
+      check "certified: t-unit" in memberReport(pushed.output, "lib-b")
+      check "certified against 'lib-a' at its pinned commit" in
+        memberReport(pushed.output, "lib-b")
+      check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bTip
+      check upstreamTip(fx.sf) == aTip
+      check fx.records(fx.tree(aTip)) == 1
+
+  test "an interrupted push removes the temporary checkouts it certified in, " &
+      "and leaves the user's checkouts as they were":
+    guarded:
+      let fx = setupPush("push-cycle-interrupted", "required")
+      defer: removeDir(fx.sf.scratch)
+      let (libB, a0, _, _) = fx.lagFirstCycle("SLOW, then passes\n")
+      let before = (a: checkoutState(fx.app), b: checkoutState(libB.path))
+      let bBefore = gitOut(libB.bare, "rev-parse", "refs/heads/main")
+      let scratchBefore = isolatedScratchDirs()
+      var env = newStringTable(modeCaseSensitive)
+      for name, value in envPairs():
+        env[name] = value
+      for (name, value) in daemonKeyEnv(fx.sf.daemonKey, storeKeyId) &
+          @[(name: "PATH", value: fx.binDir & $PathSep & pathWithoutTool()),
+            (name: "REPROBUILD_REPRO", value: fx.sf.reproBin)]:
+        env[name] = value
+      let push = startProcess(fx.sf.reproBin, workingDir = fx.app,
+        args = ["push", "--tool-provisioning=path"], env = env,
+        options = {poStdErrToStdOut})
+      defer: push.close()
+      # Interrupt once lib-b's test is running in its temporary checkout.
+      var running = false
+      for _ in 0 ..< 600:
+        for dir in isolatedScratchDirs():
+          if dir notin scratchBefore and
+              fileExists(dir / "workspace" / "lib-b" / ".repro" / "runs.log"):
+            running = true
+        if running or not push.running: break
+        sleep(200)
+      check running
+      discard posix.kill(Pid(push.processID), SIGINT)
+      let code = push.waitForExit(60_000)
+      let transcript = push.outputStream.readAll()
+      checkpoint("interrupted push:\n" & transcript)
+      # Non-zero; the push reports the interrupt and removes the temporary
+      # workspace before it exits.
+      check code != 0
+      check "interrupted; the temporary workspace was removed" in transcript
+      check isolatedScratchDirs() == scratchBefore
+      check checkoutState(fx.app) == before.a
+      check checkoutState(libB.path) == before.b
+      check gitOut(libB.path, "status", "--porcelain").len == 0
+      check fx.git("status --porcelain").len == 0
+      check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bBefore
+      check upstreamTip(fx.sf) == a0

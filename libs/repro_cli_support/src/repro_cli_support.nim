@@ -11,10 +11,11 @@ else:
   from runquota_ipc import rendezvousPolicy, defaultEndpoint,
     directoryResolvesWithin, hostWideEndpointDir, requireTrustedEndpointDir
   from runquota_client import connectDefault, close
-  # Only these names, and only for the pipe-feeding guard in
-  # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
-  # this module's namespace.
+  # Only these names: the pipe-feeding guard in ``runFeedingStdin``, and the
+  # interrupt of an isolated certification (``interruptIsolatedPins``). `from …
+  # import` keeps the rest of `std/posix` out of this module's namespace.
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN,
+    SIGTERM, Pid,
     ENOENT
 from repro_core/target_object_check import objectCheckTripleFromVariants
 import repro_core
@@ -69586,11 +69587,51 @@ proc executeCheckPrePush(parsed: CheckArgs;
       publicationMembers.mapIt(it.name).join(", ") &
       "; planned peers are provisional until their source pushes succeed")
 
+  # ---- 2a. issuance: peers in the attested repository's dependency cycle ---
+  #
+  # When issuance reuses this gate, the current repository's own HEAD is
+  # exempt from publication because its publication is the push the
+  # certificate is for (Agents-Push-Gate.md §4.1). A peer in the same
+  # strongly connected component of the develop-set graph is in the same
+  # position: the component publishes together, and no member can be
+  # published before another (CLI/push.md, "Repository dependency cycles").
+  # Requiring it published first made a cycle under a `required` policy
+  # uncertifiable.
+  #
+  # The exemption has the source publication authority's exact-commit shape:
+  # only a peer whose HEAD is the commit the tested content's committed lock
+  # pins. The certificate binds the content, and that content names the
+  # peer's commit, so a later verifier reconstructs exactly the peer the
+  # tests ran against; publishing that commit stays the push's job, and the
+  # pre-push gate still refuses a committed pin that is not obtainable
+  # (`source-component-unpublished-pin`). Content with no committed lock names
+  # no peer commit, so its peer is not exempt: that needs a project with no
+  # policy snapshot (the snapshot lives in the tracked `repro.lock`, whose
+  # managed refresh pins every develop-set sibling), and no gate asks such a
+  # project for a certificate. A peer at another revision, and every
+  # dependency outside the component, still refuses.
+  var issuanceCyclePeers = initHashSet[string]()
+  var issuanceCyclePeersOffPin = initHashSet[string]()
+  if parsed.issuingForCurrentHead and currentRepoName.len > 0 and
+      parsed.currentRepo.len > 0:
+    let pins = committedLockRevisions(parsed.currentRepo)
+    let ownClosure = developSetClosure(resolved.repos, currentRepoName)
+    for obs in observations:
+      if not obs.hasGit or obs.name == currentRepoName or
+          obs.name notin ownClosure or obs.headSha.len == 0 or
+          currentRepoName notin developSetClosure(resolved.repos, obs.name):
+        continue
+      if pins.ok and obs.headSha.toLowerAscii() in pins.revs:
+        issuanceCyclePeers.incl(obs.name)
+      else:
+        issuanceCyclePeersOffPin.incl(obs.name)
+
   # ---- 2. unpublished ----------------------------------------------------
   for obs in observations:
     if not obs.hasGit:
       continue
-    if not obs.isPublished and obs.name notin provisional and not
+    if not obs.isPublished and obs.name notin provisional and
+        obs.name notin issuanceCyclePeers and not
         (outgoing.outgoingCurrent and obs.name == currentRepoName and
          obs.headSha == outgoing.headOid) and not
         (parsed.issuingForCurrentHead and currentRepoName.len > 0 and
@@ -69632,6 +69673,23 @@ proc executeCheckPrePush(parsed: CheckArgs;
         if selfPush and outgoing.diagnostic.len > 0:
           "resolve '" & outgoing.diagnostic & "' in " & obs.path &
           " — re-running 'git push' will not help, this refusal IS that push"
+        elif obs.name in issuanceCyclePeersOffPin:
+          # Issuance only. The peer publishes together with this repository,
+          # so publishing it first is not the remedy; the tests ran against a
+          # peer the tested lock does not name.
+          "'" & obs.name & "' is in the same dependency cycle as '" &
+          currentRepoName & "', and its checkout is at " & obs.headSha &
+          ", which the tested lock does not pin: check '" & obs.name &
+          "' out at the revision the lock pins, or pin its checkout here " &
+          "('repro lock refresh'), then certify again; for a committed state, " &
+          "'repro push' certifies it against the revision the lock pins, in " &
+          "temporary worktrees"
+        elif parsed.issuingForCurrentHead:
+          # Issuance only: 'repro push' publishes it with its own closure and
+          # obtains the certificate its gate may ask for; a raw 'git push' of
+          # it can be refused for exactly that certificate.
+          "publish it first: run 'repro push' in " & obs.path &
+          ", then certify again"
         else:
           "run 'git push' in " & obs.path & " first"
       result.failures.add(CheckFailure(
@@ -72723,7 +72781,244 @@ proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
         remedies.join("; ") & ", then retry 'repro push'; 'repro push " &
           "--no-certify' leaves the decision to the pre-push and receiving gates"
 
-proc runCertifyChild(args: PushArgs; repoAbs: string;
+type
+  PinnedSibling = object
+    ## A sibling a member's committed ``repro.lock`` pins at a commit other than
+    ## the one its checkout is at.
+    name, relPath, checkout, pin, head: string
+
+  IsolatedPinsWorkspace = object
+    ## A temporary workspace whose checkouts are the member's commit and its
+    ## siblings' pinned commits (standalone clones under ``root``); every other
+    ## entry mirrors the user's workspace by symlink.
+    root, scratch: string
+
+
+proc siblingsOffTheirPins(workspaceRoot: string;
+    byName: Table[string, ResolvedRepo]; name: string;
+    heads: Table[string, string]): seq[PinnedSibling] =
+  ## Every workspace repository the member's committed ``repro.lock`` pins at a
+  ## commit other than its checkout's HEAD. In a dependency cycle with new
+  ## commits on both sides one member always has one: two locks cannot each
+  ## name the other's newest commit, so one keeps a published, older commit of
+  ## the other (Unified-Locking-And-Hooks §13.5). That member's commit names the
+  ## older revision, so it is certified with the sibling there.
+  let lockPath = workspaceRoot / byName[name].path / CommittedLockFileName
+  if not fileExists(extendedPath(lockPath)):
+    return
+  var deps: LockedDependencies
+  try:
+    deps = parseLockedDependencies(readFile(extendedPath(lockPath)))
+  except CatchableError:
+    return
+  for dep in deps.deps:
+    if dep.coordinates.kind != ckVcs or dep.coordinates.revision.len == 0 or
+        dep.name == name or dep.name notin byName or dep.name notin heads:
+      continue
+    let head = heads[dep.name]
+    if head.len == 0 or
+        head.toLowerAscii() == dep.coordinates.revision.toLowerAscii():
+      continue
+    result.add(PinnedSibling(name: dep.name, relPath: byName[dep.name].path,
+      checkout: workspaceRoot / byName[dep.name].path,
+      pin: dep.coordinates.revision, head: head))
+
+proc removeMirrorTree(dir: string) =
+  ## Remove ``dir`` without following a link in it: a mirror entry is a link to
+  ## the user's workspace. ``removeDir`` does not follow one either, but on
+  ## Windows it removes a directory link with ``DeleteFileW``, which refuses
+  ## one; ``RemoveDirectoryW`` removes the link itself.
+  for kind, path in walkDir(dir):
+    case kind
+    of pcDir:
+      removeMirrorTree(path)
+    of pcLinkToDir:
+      when defined(windows):
+        if removeDirectoryW(newWideCString(path)) == 0:
+          raiseOSError(osLastError(), path)
+      else:
+        removeFile(path)
+    of pcFile, pcLinkToFile:
+      removeFile(path)
+  removeDir(dir)
+
+proc removeIsolatedPinsWorkspace(ws: IsolatedPinsWorkspace): string =
+  ## Remove the scratch tree: the clones, which only borrow the user's objects,
+  ## and the mirror entries, which are links and are removed, never followed.
+  ## Returns what could not be removed, or "".
+  if ws.scratch.len > 0:
+    try: removeMirrorTree(ws.scratch)
+    except OSError as err:
+      return "could not remove the temporary workspace " & ws.scratch & ": " &
+        err.msg & "; remove it by hand (its links point into your workspace: " &
+        "remove them, do not follow them)"
+
+var activeCertifyChildPid: int
+  ## The pid of the ``repro certify`` child of an isolated certification, or 0.
+var isolatedCertifyInterrupted: bool
+  ## Set by ``interruptIsolatedPins``; read once the child has ended.
+
+proc interruptIsolatedPins() {.noconv.} =
+  ## Ctrl-C while a member is certified against its pins. A signal handler may
+  ## only do async-signal-safe work, so this records the interrupt and sends
+  ## the certifying child SIGTERM (a terminal's Ctrl-C reaches it anyway, a
+  ## signal sent to this process alone does not). The child then ends, the
+  ## parent's read of its output ends, and the ordinary exit path removes the
+  ## scratch tree before the process exits with 130.
+  isolatedCertifyInterrupted = true
+  when defined(posix):
+    if activeCertifyChildPid > 0:
+      discard posix.kill(Pid(activeCertifyChildPid), SIGTERM)
+
+proc mirrorWorkspaceEntries(source, target: string;
+                            replaced: seq[string]) =
+  ## Symlink every entry of ``source`` into ``target``, except the replaced
+  ## repository paths (left absent) and the directories that contain one
+  ## (recreated, and mirrored entry by entry).
+  createDir(target)
+  for kind, path in walkDir(source):
+    let entry = extractFilename(path)
+    let entryTarget = target / entry
+    if entryTarget in replaced:
+      continue
+    if entry == ".repro" and kind == pcDir and
+        fileExists(path / "workspace-state.toml"):
+      # The workspace's own state. Its caches (engine, build, reports) are
+      # keyed by what they were computed from, including checkout paths, so
+      # they are not shared: a lowered graph from the user's workspace names
+      # the user's checkouts. Shared are the files that say what the
+      # workspace is, the lock record stores and the registered keys.
+      createDir(entryTarget)
+      for subKind, sub in walkDir(path):
+        let name = extractFilename(sub)
+        if subKind == pcFile:
+          copyFile(sub, entryTarget / name)
+        elif name in ["manifests", "manifests-private"]:
+          createSymlink(sub, entryTarget / name)
+      if dirExists(path / "workspace" / "certificates"):
+        createDir(entryTarget / "workspace")
+        createSymlink(path / "workspace" / "certificates",
+          entryTarget / "workspace" / "certificates")
+      continue
+    var contains = false
+    for r in replaced:
+      if r.startsWith(entryTarget & DirSep):
+        contains = true
+    if contains and kind == pcDir:
+      mirrorWorkspaceEntries(path, entryTarget, replaced)
+    else:
+      createSymlink(path, entryTarget)
+
+proc populateSubmodules(identity: GitToolIdentity;
+                        clone, source: string): string =
+  ## Check out every submodule of ``clone`` at the commit its tree names, from
+  ## the user's checkout of that submodule in ``source``, borrowing its objects
+  ## (``--reference``) and fetching nothing. A clone does not populate
+  ## submodules, and an unpopulated one is invisible to ``git status``: the
+  ## tests would run without content the certificate's tree names. One the
+  ## user has not initialized stays unpopulated, as the tests would see it in
+  ## place. Recurses into nested submodules. Returns why it could not, or "".
+  let staged = gitRunPlainQuery(identity, ["-C", clone, "ls-files", "--stage",
+    "-z"])
+  if staged.code != 0:
+    return "git ls-files --stage failed in " & clone & ": " & staged.diagnostic
+  for line in staged.output.split('\0'):
+    if not line.startsWith("160000 "):
+      continue
+    let path = line.split('\t', 1)[^1]
+    let src = source / path
+    if not (dirExists(src / ".git") or fileExists(src / ".git")):
+      # Not initialized in the user's checkout either, so an in-place
+      # certification would run without it too: left as it is there.
+      continue
+    let name = gitRunPlainQuery(identity, ["-C", clone, "config", "-f",
+      ".gitmodules", "--null", "--get-regexp", r"^submodule\..*\.path$"])
+    var key = ""
+    for entry in name.output.split('\0'):
+      let parts = entry.split('\n', 1)
+      if parts.len == 2 and parts[1] == path:
+        key = parts[0][0 ..< parts[0].len - ".path".len]
+    if key.len == 0:
+      return "submodule '" & path & "' of " & clone & " has no entry in " &
+        ".gitmodules"
+    for argv in [@["-C", clone, "config", key & ".url", src],
+        @["-C", clone, "-c", "protocol.file.allow=always", "submodule",
+          "--quiet", "update", "--init", "--reference", src, "--", path]]:
+      let res = gitRunPlainQuery(identity, argv)
+      if res.code != 0:
+        return "could not populate submodule '" & path & "' from " & src &
+          ": git " & argv.join(" ") & " failed (" & $res.code & "): " &
+          res.diagnostic
+    let nested = populateSubmodules(identity, clone / path, src)
+    if nested.len > 0:
+      return nested
+
+proc prepareIsolatedPinsWorkspace(identity: GitToolIdentity;
+    workspaceRoot, memberRel, memberCheckout, memberCommit: string;
+    pinned: seq[PinnedSibling]):
+    tuple[ok: bool; ws: IsolatedPinsWorkspace; diagnostic: string] =
+  ## A temporary workspace that is the user's, except that the member is a
+  ## checkout of the pushed commit and each pinned sibling one of the commit the
+  ## member's lock pins. Each is a standalone ``git clone --shared`` of the
+  ## user's repository, borrowing its objects: not a linked worktree, which
+  ## registers itself in the user's repository and whose committed lock is read
+  ## relative to the main checkout, i.e. against the user's siblings. Its
+  ## remotes and remote-tracking refs are the user's, so whether a commit is
+  ## published is answered exactly as in the user's checkout.
+  result.ws.scratch = createTempDir("repro-push-pins-", "")
+  result.ws.root = result.ws.scratch / "workspace"
+  var replaced = @[result.ws.root / memberRel]
+  for s in pinned:
+    replaced.add(result.ws.root / s.relPath)
+  try:
+    mirrorWorkspaceEntries(workspaceRoot, result.ws.root, replaced)
+  except OSError as err:
+    result.diagnostic = "could not mirror the workspace into " &
+      result.ws.root & ": " & err.msg
+    return
+  var plan = @[(repo: memberCheckout, path: result.ws.root / memberRel,
+    commit: memberCommit)]
+  for s in pinned:
+    plan.add((repo: s.checkout, path: result.ws.root / s.relPath, commit: s.pin))
+  proc run(argv: openArray[string]): tuple[ok: bool; diagnostic: string] =
+    let res = gitRunPlainQuery(identity, argv)
+    (ok: res.code == 0, diagnostic: "git " & argv.join(" ") & " failed (" &
+      $res.code & "): " & res.diagnostic & res.output)
+  for p in plan:
+    createDir(parentDir(p.path))
+    var step = run(["clone", "--quiet", "--shared", "--no-checkout",
+      "--origin", "repro-push-source", p.repo, p.path])
+    if step.ok:
+      step = run(["-C", p.path, "remote", "remove", "repro-push-source"])
+    if step.ok:
+      let remotes = gitRunPlainQuery(identity, ["-C", p.repo, "remote"])
+      for remote in remotes.output.splitLines():
+        let r = remote.strip()
+        if r.len == 0 or not step.ok: continue
+        let url = gitRunPlainQuery(identity,
+          ["-C", p.repo, "remote", "get-url", r]).output.strip()
+        step = run(["-C", p.path, "remote", "add", r, url])
+        if step.ok:
+          step = run(["-C", p.path, "fetch", "--quiet", "--no-tags", p.repo,
+            "+refs/remotes/" & r & "/*:refs/remotes/" & r & "/*"])
+    if step.ok:
+      step = run(["-C", p.path, "-c", "advice.detachedHead=false", "checkout",
+        "--quiet", "--detach", p.commit])
+    if step.ok:
+      let populated = populateSubmodules(identity, p.path, p.repo)
+      if populated.len > 0:
+        result.diagnostic = populated & ". Certify this commit in place " &
+          "instead: check each sibling out at the commit its lock pins (" &
+          pinned.mapIt("'" & it.name & "' at " & it.pin).join(", ") &
+          "), run 'repro certify' in " & memberCheckout &
+          ", and check the siblings back out"
+        return
+    if not step.ok:
+      result.diagnostic = step.diagnostic
+      return
+  result.ok = true
+
+proc runCertifyChild(args: PushArgs; workspaceRoot, repoAbs: string;
                      names: seq[string]): int =
   ## ``repro certify <names>`` in the member's checkout: a child, because the
   ## build it runs registers process-wide executors and stops the process on its
@@ -72731,11 +73026,14 @@ proc runCertifyChild(args: PushArgs; repoAbs: string;
   ## the tests run. It goes to stderr so ``--json`` keeps stdout to the report.
   var argv = @["certify"] & names & @[
     "--tool-provisioning=" & modeName(args.toolProvisioning),
-    "--workspace-root=" & args.workspaceRoot,
+    "--workspace-root=" & workspaceRoot,
     "--current-repo=" & repoAbs]
   let child = uncontrolledStartProcess(publicCliImagePath(), workingDir = repoAbs,
     args = argv, options = {poStdErrToStdOut})
-  defer: child.close()
+  activeCertifyChildPid = child.processID
+  defer:
+    activeCertifyChildPid = 0
+    child.close()
   let output = child.outputStream
   var line = ""
   while output.readLine(line):
@@ -72746,28 +73044,73 @@ proc certifyPushedWorktree(identity: GitToolIdentity; args: PushArgs;
                            repoAbs: string; observed: PushPreflightRepo;
                            decision: PushCertifyDecision;
                            keys: RegisteredKeyStoreLoad;
-                           lockSource: ReprobuildLockSource):
+                           lockSource: ReprobuildLockSource;
+                           memberRel = "";
+                           pinned: seq[PinnedSibling] = @[]):
     tuple[ok: bool; names: seq[string]; diagnostic, remediation: string;
           notices: seq[string]] =
   ## The running half of the certify step: test the worktree, then ask the gate's
   ## question again rather than trust the exit code. A run can pass and still
   ## cover nothing: a refused issuance precondition exits with the build's code,
   ## and a lock refresh moves the content away from the commit being pushed.
-  stderr.writeLine("repro push: certifying " & decision.certifyNames.join(", ") &
-    " for " & observed.headSha[0 ..< min(12, observed.headSha.len)] & " in " &
-    repoAbs)
+  ##
+  ## With ``pinned`` siblings the member's commit names other revisions of them
+  ## than their checkouts hold, so the test runs in a temporary workspace: the
+  ## member's commit and each sibling's pinned commit as temporary clones,
+  ## everything else mirrored. The certificate binds the member's tracked
+  ## content, which is the same there, and the user's checkouts are untouched.
+  ## The clones are removed on every exit path, an interrupt included.
+  let short = observed.headSha[0 ..< min(12, observed.headSha.len)]
+  var certifyRoot = args.workspaceRoot
+  var certifyRepo = repoAbs
+  var isolated: IsolatedPinsWorkspace
+  var hadHook = false
+  defer:
+    if isolated.scratch.len > 0:
+      let left = removeIsolatedPinsWorkspace(isolated)
+      if left.len > 0:
+        stderr.writeLine("repro push: warning: " & left)
+    if hadHook:
+      unsetControlCHook()
+    if isolatedCertifyInterrupted:
+      stderr.writeLine("repro push: interrupted; the temporary workspace " &
+        "was removed and nothing was pushed by this step")
+      quit(130)
+  if pinned.len > 0:
+    isolatedCertifyInterrupted = false
+    setControlCHook(interruptIsolatedPins)
+    hadHook = true
+    let prepared = prepareIsolatedPinsWorkspace(identity, args.workspaceRoot,
+      memberRel, repoAbs, observed.headSha, pinned)
+    isolated = prepared.ws
+    if not prepared.ok:
+      result.diagnostic = "could not prepare the isolated workspace to " &
+        "certify " & short & " against its pinned siblings: " &
+        prepared.diagnostic
+      result.remediation = "fix what it reported, then retry 'repro push'"
+      return
+    certifyRoot = isolated.root
+    certifyRepo = isolated.root / memberRel
+    stderr.writeLine("repro push: certifying " &
+      decision.certifyNames.join(", ") & " for " & short & " against " &
+      pinned.mapIt("'" & it.name & "' at " & shortRev(it.pin)).join(", ") &
+      ", the commits its lock pins, in temporary worktrees under " &
+      isolated.scratch & " (your checkouts are not touched)")
+  else:
+    stderr.writeLine("repro push: certifying " &
+      decision.certifyNames.join(", ") & " for " & short & " in " & repoAbs)
   let code =
     try:
-      runCertifyChild(args, repoAbs, decision.certifyNames)
+      runCertifyChild(args, certifyRoot, certifyRepo, decision.certifyNames)
     except OSError, IOError:
-      result.diagnostic = "'repro certify' could not be started in " & repoAbs &
-        ": " & getCurrentExceptionMsg()
+      result.diagnostic = "'repro certify' could not be started in " &
+        certifyRepo & ": " & getCurrentExceptionMsg()
       result.remediation = "run 'repro certify " &
         decision.certifyNames.join(" ") & "' there, then retry 'repro push'"
       return
   if code != 0:
     result.diagnostic = "'repro certify " & decision.certifyNames.join(" ") &
-      "' failed with exit code " & $code & " in " & repoAbs &
+      "' failed with exit code " & $code & " in " & certifyRepo &
       ", so this member was not pushed"
     result.remediation = "fix what it reported above, then retry 'repro push'"
     let tip = judgePushedCommit(repoAbs, observed.headSha,
@@ -72777,13 +73120,21 @@ proc certifyPushedWorktree(identity: GitToolIdentity; args: PushArgs;
         "--no-certify' pushes without it")
     return
   let dirty = gitRunPlainQuery(identity,
-    ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
+    ["--no-optional-locks", "-C", certifyRepo, "status", "--porcelain=v1"])
   if dirty.code != 0 or dirty.output.strip().len > 0:
-    result.diagnostic = "certifying changed the working tree of " & repoAbs &
+    result.diagnostic = "certifying changed the working tree of " &
+      certifyRepo &
       (if dirty.code == 0: " (" & dirty.output.strip() & ")" else: "") &
       ", so what it certified is not commit " & observed.headSha
-    result.remediation = "review the change; if it is a lock refresh, commit " &
-      "it, and retry 'repro push'"
+    result.remediation =
+      if pinned.len > 0:
+        "the lock-update step rewrote the lock of commit " & short &
+          " with its siblings at the commits it pins, so the lock does not " &
+          "describe them; run 'repro lock refresh' with them there, commit, " &
+          "and retry 'repro push'"
+      else:
+        "review the change; if it is a lock refresh, commit it, and retry " &
+          "'repro push'"
     return
   let judged = judgePushedCommit(repoAbs, observed.headSha,
     branchRefFromRef(observed.destinationRef), keys, lockSource)
@@ -72798,6 +73149,11 @@ proc certifyPushedWorktree(identity: GitToolIdentity; args: PushArgs;
       return
     result.notices.add("certificates: still not covered after certifying: " &
       shortfall)
+  if pinned.len > 0:
+    result.notices.add("certified against " &
+      pinned.mapIt("'" & it.name & "' at its pinned commit " & it.pin &
+        " (checkout at " & shortRev(it.head) & ")").join(", ") &
+      ", in temporary worktrees")
   result.ok = true
   result.names = decision.certifyNames
 
@@ -72973,6 +73329,53 @@ proc executePush(args: PushArgs): PushReport =
       result.exitCode = 2
       return
     preflight[name] = observed.observed
+  # Inside a component, a member whose committed lock pins a peer's unpublished
+  # HEAD is transported after that peer: its gate refuses that pin until the
+  # peer is published (`source-component-unpublished-pin`), and the peer's gate
+  # defers its own published, older pin of this member (Unified-Locking-And-
+  # Hooks.md §13.5). Two locks cannot each name the other's newest commit, so
+  # such an order always exists; declaration order breaks ties.
+  block orderComponentsByPins:
+    var reordered: seq[string]
+    for component in pushComponents(resolved.repos, closure, extraDepends):
+      if component.len < 2:
+        reordered.add(component)
+        continue
+      var after = initTable[string, HashSet[string]]()
+      for name in component:
+        let pins = committedLockRevisions(args.workspaceRoot / byName[name].path)
+        var preceding = initHashSet[string]()
+        for peer in component:
+          if peer != name and not preflight[peer].published and pins.ok and
+              preflight[peer].headSha.toLowerAscii() in pins.revs:
+            preceding.incl(peer)
+        after[name] = preceding
+      var placed = initHashSet[string]()
+      while placed.len < component.len:
+        var next = ""
+        for name in component:
+          if name notin placed and after[name] <= placed:
+            next = name
+            break
+        if next.len == 0:
+          # Unreachable for real commits; keep declaration order and let the
+          # gate name the pin it refuses.
+          for name in component:
+            if name notin placed:
+              next = name
+              break
+        placed.incl(next)
+        reordered.add(next)
+    result.order = reordered
+  # Each member's component, in transport order (itself included).
+  var componentOf = initTable[string, seq[string]]()
+  for name in result.order:
+    let own = developSetClosure(resolved.repos, name)
+    var component: seq[string]
+    for peer in result.order:
+      if peer in own and name in developSetClosure(resolved.repos, peer):
+        component.add(peer)
+    componentOf[name] = component
   # A protocol-v2 interpreter can predate source component publication. Probe
   # the interpreter the installed hook will actually execute for every source
   # component member, before publishing even an earlier acyclic dependency.
@@ -73150,8 +73553,15 @@ proc executePush(args: PushArgs): PushReport =
   # closure, so that one member's uncovered commit does not leave an earlier
   # dependency published. Running the tests has to wait for the member's turn:
   # issuance requires its dependencies to be published already, and until then
-  # `repro certify` would refuse for that reason alone.
+  # `repro certify` would refuse for that reason alone. A dependency cycle's
+  # turn is its first member's, since issuance accepts a cycle peer at the
+  # commit the tested lock pins; a member whose lock pins a sibling at another
+  # commit than its checkout holds is certified against those pins, isolated.
   var pushCertification = initTable[string, PushCertifyDecision]()
+  var pinnedFor = initTable[string, seq[PinnedSibling]]()
+  var heads = initTable[string, string]()
+  for name, observed in preflight:
+    heads[name] = observed.headSha
   var carryFirst = initHashSet[string]()
   var certifyKeys: RegisteredKeyStoreLoad
   let certifyLockSource =
@@ -73177,7 +73587,7 @@ proc executePush(args: PushArgs): PushReport =
       carryFirst.incl(name)
     if not args.certify:
       continue
-    let decision =
+    var decision =
       if introduced.ok:
         planPushCertification(identity, repoAbs, observed, introduced.commits,
           certifyKeys, certifyLockSource)
@@ -73185,6 +73595,14 @@ proc executePush(args: PushArgs): PushReport =
         PushCertifyDecision(refused: true, diagnostic: introduced.problem,
           remediation: "repair what git reported in " & byName[name].path &
             " and retry 'repro push'")
+    if not decision.refused and decision.certifyNames.len > 0:
+      # A member whose lock pins a sibling at another commit than its checkout
+      # holds is certified against those pins, in isolation (see
+      # ``certifyPushedWorktree``); in this workspace the lock-update step would
+      # re-pin it and certify other content.
+      let pinned = siblingsOffTheirPins(args.workspaceRoot, byName, name, heads)
+      if pinned.len > 0:
+        pinnedFor[name] = pinned
     if decision.refused:
       result.repos.add(PushRepoResult(name: name, path: byName[name].path,
         branch: observed.branch, headSha: observed.headSha,
@@ -73202,6 +73620,12 @@ proc executePush(args: PushArgs): PushReport =
   # actionable {offender, remedy} diagnostic (never silently discarded). A
   # member with unpublished commits is pushed; an already-published member
   # is a benign noop.
+  #
+  # The members of a component are certified together, before the first of
+  # them is transported: issuance accepts a peer of the same component at the
+  # exact commit the tested lock pins, so none waits on another's publication,
+  # and a failing test in any member publishes no member of the component.
+  var certifiedAhead = initTable[string, tuple[names, notices: seq[string]]]()
   for name in result.order:
     let repo = byName[name]
     let repoAbs = args.workspaceRoot / repo.path
@@ -73210,11 +73634,44 @@ proc executePush(args: PushArgs): PushReport =
       branch: observed.branch, headSha: observed.headSha)
     let decision = pushCertification.getOrDefault(name)
     entry.notices.add(decision.notices)
-    if decision.certifyNames.len > 0:
+    if componentOf[name].len > 1 and name notin certifiedAhead:
+      for peer in componentOf[name]:
+        let peerDecision = pushCertification.getOrDefault(peer)
+        if peerDecision.certifyNames.len == 0:
+          certifiedAhead[peer] = (names: newSeq[string](),
+            notices: newSeq[string]())
+          continue
+        let certified = certifyPushedWorktree(identity, args,
+          args.workspaceRoot / byName[peer].path, preflight[peer],
+          peerDecision, certifyKeys, certifyLockSource, byName[peer].path,
+          pinnedFor.getOrDefault(peer))
+        if not certified.ok:
+          var failed = PushRepoResult(name: peer, path: byName[peer].path,
+            branch: preflight[peer].branch, headSha: preflight[peer].headSha,
+            outcome: proFailed, diagnostic: certified.diagnostic,
+            remediation: certified.remediation)
+          failed.notices.add(peerDecision.notices)
+          failed.notices.add(certified.notices)
+          failed.notices.add("this run pushed no member of the dependency " &
+            "cycle " & componentOf[name].join(", ") & ": its members are " &
+            "certified before the first of them is pushed")
+          result.repos.add(failed)
+          result.stoppedRepo = peer
+          result.stoppedStage = "certify"
+          result.retryCommand = "repro push"
+          result.exitCode = 2
+          return
+        certifiedAhead[peer] = (names: certified.names,
+          notices: certified.notices)
+    if name in certifiedAhead:
+      entry.notices.add(certifiedAhead[name].notices)
+      entry.certified = certifiedAhead[name].names
+    elif decision.certifyNames.len > 0:
       # Before the revalidation below, which then also covers what the tests
       # did to the checkout.
       let certified = certifyPushedWorktree(identity, args, repoAbs, observed,
-        decision, certifyKeys, certifyLockSource)
+        decision, certifyKeys, certifyLockSource, repo.path,
+        pinnedFor.getOrDefault(name))
       entry.notices.add(certified.notices)
       if not certified.ok:
         entry.outcome = proFailed

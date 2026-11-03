@@ -134,7 +134,8 @@ reason and the remedy:
 | The tests read an untracked file (`untracked_inputs = "read-set"`, the default) | `git add` it, or ignore it if it is generated or machine-local |
 | Any untracked file exists (`untracked_inputs = "strict"`) | `git add`, ignore or delete each one |
 | The lock-update step refused to move a pin backward | Bring the sibling forward, or name it in `REPRO_ALLOW_PIN_REGRESSION` |
-| A sibling repository is dirty, unpublished or not at the revision the tested lock pins | Commit, push or check out that sibling |
+| A sibling repository is dirty, or not at the revision the tested lock pins | Commit, or check out that sibling |
+| A dependency has unpushed commits | Run `repro push` in it, then certify again. A repository in the same dependency cycle as yours is not refused for this when its checkout is at the commit your tested lock pins: it is published together with yours |
 
 Files that `.gitignore` covers are not untracked inputs: build outputs do not count.
 
@@ -363,6 +364,33 @@ change a dependent's `repro.lock`: a pin records only the commit, never which
 branch publishes it. So one `repro push` certifies and publishes the whole
 closure under `required`. A member whose test fails stops the run before its
 dependents. What was already pushed stays published, and the retry resumes.
+
+Repositories that depend on each other (a dependency cycle) are published
+together, and their members are certified together, before the first of them is
+pushed. A member is certified with its cycle peers unpublished when its lock pins
+each of them at the peer's current commit. A test failure in any member publishes
+none of them. Inside the cycle, a member whose lock pins a peer's new commit is
+pushed after that peer.
+
+With new commits on both sides of a cycle, one member's lock keeps an older,
+published commit of the other, because two locks cannot each name the other's
+newest commit. That member's commit is tested with its peer at the pinned
+commit. `repro push` does this in temporary worktrees: the member at its commit
+and the peer at the pinned commit, with the rest of the workspace mirrored.
+Submodules you have checked out are checked out there too, at the commits the
+tree names. Your checkouts are not touched, and the worktrees are removed
+afterwards, also when the test fails or the push is interrupted. The report
+says what the member was certified against:
+
+```text
+repro push: lib-b (lib-b) → pushed
+    certified: t-unit
+    certified against 'lib-a' at its pinned commit 5c2e91d0a7b3… (checkout at 0f7a3c88e2d1), in temporary worktrees
+```
+
+`repro certify` on its own certifies your working tree against the checkouts as
+they are, so it re-pins such a lock to the peer's checkout first. To certify the
+committed state against the pins it records, use `repro push`.
 
 Under `required`, then, a branch with several untested commits has to be folded
 together or certified commit by commit, which also applies after a
