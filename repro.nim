@@ -65,6 +65,10 @@ import repro_dsl_stdlib/monitor_shim_artifacts
               # call in the ``build:`` block below.
 import repro_dsl_stdlib/openssl_layout
 import repro_dsl_stdlib/source_only_packages
+              # A15: the monitor shim's version script, merged with the
+              # `cross_zig` compiler-rt node under a zig target (below).
+import repro_dsl_stdlib/adapters/cross_zig
+import repro_dsl_stdlib/operations/zig_c
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -3883,8 +3887,28 @@ package reprobuild:
       # io-mon's ``build_shim.sh`` passes it via ``--version-script``; mirror it
       # here or the fixture link fails with "version node not found for symbol
       # dlsym@GLIBC_2.2.5 / failed to set dynamic section sizes".
-      let linuxShimVersionScript =
+      let ioMonShimVersionScript =
         ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map"
+      # Under a zig target whose shared libraries would export zig's
+      # compiler-rt (the 32-bit ARM rows), io-mon's script is merged with
+      # the `cross_zig` node that makes it local. zig takes one version
+      # script per link, and the wrappers refuse a shared link whose own
+      # script leaves compiler-rt exported. A preloaded shim exporting it
+      # would offer every monitored process zig's `__aeabi_*` helpers,
+      # unwinder entry points included (reprobuild-pm issue
+      # 2026-11-02-zig-built-shared-libraries-export-compiler-rt-and-armv7-images-import-it).
+      let shimZigTarget = activeZigCrossTarget()
+      var shimVersionScriptEdge: seq[BuildActionDef]
+      let linuxShimVersionScript =
+        if shimZigTarget != nil and zigCrossCompilerRtMap(
+            zigCrossTarget(shimZigTarget.triple)).len > 0:
+          shimVersionScriptEdge.add(emitZigCrossVersionScriptAction(
+            activeProviderProjectRoot(), currentOwningPackage(),
+            shimZigTarget.triple, ioMonShimVersionScript,
+            targetKeyedPath("build/lib/librepro_monitor_shim.versions.map")))
+          shimVersionScriptEdge[0].outputs[0]
+        else:
+          ioMonShimVersionScript
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "linux_preload.nim",
         # ``-d:useMalloc``: io-mon's shim entry points REFUSE to compile
@@ -3899,6 +3923,9 @@ package reprobuild:
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
         passL = @["-Wl,--version-script=" & linuxShimVersionScript],
+        extraInputs = (if shimVersionScriptEdge.len > 0:
+          @[linuxShimVersionScript] else: @[]),
+        after = shimVersionScriptEdge,
         # ``NIX_DONT_SET_RPATH`` is as load-bearing here as ``-static-libgcc``
         # is on the Windows arm above, and for the same reason: this library is
         # injected into processes NOBODY HERE BUILT, so it must resolve with no
