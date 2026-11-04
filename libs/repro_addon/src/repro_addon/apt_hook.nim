@@ -32,6 +32,7 @@ import repro_infra/state_dir
 import ./addon_apply
 import ./base_identity
 import ./collision
+import ./evidence
 import ./generation0
 import ./host_exec
 import ./ledger
@@ -141,7 +142,9 @@ proc appendEventLog*(path: string; lines: openArray[string];
     discard
 
 proc runAfterDpkgCli*(stateDir = DefaultStateDir;
-                      logPath = AptHookLogPath): int =
+                      logPath = AptHookLogPath;
+                      site = defaultSite(DefaultStateDir);
+                      dpkgLog = "/var/log/dpkg.log"): int =
   ## The hook's entry point: report, record (event log first, then the
   ## journal), exit 0.
   var r: AfterDpkgReport
@@ -150,6 +153,26 @@ proc runAfterDpkgCli*(stateDir = DefaultStateDir;
   except CatchableError as e:
     r = AfterDpkgReport(status: "degraded", findings: @[e.msg])
   stdout.write(renderAfterDpkg(r))
+  # The evidence record (spec §7.8, §10.4; DET-AO-6): every run leaves one,
+  # naming the dpkg run it followed, so the off-host check can tell a hook
+  # that ran clean from one that never ran (DET-AO-8). A clean run's goes
+  # off-host only; findings are a detection with a local copy too.
+  try:
+    var site = site
+    site.stateDir = stateDir
+    let fields = @[("status", r.status), ("count", $r.findings.len),
+                   ("dpkgLastRun", dpkgLastRun(dpkgLog)),
+                   ("message", r.findings.join("; "))]
+    discard recordEvidence(EvidenceEvent(detector: edAptHook,
+      category: ecAudit, trigger: "hook-run", fields: fields, attest: true,
+      offHostOnly: true), site)
+    if r.status != "ok":
+      discard recordEvidence(EvidenceEvent(detector: edAptHook,
+        category: ecDetection, trigger: "hook-finding",
+        kind: "apt-hook-" & r.status, fields: fields, attest: true), site)
+  except CatchableError as e:
+    stderr.write("repro-addon apt hook: cannot write its evidence record: " &
+      e.msg & "\n")
   if r.status == "ok":
     journal("info", ["repro-addon apt hook: ok"])
     return 0

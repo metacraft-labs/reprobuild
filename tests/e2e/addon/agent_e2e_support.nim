@@ -246,9 +246,12 @@ proc fetchStartMonotonic(g: Guest): string =
 
 proc guestMonotonic(g: Guest): string =
   ## The guest's CLOCK_MONOTONIC now, in microseconds, on the same clock as
-  ## systemd's ``*TimestampMonotonic`` properties.
-  g.run("python3 -c 'import time; print(time.clock_gettime_ns(" &
-        "time.CLOCK_MONOTONIC) // 1000)'").strip()
+  ## systemd's ``*TimestampMonotonic`` properties: the kernel's own
+  ## ``now at <ns> nsecs`` line of ``/proc/timer_list`` (read as root; no
+  ## interpreter in the guest is needed). "" when it cannot be read.
+  let r = g.exec("awk '/^now at [0-9]+ nsecs/ {print int($3 / 1000); exit}' " &
+                 "/proc/timer_list")
+  if r.exitCode == 0: r.stdout.strip() else: ""
 
 proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   ## One cycle of the real units: start the fetch (a oneshot, so this
@@ -289,6 +292,13 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
                      "repro-agent-apply.service").strip()
   let fetchBefore = g.fetchStartMonotonic()
   let startedAfter = g.guestMonotonic()
+  if not oldHelper and startedAfter.len == 0:
+    # Without the guest's monotonic clock the proof cannot be made; that is
+    # a named failure, not a pass and not a stale cycle.
+    result.outcome = "tick-clock-unavailable"
+    result.message = "cannot read the guest's CLOCK_MONOTONIC from " &
+      "/proc/timer_list, so this tick cannot prove its cycle is new"
+    return
   let f = g.exec("systemctl start repro-agent-fetch.service", timeoutSec)
   result.fetchLog = g.exec("journalctl -q -o cat --since @" & since &
     " -u repro-agent-fetch.service").stdout

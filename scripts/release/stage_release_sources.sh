@@ -88,13 +88,14 @@ copy_tree() {
 # time (`staticRead` of recipe templates), so no extension filter here. The
 # filter loop uses only shell builtins, so it spawns nothing per file.
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git ls-files -z -- libs | while IFS= read -r -d '' f; do
+  git ls-files -z -- libs lints | while IFS= read -r -d '' f; do
     case "/$f/" in */tests/*) continue ;; esac
     [[ -f "$f" ]] || continue
     printf '%s\0' "$f"
   done | copy_listed . "$source_root"
 else
   copy_tree libs "$source_root/libs"
+  [[ -d lints ]] && copy_tree lints "$source_root/lints"
 fi
 # The root config.nims, beside libs/. The profile compile (`repro home apply`,
 # `repro infra apply`) includes `<source root>/config.nims` from a wrapper it

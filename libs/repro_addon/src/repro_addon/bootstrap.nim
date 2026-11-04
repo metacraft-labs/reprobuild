@@ -37,9 +37,13 @@ import repro_core/host_apply_lock
 import repro_infra
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/key_types
+import repro_peer_cache/identity
+import repro_peer_cache/types
 import repro_deploy_agent/secrets
 
 import ./addon_apply
+import ./attestation
+import ./evidence
 import ./fingerprint
 import ./generation0
 import ./static_tree
@@ -64,6 +68,10 @@ type
     agentTarget*: string          ## the deploy agent's target (A8), or ""
     agentSources*: seq[string]    ## its manifest sources
     profileCompiler*: string      ## the fetch unit's profile compiler, or ""
+    agentPollSec*: int            ## the fetch timer's interval (0: default)
+    evidenceSink*: string         ## the Evidence sink, ``address:port`` (A11)
+    evidenceSinkCaPath*: string   ## its host CA certificate
+    evidenceHeartbeatSec*: int    ## the shipping heartbeat (0: default)
 
   BootstrapResult* = object
     planDigest*: string
@@ -71,6 +79,9 @@ type
     binarySha256*: string
     reproExe*: string
     recipientPublicKeyHex*: string
+    attestationPublicKeyHex*: string  ## "" without an Evidence sink
+    evidenceCredentialHost*: string   ## the sink credential's host id, or ""
+    evidenceCredentialCert*: string   ## where its certificate is, to enrol
     ledger*: Ledger
 
 var ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
@@ -187,11 +198,15 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       "first and acknowledge the digest it prints")
 
   # 1. The plan, recomputed on the host, before any write.
-  let plan = runPreflight(PreflightInputs(
+  let inputs = PreflightInputs(
     deploySignersPath: opts.deploySignersPath,
     cachePublishersPath: opts.cachePublishersPath,
     cacheUrl: opts.cacheUrl, agentTarget: opts.agentTarget,
-    agentSources: opts.agentSources, profileCompiler: opts.profileCompiler))
+    agentSources: opts.agentSources, profileCompiler: opts.profileCompiler,
+    agentPollSec: opts.agentPollSec, evidenceSink: opts.evidenceSink,
+    evidenceSinkCaPath: opts.evidenceSinkCaPath,
+    evidenceHeartbeatSec: opts.evidenceHeartbeatSec)
+  let plan = runPreflight(inputs)
   if plan.digest != opts.planDigest:
     raise newException(AddonPlanMismatch,
       "the host's preflight plan is " & plan.digest & ", not the " &
@@ -214,11 +229,7 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   # while this one waited, so the plan is recomputed under the lock.
   var hostLock = acquireHostApplyLock("repro system addon bootstrap")
   defer: hostLock.release()
-  let lockedPlan = runPreflight(PreflightInputs(
-    deploySignersPath: opts.deploySignersPath,
-    cachePublishersPath: opts.cachePublishersPath,
-    cacheUrl: opts.cacheUrl, agentTarget: opts.agentTarget,
-    agentSources: opts.agentSources, profileCompiler: opts.profileCompiler))
+  let lockedPlan = runPreflight(inputs)
   if lockedPlan.digest != plan.digest:
     raise newException(AddonPlanMismatch,
       "the host's preflight plan changed to " & lockedPlan.digest &
@@ -312,6 +323,35 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     else:
       entries.add(keptRecordEntry(k.path))
 
+  # 3b. Evidence (A11, spec §10.4, §10.5), only with a sink: the
+  # attestation key beside the recipient key, the sink write credential in
+  # its own root-only directory, and the outbox the shipping unit's path
+  # unit watches. Each key is created here, never adopted (the preflight
+  # refused a host that already had one).
+  let shipping = plan.gen0Inputs.evidence.sinkAddress.len > 0
+  if shipping:
+    entries.add(establishRoot(plan, EvidenceStateDir, 0o700))
+    let att = ensureAttestationKey(AttestationKeyPath)
+    if not att.created:
+      raise newException(AddonBootstrapError, AttestationKeyPath &
+        " appeared after the preflight; refusing to adopt it")
+    createExclusive(AttestationPubPath, att.publicKeyHex & "\n", 0o444)
+    result.attestationPublicKeyHex = att.publicKeyHex
+    let cred = loadOrCreateHostIdentity(EvidenceCredentialCertPath,
+                                        EvidenceCredentialKeyPath)
+    discard posix.chmod(EvidenceCredentialKeyPath.cstring, Mode(0o400))
+    discard posix.chmod(EvidenceCredentialCertPath.cstring, Mode(0o444))
+    result.evidenceCredentialHost = $cred.hostId
+    result.evidenceCredentialCert = EvidenceCredentialCertPath
+    for k in [AttestationKeyPath, AttestationPubPath,
+              EvidenceCredentialKeyPath, EvidenceCredentialCertPath]:
+      let st = statOwner(k)
+      entries.add(LedgerEntry(class: lcKey, path: k, sha256: sha256OfFile(k),
+                              mode: st.mode, owner: st.owner))
+    createDir(EvidenceOutboxPath)
+    setFilePermissions(EvidenceDirPath, {fpUserRead, fpUserWrite, fpUserExec})
+    setFilePermissions(EvidenceOutboxPath, {fpUserRead, fpUserWrite, fpUserExec})
+
   # 4. This binary and generation 0's file bodies into the store.
   var files: seq[tuple[name, content: string]]
   for o in plan.gen0:
@@ -363,5 +403,22 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     "deploySignersSha256": sha256OfFile(DeploySignersPath),
     "cachesConfSha256": sha256OfFile(CachesConfPath),
   }
-  writeFileAtomic(addonDir(stateDir) / "bootstrap-evidence.json",
+  if shipping:
+    evidence["attestationPublicKey"] = %result.attestationPublicKeyHex
+    evidence["evidenceCredentialHost"] = %result.evidenceCredentialHost
+  writeFileAtomic(addonDir(stateDir) / BootstrapEvidenceName,
                   canonical(evidence) & "\n", 0o600)
+  # The first evidence record (spec §6.2 step 5): the binary's digest, the
+  # anchors, the recipient key and -- what the off-host check enrols -- the
+  # attestation key, attested over generation 0.
+  discard recordEvidence(EvidenceEvent(detector: edBootstrap,
+    category: ecAudit, trigger: "bootstrap", kind: "bootstrap",
+    fields: @[("planDigest", plan.digest),
+              ("digest", plan.binarySha256),
+              ("recipientKey", result.recipientPublicKeyHex),
+              ("credentialHost", result.evidenceCredentialHost),
+              ("path", prefixes.reproExe),
+              # dpkg runs up to here had no hook to follow them: the
+              # off-host check counts only later ones (DET-AO-8).
+              ("dpkgLastRun", dpkgLastRun("/var/log/dpkg.log"))],
+    attest: true), defaultSite(stateDir))

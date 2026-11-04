@@ -21,20 +21,34 @@
 ## - **pending** (``pendingCarriedState``): a carried directory is restored
 ##   only when the live directory under the host's root holds exactly the
 ##   manifest's tree (its digest), or when the restore receipt records a
-##   restore *at this root* into the very directory now in place (device
-##   and inode). A receipt written for another root (``restore --root``)
-##   or for a directory since replaced does not count;
+##   restore *at this root* into the very directory now in place. "The very
+##   directory" is its device and inode *and* something a new directory
+##   cannot inherit: its creation time (``statx`` ``STATX_BTIME``) and, where
+##   the file system keeps one, its inode generation (``FS_IOC_GETVERSION``).
+##   A file system may hand a replaced directory the inode it just freed
+##   (ext4 does), so device and inode alone do not identify it. When neither
+##   discriminator is available on both sides the receipt is not trusted and
+##   the live digest decides. A receipt written for another root
+##   (``restore --root``) or for a directory since replaced does not count;
 ## - **reach** (``unitReach``): which carried directories a profile's units
 ##   can touch, decided from what systemd would give each unit -- its
 ##   declared state set, ``StateDirectory=``/``CacheDirectory=``/
 ##   ``LogsDirectory=``, ``ReadWritePaths=``, ``WorkingDirectory=``,
 ##   ``BindPaths=``/``BindReadOnlyPaths=`` sources and ``RootDirectory=``;
 ##   a unit that is not confined to those paths (no
-##   ``ProtectSystem=strict``, no ``DynamicUser=yes``), a path with a
-##   specifier, a unit type that is not a service, timer, target, path or
-##   slice, and a distribution unit the profile starts all reach
-##   everything. The unit's name plays no part: a renamed unit that keeps
-##   the directory is still held;
+##   ``ProtectSystem=strict``, no ``DynamicUser=yes``), a command run
+##   outside the sandbox (an ``Exec*=`` prefix with ``+`` or ``!``,
+##   ``PermissionsStartOnly=yes``), a path with a specifier, a unit type
+##   that is not a service, timer, target, path or slice, a unit installed
+##   as a drop-in over a distribution unit (``collision = "dropIn"``, or a
+##   ``systemd.systemDropIn``), a unit that activates one the profile does
+##   not define (``Wants=``, ``Requires=``, ``Requisite=``, ``BindsTo=``,
+##   ``Upholds=``, ``PartOf=``, ``OnFailure=``, ``OnSuccess=``, a timer's
+##   or a path unit's ``Unit=`` or its same-name service), and a
+##   distribution unit the profile starts all reach everything: what cannot
+##   be shown to stay away from a carried directory counts as reaching it.
+##   The unit's name plays no part: a renamed unit that keeps the directory
+##   is still held;
 ## - **owners**: a carried tree keeps its numeric owners (the digest covers
 ##   them), so every account it names must have the source host's id here:
 ##   the live account of that name, else the id the profile pins for it
@@ -85,10 +99,22 @@ type
     createdAt*: string
     entries*: seq[ManifestEntry]
 
+  DirIdentity* = object
+    ## What identifies a directory across a replacement in place. ``dev``
+    ## and ``ino`` alone do not: a directory removed and made again can get
+    ## the same inode. ``btime`` (creation time, ``statx`` ``STATX_BTIME``)
+    ## and ``gen`` (the inode generation, ``FS_IOC_GETVERSION``) are new for
+    ## every new inode, where the file system provides them.
+    dev*, ino*: int64            ## -1 when the path is not a directory
+    haveBtime*: bool
+    btimeSec*, btimeNsec*: int64
+    haveGen*: bool
+    gen*: int64
+
   ReceiptEntry* = object
     digest*: string
     root*: string                ## the root the restore wrote under
-    dev*, ino*: int64            ## the restored directory's identity
+    id*: DirIdentity             ## the restored directory's identity
 
 const
   ManifestSchema* = "repro-state-set/1"
@@ -292,9 +318,17 @@ proc readReceipt*(dir: string): Table[string, ReceiptEntry] =
   for k, v in j{"restored"}.getFields():
     if v.kind != JObject:
       raise newException(StateSetError, "the restore receipt is malformed")
+    var id = DirIdentity(dev: v{"dev"}.getBiggestInt(-1),
+                         ino: v{"ino"}.getBiggestInt(-1))
+    if v.hasKey("btime") and v["btime"].kind == JArray and v["btime"].len == 2:
+      id.haveBtime = true
+      id.btimeSec = v["btime"][0].getBiggestInt()
+      id.btimeNsec = v["btime"][1].getBiggestInt()
+    if v.hasKey("generation") and v["generation"].kind == JInt:
+      id.haveGen = true
+      id.gen = v["generation"].getBiggestInt()
     result[k] = ReceiptEntry(digest: v{"digest"}.getStr(),
-      root: v{"root"}.getStr(), dev: v{"dev"}.getBiggestInt(-1),
-      ino: v{"ino"}.getBiggestInt(-1))
+      root: v{"root"}.getStr(), id: id)
 
 proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
   var o = newJObject()
@@ -302,18 +336,95 @@ proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
   for k in r.keys: keys.add(k)
   keys.sort()
   for k in keys:
-    o[k] = %*{"digest": r[k].digest, "root": r[k].root, "dev": r[k].dev,
-              "ino": r[k].ino}
+    let id = r[k].id
+    var e = %*{"digest": r[k].digest, "root": r[k].root, "dev": id.dev,
+               "ino": id.ino}
+    if id.haveBtime: e["btime"] = %*[id.btimeSec, id.btimeNsec]
+    if id.haveGen: e["generation"] = %id.gen
+    o[k] = e
   let tmp = receiptPath(dir) & ".tmp"
   writeFile(tmp, $(%*{"restored": o}) & "\n")
   moveFile(tmp, receiptPath(dir))
 
-proc dirIdentity*(path: string): (int64, int64) =
-  ## (device, inode) of a directory, (-1, -1) when it is not one.
+# statx(2) by number: neither libc this links against (glibc, the add-on's
+# static musl) is required to wrap it, and only the creation time is
+# read, from the fixed layout of ``struct statx``
+# (https://man7.org/linux/man-pages/man2/statx.2.html: stx_mask at 0,
+# stx_btime -- tv_sec i64, tv_nsec u32 -- at 80).
+const SysStatx =
+  when defined(amd64): 332
+  elif defined(arm64) or defined(riscv64): 291
+  elif defined(arm): 397
+  elif defined(i386): 383
+  else: -1
+const
+  AtFdCwd = -100
+  AtSymlinkNoFollow = 0x100
+  StatxBtime = 0x800'u32
+  # FS_IOC_GETVERSION = _IOR('v', 1, long)
+  # (https://man7.org/linux/man-pages/man2/ioctl_iflags.2.html).
+  FsIocGetVersion = (2'u64 shl 30) or (uint64(sizeof(clong)) shl 16) or
+                    (uint64(ord('v')) shl 8) or 1'u64
+
+proc c_syscall(n: clong): clong {.importc: "syscall", header: "<unistd.h>",
+                                  varargs.}
+proc c_ioctl(fd: cint; req: culong): cint {.importc: "ioctl",
+  header: "<sys/ioctl.h>", varargs.}
+var ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+var ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+var OCloexec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
+
+proc dirIdentity*(path: string): DirIdentity =
+  ## The identity of a directory (``dev = -1`` when it is not one). The
+  ## creation time and the inode generation are filled in where the kernel
+  ## and the file system provide them.
   var st: Stat
   if lstat(path.cstring, st) != 0 or not S_ISDIR(st.st_mode):
-    return (-1'i64, -1'i64)
-  (int64(st.st_dev), int64(st.st_ino))
+    return DirIdentity(dev: -1, ino: -1)
+  result = DirIdentity(dev: int64(st.st_dev), ino: int64(st.st_ino))
+  when SysStatx > 0:
+    var buf: array[256, byte]
+    if c_syscall(clong(SysStatx), cint(AtFdCwd), path.cstring,
+                 cint(AtSymlinkNoFollow), cuint(StatxBtime), addr buf) == 0:
+      var mask: uint32
+      copyMem(addr mask, addr buf[0], 4)
+      if (mask and StatxBtime) != 0:
+        var sec: int64
+        var nsec: uint32
+        copyMem(addr sec, addr buf[80], 8)
+        copyMem(addr nsec, addr buf[88], 4)
+        result.haveBtime = true
+        result.btimeSec = sec
+        result.btimeNsec = int64(nsec)
+  let fd = posix.open(path.cstring, O_RDONLY or ODirectory or ONoFollow or
+                      OCloexec)
+  if fd >= 0:
+    var v: clong
+    if c_ioctl(fd, culong(FsIocGetVersion), addr v) == 0:
+      result.haveGen = true
+      result.gen = int64(v)
+    discard posix.close(fd)
+
+proc sameDirectory*(recorded, live: DirIdentity): bool =
+  ## Whether ``live`` is the directory ``recorded`` names: the same device
+  ## and inode, every discriminator both sides have equal, and at least one
+  ## discriminator compared. Without one (a file system with neither a
+  ## creation time nor a generation) nothing tells a replacement apart, so
+  ## the answer is no and the caller decides on the contents instead.
+  if recorded.dev < 0 or live.dev < 0: return false
+  if recorded.dev != live.dev or recorded.ino != live.ino: return false
+  when CarriedMutation == "receipt-trusts-inode":
+    return true
+  var compared = false
+  if recorded.haveBtime and live.haveBtime:
+    if recorded.btimeSec != live.btimeSec or
+        recorded.btimeNsec != live.btimeNsec:
+      return false
+    compared = true
+  if recorded.haveGen and live.haveGen:
+    if recorded.gen != live.gen: return false
+    compared = true
+  compared
 
 proc normalRoot(root: string): string =
   if root.len == 0: "/" else: root
@@ -338,8 +449,8 @@ proc pendingCarriedState*(dir = CarriedStateDir; root = "/"): seq[ManifestEntry]
       if e.path in receipt:
         let rc = receipt[e.path]
         restored = rc.digest == e.digest and normalRoot(rc.root) == r and
-          id[0] >= 0 and rc.dev == id[0] and rc.ino == id[1]
-      if not restored and id[0] >= 0:
+          sameDirectory(rc.id, id)
+      if not restored and id.dev >= 0:
         try: restored = treeDigest(live) == e.digest
         except CatchableError: restored = false
     if not restored: result.add(e)
@@ -386,6 +497,26 @@ proc serviceReach*(name: string; texts: seq[string]): UnitReach =
       case key
       of "ProtectSystem": strict = value.toLowerAscii() == "strict"
       of "DynamicUser": dynamic = truthy(value)
+      of "PermissionsStartOnly":
+        # Deprecated, and it runs every ExecStartPre=/Post=/Reload=/Stop=
+        # outside the sandbox (systemd.service(5)).
+        when CarriedMutation != "reach-ignores-privileged-commands":
+          if truthy(value):
+            return UnitReach(all: true, why: "PermissionsStartOnly=yes " &
+              "(its other commands run outside the sandbox)")
+      of "ExecStart", "ExecStartPre", "ExecStartPost", "ExecReload",
+         "ExecStop", "ExecStopPost", "ExecCondition":
+        # A command whose prefix carries "+" runs with full privileges and
+        # without the namespacing (ProtectSystem=, ReadWritePaths=, ...);
+        # "!" drops User=/Group=. Neither is confined to the unit's paths
+        # (systemd.service(5), "Table 1. Special executable prefixes").
+        when CarriedMutation != "reach-ignores-privileged-commands":
+          var i = 0
+          while i < value.len and value[i] in {'@', '-', ':', '+', '!'}:
+            if value[i] in {'+', '!'}:
+              return UnitReach(all: true, why: key & "=" & value &
+                " (a privileged command, outside the sandbox)")
+            inc i
       of "RootDirectory", "RootImage":
         if value.len > 0:
           return UnitReach(all: true, why: key & "=")
@@ -416,16 +547,39 @@ proc serviceReach*(name: string; texts: seq[string]): UnitReach =
     return UnitReach(all: true, why: "not confined (no ProtectSystem=strict " &
       "or DynamicUser=yes): it can write anywhere")
 
+proc activatedUnits(name, suffix: string; texts: seq[string]): seq[string] =
+  ## The units starting this one also starts: its requirement and want
+  ## dependencies, its failure and success handlers, and for a timer or a
+  ## path unit the unit it triggers (``Unit=``, else the service of the
+  ## same name). Ordering (``After=``/``Before=``) starts nothing.
+  var trigger = ""
+  for t in texts:
+    for (section, key, value) in unitDirectivesOf(t):
+      if section == "Unit" and key in ["Wants", "Requires", "Requisite",
+          "BindsTo", "Upholds", "OnFailure", "OnSuccess", "PartOf"]:
+        for w in value.splitWhitespace():
+          if w notin result: result.add(w)
+      elif section in ["Timer", "Path"] and key == "Unit":
+        trigger = value.strip()
+  if suffix in ["timer", "path"]:
+    if trigger.len == 0:
+      trigger = name[0 ..< name.len - suffix.len] & "service"
+    if trigger notin result: result.add(trigger)
+
 proc unitReach*(r: SystemResource; p: SystemProfile): UnitReach =
   ## What a resource of the profile can reach (see the module header).
   case r.kind
   of srkSystemdSystemUnit:
     let ext = r.suName.rsplit('.', maxsplit = 1)
     let suffix = if ext.len == 2: ext[1] else: ""
-    case suffix
-    of "timer", "target", "path", "slice": return UnitReach()
-    of "service": discard
-    else: return UnitReach(all: true, why: "a ." & suffix & " unit")
+    if suffix notin ["service", "timer", "target", "path", "slice"]:
+      return UnitReach(all: true, why: "a ." & suffix & " unit")
+    when CarriedMutation != "reach-dropin-judged-alone":
+      if r.suCollision == "dropIn":
+        # Installed as a drop-in over a unit some package ships: the
+        # unit's own file, which is not in the profile, still runs.
+        return UnitReach(all: true, why: "a drop-in over the distribution " &
+          "unit " & r.suName)
     var texts: seq[string]
     try: texts.add(renderedSystemUnitContent(r))
     except CatchableError as e:
@@ -433,6 +587,23 @@ proc unitReach*(r: SystemResource; p: SystemProfile): UnitReach =
     for d in p.resources:
       if d.kind == srkSystemdSystemDropIn and d.diUnit == r.suName:
         texts.add(d.diContent)
+    # Starting this unit starts what it activates: a unit the profile does
+    # not define (a distribution unit, another package's) can reach
+    # anything, whatever this one is confined to. One the profile defines
+    # is judged on its own.
+    when CarriedMutation != "reach-trigger-units-reach-nothing":
+      var defined: HashSet[string]
+      for d in p.resources:
+        if d.kind == srkSystemdSystemUnit and d.suCollision != "dropIn":
+          defined.incl(d.suName)
+      for u in activatedUnits(r.suName, suffix, texts):
+        if u notin defined and not u.endsWith(".slice"):
+          return UnitReach(all: true, why: "it starts " & u &
+            ", which the profile does not define")
+    if suffix != "service":
+      # A timer, target, path or slice runs nothing itself; what it
+      # activates was judged above.
+      return UnitReach()
     result = serviceReach(r.suName, texts)
     for sd in r.suStateDirectories: result.paths.add(sd.path)
   of srkSystemdSystemDropIn:

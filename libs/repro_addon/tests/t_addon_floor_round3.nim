@@ -139,7 +139,7 @@ suite "round 3: the parse-time half (red under floor-static-r3-disabled)":
       "PAMName=login\nExecStart=" & Prefix & "/bin/svc\n",
       "  floorExceptions = [\"PAMName: needs a session\"]\n"))
 
-  test "the allowlist: a key outside it needs an exception":
+  test "the allowlist: a key outside it is refused (round 4: no exception names it)":
     for service in ["MountAPIVFS=yes\n", "Delegate=yes\n",
                     "DeviceAllow=/dev/sda rw\n", "TTYPath=/dev/tty1\n"]:
       checkpoint service
@@ -147,9 +147,9 @@ suite "round 3: the parse-time half (red under floor-static-r3-disabled)":
         Prefix & "/bin/svc\n")
       check "allowlist" in refused(s)
       let key = service.split('=')[0]
-      check refused(unitStanza("a.service", "User=a\n" & service &
-        "ExecStart=" & Prefix & "/bin/svc\n",
-        "  floorExceptions = [\"" & key & ": a fixture\"]\n")) == ""
+      check "names no serviceFloor setting" in refused(unitStanza("a.service",
+        "User=a\n" & service & "ExecStart=" & Prefix & "/bin/svc\n",
+        "  floorExceptions = [\"" & key & ": a fixture\"]\n"))
     check "allowlist" in refused(unitStanza("a.service", "User=a\n" &
       "ExecStart=" & Prefix & "/bin/svc\n").replace("[Unit]\n",
       "[Unit]\nJoinsNamespaceOf=other.service\n"))
@@ -212,10 +212,15 @@ suite "round 3: the effective-unit check":
   let denied = toHashSet(["memfd_create", "shmat", "mount", "reboot"])
   proc uid(n: string): int = (if n == "root": 0 else: 1000)
 
+  proc noGroups(n: string): seq[string] = @[]
   proc problems(show: ShowProps; version = FloorVersion;
                 own: seq[string] = @[]): seq[string] =
-    effectiveFloorProblems("a.service", ru, version, @[], show, own, denied,
-                           uid)
+    var e = EffectiveInput(unit: "a.service", rendered: ru, version: version,
+      show: show, denied: denied, uidOf: uid, groupsOf: noGroups)
+    e.lines["ExecStartEx"] = @["{ path=" & Prefix & "/bin/svc ; argv[]=" &
+      Prefix & "/bin/svc ; flags= ; start_time=[n/a] }"]
+    for o in own: e.ownDropIns.add((path: o, content: ""))
+    effectiveFloorProblems(e)
 
   test "a unit that holds its floor has no problem":
     check problems(goodShow()).len == 0
@@ -245,10 +250,10 @@ suite "round 3: the effective-unit check":
     let p = problems(s).join()
     check "MemoryDenyWriteExecute=no" in p
     check "not one the add-on installed" in p
-    # ... a drop-in the add-on installed itself, or the distribution's, is not
+    # ... a drop-in the add-on installed itself is not (the distribution's
+    # is, since round 4: t_addon_floor_round4)
     s = goodShow()
-    s["DropInPaths"] = "/etc/systemd/system/a.service.d/x.conf " &
-      "/usr/lib/systemd/system/service.d/10-timeout-abort.conf"
+    s["DropInPaths"] = "/etc/systemd/system/a.service.d/x.conf"
     check problems(s, own = @["/etc/systemd/system/a.service.d/x.conf"]).len == 0
 
   test "denied calls, PAMName and LoadState":

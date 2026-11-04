@@ -975,6 +975,60 @@ suite "M83 step 10: fs.userFile contentFromCommand":
       userFileMode: "0600")
     check digestOfResource(rCmd) != digestOfResource(rLit)
 
+  test "dangling symlink at hostPath: observeUserFile returns present=false and apply replaces it":
+    when not defined(windows):
+      let dir = createTempDir("repro-userfile-dangling-", "")
+      defer: removeDir(dir)
+      let target = dir / "dangling.txt"
+      createSymlink(dir / "nonexistent-target", target)
+      check symlinkExists(target)
+      let obs = observeUserFile(target)
+      check not obs.present
+      let written = applyUserFileResource(target, "replaced-body", "0644")
+      check written.len == "replaced-body".len
+      check not symlinkExists(target)
+      check readFile(target) == "replaced-body"
+
+  test "lifecycle: contentFromCommand takeover + steady-state no-op vs cacheKey bump":
+    let dir = createTempDir("repro-userfile-cmd-lifecycle-", "")
+    defer: removeDir(dir)
+    let target = dir / "secret.txt"
+    when defined(windows):
+      let argv = @["cmd", "/c", "echo secret-payload-1"]
+    else:
+      let argv = @["/bin/sh", "-c", "printf secret-payload-1"]
+    let outBytes = runContentCommand(argv)
+    var s = newString(outBytes.len)
+    for i, b in outBytes: s[i] = char(b)
+    writeFile(target, s)
+    var desired = Resource(kind: rkFsUserFile, address: "uf:cmd:takeover",
+      lifecyclePolicy: lpDefault,
+      userFileHostPath: target,
+      userFileContent: "",
+      userFileContentFromCommand: argv,
+      userFileMode: "0600",
+      userFileCacheKey: "k1")
+    # 1. First-apply takeover: file already on disk with matching decrypted bytes -> rakNoOp
+    var stTakeover: ResourceState
+    stTakeover.address = desired.address
+    stTakeover.desired = desired
+    stTakeover.hasDesired = true
+    stTakeover.observed = observeUserFile(target)
+    stTakeover.hasRecorded = false
+    check decideAction(stTakeover).kind == rakNoOp
+    # 2. Steady-state re-plan with recorded postWriteDigest + matching payloadKind -> rakNoOp
+    var stSteady = stTakeover
+    stSteady.hasRecorded = true
+    stSteady.recorded.kind = rkFsUserFile
+    stSteady.recorded.postWriteDigest = stTakeover.observed.digest
+    stSteady.recorded.payloadKind = "user-file:" & digestHex(digestOfResource(desired))
+    check decideAction(stSteady).kind == rakNoOp
+    # 3. Bumping cacheKey changes desiredDigest -> rakUpdate
+    var bumped = desired
+    bumped.userFileCacheKey = "k2"
+    stSteady.desired = bumped
+    check decideAction(stSteady).kind == rakUpdate
+
 # ===========================================================================
 # M83 step 4b: systemd.userUnit canonical-bytes + lifecycle assertions.
 # These are pure (no `systemctl` shell-out); they pin that the digest is

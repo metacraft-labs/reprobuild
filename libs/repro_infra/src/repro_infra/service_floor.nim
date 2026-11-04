@@ -105,6 +105,12 @@ const FloorMutation {.strdefine: "reproAddonMutation".} = ""
   ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
   ## never set in a product build.
 
+const ExceptionsLiftRoot = FloorMutation == "exception-lifts-root"
+  ## Falsifying build (A9 review round 4, finding 4): round 3's rule, under
+  ## which a ``User``, ``DynamicUser`` or ``SupplementaryGroups`` exception
+  ## let a floored unit run as root or with a privileged group, and any
+  ## systemd key could be named as an exception.
+
 const StaticRound3Off = FloorMutation in ["floor-static-r3-disabled",
                                           "floor-unchecked"]
   ## The falsifying builds of review round 3's structural requirement: the
@@ -293,7 +299,8 @@ proc parseFloorExceptions*(unitName: string;
         "under the floor, with or without an exception")
     let systemdKey = k.len > 0 and k[0] in {'A'..'Z'} and
       k.allCharsInSet({'A'..'Z', 'a'..'z', '0'..'9'})
-    if k notin keys and (StaticRound3Off or not systemdKey):
+    if k notin keys and (not ExceptionsLiftRoot or StaticRound3Off or
+                         not systemdKey):
       raiseFloor(unitName, "floor exception '" & k & "' names no " &
         "serviceFloor setting (one of " & keys.join(", ") & ") or systemd " &
         "unit setting")
@@ -740,6 +747,14 @@ proc allowedForm(section, key: string; dropIn: bool): (bool, ValueForm) =
   else: discard
   (false, vfAny)
 
+proc floorKnowsKey*(section, key: string; dropIn: bool): bool =
+  ## Whether a floored unit (or a drop-in of one) may carry ``key`` in
+  ## ``section`` at all: the allowlist's keys, independent of the value
+  ## forms. The effective-unit check holds the files systemd loaded to it
+  ## (``repro_addon/effective_floor``), for the settings systemd does not
+  ## report back (``PermissionsStartOnly=``).
+  allowedForm(section, key, dropIn)[0]
+
 proc isAccountName*(v: string): bool =
   ## A literal account name systemd resolves as written: lower-case
   ## letters, digits, ``_``, ``-``, not starting with a digit or ``-``.
@@ -836,14 +851,18 @@ proc allowlistRefusal*(unitName, content: string;
       return what & " opens a login session outside the floor; it is " &
         "refused under the floor, with or without an exception"
     if d.section notin ["Unit", "Service", "Install"]:
-      if waived(ex, d.key): continue
-      return what & ": the section is not one a floored unit may carry"
+      if ExceptionsLiftRoot and waived(ex, d.key): continue
+      return what & ": the section is not one a floored unit may carry " &
+        "(only \"serviceFloor: <why>\" allows it)"
     let (ok, form) = allowedForm(d.section, d.key, dropIn)
     if not ok:
-      if waived(ex, d.key): continue
+      # Only the keys floorExceptionKeys lists can be waived (round 4,
+      # finding 4); a key off the allowlist is not one of them.
+      if (ExceptionsLiftRoot or d.key in floorExceptionKeys()) and
+          waived(ex, d.key): continue
       return what & " is not on the floor's allowlist" &
-        (if dropIn: " for a drop-in" else: "") & "; name the exception \"" &
-        d.key & ": <why>\""
+        (if dropIn: " for a drop-in" else: "") & "; it is refused under " &
+        "the floor (only \"serviceFloor: <why>\" allows it)"
     if waived(ex, d.key): continue
     let why = formRefusal(d.key, d.value, form)
     if why.len > 0: return what & ": " & why
@@ -924,9 +943,16 @@ proc floorRefusal*(unitName: string;
           "wants the families the service uses (or name the exception " &
           "\"RestrictAddressFamilies: <why>\")"
     of "User", "Group":
-      if v in ["root", "0"] and not waived(ex, "User"):
-        return what & " runs the service as root; name the exception " &
-          "\"User: <why>\""
+      # Root, and a privileged group, are refused under the floor whatever
+      # it names (round 4, finding 4): only the whole-floor waiver, under
+      # which the unit has no floor, lets a service run as root.
+      if v in ["root", "0"] and (not ExceptionsLiftRoot or not waived(ex, "User")):
+        return what & " runs the service as root; a floored unit may not " &
+          "(only the whole-floor waiver \"serviceFloor: <why>\" allows it)"
+      if k == "Group" and v in PrivilegedGroups and not ExceptionsLiftRoot and
+          not StaticRound3Off:
+        return what & " runs the service in the privileged group " & v &
+          "; a floored unit may not (only \"serviceFloor: <why>\" allows it)"
       when not StaticRound3Off:
         if not isAccountName(v) and not waived(ex, "User"):
           return what & ": an empty value, a number or a specifier is not " &
@@ -948,15 +974,24 @@ proc floorRefusal*(unitName: string;
               "the exception \"DynamicUser: <why>\""
           if v == "no" and not hasAccount:
             return what & " without a literal User= runs the service as " &
-              "root; name the exception \"DynamicUser: <why>\""
+              "root; a floored unit may not (only \"serviceFloor: <why>\" " &
+              "allows it)"
           if dropIn:
             return what & " changes the account of a floored unit; a " &
               "drop-in may not (name the exception \"DynamicUser: <why>\")"
+        elif v.toLowerAscii() in ["no", "false", "0", "off"] and
+            not hasAccount and not ExceptionsLiftRoot:
+          # Round 4, finding 4: a DynamicUser exception lifts the spelling
+          # rules, never root.
+          return what & " without a literal User= runs the service as " &
+            "root, which a DynamicUser exception does not allow (only " &
+            "\"serviceFloor: <why>\" does)"
     of "SupplementaryGroups":
       for gname in v.splitWhitespace():
-        if gname in PrivilegedGroups and not waived(ex, k):
+        if gname in PrivilegedGroups and
+            (not ExceptionsLiftRoot or not waived(ex, k)):
           return what & " adds the privileged group " & gname &
-            "; name the exception \"SupplementaryGroups: <why>\""
+            "; a floored unit may not (only \"serviceFloor: <why>\" allows it)"
     of "ReadWritePaths":
       when not StaticRound3Off:
         if dropIn and v.len > 0 and not waived(ex, k):
@@ -1078,9 +1113,11 @@ proc floorRefusal*(unitName: string;
           if '+' in c.prefixes and not waived(ex, WholeFloorException):
             return what & " runs with the '+' prefix, outside every " &
               "sandboxing setting (name the exception \"serviceFloor: <why>\")"
-          if '!' in c.prefixes and not waived(ex, "User"):
+          if '!' in c.prefixes and
+              (not ExceptionsLiftRoot or not waived(ex, "User")):
             return what & " runs with the '!' prefix, without the user " &
-              "change; name the exception \"User: <why>\""
+              "change (as root); a floored unit may not (only " &
+              "\"serviceFloor: <why>\" allows it)"
           if dropIn and not waived(ex, ExecConfinementException) and
               c.path.len > 0:
             if pathCannotBeJudged(c.path):
@@ -1147,6 +1184,11 @@ proc renderServiceFloorLines*(unitName, content: string;
     result.add("RestrictAddressFamilies=" & FloorDefaultAddressFamilies)
   if not hasUser and not waived(ex, "DynamicUser"):
     result.add("DynamicUser=yes")
+  elif not hasUser and not ExceptionsLiftRoot:
+    # A DynamicUser exception and no account: systemd runs it as root.
+    raiseFloor(unitName, "the exception \"DynamicUser\" with no literal " &
+      "User= runs the service as root, which a floored unit may not (name " &
+      "an account, or \"serviceFloor: <why>\")")
   if not waived(ex, ExecConfinementException) and not dropExec:
     result.add("NoExecPaths=/")
     when FloorMutation != "floor-private-mounts-exec":

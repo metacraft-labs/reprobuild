@@ -22,6 +22,7 @@ import repro_core/nix_evaluation_policy
 # the merged stdout/stderr descriptor (see ``repro_core/process_close``).
 from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
+import repro_core/source_root
 from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
@@ -6242,6 +6243,85 @@ proc buildNimFromSourceThroughEdges*(version, url, sha256, storeRoot, cc,
   raise newException(OSError, "the Nim " & version & " source build " &
     "edge's receipt " & edges.rootReceipt & " names no existing bin/nim")
 
+proc versionSatisfiesRange(version, constraint: string): bool
+
+const
+  InstalledPrefixRecordPath = "share" / "repro" / "cross-build-info"
+    ## `packaging/producers/installed_prefix.PrefixRecordPath`, spelled here
+    ## so the engine does not import the DSL's packaging layer.
+  InstalledPrefixNimRevisionPath = "nim" / ".nim-fork-revision"
+    ## What the catalog's `nim-fork` recipe records beside the compiler.
+
+proc installedPrefixNimVersion(nimTree: string): string =
+  ## The Nim release `nimTree` is, from its `lib/system/compilation.nim`
+  ## (`NimMajor` / `NimMinor` / `NimPatch`), or "" when it says none. Read,
+  ## not run: a compiler built for another machine cannot answer
+  ## `--version` on the build host, and on its own host this costs no spawn.
+  let file = nimTree / "lib" / "system" / "compilation.nim"
+  if not fileExists(file):
+    return ""
+  var parts = ["", "", ""]
+  for line in readFile(file).splitLines:
+    for i, name in ["NimMajor", "NimMinor", "NimPatch"]:
+      let at = line.find(name & "*")
+      if at >= 0 and "=" in line:
+        parts[i] = line.rsplit('=', maxsplit = 1)[1].strip()
+  if parts.anyIt(it.len == 0 or not it.allCharsInSet(Digits)):
+    return ""
+  parts.join(".")
+
+proc installedPrefixNim*(prefixes: openArray[string];
+                         rawConstraint = "nim >=2.2 <3.0"): string =
+  ## The provider compiler an installed prefix ships, or "" when none of
+  ## `prefixes` (the running image's, `runningImagePrefixCandidates`) ships
+  ## `nim/bin/nim` (reprobuild-pm Distribution-And-Packaging.md §5.3,
+  ## amendment N3, approved by Zahary Karadjov, 2026-11-04: this route runs
+  ## before the per-host routes of the provider-toolchain rule 2).
+  ##
+  ## The prefix exists because the appliance compiles providers and profiles
+  ## itself, with the fork the images were built by. Without this route the
+  ## armv7 prefix on rpi2 built stock Nim 2.2.10 from source instead
+  ## (2026-11-04). The compiler is found by the image's own prefix, not by
+  ## `PATH` and not by a build-time path, and is used only when it is the
+  ## fork the prefix records: `nim/.nim-fork-revision` must equal the
+  ## `nim_fork=` line of `share/repro/cross-build-info`. A mismatch, a
+  ## missing record, or a release outside `rawConstraint` (the bootstrap's
+  ## own range) raises `BootstrapNimError`, naming what it found.
+  let range = rawConstraint.splitWhitespace()[1 .. ^1].join(",")
+  for prefix in prefixes:
+    let exe = prefix / "nim" / "bin" / addFileExt("nim", ExeExt)
+    if not fileExists(exe):
+      continue
+    let record = prefix / InstalledPrefixRecordPath
+    if not fileExists(record):
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships " & exe & " but no build record " & record &
+        " to check it against; reinstall the prefix")
+    var recorded = ""
+    for line in readFile(record).splitLines:
+      if line.startsWith("nim_fork="):
+        recorded = line["nim_fork=".len .. ^1].strip()
+    let revisionFile = prefix / InstalledPrefixNimRevisionPath
+    let shipped =
+      if fileExists(revisionFile): readFile(revisionFile).strip() else: ""
+    if recorded.len == 0 or shipped != recorded:
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships a Nim that is not the fork it was built with" &
+        "\n  " & InstalledPrefixNimRevisionPath & ": " &
+        (if shipped.len > 0: shipped else: "(missing)") &
+        "\n  " & InstalledPrefixRecordPath & " nim_fork: " &
+        (if recorded.len > 0: recorded else: "(missing)") &
+        "\n  remedy: reinstall the prefix; its nim/ was replaced or damaged")
+    let version = installedPrefixNimVersion(prefix / "nim")
+    if version.len == 0 or not versionSatisfiesRange(version, range):
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships Nim " &
+        (if version.len > 0: version else: "(unknown version)") &
+        ", outside the provider compiler's range " & rawConstraint &
+        "; pin the provider compiler in the project's lock")
+    return exe
+  ""
+
 proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
                             cc = ""): string =
   ## Provision the recipe-compile Nim by ``route`` and return its path, or
@@ -6350,7 +6430,13 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if provisioned.sdkRoot.len > 0:
       putEnv(bootstrapSdkRootEnv, provisioned.sdkRoot)
   if getEnv(bootstrapNimCompilerEnv).len == 0:
-    let nim = provisionBootstrapNim(effectiveStoreRoot, cc = cc)
+    # The installed-prefix route first (§5.3 amendment N3): the Nim the
+    # running image's prefix ships, then the per-host routes.
+    let shipped = installedPrefixNim(runningImagePrefixCandidates(),
+      bootstrapNimToolUse().rawConstraint)
+    let nim =
+      if shipped.len > 0: shipped
+      else: provisionBootstrapNim(effectiveStoreRoot, cc = cc)
     bumpWindowsNimStack(nim)
     putEnv(bootstrapNimCompilerEnv, nim)
   publishBootstrapCompilerEnv(cc, defined(windows))
@@ -7129,6 +7215,60 @@ proc runScoopInstall(scoopExecutable, scoopRoot, bucket, app: string;
     raise newException(EScoopInstallFailed,
       "EScoopInstallFailed: scoop install " & appRef &
       " (root=" & scoopRoot & ") exited " & $res.exitCode & "\n" & res.output)
+
+proc parseScoopProvenance*(provenance: string): tuple[
+    ok: bool, bucket, app, version: string] =
+  ## Parse a recorded Scoop provenance string `"scoop:<bucket>/<app>@<version>"`
+  ## (or `"scoop:<bucket>/<app>"`).
+  if not provenance.startsWith("scoop:"):
+    return (false, "", "", "")
+  let body = provenance["scoop:".len .. ^1]
+  let slash = body.find('/')
+  if slash <= 0 or slash + 1 >= body.len:
+    return (false, "", "", "")
+  let bucket = body[0 ..< slash]
+  let rest = body[slash + 1 .. ^1]
+  let at = rest.find('@')
+  if at < 0:
+    return (true, bucket, rest, "")
+  if at == 0:
+    return (false, "", "", "")
+  let app = rest[0 ..< at]
+  let version = if at + 1 < rest.len: rest[at + 1 .. ^1] else: ""
+  result = (true, bucket, app, version)
+
+proc uninstallScoopApp*(app: string; scoopOverride = "") =
+  ## Uninstall a Scoop-managed application when a generation transition
+  ## (apply or rollback) removes it from the active home profile or switches
+  ## its realization away from the Scoop adapter (Scoop-Catalog-Adapter.md
+  ## § Removal). Invokes `scoop uninstall <app>` when the Scoop CLI is
+  ## reachable, and ensures `<scoopRoot>/apps/<app>` is cleaned up.
+  if app.len == 0:
+    return
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  if scoopRoot.len == 0:
+    return
+  let appsDir = scoopAppsDir(scoopRoot, app)
+  if not dirExists(extendedPath(appsDir)):
+    return
+  if scoopExe.len > 0:
+    let isPowerShell = scoopExe.endsWith(".ps1")
+    let invocation: seq[string] =
+      if isPowerShell:
+        @["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+          scoopExe, "uninstall", app]
+      else:
+        @[scoopExe, "uninstall", app]
+    let command = invocation.mapIt(quoteShell(it)).join(" ")
+    putEnv("SCOOP", scoopRoot)
+    discard execCmdEx(command)
+  if dirExists(extendedPath(appsDir)):
+    deleteJunctionDir(appsDir / "current")
+    try:
+      removeDir(extendedPath(appsDir))
+    except OSError:
+      discard
 
 proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
                                  executionProfileCaptured: bool):

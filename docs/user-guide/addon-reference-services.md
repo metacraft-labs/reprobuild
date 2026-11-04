@@ -65,21 +65,41 @@ The add-on handles this in four ways:
   a stored unit was written under, it refuses the switch. It does not
   guess, because a wrong guess would rewrite the unit with other bytes than
   were installed.
-- **Before anything starts, systemd's own view is checked.** After the
-  switch reloads systemd, the add-on reads each floored unit's effective
-  settings with `systemctl show` and compares them with the floor the unit
-  was written under, minus its named exceptions. If any differ, the switch
-  starts nothing and reverts. This covers settings the unit's text does
-  not show: a drop-in from another package, an instance's drop-in over a
-  template, or a value systemd parses differently than it reads. This
-  check runs on an apply, a revert, a rollback and a crash recovery.
+- **Before anything starts, systemd's own view is checked.** From just
+  before the switch reloads systemd until this check passes, the switch
+  holds every floored unit, so no socket, timer or other start request can
+  run it. The add-on then reads everything `systemctl show` reports for
+  each floored unit and compares it with the floor the unit was written
+  under, minus its named exceptions. A property the floor neither checks
+  nor lists as harmless is refused, so a setting from a newer systemd is
+  refused until it is reviewed. If anything differs, the switch starts
+  nothing and reverts. The check also refuses:
+  - any drop-in the add-on did not write, wherever systemd would read it
+    for the unit or for any instance of a templated unit. This includes a
+    package's drop-in under `/usr/lib/systemd` and a type-wide
+    `service.d/` drop-in;
+  - a command flag that leaves the sandbox (`+`, `!`, `!!`);
+  - a file the service manager would open as root (`OpenFile=`,
+    `StandardOutput=file:`);
+  - a privileged group, including one the service's account belongs to in
+    `/etc/group`.
+
+  This check runs on every switch: an apply, an agent tick, a revert, a
+  rollback and a crash recovery. It does not run between switches. A
+  drop-in that someone with root, or a package, installs later takes
+  effect at the next reload or boot without the check. The next switch
+  then refuses it.
 
 Each newer floor version can refuse settings an older one accepted. For
 example, it may forbid a writable or executable path the unit relied on,
-quoting or `%` specifiers in a path, `PAMName=`, or a `[Service]` key
-outside the floor's list of known keys. The plan names each refusal and
-the exception that would waive it. `PAMName=` cannot be waived, because
-a PAM session can run code as root outside the unit's sandbox.
+quoting or `%` specifiers in a path, `PAMName=`, or a key outside the
+floor's list of known keys. The plan names each refusal and the exception
+that would waive it, where one exists. An exception can name only the
+floor's own settings. A service that must run as root, or in a privileged
+group such as `adm` or `shadow`, needs the whole-floor waiver
+`serviceFloor`: no narrower exception allows it. `PAMName=` cannot be
+waived, because a PAM session can run code as root outside the unit's
+sandbox.
 
 ## Running a validator safely
 

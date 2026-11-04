@@ -1879,7 +1879,11 @@ proc bindingOfLiveObject(address: string; desired: Resource;
     of rkSystemdUserUnit: "unit-content"
     of rkMacosUserDefault: "defaults-literal"
     of rkLaunchdUserAgent: "plist-content"
-    of rkFsUserFile: "user-file"
+    of rkFsUserFile:
+      if desired.userFileContentFromCommand.len > 0:
+        "user-file:" & digestHex(digestOfResource(desired))
+      else:
+        "user-file"
     of rkVscodeExtension: "vscode-extensions"
     of rkLinuxDconfKey: "gvariant-literal"
     of rkLinuxKdeConfigKey: "kde-config-value"
@@ -2617,6 +2621,38 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
           prevFileDigests[gf.absoluteOutputPath] = gf.postWriteDigest
           if gf.ownershipPolicy in {gfoStowSymlink, gfoStowCopy}:
             recordedStow[gf.absoluteOutputPath] = gf
+        # Preview Scoop package removals (Scoop-Catalog-Adapter.md § Removal):
+        # any Scoop package recorded by the active generation that is no longer
+        # selected via the Scoop adapter in the new plan will be uninstalled.
+        var plannedScoopApps: HashSet[string]
+        for pp in packagePreviews:
+          let app = previewedScoopApp(pp)
+          if app.len > 0:
+            plannedScoopApps.incl(app)
+        for rp in prevManifest.realizedPackages:
+          let sc = recordedScoopApp(rp)
+          if sc.ok and sc.app notin plannedScoopApps:
+            let otherHolders = heldByNonProfileRoot(store, rp.realizedPrefixId)
+            if otherHolders.len == 0:
+              result.items.add(PlanItem(
+                category: "package",
+                name: rp.packageId,
+                action: piaDestroy,
+                concern: hcPackages,
+                notApplied: hcPackages notin owned,
+                detail: "scoop uninstall " & sc.app & " (was " & sc.bucket &
+                  "/" & sc.app & (if sc.version.len > 0: "@" & sc.version
+                                  else: "") & ")"))
+            else:
+              result.items.add(PlanItem(
+                category: "package",
+                name: rp.packageId,
+                action: piaSkip,
+                concern: hcPackages,
+                notApplied: hcPackages notin owned,
+                detail: "scoop app " & sc.app &
+                  " retained in Scoop (still held by store root(s): " &
+                  otherHolders.join(", ") & ")"))
       except CatchableError:
         discard
 
@@ -3361,6 +3397,21 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               # (listed in `result.released`), never deleted.
               if gf.absoluteOutputPath notin newPaths and filesApplied:
                 deleteRemovedFile(gf.absoluteOutputPath)
+            # Uninstall Scoop packages that the previous generation owned via
+            # the Scoop adapter (`adapter == "scoop"`) and that are no longer
+            # realized via Scoop in the new generation (Scoop-Catalog-Adapter.md
+            # § Removal).
+            if hcPackages in owned:
+              var newScoopApps: HashSet[string]
+              for r in realized:
+                let app = realizedScoopApp(r)
+                if app.len > 0:
+                  newScoopApps.incl(app)
+              for rp in prevManifest.realizedPackages:
+                let sc = recordedScoopApp(rp)
+                if sc.ok and sc.app notin newScoopApps:
+                  if heldByNonProfileRoot(store, rp.realizedPrefixId).len == 0:
+                    uninstallScoopRecord(sc.app)
             # Same for managed blocks.
             var newBlockKeys: seq[string]
             for mb in appliedManagedBlocks:
@@ -3698,11 +3749,15 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # short-circuit the command invocation on a cache-hit
             # when `userFileCacheKey` is non-empty.
             if desired.userFileContentFromCommand.len > 0:
+              let expectedPayloadKind =
+                "user-file:" & digestHex(digestOfResource(desired))
               var recordedPostDigest = zeroDigest()
               var hasRecordedPost = false
               if action.address in recordedBindings:
                 let prev = recordedBindings[action.address]
-                if not isZeroDigest(prev.postWriteDigest):
+                if not isZeroDigest(prev.postWriteDigest) and
+                   (prev.payloadKind == expectedPayloadKind or
+                    prev.payloadKind == "user-file"):
                   recordedPostDigest = prev.postWriteDigest
                   hasRecordedPost = true
               postWriteBytes = applyUserFileResourceCmd(
@@ -3712,10 +3767,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
                 desired.userFileCacheKey,
                 recordedPostDigest,
                 hasRecordedPost)
+              payloadKindStr = expectedPayloadKind
             else:
               postWriteBytes = applyUserFileResource(desired.userFileHostPath,
                 desired.userFileContent, desired.userFileMode)
-            payloadKindStr = "user-file"
+              payloadKindStr = "user-file"
           of rkVscodeExtension:
             # The vscode.extension driver wraps `code --list/install/
             # uninstall-extension`. Reconciles the live installed
@@ -4061,6 +4117,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       result.rebuiltCount = rebuiltCount
       store.close()
       storeClosed = true
+    except CatchableError as err:
+      if not storeClosed:
+        try: store.close() except CatchableError: discard
+        storeClosed = true
+      releaseApplyLock(lock)
+      raise err
     finally:
       if not storeClosed:
         try: store.close() except CatchableError: discard

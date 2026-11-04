@@ -451,6 +451,49 @@
 ## ``import-copies-env-secret``               the import copies a secret
 ##                                            Environment= value into the
 ##                                            skeleton
+## ``sink-credential-has-read-scope``         the Evidence sink answers a
+##                                            list or a read from an
+##                                            appender's credential
+## ``ship-deletes-before-ack``                the shipping unit deletes an
+##                                            outbox entry before the sink
+##                                            acknowledged it
+## ``attestation-unsigned``                   the attestation signature
+##                                            covers other bytes than the
+##                                            statement
+## ``attestation-claims-host``                the statement's scope says
+##                                            host attestation and drops
+##                                            what it does not cover
+## ``check-silence-as-idle``                  the off-host check reports a
+##                                            silent detector as live-idle
+## ``check-skips-attestation``                the off-host check compares
+##                                            no attestation (DET-AO-9)
+## ``lag-detector-disabled``                  the off-host check raises no
+##                                            lag alert (DET-AO-10)
+## ``tick-records-no-detection``              a tick's outcome leaves no
+##                                            detection record
+## ``evidence-ship-unrestricted-egress``      the shipping unit has no
+##                                            egress allow-list
+## ``evidence-ship-sees-agent-keys``          the shipping unit can read
+##                                            the attestation and recipient
+##                                            keys
+## ``receipt-trusts-inode``                   the restore receipt counts a
+##                                            directory as restored on its
+##                                            device and inode alone
+## ``reach-ignores-privileged-commands``      a "+"/"!" Exec*= command and
+##                                            PermissionsStartOnly= do not
+##                                            widen a unit's reach
+## ``reach-dropin-judged-alone``              a collision="dropIn" unit is
+##                                            judged by its drop-in only
+## ``reach-trigger-units-reach-nothing``      what a unit activates (Wants=,
+##                                            a timer's Unit=, ...) is not
+##                                            followed
+## ``backup-without-host-lock``               the backup runs without the
+##                                            host apply lock and is not
+##                                            re-checked after the hold; an
+##                                            apply's carried check is not
+##                                            repeated under the lock
+## ``restore-not-required-by-units``          the carried units do not
+##                                            require the restore unit
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -650,6 +693,13 @@ const
                           "store-objects-by-string",
                           "trace-sampler-blind",
                           "template-observed-by-name",
+                          # A9 review round 4.
+                          "exception-lifts-root",
+                          "instance-dropin-needs-provider",
+                          "dropins-from-the-distribution-trusted",
+                          "properties-not-default-denied",
+                          "unnamed-instances-unchecked",
+                          "floor-start-unheld",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -680,7 +730,41 @@ const
                           "keep-without-mount-requirement",
                           "import-copies-env-secret",
                           "restore-after-start",
-                          "revert-refuses-restored"]
+                          "revert-refuses-restored",
+                          # Milestone A11 (detection and capture). Read by
+                          # repro_peer_cache/evidence.nim, which cannot
+                          # import this module: the Evidence sink answers a
+                          # list or a read from an appender (G34's gate).
+                          "sink-credential-has-read-scope",
+                          # The shipping unit deletes outbox entries before
+                          # the sink acknowledged them (DET-6).
+                          "ship-deletes-before-ack",
+                          # The attestation is signed over other bytes than
+                          # its statement (spec §10.5).
+                          "attestation-unsigned",
+                          # The statement presents itself as host
+                          # attestation (spec §10.5's "never").
+                          "attestation-claims-host",
+                          # The off-host check: silence reported as idle
+                          # (DET-5), attestations not compared (DET-AO-9),
+                          # no lag alert (DET-AO-10).
+                          "check-silence-as-idle",
+                          "check-skips-attestation",
+                          "lag-detector-disabled",
+                          # A tick's outcome leaves no detection record.
+                          "tick-records-no-detection",
+                          # The shipping unit without its egress allow-list,
+                          # and with the attestation and recipient keys
+                          # visible to it.
+                          "evidence-ship-unrestricted-egress",
+                          "evidence-ship-sees-agent-keys",
+                          # A13 review round 2.
+                          "receipt-trusts-inode",
+                          "reach-ignores-privileged-commands",
+                          "reach-dropin-judged-alone",
+                          "reach-trigger-units-reach-nothing",
+                          "backup-without-host-lock",
+                          "restore-not-required-by-units"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

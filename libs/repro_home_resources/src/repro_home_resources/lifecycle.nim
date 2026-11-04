@@ -34,6 +34,7 @@ import ./drivers/defaults
 import ./drivers/kde_config_key
 import ./drivers/launchd_user
 import ./drivers/systemd_user
+import ./drivers/user_file
 import ./drivers/vscode_extension
 import repro_homebrew_adapter/formula as homebrew_formula
 import repro_homebrew_adapter/cask as homebrew_cask
@@ -358,6 +359,31 @@ proc decideActionIgnoringBusy(state: ResourceState;
       result.kind = rakNoOp
       result.summary = summarize(rakNoOp, state.address, result.resourceKind)
       return
+    if state.desired.kind == rkFsUserFile and
+       state.desired.userFileContentFromCommand.len > 0:
+      if state.hasRecorded and not isZeroDigest(state.recorded.postWriteDigest) and
+         state.recorded.postWriteDigest == state.observed.digest:
+        let expectedPayloadKind = "user-file:" & digestHex(desiredDigest)
+        if state.desired.userFileCacheKey.len > 0 and
+           (state.recorded.payloadKind == expectedPayloadKind or
+            state.recorded.payloadKind == "user-file"):
+          # Steady-state cache-hit for contentFromCommand: on-disk bytes match
+          # the recorded postWriteDigest and the (cacheKey, argv) digest has not changed.
+          result.kind = rakNoOp
+          result.summary = summarize(rakNoOp, state.address, result.resourceKind)
+          return
+      elif not state.hasRecorded:
+        # First-apply takeover of a pre-existing decrypted file: if the command
+        # succeeds and produces the exact bytes already on disk, treat as no-op
+        # so the file is adopted into the generation manifest without false drift.
+        try:
+          let cmdOut = runContentCommand(state.desired.userFileContentFromCommand)
+          if digestOfBytes(cmdOut) == state.observed.digest:
+            result.kind = rakNoOp
+            result.summary = summarize(rakNoOp, state.address, result.resourceKind)
+            return
+        except CatchableError:
+          discard
     # Observed != desired. Decide between update (safe, we wrote
     # it last) and drift_blocked (user mutated since our write).
     if state.hasRecorded and not isZeroDigest(state.recorded.postWriteDigest) and

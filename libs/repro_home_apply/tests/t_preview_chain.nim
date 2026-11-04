@@ -41,6 +41,8 @@ import repro_dsl_stdlib/package_registry
 import repro_home_apply/plan
 import repro_home_apply/realize
 import repro_home_apply/package_catalog
+import repro_home_generations
+import repro_local_store
 
 let
   FixtureRoot = "build/test-tmp/t-preview-chain" / testCaseScratchSlug()
@@ -270,3 +272,50 @@ suite "M0/GM4b — previewPackageResolutions resolves like the apply":
       if not referenced:
         echo "  [diag] reference home.nim is missing package(" & id & ", ...)"
       check referenced
+
+  test "t_scoop_removal_lifecycle_helpers_and_uninstall":
+    resetDir(FixtureRoot)
+    isolateProdCatalog()
+    let parsed = parseScoopProvenance("scoop:main/ripgrep@14.1.1")
+    check parsed.ok
+    check parsed.bucket == "main"
+    check parsed.app == "ripgrep"
+    check parsed.version == "14.1.1"
+    check not parseScoopProvenance("tarball:sha256:abc").ok
+
+    # Fake Scoop app under $SCOOP/apps/ripgrep/14.1.1
+    let scoopRoot = getEnv("SCOOP")
+    let appDir = scoopRoot / "apps" / "ripgrep"
+    createDir(extendedPath(appDir / "14.1.1"))
+    writeFile(extendedPath(appDir / "14.1.1" / "rg.exe"), "stub")
+    check dirExists(extendedPath(appDir))
+
+    uninstallScoopRecord("ripgrep")
+    check not dirExists(extendedPath(appDir))
+
+    # Verify heldByNonProfileRoot distinguishes profile roots from session/workspace roots
+    let storeDir = FixtureRoot / "fake-store"
+    resetDir(storeDir)
+    var store = openStore(storeDir)
+    defer: store.close()
+    var pid: PrefixIdBytes
+    var dig: Digest256
+    for i in 0 ..< 32:
+      pid[i] = byte(i + 1)
+      dig[i] = byte(i + 1)
+    discard store.insertPrefixOrIgnore(PrefixRow(
+      prefixId: pid,
+      packageName: "scoop.main.ripgrep",
+      version: "14.1.1",
+      realizedPath: "prefixes/scoop.main.ripgrep/14.1.1-abc",
+      adapter: "scoop",
+      receiptDigest: pid,
+      createdAtUnix: 1000))
+    store.registerRoot("gen-1", rkProfile)
+    store.attachPrefixToRoot("gen-1", pid)
+    check heldByNonProfileRoot(store, dig).len == 0
+    store.registerRoot("dev-shell-1", rkSession)
+    store.attachPrefixToRoot("dev-shell-1", pid)
+    let holders = heldByNonProfileRoot(store, dig)
+    check holders.len == 1
+    check holders[0] == "dev-shell-1 (session)"

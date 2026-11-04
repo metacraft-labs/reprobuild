@@ -75,7 +75,26 @@
 ## - ``REPRO_A13_MUTATION=rev-beacon-dropped`` (the beacon directory
 ##   emptied): the node starts at genesis; red;
 ## - ``REPRO_A13_MUTATION=rev-slashing-db-reset`` (``validator.db``
-##   deleted): the carried history is gone; red.
+##   deleted): the carried history is gone; red (either at the history
+##   step, or earlier when prysm's doppelganger check finds the keys live
+##   and refuses to start);
+## - ``REPRO_A13_MUTATION=rev-slashing-db-reset-no-doppelganger`` (the same,
+##   with the doppelganger check off in the profile): the validator signs on
+##   an empty history; red at the history step, the history beginning after
+##   the add-on host's epoch on a chain that progressed
+##   (``historyEvidence``);
+## - ``REPRO_A13_MUTATION=rev-inode-reuse`` (the restored validator directory
+##   replaced in place by an empty one; ext4 usually hands it the freed
+##   inode): the apply refuses with ``ECarriedStatePending``; red there;
+## - engine build ``restore-not-required-by-units``: at the boot after the
+##   restored validator directory is replaced and the archives damaged, the
+##   validator starts although the restore failed; red.
+##
+## The last check (after the kept disk's): the boot path is governed by the
+## restore. The restore unit is installed with ``repro system state
+## install-unit``, which makes every carried unit require it; with the
+## validator's directory replaced and the archives damaged, the next boot's
+## restore fails and the validator does not start.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``, ``REPRO_ADDON_ENGINE_CLOSURE`` (the
 ## full engine built from this tree) and ``REPRO_A12_PACKAGES``. Bases:
@@ -341,10 +360,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          sync.stdout & sync.stderr)
 
     # --- 3. The first-boot unit restores before anything starts.
-    let unitText = nw.exec(eng & " system state unit")
-    writeFile(work / RestoreUnit, unitText.stdout)
-    nw.copyTo(work / RestoreUnit, "/etc/systemd/system/" & RestoreUnit)
-    discard nw.run("systemctl daemon-reload && systemctl enable " & RestoreUnit)
+    # Installed as a conversion installs it: the unit, enabled, and the
+    # drop-in that makes every carried unit require it.
+    let inst = nw.exec(eng & " system state install-unit --from " & CarriedDir)
+    step("the restore unit is installed and the carried units require it",
+         inst.exitCode == 0 and DefaultValidatorUnit in inst.stdout,
+         inst.stdout & inst.stderr)
     nw.rebootGuest()
     let res = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
     step("the first-boot unit restored the carried state",
@@ -367,10 +388,31 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       discard nw.run("find /var/lib/ethereum/beacon -mindepth 1 -delete")
     of "rev-slashing-db-reset":
       discard nw.run("find /var/lib/ethereum/validator -name validator.db -delete")
+    of "rev-slashing-db-reset-no-doppelganger":
+      # The same reset, with the doppelganger check off in the profile the
+      # apply realises: the validator then signs on an empty history, and
+      # only the carried-history assertion can tell (review round 2).
+      discard nw.run("find /var/lib/ethereum/validator -name validator.db -delete")
+      discard nw.run("sed -i 's/enable-doppelganger: true/enable-doppelganger: false/' " &
+        RefDir & "/system.nim && grep -c 'enable-doppelganger: false' " &
+        RefDir & "/system.nim")
+    of "rev-inode-reuse":
+      # The restored validator directory replaced in place by an empty one
+      # of the same owner and mode; on ext4 the new directory usually gets
+      # the inode just freed (review round 2, finding 1). The apply must
+      # still see the carried state as pending.
+      let v = "/var/lib/ethereum/validator"
+      record["inodeReuse"] = %nw.run("own=$(stat -c %u:%g " & v & "); " &
+        "mode=$(stat -c %a " & v & "); b=$(stat -c %d:%i " & v & "); " &
+        "rm -rf " & v & "; sleep 40; mkdir " & v & " && chown $own " & v &
+        " && chmod $mode " & v & "; echo \"before $b after $(stat -c %d:%i " &
+        v & ")\"")
     else: discard
 
     # --- 4. The full realisation.
     let applied = nw.exec(applyCmd, timeoutSec = 3600)
+    record["applyOutput"] = %((applied.stdout & applied.stderr)[0 ..< min(
+      4000, (applied.stdout & applied.stderr).len)])
     step("the reinstalled host realises the activities in full",
          applied.exitCode == 0, applied.stdout & applied.stderr & "\n" &
          nw.serviceJournal(SetUnits))
@@ -444,8 +486,17 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       for a in rec{"signed_attestations"}.getElems():
         latest = max(latest, parseInt(a{"target_epoch"}.getStr("0")))
     var carriedHistory = earliest.len == InteropValidators
+    var earliestMin = high(int)
     for k, ep in earliest:
       if ep > oldEpoch: carriedHistory = false
+      earliestMin = min(earliestMin, ep)
+    # What the history step decides on, recorded before it is decided: a
+    # history that is red because it begins after the add-on host's epoch on
+    # a chain that progressed is distinct from one that is merely empty.
+    record["historyEvidence"] = %*{"keys": earliest.len,
+      "earliestMin": (if earliest.len > 0: earliestMin else: -1),
+      "addOnEpoch": oldEpoch, "progressed": progressed,
+      "attestations": attestationCount([hist]), "conflicts": cs.len}
     step("the slashing-protection history was carried: every key's history " &
          "begins on the add-on host, and it holds no conflicting signature",
          cs.len == 0 and carriedHistory and attestationCount([hist]) > 0,
@@ -485,6 +536,24 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          vwStart.exitCode != 0 and vwState != "active" and onRoot.len == 0,
          "start exit " & $vwStart.exitCode & ", state " & vwState &
          ", on the root file system: " & onRoot)
+    # --- 7. The boot path is governed by the restore too: with the restored
+    # validator directory replaced and its archive damaged, the restore unit
+    # fails at the next boot, and the validator, which requires it, is not
+    # started (review round 2, finding 4).
+    discard nw.run("systemctl stop " & DefaultValidatorUnit & "; " &
+      "v=/var/lib/ethereum/validator; own=$(stat -c %u:%g $v); " &
+      "mode=$(stat -c %a $v); rm -rf $v && mkdir $v && chown $own $v && " &
+      "chmod $mode $v; for a in " & CarriedDir & "/carry-*.rsa; do " &
+      "printf x | dd of=$a bs=1 seek=4096 conv=notrunc 2>/dev/null; done")
+    nw.rebootGuest()
+    let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
+    let vState = nw.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip()
+    let vStarts = nw.exec("journalctl -b -u " & DefaultValidatorUnit &
+      " --no-pager | grep -c 'Started' || true").stdout.strip()
+    step("a carried unit does not start at boot while its restore fails",
+         "Result=success" notin rres and vState != "active" and vStarts == "0",
+         rres & "\nvalidator " & vState & ", starts this boot " & vStarts &
+         "\n" & nw.serviceJournal([RestoreUnit, DefaultValidatorUnit]))
     record["history"] = %*{"keys": earliest.len, "latestTarget": latest,
                            "addOnEpoch": oldEpoch, "restoreEpoch": restoreEpoch,
                            "conflicts": cs.len}
