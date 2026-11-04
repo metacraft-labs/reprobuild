@@ -1184,6 +1184,7 @@ tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_survives_point_upgrades.nim	nim	1
 tests/e2e/addon/t_e2e_addon_switch_is_planned_exactly.nim	nim	1
 tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim	nim	1
+tests/e2e/addon/t_e2e_addon_tick_observes_a_fresh_cycle.nim	nim	1
 tests/e2e/addon/t_e2e_addon_to_reproos_conversion_keeps_state.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
