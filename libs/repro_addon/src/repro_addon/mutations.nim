@@ -639,6 +639,16 @@ const
                           "replay-forgets-stored-target",
                           "recheck-skips-dropin-prefixes",
                           "trace-attributes-by-window",
+                          # A9 review round 3: the static half off (the
+                          # effective-unit check alone), both halves off,
+                          # and each point fix's round-2 behaviour.
+                          "floor-static-r3-disabled",
+                          "floor-unchecked",
+                          "effective-check-skipped",
+                          "stored-floor-guess",
+                          "floor-change-ignores-exceptions",
+                          "store-objects-by-string",
+                          "trace-sampler-blind",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

@@ -51,6 +51,15 @@
 ## journal time, as before; the foreign unit's records land in the add-on
 ## units' windows: red.
 ##
+## The control is positive (A9 review round 3, finding 10): each add-on
+## unit must have had a sampled process, and every record of the foreign
+## unit must be attributed *to the foreign unit*. A record merely not
+## attributed to an add-on unit proves nothing: with a sampler that saw
+## no unit, every record is unattributed, the foreign unit's included,
+## and a check-mode run (which judges kills only) passed with no evidence
+## at all. Falsifying mutation (``REPRO_ADDON_MUTATION=trace-sampler-blind``):
+## the sampler watches only a unit that never runs: red.
+##
 ## The work: deploy-agent ticks over a profile as wide as the add-on's
 ## classes -- a secret an operator put, materialised for a unit's
 ## credential; an apt closure realised from the ``.deb`` cache; a package
@@ -401,7 +410,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # Attribution (header): which process was in which unit, sampled from
   # here to the end of the work; and a foreign unit that logs its own
   # calls the whole time.
-  g.startSampler(@Units & @[ForeignUnit])
+  if mutation() == "trace-sampler-blind":
+    g.startSampler(@["a9-never-runs.service"])
+  else:
+    g.startSampler(@Units & @[ForeignUnit])
   discard g.run("systemd-run --quiet --unit=" & ForeignUnit &
     " -p SystemCallLog=clock_nanosleep -p SystemCallLog=nanosleep " &
     "/bin/sh -c 'while :; do sleep 0.05; done'")
@@ -464,6 +476,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   var unattributed: seq[string]
   var foreignAttributed: seq[string]
   var foreignSeen = 0
+  var foreignNotOwn: seq[string]   # not positively the foreign unit's
   var unattributedInRun: seq[string]
   for r in g.auditRecords(t1 + 2):
     if r.nr == unameNr and r.comm == "uname": continue   # the vacuity guards
@@ -475,6 +488,8 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       # add-on unit does): never an add-on unit's.
       inc foreignSeen
       if unit.len > 0: foreignAttributed.add(unit & ": " & name)
+      if a.kind != akUnit or a.unit != ForeignUnit:
+        foreignNotOwn.add(name & " (pid " & $r.pid & ", " & $a.kind & ")")
       continue
     # Check mode counts kills; derive mode counts every logged call.
     if not baselineMode() and r.sig == 0: continue
@@ -504,6 +519,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        "something to refuse)", foreignSeen > 0, $foreignSeen)
   step("no record of the foreign unit is attributed to an add-on unit",
        foreignAttributed.len == 0, foreignAttributed.join(", "))
+  step("every record of the foreign unit is attributed to the foreign " &
+       "unit (the attribution positively sees it)",
+       foreignNotOwn.len == 0, foreignNotOwn.join(", "))
+  var sampledPer = initTable[string, int]()
+  for l in lifetimes: sampledPer.mgetOrPut(l.unit, 0).inc
+  for u in Units:
+    step(u & " had sampled processes (its records can be attributed)",
+         sampledPer.getOrDefault(u) > 0, $sampledPer.getOrDefault(u))
   if not baselineMode():
     for u in Units:
       step(u & " made no system call outside its filter (no kill)",

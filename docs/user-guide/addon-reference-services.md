@@ -40,6 +40,47 @@ Both activities declare the same kinds of things:
   store prefix.
 - **A health check** that an add-on switch waits for before it commits.
 
+## When an upgrade changes the hardening floor
+
+The floor is versioned. A newer Reprobuild can tighten it, and an add-on
+host records with each installed unit the floor version it was written
+under. Upgrading the engine therefore changes the bytes of every floored
+unit, and each such unit restarts. A host upgraded from an engine that
+wrote version 2 to one that writes version 3 or later is one example.
+The add-on handles this in four ways:
+
+- **Every plan lists the units whose floor changes**, under `service floor
+  changed`, and lists each one as a restart in the transition list too.
+  Removing a floor exception from a unit counts as a floor change, because
+  the unit loses something it ran with.
+- **The deploy agent refuses such a generation** and reports it as an
+  operator action. A running service's floor changes only in an apply an
+  operator has reviewed, never in an unattended tick. Run
+  `repro system addon plan` with the new engine, read the list, and apply
+  from the operator's shell. Later generations that change no floor go
+  back to the agent.
+- **A stored generation keeps the floor it was installed with.** A revert
+  or a rollback to an older generation renders that generation's units
+  under their own floor version. If the add-on cannot tell which version
+  a stored unit was written under, it refuses the switch. It does not
+  guess, because a wrong guess would rewrite the unit with other bytes than
+  were installed.
+- **Before anything starts, systemd's own view is checked.** After the
+  switch reloads systemd, the add-on reads each floored unit's effective
+  settings with `systemctl show` and compares them with the floor the unit
+  was written under, minus its named exceptions. If any differ, the switch
+  starts nothing and reverts. This covers settings the unit's text does
+  not show: a drop-in from another package, an instance's drop-in over a
+  template, or a value systemd parses differently than it reads. This
+  check runs on an apply, a revert, a rollback and a crash recovery.
+
+Each newer floor version can refuse settings an older one accepted. For
+example, it may forbid a writable or executable path the unit relied on,
+quoting or `%` specifiers in a path, `PAMName=`, or a `[Service]` key
+outside the floor's list of known keys. The plan names each refusal and
+the exception that would waive it. `PAMName=` cannot be waived, because
+a PAM session can run code as root outside the unit's sandbox.
+
 ## Running a validator safely
 
 The validator client is declared `exclusive = true`. On an add-on host,

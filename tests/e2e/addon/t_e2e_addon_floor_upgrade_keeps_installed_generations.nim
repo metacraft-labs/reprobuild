@@ -9,16 +9,23 @@
 ## parsed a stored pre-floor generation under its floor and wedged: round
 ## 1's H1, which is why no host carries both):
 ##
-## - ``prefloor`` (9d5ce19e07, no floor) then ``v2`` (d03bb6759e, floor
-##   version 2);
-## - ``v1`` (1a598170c0, floor version 1) then ``v2``.
+## - ``prefloor`` (9d5ce19e07, no floor) then ``v3`` (221ac312b6, floor
+##   version 3, the first engine that records a unit's floor version);
+## - ``v1`` (1a598170c0, floor version 1) then ``v2`` (d03bb6759e, floor
+##   version 2).
+##
+## Between them every stored form the engine under test must restore:
+## pre-floor, versions 1 and 2 (recorded by no version; told apart by the
+## ledger) and version 3 (recorded), each re-rendered by its frozen
+## renderer.
 ##
 ## Each engine installs a generation of a web service that runs the base's
 ## own ``python3`` (the floored ones naming the exception it needs). Then
 ## the engine under test:
 ##
 ## - plans a profile over the stored generations without wedging, and its
-##   plan names the unit's floor change (version 2 -> today's); the unfixed
+##   plan names the unit's floor change (the chain's last version ->
+##   today's); the unfixed
 ##   profile is refused for its own unit, by the floor;
 ## - a floored generation that fails its confirm is reverted, and the revert
 ##   restores the newest stored generation's unit byte for byte;
@@ -32,14 +39,14 @@
 ## (a stored floored unit rendered with today's floor version): a revert
 ## or a rollback no longer restores the stored bytes, red.
 ##
-## Needs ``REPRO_ADDON_OLD_ENGINES``: ``prefloor:<dir>;v1:<dir>;v2:<dir>``,
+## Needs ``REPRO_ADDON_OLD_ENGINES``: ``prefloor:<dir>;v1:<dir>;v2:<dir>;v3:<dir>``,
 ## each a ``scripts/build_addon_static.sh --out`` directory of a worktree at
 ## that engine's commit (``<dir>/<debArch>/repro``); a missing engine is a
 ## failure, never a skip.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
-## *Mocking.* None: four real builds of the add-on, real switches.
+## *Mocking.* None: five real builds of the add-on, real switches.
 
 import std/[json, os, strutils, tables, times, unittest]
 
@@ -86,7 +93,7 @@ proc oldEngine(name, debArch: string): string =
       if fileExists(p): return p
       raise newException(TestBedError, "REPRO_ADDON_OLD_ENGINES: no " & p)
   raise newException(TestBedError, "REPRO_ADDON_OLD_ENGINES names no " &
-    name & " engine: the gate needs prefloor, v1 and v2")
+    name & " engine: the gate needs prefloor, v1, v2 and v3")
 
 proc generationNow(g: Guest): string =
   extractFilename(g.run("readlink /var/lib/repro/system/current").strip())
@@ -148,7 +155,8 @@ proc runBase(b: BaseImage; chain: seq[string]; record: JsonNode): seq[string] =
     step("the engine under test plans over the stored generations",
          pf.exitCode == 0, pf.stdout & pf.stderr)
     step("its plan names the unit's floor change",
-         "a9-up.service (floor version 2 -> floor version" in
+         "a9-up.service (floor version " & chain[^1][1 .. ^1] &
+           " -> floor version" in
            pf.stdout & pf.stderr, pf.stdout & pf.stderr)
     let pu = g.exec(repro & " infra plan --profile " &
       g.putProfile("unfixed", profile(service("page-x"), good)),
@@ -209,7 +217,7 @@ suite Gate:
     else:
       var failures: seq[string]
       for b in selectedBases():
-        for chain in [@["prefloor", "v2"], @["v1", "v2"]]:
+        for chain in [@["prefloor", "v3"], @["v1", "v2"]]:
           let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
             "backend": (if useIncus(): "incus" else: "qemu"),
             "mutation": mutation(), "reprobuild": gitHead(),
