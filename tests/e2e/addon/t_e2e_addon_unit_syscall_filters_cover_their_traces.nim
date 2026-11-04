@@ -52,13 +52,22 @@
 ## units' windows: red.
 ##
 ## The control is positive (A9 review round 3, finding 10): each add-on
-## unit must have had a sampled process, and every record of the foreign
-## unit must be attributed *to the foreign unit*. A record merely not
-## attributed to an add-on unit proves nothing: with a sampler that saw
-## no unit, every record is unattributed, the foreign unit's included,
-## and a check-mode run (which judges kills only) passed with no evidence
-## at all. Falsifying mutation (``REPRO_ADDON_MUTATION=trace-sampler-blind``):
-## the sampler watches only a unit that never runs: red.
+## unit must have had a sampled process, and the foreign unit's records
+## must be attributed *to the foreign unit* -- at least
+## ``ForeignAttributedPercent`` of them. A record merely not attributed to
+## an add-on unit proves nothing: with a sampler that saw no unit, every
+## record is unattributed, the foreign unit's included, and a check-mode
+## run (which judges kills only) passed with no evidence at all. Not
+## every one: the foreign unit runs a 50 ms ``sleep`` after another (the
+## short-lived processes that make a pid wrap, round 2's case), and on a
+## loaded host the guest's sampler can stall for longer than one of them
+## lives. Such a process is never sampled, so its record is attributed to
+## no unit -- never to an add-on unit, which is the safety property -- and
+## measured at 9a867eed94 that was 4-52 of 460-4011 records per base (at
+## most 1.7 %, under a host load average of 200-300). Falsifying mutation
+## (``REPRO_ADDON_MUTATION=trace-sampler-blind``): the sampler watches only
+## a unit that never runs, none of the foreign records is attributed to
+## it: red.
 ##
 ## The work: deploy-agent ticks over a profile as wide as the add-on's
 ## classes -- a secret an operator put, materialised for a unit's
@@ -116,6 +125,10 @@ const
   BaselineFilter = @["@system-service", "~@privileged @resources @obsolete"]
     ## The deployment policy's recipe (CONF-1's SystemCallFilter row).
   DropInName = "90-a9-syscall-profile.conf"
+  ForeignAttributedPercent = 90
+    ## The share of the foreign unit's records the attribution must assign
+    ## to the foreign unit itself (header: a process shorter than a
+    ## sampler stall goes unseen).
 
 proc baselineMode(): bool = getEnv("REPRO_ADDON_SYSCALL_BASELINE") == "1"
 
@@ -519,9 +532,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        "something to refuse)", foreignSeen > 0, $foreignSeen)
   step("no record of the foreign unit is attributed to an add-on unit",
        foreignAttributed.len == 0, foreignAttributed.join(", "))
-  step("every record of the foreign unit is attributed to the foreign " &
-       "unit (the attribution positively sees it)",
-       foreignNotOwn.len == 0, foreignNotOwn.join(", "))
+  let foreignOwn = foreignSeen - foreignNotOwn.len
+  record["foreignAttributedToForeign"] = %foreignOwn
+  record["foreignNotAttributed"] = %foreignNotOwn
+  step("at least " & $ForeignAttributedPercent & "% of the foreign unit's " &
+       "records are attributed to the foreign unit (the attribution " &
+       "positively sees it): " & $foreignOwn & " of " & $foreignSeen,
+       foreignOwn > 0 and foreignOwn * 100 >= foreignSeen * ForeignAttributedPercent,
+       foreignNotOwn.join(", "))
   var sampledPer = initTable[string, int]()
   for l in lifetimes: sampledPer.mgetOrPut(l.unit, 0).inc
   for u in Units:
