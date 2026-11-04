@@ -10,7 +10,9 @@
 #                         ubuntu-24.04-armhf, which run under TCG)
 #   REPRO_ADDON_MUTATION  build and run the falsifying mutation of that name
 #                         (libs/repro_addon/src/repro_addon/mutations.nim);
-#                         the gate is then expected to FAIL
+#                         the gate is then expected to FAIL. The off-host
+#                         check's mutations are compiled into the gate
+#                         binary too (see gate_defines below)
 #   REPRO_ADDON_BACKEND   "incus" for the Incus inner loop (amd64 only)
 #   REPRO_ADDON_TEST_SEAMS  "1" builds and runs the variant with the
 #                         switch's pause points (seams.nim); the gates that
@@ -81,22 +83,35 @@ mutation_args=()
 [ -n "${REPRO_ADDON_MUTATION:-}" ] && mutation_args=(--mutation "$REPRO_ADDON_MUTATION")
 # Gates that pause a switch at a step need the seam build.
 case "$test" in
-  t_e2e_addon_hard_reset_at_every_step|t_e2e_addon_recovery_never_holds_up_boot|t_e2e_addon_refused_recovery_keeps_its_record|t_e2e_addon_confirm_or_revert|t_e2e_addon_exclusive_never_overlaps|t_e2e_addon_no_plaintext_secret_on_disk|t_e2e_addon_secrets_follow_generations|t_e2e_addon_secrets_without_memory_controller|t_e2e_addon_apply_unit_has_no_network|t_e2e_addon_fetch_unit_reaches_only_its_origins|t_e2e_addon_sequence_floor_survives_and_is_root_only|t_e2e_addon_tick_observes_a_fresh_cycle|t_e2e_addon_staging_swap_after_verify_is_refused|t_e2e_addon_store_is_read_only_to_everything_else|t_addon_agent_apply_unit_lacks_cap_net_admin|t_e2e_addon_unit_syscall_filters_cover_their_traces|t_e2e_addon_detectors_positive_controls)
+  t_e2e_addon_hard_reset_at_every_step|t_e2e_addon_recovery_never_holds_up_boot|t_e2e_addon_refused_recovery_keeps_its_record|t_e2e_addon_confirm_or_revert|t_e2e_addon_exclusive_never_overlaps|t_e2e_addon_no_plaintext_secret_on_disk|t_e2e_addon_secrets_follow_generations|t_e2e_addon_secrets_without_memory_controller|t_e2e_addon_apply_unit_has_no_network|t_e2e_addon_fetch_unit_reaches_only_its_origins|t_e2e_addon_sequence_floor_survives_and_is_root_only|t_e2e_addon_tick_observes_a_fresh_cycle|t_e2e_addon_staging_swap_after_verify_is_refused|t_e2e_addon_store_is_read_only_to_everything_else|t_addon_agent_apply_unit_lacks_cap_net_admin|t_e2e_addon_unit_syscall_filters_cover_their_traces|t_e2e_addon_detectors_positive_controls|t_e2e_addon_egress_observer)
     export REPRO_ADDON_TEST_SEAMS=1 ;;
 esac
 [ "${REPRO_ADDON_TEST_SEAMS:-}" = "1" ] && mutation_args+=(--test-seams)
 bash ./scripts/build_addon_static.sh ${mutation_args[@]+"${mutation_args[@]}"} "${arches[@]}"
 
 mkdir -p build/test-bin
+# Mutations of code that runs in the GATE process, not on the guest: the
+# off-host evidence check (libs/repro_addon/src/repro_addon/evidence_check.nim)
+# is the build host's half of the A11 detectors, so its falsifying builds
+# must reach the gate binary itself. Every other mutation is the add-on
+# binary's (built above) or the sink's (built by the gate).
+gate_defines=()
+gate_tag=""
+case "${REPRO_ADDON_MUTATION:-}" in
+  check-silence-as-idle|check-skips-attestation|lag-detector-disabled)
+    gate_defines=(--define:reproAddonMutation="$REPRO_ADDON_MUTATION")
+    gate_tag="-$REPRO_ADDON_MUTATION" ;;
+esac
 # Concurrent runs of the same gate share its nimcache: the compile takes a
 # lock, and each run executes its own copy of the binary.
 mkdir -p build/test-bin build/nimcache
-bin="build/test-bin/${test}.run-$$"
+bin="build/test-bin/${test}${gate_tag}.run-$$"
 (
   flock 8
-  nim c --hints:off --warnings:off --nimcache:"build/nimcache/${test}" \
-    --out:"build/test-bin/${test}" "$src"
-  cp "build/test-bin/${test}" "$bin"
-) 8>"build/nimcache/${test}.lock"
+  nim c --hints:off --warnings:off ${gate_defines[@]+"${gate_defines[@]}"} \
+    --nimcache:"build/nimcache/${test}${gate_tag}" \
+    --out:"build/test-bin/${test}${gate_tag}" "$src"
+  cp "build/test-bin/${test}${gate_tag}" "$bin"
+) 8>"build/nimcache/${test}${gate_tag}.lock"
 trap 'rm -f "$bin"' EXIT
 REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin"
