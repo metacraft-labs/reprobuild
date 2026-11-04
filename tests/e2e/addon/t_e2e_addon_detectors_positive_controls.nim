@@ -10,7 +10,7 @@
 ## |-----------|-------------------------------------------------------------|
 ## | DET-AO-1  | a manifest signed by a key the host does not anchor          |
 ## | DET-AO-2  | a compiled resource set writing ``/etc/shadow`` (A8's)       |
-## | DET-AO-3  | -- no detector exists (owner decision pending); a red step  |
+## | DET-AO-3  | a connect to a third address from inside the fetch unit     |
 ## | DET-AO-4  | ``/etc/repro/static`` retargeted, then a reboot             |
 ## | DET-AO-5  | a store file corrupted between realise and flip (A9's)      |
 ## | DET-AO-6  | an ``equivs`` package shipping a ledger path (A10's)         |
@@ -143,12 +143,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        t2.outcome == "aoApplyFailed", $t2)
   control("DET-AO-2", "addon-apply-refusal", "addon-staging-refused", since)
 
-  # DET-AO-3: not implemented (no mechanism sees a denied connect).
-  step("DET-AO-3: egress denial detector", false,
-       "no detector exists: systemd's IPAddressDeny= drops silently and " &
-       "counts nothing it denied; the mechanism needs an owner decision " &
-       "(reprobuild-pm issue 2026-11-04-det-ao-3-egress-denials-have-no-" &
-       "observable-signal)")
+  # DET-AO-3: a connect from the fetch unit to a third address. The unit's
+  # IP filter refuses it; the add-on's nftables table counts it; the check
+  # that follows every fetch records it.
+  since = sink.headSeq()
+  let fc = g.forbiddenConnectFromFetch()
+  step("DET-AO-3: the fetch unit paused and its forbidden connect was refused",
+       fc.paused and fc.connect != 0, $fc)
+  control("DET-AO-3", "addon-egress", "egress-refused", since)
 
   # DET-AO-4: a ledger link changed, then a reboot.
   since = sink.headSeq()

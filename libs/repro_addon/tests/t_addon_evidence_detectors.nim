@@ -8,7 +8,8 @@
 ## ``/etc/shadow`` resource set, a reboot after a ledger link changed, ...)
 ## run in a VM.
 ##
-## Hosts: ``host-a`` is tripped by every control; ``host-b`` is healthy and
+## Hosts: ``host-a`` is tripped by every control (DET-AO-3's through the
+## egress observer's check, from a counted destination); ``host-b`` is healthy and
 ## must come out live-idle with no alert; ``host-c`` was enrolled and never
 ## shipped anything.
 ##
@@ -34,6 +35,7 @@ import repro_deploy_agent/tick_status
 import repro_addon/agent_record
 import repro_addon/agent_split
 import repro_addon/apt_hook
+import repro_addon/egress_observer
 import repro_addon/attestation
 import repro_addon/evidence as addonEvidence
 import repro_addon/evidence_check
@@ -111,6 +113,7 @@ suite "the add-on's detectors, from control to off-host alert":
   bootstrapHost(b)
   applyFrom(b, "g1", mb)
   b.tick(aoConverged, "h2", 1)
+  recordEgressCheck(EgressCheck(present: true), b.evidence, 30_000)
   recordReassertEvidence(ReassertReport(status: "ok"), b.evidence.stateDir,
     atBoot = true, site = b.evidence, bootIdPath = b.site.bootIdPath)
   b.ship()
@@ -121,6 +124,9 @@ suite "the add-on's detectors, from control to off-host alert":
   writeFile(a.site.dpkgLog, "2026-11-04 10:00:00 startup archives unpack\n")
   a.tick(aoApplied, "h1", 1)
   a.tick(aoRejected, "h1", message = "signed by an unanchored key")        # DET-AO-1
+  recordEgressCheck(EgressCheck(present: true,                            # DET-AO-3
+    refused: @[("1.1.1.1", 1'i64)], fresh: @[("1.1.1.1", 1'i64)]),
+    a.evidence, 30_000)
   var refused = AgentApplyContext(refusal: "EAddOnManagementPath: /etc/shadow",
                                   refusalPayload: "resource /etc/shadow\n")
   a.tick(aoApplyFailed, "h1", 2, refused.refusal, ctx = refused)          # DET-AO-2
@@ -160,6 +166,7 @@ suite "the add-on's detectors, from control to off-host alert":
   test "each control trips its detector's alert":
     for (det, trig) in [("DET-AO-1", "addon-manifest-refused"),
                         ("DET-AO-2", "addon-staging-refused"),
+                        ("DET-AO-3", "egress-refused"),
                         ("DET-AO-4", "drift"),
                         ("DET-AO-5", "store-changed"),
                         ("DET-AO-6", "hook-finding"),
@@ -206,7 +213,8 @@ suite "the add-on's detectors, from control to off-host alert":
 
   test "nothing detected is live-idle, with no alert at all":
     check now.alerts.filterIt(it.host == b.credentialHost).len == 0
-    for det in ["addon-agent-tick", "addon-evidence-ship", "addon-reassert",
+    for det in ["addon-agent-tick", "addon-evidence-ship", "addon-egress",
+                "addon-reassert",
                 "addon-apt-hook", "addon-manifest", "addon-apply-refusal",
                 "addon-store", "addon-rollback", "addon-freshness"]:
       checkpoint det
@@ -216,7 +224,8 @@ suite "the add-on's detectors, from control to off-host alert":
   test "a host that never reported is never-reported, not idle":
     check now.statusOf(c.credentialHost, "addon-agent-tick") == "never-reported"
     check now.statusOf(c.credentialHost, "addon-evidence-ship") == "never-reported"
-    check now.alertsOf(c.credentialHost, "DET-AO-8").len == 2
+    check now.statusOf(c.credentialHost, "addon-egress") == "never-reported"
+    check now.alertsOf(c.credentialHost, "DET-AO-8").len == 3
 
   test "silence: the same healthy host, later, with nothing new, is silent":
     var later = inputs

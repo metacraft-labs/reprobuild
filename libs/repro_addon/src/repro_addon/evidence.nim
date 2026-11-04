@@ -49,6 +49,7 @@ type
     ## The detectors of threat model §9, by the name their records carry.
     edManifest = "addon-manifest"            ## DET-AO-1 manifest refusal
     edApplyRefusal = "addon-apply-refusal"   ## DET-AO-2 apply-side refusal
+    edEgress = "addon-egress"                ## DET-AO-3 egress denial
     edReassert = "addon-reassert"            ## DET-AO-4 re-assert result
     edStore = "addon-store"                  ## DET-AO-5 store integrity
     edAptHook = "addon-apt-hook"             ## DET-AO-6 apt hook finding

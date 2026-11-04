@@ -40,9 +40,9 @@ type
 
   RepinError* = object of CatchableError
 
-const UnitBlockHead = "systemd.systemUnit {\n  name = \""
+const UnitBlockHead* = "systemd.systemUnit {\n  name = \""
 
-proc blockBounds(own, head: string): tuple[a, b: int] =
+proc blockBounds*(own, head: string): tuple[a, b: int] =
   ## The ``[a, b)`` span of the canonical block that starts with ``head``
   ## (``renderOwnProfile``'s layout: a block ends at the first "\n}\n").
   let a = own.find(head)
@@ -53,7 +53,7 @@ proc blockBounds(own, head: string): tuple[a, b: int] =
       " is not terminated")
   (a, e + 3)
 
-proc unitContentOf(own, unit: string): string =
+proc unitContentOf*(own, unit: string): string =
   let (a, b) = blockBounds(own, UnitBlockHead & unit & "\"\n")
   if a < 0: return ""
   let block0 = own[a ..< b]
@@ -76,7 +76,7 @@ proc hostsLines(text: string): string =
     if l.strip().len > 0 and not l.strip().startsWith("#"):
       result.add(l & "\n")
 
-proc execStartExe(unitContent: string): string =
+proc execStartExe*(unitContent: string): string =
   for l in unitContent.splitLines():
     if l.startsWith("ExecStart="):
       return l["ExecStart=".len .. ^1].splitWhitespace()[0]

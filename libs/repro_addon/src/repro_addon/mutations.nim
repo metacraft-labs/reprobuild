@@ -494,6 +494,15 @@
 ##                                            repeated under the lock
 ## ``restore-not-required-by-units``          the carried units do not
 ##                                            require the restore unit
+## ``engine-tick-unrecorded``                 the full engine's agent tick
+##                                            on an add-on host leaves no
+##                                            evidence record
+## ``egress-observer-not-installed``          the egress observer's unit
+##                                            never loads its nftables
+##                                            table
+## ``evidence-keys-adopted``                  creating the evidence keys
+##                                            does not refuse keys that
+##                                            are already there
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -764,7 +773,16 @@ const
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",
                           "backup-without-host-lock",
-                          "restore-not-required-by-units"]
+                          "restore-not-required-by-units",
+                          # A11 review: the full engine's deploy-agent tick
+                          # on an add-on host leaves no record.
+                          "engine-tick-unrecorded",
+                          # Owner decision 2026-11-04 (DET-AO-3): the egress
+                          # observer's table is never loaded.
+                          "egress-observer-not-installed",
+                          # Owner decision 2026-11-04 (evidence-enrol): keys
+                          # already on the host are not looked for.
+                          "evidence-keys-adopted"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

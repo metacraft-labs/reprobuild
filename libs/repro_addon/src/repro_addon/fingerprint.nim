@@ -49,6 +49,7 @@ import std/[algorithm, os, posix, sets, strutils, tables]
 import nimcrypto/[hash, sha2]
 
 import ./host_exec
+import ./nft_tables
 import ./linux_fs
 
 type
@@ -63,6 +64,11 @@ type
     fcDiversions = "diversions"
     fcListeners = "listeners"
     fcAddonRoots = "addon-roots"
+    fcNftables = "nftables"
+      ## The NAMES of the host's nftables tables (``<family> <name>`` ->
+      ## ``table``), never their rules: what the add-on's egress observer
+      ## adds and uninstall removes. A host whose ruleset cannot be listed
+      ## records why, once, so two reads still compare equal.
 
   FingerprintRecord* = object
     component*: FingerprintComponent
@@ -691,6 +697,11 @@ proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
         ephLo = parseInt(r[0]); ephHi = parseInt(r[1])
     except IOError, OSError, ValueError:
       discard
+    let nft = listTableNames()
+    if nft.ok:
+      for t in nft.tables: result.add(fcNftables, t, "table")
+    elif nftBinary().len > 0:
+      result.add(fcNftables, "(unreadable)", nft.why)
     for proto in ["tcp", "tcp6", "udp", "udp6"]:
       let p = "/proc/net/" & proto
       if fileExists(p):

@@ -64,10 +64,21 @@ type
     cachePublishers*: seq[string] ## the only producer keys trusted for it
     agent*: AgentUnitsInputs    ## the deploy agent's units (A8); none when
                                 ## ``agent.target`` is empty
+    egress*: EgressObserverInputs
+      ## The egress observer; none when ``egress.nft`` is empty.
     evidence*: EvidenceUnitsInputs
       ## The Evidence sink and the units that ship to it (A11, spec §10.4);
       ## none when ``evidence.sinkAddress`` is empty, so a host bootstrapped
       ## without a sink keeps the generation 0 it had.
+
+  EgressObserverInputs* = object
+    ## The deploy agent's egress observer (owner decision 2026-11-04, threat
+    ## model G40, DET-AO-3): the add-on's own nftables table, counting and
+    ## logging every packet from the fetch unit's slice to an address the
+    ## unit may not reach. Present on a host with both the deploy agent and
+    ## an Evidence sink; bootstrap refuses one whose base cannot carry it.
+    nft*: string                     ## the base's ``nft`` ("" = none)
+    allowedAddresses*: seq[string]   ## the fetch unit's, as its allow-list
 
   EvidenceUnitsInputs* = object
     ## Where this host's evidence records go (spec §10.4): one Evidence sink
@@ -164,6 +175,16 @@ const
   EvidenceShipUnit* = "repro-addon-evidence.service"
   EvidenceShipPathUnit* = "repro-addon-evidence.path"
   EvidenceShipTimer* = "repro-addon-evidence.timer"
+  AgentSlice* = "system-reproagent.slice"
+    ## The fetch unit's slice when the egress observer is present: a slice
+    ## of its own, active for as long as the observer is, so the table's
+    ## ``socket cgroupv2`` match (resolved when the rule is loaded) names a
+    ## cgroup that exists. Under ``system.slice``, so it adds no parent.
+  AgentSliceCgroup* = "system.slice/" & AgentSlice
+  EgressNftPath* = "/etc/repro/egress.nft"
+  EgressUnit* = "repro-addon-egress.service"
+  EgressCheckUnit* = "repro-addon-egress-check.service"
+  EgressCheckTimer* = "repro-addon-egress-check.timer"
   DefaultEvidenceHeartbeatSec* = 300
   DefaultAgentPollSec* = 300
   AgentPollRandomDelaySec* = 30
@@ -669,7 +690,141 @@ proc agentCompileBounds*(): string =
   "IOWeight=" & $AgentCompileWeight & "\n" &
   "OOMScoreAdjust=" & $AgentCompileOomScoreAdjust & "\n"
 
-proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
+proc renderEgressNft*(allowed: seq[string]): string =
+  ## ``/etc/repro/egress.nft``: the add-on's table, replaced as a whole on
+  ## every load (declare, delete, define: one transaction), so loading it
+  ## twice never duplicates a rule and nothing outside it is touched. It
+  ## drops nothing -- the unit's ``IPAddressDeny=`` does that, after the
+  ## netfilter output hook -- it counts each refused destination (a dynamic
+  ## set with per-element counters), counts all of them, and logs them,
+  ## rate-limited, to the kernel log.
+  var v4, v6: seq[string]
+  for a in allowed:
+    if ':' in a: v6.add(a) else: v4.add(a)
+  proc elements(xs: seq[string]): string =
+    if xs.len == 0: "" else: "\t\telements = { " & xs.join(", ") & " }\n"
+  let match = "socket cgroupv2 level 2 \"" & AgentSliceCgroup & "\""
+  "# Reprobuild add-on: the deploy agent's egress observer. The add-on's\n" &
+  "# only table; it never touches another.\n" &
+  "table inet repro_addon_egress\n" &
+  "delete table inet repro_addon_egress\n" &
+  "table inet repro_addon_egress {\n" &
+  "\tset allowed4 {\n\t\ttype ipv4_addr\n" & elements(v4) & "\t}\n" &
+  "\tset allowed6 {\n\t\ttype ipv6_addr\n" & elements(v6) & "\t}\n" &
+  "\tset refused4 {\n\t\ttype ipv4_addr\n\t\tsize 4096\n" &
+    "\t\tflags dynamic\n\t\tcounter\n\t}\n" &
+  "\tset refused6 {\n\t\ttype ipv6_addr\n\t\tsize 4096\n" &
+    "\t\tflags dynamic\n\t\tcounter\n\t}\n" &
+  "\tcounter refused {\n\t}\n" &
+  "\tchain output {\n" &
+  "\t\ttype filter hook output priority filter - 10; policy accept;\n" &
+  "\t\t" & match & " meta nfproto ipv4 ip daddr != @allowed4 " &
+    "update @refused4 { ip daddr } counter name \"refused\"\n" &
+  "\t\t" & match & " meta nfproto ipv6 ip6 daddr != @allowed6 " &
+    "update @refused6 { ip6 daddr } counter name \"refused\"\n" &
+  "\t\t" & match & " meta nfproto ipv4 ip daddr != @allowed4 " &
+    "limit rate 10/second log prefix \"repro-addon-egress-refused \" level warn\n" &
+  "\t\t" & match & " meta nfproto ipv6 ip6 daddr != @allowed6 " &
+    "limit rate 10/second log prefix \"repro-addon-egress-refused \" level warn\n" &
+  "\t}\n}\n"
+
+proc agentSliceUnit*(): string =
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: the deploy agent's fetch slice (egress observer)\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc egressUnit*(nft: string): string =
+  ## ``repro-addon-egress.service``: loads the table and deletes it when
+  ## stopped (uninstall stops it). Root with ``CAP_NET_ADMIN`` alone and no
+  ## IP socket; ordered before the fetch unit, which requires it, and the
+  ## re-assert unit, which checks the table.
+  let load = when mutated("egress-observer-not-installed"): "/bin/true"
+             else: nft & " -f " & EgressNftPath
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: egress observer (its own nftables table)\n" &
+  "Requires=" & AgentSlice & "\n" &
+  "After=" & AgentSlice & "\n" &
+  "Before=" & AgentFetchUnit & " " & ReassertUnit & "\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "RemainAfterExit=yes\n" &
+  "ExecStart=" & load & "\n" &
+  "ExecStop=" & nft & " delete table inet repro_addon_egress\n" &
+  "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
+  "AmbientCapabilities=\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectSystem=strict\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  "ProtectKernelTunables=yes\n" &
+  "ProtectControlGroups=yes\n" &
+  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "IPAddressDeny=any\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc egressCheckUnit*(reproExe: string): string =
+  ## ``repro-addon-egress-check.service``: reads the table's counters and
+  ## records every refused destination (DET-AO-3), and heartbeats. Started
+  ## after every fetch, whatever its result, and by its timer.
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: egress observer check (DET-AO-3)\n" &
+  "After=" & EgressUnit & "\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "ExecStart=" & reproExe & " system addon egress-check\n" &
+  "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
+  "AmbientCapabilities=\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectSystem=strict\n" &
+  "ReadWritePaths=" & EvidenceDirPath & "\n" &
+  "InaccessiblePaths=-/var/lib/repro/agent -/run/repro -/repro\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  "PrivateDevices=yes\n" &
+  "ProtectKernelTunables=yes\n" &
+  "ProtectKernelModules=yes\n" &
+  "ProtectControlGroups=yes\n" &
+  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "IPAddressDeny=any\n"
+
+proc egressCheckTimer*(heartbeatSec: int): string =
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: egress observer heartbeat\n" &
+  "\n" &
+  "[Timer]\n" &
+  "OnBootSec=1min\n" &
+  "OnUnitActiveSec=" & $heartbeatSec & "s\n" &
+  "Unit=" & EgressCheckUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc observeFetchUnit*(content: string): string =
+  ## The fetch unit under the egress observer: in its own slice, which the
+  ## table matches; not run without the table; and every run, whatever its
+  ## result, followed by the check that reads the table. A transformation of
+  ## the unobserved unit, so bootstrap and ``evidence-enrol`` (which has only
+  ## the unit as installed) render the same bytes.
+  for line in content.splitLines(keepEol = true):
+    if line.startsWith("After=network-online.target") and EgressUnit notin line:
+      result.add(line.strip(leading = false) & " " & EgressUnit & "\n")
+      result.add("Requires=" & EgressUnit & "\n")
+    elif line == "OnSuccess=" & AgentApplyUnit & "\n":
+      result.add("OnSuccess=" & AgentApplyUnit & " " & EgressCheckUnit & "\n")
+      result.add("OnFailure=" & EgressCheckUnit & "\n")
+    elif line.startsWith("ExecStart=") and "agent-fetch" in line:
+      result.add(line)
+      result.add("Slice=" & AgentSlice & "\n")
+    else:
+      result.add(line)
+
+proc unobservedFetchUnit(reproExe: string; a: AgentUnitsInputs): string =
   ## ``repro-agent-fetch.service`` (spec §9.1): a dynamic user with no
   ## capabilities, a read-only system, no access to the add-on's state
   ## (the recipient key, the sequence floor), and egress to the pinned
@@ -748,6 +903,13 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
 
 proc agentPollSec*(a: AgentUnitsInputs): int =
   if a.pollIntervalSec > 0: a.pollIntervalSec else: DefaultAgentPollSec
+
+proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs;
+                     observed = false): string =
+  ## ``repro-agent-fetch.service``; ``observed``: under the egress observer
+  ## (``observeFetchUnit``).
+  let u = unobservedFetchUnit(reproExe, a)
+  if observed: observeFetchUnit(u) else: u
 
 proc agentFetchTimer*(a: AgentUnitsInputs = AgentUnitsInputs()): string =
   # The default renders as it always did (``5min``), so a host bootstrapped
@@ -957,6 +1119,26 @@ proc renderCachesConf*(url: string; keys: seq[string]): string =
   result.add("url = \"" & url & "\"\n")
   result.add("trusted-public-keys = \"" & keys.join(", ") & "\"\n")
 
+proc egressObjects*(inp: Gen0Inputs): seq[OwnObject] =
+  ## The egress observer's objects, in apply order (the slice before the
+  ## unit that requires it, the table's unit before the check).
+  @[OwnObject(kind: ookEtcFile, path: EgressNftPath,
+              content: renderEgressNft(inp.egress.allowedAddresses)),
+    OwnObject(kind: ookUnit, unit: AgentSlice, path: unitPath(AgentSlice),
+              content: agentSliceUnit(), enabled: true),
+    OwnObject(kind: ookUnit, unit: EgressUnit, path: unitPath(EgressUnit),
+              content: egressUnit(inp.egress.nft), enabled: true),
+    OwnObject(kind: ookUnit, unit: EgressCheckUnit,
+              path: unitPath(EgressCheckUnit),
+              content: egressCheckUnit(inp.reproExe), enabled: false),
+    OwnObject(kind: ookUnit, unit: EgressCheckTimer,
+              path: unitPath(EgressCheckTimer),
+              content: egressCheckTimer(evidenceHeartbeatSec(inp.evidence)),
+              enabled: true)]
+
+proc evidenceObjects*(inp: Gen0Inputs): seq[OwnObject]
+  ## Below.
+
 proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
   ## The add-on's own objects, in apply order: the target first (the other
   ## units are wanted by it), the mount before the unit that is ordered
@@ -996,15 +1178,25 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
     result.add(OwnObject(kind: ookUnit, unit: AgentApplyUnit,
       path: unitPath(AgentApplyUnit), content: agentApplyUnit(inp.reproExe),
       enabled: false))
+    let observed = inp.egress.nft.len > 0
+    if observed:
+      result.add(egressObjects(inp))
     result.add(OwnObject(kind: ookUnit, unit: AgentFetchUnit,
       path: unitPath(AgentFetchUnit),
-      content: agentFetchUnit(inp.reproExe, inp.agent), enabled: false))
+      content: agentFetchUnit(inp.reproExe, inp.agent, observed),
+      enabled: false))
     result.add(OwnObject(kind: ookUnit, unit: AgentFetchTimer,
       path: unitPath(AgentFetchTimer), content: agentFetchTimer(inp.agent),
       enabled: true))
   if inp.evidence.sinkAddress.len > 0:
     # The Evidence sink (A11): present only on a host bootstrapped with
     # one, so a host without it keeps the generation 0 it had.
+    result.add(evidenceObjects(inp))
+
+proc evidenceObjects*(inp: Gen0Inputs): seq[OwnObject] =
+  ## Generation 0's evidence objects (the sink's configuration and CA, the
+  ## shipping unit, its path unit and timer).
+  if true:
     result.add(OwnObject(kind: ookEtcFile, path: EvidenceConfPath,
                          content: renderEvidenceConf(inp.evidence, inp.agent)))
     result.add(OwnObject(kind: ookEtcFile, path: EvidenceSinkCaPath,

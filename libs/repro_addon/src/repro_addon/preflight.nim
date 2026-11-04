@@ -40,6 +40,7 @@ export host_exec.systemdMajor
 import ./linux_fs
 import ./mutations
 import ./store_root
+import ./nft_tables
 
 type
   Verdict* = enum
@@ -882,6 +883,22 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       else: "records ship to " & sinkEndpoint(evidenceInputs) & " (sink " &
             evidenceInputs.sinkHostId[0 ..< 16] & "...), heartbeat every " &
             $evidenceHeartbeatSec(evidenceInputs) & " s")
+  # The egress observer (owner decision 2026-11-04, DET-AO-3): a host with
+  # both the deploy agent and a sink carries it, and one whose base cannot
+  # (no nft, no socket cgroupv2 match) is refused here -- never bootstrapped
+  # without it.
+  var egressInputs: EgressObserverInputs
+  if evidenceInputs.sinkAddress.len > 0 and agentInputs.target.len > 0 and
+      agentError.len == 0:
+    let nft = nftBinary()
+    let problem = egressObserverProblem(nft)
+    result.add("egress-observer", problem.len == 0,
+      if problem.len > 0: problem
+      else: "the deploy agent's refused connects are counted in the " &
+            "add-on's own nftables table (" & nft & ")")
+    if problem.len == 0:
+      egressInputs = EgressObserverInputs(nft: nft,
+        allowedAddresses: agentInputs.allowedAddresses)
   for p in [EvidenceStateDir, AttestationKeyPath, AttestationPubPath]:
     if evidenceInputs.sinkAddress.len > 0 and pathPresent(p):
       result.add("evidence-sink", false, p & " already exists; bootstrap " &
@@ -893,6 +910,7 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     cacheUrl: (if anchorsError.len > 0: "" else: inp.cacheUrl),
     cachePublishers: publishers,
     agent: (if agentError.len > 0: AgentUnitsInputs() else: agentInputs),
+    egress: egressInputs,
     evidence: (if evidenceError.len > 0: EvidenceUnitsInputs()
                else: evidenceInputs))
   result.gen0 = generation0Objects(result.gen0Inputs)
@@ -980,6 +998,7 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       "sink": sinkEndpoint(evidenceInputs),
       "sinkHost": evidenceInputs.sinkHostId,
       "heartbeatSec": evidenceHeartbeatSec(evidenceInputs),
+      "egressObserver": egressInputs.nft,
     }
   if agentInputs.pollIntervalSec > 0:
     plan["agent"]["pollSec"] = %agentInputs.pollIntervalSec

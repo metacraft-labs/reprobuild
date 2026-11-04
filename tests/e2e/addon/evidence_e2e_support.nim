@@ -223,3 +223,24 @@ proc serveRequests*(g: Guest; dir: string; until: string; holdSec: int) =
           writeFile(req / (name & ".out"), "copy failed: " & e.msg & "\n")
     sleep(1000)
 
+
+const FetchCgroupProcs* = "/sys/fs/cgroup/system.slice/system-reproagent.slice/" &
+  "repro-agent-fetch.service/cgroup.procs"
+  ## The fetch unit's cgroup under the egress observer's slice (while the
+  ## unit runs).
+
+proc forbiddenConnectFromFetch*(g: Guest; host = "1.1.1.1"; port = 53):
+    tuple[paused: bool; connect: int] =
+  ## DET-AO-3's positive control: the fetch unit paused after it selected a
+  ## manifest (seam build), a shell moved into its cgroup connects to an
+  ## address outside its allow-list (refused by the unit's IP filter), and
+  ## the unit is let go -- after which the egress check runs (``OnSuccess=``
+  ## / ``OnFailure=``). Returns whether it paused and the connect's status.
+  g.armFetchSeam("agent-fetch-after-select")
+  g.startFetchNoWait()
+  result.paused = g.waitSeam(FetchSeamDir, "agent-fetch-after-select")
+  if result.paused:
+    result.connect = g.exec("echo $$ > " & FetchCgroupProcs & " && timeout 10 " &
+      "bash -c 'exec 3<>/dev/tcp/" & host & "/" & $port & "'").exitCode
+    g.resumeSeam(FetchSeamDir)
+  g.waitApplyIdle()
