@@ -48,6 +48,7 @@
 
 import std/[algorithm, json, os, posix, sequtils, sets, strutils, tables, times]
 
+import repro_core/host_apply_lock
 import repro_elevation
 import repro_elevation/nofollow_write
 import repro_infra
@@ -464,6 +465,16 @@ proc backupStateSet*(p: SystemProfile; outDir, host: string;
   if set.len == 0:
     raise newException(StateSetError,
       "the profile declares no stateDirectories")
+  # No apply may start a unit of the set while it is backed up: the backup
+  # holds the host's apply lock (the one every apply takes,
+  # ``repro_core/host_apply_lock``) from its first check to its manifest.
+  var hostLock: HostApplyLock
+  when not mutated("backup-without-host-lock"):
+    try:
+      hostLock = acquireHostApplyLock("state backup")
+    except CatchableError as e:
+      raise newException(StateSetError, "state backup: " & e.msg)
+  defer: hostLock.release()
   requireStopped(allUnits(set), alive, "state backup")
   for e in set:
     if not dirExists(under(root, e.path)) or symlinkExists(under(root, e.path)):
@@ -478,6 +489,17 @@ proc backupStateSet*(p: SystemProfile; outDir, host: string;
   # nothing may change what is being copied.
   if hold:
     holdUnits(allUnits(set))
+  # Checked again with the hold in place: a unit started between the first
+  # check and the hold (by something that is not an apply: an operator, a
+  # timer, socket activation) is caught here, and the hold just written is
+  # taken back so the refusal leaves the host as it found it.
+  when not mutated("backup-without-host-lock"):
+    try:
+      requireStopped(allUnits(set), alive, "state backup (after the hold)")
+    except StateSetError:
+      if hold: releaseUnits(allUnits(set))
+      removeDir(outDir)
+      raise
   result.host = host
   result.createdAt = now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
   for e in set:
@@ -543,12 +565,19 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
     if e.disposition != sdCarry: continue
     let archive = dir / e.archive
     let target = under(root, e.path)
+    # Restored here before, into the very directory still in place: its
+    # service has used it since, so its tree is no longer the manifest's,
+    # and that is not a reason to refuse (the restore runs at every boot).
+    if e.path in receipt:
+      let rc = receipt[e.path]
+      if rc.digest == e.digest and rootOf(rc.root) == rootOf(root) and
+          sameDirectory(rc.id, dirIdentity(target)):
+        continue
     if dirExists(target) and not symlinkExists(target) and
         not isEmptyDir(target):
       if treeDigest(target) == e.digest:
-        let id = dirIdentity(target)
         receipt[e.path] = ReceiptEntry(digest: e.digest, root: rootOf(root),
-                                       dev: id[0], ino: id[1])
+                                       id: dirIdentity(target))
         continue
       raise newException(StateSetError, e.path & " already holds " &
         "something other than the carried state; refusing to replace it")
@@ -590,9 +619,8 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
     except CatchableError:
       if dirExists(staging): removeDir(staging)
       raise
-    let id = dirIdentity(target)
     receipt[e.path] = ReceiptEntry(digest: e.digest, root: rootOf(root),
-                                   dev: id[0], ino: id[1])
+                                   id: dirIdentity(target))
     result.add(e.path)
   writeReceipt(dir, receipt)
 

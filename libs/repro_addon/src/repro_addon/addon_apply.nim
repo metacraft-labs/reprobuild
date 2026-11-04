@@ -2662,6 +2662,21 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
 
+proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
+  ## The carried-state refusal for this apply (``carried_state``), "" when
+  ## it may go ahead. A stored generation (a revert, a rollback, a replay)
+  ## is read under the rules it was installed with, as the switch reads it
+  ## (§10.1): a pre-floor generation parsed with today's floor default
+  ## would throw here, and a revert to it could never start.
+  let carriedFrom =
+    if opts.storedTarget or opts.replay:
+      parseStoredUserProfile(opts.userProfileText, stateDir)
+    else: parseAddOnUserProfile(opts.userProfileText)
+  carriedStateRefusal(carriedFrom,
+    (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+     else: CarriedStateDir),
+    (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
   ## Defined below, after the switch it wraps with its evidence record.
 
@@ -2685,19 +2700,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     # (spec §11.1), whichever path asked for the apply (an operator, the
     # deploy agent, an adopt, a rollback). Decided by the library both
     # apply paths share (`carried_state`); first, before anything else is
-    # looked at or written.
-    # A stored generation (a revert, a rollback, a replay) is read under the
-    # rules it was installed with, as the switch below reads it (§10.1): a
-    # pre-floor generation parsed with today's floor default would throw
-    # here, and a revert to it could never start.
-    let carriedFrom =
-      if opts.storedTarget or opts.replay:
-        parseStoredUserProfile(opts.userProfileText, stateDir)
-      else: parseAddOnUserProfile(opts.userProfileText)
-    let why = carriedStateRefusal(carriedFrom,
-      (if opts.carriedStateDir.len > 0: opts.carriedStateDir
-       else: CarriedStateDir),
-      (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+    # looked at or written, and again under the host lock below.
+    let why = carriedRefusalFor(opts, stateDir)
     if why.len > 0:
       raise newException(AddonApplyError, why)
     # The before-each-write re-check runs on the in-process apply path,
@@ -2720,6 +2724,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
       stateDir & ")")
   defer: hostLock.release()
+  if not opts.planOnly:
+    # Decided again under the host lock: a state backup takes the same
+    # lock, so a hold it wrote while this apply waited is seen here, not
+    # after the switch has started units.
+    when not mutated("backup-without-host-lock"):
+      let why = carriedRefusalFor(opts, stateDir)
+      if why.len > 0:
+        raise newException(AddonApplyError, why)
   if not opts.planOnly:
     enterWritableStoreView()
     createDir(addonDir(stateDir))

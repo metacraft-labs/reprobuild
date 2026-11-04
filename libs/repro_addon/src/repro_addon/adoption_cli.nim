@@ -11,6 +11,7 @@
 ##   repro system addon state restore [--from <dir>] [--root R] [--boot]
 ##   repro system addon state digest <path>
 ##   repro system addon state unit
+##   repro system addon state install-unit [--from <dir>] [--root R]
 ##
 ## Exit status: 0 success; 1 a failure, or a verify that found a
 ## difference; 2 a usage error or a refusal decided before anything was
@@ -23,6 +24,8 @@ import repro_infra
 
 import ./addon_import
 import ./collision
+import ./host_exec
+import ./mutations
 import ./state_sets
 
 const
@@ -47,6 +50,10 @@ const
       Print a directory's state digest.
   unit
       Print the first-boot restore unit for this binary.
+  install-unit [--from <dir>] [--root R]
+      Install and enable the first-boot restore unit, and make every unit
+      of the carried state in <dir> require it: none of them starts at
+      boot unless the restore succeeded.
 """
   RestoreUnitName* = "repro-state-restore.service"
 
@@ -71,6 +78,48 @@ proc stateRestoreUnitText*(repro: string): string =
     "ExecStart=" & repro & " system state restore --boot\n" &
     "\n[Install]\n" &
     "WantedBy=sysinit.target\n"
+
+const RestoreRequiredDropIn* = "80-repro-state-restore.conf"
+  ## The drop-in that makes a carried unit require the restore unit.
+
+proc restoreRequiredDropInText*(): string =
+  ## ``Requires=`` fails the unit's start job when the restore unit failed
+  ## (a tampered archive, a tree that does not verify), and ``After=``
+  ## orders it behind the restore (systemd.unit(5)). A restore unit whose
+  ## condition is false (no carried state) counts as started.
+  "[Unit]\n" &
+    "# Carried state (ReproOS Add-On Mode §11.1): starts only after the\n" &
+    "# first-boot restore of it succeeded.\n" &
+    "Requires=" & RestoreUnitName & "\n" &
+    "After=" & RestoreUnitName & "\n"
+
+proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
+  ## Install the first-boot restore unit under ``root`` (enabled: linked
+  ## into ``sysinit.target.wants``) and the drop-in that makes each unit
+  ## of the carried directories in ``dir``'s manifest require it. Returns
+  ## the units given the drop-in. The boot path is then governed by the
+  ## restore, as the apply path is by ``carried_state``: a carried unit
+  ## already installed (a conversion that brings the generation along)
+  ## does not start on an empty or unverified directory.
+  let m = readStateManifest(dir)
+  let unitDir = root / "etc/systemd/system"
+  createDir(unitDir)
+  let unitPath = unitDir / RestoreUnitName
+  writeFile(unitPath, stateRestoreUnitText(repro))
+  let wants = unitDir / "sysinit.target.wants"
+  createDir(wants)
+  let link = wants / RestoreUnitName
+  if symlinkExists(link) or fileExists(link): removeFile(link)
+  createSymlink("/etc/systemd/system/" & RestoreUnitName, link)
+  for e in m.entries:
+    if e.disposition != sdCarry: continue
+    for u in e.units:
+      if u in result: continue
+      when not mutated("restore-not-required-by-units"):
+        let d = unitDir / (u & ".d")
+        createDir(d)
+        writeFile(d / RestoreRequiredDropIn, restoreRequiredDropInText())
+      result.add(u)
 
 proc takeArg(args: seq[string]; i: var int; flag: string): string =
   let a = args[i]
@@ -218,6 +267,17 @@ proc runStateCli*(args: seq[string]): int =
       # The path that re-enters this binary (a launcher's, when the engine
       # runs under one), not the loader `getAppFilename` may name.
       stdout.write(stateRestoreUnitText(publicCliImagePath()))
+      0
+    of "install-unit":
+      let dir = if fromDir.len > 0: fromDir else: CarriedStateDir
+      let units = installRestoreUnit(dir, publicCliImagePath(), root)
+      stdout.write("installed " & RestoreUnitName & "; required by: " &
+        units.join(", ") & "\n")
+      if root == "/":
+        let r = runSystemctl(["daemon-reload"])
+        if r.exitCode != 0:
+          raise newException(StateSetError, "systemctl daemon-reload " &
+            "failed: " & r.output)
       0
     else:
       raise newException(ValueError, "unknown state command " & verb)

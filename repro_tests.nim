@@ -289,6 +289,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"repro-apt-hook-\", \"\")"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
+    binary: "build/test-bin/t_addon_carried_state_fails_closed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: var scratch = getTempDir() / (\"t_addon_carried_state_fails_c..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_collision.nim",
     binary: "build/test-bin/t_addon_collision",
     defines: @[],

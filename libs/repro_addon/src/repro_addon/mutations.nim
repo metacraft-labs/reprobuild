@@ -476,6 +476,24 @@
 ## ``evidence-ship-sees-agent-keys``          the shipping unit can read
 ##                                            the attestation and recipient
 ##                                            keys
+## ``receipt-trusts-inode``                   the restore receipt counts a
+##                                            directory as restored on its
+##                                            device and inode alone
+## ``reach-ignores-privileged-commands``      a "+"/"!" Exec*= command and
+##                                            PermissionsStartOnly= do not
+##                                            widen a unit's reach
+## ``reach-dropin-judged-alone``              a collision="dropIn" unit is
+##                                            judged by its drop-in only
+## ``reach-trigger-units-reach-nothing``      what a unit activates (Wants=,
+##                                            a timer's Unit=, ...) is not
+##                                            followed
+## ``backup-without-host-lock``               the backup runs without the
+##                                            host apply lock and is not
+##                                            re-checked after the hold; an
+##                                            apply's carried check is not
+##                                            repeated under the lock
+## ``restore-not-required-by-units``          the carried units do not
+##                                            require the restore unit
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -732,7 +750,14 @@ const
                           # and with the attestation and recipient keys
                           # visible to it.
                           "evidence-ship-unrestricted-egress",
-                          "evidence-ship-sees-agent-keys"]
+                          "evidence-ship-sees-agent-keys",
+                          # A13 review round 2.
+                          "receipt-trusts-inode",
+                          "reach-ignores-privileged-commands",
+                          "reach-dropin-judged-alone",
+                          "reach-trigger-units-reach-nothing",
+                          "backup-without-host-lock",
+                          "restore-not-required-by-units"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
