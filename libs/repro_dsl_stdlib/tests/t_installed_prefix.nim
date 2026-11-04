@@ -184,6 +184,34 @@ suite "an installed prefix":
       check r.code != 0
       check ("lib/libbar.so.1: 1 line(s) carry " & root) in r.output
 
+  test "the gate refuses a path of a library source's own build tree":
+    # The catalog's nim-fork put 47 lines of `<catalog>/nim-fork/.repro/
+    # build/...` into `nim/bin/nim`, and the gate, which searched only the
+    # store, `/home/`, its working directory and `$HOME`, passed it
+    # (measured 2026-11-04). A catalog checkout is not under the project.
+    requireTools:
+      let root = createTempDir("prefix-gate-roots-", "")
+      defer: removeDir(root)
+      let f = makeFixture(root, portableInterp = true)
+      let recipe = root / "catalog" / "libbar"
+      let mirror = recipe / ".repro" / "output" / "install" / "usr" / "lib"
+      createDir(mirror)
+      copyFile(f.libs / "libbar.so.1", mirror / "libbar.so.1")
+      writeFile(mirror / "libbar.so.1", readFile(mirror / "libbar.so.1") &
+        recipe & "/.repro/build/tree/bar.c\0")
+      var s = spec(f, @[mirror, f.libs])
+      let project = root / "project"
+      createDir(project)
+      require sh(assemblyScript(s), project).code == 0
+      check prefixBuildRoots(s) == @[recipe]
+      let r = sh(gateScript(s.output, roots = prefixBuildRoots(s)), project)
+      checkpoint(r.output)
+      check r.code != 0
+      check ("lib/libbar.so.1: 1 line(s) carry " & recipe) in r.output
+      # An explicit root (the whole catalog checkout) is searched too.
+      s.buildRoots = @[root / "catalog"]
+      check prefixBuildRoots(s) == @[root / "catalog", recipe]
+
   test "the archive refuses a prefix built from a modified tree":
     requireTools:
       let root = createTempDir("prefix-dirty-", "")

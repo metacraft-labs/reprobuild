@@ -4322,6 +4322,9 @@ package reprobuild:
             "check_release_source_closure.sh \"$O\""],
           gateTools: @["bash", "nim", "mktemp", "cat", "grep", "head", "tail",
             "rm", "mkdir"],
+          # The catalog checkout built nim-fork, pcre and clingo: a path in
+          # it is a build-host path too.
+          buildRoots: @[catalog],
           # The catalog's source builds carry debug info naming this host's
           # directories. LLVM's objcopy reads every target; the host's GNU
           # objcopy and zig 0.13's do not read an armv7 library
