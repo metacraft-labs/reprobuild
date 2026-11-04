@@ -69,7 +69,18 @@ suite "python3 answers to the name it is declared under":
     # Pinned on its own because this is the slice that regressed, and a
     # loop that passes for the wrong reason would hide it: the POSIX
     # entries satisfy the rule above through `executablePath` alone.
+    #
+    # Checked over EVERY Windows entry, not one of them. The assertion was
+    # `windows.len == 1` with indexed checks, which held only while
+    # python.org's Windows build was a single entry. The slice now carries
+    # 3.12 x86_64 plus 3.14 x86_64 and aarch64, and the COUNT was never the
+    # property worth pinning -- the alias on each entry is. Every Windows
+    # entry ships `python.exe` and so must carry the alias, which makes this
+    # loop strictly more coverage than the indexed form it replaces: it
+    # would now catch an unaliased entry that the old form never looked at.
+    # `len > 0` is there so an empty slice cannot satisfy the loop vacuously.
     let windows = slices("python3").filterIt(it.os == "windows")
-    check windows.len == 1
-    check windows[0].executablePath == "python.exe"
-    check windows[0].executableAlias == "python3.exe"
+    check windows.len > 0
+    for slice in windows:
+      check slice.executablePath == "python.exe"
+      check slice.executableAlias == "python3.exe"
