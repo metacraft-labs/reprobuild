@@ -104,6 +104,7 @@ import repro_test_support/descendant_guard_expectations
 import repro_build_engine/worker_pool
 from repro_test_support import prepareMonitorTools, testCaseScratchSlug
 from repro_core/dependency_gathering import automaticMonitorGatheringPolicy
+from repro_core/paths import VolatileScope, exemptRoots
 
 when defined(linux) or defined(macosx):
   import io_mon
@@ -521,6 +522,13 @@ else:
         # equal and prove nothing.
         for contributor in value:
           entries.add $contributor
+      elif value is VolatileScope:
+        # The invocation's own trees under a volatile prefix, against which
+        # the fold judged every read there. Both arms build it from the same
+        # action and configuration, so a difference is a hosting difference
+        # in what was kept. Paths, normalised like any other.
+        for root in value.exemptRoots:
+          entries.add normalisePath(root, workDir)
       else:
         {.error: "renderEvidence has no rendering for a new " &
           "PathSetEvidence field of this shape. Add an arm — do NOT add " &
