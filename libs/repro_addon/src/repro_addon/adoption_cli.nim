@@ -79,46 +79,37 @@ proc stateRestoreUnitText*(repro: string): string =
     "\n[Install]\n" &
     "WantedBy=sysinit.target\n"
 
-const RestoreRequiredDropIn* = "80-repro-state-restore.conf"
-  ## The drop-in that makes a carried unit require the restore unit.
-
-proc restoreRequiredDropInText*(): string =
-  ## ``Requires=`` fails the unit's start job when the restore unit failed
-  ## (a tampered archive, a tree that does not verify), and ``After=``
-  ## orders it behind the restore (systemd.unit(5)). A restore unit whose
-  ## condition is false (no carried state) counts as started.
-  "[Unit]\n" &
-    "# Carried state (ReproOS Add-On Mode §11.1): starts only after the\n" &
-    "# first-boot restore of it succeeded.\n" &
-    "Requires=" & RestoreUnitName & "\n" &
-    "After=" & RestoreUnitName & "\n"
-
 proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
-  ## Install the first-boot restore unit under ``root`` (enabled: linked
-  ## into ``sysinit.target.wants``) and the drop-in that makes each unit
-  ## of the carried directories in ``dir``'s manifest require it. Returns
-  ## the units given the drop-in. The boot path is then governed by the
-  ## restore, as the apply path is by ``carried_state``: a carried unit
-  ## already installed (a conversion that brings the generation along)
-  ## does not start on an empty or unverified directory.
+  ## Install the first-boot restore unit under ``root``, enabled (a link
+  ## in ``sysinit.target.wants``), and make each unit of the carried
+  ## directories in ``dir``'s manifest require it: a link to it in
+  ## ``<unit>.requires/``, which systemd reads as ``Requires=`` on the
+  ## restore unit (systemd.unit(5), "<unit>.requires/"). Returns those
+  ## units. A failed restore then fails their start jobs ("dependency
+  ## failed"), so a carried unit already installed (a conversion that
+  ## brings the generation along) does not start on an empty or
+  ## unverified directory: the boot path is governed by the restore as the
+  ## apply path is by ``carried_state``. The ordering needs no line of its
+  ## own: the restore unit runs before ``sysinit.target``, which every
+  ## service with default dependencies starts after. A link, not a drop-in:
+  ## a unit's drop-ins are the generation's (the add-on's effective-unit
+  ## check refuses one it did not write, spec §10.1).
   let m = readStateManifest(dir)
   let unitDir = root / "etc/systemd/system"
   createDir(unitDir)
-  let unitPath = unitDir / RestoreUnitName
-  writeFile(unitPath, stateRestoreUnitText(repro))
-  let wants = unitDir / "sysinit.target.wants"
-  createDir(wants)
-  let link = wants / RestoreUnitName
-  if symlinkExists(link) or fileExists(link): removeFile(link)
-  createSymlink("/etc/systemd/system/" & RestoreUnitName, link)
+  writeFile(unitDir / RestoreUnitName, stateRestoreUnitText(repro))
+  proc linkInto(d: string) =
+    createDir(d)
+    let link = d / RestoreUnitName
+    if symlinkExists(link) or fileExists(link): removeFile(link)
+    createSymlink("/etc/systemd/system/" & RestoreUnitName, link)
+  linkInto(unitDir / "sysinit.target.wants")
   for e in m.entries:
     if e.disposition != sdCarry: continue
     for u in e.units:
       if u in result: continue
       when not mutated("restore-not-required-by-units"):
-        let d = unitDir / (u & ".d")
-        createDir(d)
-        writeFile(d / RestoreRequiredDropIn, restoreRequiredDropInText())
+        linkInto(unitDir / (u & ".requires"))
       result.add(u)
 
 proc takeArg(args: seq[string]; i: var int; flag: string): string =
