@@ -845,6 +845,12 @@ proc systemdUnitTransition*(wasActive, fileChanged, dependencyChanged,
 proc systemdUnitIsActive*(name: string): bool =
   ## `systemctl is-active` exits 0 only for `active` (`activating` and
   ## `reloading` exit non-zero), which is the state a restart is for.
+  ## A template (``foo@.service``) is never active, and systemctl refuses
+  ## its name ("Failed to retrieve unit state"; A9 review round 4,
+  ## finding 8): it is not asked.
+  let at = name.find('@')
+  if at > 0 and at + 1 < name.len and name[at + 1] == '.':
+    return false
   when defined(linux):
     execCmd("systemctl is-active --quiet " & quoteShell(name)) == 0
   else:

@@ -58,13 +58,17 @@
 ## an add-on unit proves nothing: with a sampler that saw no unit, every
 ## record is unattributed, the foreign unit's included, and a check-mode
 ## run (which judges kills only) passed with no evidence at all. Not
-## every one: the foreign unit runs a 50 ms ``sleep`` after another (the
+## every one: the foreign unit runs a 50 ms sleep after another (the
 ## short-lived processes that make a pid wrap, round 2's case), and on a
 ## loaded host the guest's sampler can stall for longer than one of them
 ## lives. Such a process is never sampled, so its record is attributed to
 ## no unit -- never to an add-on unit, which is the safety property -- and
 ## measured at 9a867eed94 that was 4-52 of 460-4011 records per base (at
-## most 1.7 %, under a host load average of 200-300). Falsifying mutation
+## most 1.7 %, under a host load average of 200-300). A record is the
+## foreign unit's when the attribution places it in that unit's control
+## group, or -- for a process the sampler never saw -- when it was made by
+## the foreign unit's sleeper, a copy of sleep(1) under a name no add-on
+## unit runs (``ForeignComm``; round 4, finding 9). Falsifying mutation
 ## (``REPRO_ADDON_MUTATION=trace-sampler-blind``): the sampler watches only
 ## a unit that never runs, none of the foreign records is attributed to
 ## it: red.
@@ -268,6 +272,8 @@ proc auditRecords(g: Guest; since: float): seq[AuditRecord] =
 
 const
   ForeignUnit = "a9-foreign.service"
+  ForeignComm = "a9-fgn-sleep"
+    ## The foreign unit's sleeper (a copy of sleep(1)): its ``comm``.
 
 proc nativeAuditArch(debArch: string): string =
   ## The ``arch=`` of a native call on the base (linux/audit.h
@@ -427,9 +433,16 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     g.startSampler(@["a9-never-runs.service"])
   else:
     g.startSampler(@Units & @[ForeignUnit])
+  # The foreign unit sleeps through a copy of sleep(1) under a name no
+  # add-on unit runs, so a record of it is known as foreign by its
+  # control group (the sampler) and, where the sampler missed the
+  # process, by that name -- not by `comm == "sleep"` alone (A9 review
+  # round 4, finding 9).
+  discard g.run("mkdir -p /run/a9-foreign && cp /bin/sleep /run/a9-foreign/" &
+    ForeignComm)
   discard g.run("systemd-run --quiet --unit=" & ForeignUnit &
     " -p SystemCallLog=clock_nanosleep -p SystemCallLog=nanosleep " &
-    "/bin/sh -c 'while :; do sleep 0.05; done'")
+    "/bin/sh -c 'while :; do /run/a9-foreign/" & ForeignComm & " 0.05; done'")
   tick(1, gen(1))
   # Generations past the retention policy's five: the apply releases the
   # store roots of those it drops (§5.2).
@@ -496,9 +509,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     let name = names.getOrDefault(r.nr, "#" & $r.nr)
     let a = attributeRec(r)
     let unit = if a.kind == akUnit and a.unit in Units: a.unit else: ""
-    if r.comm == "sleep":
-      # The foreign unit's records (a9-foreign.service runs `sleep`; no
-      # add-on unit does): never an add-on unit's.
+    if (a.kind == akUnit and a.unit == ForeignUnit) or r.comm == ForeignComm:
+      # The foreign unit's records: attributed to its control group, or
+      # made by its sleeper (no add-on unit runs it). Never an add-on
+      # unit's.
       inc foreignSeen
       if unit.len > 0: foreignAttributed.add(unit & ": " & name)
       if a.kind != akUnit or a.unit != ForeignUnit:

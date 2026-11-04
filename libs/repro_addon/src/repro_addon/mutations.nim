@@ -693,6 +693,13 @@ const
                           "store-objects-by-string",
                           "trace-sampler-blind",
                           "template-observed-by-name",
+                          # A9 review round 4.
+                          "exception-lifts-root",
+                          "instance-dropin-needs-provider",
+                          "dropins-from-the-distribution-trusted",
+                          "properties-not-default-denied",
+                          "unnamed-instances-unchecked",
+                          "floor-start-unheld",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

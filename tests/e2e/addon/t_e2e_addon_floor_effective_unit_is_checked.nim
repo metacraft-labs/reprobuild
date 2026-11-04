@@ -35,11 +35,24 @@
 ##
 ## *Mocking.* None: the real add-on, the base's own systemd.
 
-import std/[json, strutils, tables, times, unittest]
+import std/[json, os, strutils, tables, times, unittest]
 
 import repro_test_support/reasoned_skip
 
+import repro_dsl_stdlib/packages/apt_closure
+import repro_addon/generation0
+
 import ./addon_testbed
+import ./deb_fixture_support
+
+proc aptFixtureDeb(work, name, debArch: string):
+    tuple[path: string; lock: AptClosureLock] =
+  ## A one-file .deb and its closure lock for the guest's architecture.
+  result.path = work / (name & ".deb")
+  writeDeb(result.path, @[dir("./"), dir("./usr/"), dir("./usr/share/"),
+    dir("./usr/share/" & name & "/"),
+    ("./usr/share/" & name & "/ok.txt", '0', 0o644, name & "\n", "")])
+  result.lock = fixtureLock(name, result.path, debArch)
 
 const Gate = "e2e_addon_floor_effective_unit_is_checked"
 
@@ -48,9 +61,10 @@ type Case = object
   service: string       ## lines added to its [Service]
   extra: string         ## more resources (a drop-in, a dropIn unit)
   coveredPlace: string  ## a writable place the floor now covers (may run)
-  first: string         ## a generation applied before the case's (the
-                        ## floored template an instance's drop-in then
-                        ## modifies must already be on the host)
+  host: string          ## a shell line run on the host before the apply
+                        ## (a host's, a package's or a type-wide drop-in;
+                        ## an account in a privileged group)
+  probes: string        ## the units the case tries to start (default: it)
 
 proc unitResource(name, service, binary: string): string =
   ## A floored oneshot unit; a template is declared without ``[Install]``
@@ -66,7 +80,17 @@ proc dropIn(unit, content: string): string =
   "systemd.systemDropIn {\n  unit = \"" & unit & "\"\n  name = \"x\"\n" &
     "  content = \"" & content & "\"\n}\n"
 
+proc hostDropIn(dir, content: string): string =
+  "mkdir -p " & dir & " && printf '" & content.replace("\n", "\\n") &
+    "' > " & dir & "/host.conf"
+
+const HostCleanup = "rm -rf /etc/systemd/system/a9e-*.service.d/host.conf " &
+  "/usr/lib/systemd/system/a9e-*.service.d " &
+  "/usr/lib/systemd/system/service.d/zz-a9e.conf; systemctl daemon-reload"
+
 proc cases(binary, prefix: string): seq[Case] =
+  let etc = "/etc/systemd/system/"
+  let vendor = "/usr/lib/systemd/system/"
   @[Case(name: "a9e-user-empty.service", service: "User=\n"),
     Case(name: "a9e-dyn-n.service", service: "DynamicUser=n\n"),
     Case(name: "a9e-drop-user.service", service: "User=a9e\n",
@@ -82,14 +106,40 @@ proc cases(binary, prefix: string): seq[Case] =
          extra: dropIn("a9e-drop-state.service", "[Service]\nStateDirectory=a9e-evil\n")),
     Case(name: "a9e-quoted.service",
          service: "User=a9e\nBindPaths=/var/lib/a9e-rw:'" & prefix & "/drop'\n"),
+    # An instance's drop-in over a floored template of the same generation
+    # (round 4, finding 8: no first generation needed).
     Case(name: "a9e-tpl@.service", service: "",
-         extra: dropIn("a9e-tpl@1.service", "[Service]\nMemoryDenyWriteExecute=no\n"),
-         first: "a9e-tpl@.service"),
+         extra: dropIn("a9e-tpl@1.service", "[Service]\nMemoryDenyWriteExecute=no\n")),
     Case(name: "a9e-cd@.service", service: "User=a9e\n",
          extra: "systemd.systemUnit {\n  name = \"a9e-cd@1.service\"\n" &
-                "  collision = \"dropIn\"\n  content = \"[Service]\nUser=\n\"\n}\n",
-         first: "a9e-cd@.service"),
-    Case(name: "a9e-pam.service", service: "User=a9e\nPAMName=login\n")]
+                "  collision = \"dropIn\"\n  content = \"[Service]\nUser=\n\"\n}\n"),
+    Case(name: "a9e-pam.service", service: "User=a9e\nPAMName=login\n"),
+    # Review round 4.
+    Case(name: "a9e-gshadow.service", service: "User=a9e\nGroup=shadow\n"),
+    Case(name: "a9e-member.service", service: "User=a9g\n",
+         host: "id a9g >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin " &
+               "-G shadow,adm a9g"),
+    Case(name: "a9e-psonly.service", service: "User=a9e\nPermissionsStartOnly=yes\n" &
+         "ExecStartPre=" & binary & " --version\n"),
+    Case(name: "a9e-openfile.service", service: "OpenFile=/etc/a9e-target:t\n"),
+    Case(name: "a9e-stdout.service", service: "StandardOutput=truncate:/etc/a9e-out\n"),
+    Case(name: "a9e-hostdrop.service", service: "",
+         host: hostDropIn(etc & "a9e-hostdrop.service.d",
+                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n")),
+    Case(name: "a9e-vplus.service", service: "",
+         host: hostDropIn(vendor & "a9e-vplus.service.d",
+                          "[Service]\nExecStartPre=+" & binary & " --version\n")),
+    Case(name: "a9e-vtype.service", service: "",
+         host: "mkdir -p " & vendor & "service.d && printf '[Service]\\n" &
+               "PermissionsStartOnly=yes\\n' > " & vendor & "service.d/zz-a9e.conf"),
+    Case(name: "a9e-th@.service", service: "", probes: "a9e-th@x.service",
+         host: hostDropIn(etc & "a9e-th@.service.d",
+                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n")),
+    Case(name: "a9e-ti@.service", service: "",
+         probes: "a9e-ti@1.service a9e-ti@2.service",
+         extra: dropIn("a9e-ti@1.service", "[Service]\nEnvironment=A9E=1\n"),
+         host: hostDropIn(etc & "a9e-ti@2.service.d",
+                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n"))]
 
 proc invocation(g: Guest; unit: string): string =
   g.exec("systemctl show -p InvocationID --value " & unit).stdout.strip()
@@ -120,20 +170,44 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("a plain floored unit applies", r.exitCode == 0, r.stdout & r.stderr)
     step("and starts", g.invocation("a9e-control.service").len > 0, "")
     let effectiveOnly = mutation() == "floor-static-r3-disabled"
+    # A floored unit bound to an apt closure applies (round 4, finding 5:
+    # the closure's read-only /usr bind was taken for a writable place, and
+    # every such unit was refused). No FixtureFloorWaiver.
+    let deb = aptFixtureDeb(g.runDir, "a9e-closure", g.base.debArch)
+    discard g.run("mkdir -p " & AddOnAptDebCacheDir & " && chmod 0700 " &
+                  AddOnAptDebCacheDir)
+    g.copyTo(deb.path, AddOnAptDebCacheDir & "/" & deb.lock.debs[0].sha256 &
+             ".deb")
+    r = g.applyProfile(repro, "apt", head &
+      unitResource("a9e-control.service", "", binary) &
+      "systemd.systemUnit {\n  name = \"a9e-apt.service\"\n  content = " &
+      "\"[Service]\nType=oneshot\nUser=a9e\nExecStart=/usr/bin/true\n\"\n" &
+      "  enabled = false\n  aptClosureLock = \"" &
+      renderAptClosureLock(deb.lock) & "\"\n}\n")
+    step("a floored unit bound to an apt closure applies (no waiver)",
+         r.exitCode == 0, r.stdout & r.stderr)
+    step("systemd shows its closure bind read-only",
+         "apt-closure" in g.exec("systemctl show -p BindReadOnlyPaths " &
+           "a9e-apt.service").stdout, "")
+    discard g.applyProfile(repro, "back", head &
+      unitResource("a9e-control.service", "", binary))
     var results = newJArray()
     for c in cases(binary, prefix):
       let base = head & unitResource("a9e-control.service", "", binary)
-      if c.first.len > 0:
-        r = g.applyProfile(repro, c.name.split('.')[0] & "-first",
-                           base & unitResource(c.name, c.service, binary))
-        step(c.name & ": the floored template alone applies",
-             r.exitCode == 0, r.stdout & r.stderr)
+      if c.host.len > 0:
+        discard g.run(c.host & "; systemctl daemon-reload")
       let text = base & unitResource(c.name, c.service, binary) & c.extra
-      r = g.applyProfile(repro, c.name.split('.')[0], text)
+      r = g.applyProfile(repro, c.name.split('.')[0].replace("@", "-"), text)
       let output = r.stdout & r.stderr
-      let probeUnit = if c.name.contains("@."): c.name.replace("@.", "@1.")
-                      else: c.name
-      let started = g.invocation(probeUnit).len > 0
+      let probes = if c.probes.len > 0: c.probes.splitWhitespace()
+                   elif c.name.contains("@."): @[c.name.replace("@.", "@1.")]
+                   else: @[c.name]
+      var started = false
+      for u in probes:
+        # A refused unit is gone with its generation and cannot start; one
+        # the switch left behind would start here.
+        discard g.exec("systemctl start " & u & " 2>/dev/null; true")
+        if g.invocation(u).len > 0: started = true
       var held = false
       if r.exitCode == 0 and c.coveredPlace.len > 0 and started:
         var show = initTable[string, string]()
@@ -160,7 +234,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         if effectiveOnly:
           step(c.name & ": refused by the effective-unit check",
                "EAddOnFloorNotEffective" in output, output)
-      # The host stays on the control's generation between cases.
+      # The host stays on the control's generation between cases, with no
+      # host drop-in left behind.
+      discard g.run(HostCleanup & "; rm -f /etc/a9e-out; echo orig > /etc/a9e-target")
       discard g.applyProfile(repro, "back", head &
         unitResource("a9e-control.service", "", binary))
     record["cases"] = results
