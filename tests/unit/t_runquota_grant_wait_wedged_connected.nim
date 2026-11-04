@@ -52,6 +52,11 @@ import runquota_ipc
 import runquota_protocol
 import runquota_core
 
+# `runquotaRendezvousDir` is the ONE place the suite decides where a locally
+# spawned RunQuota endpoint may live. Narrow import: this file already has
+# `connect`/`close` from `runquota_client`, and the module exports more.
+from repro_test_support import runquotaRendezvousDir
+
 const stubEnvVar = "REPRO_WEDGED_STUB_SOCKET"
 
 proc sendResponse(connection: var LocalConnection; kind: RqspMessageKind;
@@ -125,11 +130,13 @@ proc waitForSocket(path: string): bool =
     sleep(10)
   false
 
-proc privateSocketPath(): string =
-  ## A rendezvous directory THIS process owns, because runquota refuses to
-  ## bind or connect through one it does not.
+proc privateSocketPath(): tuple[root, socket: string] =
+  ## A rendezvous directory THIS process owns — because runquota refuses to
+  ## bind or connect through one it does not — and short enough that the
+  ## address fits a ``sockaddr_un``. Returns the scratch root as well, so
+  ## the caller can remove it.
   ##
-  ## These cases used to name ``/tmp/repro-wedged-rq-<pid>.sock`` directly.
+  ## These cases once named ``/tmp/repro-wedged-rq-<pid>.sock`` directly.
   ## ``/tmp`` is root-owned and ``1777`` on an ordinary host, and
   ## ``requireTrustedEndpointDir`` refuses exactly that — "a rendezvous
   ## point another user owns is a rendezvous point another user controls".
@@ -137,29 +144,64 @@ proc privateSocketPath(): string =
   ## the parent then died in ``connect``: the wedged-daemon wiring under
   ## test was never reached, in either direction.
   ##
-  ## ``createTempDir`` gives a fresh directory under ``$TMPDIR`` owned by
-  ## this uid. The mode is then set EXPLICITLY: the rule requires exactly
-  ## ``0700`` and refuses anything it cannot see was created that way, and
-  ## Nim's ``createTempDir`` lands on ``0755`` here. Setting it rather than
-  ## assuming it is the same discipline the rule is asking for.
+  ## They then named a ``createTempDir`` directory under ``$TMPDIR`` and
+  ## ``setFilePermissions``-ed it to ``0700`` by hand. Both halves of that
+  ## were wrong, and ``repro_test_support.runquotaRendezvousDir`` is the one
+  ## place that gets both right:
   ##
-  ## The per-pid name is kept inside the directory so a crashed run leaves
-  ## an obvious trail.
-  let dir = createTempDir("repro-wedged-rq-", "")
-  setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
-  dir / ("rq-" & $getCurrentProcessId() & ".sock")
+  ## * **The mode is a function of the HOST, not a constant.** RunQuota's
+  ##   ``rendezvousPolicy`` wants owner-only ``0700`` on a host with no
+  ##   ``runquota`` group and group-gated ``0750`` on a host that has one, so
+  ##   a hard-coded ``0700`` is refused for the OPPOSITE reason on a
+  ##   provisioned host (``refusing mode 0700, required 0750``). Four copies
+  ##   of this helper carried that constant and were silently correct only in
+  ##   the first case. ``runquotaRendezvousDir`` routes through
+  ##   ``runquota_ipc.ensureEndpointDir``, which both provisions and VERIFIES
+  ##   the directory by the product's own rule, so this file keeps no second
+  ##   copy of it.
+  ## * **``$TMPDIR`` is not short.** ``bindUnix``/``connectUnix`` refuse a
+  ##   path of ``Sockaddr_un_path_length`` bytes or more — 108 on Linux, but
+  ##   only 92 on macOS, where ``std/posix`` declares an array shorter than
+  ##   the kernel's 104. The suite scratch root is 73 bytes on the shared CI
+  ##   runners (``/var/lib/github-runner-work/<slot>/.cache/
+  ##   reprobuild-test-tmp/<n>`` — a GARM work root, far deeper than a login
+  ##   home), which put this socket at 116 bytes: the stub child died in
+  ##   ``bindEndpoint`` with ``socket path too long``, ``waitForSocket`` then
+  ##   failed, and the parent died in ``runquota_client.connect`` with the
+  ##   same message — both cases having asserted nothing about a wedged
+  ##   daemon. Shortening the fixture's own name was never the fix, because
+  ##   the overflow is paid out of a budget the checkout and the ``TMPDIR``
+  ##   have already spent: fixture IPC paths must fit INDEPENDENTLY of the
+  ##   checkout and ``TMPDIR`` length (reprobuild ``6210412a``).
+  ##   ``runquotaRendezvousDir`` already applies that rule — when
+  ##   ``<root>/ep`` plus a socket name would not fit it relocates the
+  ##   endpoint to a short private directory under ``/tmp``, provisioned and
+  ##   verified by the very same ``ensureEndpointDir`` and registered for
+  ##   removal at process exit only once it has passed.
+  ##
+  ## ONLY THE ENDPOINT MOVES. The scratch root is still a fresh
+  ## ``createTempDir`` under ``$TMPDIR``, and the per-pid socket name is kept
+  ## so a crashed run leaves an obvious trail. ``rq-<pid>.sock`` is 15 bytes
+  ## at a seven-digit pid, inside the 24 bytes
+  ## ``RunquotaRendezvousSocketNameBudget`` promises a caller.
+  result.root = createTempDir("repro-wedged-rq-", "")
+  result.socket = runquotaRendezvousDir(result.root) /
+    ("rq-" & $getCurrentProcessId() & ".sock")
 
 suite "repro_runquota grant-wait — wedged-but-connected daemon (end-to-end)":
 
   test "bounded daemonStatus against a connected-but-silent daemon raises within bound":
-    let socketPath = privateSocketPath()
+    # ``scratchRoot`` is removed here; the endpoint directory is inside it
+    # unless it had to be relocated, and a relocated one is removed at
+    # process exit by ``runquotaRendezvousDir`` itself.
+    let (scratchRoot, socketPath) = privateSocketPath()
     removeFile(socketPath)
     let stub = startStub(socketPath)
     defer:
       stub.terminate()
       discard stub.waitForExit()
       removeFile(socketPath)
-      removeDir(socketPath.parentDir)
+      removeDir(scratchRoot)
     check waitForSocket(socketPath)
 
     var client = connect(unixEndpoint(socketPath))
@@ -190,14 +232,14 @@ suite "repro_runquota grant-wait — wedged-but-connected daemon (end-to-end)":
     client.close()
 
   test "awaitGrant path with the REAL probe raises within the deadline (no hang)":
-    let socketPath = privateSocketPath()
+    let (scratchRoot, socketPath) = privateSocketPath()
     removeFile(socketPath)
     let stub = startStub(socketPath)
     defer:
       stub.terminate()
       discard stub.waitForExit()
       removeFile(socketPath)
-      removeDir(socketPath.parentDir)
+      removeDir(scratchRoot)
     check waitForSocket(socketPath)
 
     var client = connect(unixEndpoint(socketPath))

@@ -95,6 +95,14 @@
 
 import std/[options, os, osproc, strutils, sysrand, times, unittest]
 
+when defined(posix):
+  # The two `swtpm` endpoints do NOT live beside the TPM state directory;
+  # `tpmSocketDir` says why. `Sockaddr_un_path_length` is the bound the Nim
+  # client that dials them enforces, and it is the stricter of the two
+  # limits in play (see that proc).
+  from std/posix import Sockaddr_un_path_length
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
+
 import repro_attest
 import repro_attest_agent
 import repro_attest_agent/cli
@@ -121,6 +129,12 @@ type
   LiveTpm = ref object
     ## One software TPM, its socket, and the conversation with it.
     dir: string
+      ## The TPM state, the emulator's log, and this file's own fixture
+      ## files. Under the suite's scratch root, where the assertions
+      ## expect them.
+    sockDir: string
+      ## The two endpoints, and nothing else. NOT under `dir`: see
+      ## `tpmSocketDir`.
     dataSocket: string
     ctrlSocket: string
     process: Process
@@ -155,6 +169,76 @@ proc swtpmCommand(): string =
   let dir = getEnv(SwtpmBinEnv)
   if dir.len > 0: dir / "swtpm" else: "swtpm"
 
+proc tpmSocketDir(stateDir: string): string =
+  ## WHERE THE TWO `swtpm` ENDPOINTS GO — and it is not beside the TPM
+  ## state, although that is where they started out.
+  ##
+  ## An `AF_UNIX` address has to fit `sockaddr_un.sun_path` with its NUL,
+  ## and two different pieces of software enforce two different bounds on
+  ## the same path here:
+  ##
+  ## * `swtpm` itself, before it binds: it refuses with `Path for UnioIO
+  ##   socket is too long` at the kernel's `sun_path` — 108 bytes on Linux,
+  ##   104 on macOS (measured on aarch64-darwin with `swtpm` 0.10.1: a
+  ##   102-byte path binds, a 105-byte one is refused).
+  ## * the Nim client that dials it, `newTpm2Transport` through
+  ##   `std/net`: `Sockaddr_un_path_length`, which is the same 108 on Linux
+  ##   but only **92** on macOS, because `std/posix` declares an array
+  ##   shorter than the kernel's.
+  ##
+  ## So the client's bound is the stricter of the two on every host we
+  ## build for, which is why the guard below checks that one and covers
+  ## both. The two failures read quite differently, and both were seen:
+  ## over 108 on Linux the emulator never starts and the log carries its
+  ## refusal, while between 92 and 104 on macOS the emulator starts
+  ## happily and the 200 connection attempts all raise `socket path too
+  ## long`, so the fixture reports "never answered" with an EMPTY log.
+  ##
+  ## The directory used to be `getTempDir() / repro-live-tpm-<pid>-<clock>`,
+  ## and `getTempDir()` is the suite's own per-run scratch root: 73 bytes
+  ## on the shared CI runners, where a GARM work root
+  ## (`/var/lib/github-runner-work/<slot>/.cache/reprobuild-test-tmp/<n>`)
+  ## is far deeper than a login home. The data socket then came to ~129
+  ## bytes and every case in this file failed in `startLiveTpm`, having
+  ## measured nothing. Shortening the fixture's own name was never the
+  ## fix: the overflow is paid out of a budget the checkout and the
+  ## `TMPDIR` have already spent. Fixture IPC paths must fit
+  ## INDEPENDENTLY of the checkout and `TMPDIR` length (reprobuild
+  ## `6210412a`), which is the rule `shortSocketDirAtProcessExit`
+  ## implements: a fresh owner-only (0700) directory directly under
+  ## `/tmp`, `/tmp/ltpm-<12 hex>` = 22 bytes, removed when this process
+  ## exits.
+  ##
+  ## ONLY THE ENDPOINTS MOVE. The TPM state directory, the emulator's log,
+  ## the working directory it is started in and every fixture file the
+  ## cases write stay under `stateDir`, so every path an assertion reads is
+  ## where it was. Nothing in this file reads monitor evidence, and `/tmp`
+  ## is not one of the volatile prefixes the engine drops from it in any
+  ## case (`nonVolatileTempBase` falls back TO it), so an endpoint there
+  ## cannot make an arm vacuous.
+  when defined(posix):
+    result = shortSocketDirAtProcessExit("ltpm-")
+    # A backstop, not the mechanism: the relocation above makes a fit the
+    # normal case, so a longer tag or a deeper endpoint has to fail HERE,
+    # where the reason is legible, rather than as a `swtpm` refusal or as
+    # 200 silent connection failures reported as "never answered". Sized to
+    # the longer of the two basenames this fixture actually binds — they
+    # are both 13 bytes — and compared with `std/net`'s own `>=`.
+    let probeSocket = result / "tpm-ctrl.sock"
+    if probeSocket.len >= Sockaddr_un_path_length:
+      raise newException(IOError,
+        "fixture socket path is " & $probeSocket.len & " bytes, which will " &
+        "not fit a unix socket address on this host (std/net refuses " &
+        $Sockaddr_un_path_length & " or more, and swtpm refuses the " &
+        "kernel's own limit); " & result &
+        " is far longer than a `shortSocketDirAtProcessExit` directory " &
+        "should be")
+  else:
+    # Windows: `swtpm`'s `unixio` transport is POSIX-only, and there is no
+    # always-writable short root for a non-elevated account, so the
+    # endpoints stay beside the state the way they always did.
+    result = stateDir
+
 proc stopLiveTpm(t: LiveTpm) =
   ## Unconditional teardown: the socket, the process and the state
   ## directory, whatever happened above. A software TPM left running
@@ -180,6 +264,14 @@ proc stopLiveTpm(t: LiveTpm) =
     t.process = nil
   try: removeDir(t.dir)
   except CatchableError: discard
+  # The endpoint directory is separate from the state directory (see
+  # `tpmSocketDir`), so removing the state directory no longer removes the
+  # sockets. `shortSocketDirAtProcessExit` would get it at process exit
+  # anyway; doing it here keeps a binary that starts one TPM per case from
+  # holding every run's endpoint directory until it exits.
+  try:
+    if t.sockDir.len > 0 and t.sockDir != t.dir: removeDir(t.sockDir)
+  except CatchableError: discard
 
 proc startLiveTpm(): LiveTpm =
   ## Start one `swtpm` over a Unix socket and return once it has
@@ -199,8 +291,9 @@ proc startLiveTpm(): LiveTpm =
                                "-" & $int64(epochTime() * 1000.0))
   removeDir(result.dir)
   createDir(result.dir)
-  result.dataSocket = result.dir / "tpm-data.sock"
-  result.ctrlSocket = result.dir / "tpm-ctrl.sock"
+  result.sockDir = tpmSocketDir(result.dir)
+  result.dataSocket = result.sockDir / "tpm-data.sock"
+  result.ctrlSocket = result.sockDir / "tpm-ctrl.sock"
 
   let command = swtpmCommand()
   try:
@@ -222,6 +315,10 @@ proc startLiveTpm(): LiveTpm =
   except CatchableError as e:
     let dir = result.dir
     removeDir(dir)
+    # Nothing bound in it, but it is this process's to remove and the
+    # at-exit release should not be the only thing that does so.
+    if result.sockDir.len > 0 and result.sockDir != dir:
+      removeDir(result.sockDir)
     raise newException(IOError,
       "could not start a software TPM (" & command & "): " & e.msg &
       ". It is part of this repository's development toolchain; enter the " &

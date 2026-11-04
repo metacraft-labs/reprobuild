@@ -67,6 +67,11 @@ import std/[monotimes, net, os, posix, strutils, times, unittest]
 
 import repro_attest
 
+# The socket this file binds does NOT live under the suite's scratch root;
+# `connectedPair` says why, and `shortSocketDirAtProcessExit`'s own doc
+# comment states the rule it implements.
+from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
+
 # `setitimer` and `struct itimerval` are not in `std/posix`, so they are
 # taken from the header rather than written as numbers — the struct's
 # layout and `ITIMER_REAL`'s value are the platform's to state.
@@ -175,11 +180,52 @@ proc connectedPair(): SocketPair =
   ## Built through `newTpm2Transport` rather than by hand so the
   ## transport is configured exactly as a daemon's would be — the same
   ## unbuffered socket and the same read bound.
-  result.dir = getTempDir() / ("repro-tpm-wait-" & $getCurrentProcessId() &
-                               "-" & $getMonoTime().ticks)
-  removeDir(result.dir)
-  createDir(result.dir)
+  ##
+  ## THE DIRECTORY IS NOT UNDER THE SUITE'S `TMPDIR`, and that is a
+  ## correctness requirement rather than tidiness. `bindUnix` refuses a
+  ## path of `Sockaddr_un_path_length` bytes or more — 108 on Linux, but
+  ## 92 on macOS, where `std/posix` declares an array shorter than the
+  ## kernel's 104 — with a bare `socket path too long`, raised before a
+  ## single byte of this file's subject has run. This used to be
+  ## `getTempDir() / repro-tpm-wait-<pid>-<ticks>`, and `getTempDir()` is
+  ## the suite's own per-run scratch root: 73 bytes on the shared CI
+  ## runners, where a GARM work root
+  ## (`/var/lib/github-runner-work/<slot>/.cache/reprobuild-test-tmp/<n>`)
+  ## is far deeper than a login home, and 49 bytes on a stock macOS host.
+  ## Those put this socket at 129 and 97 bytes — over the limit on both —
+  ## so the two cases that build a pair failed in `bindUnix` having
+  ## asserted nothing about signals, timeouts or the claim this file
+  ## exists to police.
+  ##
+  ## Shortening the fixture's own name was never the fix: the overflow is
+  ## paid out of a budget the checkout and the `TMPDIR` have already
+  ## spent. Fixture IPC paths must fit INDEPENDENTLY of the checkout and
+  ## `TMPDIR` length (reprobuild `6210412a`), which is exactly the rule
+  ## `shortSocketDirAtProcessExit` implements: a fresh owner-only (0700)
+  ## directory directly under `/tmp` — `/tmp/<tag><12 hex>`, 22 bytes with
+  ## the five-byte tag below — removed when this process exits.
+  ##
+  ## ONLY THE ENDPOINT MOVES, and here that is the whole directory,
+  ## because the socket is the only thing this fixture ever put in it:
+  ## no assertion in this file reads a path, and nothing here reads
+  ## monitor evidence (`/tmp` is not one of the volatile prefixes the
+  ## engine drops from it in any case). `closePair` still removes the
+  ## directory, so the at-exit release is a backstop for a crash.
+  result.dir = shortSocketDirAtProcessExit("tpmw-")
   let path = result.dir / "tpm-data.sock"
+  # The relocation above makes a fit the normal case, so this is a
+  # backstop and not the mechanism: a longer tag, an endpoint nested one
+  # directory deeper, or a case that names its own socket has to fail
+  # HERE, where the reason is legible, rather than inside `bindUnix`. The
+  # bound is `std/net`'s own `Sockaddr_un_path_length` with the same `>=`
+  # — not a hard-coded 108, which is Linux's value and would let a
+  # 92..107-byte path through on macOS.
+  if path.len >= Sockaddr_un_path_length:
+    raise newException(IOError,
+      "fixture socket path is " & $path.len & " bytes, which will not fit " &
+      "a unix socket address on this host (std/net refuses " &
+      $Sockaddr_un_path_length & " or more); " & result.dir &
+      " is far longer than a `shortSocketDirAtProcessExit` directory should be")
   result.listener = newSocket(Domain.AF_UNIX, SockType.SOCK_STREAM,
                               Protocol.IPPROTO_IP, buffered = false)
   result.listener.bindUnix(path)

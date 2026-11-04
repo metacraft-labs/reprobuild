@@ -34613,7 +34613,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_attest",
-        "repro_attest_agent"
+        "repro_attest_agent",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -48241,7 +48242,8 @@
       "localDependencyShape": [
         "repro_attest",
         "repro_attest_agent",
-        "repro_attest_verify"
+        "repro_attest_verify",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -48276,7 +48278,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_attest"
+        "repro_attest",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -53937,7 +53940,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_runquota"
+        "repro_runquota",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
