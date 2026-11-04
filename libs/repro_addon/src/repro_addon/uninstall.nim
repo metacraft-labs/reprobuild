@@ -314,6 +314,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       result.undone.incl(entryKey(sl))
   removeEmptyDirs(byClass[lcDir])
   systemctlOrRecord(["daemon-reload"], result)
+  # A unit of the add-on's that ended failed stays listed, failed, after its
+  # file is gone; the base never had that record. Best effort: a unit that
+  # is not failed (or no longer loaded) has nothing to reset.
+  for u in byClass[lcUnit]:
+    if u.collision notin ["replace", "adopt", "reconcile", "closure-relocate"]:
+      discard runSystemctl(["reset-failed", "--", u.unit])
   for u in handBack:
     if entryKey(u) notin result.undone:
       continue                   # left as drift above: not ours to touch

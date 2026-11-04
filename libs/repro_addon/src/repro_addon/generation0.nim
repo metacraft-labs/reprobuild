@@ -783,7 +783,7 @@ proc egressCheckUnit*(reproExe: string): string =
   "NoNewPrivileges=yes\n" &
   "ProtectSystem=strict\n" &
   "ReadWritePaths=" & EvidenceDirPath & "\n" &
-  "InaccessiblePaths=-/var/lib/repro/agent -/run/repro -/repro\n" &
+  "InaccessiblePaths=-/var/lib/repro/agent -/run/repro\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
   "PrivateDevices=yes\n" &
@@ -993,8 +993,10 @@ proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   ## the sink credential, and this one cannot sign attestations.
   let egress = when mutated("evidence-ship-unrestricted-egress"): ""
                else: "IPAddressDeny=any\nIPAddressAllow=" & e.sinkAddress & "\n"
-  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro -/repro"
-               else: "-/var/lib/repro/agent -/run/repro -/repro"
+  # The store stays visible (read-only, as everywhere): the unit's own
+  # binary is in it.
+  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro"
+               else: "-/var/lib/repro/agent -/run/repro"
   "[Unit]\n" &
   "Description=Reprobuild add-on: ship evidence records to the Evidence sink\n" &
   "After=network-online.target\n" &

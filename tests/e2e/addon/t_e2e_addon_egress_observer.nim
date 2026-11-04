@@ -65,7 +65,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let l1 = g.ledgerOf()
   step("the ledger tracks the table", "nftTable" in l1 and
        "inet repro_addon_egress" in l1, "")
+  # bootstrapWithAgent stopped the fetch timer (the gates drive ticks);
+  # generation 0 left it active, which is what its ledger records.
+  discard g.exec("systemctl start repro-agent-fetch.timer")
   let f1 = g.takeFingerprint(repro)
+  discard g.exec("systemctl stop repro-agent-fetch.timer")
   let d = deltaReport(f0, f1, "", l1)
   step("bootstrap's fingerprint diff (nftables included) == the ledger's delta",
        d.ok, d.text)
@@ -88,8 +92,12 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("uninstall succeeds", un.exitCode == 0, un.stdout & un.stderr)
   let after = g.exec("nft list tables").stdout
   step("the table is gone", "repro_addon_egress" notin after, after)
-  let id = identityReport(f0, g.takeFingerprint(repro))
-  step("the fingerprint equals the pre-bootstrap one", id.ok, id.text)
+  # The one enumerated exception (spec §6.4): the kernel's packet-logger
+  # bindings the table's log statement loaded stay after the table is gone.
+  let id = identityReport(f0, g.takeFingerprint(repro),
+                          ["sysctl:net.netfilter.nf_log.*"])
+  step("the fingerprint equals the pre-bootstrap one (but the logger " &
+       "bindings)", id.ok, id.text)
 
 suite Gate:
   test "the egress observer: fail closed, ledgered, counting, uninstalled":
