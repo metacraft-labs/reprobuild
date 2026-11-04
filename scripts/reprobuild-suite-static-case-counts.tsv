@@ -908,6 +908,7 @@ libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.ni
 libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim	nim	6
 libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	3
 libs/repro_tool_profiles/tests/t_environment_prefix_provisioning.nim	nim	11
+libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim	nim	7
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_native_and_target_outputs_are_disjoint.nim	nim	12
 libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim	nim	4

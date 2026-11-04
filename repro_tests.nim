@@ -9914,6 +9914,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_tool_profiles_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim",
+    binary: "build/test-bin/t_installed_prefix_nim_route",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_tool_profiles_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim",
     binary: "build/test-bin/t_n48_tool_profiles_tar_operands",
     defines: @[],
