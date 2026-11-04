@@ -19,8 +19,13 @@
 ## headers with nanosecond mtimes) and `zstd` executables. Both are present
 ## wherever the other bundle halves are produced and consumed.
 
-import std/[algorithm, json, os, osproc, posix, sets, streams, strutils,
-    tables]
+# This module's C (including the SHA-256 it instantiates for part checks)
+# runs once per byte of a bundle, so it is optimized whatever the Nim build
+# mode is. See docs/store-bundles.md §10 for the measurement.
+{.localPassC: "-O3".}
+
+import std/[algorithm, json, monotimes, os, osproc, posix, sets, streams,
+    strutils, tables, times]
 import nimcrypto/sha2
 import blake3
 import repro_hash
@@ -132,6 +137,8 @@ type
     restampMismatches*: int
     devEnvs*: seq[FrozenDevEnv]
     roots*: BundleRoots
+    phaseSeconds*: seq[tuple[phase: string, seconds: float]]
+      ## Wall time per §5 step, in order, for `--json` and for measuring.
 
 const
   ContentsHeader* = "reprobuild.store-bundle.contents.v1"
@@ -198,20 +205,27 @@ proc lowerHex(bytes: openArray[byte]): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
 
-proc fileBlake3Hex*(path: string): string =
-  ## Streamed BLAKE3-256 of a file's bytes.
+proc fileBlake3Hex*(path: string; buf: var seq[byte]): string =
+  ## Streamed BLAKE3-256 of a file's bytes. `buf` is the caller's reusable
+  ## read buffer: a bundle hashes tens of thousands of files, and a fresh
+  ## zeroed buffer per file was the dominant cost of verification.
   var f: File
   if not open(f, path, fmRead):
     fail("cannot read " & path)
   defer: close(f)
+  if buf.len == 0:
+    buf = newSeq[byte](ReadChunk)
   let hasher = initHasher()
   defer: hasher.close()
-  var buf = newSeq[byte](ReadChunk)
   while true:
     let n = f.readBuffer(addr buf[0], buf.len)
     if n <= 0: break
     hasher.update(addr buf[0], n)
   hasher.finalize().toHex()
+
+proc fileBlake3Hex*(path: string): string =
+  var buf: seq[byte]
+  fileBlake3Hex(path, buf)
 
 type LiveState = object
   exists: bool
@@ -247,9 +261,9 @@ proc setMtimeNs(path: string; mtimeNs: int64) =
   ## Nanosecond-exact mtime restore (std/times only reaches microseconds,
   ## and the timestamp policy compares nanoseconds). atime is left alone.
   var times: array[2, Timespec]
-  times[0].tv_sec = Time(0)
+  times[0].tv_sec = posix.Time(0)
   times[0].tv_nsec = UtimeOmit
-  times[1].tv_sec = Time(mtimeNs div 1_000_000_000)
+  times[1].tv_sec = posix.Time(mtimeNs div 1_000_000_000)
   times[1].tv_nsec = clong(mtimeNs mod 1_000_000_000)
   if c_utimensat(AtFdCwd, path.cstring, addr times, AtSymlinkNoFollow) != 0:
     raiseOSError(osLastError(), "utimensat " & path)
@@ -357,7 +371,7 @@ proc scanStorePaths(text, storeRoot: string; prefixes: var HashSet[string]) =
     start = stop
 
 proc expandInto(path: string; seen: var HashSet[string];
-                entries: var seq[BundleEntry]) =
+                entries: var seq[BundleEntry]; buf: var seq[byte]) =
   ## Add `path` and, for a directory, everything below it.
   var stack = @[path]
   while stack.len > 0:
@@ -373,7 +387,7 @@ proc expandInto(path: string; seen: var HashSet[string];
     case st.kind
     of bekFile:
       entry.size = st.size
-      entry.digest = fileBlake3Hex(p)
+      entry.digest = fileBlake3Hex(p, buf)
     of bekLink:
       entry.digest = expandSymlink(p)
     of bekDir:
@@ -497,6 +511,19 @@ proc computeClosure*(roots: BundleRoots;
         elif not record.recordTouches(ws):
           continue
         touching = true
+        # Import refuses any member outside the declared roots, so a record
+        # writing elsewhere cannot travel (and is reported instead).
+        var outside = ""
+        for output in record.outputs:
+          let p = resolvedPath(outputRoot, output.path)
+          if not (p.withinAny(ws) or p.isWithin(storeRoot) or
+              p.isWithin(acRoot)):
+            outside = p
+            break
+        if outside.len > 0:
+          result.skippedRecords.add((edgeDir, strongHex,
+            "an output lies outside the bundle roots: " & outside))
+          continue
         if outputRoot.len == 0:
           let mismatch = outputStateMismatch(record, "")
           if mismatch.len > 0:
@@ -550,8 +577,9 @@ proc computeClosure*(roots: BundleRoots;
   # Expand everything selected so far, then add the prefixes it references.
   var seen = initHashSet[string]()
   var entries: seq[BundleEntry]
+  var hashBuf: seq[byte]
   for path in selected:
-    expandInto(path, seen, entries)
+    expandInto(path, seen, entries, hashBuf)
   for entry in entries:
     let prefix = prefixDirOf(entry.path, storeRoot)
     if prefix.len > 0:
@@ -570,7 +598,7 @@ proc computeClosure*(roots: BundleRoots;
   for prefix in prefixes:
     if fileExists(prefix / ReceiptFileName):
       result.prefixes.add(prefix)
-      expandInto(prefix, seen, entries)
+      expandInto(prefix, seen, entries, hashBuf)
   result.prefixes.sort()
 
   # Every member's parent directories that lie inside a root are members
@@ -608,7 +636,7 @@ proc computeClosure*(roots: BundleRoots;
         uint64(st.mtimeNs) != recorded.mtimeNs:
       continue
     result.restamps.add(RestampEntry(size: st.size, mtimeNs: st.mtimeNs,
-      digest: fileBlake3Hex(path), path: path))
+      digest: fileBlake3Hex(path, hashBuf), path: path))
 
 proc unpackedBytes*(closure: BundleClosure): int64 =
   for entry in closure.entries:
@@ -889,6 +917,32 @@ proc readVerifiedPart(dir: string; part: BundlePart): string =
     fail("bundle part " & part.name & " has SHA-256 " & actual &
       ", the manifest says " & part.sha256)
 
+type FeedShared = object
+  ## Shared between `feedParts` and its writer thread. `writeError` is
+  ## written by the writer only, and read only after it has been joined.
+  chan: Channel[string]
+  fd: cint
+  writeError: cint
+
+proc feedWriter(shared: ptr FeedShared) {.thread.} =
+  ## Push each verified part into the unpacker's stdin. An empty string is
+  ## the end. After a failed write it keeps draining, so the producer never
+  ## blocks on a full channel.
+  while true:
+    let data = shared.chan.recv()
+    if data.len == 0:
+      break
+    if shared.writeError != 0:
+      continue
+    var offset = 0
+    while offset < data.len:
+      let n = posix.write(shared.fd, unsafeAddr data[offset], data.len - offset)
+      if n < 0:
+        if errno == EINTR: continue
+        shared.writeError = errno
+        break
+      offset += n
+
 proc feedParts(dir: string; parts: seq[BundlePart]; command: string;
                stopEarly: bool): int =
   ## Run `command` with the verified parts streamed to its stdin and return
@@ -896,8 +950,19 @@ proc feedParts(dir: string; parts: seq[BundlePart]; command: string;
   ## files: nothing reads those pipes while the feed runs. With `stopEarly`
   ## the feed stops quietly when the command exits before reading
   ## everything (the contents peek).
-  let p = uncontrolledStartProcess(requireTool("bash"), args = ["-c", command], options = {})
-  let input = p.inputStream
+  ##
+  ## A writer thread pushes part N while this thread reads and hashes part
+  ## N+1, so verification overlaps the unpack instead of adding to it; still,
+  ## no byte reaches the unpacker before its whole part has been verified.
+  ## SIGPIPE is ignored meanwhile, so an unpacker that dies mid-stream
+  ## surfaces as its exit status rather than killing this process.
+  var ignore, previous: Sigaction
+  ignore.sa_handler = SIG_IGN
+  discard sigemptyset(ignore.sa_mask)
+  discard sigaction(SIGPIPE, ignore, previous)
+  defer: discard sigaction(SIGPIPE, previous, ignore)
+  let p = uncontrolledStartProcess(requireTool("bash"), args = ["-c", command],
+    options = {})
   var completed = false
   defer:
     if not completed:
@@ -905,22 +970,34 @@ proc feedParts(dir: string; parts: seq[BundlePart]; command: string;
       # truncated stream, and reap it.
       try: p.terminate() except CatchableError: discard
       try: discard p.waitForExit(); p.close() except CatchableError: discard
+  let shared = cast[ptr FeedShared](allocShared0(sizeof(FeedShared)))
+  shared.chan.open(maxItems = 1)
+  shared.fd = cint(p.inputHandle)
+  var writer: Thread[ptr FeedShared]
+  createThread(writer, feedWriter, shared)
+  var writeError: cint = 0
   try:
     for part in parts:
       if stopEarly and not p.running:
         break
       let bytes = readVerifiedPart(dir, part)
-      try:
-        input.write(bytes)
-        input.flush()
-      except IOError, OSError:
-        if stopEarly: break
-        raise
+      if shared.writeError != 0 and stopEarly:
+        break
+      shared.chan.send(bytes)
   finally:
-    try: input.close() except CatchableError: discard
+    shared.chan.send("")
+    joinThread(writer)
+    writeError = shared.writeError
+    shared.chan.close()
+    deallocShared(shared)
+    # Closing through the stream closes the pipe exactly once (`close(p)`
+    # closes the stream when one exists, the raw handle otherwise).
+    try: p.inputStream.close() except CatchableError: discard
   result = p.waitForExit()
   p.close()
   completed = true
+  if writeError != 0 and result == 0 and not stopEarly:
+    fail("writing to the unpacker failed: " & $strerror(writeError))
 
 proc checkRoots*(bundle, local: BundleRoots) =
   ## §3: refuse before writing anything if any root differs.
@@ -965,7 +1042,8 @@ proc checkEntryPlacement(c: BundleClosure) =
     if not r.path.withinAny(c.roots.workspaceRoots):
       fail("bundle restamp outside the workspace roots: " & r.path)
 
-proc entryMatches(e: BundleEntry; checkContent: bool): string =
+proc entryMatches(e: BundleEntry; checkContent: bool;
+                  buf: var seq[byte]): string =
   ## "" when the live path is in the recorded state.
   let st = liveState(e.path)
   if not st.exists:
@@ -978,7 +1056,7 @@ proc entryMatches(e: BundleEntry; checkContent: bool): string =
       return "size " & $st.size & ", expected " & $e.size
     if st.mtimeNs != e.mtimeNs:
       return "mtime " & $st.mtimeNs & ", expected " & $e.mtimeNs
-    if checkContent and fileBlake3Hex(e.path) != e.digest:
+    if checkContent and fileBlake3Hex(e.path, buf) != e.digest:
       return "content digest differs"
   of bekLink:
     if expandSymlink(e.path) != e.digest:
@@ -1000,6 +1078,10 @@ proc prefixIntact(prefix: string): bool =
     false
 
 proc peekContents(dir: string; m: ParsedManifest): string =
+  ## The `contents` member, which export writes first. It is read from the
+  ## shortest prefix of the parts that yields it whole: one part, in every
+  ## bundle whose compressed contents list fits in the first part. Each try
+  ## is checked against the manifest's SHA-256 of `contents`.
   let zstdExe = requireTool("zstd")
   let tarExe = requireTool("tar")
   let outPath = dir / ("." & m.bundleId & ".contents")
@@ -1008,11 +1090,15 @@ proc peekContents(dir: string; m: ParsedManifest): string =
     $ZstdWindowLog & " - | " & quoteShell(tarExe) &
     " -xOf - --occurrence=1 " & quoteShell(relToSlash(m.contentsPath)) &
     ") >" & quoteShell(outPath) & " 2>/dev/null"
-  discard feedParts(dir, m.parts, command, stopEarly = true)
-  result = (if fileExists(outPath): readFile(outPath) else: "")
-  if lowerHex(sha256.digest(result).data) != m.contentsSha:
-    fail("bundle contents entry does not match the manifest's SHA-256 " &
-      "(or is not the first member)")
+  for count in 1 .. m.parts.len:
+    removeFile(outPath)
+    # A truncated stream makes the pipeline fail; only the hash decides.
+    discard feedParts(dir, m.parts[0 ..< count], command, stopEarly = true)
+    result = (if fileExists(outPath): readFile(outPath) else: "")
+    if lowerHex(sha256.digest(result).data) == m.contentsSha:
+      return
+  fail("bundle contents entry does not match the manifest's SHA-256 " &
+    "(or is not the first member)")
 
 proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
   ## §5. `local` carries the roots resolved on this machine; workspace roots
@@ -1023,6 +1109,11 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
     if opts.manifestName.len > 0: opts.manifestName
     else: DefaultHalfName & ".json"
   let m = readManifest(dir / manifestName)
+  var phaseStart = getMonoTime()
+  template phaseDone(name: string) =
+    let now = getMonoTime()
+    result.phaseSeconds.add((name, (now - phaseStart).inNanoseconds.float / 1e9))
+    phaseStart = now
   # Steps 1 + 2: verify the parts that carry `contents`, read it, check roots.
   let contentsText = peekContents(dir, m)
   let c = parseContents(contentsText)
@@ -1035,6 +1126,7 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
   result.roots = c.roots
   result.devEnvs = c.devEnvs
 
+  var hashBuf: seq[byte]
   let marker = c.roots.storeRoot / BundlesDirName / m.bundleId /
     ImportedMarkerName
   var alreadyThere = false
@@ -1048,7 +1140,7 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
           alreadyThere = false
           break
         continue
-      if entryMatches(e, checkContent = false).len > 0:
+      if entryMatches(e, checkContent = false, hashBuf).len > 0:
         alreadyThere = false
         break
 
@@ -1056,6 +1148,7 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
   if alreadyThere:
     result.skippedExtraction = true
   else:
+    phaseDone("verify contents + roots")
     # Step 3: unpack, leaving intact content-addressed prefixes alone.
     for prefix in c.prefixes:
       if dirExists(prefix) and prefixIntact(prefix):
@@ -1082,6 +1175,7 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
       fail("unpack failed (exit " & $code & "): " &
         (if fileExists(errPath): readFile(errPath).strip() else: ""))
 
+  phaseDone("unpack")
   # Step 4: verify every unpacked entry against `contents`.
   var excludedList: seq[string]
   for prefix in excluded: excludedList.add(prefix)
@@ -1090,12 +1184,13 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
       continue
     if alreadyThere and e.path.withinAny(c.edges):
       continue
-    let problem = entryMatches(e, checkContent = not alreadyThere)
+    let problem = entryMatches(e, checkContent = not alreadyThere, hashBuf)
     if problem.len > 0:
       fail("unpacked entry does not match the bundle (" & problem & "): " &
         e.path & "; nothing was registered")
     inc result.verifiedEntries
 
+  phaseDone("verify entries")
   # Step 5.1: prefixes, from their receipts, held by a bundle root.
   let recovered = recoverStoreRoot(c.roots.storeRoot)
   result.reinsertedPrefixes = recovered.reinsertedPrefixes.len
@@ -1112,6 +1207,7 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
       if store.lookupPrefix(receipt.realizationHash).found:
         store.attachPrefixToRoot(rootId, receipt.realizationHash)
 
+  phaseDone("register prefixes")
   # Step 5.2: re-witness the records the exporter vouched for.
   if c.records.len > 0:
     var cache = openActionCache(c.roots.actionCacheRoot / "action-cache",
@@ -1130,6 +1226,7 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
           discard refreshRestoredOutputs(cache, record, strongs[hex])
           inc result.rewitnessedRecords
 
+  phaseDone("re-witness records")
   # Step 5.3: restamp source inputs whose bytes are the recorded ones.
   for r in c.restamps:
     let st = liveState(r.path)
@@ -1138,12 +1235,13 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
       continue
     if st.mtimeNs == r.mtimeNs:
       continue
-    if fileBlake3Hex(r.path) != r.digest:
+    if fileBlake3Hex(r.path, hashBuf) != r.digest:
       inc result.restampMismatches
       continue
     setMtimeNs(r.path, r.mtimeNs)
     inc result.restamped
 
+  phaseDone("restamp inputs")
   # Step 6.
   createDir(marker.parentDir)
   writeFile(marker, m.bundleId & "\n")

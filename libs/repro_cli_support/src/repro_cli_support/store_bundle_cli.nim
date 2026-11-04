@@ -256,6 +256,9 @@ else:
               return 1
         if emitJson:
           var envs = newJArray()
+          var phases = newJObject()
+          for (phase, seconds) in report.phaseSeconds:
+            phases[phase] = %seconds
           for env in report.devEnvs:
             envs.add(%*{"projectRoot": env.projectRoot,
               "script": env.scriptPath})
@@ -269,7 +272,8 @@ else:
             "rewitnessedRecords": report.rewitnessedRecords,
             "restamped": report.restamped,
             "restampMismatches": report.restampMismatches,
-            "frozenDevEnvs": envs})
+            "frozenDevEnvs": envs,
+            "phaseSeconds": phases})
         else:
           echo "bundle " & report.bundleId &
             (if report.skippedExtraction: ": already imported, verified"

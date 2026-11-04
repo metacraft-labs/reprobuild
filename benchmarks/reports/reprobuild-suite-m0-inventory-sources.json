@@ -2,7 +2,7 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
     "nimTestBinaries": 2628,
-    "pureUnitConsolidationGroups": 77,
+    "pureUnitConsolidationGroups": 78,
     "pureUnitTests": 730,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
     "testEntries": 2668
@@ -497,7 +497,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -510,7 +510,22 @@
         "libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim",
         "libs/repro_local_store/tests/t_per_computation_output_dirs.nim",
         "libs/repro_local_store/tests/t_retention_gc.nim",
-        "libs/repro_local_store/tests/t_store_budget_gc.nim",
+        "libs/repro_local_store/tests/t_store_budget_gc.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim",
         "libs/repro_local_store/tests/t_store_bundle_roundtrip.nim"
       ],
       "targetOs": "soAny"
@@ -18067,7 +18082,8 @@
       "localDependencyShape": [
         "repro_core",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_local_store",
       "requiresReproBinary": false,

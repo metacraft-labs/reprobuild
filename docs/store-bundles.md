@@ -39,7 +39,17 @@ when one is set. It has these parts:
    the `.rec` files and their sidecars (`.octime`, `.det`, the
    execution-observation and input-access sidecars).
 2. **Recorded outputs.** Every output path named by an included record that
-   exists on disk. Directory outputs are included recursively.
+   exists on disk. Directory outputs are included recursively. The CAS blobs
+   of payload-backed records are included too.
+
+   A record is exported as *re-witnessable* (§5.1) only if three things hold.
+   Its outputs pass the in-place check on the exporting host. All of its
+   outputs lie inside the bundle roots. And, for a relocatable record (one
+   whose paths are relative to the action's directory, which the record does
+   not name), there is a project directory under the roots where its in-place
+   check passes; that directory is recorded with it. Any other record that
+   touches a root is reported by `closure` with the reason, and is not
+   re-witnessed. It simply misses on the importing machine.
 3. **Project state.** Every `.repro/` directory under a workspace root (not
    under `.git/`), recursively. This covers the legacy install mirrors
    (`.repro/output/install`), their `.realization-info` sidecars, the engine's
@@ -116,8 +126,8 @@ The published form is the same as the other dev-shell bundle halves:
 
 ### 4.1 `contents`
 
-A line-oriented UTF-8 text file. Fields are separated by TAB. Paths are the
-last field, with `\`, TAB and newline escaped as `\\`, `\t` and `\n`.
+A line-oriented UTF-8 text file. Fields are separated by TAB. Path and link-target fields are escaped,
+with `\`, TAB and newline written as `\\`, `\t` and `\n`.
 
 ```
 reprobuild.store-bundle.contents.v1
@@ -126,6 +136,7 @@ root	action-cache	<abs>
 root	workspace	<abs>          (one per workspace root)
 devenv	<project-root>	<script-abs-path>
 edge	<abs edge dir>
+record	<strong-hex>	<abs edge dir>	<abs action dir, or empty>
 prefix	<abs prefix dir>
 entry	<kind>	<mode-octal>	<size>	<mtime-ns>	<blake3-hex|->	<abs path>
 restamp	<size>	<mtime-ns>	<blake3-hex>	<abs path>

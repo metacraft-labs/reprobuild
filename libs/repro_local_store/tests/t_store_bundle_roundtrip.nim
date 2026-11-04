@@ -125,10 +125,23 @@ suite "store bundle round trip":
       check before.status == aclHit
       check f.lookup("consumer").status == aclHit
 
+      # A record that writes outside every bundle root cannot travel: it is
+      # reported, and the rest of the bundle is unaffected.
+      block:
+        writeFile(f.top / "elsewhere.txt", "outside\n")
+        var cache = openActionCache(f.ac / "action-cache", attachShm = false)
+        var cas = openStore(f.ac)
+        discard cache.recordActionResult(cas, weakOf("outside"), ffpTimestamp,
+          [f.ws / "src" / "in.txt"], [f.top / "elsewhere.txt"],
+          storeOutputBlobs = false)
+        cas.close()
+        cache.closeShmTier()
+
       let closure = computeClosure(f.roots)
-      check closure.edges.len == 2
+      check closure.edges.len == 3
       check closure.records.len == 2
-      check closure.skippedRecords.len == 0
+      check closure.skippedRecords.len == 1
+      check "outside the bundle roots" in closure.skippedRecords[0].reason
       check closure.prefixes.len == 1
       check closure.restamps.len == 1
       check closure.restamps[0].path == f.ws / "src" / "in.txt"
