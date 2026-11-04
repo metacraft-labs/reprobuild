@@ -281,6 +281,8 @@ the other halves' parts, into `$DL/native-store/`:
 ```sh
 export REPRO_STORE_ROOT=/root/.cache/repro/store
 export REPROBUILD_ACTION_CACHE_ROOT=/root/.cache/repro/action-cache
+# Whatever compiler selection the publisher used (§10), e.g.
+# export REPRO_NIM_COMPILER=/nix/store/...-nim-wrapper-2.2.4/bin/nim
 repro store import "$DL/native-store" --allow-dev-env
 # Enter the project environment without running repro:
 echo ". <store>/frozen-dev-env/<key>/activate.bash" >> ~/.bashrc
@@ -301,3 +303,75 @@ Nothing is registered in that case.
 * Whether workspace builds should register a `workspace:<root>` GC root as
   they run, so the closure can be read from roots instead of scanning the
   action cache.
+* The transport manifest's field names follow the description of the
+  dev-shell bundle format, not its source, which this draft could not read.
+  They should be aligned with `scripts/devshell-bundles` before the half is
+  published.
+* A relocatable record with no outputs cannot be placed in a project
+  directory, so it is not re-witnessed. Stale records (for example, from an
+  earlier engine binary) are reported and skipped, but they still travel in
+  their edge directories. Pruning them at export would shrink bundles.
+* The package recipe builds `repro` in debug mode. That roughly doubles
+  import time (§10), and the same holds for every other `repro` operation.
+
+## 10. Verification and measurements
+
+All numbers were measured at commit `0b68582`. The container was a cloud
+session host with 4 vCPU, 15 GiB RAM and ~600 MB/s sequential disk write. The
+`repro` binaries were built by `scripts/build_apps.sh` in its default
+(debug) mode, the mode the package recipe uses today.
+
+**Fixture.** `tests/integration/source_producer_fixture.nim`'s layout: a
+consumer whose `buildDeps` producer `probe` is built from source
+(`--tool-provisioning=from-source`). The provider compile and the recipe
+compile ran with a Nix gcc and Nim, through wrappers that log every
+invocation.
+
+**Procedure.**
+1. Build the fixture, then build again until warm.
+2. `repro store export --root=<fixture> --freeze-dev-env=<consumer>`.
+3. Move the fixture away. Recreate it with only its source files, copied
+   without preserving mtimes (a fresh checkout), and delete the compile
+   scratch under `/tmp`.
+4. `repro store import <out> --allow-dev-env`.
+5. Source the frozen script with no `repro` on PATH.
+6. `repro build` with `HTTPS_PROXY`/`HTTP_PROXY` pointing at a closed port.
+
+| Case | Unpacked | Parts | Import | Rebuild after import | Compiler runs |
+| --- | --- | --- | --- | --- | --- |
+| Fixture | 56 MB, 263 entries | 1 (1.3 MB, `-19`) | 8.0 s | 7.8 s, all up to date | 0 |
+| Fixture + 1.8 GB install-mirror payload | 2.48 GB, 75 131 entries | 6 (350 MB, `-9`) | 35.9 s | 8.0 s, all up to date | 0 |
+| Control: fresh checkout, no bundle | — | — | — | 158.8 s, both producers executed | 278 |
+
+The frozen dev-env script activated in 7 ms, with no `repro` process.
+
+**Import phases** (library harness on the 2.35 GB bundle, into empty roots,
+caches dropped between runs):
+
+| Phase | debug | `-d:release` |
+| --- | --- | --- |
+| verify parts + read `contents` + check roots | 5.1 s | 1.1 s |
+| unpack (`zstd -d \| tar -x`) | 15.7 s | 7.3 s |
+| verify every entry (BLAKE3) | 6.8 s | 5.5 s |
+| register prefixes | 0.0 s | 0.0 s |
+| re-witness records | 5.8 s | 1.1 s |
+| total | 33.5 s | 16.4 s |
+
+Plain `cat parts | zstd -d | tar -x` of the same bundle into an empty
+directory took 7.1 s, so the release unpack runs at the disk floor. Before
+`0b68582`, the debug import of that bundle took 268 s. Nearly all of it was
+verification: a zeroed 1 MiB buffer per hashed file, and BLAKE3's C compiled
+at `-O0`. In the debug build, re-witnessing costs about 200 ms per
+provider-compile record (15–20k inputs each), spent in the record encoder.
+
+Things the measurement depended on:
+
+* **The same compiler selection on both sides.** The recipe and provider
+  compiles key on the compiler that runs them. The bundle can only hit if the
+  session selects the same compiler (here `REPRO_NIM_COMPILER` and
+  `REPRO_BOOTSTRAP_CC`, both pointing into `/nix/store`). Without those
+  variables `repro` provisions the pinned compilers from `github:` flake
+  references, and a cloud session refuses those GitHub archive downloads.
+* **The same `repro` binary.** Provider-compile records fingerprint the
+  engine binary, so publisher and session must run the same build (in
+  practice, the same Nix-half closure).
