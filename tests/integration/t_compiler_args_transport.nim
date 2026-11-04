@@ -23,6 +23,7 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_interface_artifacts
 import repro_interface_artifacts/compiler_args_transport
 import repro_tool_profiles
+import repro_test_support
 
 suite "compiler argument transport":
   test "measures the command line CreateProcessW receives":
@@ -84,7 +85,9 @@ suite "compiler argument transport":
   when defined(windows):
     test "a >32,767-unit provider compile fails directly and compiles via the file":
       let root = createTempDir("t_compiler_args_transport_win_", "")
-      defer: removeDir(root)
+      # The private tool store's action-cache records sit past MAX_PATH under
+      # %TEMP%; `removeDirEventually` retries with the extended-length form.
+      defer: removeDirEventually(root)
       let store = root / "tool-store"
       let nim = provisionBootstrapNim(store, bnrArchive)
       writeFile(root / "main.nim",

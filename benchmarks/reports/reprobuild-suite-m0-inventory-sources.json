@@ -37228,6 +37228,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_interface_artifacts",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/integration",
