@@ -7216,6 +7216,60 @@ proc runScoopInstall(scoopExecutable, scoopRoot, bucket, app: string;
       "EScoopInstallFailed: scoop install " & appRef &
       " (root=" & scoopRoot & ") exited " & $res.exitCode & "\n" & res.output)
 
+proc parseScoopProvenance*(provenance: string): tuple[
+    ok: bool, bucket, app, version: string] =
+  ## Parse a recorded Scoop provenance string `"scoop:<bucket>/<app>@<version>"`
+  ## (or `"scoop:<bucket>/<app>"`).
+  if not provenance.startsWith("scoop:"):
+    return (false, "", "", "")
+  let body = provenance["scoop:".len .. ^1]
+  let slash = body.find('/')
+  if slash <= 0 or slash + 1 >= body.len:
+    return (false, "", "", "")
+  let bucket = body[0 ..< slash]
+  let rest = body[slash + 1 .. ^1]
+  let at = rest.find('@')
+  if at < 0:
+    return (true, bucket, rest, "")
+  if at == 0:
+    return (false, "", "", "")
+  let app = rest[0 ..< at]
+  let version = if at + 1 < rest.len: rest[at + 1 .. ^1] else: ""
+  result = (true, bucket, app, version)
+
+proc uninstallScoopApp*(app: string; scoopOverride = "") =
+  ## Uninstall a Scoop-managed application when a generation transition
+  ## (apply or rollback) removes it from the active home profile or switches
+  ## its realization away from the Scoop adapter (Scoop-Catalog-Adapter.md
+  ## § Removal). Invokes `scoop uninstall <app>` when the Scoop CLI is
+  ## reachable, and ensures `<scoopRoot>/apps/<app>` is cleaned up.
+  if app.len == 0:
+    return
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  if scoopRoot.len == 0:
+    return
+  let appsDir = scoopAppsDir(scoopRoot, app)
+  if not dirExists(extendedPath(appsDir)):
+    return
+  if scoopExe.len > 0:
+    let isPowerShell = scoopExe.endsWith(".ps1")
+    let invocation: seq[string] =
+      if isPowerShell:
+        @["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+          scoopExe, "uninstall", app]
+      else:
+        @[scoopExe, "uninstall", app]
+    let command = invocation.mapIt(quoteShell(it)).join(" ")
+    putEnv("SCOOP", scoopRoot)
+    discard execCmdEx(command)
+  if dirExists(extendedPath(appsDir)):
+    deleteJunctionDir(appsDir / "current")
+    try:
+      removeDir(extendedPath(appsDir))
+    except OSError:
+      discard
+
 proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
                                  executionProfileCaptured: bool):
     PracticalHardening =

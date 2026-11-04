@@ -462,7 +462,7 @@ libs/repro_home_apply/tests/t_junction_aware_remove.nim	nim	7
 libs/repro_home_apply/tests/t_macos_archives.nim	nim	11
 libs/repro_home_apply/tests/t_macos_installer_app_realize.nim	nim	15
 libs/repro_home_apply/tests/t_plan_topological_sort.nim	nim	7
-libs/repro_home_apply/tests/t_preview_chain.nim	nim	6
+libs/repro_home_apply/tests/t_preview_chain.nim	nim	7
 libs/repro_home_apply/tests/t_realize_honors_adapter_preference.nim	nim	4
 libs/repro_home_apply/tests/t_realize_honors_requested_version.nim	nim	3
 libs/repro_home_apply/tests/t_runtime_library_binding.nim	nim	8
@@ -487,7 +487,7 @@ libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	18
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	174
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	176
 libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2

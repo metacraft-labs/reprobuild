@@ -22,7 +22,7 @@
 ##      re-activation time.
 ##  10. Release the lock.
 
-import std/[algorithm, os, strutils, times]
+import std/[algorithm, os, sets, strutils, times]
 from repro_core/paths import extendedPath
 
 import repro_home_apply
@@ -864,6 +864,20 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
             op.targetRecord)
         else: discard
         inc result.launcherOpsApplied
+      # Scoop packages (Scoop-Catalog-Adapter.md § Removal): uninstall any
+      # Scoop package owned by the current generation that is not in the
+      # target generation's Scoop package set.
+      if hcPackages in ownedConcernsOf(tgt.manifest):
+        var targetScoopApps: HashSet[string]
+        for rp in tgt.manifest.realizedPackages:
+          let sc = recordedScoopApp(rp)
+          if sc.ok and sc.app.len > 0:
+            targetScoopApps.incl(sc.app)
+        for rp in cur.manifest.realizedPackages:
+          let sc = recordedScoopApp(rp)
+          if sc.ok and sc.app notin targetScoopApps:
+            if heldByNonProfileRoot(store, rp.realizedPrefixId).len == 0:
+              uninstallScoopRecord(sc.app)
       # M68 resources.
       for op in plan.resourceOps:
         if removesNothingOwned(op):
@@ -1036,6 +1050,12 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
 
       store.close()
       storeClosed = true
+    except CatchableError as err:
+      if not storeClosed:
+        try: store.close() except CatchableError: discard
+        storeClosed = true
+      releaseApplyLock(lock)
+      raise err
     finally:
       if not storeClosed:
         try: store.close() except CatchableError: discard

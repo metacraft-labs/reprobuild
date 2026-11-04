@@ -712,3 +712,65 @@ proc realizePlannedPackages*(store: var Store;
         except ValueError as err:
           raiseRealizeFailed(p.packageId, "<selection>", err.msg)
       result.add(realizeResolution(store, resolution, appTrust))
+
+proc previewedScoopApp*(pp: PackagePreview): string =
+  ## Return the Scoop app name selected by `pp`, or `""` when `pp` does not
+  ## resolve through the Scoop adapter.
+  if pp.resolved and pp.resolution.selection.kind == rkScoop:
+    if pp.resolution.selection.ambient:
+      return pp.resolution.selection.scoopInventory.app
+    return pp.resolution.selection.scoop.app
+  const prefix = "scoop adapter (test seam) -> "
+  if pp.detail.startsWith(prefix):
+    let spec = pp.detail[prefix.len .. ^1]
+    let slash = spec.find('/')
+    if slash >= 0 and slash + 1 < spec.len:
+      return spec[slash + 1 .. ^1]
+
+proc realizedScoopApp*(r: RealizedRecord): string =
+  ## Return the Scoop app name for a realized Scoop package, or `""` otherwise.
+  if r.adapter != akScoop:
+    return ""
+  var provStr = newString(r.provenance.len)
+  for i, b in r.provenance:
+    provStr[i] = char(b)
+  let parsed = parseScoopProvenance(provStr)
+  if parsed.ok:
+    return parsed.app
+
+proc recordedScoopApp*(rp: RealizedPackage): tuple[
+    ok: bool, bucket, app, version: string] =
+  ## Parse the Scoop `(bucket, app, version)` from a manifest's
+  ## `RealizedPackage` record when `rp.adapter == "scoop"`.
+  if rp.adapter != $akScoop:
+    return (false, "", "", "")
+  var provStr = newString(rp.provenance.len)
+  for i, b in rp.provenance:
+    provStr[i] = char(b)
+  result = parseScoopProvenance(provStr)
+
+proc uninstallScoopRecord*(app: string) =
+  ## Uninstall a Scoop-managed app removed by a generation transition.
+  uninstallScoopApp(app, getEnv(ScoopOverrideEnvVar))
+
+proc heldByNonProfileRoot*(store: Store; prefixDigest: Digest256): seq[string] =
+  ## Return any non-`profile` root IDs (`workspace`, `session`, `pin`) in
+  ## `store` that currently hold `prefixDigest`. When empty, no dev shell,
+  ## workspace lock, or explicit pin references this prefix, so an active
+  ## generation transition (`repro home apply` / `rollback`) can eagerly
+  ## uninstall a backing Scoop app.
+  var pid: PrefixIdBytes
+  for i in 0 ..< 32:
+    pid[i] = prefixDigest[i]
+  let holders = store.rootsHolding(pid)
+  if holders.len == 0:
+    return @[]
+  var rootKinds = initTable[string, string]()
+  for r in store.listRoots():
+    rootKinds[r.rootId] = r.kind
+  for h in holders:
+    let k = rootKinds.getOrDefault(h, "")
+    if k.len > 0 and k != $rkProfile:
+      result.add(h & " (" & k & ")")
+
+export parseScoopProvenance

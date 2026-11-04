@@ -16476,13 +16476,15 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
+        "repro_home_generations",
+        "repro_local_store",
         "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_preview_chain.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16954,7 +16956,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
       "sourceSuiteCount": 13,
-      "staticCaseCount": 174,
+      "staticCaseCount": 176,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
