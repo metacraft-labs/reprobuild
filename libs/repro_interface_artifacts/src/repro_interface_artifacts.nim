@@ -84,6 +84,7 @@ import cbor
 import repro_core
 import repro_core/file_lock
 export file_lock.ReproFileLock
+import repro_interface_artifacts/compiler_args_transport
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -7373,13 +7374,12 @@ proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
   ## Release a lock taken by ``acquireExclusiveFileLock``. Idempotent.
   releaseProviderNimcacheLock(lock)
 
-proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
-    ProviderCompileExecutionResult =
-  ## Execute a compiler command whose nimcache the CALLER already holds
-  ## exclusively (`runSharedNimcacheCompilerCommand` takes the directory's
-  ## lock itself; the interface extraction holds a slot lock instead, see
-  ## `acquireInterfaceNimcacheSlot`).
-  result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+proc runLogicalCompilerCommand(command, physical: openArray[string];
+    cwd: string): ProviderCompileExecutionResult =
+  ## Launch `physical` (the logical `command` itself, or its argument-file
+  ## transport), retrying once on an abnormal compiler termination. Failures
+  ## are reported against the logical `command`.
+  result = runCommand(physical, cwd = cwd, raiseOnFailure = false)
   var priorNote = ""
   if compilerCrashIsRetryable(result.exitCode):
     # The compiler died instead of answering, so this run produced no
@@ -7401,9 +7401,40 @@ proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
     priorNote = "note: a first attempt terminated abnormally (" &
       firstCrash & ") and was retried once; the output below is the " &
       "SECOND attempt's.\n"
-    result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+    result = runCommand(physical, cwd = cwd, raiseOnFailure = false)
   if result.exitCode != 0:
     raise commandFailure(command, result, priorNote)
+
+proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  ## Execute a compiler command whose nimcache the CALLER already holds
+  ## exclusively (`runSharedNimcacheCompilerCommand` takes the directory's
+  ## lock itself; the interface extraction holds a slot lock instead, see
+  ## `acquireInterfaceNimcacheSlot`).
+  ##
+  ## `command` is the LOGICAL compiler argv; callers have already formed every
+  ## cache identity from it. When launching it directly would exceed the
+  ## platform's process argument limit (Windows' 32,767-unit command line), the
+  ## same vector is carried through `--compilerArgsFile`, staged in `cwd` -- the
+  ## invocation's own compiler scratch -- for the whole compile including its
+  ## retry, and removed afterwards (codetracer-pm
+  ## `spec/Nim-Compiler-Argument-Files.md`). Diagnostics keep naming the
+  ## logical argv.
+  if command.len == 0:
+    raise newException(OSError, "a compiler command needs a compiler")
+  var physical = @command
+  var argsFile = ""
+  if compilerArgvExceedsPlatformLimit(command):
+    if cwd.len == 0:
+      raise newException(OSError, "a compiler command over the platform " &
+        "argument limit needs an invocation-owned working directory for " &
+        "its argument file: " & command[0])
+    argsFile = stageCompilerArgsFile(cwd, command[1 .. ^1])
+    physical = physicalCompilerCommand(command[0], argsFile)
+  try:
+    result = runLogicalCompilerCommand(command, physical, cwd)
+  finally:
+    removeStagedCompilerArgsFile(argsFile)
 
 proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
     ProviderCompileExecutionResult =

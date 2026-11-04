@@ -17669,6 +17669,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_compiler_args_transport.nim",
+    binary: "build/test-bin/t_compiler_args_transport",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "its binary is named by .github/workflows/ci.yml"),
+  TestSpec(
     source: "tests/integration/t_compiler_scratch_isolation.nim",
     binary: "build/test-bin/t_compiler_scratch_isolation",
     defines: @[],
