@@ -549,6 +549,7 @@ libs/repro_local_store/tests/t_refresh_restored_outputs.nim	nim	2
 libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
 libs/repro_local_store/tests/t_store_budget_gc.nim	nim	12
+libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	5
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
@@ -2215,6 +2216,7 @@ tests/integration/t_status_health_add_remove_use_unified_resolver.nim	nim	1
 tests/integration/t_stdlib_catalog_tarball_arms_realize.nim	nim	1
 tests/integration/t_stdlib_python_tarball_arms_realize.nim	nim	1
 tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	nim	1
+tests/integration/t_store_bundle_cli.nim	nim	1
 tests/integration/t_store_daemon_m66_dev.nim	nim	6
 tests/integration/t_store_roots_resolve_or_report_unresolved.nim	nim	1
 tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim	nim	6

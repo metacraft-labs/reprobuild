@@ -22,6 +22,7 @@ import repro_core/engine_build_info
 import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
+import repro_cli_support/store_bundle_cli
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
@@ -509,7 +510,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " stats [status|overview|rank|show|snapshot|compare]\n       " &
           programName &
-      " store {gc | recover | roots | list | daemon} ...\n       " &
+      " store {gc | recover | roots | list | closure | export | import | daemon} ...\n       " &
           programName &
       " self {install | provision | hold | which | list | prune-roots} ...\n       " &
           programName &
@@ -38959,6 +38960,12 @@ proc runStoreCommand*(args: seq[string]): int =
   ##              SQLite index.
   ##   roots    — list the currently-registered roots.
   ##   list     — list every realized prefix recorded in the index.
+  ##   closure / export / import
+  ##            — native-store bundles: list, write or restore everything the
+  ##              store and caches hold for a set of workspace roots, so a
+  ##              fresh machine at the same paths builds without re-running
+  ##              producers (`repro_cli_support/store_bundle_cli`,
+  ##              docs/store-bundles.md).
   ##   materialize <src-dir> <dst-dir>
   ##            — reproduce a directory tree at another path using the
   ##              store's OWN materialiser (hardlink per file, copy per
@@ -38985,7 +38992,7 @@ proc runStoreCommand*(args: seq[string]): int =
   ## is honoured otherwise.
   if args.len == 0:
     echo "usage: repro store {gc | recover | roots | list | optimise | " &
-      "materialize <src-dir> <dst-dir>} " &
+      "materialize <src-dir> <dst-dir> | closure | export | import} " &
       "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode] " &
       "[--budget=SIZE [--target=SIZE] [--keep-recent=DURATION] " &
       "[--evict-cas] [--dry-run]]"
@@ -38999,6 +39006,15 @@ proc runStoreCommand*(args: seq[string]): int =
   if args[0] == "daemon":
     let daemonArgs = if args.len > 1: args[1 .. ^1] else: @[]
     return runStoreDaemonCommand(daemonArgs)
+  if args[0] in ["closure", "export", "import"]:
+    # Native-store bundles (docs/store-bundles.md). Routed before the flag
+    # loop below: they take their own flags (--root, --out, ...) and must
+    # resolve the action-cache root exactly as `repro build` does.
+    return runStoreBundleCommand(args, StoreBundleCliHooks(
+      resolveActionCacheRoot: proc (explicit: string): string =
+        resolveActionCacheRoot(explicit),
+      allowProject: proc (projectRoot: string): int =
+        runReproAllowCommand([projectRoot])))
   var storeRootOverride = ""
   var graceSeconds = DefaultGcGraceSeconds
   var emitJson = false
