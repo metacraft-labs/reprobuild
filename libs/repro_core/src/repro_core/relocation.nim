@@ -62,10 +62,12 @@ proc hasParentComponent(path: string): bool =
       start = i + 1
   false
 
-proc isRealDirectory(path: string): bool =
+proc isRealDirectory*(path: string): bool =
   ## Whether `path` is, by `lstat`, an existing directory that is NOT a
   ## symlink: the only component a `..` after it may pop lexically. A
-  ## failed `lstat` answers false, which keeps the `..` unfolded.
+  ## failed `lstat` answers false, which keeps the `..` unfolded. Also the
+  ## test `repro_core/paths.normalizedPath` applies before it folds a `..`
+  ## of a POSIX absolute path.
   try:
     getFileInfo(path, followSymlink = false).kind == pcDir
   except OSError:

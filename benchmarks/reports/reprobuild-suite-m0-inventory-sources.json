@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2623,
+    "nimTestBinaries": 2624,
     "pureUnitConsolidationGroups": 77,
-    "pureUnitTests": 728,
+    "pureUnitTests": 729,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2663
+    "testEntries": 2664
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -188,7 +188,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_core"
@@ -198,6 +198,7 @@
         "libs/repro_core/tests/t_engine_build_info.nim",
         "libs/repro_core/tests/t_installed_prefix_anchors.nim",
         "libs/repro_core/tests/t_nix_store_references_scan.nim",
+        "libs/repro_core/tests/t_normalized_path_folds_absolute_dotdot.nim",
         "libs/repro_core/tests/t_target_object_check.nim"
       ],
       "targetOs": "soAny"
@@ -1523,7 +1524,7 @@
       "graph-fixture": 19,
       "integration": 1454,
       "platform/destructive": 165,
-      "pure unit": 728,
+      "pure unit": 729,
       "unclassified": 297
     },
     "graphOwnedTestArtifacts": [
@@ -1732,9 +1733,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2623,
+    "nimTestBinaryCount": 2624,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2663
+    "testEntryCount": 2664
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13294,6 +13295,23 @@
       "source": "libs/repro_core/tests/t_nix_store_references_scan.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_normalized_path_folds_absolute_dotdot",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_normalized_path_folds_absolute_dotdot.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

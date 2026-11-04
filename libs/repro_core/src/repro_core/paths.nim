@@ -1,4 +1,5 @@
 import std/[strutils]
+from ./relocation import isRealDirectory
 when defined(posix):
   import std/[posix, sha1]
 type
@@ -25,15 +26,119 @@ proc collapseSlashes(path: string): string =
       result.add(ch)
       priorSlash = false
 
+proc absoluteRootLen(cleaned: string): int =
+  ## The length of the root of `cleaned` (separators already `/`, runs of
+  ## them collapsed) when it is an absolute path whose dot segments can be
+  ## folded, or 0 when it is not: `/` (POSIX, or the current drive's root on
+  ## Windows) is 1, a drive root such as `D:/` is 3.
+  ##
+  ## A drive-relative spelling (`D:foo`) is relative to a per-drive current
+  ## directory this process cannot see, so it answers 0 and keeps the
+  ## relative-path rules.
+  if cleaned.startsWith("/"):
+    1
+  elif cleaned.len >= 3 and cleaned[0].isAlphaAscii and cleaned[1] == ':' and
+      cleaned[2] == '/':
+    3
+  else:
+    0
+
+proc hasDotSegment(cleaned: string): bool =
+  for part in cleaned.split('/'):
+    if part == "." or part == "..":
+      return true
+  false
+
+proc foldAbsoluteDotSegments(cleaned: string; rootLen: int;
+                             physicalParents: bool): string =
+  ## `cleaned`, absolute with a root of `rootLen` characters, with every `.`
+  ## segment dropped and every `..` popping the segment before it.
+  ##
+  ## Lexical folding is exact only where the operating system folds the same
+  ## way. Win32 normalizes a drive-rooted or `/`-rooted path lexically before
+  ## any reparse point is consulted
+  ## (https://learn.microsoft.com/en-us/dotnet/standard/io/file-path-formats#path-normalization),
+  ## so a Windows path folds purely. A POSIX kernel resolves `..` against the
+  ## directory it actually reached, so `/a/link/../b` is `<link target's
+  ## parent>/b`, not `/a/b` -- "Never pop a symlink component lexically"
+  ## (Monitor-Hook-Shim.md, §"Metadata, Probe, And Symlink APIs"; the same
+  ## rule `relocation.foldedPath` follows). With `physicalParents` a `..` pops
+  ## only a segment `lstat` shows to be an existing directory that is not a
+  ## symlink; anything else is refused rather than given a spelling that
+  ## names a different file from the one the process would reach.
+  ##
+  ## A `..` with nothing left to pop climbs above the root. The kernel would
+  ## clamp it to the root, but a path composed that way is a mistake in
+  ## whatever built it, so it is refused too.
+  ##
+  ## A trailing separator is kept, as the unfolded spelling keeps it.
+  let root = cleaned[0 ..< rootLen]
+  var parts: seq[string] = @[]
+  for part in cleaned[rootLen .. ^1].split('/'):
+    case part
+    of "", ".":
+      discard
+    of "..":
+      if parts.len == 0:
+        raise newException(ValueError,
+          "normalized path must not climb above its root with '..': " &
+          cleaned)
+      if physicalParents and not isRealDirectory(root & parts.join("/")):
+        raise newException(ValueError,
+          "normalized path has a '..' after '" & root & parts.join("/") &
+          "', which is not an existing directory that is not a symlink, " &
+          "so it cannot be folded to the directory the kernel reaches: " &
+          cleaned)
+      parts.setLen(parts.len - 1)
+    else:
+      parts.add(part)
+  result = root & parts.join("/")
+  if parts.len > 0 and cleaned.endsWith("/"):
+    result.add('/')
+
 proc normalizedPath*(path: string): NormalizedPath =
-  let cleaned = collapseSlashes(normalizeSeparators(path).strip())
+  ## `path` in the one spelling a `ProcessSpec` carries (and an action's
+  ## identity is computed from): `/` separators, no empty segments, and no
+  ## `..`.
+  ##
+  ## A RELATIVE path is kept as written apart from that, and a `..` in it is
+  ## refused: it is resolved later against some base, which a `..` could
+  ## escape, and a spelling that still holds one is not the single spelling
+  ## of anything.
+  ##
+  ## An ABSOLUTE path (`/...`, or a drive-rooted `D:/...` in either separator
+  ## spelling) has its `.` and `..` segments folded instead, so `/a/b/../c`
+  ## is `/a/c` and `D:\a\b/../c` is `D:/a/c`. Callers hand this operator- and
+  ## environment-supplied roots such as `$REPROBUILD_REPO_ROOT`, and
+  ## `<checkout>/../<sibling>` is an ordinary way to name one. See
+  ## `foldAbsoluteDotSegments` for when folding is refused (a `..` above the
+  ## root, or after a POSIX symlink).
+  ##
+  ## A path spelled with two leading separators (a UNC share `\\server\share`
+  ## or a `\\?\` / `\\.\` device path, where Windows does not fold `..` at
+  ## all) still refuses `..`, as before.
+  let separated = normalizeSeparators(path).strip()
+  var cleaned = collapseSlashes(separated)
   if cleaned.len == 0:
     raise newException(ValueError, "normalized path must not be empty")
   if cleaned == ".":
     return NormalizedPath(kind: npRelative, value: ".")
-  for part in cleaned.split('/'):
-    if part == "..":
-      raise newException(ValueError, "normalized path must not contain '..'")
+  let rootLen =
+    if separated.startsWith("//"): 0
+    else: absoluteRootLen(cleaned)
+  if rootLen > 0:
+    if hasDotSegment(cleaned):
+      # `/` on a POSIX host is resolved physically by the kernel; a drive
+      # root, or any root on a Windows host, follows Win32's lexical rules.
+      let physicalParents =
+        when defined(windows): false
+        else: rootLen == 1
+      cleaned = foldAbsoluteDotSegments(cleaned, rootLen, physicalParents)
+  else:
+    for part in cleaned.split('/'):
+      if part == "..":
+        raise newException(ValueError,
+          "normalized path must not contain '..'")
   let kind =
     if cleaned.startsWith("/"): npAbsolute
     else: npRelative
