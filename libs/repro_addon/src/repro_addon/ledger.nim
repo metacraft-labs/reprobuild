@@ -30,6 +30,7 @@ import std/[algorithm, os, posix, sets, strutils, tables]
 import ./etc_write
 import ./fingerprint
 import ./host_exec
+import ./nft_tables
 
 type
   LedgerClass* = enum
@@ -92,6 +93,11 @@ type
       ## ``baseUnitState`` / ``baseActiveState`` what it reported before).
       ## A removed requirement changes nothing on the host (spec §4.1), so
       ## the entry then stays, resource-less, accounting for the state.
+    lcNftTable = "nftTable"
+      ## The add-on's own nftables table (``inet repro_addon_egress``, the
+      ## egress observer; owner decision 2026-11-04): ``path`` is
+      ## ``<family> <name>``. Created by generation 0's observer unit,
+      ## removed by uninstall; no other table is ever the add-on's.
 
   LedgerEntry* = object
     class*: LedgerClass
@@ -364,6 +370,11 @@ proc observeDrift*(e: LedgerEntry): string =
     # Content unpinned by definition: the agent owns the bytes. Even a
     # missing record is not drift -- the agent may rotate its files.
     ""
+  of lcNftTable:
+    let l = listTableNames()
+    if not l.ok: return "unreadable: " & l.why
+    if e.path notin l.tables: return "missing"
+    ""
   of lcMount, lcDiversion, lcStorePrefix, lcAccount, lcUnitState:
     ""
 
@@ -520,6 +531,9 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
         if k != sysctlFingerprintKey(e.path):
           result.add(ExpectedRecord(component: fcSysctl, key: k, value: "*",
                                     coupled: true))
+    of lcNftTable:
+      result.add(ExpectedRecord(component: fcNftables, key: e.path,
+        value: "table"))
     of lcKey, lcStorePrefix, lcKept:
       discard  # under /var/lib/repro and /repro: not fingerprinted
 

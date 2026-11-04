@@ -11,8 +11,8 @@
 ## It reports, per enrolled host:
 ##
 ## * every DETECTION record of an add-on detector, as an alert under its
-##   threat-model identifier (DET-AO-1, -2, -4, -5, -6, -7 and the host half
-##   of -10);
+##   threat-model identifier (DET-AO-1, -2, -3, -4, -5, -6, -7 and the host
+##   half of -10);
 ## * DET-AO-8, silence -- distinct from "nothing detected" (DET-5). A
 ##   detector with a heartbeat of its own (the deploy agent's tick, the
 ##   shipping unit) is ``silent`` once ``silenceFactor`` intervals passed
@@ -86,6 +86,7 @@ type
 const
   DetectorIds* = {"addon-manifest": "DET-AO-1",
                   "addon-apply-refusal": "DET-AO-2",
+                  "addon-egress": "DET-AO-3",
                   "addon-reassert": "DET-AO-4",
                   "addon-store": "DET-AO-5",
                   "addon-apt-hook": "DET-AO-6",
@@ -301,7 +302,11 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
 
     # DET-AO-8: heartbeats, then the per-boot and per-dpkg-run rules.
     var beating = @["addon-evidence-ship"]
-    if h.target.len > 0: beating.add("addon-agent-tick")
+    if h.target.len > 0:
+      # An agent host with a sink carries the egress observer, which
+      # heartbeats on its own timer (DET-AO-3's DET-5).
+      beating.add("addon-agent-tick")
+      beating.add("addon-egress")
     var alive = initTable[string, bool]()
     for det in beating:
       var st = DetectorStatus(host: h.hostId, detector: det,

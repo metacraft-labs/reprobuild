@@ -63,6 +63,8 @@ import ./base_identity
 import ./bootstrap
 import ./collision
 import ./evidence_ship
+import ./evidence_enrol
+import ./egress_observer
 import ./fingerprint
 import ./generation0
 import ./ledger
@@ -98,6 +100,15 @@ commands:
   evidence-ship [--heartbeat]
       The shipping unit (repro-addon-evidence.service): append every queued
       evidence record to the Evidence sink, then a heartbeat.
+  evidence-enrol --evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]
+      Give an add-on host bootstrapped without an Evidence sink one: create
+      the attestation key and the sink write credential (never adopting or
+      replacing a key), and apply generation 0's evidence objects -- and,
+      with the deploy agent, its egress observer -- as one switch.
+  egress-check
+      The egress observer's check (repro-addon-egress-check.service): record
+      every destination the deploy agent's fetch unit was refused, and
+      heartbeat.
   evidence-credential-check
       Test this host's sink write credential: an append must succeed and a
       list, a read, an overwrite and a delete must each be refused. Exit 0
@@ -497,6 +508,10 @@ proc runAddonCli*(args: seq[string]): int =
       return runEvidenceShipCli(rest)
     of "evidence-credential-check":
       return runCredentialCheckCli(rest)
+    of "evidence-enrol":
+      return runEvidenceEnrolCli(rest)
+    of "egress-check":
+      return runEgressCheckCli(rest)
     of "agent-tick":
       return agent_split.runAgentTickCli(rest)
     of "agent-fetch":

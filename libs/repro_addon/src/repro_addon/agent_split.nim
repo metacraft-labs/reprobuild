@@ -55,6 +55,7 @@ import ./agent_switch
 import ./apt_hook
 import ./evidence
 import ./evidence_ship
+import ./tick_evidence
 import ./fingerprint
 import ./generation0
 import ./host_exec
@@ -62,7 +63,7 @@ import ./ledger
 import ./mutations
 import ./verified_compile
 
-export agent_checks, verified_compile
+export agent_checks, verified_compile, tick_evidence
 import ./preflight
 import ./seams
 import ./secrets_ops
@@ -797,88 +798,21 @@ proc preserveRefusedStaging*(copyDir: string): string =
   except CatchableError:
     result = ""
 
-proc tickIntervalMs*(confPath = EvidenceConfPath): int64 =
-  ## The longest a tick may take to follow the previous one, from the
-  ## evidence configuration (0 when unknown).
-  try: int64(loadEvidenceConf(confPath).tickSec) * 1000
-  except CatchableError: 0
+proc refusalOf(ctx: AgentApplyContext): TickRefusal =
+  TickRefusal(refusal: ctx.refusal, payload: ctx.refusalPayload,
+    recorded: ctx.refusalRecorded,
+    manifestPayload: stagedText(ctx.copyDir, StagedManifestName))
 
 proc tickDetection*(t: RecordedTick; ctx: AgentApplyContext):
     tuple[found: bool; detector: AddonDetector; trigger: string;
           offHostOnly: bool] =
-  ## The detection a tick's outcome is, if any (threat model §9). A repeat
-  ## (a quarantined deployment, a paused agent: reported on every tick) goes
-  ## off-host only, so it does not fill the local record directory.
-  if t.raised: return (true, edApplyRefusal, "tick-raised", false)
-  let o = t.outcome
-  case o.kind
-  of aoRejected, aoAmbiguous:
-    (true, edManifest, "addon-manifest-refused", false)
-  of aoSecretsFailed: (true, edManifest, "sealed-section-failed", false)
-  of aoApplyFailed:
-    if ctx.refusal.len > 0:
-      if ctx.refusalRecorded: (false, edApplyRefusal, "", false)
-      else: (true, edApplyRefusal, "addon-staging-refused", false)
-    elif $adStoreChanged in o.message: (true, edStore, "store-changed", false)
-    else: (true, edApplyRefusal, "apply-failed", false)
-  of aoStale:
-    # The host half of DET-AO-10 (spec §9.2, threat model G32): the kind
-    # the A8 record had, so its local file name is unchanged.
-    (true, edFreshness, "stale-manifest", false)
-  of aoRolledBack:
-    if o.errorCode == "quarantined": (true, edRollback, "quarantined", true)
-    else: (true, edRollback, "rolled-back", false)
-  of aoPaused: (true, edRollback, "paused", true)
-  of aoUnsupportedBase: (true, edApplyRefusal, "unsupported-base", false)
-  of aoOperatorAction: (true, edApplyRefusal, "operator-action", false)
-  else: (false, edApplyRefusal, "", false)
+  tickDetection(t, refusalOf(ctx))
 
 proc recordTickEvidence*(t: RecordedTick; ctx: AgentApplyContext;
                          site = defaultSite()) =
-  ## The tick's records: its detection, if it is one, and its heartbeat
-  ## (DET-AO-8), which carries the applied sequence the off-host lag check
-  ## compares (DET-AO-10). Never raises: a record that cannot be written is
-  ## reported on stderr (the journal), and the outcome stands.
-  let o = t.outcome
-  var fields = @[("outcome", if t.raised: "tickRaised" else: $o.kind),
-                 ("target", o.target), ("sequence", $o.sequence),
-                 ("deploymentId", o.deploymentId), ("errorCode", o.errorCode),
-                 ("message", if t.raised: t.error else: o.message)]
-  let d = tickDetection(t, ctx)
-  if d.found and not mutated("tick-records-no-detection"):
-    var payload = ""
-    var extra: seq[(string, string)]
-    # A refused compile keeps the A8 record's file name.
-    let kind = if d.trigger == "addon-staging-refused" and
-                   ctx.refusal.startsWith(CompiledProfileRefusal):
-                 "compiled-profile-refused"
-               else: d.trigger
-    if d.trigger == "addon-manifest-refused":
-      payload = stagedText(ctx.copyDir, StagedManifestName)
-    elif d.trigger == "addon-staging-refused":
-      payload = ctx.refusalPayload
-      extra.add(("reason", ctx.refusal))
-    try:
-      discard recordEvidence(EvidenceEvent(detector: d.detector,
-        category: ecDetection, trigger: d.trigger, kind: kind,
-        fields: fields & extra,
-        payload: payload, attest: true, offHostOnly: d.offHostOnly), site)
-    except CatchableError as e:
-      stderr.write("repro-addon: cannot write the tick's evidence record: " &
-        e.msg & "\n")
-  try:
-    var applied = ""
-    let cur = readCurrentGenerationId(site.stateDir)
-    if cur.len > 0: applied = $readAgentRecord(site.stateDir, cur).sequence
-    discard recordEvidence(EvidenceEvent(detector: edAgentTick,
-      category: ecHeartbeat, trigger: "", kind: "tick",
-      fields: fields & @[("intervalMs", $tickIntervalMs(site.confPath)),
-                         ("appliedSequence", applied),
-                         ("count", $t.addOnDrift.len)],
-      attest: true, offHostOnly: true), site)
-  except CatchableError as e:
-    stderr.write("repro-addon: cannot write the tick's heartbeat: " & e.msg &
-      "\n")
+  ## ``tick_evidence.recordTickEvidence`` for one of the add-on agent's own
+  ## ticks, with what its apply refused.
+  recordTickEvidence(t, refusalOf(ctx), site)
 
 proc runAddonAgentTick*(cfg: AgentConfig; ctx: var AgentApplyContext;
                         what: string): RecordedTick =

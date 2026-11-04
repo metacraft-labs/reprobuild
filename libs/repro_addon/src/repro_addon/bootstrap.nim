@@ -44,6 +44,7 @@ import repro_deploy_agent/secrets
 import ./addon_apply
 import ./attestation
 import ./evidence
+import ./evidence_keys
 import ./fingerprint
 import ./generation0
 import ./static_tree
@@ -51,6 +52,7 @@ import ./host_exec
 import ./ledger
 import ./linux_fs
 import ./mutations
+import ./nft_tables
 import ./preflight
 import ./store_root
 
@@ -331,26 +333,19 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let shipping = plan.gen0Inputs.evidence.sinkAddress.len > 0
   if shipping:
     entries.add(establishRoot(plan, EvidenceStateDir, 0o700))
-    let att = ensureAttestationKey(AttestationKeyPath)
-    if not att.created:
-      raise newException(AddonBootstrapError, AttestationKeyPath &
-        " appeared after the preflight; refusing to adopt it")
-    createExclusive(AttestationPubPath, att.publicKeyHex & "\n", 0o444)
-    result.attestationPublicKeyHex = att.publicKeyHex
-    let cred = loadOrCreateHostIdentity(EvidenceCredentialCertPath,
-                                        EvidenceCredentialKeyPath)
-    discard posix.chmod(EvidenceCredentialKeyPath.cstring, Mode(0o400))
-    discard posix.chmod(EvidenceCredentialCertPath.cstring, Mode(0o444))
-    result.evidenceCredentialHost = $cred.hostId
+    let keys = try: createEvidenceKeys()
+               except EvidenceKeysError as e:
+                 raise newException(AddonBootstrapError, e.msg)
+    result.attestationPublicKeyHex = keys.attestationPublicKeyHex
+    result.evidenceCredentialHost = keys.credentialHost
     result.evidenceCredentialCert = EvidenceCredentialCertPath
-    for k in [AttestationKeyPath, AttestationPubPath,
-              EvidenceCredentialKeyPath, EvidenceCredentialCertPath]:
-      let st = statOwner(k)
-      entries.add(LedgerEntry(class: lcKey, path: k, sha256: sha256OfFile(k),
-                              mode: st.mode, owner: st.owner))
-    createDir(EvidenceOutboxPath)
-    setFilePermissions(EvidenceDirPath, {fpUserRead, fpUserWrite, fpUserExec})
-    setFilePermissions(EvidenceOutboxPath, {fpUserRead, fpUserWrite, fpUserExec})
+    entries.add(keys.entries)
+    if plan.gen0Inputs.egress.nft.len > 0:
+      # The egress observer's table: generation 0's unit loads it during
+      # the apply below; the ledger tracks it from the start, like every
+      # other object of generation 0 (owner decision 2026-11-04).
+      entries.add(LedgerEntry(class: lcNftTable, path: EgressTableKey))
+    createEvidenceDirs()
 
   # 4. This binary and generation 0's file bodies into the store.
   var files: seq[tuple[name, content: string]]
