@@ -205,10 +205,21 @@
 ## `connectUnix` (which `checkDeclaredDaemon` uses) refuses any path of
 ## `posix.Sockaddr_un_path_length` bytes or more — 108 on Linux, but 92 on
 ## macOS, below the kernel's 104 — and the refusal surfaces as `dcoUnreachable`.
-## A fixture root under a long `TMPDIR` pushes the socket path past it and the
-## check reports the daemon unreachable — which looks exactly like a real red.
-## `makeFixture` keeps its own path components short and refuses a root that
-## is still too long, loudly, instead of producing one.
+## A socket UNDER THE FIXTURE ROOT inherits the suite's `TMPDIR`, which is a
+## per-checkout slot below `$XDG_CACHE_HOME` (`scripts/run_tests.sh`) and is
+## therefore only as short as the home directory it hangs off: on the shared CI
+## runners it is 73 bytes, and this fixture's own socket under it came to 110 —
+## past even Linux's 108 — so every case here that needs a live daemon raised
+## `makeFixture`'s guard instead of asserting anything. The sockets consequently
+## DO NOT live under the fixture root; `makeFixture` takes them from
+## `shortSocketDirAtProcessExit`, whose doc comment states the governing rule:
+## fixture IPC paths must fit independently of the checkout and TMPDIR length
+## (reprobuild `6210412a`). ONLY the endpoints move. Everything the assertions
+## read — the scratch root, the compiled helpers, the logs, the `.contacts`
+## accept logs, the cache root — stays under the fixture root, which is still
+## the thing `isVolatilePrefix` guards; `/tmp` is not one of the volatile
+## prefixes the engine drops (`nonVolatileTempBase` falls back TO it), so
+## relocating an endpoint cannot make a monitor-evidence arm vacuous.
 ##
 ## PLATFORM CONTRACT — LINUX GRADES THE CHECK, EVERY OTHER HOST GRADES ITS
 ## REFUSAL. `reprobuild-pm/milestones/Dependency-Attribution.milestones.org`,
@@ -256,6 +267,11 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
+# Not re-exported by `repro_test_support` (it imports only
+# `releaseDirAtProcessExit` from this module, and exports neither), so the
+# socket directory `makeFixture` takes its endpoints from has to be imported
+# from the submodule by name — the spelling the other callers use.
+from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 const RepoRootMarker = "repro.nim"
 
@@ -490,6 +506,10 @@ type Fixture = object
   root: string
   workRoot: string
   cacheRoot: string
+  sockDir: string
+    ## Where the unix endpoints are bound — and the ONLY part of this fixture
+    ## that is not under `root`, for the reason the socket-length HAZARD in the
+    ## header gives.
   binDir: string
   daemonPath: string
   clientPath: string
@@ -537,7 +557,10 @@ proc makeFixture(): Fixture =
   # under `scripts/run_tests.sh` the `TMPDIR` is a per-checkout slot below
   # `~/.cache/reprobuild-test-tmp/`, and with the longer `repro-decltrust-` /
   # `work` spelling a fixture socket there reached 95 bytes on macOS, past
-  # std/net's 92.
+  # std/net's 92. Keeping them short was never enough — a 73-byte slot still
+  # overflowed — which is why the endpoints have since moved out from under the
+  # root entirely, below; the short components stay because every OTHER path in
+  # the fixture is still built from `root`.
   let root = createTempDir("rdt-", "", dir = nonVolatileTempBase())
   if root.isVolatilePrefix():
     raise newException(IOError,
@@ -549,29 +572,40 @@ proc makeFixture(): Fixture =
   createDir(binDir)
   let logDir = workRoot / "o"
   createDir(logDir)
+  # THE ENDPOINTS ARE NOT UNDER `root` (socket-length HAZARD in the header).
+  # `shortSocketDirAtProcessExit` hands out a fresh owner-only (0700) directory
+  # DIRECTLY under `/tmp` — `/tmp/rdt-<12 hex>`, 21 bytes — removed when this
+  # process exits, because fixture IPC paths must fit independently of the
+  # checkout and TMPDIR length (reprobuild `6210412a`). The tag is four bytes on
+  # purpose: it is spent out of the same budget as the socket basename.
+  let sockDir = shortSocketDirAtProcessExit("rdt-")
   result = Fixture(
     root: root,
     workRoot: workRoot,
     cacheRoot: root / "cache",
+    sockDir: sockDir,
     binDir: binDir,
     daemonPath: binDir / "decl_daemon",
     clientPath: binDir / "decl_client",
     logDir: logDir)
-  # A long `TMPDIR` silently exceeds the socket-path limit (header HAZARD).
-  # Refuse here, where the reason is legible, rather than in a `bind` failure
-  # or a `dcoUnreachable` that reads like a real red. The limit is std/net's
+  # The relocation above makes a fit the normal case, so this is a backstop and
+  # not the mechanism: a future regression — a longer tag, an endpoint nested
+  # one directory deeper, a case that names its own socket — has to fail HERE,
+  # where the reason is legible, rather than in a `bind` failure or a
+  # `dcoUnreachable` that reads like a real red. The limit is std/net's
   # `Sockaddr_un_path_length` — what `connectUnix` / `bindUnix` enforce, with
   # the same `>=` — not a hard-coded 108, which is Linux's value and let a
   # 92..107-byte path through on macOS.
   # 24 bytes of headroom, not 6: the longest fixture socket basename in this
   # file is the two-endpoint case's, and a probe sized for `d.sock` would let a
-  # marginal TMPDIR through and fail at `bind` instead of here.
-  let probeSocket = workRoot / "0123456789012345.sock"
+  # marginal path through and fail at `bind` instead of here.
+  let probeSocket = sockDir / "0123456789012345.sock"
   if probeSocket.len >= Sockaddr_un_path_length:
     raise newException(IOError,
       "fixture socket path is " & $probeSocket.len & " bytes, which will not " &
       "fit a unix socket address on this host (std/net refuses " &
-      $Sockaddr_un_path_length & " or more); use a shorter TMPDIR")
+      $Sockaddr_un_path_length & " or more); " & sockDir &
+      " is far longer than a `shortSocketDirAtProcessExit` directory should be")
   compileC(DaemonSource, result.daemonPath, workRoot, "dmn.c")
   compileC(ClientSource, result.clientPath, workRoot, "cli.c")
 
@@ -652,10 +686,17 @@ proc startDetachedDaemon(f: Fixture; mode, name: string;
   removeFile(readyPath)
   removeFile(readyPath & ".contacts")
   let image = if imageOverride.len > 0: imageOverride else: f.daemonPath
-  let address = if mode == "unix": f.workRoot / (name & ".sock") else: ""
+  # `sockDir`, not `workRoot`: the endpoints are the paths that have to fit
+  # `sun_path` whatever the checkout and TMPDIR are (header HAZARD). The ready
+  # file stays under `workRoot` and the daemon's `.contacts` accept log is
+  # derived from IT, so the move leaves every observation this fixture reads
+  # exactly where it was. BOTH endpoints move together and keep their distinct
+  # basenames — `secondSocketName` differs from `name` at every call site, which
+  # is what makes the two-endpoint case two endpoints rather than one re-bound.
+  let address = if mode == "unix": f.sockDir / (name & ".sock") else: ""
   let second =
     if mode == "unix" and secondSocketName.len > 0:
-      f.workRoot / (secondSocketName & ".sock")
+      f.sockDir / (secondSocketName & ".sock")
     else:
       ""
   let shell = findExe("sh")
@@ -680,7 +721,8 @@ proc startDaemon(f: Fixture; mode, name: string): LiveDaemon =
   let readyPath = f.workRoot / (name & ".ready")
   removeFile(readyPath)
   removeFile(readyPath & ".contacts")
-  let address = if mode == "unix": f.workRoot / (name & ".sock") else: ""
+  # `sockDir` for the same reason `startDetachedDaemon` uses it.
+  let address = if mode == "unix": f.sockDir / (name & ".sock") else: ""
   let process = startProcess(f.daemonPath,
     args = [mode, address, readyPath], options = {poStdErrToStdOut})
   result = f.awaitReady(readyPath, mode, f.daemonPath, address, name)
@@ -1804,7 +1846,12 @@ suite "declared IPC trust: the check is what makes it a claim":
     reset()
     let f = makeFixture()
     defer: removeDir(f.root)
-    let absent = f.workRoot / "absent.sock"
+    # In `sockDir` like every other endpoint here, and for a reason this case
+    # owns: `connectUnix` refuses an over-long path BEFORE it reaches the
+    # filesystem, and the refusal surfaces as the same `dcoUnreachable` this
+    # case asserts. A socket path built from a long TMPDIR would therefore make
+    # the case pass without anything ever having looked for the peer.
+    let absent = f.sockDir / "absent.sock"
     # A COMPLETE declaration — program-identifying, so the surface refusals do
     # not answer first and the outcome really is "nobody was there". That
     # ordering is load-bearing: `dcoNoProgramAssertion` is decided before the

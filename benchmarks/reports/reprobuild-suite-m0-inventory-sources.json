@@ -4638,7 +4638,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 528,
+          "line": 548,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4660,7 +4660,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 530,
+          "line": 550,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4684,7 +4684,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 366,
+          "line": 389,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4702,7 +4702,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 368,
+          "line": 391,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"

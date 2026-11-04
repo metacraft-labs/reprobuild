@@ -128,10 +128,24 @@
 ##    graded is still there afterwards, still carrying both the `mrIpcConnect`
 ##    and the loss text, while the edge publishes.
 ##
-## HAZARD THIS FIXTURE HAS TO RESPECT. `sockaddr_un.sun_path` is 108 bytes.
-## A fixture root under a long `TMPDIR` pushes the socket path past it and the
-## daemon fails to bind — which looks exactly like a real red. `makeFixture`
-## refuses such a root loudly instead of producing one.
+## HAZARD THIS FIXTURE HAS TO RESPECT. `sockaddr_un.sun_path` holds 108 bytes
+## on Linux and 104 on macOS, the terminating NUL included, and the sockets here
+## are bound and dialled by the C helpers, so it is the KERNEL's limit that
+## applies rather than std/net's shorter one. A socket UNDER THE FIXTURE ROOT
+## inherits the suite's `TMPDIR`, which is a per-checkout slot below
+## `$XDG_CACHE_HOME` (`scripts/run_tests.sh`) and is therefore only as short as
+## the home directory it hangs off: on the shared CI runners it is 73 bytes, and
+## this fixture's own socket under it came to 117 — so the daemon could not
+## bind, and every case that needs a live daemon raised `makeFixture`'s guard
+## instead of asserting anything. The sockets consequently DO NOT live under the
+## fixture root; `makeFixture` takes them from `shortSocketDirAtProcessExit`,
+## whose doc comment states the governing rule: fixture IPC paths must fit
+## independently of the checkout and TMPDIR length (reprobuild `6210412a`).
+## ONLY the endpoints move. Everything the assertions read — the scratch root,
+## the compiled helpers, the logs, the cache root — stays under the fixture
+## root, which is still the thing `isVolatilePrefix` guards; `/tmp` is not one
+## of the volatile prefixes the engine drops (`nonVolatileTempBase` falls back
+## TO it), so relocating an endpoint cannot make a monitor-evidence arm vacuous.
 ##
 ## PLATFORM CONTRACT — LINUX GRADES THE MECHANISM, EVERY OTHER HOST GRADES ITS
 ## REFUSAL. `reprobuild-pm/milestones/Dependency-Attribution.milestones.org`,
@@ -167,6 +181,11 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
+# Not re-exported by `repro_test_support` (it imports only
+# `releaseDirAtProcessExit` from this module, and exports neither), so the
+# socket directory `makeFixture` takes its endpoints from has to be imported
+# from the submodule by name — the spelling the other callers use.
+from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 const RepoRootMarker = "repro.nim"
 
@@ -337,6 +356,10 @@ type Fixture = object
   root: string
   workRoot: string
   cacheRoot: string
+  sockDir: string
+    ## Where the unix endpoints are bound — and the ONLY part of this fixture
+    ## that is not under `root`, for the reason the socket-length HAZARD in the
+    ## header gives.
   binDir: string
   daemonPath: string
   clientPath: string
@@ -382,29 +405,40 @@ proc makeFixture(): Fixture =
   createDir(binDir)
   let logDir = workRoot / "o"
   createDir(logDir)
+  # THE ENDPOINTS ARE NOT UNDER `root` (socket-length HAZARD in the header).
+  # `shortSocketDirAtProcessExit` hands out a fresh owner-only (0700) directory
+  # DIRECTLY under `/tmp` — `/tmp/rdv-<12 hex>`, 21 bytes — removed when this
+  # process exits, because fixture IPC paths must fit independently of the
+  # checkout and TMPDIR length (reprobuild `6210412a`). The tag is four bytes on
+  # purpose: it is spent out of the same budget as the socket basename.
+  let sockDir = shortSocketDirAtProcessExit("rdv-")
   result = Fixture(
     root: root,
     workRoot: workRoot,
     cacheRoot: root / "cache",
+    sockDir: sockDir,
     binDir: binDir,
     daemonPath: binDir / "ipctrust_daemon",
     clientPath: binDir / "ipctrust_client",
     logDir: logDir)
-  # A long `TMPDIR` silently exceeds `sockaddr_un.sun_path`. Refuse here,
-  # where the reason is legible, rather than in a `bind` failure that reads
-  # like a real red. The sockets are bound and dialled by the C helpers, so
-  # the KERNEL's limit applies (not std/net's): 108 bytes on Linux, 104 on
-  # macOS and the BSDs, terminating NUL included. This used to hard-code 108
-  # — Linux's value, which let a 104..107-byte path through on macOS — and to
-  # probe `d.sock`, eight bytes shorter than the longest name `startDaemon`
-  # is actually given (`untrusted`).
+  # The relocation above makes a fit the normal case, so this is a backstop and
+  # not the mechanism: a future regression — a longer tag, an endpoint nested
+  # one directory deeper, a case that names its own socket — has to fail HERE,
+  # where the reason is legible, rather than in a `bind` failure that reads like
+  # a real red. The sockets are bound and dialled by the C helpers, so the
+  # KERNEL's limit applies (not std/net's): 108 bytes on Linux, 104 on macOS and
+  # the BSDs, terminating NUL included. This used to hard-code 108 — Linux's
+  # value, which let a 104..107-byte path through on macOS — and to probe
+  # `d.sock`, eight bytes shorter than the longest name `startDaemon` is
+  # actually given (`untrusted`).
   const SunPathBytes = when defined(linux): 108 else: 104
-  let probeSocket = workRoot / "untrusted.sock"
+  let probeSocket = sockDir / "untrusted.sock"
   if probeSocket.len >= SunPathBytes:
     raise newException(IOError,
       "fixture socket path is " & $probeSocket.len & " bytes, which will not " &
       "fit sockaddr_un.sun_path (" & $SunPathBytes & " on this host); " &
-      "use a shorter TMPDIR")
+      sockDir & " is far longer than a `shortSocketDirAtProcessExit` " &
+      "directory should be")
   compileC(DaemonSource, result.daemonPath, workRoot, "dmn.c")
   compileC(ClientSource, result.clientPath, workRoot, "cli.c")
 
@@ -421,8 +455,12 @@ proc startDaemon(f: Fixture; mode, name: string): LiveDaemon =
   ## AFTER `listen(2)` returns, so a client that sees it cannot race the bind.
   let readyPath = f.workRoot / (name & ".ready")
   removeFile(readyPath)
+  # `sockDir`, not `workRoot`: the endpoint is the one path here that has to fit
+  # `sun_path` whatever the checkout and TMPDIR are. The ready file and the
+  # client's run log stay under the fixture root, so the move leaves every
+  # observation this fixture reads exactly where it was.
   let address =
-    if mode == "unix": f.workRoot / (name & ".sock")
+    if mode == "unix": f.sockDir / (name & ".sock")
     else: ""
   result.process = startProcess(f.daemonPath,
     args = [mode, address, readyPath],
