@@ -5449,10 +5449,14 @@ const
     "sha256-Wp5g3mKC+QIjiO39yuiXkSMxzvH4PO4TAuEjCvyWvcI="
   BootstrapNimPackageId = "nim@" & BootstrapNimVersion
   BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
+  # The Windows maintenance prefix, the same archive `packages/nim.nim`
+  # declares. It carries `--compilerArgsFile`, which the provider and
+  # interface compiles need once their argv exceeds the 32,767-unit Windows
+  # command line (qualification run 41815608798).
   BootstrapNimTarballUrl =
-    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip"
+    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633-windows-x64.zip"
   BootstrapNimTarballSha256 =
-    "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b"
+    "e6eaf87df71f83629a8877ac496bcd8cdb7755f9e860b982bb0b886e38eac1c3"
   # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
   # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
   # x86_64: unsigned), so the monitor shim loads into it like into any other
