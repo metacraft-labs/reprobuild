@@ -59,7 +59,16 @@ const
     "descriptorDigest", "snapshotDigest", "listen", "detectorVersion",
     "host", "pid", "exitCode", "layer", "direction", "suppressed",
     "syscall", "probe", "receiptSeq", "receiptHead", "workerHost",
-    "keyId", "certificateSerial", "signal", "limit"]
+    "keyId", "certificateSerial", "signal", "limit",
+    # The ReproOS add-on's records (``repro_addon/evidence``): the event,
+    # the deploy agent's outcome, and the signed generation attestation.
+    # None carries a secret: sealed sections are never opened into a
+    # record, and plaintext lives only under /run/repro/secrets.
+    "kind", "outcome", "sequence", "deploymentId", "generation", "target",
+    "finding", "status", "errorCode", "message", "bootId", "purpose",
+    "attestation", "attestationSignature", "attestationKey",
+    "appliedSequence", "dpkgLastRun", "pending", "planDigest",
+    "recipientKey", "credentialHost", "previousGeneration"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold
     ## credentials, a body can hold source.
@@ -69,7 +78,12 @@ const
     "memo-attestation-expired",
     "memo-selector-mismatch", "selector-validation-failed",
     "frame-refused", "goal-argv-not-derivable", "goal-path-outside-snapshot",
-    "goal-descriptor-unbound", "goal-schema-invalid"]
+    "goal-descriptor-unbound", "goal-schema-invalid",
+    # The ReproOS add-on: the manifest envelope a host refused, and the
+    # staged bytes its apply unit refused (EVID-1). Both are what the
+    # network-facing fetch unit produced -- the producer's signed text or an
+    # attacker's planted bytes -- never a developer's source tree.
+    "addon-manifest-refused", "addon-staging-refused"]
     ## Triggers whose payload is protocol metadata and is captured
     ## (EVID-1: the payload, not only the fact). A blob-digest mismatch is
     ## NOT here: its payload may be a source file.

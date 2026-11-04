@@ -47,6 +47,7 @@ import repro_addon/agent_checks
 import repro_addon/agent_record
 import repro_addon/agent_switch
 import repro_addon/collision
+import repro_addon/fingerprint
 import repro_addon/ledger
 import repro_addon/verified_compile
 from repro_addon/generation0 import agentCompileBounds, agentFetchUnit,
@@ -183,7 +184,10 @@ suite "the agent's apply goes through the add-on switch":
     check registeredAgentStates(tmp / "system") == @[tmp / "agent"]
     check o.hostIdentity == "rpi2"
     check o.userProfileText == Canonical
-    check o.agentRecord == AgentRecord(deploymentId: "hms-4-aa", sequence: 4)
+    check o.agentRecord.deploymentId == "hms-4-aa"
+    check o.agentRecord.sequence == 4'u64
+    # The producer-side digests its generation attestation names (A11).
+    check o.agentRecord.profileDigest == "sha256:" & sha256Hex(Canonical)
     check o.buildActions.len == 1 and o.buildActions[0].id == "llm-api-proxy"
 
   test "a source profile is compiled elsewhere and applied only at its signed digest (A8 B1/B3)":

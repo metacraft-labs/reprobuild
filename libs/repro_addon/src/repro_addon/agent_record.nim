@@ -30,6 +30,14 @@ type
       ## The agent generation (in the agent's own state directory) this
       ## add-on generation took over, when it is the migration of a host
       ## whose agent applied outside the add-on switch (§9, "Migration").
+    profileDigest*: string
+      ## The producer-side digest the apply verified the profile against
+      ## (``attestation.manifestProfileDigestOf``), so the generation's
+      ## attestation can name it (spec §10.5). "" in a record written
+      ## before it existed.
+    closuresDigest*: string
+      ## ``attestation.closureDigestsDigest`` of the manifest's pinned
+      ## closures; "" when it pinned none.
 
   AgentRecordError* = object of CatchableError
 
@@ -49,6 +57,12 @@ proc render*(r: AgentRecord): string =
   if r.migratedFrom.len > 0:
     result.add("migrated-from\t" & oneLine(r.migratedFrom, "migratedFrom") &
       "\n")
+  if r.profileDigest.len > 0:
+    result.add("profile-digest\t" & oneLine(r.profileDigest, "profileDigest") &
+      "\n")
+  if r.closuresDigest.len > 0:
+    result.add("closures-digest\t" &
+      oneLine(r.closuresDigest, "closuresDigest") & "\n")
 
 proc parseAgentRecord*(text: string): AgentRecord =
   let lines = text.splitLines()
@@ -67,6 +81,8 @@ proc parseAgentRecord*(text: string): AgentRecord =
       except ValueError:
         raise newException(AgentRecordError, "malformed sequence " & f[1])
     of "migrated-from": result.migratedFrom = f[1]
+    of "profile-digest": result.profileDigest = f[1]
+    of "closures-digest": result.closuresDigest = f[1]
     else: discard              # a later field; this build does not need it
 
 proc agentRecordPath*(stateDir, generationId: string): string =

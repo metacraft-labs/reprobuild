@@ -82,6 +82,7 @@ import ./tmpfiles_scope
 import ./addon_secrets
 import ./base_identity
 import ./etc_write
+import ./evidence
 import ./fingerprint
 import ./generation0
 import ./handback
@@ -2661,7 +2662,10 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
 
-proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
+proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
+  ## Defined below, after the switch it wraps with its evidence record.
+
+proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
   ## collision pass refuses, and ``AddonApplyError`` when the infra apply
@@ -5220,3 +5224,58 @@ proc renderLedgerDiff*(r: AddonApplyResult): string =
                "does not list it; never removed\n")
   for d in r.drift:
     result.add("  drift\t" & d & "\n")
+
+# ---------------------------------------------------------------------------
+# Every apply's evidence record (spec §10.4, milestone A11).
+# ---------------------------------------------------------------------------
+
+var applyDepth {.threadvar.}: int
+  ## A revert, a replay and a record-only pass run inside an outer apply;
+  ## only the outermost one records.
+
+proc recordApplyEvidence(opts: AddonApplyOptions; stateDir: string;
+                         r: AddonApplyResult; failure: ref CatchableError) =
+  ## The record of one apply: ``addon-apply`` (audit) with the attestation
+  ## of the generation it committed, or, for an operator's apply that did
+  ## not commit, its refusal or rollback (DET-AO-2, -5, -7). The deploy
+  ## agent's own applies record their failures in the tick's record, and a
+  ## switch the rollback floor kept in place has its own record. Never
+  ## raises: the apply's outcome stands whatever happens here.
+  var site = defaultSite(stateDir)
+  let purpose = if opts.purpose.len > 0: opts.purpose else: "apply"
+  var fields = @[("purpose", purpose), ("sequence", $opts.agentSequence)]
+  try:
+    if failure.isNil:
+      fields.add(("previousGeneration", r.previousGenerationId))
+      discard recordEvidence(EvidenceEvent(detector: edApply,
+        category: ecAudit, trigger: "applied", kind: "apply",
+        fields: fields, attest: true, attestGeneration: r.generationId), site)
+      return
+    if opts.agentSequence > 0'u64 or failure of AddonFailedAtFloor: return
+    fields.add(("message", failure.msg))
+    let (det, trig) =
+      if failure of AddonRolledBack: (edRollback, "rolled-back")
+      elif $adStoreChanged in failure.msg: (edStore, "store-changed")
+      else: (edApplyRefusal, "apply-refused")
+    discard recordEvidence(EvidenceEvent(detector: det, category: ecDetection,
+      trigger: trig, fields: fields, attest: true), site)
+  except CatchableError as e:
+    stderr.write("repro-addon: cannot write the apply's evidence record: " &
+      e.msg & "\n")
+
+proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
+  ## ``applyGenerationUnrecorded`` with its evidence record (spec §10.4):
+  ## every apply that commits, and every operator apply that refuses or is
+  ## reverted, leaves one. A plan-only run and a record-only replay change
+  ## nothing and record nothing.
+  inc applyDepth
+  defer: dec applyDepth
+  if applyDepth > 1 or opts.planOnly or opts.recordOnly:
+    return applyGenerationUnrecorded(opts)
+  let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  try:
+    result = applyGenerationUnrecorded(opts)
+  except CatchableError as e:
+    recordApplyEvidence(opts, stateDir, AddonApplyResult(), e)
+    raise
+  recordApplyEvidence(opts, stateDir, result, nil)

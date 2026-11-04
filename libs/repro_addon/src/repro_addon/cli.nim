@@ -6,6 +6,9 @@
 ##                                [--json]
 ##   repro system addon bootstrap --plan <digest> [--deploy-signers F]
 ##                                [--cache-publishers F [--cache-url U]]
+##                                [--evidence-sink A:P --evidence-sink-ca F]
+##   repro system addon evidence-ship [--heartbeat]
+##   repro system addon evidence-credential-check
 ##   repro system addon uninstall [--keep-store]
 ##   repro system addon verify [--boot | --after-dpkg]
 ##   repro system addon reassert [--boot]
@@ -59,6 +62,7 @@ import ./apt_hook
 import ./base_identity
 import ./bootstrap
 import ./collision
+import ./evidence_ship
 import ./fingerprint
 import ./generation0
 import ./ledger
@@ -81,11 +85,23 @@ const
 
 commands:
   preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
-            [--target T --manifest URL... [--profile-compiler P]] [--json]
+            [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
+            [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
+            [--json]
       Inventory the host read-only and print the plan and its digest.
   bootstrap --plan <digest> [--deploy-signers F] [--cache-publishers F [--cache-url U]]
-            [--target T --manifest URL... [--profile-compiler P]]
-      Install the add-on on a host whose preflight plan has <digest>.
+            [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
+            [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
+      Install the add-on on a host whose preflight plan has <digest>. With
+      an Evidence sink, also generate the generation-attestation key and
+      the sink write credential (enrol its certificate at the sink).
+  evidence-ship [--heartbeat]
+      The shipping unit (repro-addon-evidence.service): append every queued
+      evidence record to the Evidence sink, then a heartbeat.
+  evidence-credential-check
+      Test this host's sink write credential: an append must succeed and a
+      list, a read, an overwrite and a delete must each be refused. Exit 0
+      only then.
   uninstall [--keep-store]
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
@@ -345,6 +361,15 @@ proc runAddonCli*(args: seq[string]): int =
           inp.agentSources.add(takeValue(rest, i, "--manifest"))
         elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
           inp.profileCompiler = takeValue(rest, i, "--profile-compiler")
+        elif a == "--poll-interval" or a.startsWith("--poll-interval="):
+          inp.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
+        elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
+          inp.evidenceSink = takeValue(rest, i, "--evidence-sink")
+        elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
+          inp.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
+        elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
+          inp.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
+            "--heartbeat-interval"))
         elif a == "--json":
           json = true
         else:
@@ -375,6 +400,15 @@ proc runAddonCli*(args: seq[string]): int =
           opts.agentSources.add(takeValue(rest, i, "--manifest"))
         elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
           opts.profileCompiler = takeValue(rest, i, "--profile-compiler")
+        elif a == "--poll-interval" or a.startsWith("--poll-interval="):
+          opts.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
+        elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
+          opts.evidenceSink = takeValue(rest, i, "--evidence-sink")
+        elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
+          opts.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
+        elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
+          opts.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
+            "--heartbeat-interval"))
         else:
           raise newException(ValueError, "unknown option " & a)
         inc i
@@ -385,6 +419,13 @@ proc runAddonCli*(args: seq[string]): int =
                      "add-on binary:        " & r.reproExe & "\n" &
                      "binary sha256:        " & r.binarySha256 & "\n" &
                      "recipient public key: " & r.recipientPublicKeyHex & "\n")
+        if r.evidenceCredentialHost.len > 0:
+          # Evidence ships once the sink knows this host: the operator
+          # copies the credential's certificate into the sink's anchor
+          # directory (records wait in the outbox until then).
+          stdout.write("attestation key:      " & r.attestationPublicKeyHex & "\n" &
+                       "evidence credential:  " & r.evidenceCredentialHost &
+                       " (enrol " & r.evidenceCredentialCert & " at the sink)\n")
         return 0
       except AddonPlanMismatch as e:
         stderr.write("repro system addon bootstrap: " & e.msg & "\n")
@@ -452,6 +493,10 @@ proc runAddonCli*(args: seq[string]): int =
       return runSecretPutCli(rest)
     of "rotate-recipient-key":
       return runRotateRecipientKeyCli(rest)
+    of "evidence-ship":
+      return runEvidenceShipCli(rest)
+    of "evidence-credential-check":
+      return runCredentialCheckCli(rest)
     of "agent-tick":
       return agent_split.runAgentTickCli(rest)
     of "agent-fetch":

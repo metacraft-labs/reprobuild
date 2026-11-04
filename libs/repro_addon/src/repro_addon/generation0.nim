@@ -64,6 +64,21 @@ type
     cachePublishers*: seq[string] ## the only producer keys trusted for it
     agent*: AgentUnitsInputs    ## the deploy agent's units (A8); none when
                                 ## ``agent.target`` is empty
+    evidence*: EvidenceUnitsInputs
+      ## The Evidence sink and the units that ship to it (A11, spec §10.4);
+      ## none when ``evidence.sinkAddress`` is empty, so a host bootstrapped
+      ## without a sink keeps the generation 0 it had.
+
+  EvidenceUnitsInputs* = object
+    ## Where this host's evidence records go (spec §10.4): one Evidence sink
+    ## (reprobuild's ``repro-evidence-sink``), named by address -- the
+    ## shipping unit has no DNS -- and pinned by its own CA certificate, the
+    ## only certificate the shipping unit trusts for it.
+    sinkAddress*: string        ## an IPv4 or IPv6 literal
+    sinkPort*: int
+    sinkCaPem*: string          ## the sink's host CA (PEM)
+    sinkHostId*: string         ## its host id (64 hex), derived from the CA
+    heartbeatSec*: int          ## the shipping unit's timer (0: the default)
 
   AgentUnitsInputs* = object
     ## What generation 0 needs to carry the deploy agent's two units (spec
@@ -75,6 +90,10 @@ type
     allowedAddresses*: seq[string]   ## sorted, for ``IPAddressAllow=``
     hosts*: seq[tuple[address, name: string]]  ## sorted
     profileCompiler*: string         ## "" when none is configured
+    pollIntervalSec*: int
+      ## The fetch timer's ``OnUnitActiveSec=`` in seconds; 0 is the default
+      ## (``DefaultAgentPollSec``). A tick's evidence record carries it, so
+      ## the off-host silence check knows when a tick is overdue (DET-AO-8).
 
 const
   SystemdUnitDir* = "/etc/systemd/system"
@@ -117,6 +136,37 @@ const
     ## /caches_config``): the cache list every substitution on the host reads,
     ## each cache with the only producer keys trusted for it.
   StoreRoot* = "/repro/store"
+  # --- Milestone A11: evidence (spec §10.4, §10.5). ----------------------
+  EvidenceConfPath* = "/etc/repro/evidence.conf"
+    ## The Evidence sink this host ships to and the intervals the off-host
+    ## silence check expects records at (``renderEvidenceConf``).
+  EvidenceSinkCaPath* = "/etc/repro/evidence-sink.crt"
+    ## The sink's host CA: the one certificate the shipping unit trusts for
+    ## the sink (never the peer-cache anchors, threat model G28's rule).
+  EvidenceStateDir* = "/var/lib/repro/evidence"
+    ## ``0700 root``: the host's sink write credential (``host-ca.key``,
+    ## ``host-ca.crt``), the shipping cursor and the sink's last receipt.
+    ## Nothing else can read the credential; the shipping unit cannot read
+    ## the attestation key or the recipient key (they are under
+    ## ``/var/lib/repro/agent``, hidden from it).
+  EvidenceCredentialCertPath* = EvidenceStateDir & "/host-ca.crt"
+  EvidenceCredentialKeyPath* = EvidenceStateDir & "/host-ca.key"
+  AttestationKeyPath* = "/var/lib/repro/agent/attestation.key"
+    ## The host's generation-attestation key (``0400 root``, beside the
+    ## recipient key), generated at bootstrap; its public half is in the
+    ## first evidence record. Readable by the root units that write records
+    ## (apply, re-assert, apt hook), never by the shipping unit.
+  AttestationPubPath* = "/var/lib/repro/agent/attestation.pub"
+  EvidenceDirPath* = "/var/lib/repro/system/addon/evidence"
+    ## The local records (one JSON document per event, spec §10.4).
+  EvidenceOutboxPath* = EvidenceDirPath & "/outbox"
+    ## Each record as the sink receives it, until the sink acknowledges it.
+  EvidenceShipUnit* = "repro-addon-evidence.service"
+  EvidenceShipPathUnit* = "repro-addon-evidence.path"
+  EvidenceShipTimer* = "repro-addon-evidence.timer"
+  DefaultEvidenceHeartbeatSec* = 300
+  DefaultAgentPollSec* = 300
+  AgentPollRandomDelaySec* = 30
   AgentConfPath* = "/etc/repro/agent.conf"
     ## The deploy agent's configuration on an add-on host (A8): ``target``,
     ## one ``source`` line per manifest source, ``profile-compiler``.
@@ -696,14 +746,20 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
   stateHidden & noResolver & compileExec & egress & hostsBind
 
-proc agentFetchTimer*(): string =
+proc agentPollSec*(a: AgentUnitsInputs): int =
+  if a.pollIntervalSec > 0: a.pollIntervalSec else: DefaultAgentPollSec
+
+proc agentFetchTimer*(a: AgentUnitsInputs = AgentUnitsInputs()): string =
+  # The default renders as it always did (``5min``), so a host bootstrapped
+  # without an interval keeps the bytes of its generation 0.
+  let every = if a.pollIntervalSec <= 0: "5min" else: $a.pollIntervalSec & "s"
   "[Unit]\n" &
   "Description=Reprobuild add-on deploy agent: poll for desired state\n" &
   "\n" &
   "[Timer]\n" &
   "OnBootSec=2min\n" &
-  "OnUnitActiveSec=5min\n" &
-  "RandomizedDelaySec=30s\n" &
+  "OnUnitActiveSec=" & every & "\n" &
+  "RandomizedDelaySec=" & $AgentPollRandomDelaySec & "s\n" &
   "Unit=" & AgentFetchUnit & "\n" &
   "\n" &
   "[Install]\n" &
@@ -740,6 +796,109 @@ proc agentApplyUnit*(reproExe: string): string =
   privilegedConfinement(network = mutated("agent-apply-has-network")) &
   "MemoryMax=" & AgentApplyMemoryMax & "\n" &
   net & NoSwapLine
+
+proc evidenceHeartbeatSec*(e: EvidenceUnitsInputs): int =
+  if e.heartbeatSec > 0: e.heartbeatSec else: DefaultEvidenceHeartbeatSec
+
+proc sinkEndpoint*(e: EvidenceUnitsInputs): string =
+  ## ``address:port``, IPv6 in brackets.
+  (if ':' in e.sinkAddress: "[" & e.sinkAddress & "]" else: e.sinkAddress) &
+    ":" & $e.sinkPort
+
+proc renderEvidenceConf*(e: EvidenceUnitsInputs; agent: AgentUnitsInputs): string =
+  ## ``/etc/repro/evidence.conf``: ``key = value`` lines, ``#`` comments.
+  ## ``tick-interval`` is the longest a deploy agent's tick may take to
+  ## follow the previous one (its timer plus the timer's random delay); 0
+  ## when the host has no agent, so no tick is expected.
+  let tick = if agent.target.len > 0:
+               agentPollSec(agent) + AgentPollRandomDelaySec
+             else: 0
+  "# Reprobuild add-on: the Evidence sink this host ships its records to\n" &
+  "# (spec §10.4) and the intervals the off-host silence check expects.\n" &
+  "sink = " & sinkEndpoint(e) & "\n" &
+  "sink-host = " & e.sinkHostId & "\n" &
+  "heartbeat-interval = " & $evidenceHeartbeatSec(e) & "\n" &
+  "tick-interval = " & $tick & "\n"
+
+proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
+  ## ``repro-addon-evidence.service`` (spec §10.4): ships the outbox to the
+  ## Evidence sink and heartbeats. Root -- the records and the credential
+  ## are root's files -- but with NO capability, a read-only system apart
+  ## from its own two directories, the attestation and recipient keys and
+  ## the secrets hidden, and egress to the sink's address only. It is the
+  ## only add-on unit that talks to the sink; the units that write records
+  ## (apply, re-assert, the apt hook) have no network and cannot sign as
+  ## the sink credential, and this one cannot sign attestations.
+  let egress = when mutated("evidence-ship-unrestricted-egress"): ""
+               else: "IPAddressDeny=any\nIPAddressAllow=" & e.sinkAddress & "\n"
+  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro -/repro"
+               else: "-/var/lib/repro/agent -/run/repro -/repro"
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: ship evidence records to the Evidence sink\n" &
+  "After=network-online.target\n" &
+  "Wants=network-online.target\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "ExecStart=" & reproExe & " system addon evidence-ship\n" &
+  "TimeoutStartSec=5min\n" &
+  "CapabilityBoundingSet=\n" &
+  "AmbientCapabilities=\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectSystem=strict\n" &
+  "ReadWritePaths=" & EvidenceStateDir & " " & EvidenceOutboxPath & "\n" &
+  "InaccessiblePaths=" & hidden & "\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  "PrivateDevices=yes\n" &
+  "ProtectKernelTunables=yes\n" &
+  "ProtectKernelModules=yes\n" &
+  "ProtectKernelLogs=yes\n" &
+  "ProtectControlGroups=yes\n" &
+  "ProtectClock=yes\n" &
+  "ProtectHostname=yes\n" &
+  "ProtectProc=invisible\n" &
+  "RestrictNamespaces=yes\n" &
+  "RestrictRealtime=yes\n" &
+  "RestrictSUIDSGID=yes\n" &
+  "LockPersonality=yes\n" &
+  "MemoryDenyWriteExecute=yes\n" &
+  "SystemCallArchitectures=native\n" &
+  FetchSyscallFilter &
+  "SystemCallErrorNumber=EPERM\n" &
+  "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
+  ResolverSocketsHidden &
+  "InaccessiblePaths=-/run/dbus -/var/run/dbus\n" &
+  egress
+
+proc evidenceShipPathUnit*(): string =
+  ## Starts the shipping unit whenever a record lands in the outbox (DET-6:
+  ## it leaves at once, not at the next timer).
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: ship each evidence record as it is written\n" &
+  "\n" &
+  "[Path]\n" &
+  "PathChanged=" & EvidenceOutboxPath & "\n" &
+  "MakeDirectory=yes\n" &
+  "DirectoryMode=0700\n" &
+  "Unit=" & EvidenceShipUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc evidenceShipTimer*(e: EvidenceUnitsInputs): string =
+  ## The shipping unit's heartbeat (DET-5) and its retry while the sink is
+  ## unreachable.
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: evidence heartbeat\n" &
+  "\n" &
+  "[Timer]\n" &
+  "OnBootSec=1min\n" &
+  "OnUnitActiveSec=" & $evidenceHeartbeatSec(e) & "s\n" &
+  "Unit=" & EvidenceShipUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
 
 proc profileD(reproExe: string): string =
   let bindir = reproExe[0 ..< reproExe.rfind('/')]
@@ -841,8 +1000,24 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
       path: unitPath(AgentFetchUnit),
       content: agentFetchUnit(inp.reproExe, inp.agent), enabled: false))
     result.add(OwnObject(kind: ookUnit, unit: AgentFetchTimer,
-      path: unitPath(AgentFetchTimer), content: agentFetchTimer(),
+      path: unitPath(AgentFetchTimer), content: agentFetchTimer(inp.agent),
       enabled: true))
+  if inp.evidence.sinkAddress.len > 0:
+    # The Evidence sink (A11): present only on a host bootstrapped with
+    # one, so a host without it keeps the generation 0 it had.
+    result.add(OwnObject(kind: ookEtcFile, path: EvidenceConfPath,
+                         content: renderEvidenceConf(inp.evidence, inp.agent)))
+    result.add(OwnObject(kind: ookEtcFile, path: EvidenceSinkCaPath,
+                         content: inp.evidence.sinkCaPem))
+    result.add(OwnObject(kind: ookUnit, unit: EvidenceShipUnit,
+      path: unitPath(EvidenceShipUnit),
+      content: evidenceShipUnit(inp.reproExe, inp.evidence), enabled: false))
+    result.add(OwnObject(kind: ookUnit, unit: EvidenceShipPathUnit,
+      path: unitPath(EvidenceShipPathUnit), content: evidenceShipPathUnit(),
+      enabled: true))
+    result.add(OwnObject(kind: ookUnit, unit: EvidenceShipTimer,
+      path: unitPath(EvidenceShipTimer),
+      content: evidenceShipTimer(inp.evidence), enabled: true))
 
 proc contentFileName*(o: OwnObject): string =
   ## The file under the generation's files prefix that holds ``o``'s body.
