@@ -4213,7 +4213,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim",
@@ -4631,8 +4631,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for triple in [Glibc, \"aarch64-unknown-linux-musl\"]:"),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim",
     binary: "build/test-bin/test_m69_package_macro",
