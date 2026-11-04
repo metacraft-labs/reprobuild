@@ -226,6 +226,9 @@ e2e_addon_engine_agent_enforces_a8:
 e2e_addon_sequence_floor_survives_and_is_root_only:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_sequence_floor_survives_and_is_root_only
 
+e2e_addon_tick_observes_a_fresh_cycle:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_tick_observes_a_fresh_cycle
+
 e2e_addon_profile_compiles_unprivileged:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_profile_compiles_unprivileged
 

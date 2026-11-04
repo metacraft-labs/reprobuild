@@ -12705,7 +12705,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g02",
+    group: "t_group_tests_e2e_addon_g01",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_no_plaintext_secret_on_disk.nim",
@@ -12941,6 +12941,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_symlink_on_target_path_is_refused.nim",
     binary: "build/test-bin/t_e2e_addon_symlink_on_target_path_is_refused",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/e2e/addon/t_e2e_addon_tick_observes_a_fresh_cycle.nim",
+    binary: "build/test-bin/t_e2e_addon_tick_observes_a_fresh_cycle",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
