@@ -1,11 +1,8 @@
 # Native-Store Bundles
 
-> **Status:** Draft. Not yet reviewed. The governing specs live in the private
-> specs repository (`Local-Content-Addressed-Store.md`,
-> `Action-Cache-Per-Edge-Store.md`, `Workspace-And-Develop-Mode.md`). This
-> draft was written in the public tree because the specs repository could not
-> be attached in the session that wrote it. It should move there once a human
-> reviews it. Nothing in it relaxes a trust rule from those specs.
+> **Status:** Draft, not yet reviewed. Implemented by `repro store closure`,
+> `repro store export` and `repro store import`. Nothing here relaxes the
+> store's receipt checks or the action cache's output checks.
 
 ## 1. Purpose
 
@@ -131,18 +128,19 @@ with `\`, TAB and newline written as `\\`, `\t` and `\n`.
 
 ```
 reprobuild.store-bundle.contents.v1
-root	store	<abs>
-root	action-cache	<abs>
-root	workspace	<abs>          (one per workspace root)
-devenv	<project-root>	<script-abs-path>
-edge	<abs edge dir>
-record	<strong-hex>	<abs edge dir>	<abs action dir, or empty>
-prefix	<abs prefix dir>
-entry	<kind>	<mode-octal>	<size>	<mtime-ns>	<blake3-hex|->	<abs path>
-restamp	<size>	<mtime-ns>	<blake3-hex>	<abs path>
+root  store  <abs>
+root  action-cache  <abs>
+root  workspace  <abs>          (one per workspace root)
+devenv  <project-root>  <script-abs-path>
+edge  <abs edge dir>
+record  <strong-hex>  <abs edge dir>  <abs action dir, or empty>
+prefix  <abs prefix dir>
+entry  <kind>  <mode-octal>  <size>  <mtime-ns>  <blake3-hex|->  <abs path>
+restamp  <size>  <mtime-ns>  <blake3-hex>  <abs path>
 ```
 
-`kind` is `f` (file), `d` (directory) or `l` (symlink, whose digest field holds
+The fields above are spaced for reading; on disk each line separates them with
+a single TAB. `kind` is `f` (file), `d` (directory) or `l` (symlink, whose digest field holds
 the escaped link target). Every tar entry has exactly one `entry` line, and
 there are no others.
 
