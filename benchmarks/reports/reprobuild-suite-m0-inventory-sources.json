@@ -1846,6 +1846,21 @@
             "nim-compile-verb"
           ],
           "snippet": "let r = execCmdEx(findExe(\"nim\") & \" check --hints:off --warnings:off \" &"
+        },
+        {
+          "assignedCommandVariable": "r",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "dir",
+            "probe"
+          ],
+          "line": 100,
+          "path": "libs/repro_core/tests/t_zig_target_vendored_hash.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "let r = execCmdEx(findExe(\"nim\") & \" c --hints:off --warnings:off \" &"
         }
       ],
       "source": "libs/repro_core/tests/t_zig_target_vendored_hash.nim"
@@ -13448,8 +13463,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_zig_target_vendored_hash.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 4,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

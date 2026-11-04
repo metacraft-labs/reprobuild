@@ -85,3 +85,49 @@ suite "a zig-target image links no ambient OpenSSL":
     check sslDir notin link
 
   removeDir(sslDir)
+
+proc probeTypeNameUnder(args: openArray[string]): string =
+  ## The mangled C name of an object type the probe defines, as compiled
+  ## with `args` from a directory under this repository.
+  # One fixed directory for every case: the probe's path is part of the
+  # hash, so only the map may differ between the compiles compared.
+  let dir = RepoRoot / "build" / "zig-target-typehash-probe"
+  removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+  writeFile(dir / "probe.nim",
+    "type Probe = ref object\n  x: int\nlet p = Probe(x: 1)\necho p.x\n")
+  let r = execCmdEx(findExe("nim") & " c --hints:off --warnings:off " &
+    "--compileOnly --nimcache:" & quoteShell(dir / "cache") & " " &
+    args.join(" ") & " " & quoteShell(dir / "probe.nim"),
+    workingDir = RepoRoot)
+  for kind, f in walkDir(dir / "cache"):
+    if f.endsWith(".c") and "probe" in f.extractFilename:
+      for line in readFile(f).splitLines:
+        let at = line.find("tyObject_ProbecolonObjectType___")
+        if at >= 0:
+          var e = at
+          while e < line.len and line[e] in IdentChars: inc e
+          return line[at ..< e]
+  "no type name: " & r.output
+
+suite "a zig-target image's type hashes do not depend on the checkout path":
+  # The Nim fork hashes a type by the absolute path of the file defining it
+  # (metacraft-labs/nim 9a49ee3c), so two checkouts gave the armv7 engine
+  # different bytes (measured 2026-11-04). `--typeHashPathMap` hashes the
+  # repository as `/reprobuild/` and the workspace as `/workspace/`, as
+  # scripts/build_addon_static.sh does.
+  let mapped = probeTypeNameUnder(["--typeHashPathMap:" & RepoRoot & "/=/reprobuild/"])
+  let plain = probeTypeNameUnder([])
+
+  test "the control: the map changes the type's hash":
+    checkpoint(mapped & " / " & plain)
+    check mapped.startsWith("tyObject_")
+    check plain.startsWith("tyObject_")
+    check mapped != plain
+
+  test "a zig-target compile applies the map":
+    let target = probeTypeNameUnder(
+      ["-d:reproZigTarget=armv7-unknown-linux-gnueabihf"])
+    checkpoint(target & " / " & mapped)
+    check target == mapped

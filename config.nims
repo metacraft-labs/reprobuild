@@ -41,7 +41,16 @@ let reproRepoRoot = currentSourcePath().parentDir()
 #   must not depend on the shell it was built from. Under it the providers
 #   needed `libblake3.so.0` and `libxxhash.so.0`, which the prefix does not
 #   ship (measured 2026-11-03).
+# * `--typeHashPathMap`: the Nim fork hashes a type by the absolute path of
+#   the file defining it (metacraft-labs/nim 9a49ee3c), so two checkouts of
+#   one commit gave the armv7 images different bytes (measured 2026-11-04).
+#   The repository hashes as `/reprobuild/` and the workspace around it as
+#   `/workspace/`, the maps scripts/build_addon_static.sh uses; the first
+#   that matches applies, so the repository comes first. Both are uniform
+#   (every file under each root), so no two files collide.
 when defined(reproZigTarget):
+  switch("typeHashPathMap", reproRepoRoot & "/=/reprobuild/")
+  switch("typeHashPathMap", reproRepoRoot.parentDir & "/=/workspace/")
   switch("filenames", "canonical")
   switch("passL", "-Wl,--strip-debug")
   switch("define", "reproInstalledPrefix")
