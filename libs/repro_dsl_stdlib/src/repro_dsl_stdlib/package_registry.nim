@@ -140,6 +140,9 @@ const PartialCatalogCoverage* = {
   "make": "Windows archive only; POSIX hosts use the nixPackage.",
   "bash": "Windows archive only; POSIX hosts use the nixPackage.",
   "clang": "Windows archive only; POSIX hosts use the nixPackage.",
+  "ar": "Windows archive only; POSIX hosts use the nixPackage. " &
+    "The Windows arm is a view of the WinLibs bundle binutils ships in; " &
+    "ar itself is the GNU archiver and exists on every platform.",
   "capnp": "Windows archive only; POSIX hosts use the nixPackage.",
   "zstd": "Windows archive only; POSIX hosts use the nixPackage.",
   "zstd-dev": "Windows archive only; POSIX hosts use the nixPackage. " &
