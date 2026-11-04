@@ -31,6 +31,7 @@
 ## ``writeDeb``. The payloads are authored in this file.
 
 import std/[algorithm, net, os, sequtils, strutils, tables, unittest]
+from std/sysrand import urandom
 when defined(posix):
   import std/posix
 
@@ -61,11 +62,73 @@ proc sampleLock(): AptClosureLock =
         sha256: ShaB)])
 
 proc scratch(tag: string): string =
-  result = getTempDir() / ("t-addon-apt-closure-" & tag & "-" &
-    $getCurrentProcessId())
-  releaseDirAtProcessExit(result)
-  if dirExists(result): removeDir(result)
-  createDir(result)
+  ## A fresh scratch root for one case -- SHORT by construction, owner-only
+  ## where the platform has modes, removed when this process exits.
+  ##
+  ## WHY NOT UNDER ``getTempDir()``. The fixtures below are faithful ustar
+  ## streams, whose ``name`` and ``linkName`` header fields hold 100 bytes
+  ## each (``tarBytes`` asserts it; widening that bound would stop the
+  ## fixture being the ustar stream ``dpkg-deb`` writes), and the escape
+  ## cases spell an ABSOLUTE link target inside this root -- ``root /
+  ## "outside"``, ``root / "outside" / "sentinel"`` -- because an absolute
+  ## escape is a different attack shape from the relative ones beside them.
+  ## The root's own length is therefore part of a header field. Under the
+  ## suite TMPDIR it is over the field before the target is even appended:
+  ## on the CI runner ``getTempDir()`` is 73 bytes
+  ## (``/var/lib/github-runner-work/<slot>/.cache/reprobuild-test-tmp/<n>``
+  ## -- a GARM work root is far deeper than a login home), the old name
+  ## ``t-addon-apt-closure-<tag>-<pid>`` added ~36 more, and five cases died
+  ## in ``tarBytes`` having asserted nothing. A fixture path must fit the
+  ## platform's limits independently of how long the checkout or the TMPDIR
+  ## is (reprobuild ``6210412a``): that is the rule
+  ## ``shortSocketDirAtProcessExit`` implements for ``sun_path``, and this
+  ## is the same rule for ustar's 100-byte fields.
+  ##
+  ## ``/tmp`` directly, like that helper. Nothing here is monitored -- no
+  ## case in this file reads monitor evidence, so the engine's volatile
+  ## prefixes (``/run``, ``/proc``, ``/sys``, ``/dev``) are not in play --
+  ## the fixture ``.deb``s are a few kilobytes, and nothing under test scans
+  ## ancestors for repo markers, which is why ``scripts/run_tests.sh`` keeps
+  ## the suite's own large scratch off ``/tmp`` and outside the checkout.
+  ##
+  ## Windows keeps ``getTempDir()``, and is the one platform where the fit
+  ## is still TMPDIR-bound: there is no always-writable short root there
+  ## (a non-elevated account cannot create ``C:\tmp``), and the host temp
+  ## directory is normally ~35 bytes, which leaves the fields room. A
+  ## Windows run whose TMPDIR is as deep as the GARM work root would hit
+  ## the same assert, and the remedy would be the same -- a short root, not
+  ## a wider header field.
+  ##
+  ## The name carries 32 bits from the OS CSPRNG rather than only the pid:
+  ## cases of one binary run as concurrent processes and pids are recycled
+  ## between runs, so a pid-keyed name can be an earlier run's leftover --
+  ## which the previous version ``removeDir``ed, deleting a tree it did not
+  ## own. ``mkdir`` is the exclusive creation and a fresh name is tried on
+  ## ``EEXIST``, so this directory is never one somebody else made.
+  const Hex = "0123456789abcdef"
+  when defined(posix):
+    let parent = "/tmp"
+  else:
+    let parent = getTempDir()
+  for _ in 0 ..< 64:
+    var suffix = ""
+    for b in urandom(4):
+      suffix.add Hex[int(b) shr 4]
+      suffix.add Hex[int(b) and 0xf]
+    let candidate = parent / ("t-aptcl-" & tag & "-" & suffix)
+    when defined(posix):
+      if posix.mkdir(candidate.cstring, Mode(0o700)) == 0:
+        # Ours, by construction: we just created it.
+        releaseDirAtProcessExit(candidate)
+        return candidate
+      if errno != EEXIST:
+        raiseOSError(osLastError(), "mkdir " & candidate)
+    else:
+      if not existsOrCreateDir(candidate):
+        releaseDirAtProcessExit(candidate)
+        return candidate
+  raise newException(OSError, "could not create a fresh " &
+    (parent / ("t-aptcl-" & tag & "-*")) & " directory in 64 attempts")
 
 # ---------------------------------------------------------------------------
 # Fixture builders: a ustar writer and an ar writer
