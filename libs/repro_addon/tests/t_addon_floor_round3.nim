@@ -8,7 +8,8 @@
 ##
 ## Falsifying builds: ``floor-static-r3-disabled`` turns every case of the
 ## first two suites red; ``store-objects-by-string``,
-## ``floor-change-ignores-exceptions`` turn their own case red.
+## ``floor-change-ignores-exceptions`` and ``template-observed-by-name``
+## turn their own case red.
 ##
 ## Mocks: none for the floor. The effective-unit cases feed the pure
 ## comparison ``effectiveFloorProblems`` with ``systemctl show`` text written

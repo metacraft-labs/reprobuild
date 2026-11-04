@@ -317,6 +317,11 @@ const TemplateProbeInstance* = "repro-addon-observe"
 proc templateObservationName*(unit: string): string =
   ## ``unit`` itself, or for a template ``foo@.service`` its probe instance
   ## ``foo@repro-addon-observe.service``.
+  when mutated("template-observed-by-name"):
+    # Falsifying build: the template shown by its own name, which systemd
+    # refuses -- no floored template can be applied (finding 4's vector
+    # never reaches the switch, so nothing about it is tested).
+    return unit
   let at = unit.find('@')
   let dot = unit.rfind('.')
   if at > 0 and dot == at + 1:

@@ -649,6 +649,7 @@ const
                           "floor-change-ignores-exceptions",
                           "store-objects-by-string",
                           "trace-sampler-blind",
+                          "template-observed-by-name",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
