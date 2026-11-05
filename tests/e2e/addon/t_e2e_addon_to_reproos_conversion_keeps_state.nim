@@ -183,6 +183,26 @@ proc stopAtRed(): bool =
   ## not in ``REPRO_ADDON_MUTATION``): its first red step is the verdict.
   getEnv("REPRO_A13_STOP_AT_RED") == "1"
 
+proc probeFile(label: string): string =
+  ## The file a round-4 probe profile is written to. The engine compiles a
+  ## profile as a Nim module, whose name must be an identifier
+  ## (https://nim-lang.org/docs/manual.html#modules); a name that is not
+  ## would fail to compile and could pass for a refusal, so it is refused
+  ## here, before any VM work.
+  result = "r4_" & label & ".nim"
+  let stem = result[0 ..< result.len - 4]
+  if stem.len == 0 or stem[0] notin IdentStartChars or
+      not stem.allCharsInSet(IdentChars):
+    raise newException(ValueError, "probe profile " & result &
+      " is not a valid Nim module name")
+
+proc judged(output: string): bool =
+  ## Whether an apply got as far as being judged: its profile compiled, so
+  ## its result -- applied, or refused for a reason -- is the engine's
+  ## decision rather than a compile error.
+  "profile compilation failed" notin output and
+    "nim compile failed" notin output
+
 proc probeProfile(name, resources: string): string =
   ## A profile of the host's two activities whose validator activity is
   ## ``resources`` (lines indented for it): one reach case of A13's
@@ -531,25 +551,38 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # DynamicUser=yes; a profile drop-in that retargets a profile timer at
     # a distribution unit; a path unit that creates a directory inside the
     # carried one.
+    let probes = newJObject()
+    record["roundFourProbes"] = probes
     for (label, address, resources, reason) in R4Probes:
-      writeFile(work / ("r4-" & label & ".nim"), probeProfile("r4" & label, resources))
-      nw.copyTo(work / ("r4-" & label & ".nim"), RefDir / ("r4-" & label & ".nim"))
-      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/r4-" &
-        label & ".nim --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+      let pf = probeFile(label)
+      writeFile(work / pf, probeProfile("r4" & label, resources))
+      nw.copyTo(work / pf, RefDir / pf)
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
+        pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
       let o = r.stdout & r.stderr
+      # Judged, then refused for the expected reason: a compile error or
+      # any other failure is red here, and is never the falsifier's red
+      # either (the record keeps whether each probe was judged).
+      probes[label] = %*{"exit": r.exitCode, "judged": judged(o),
+        "refusedForReason": r.exitCode != 0 and "ECarriedStatePending" in o and
+          ("(" & address) in o and reason in o}
       step("round 4, " & label & ": refused while the directory is pending, " &
            "naming " & address,
-           r.exitCode != 0 and "ECarriedStatePending" in o and
-             ("(" & address) in o and reason in o, o)
+           judged(o) and r.exitCode != 0 and "ECarriedStatePending" in o and
+             ("(" & address) in o and reason in o,
+           (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") & o)
     # A host drop-in the profile does not have (here in /run): read as
     # systemd reads it. Without it the confined unit is let in (control);
     # with it, ProtectSystem=no from the host unconfines the unit and the
     # apply is refused.
-    writeFile(work / "r4-host.nim", probeProfile("r4host", R4Host))
-    nw.copyTo(work / "r4-host.nim", RefDir / "r4-host.nim")
-    let hostApply = env & eng & " infra apply --profile " & RefDir &
-      "/r4-host.nim --host " & AgentTarget & " --no-preview"
+    let hf = probeFile("host")
+    writeFile(work / hf, probeProfile("r4host", R4Host))
+    nw.copyTo(work / hf, RefDir / hf)
+    let hostApply = env & eng & " infra apply --profile " & RefDir & "/" & hf &
+      " --host " & AgentTarget & " --no-preview"
     let ctl = nw.exec(hostApply, timeoutSec = 3600)
+    probes["hostControl"] = %*{"exit": ctl.exitCode,
+      "judged": judged(ctl.stdout & ctl.stderr)}
     step("round 4, host drop-in (control): without it the confined unit is " &
          "let in while the directory is pending",
          ctl.exitCode == 0, ctl.stdout & ctl.stderr)
@@ -558,10 +591,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       " && systemctl daemon-reload")
     let hr = nw.exec(hostApply, timeoutSec = 3600)
     let ho = hr.stdout & hr.stderr
+    probes["host"] = %*{"exit": hr.exitCode, "judged": judged(ho),
+      "refusedForReason": hr.exitCode != 0 and "ECarriedStatePending" in ho and
+        "(r4Host: not confined" in ho}
     step("round 4, host drop-in: a drop-in in /run the profile does not " &
          "have makes the unit reach everything, and the apply is refused",
-         hr.exitCode != 0 and "ECarriedStatePending" in ho and "(r4Host" in ho,
-         ho)
+         judged(ho) and hr.exitCode != 0 and "ECarriedStatePending" in ho and
+           "(r4Host: not confined" in ho,
+         (if judged(ho): "" else: "NOT JUDGED (the profile did not compile): ") & ho)
     discard nw.run("rm -rf " & R4HostDropIn.parentDir &
       " && systemctl daemon-reload")
 
