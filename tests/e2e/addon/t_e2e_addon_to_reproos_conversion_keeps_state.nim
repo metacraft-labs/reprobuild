@@ -89,10 +89,10 @@
 ## - engine build ``restore-not-required-by-units``: at the boot after the
 ##   restored validator directory is replaced and the archives damaged, the
 ##   validator starts although the restore failed; red.
-## - engine build ``restore-unordered`` (no ordering on the restore): the
-##   execution client, without default dependencies, starts while the
-##   restore is held on its archive (a FIFO the gate controls), not waiting
-##   on its start job; red at the ordering step;
+## - engine build ``restore-unordered`` with seams (no ordering on the
+##   restore): the execution client, without default dependencies, starts
+##   while the restore is held at its seam, not waiting on its start job;
+##   red at the ordering step;
 ## - engine build ``restore-required-by-link`` (round 2's ``.requires/``
 ##   link): the disable and preset of the restore unit remove it, and the
 ##   validator starts; red at the same step;
@@ -626,51 +626,62 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          rres & "\nstarted: " & bad.join("; ") & "\n" &
          nw.serviceJournal([RestoreUnit, Exe, DefaultValidatorUnit]))
 
-    # Ordering, observed while the restore is provably still running: the
+    # Ordering, observed while the restore is provably still running. The
     # execution client is given no default dependencies (it has no ordering
-    # of its own), its directory is emptied so the restore must write it
-    # back, and its archive is replaced by a FIFO the gate holds: the
-    # restore blocks reading it (its digest check opens it first). A start of
-    # the client queues the restore; while the restore is blocked the client
-    # must still be waiting on its start job. Released with bytes that do
-    # not match, the restore fails and the client must not have started.
-    # Red under the engine build ``restore-unordered``. No timing is relied
-    # on: the restore is shown blocked on the FIFO before anything is judged.
-    let fifo = CarriedDir & "/" & executionArchive
-    discard nw.run(replaceDir("/var/lib/ethereum/execution") & "; mv " & fifo &
-      " " & fifo & ".real && mkfifo -m 0600 " & fifo & " && mkdir -p " &
-      "/etc/systemd/system/" & Exe & ".d && printf '[Unit]\\n" &
-      "DefaultDependencies=no\\n' > /etc/systemd/system/" & Exe &
-      ".d/95-a13-no-default-deps.conf && systemctl daemon-reload && " &
-      "systemctl reset-failed " & RestoreUnit & " " & Exe & " " &
-      DefaultValidatorUnit & " || true")
-    discard nw.run("systemctl start --no-block " & Exe)
-    let blocked = nw.exec("for i in $(seq 1 120); do p=$(systemctl show -p " &
-      "MainPID --value " & RestoreUnit & "); if [ \"$p\" != 0 ] && ls -l " &
-      "/proc/$p/fd 2>/dev/null | grep -qF " & quoteShell(fifo) & "; then " &
-      "echo blocked-on-fifo; exit 0; fi; sleep 1; done; exit 1")
-    let held = nw.exec("systemctl show -p ActiveState -p SubState " & Exe &
-      "; systemctl list-jobs --no-legend 2>/dev/null | grep -F " & Exe &
-      " || true").stdout
-    let waiting = blocked.exitCode == 0 and "ActiveState=inactive" in held and
-      "waiting" in held
-    # Released: bytes that are not the archive, so the restore fails.
-    discard nw.exec("printf junk > " & fifo, timeoutSec = 60)
-    discard nw.exec("for i in $(seq 1 120); do s=$(systemctl show -p " &
-      "ActiveState --value " & RestoreUnit & "); [ \"$s\" = activating ] || " &
-      "break; sleep 1; done")
-    discard nw.exec("sleep 3")
-    let after = nw.exec("systemctl show -p Result -p ActiveState " &
-      RestoreUnit & "; systemctl is-active " & Exe & "; journalctl -b -u " &
-      Exe & " --no-pager | grep -c 'Started' || true").stdout
-    let neverStarted = "Result=success" notin after and
-      "\nactive\n" notin ("\n" & after) and after.strip().endsWith("0")
-    step("a carried unit without default dependencies waits for the restore " &
-         "(held on its archive) and does not start when it fails",
-         waiting and neverStarted,
-         "restore " & blocked.stdout.strip() & "; while held:\n" & held &
-         "after the release:\n" & after & "\n" &
-         nw.serviceJournal([RestoreUnit, Exe]))
+    # of its own), and its directory is emptied, so the restore must write it
+    # back. The engine's seam build (``REPRO_A13_ENGINE_SEAMS=1``: the engine
+    # built with ``REPRO_ADDON_TEST_SEAMS``; the product engine carries no
+    # seam) holds the restore at ``restore-before-archive``. A start of the
+    # client queues the restore; while the restore is shown paused at the
+    # seam, the client must still be waiting on its start job. Resumed, the
+    # restore writes the execution directory back and then fails on the
+    # validator's damaged archive, and the client must never have started.
+    # Red under the engine build ``restore-unordered`` (with seams). Nothing
+    # here depends on timing.
+    if getEnv("REPRO_A13_ENGINE_SEAMS") != "1":
+      # The product engine has no seam: the check runs in the cell that
+      # uses the engine's seam build, and this record says it did not run.
+      record["orderingCheck"] = %("not run: the product engine carries no " &
+        "seam (the seam-build cell runs it)")
+    else:
+      record["orderingCheck"] = %"run (engine seam build)"
+      const SeamDir = "/var/lib/repro/system/addon"
+      discard nw.run(replaceDir("/var/lib/ethereum/execution") & "; mkdir -p " &
+        "/etc/systemd/system/" & Exe & ".d && printf '[Unit]\\n" &
+        "DefaultDependencies=no\\n' > /etc/systemd/system/" & Exe &
+        ".d/95-a13-no-default-deps.conf && systemctl daemon-reload && " &
+        "systemctl reset-failed " & RestoreUnit & " " & Exe & " " &
+        DefaultValidatorUnit & " || true; mkdir -p " & SeamDir & " && rm -f " &
+        SeamDir & "/test-paused-at " & SeamDir & "/test-resume && echo " &
+        "restore-before-archive > " & SeamDir & "/test-pause-at")
+      discard nw.run("systemctl start --no-block " & Exe)
+      let paused = nw.exec("for i in $(seq 1 120); do grep -qx " &
+        "restore-before-archive " & SeamDir & "/test-paused-at 2>/dev/null && " &
+        "[ \"$(systemctl show -p ActiveState --value " & RestoreUnit &
+        ")\" = activating ] && exit 0; sleep 1; done; exit 1")
+      let held = nw.exec("systemctl show -p ActiveState -p SubState " & Exe &
+        "; systemctl list-jobs --no-legend 2>/dev/null | grep -F " & Exe &
+        " || true").stdout
+      let waiting = paused.exitCode == 0 and "ActiveState=inactive" in held and
+        "waiting" in held
+      discard nw.run("touch " & SeamDir & "/test-resume")
+      discard nw.exec("for i in $(seq 1 300); do s=$(systemctl show -p " &
+        "ActiveState --value " & RestoreUnit & "); [ \"$s\" = activating ] || " &
+        "break; sleep 1; done")
+      discard nw.exec("for i in $(seq 1 30); do systemctl list-jobs " &
+        "--no-legend 2>/dev/null | grep -qF " & Exe & " || break; sleep 1; done")
+      let after = nw.exec("systemctl show -p Result -p ActiveState " &
+        RestoreUnit & "; systemctl is-active " & Exe & "; journalctl -b -u " &
+        Exe & " --no-pager | grep -c 'Started' || true").stdout
+      let lines = after.strip().splitLines()
+      let neverStarted = "Result=success" notin after and lines.len >= 4 and
+        lines[^2].strip() != "active" and lines[^1].strip() == "0"
+      step("a carried unit without default dependencies waits for the " &
+           "restore (held at its seam) and does not start when it fails",
+           waiting and neverStarted,
+           "restore paused at the seam: " & $(paused.exitCode == 0) &
+           "; while held:\n" & held & "after the release:\n" & after & "\n" &
+           nw.serviceJournal([RestoreUnit, Exe]))
     record["history"] = %*{"keys": earliest.len, "latestTarget": latest,
                            "addOnEpoch": oldEpoch, "restoreEpoch": restoreEpoch,
                            "conflicts": cs.len}

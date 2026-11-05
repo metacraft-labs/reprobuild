@@ -487,6 +487,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let plain = unitStanza(\"a.service\", \"User=a\\nExecStart=\" & P..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_floor_round5.nim",
+    binary: "build/test-bin/t_addon_floor_round5",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let plain = unitStanza(\"a.service\", svc)"),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_generation_attestation.nim",
     binary: "build/test-bin/t_addon_generation_attestation",
     defines: @[],
@@ -17842,7 +17853,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim",
@@ -18568,7 +18579,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
@@ -19283,7 +19294,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_execute_edge_gives_tests_a_usable_path.nim",
@@ -19637,6 +19648,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "module-level statement runs at every start-up: let milanChain = pemCertificates(KdsMilanChainPem)"),
+  TestSpec(
+    source: "tests/integration/t_git_answer_probes_read_stdout_not_warnings.nim",
+    binary: "build/test-bin/t_git_answer_probes_read_stdout_not_warnings",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g05",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_git_object_store_lookups_are_not_cache_inputs.nim",
     binary: "build/test-bin/t_git_object_store_lookups_are_not_cache_inputs",

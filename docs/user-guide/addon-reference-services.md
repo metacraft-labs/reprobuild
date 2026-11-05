@@ -82,7 +82,17 @@ The add-on handles this in four ways:
   - a file the service manager would open as root (`OpenFile=`,
     `StandardOutput=file:`);
   - a privileged group, including one the service's account belongs to in
-    `/etc/group`.
+    `/etc/group`, or a second group name for the same gid;
+  - an `EnvironmentFile=` that the service or another user could have
+    written: a wildcard, a missing file, or a file under a writable place
+    or a parent directory that someone other than root can write. The
+    manager reads it as root;
+  - a socket, timer or path unit that starts a floored service and does
+    more than listen on a network address or a unix socket under `/run`,
+    or watch a path, for example a socket that opens a device or a FIFO,
+    or one that runs a command;
+  - realtime scheduling, a reboot `FailureAction=`, or a resource limit
+    above the service manager's default.
 
   This check runs on every switch: an apply, an agent tick, a revert, a
   rollback and a crash recovery. It does not run between switches. A

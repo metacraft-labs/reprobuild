@@ -745,6 +745,14 @@ const
                           "properties-not-default-denied",
                           "unnamed-instances-unchecked",
                           "floor-start-unheld",
+                          # A9 review round 5.
+                          "floor-round5-static-off",
+                          "inert-families-by-pattern",
+                          "privileged-groups-by-name",
+                          "environment-files-trusted",
+                          "activators-unchecked",
+                          "start-hold-removes-directory",
+                          "stale-start-holds-kept",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

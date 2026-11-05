@@ -87,7 +87,19 @@ proc goodInput(): EffectiveInput =
     denied: toHashSet(["memfd_create", "mount"]))
   result.uidOf = proc (n: string): int = (if n == "root": 0 else: 1000)
   result.groupsOf = proc (n: string): seq[string] = @[n]
-  result.readableByAll = proc (p: string): bool = not p.startsWith("/etc/shadow")
+  result.inspectFile = proc (p: string): string =
+    (if p.startsWith("/etc/shadow"): "it is not readable by every user" else: "")
+  result.gidOf = proc (g: string): int =
+    case g
+    of "root", "toor": 0
+    of "adm": 4
+    of "disk": 6
+    of "shadow": 42
+    of "ssl-cert": 110
+    of "a": 1000
+    else: -1
+  result.limitCeilings = {"DefaultLimitNOFILE": "524288",
+    "DefaultLimitNOFILESoft": "1024"}.toTable
   result.lines["ExecStartEx"] = @["{ path=" & Prefix & "/bin/svc ; argv[]=" &
     Prefix & "/bin/svc ; flags= ; start_time=[n/a] }"]
   result.loaded = @[(path: fragment, content: ru)]
@@ -154,7 +166,7 @@ suite "round 4: the effective-unit check is the authority":
       check (k & "=" & v & " opens a file or terminal") in problemsOf(e)
     e = goodInput()
     e.show["EnvironmentFiles"] = "/etc/shadow (ignore_errors=no)"
-    check "is read as root and is not readable by every user" in problemsOf(e)
+    check "EnvironmentFile /etc/shadow: it is not readable by every user" in problemsOf(e)
     e = goodInput()
     e.show["LoadCredential"] = "x:/etc/shadow"
     check "outside the service's own credentials" in problemsOf(e)
@@ -209,7 +221,8 @@ suite "round 4: every property systemd reports is classified":
                    "systemd_properties" / "service-unit-properties.tsv"):
       if l.len == 0 or l[0] == '#': continue
       let k = l.split('\t')[0]
-      if k notin ComparedProps and not isExecProp(k) and not isInertProp(k):
+      if k notin ComparedProps and k notin LimitProps and not isExecProp(k) and
+          not isInertProp(k):
         unclassified.add(k)
     check unclassified.len == 0
     checkpoint unclassified.join(" ")
