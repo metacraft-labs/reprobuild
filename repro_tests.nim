@@ -5591,6 +5591,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_infra_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_infra/tests/t_service_account.nim",
+    binary: "build/test-bin/t_service_account",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"t_service_account\" & testCaseScr..."),
+  TestSpec(
     source: "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim",
     binary: "build/test-bin/t_smoke_phase_g_runinfraapply_dispatch",
     defines: @[],

@@ -479,6 +479,11 @@
 ## ``receipt-trusts-inode``                   the restore receipt counts a
 ##                                            directory as restored on its
 ##                                            device and inode alone
+## ``account-as-written``                     a service's account is taken
+##                                            as written (no specifiers,
+##                                            no static account under
+##                                            DynamicUser=yes, no uid
+##                                            alias, no memberships)
 ## ``receipt-no-fsync``                       the restore receipt is
 ##                                            renamed into place with
 ##                                            neither its file nor its
@@ -830,6 +835,10 @@ const
                           # written without its fsyncs (the hard-reset
                           # gate's receipt points).
                           "receipt-no-fsync",
+                          # A13 review round 4 finding 1: the shared
+                          # service-account resolver (repro_infra/
+                          # service_account) takes the account as written.
+                          "account-as-written",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",
