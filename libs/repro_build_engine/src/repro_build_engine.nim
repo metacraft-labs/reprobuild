@@ -797,7 +797,8 @@ type
   BuildEngineConfig* = object
     # Project-local scratch root: holds `runquota-results/*.json`,
     # `monitor-depfiles/*.iomon`, `dependency-evidence/*.rbar`, and per-build
-    # transient state. Cleaned by `repro clean`. Per-project by design.
+    # transient state. Per-project by design. It holds no declared output,
+    # so `repro clean` leaves it in place.
     cacheRoot*: string
     # User-level shared action cache + CAS root. When empty, defaults to
     # `cacheRoot` for backwards compatibility (callers that haven't been
@@ -14555,9 +14556,8 @@ proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
   ## files live under ``<cacheRoot>/actions/`` so the same scratch dir
   ## that already holds ``runquota-results/`` and ``monitor-depfiles/``
-  ## also owns the bypass-path stdio captures. ``repro clean`` (which
-  ## wipes ``cacheRoot``) reclaims them with the rest of the per-build
-  ## transient state.
+  ## also owns the bypass-path stdio captures, beside the rest of the
+  ## per-build transient state.
   cacheRoot / "actions"
 
 when defined(macosx):

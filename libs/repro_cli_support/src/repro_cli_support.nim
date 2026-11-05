@@ -490,6 +490,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " lint [build options]\n       " &
           programName &
+      " clean [--project-root=PATH] [--work-root=PATH] [--dry-run]\n       " &
+          programName &
       " run [task:NAME|PACKAGE:NAME|NAME] [--choose] [--activity=NAME] [--work-root=PATH] [-- ARGS...]\n       " &
           programName &
       " tasks [selector] [--activity=NAME] [--work-root=PATH]\n       " &
@@ -33174,6 +33176,112 @@ proc defaultMetricForScope(scope: string): string =
     "cache-hit-ratio"
   else:
     raise newException(ValueError, "unsupported stats scope: " & scope)
+
+const CleanUsage =
+  "usage: repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]"
+
+proc projectCleanBuildRoots(projectRoot, workRoot: string): seq[string] =
+  ## The directories that hold this project's per-target build state: the
+  ## project's own ``.repro/build`` and, when a work root is configured (the
+  ## ``--work-root`` flag or ``$REPROBUILD_WORK_ROOT``), the project's scoped
+  ## tree under it. These are the two places ``outputDirForTarget`` puts a
+  ## target's state, so a clean finds every snapshot a build of this project
+  ## could have written.
+  result.add(projectRoot / ".repro" / "build")
+  # ``scopedWorktreeRoot`` reads only the module's parent directory, so any
+  # file name inside the project root names the same scoped tree.
+  let scoped = scopedWorktreeRoot(projectRoot / "repro.nim", workRoot)
+  if scoped.len > 0 and scoped / "build" notin result:
+    result.add(scoped / "build")
+
+proc projectCleanSnapshotStores(buildRoot: string): seq[string] =
+  ## Every provider-graph snapshot store under one build root:
+  ## ``<buildRoot>/<target>/provider-graph`` itself and each per-variant
+  ## subdirectory ``providerGraphStoreRoot`` creates beneath it. Sorted, so a
+  ## clean reports in the same order on every run.
+  if not dirExists(extendedPath(buildRoot)):
+    return
+  for kind, targetDir in walkDir(buildRoot):
+    if kind != pcDir:
+      continue
+    let base = targetDir / "provider-graph"
+    if not dirExists(extendedPath(base)):
+      continue
+    if fileExists(extendedPath(providerSnapshotPath(base))):
+      result.add(base)
+    for subKind, variantDir in walkDir(base):
+      if subKind == pcDir and
+          fileExists(extendedPath(providerSnapshotPath(variantDir))):
+        result.add(variantDir)
+  result.sort()
+
+proc runCleanCommand(args: openArray[string]): int =
+  ## ``repro clean``: remove the materialised outputs the project's build
+  ## state records as its own.
+  ##
+  ## Ownership comes from the provider-graph snapshots each build persists:
+  ## every declared action output is an owned-effect claim there, carrying its
+  ## cleanup policy. Only those claimed paths are deleted, through the same
+  ## executor that prunes the outputs of a vanished edge
+  ## (``applyProjectClean``). The snapshots, the action cache, the content
+  ## store, ``.repro/stats/`` and every unclaimed file stay, so the next build
+  ## still reuses the cache.
+  ##
+  ## Exit 0 when every deletable output is gone (or, with ``--dry-run``, was
+  ## listed), 1 when a deletion failed, 2 on a usage error.
+  var projectRoot = getCurrentDir()
+  var workRoot = ""
+  var dryRun = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--project-root" or arg.startsWith("--project-root="):
+      projectRoot = valueFromFlag(args, i, "--project-root")
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      workRoot = valueFromFlag(args, i, "--work-root")
+    elif arg == "--dry-run":
+      dryRun = true
+    elif arg == "--help" or arg == "-h":
+      echo CleanUsage
+      return 0
+    else:
+      stderr.writeLine("repro clean: error: unsupported argument: " & arg)
+      stderr.writeLine(CleanUsage)
+      return 2
+    inc i
+  projectRoot = os.normalizedPath(absolutePath(projectRoot))
+  if not dirExists(extendedPath(projectRoot)):
+    stderr.writeLine("repro clean: error: project root does not exist: " &
+      projectRoot)
+    return 2
+
+  var snapshots: seq[ProviderGraphSnapshot]
+  for buildRoot in projectCleanBuildRoots(projectRoot, workRoot):
+    for store in projectCleanSnapshotStores(buildRoot):
+      snapshots.add(loadProviderGraphSnapshot(store))
+
+  let res = applyProjectClean(snapshots, projectRoot, dryRun = dryRun)
+  for act in res.actions:
+    case act.outcome
+    of ocoDeleted:
+      echo "removed " & act.resolvedPath
+    of ocoWouldDelete:
+      echo "would remove " & act.resolvedPath
+    of ocoFailed:
+      stderr.writeLine("repro clean: error: cannot remove " &
+        act.resolvedPath & ": " & act.detail)
+    of ocoRefusedOutsideRoot:
+      stderr.writeLine("repro clean: kept " & act.claim.identity &
+        ": outside the project root " & projectRoot)
+    of ocoSkippedPolicy, ocoSkippedNotEmpty:
+      stderr.writeLine("repro clean: kept " & act.claim.identity & ": " &
+        act.detail)
+    of ocoAlreadyAbsent, ocoSkippedShared, ocoSkippedKind:
+      discard
+  let verb = if dryRun: "would remove " else: "removed "
+  let count = if dryRun: res.wouldDelete else: res.deleted
+  echo "repro clean: " & verb & $count & " output(s) of " & projectRoot
+  if res.failed > 0: 1 else: 0
 
 proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
   var view = "overview"
@@ -94031,7 +94139,7 @@ const reproTopLevelCommands = [
   # ``repro store`` operates against. See runCasCommand for the
   # supported subcommands.
   "cas",
-  "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
+  "clean", "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
   # `repro attest <sub>`: expected launch measurements for attested images.
@@ -102443,6 +102551,12 @@ proc runThinAppDispatch(programName: string): int =
       return 2
     except CatchableError as err:
       stderr.writeLine("repro lint: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "clean":
+    try:
+      return runCleanCommand(if args.len > 1: args[1 .. ^1] else: @[])
+    except CatchableError as err:
+      stderr.writeLine("repro clean: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "stats":
     try:

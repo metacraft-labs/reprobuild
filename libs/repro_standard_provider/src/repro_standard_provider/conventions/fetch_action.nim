@@ -49,8 +49,9 @@ const
   FetchScratchSubdir* = ".repro/fetch"
     ## Sub-directory under the project root that holds the downloaded
     ## tarballs + stamp files. Lives alongside ``.repro/build/``
-    ## (each Tier 2b convention's scratch root) so a ``repro clean``
-    ## wipes both consistently.
+    ## (each Tier 2b convention's scratch root). Only the stamp is a
+    ## declared output, so ``repro clean`` removes the stamp and keeps the
+    ## fetched payload.
 
 proc fetchScratchPath*(projectRoot: string): string =
   projectRoot / FetchScratchSubdir

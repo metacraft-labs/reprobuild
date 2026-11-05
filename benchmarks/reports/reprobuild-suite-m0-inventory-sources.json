@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2665,
+    "nimTestBinaries": 2667,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 737,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2705
+    "testEntries": 2707
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1558,10 +1558,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1477,
+      "integration": 1478,
       "platform/destructive": 168,
       "pure unit": 737,
-      "unclassified": 304
+      "unclassified": 305
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1769,9 +1769,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2665,
+    "nimTestBinaryCount": 2667,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2705
+    "testEntryCount": 2707
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9760,6 +9760,25 @@
       "source": "libs/repro_binary_cache_client/tests/t_cache_connect_is_bounded.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cache_reads_are_bounded",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client"
+      ],
+      "owner": "libs/repro_binary_cache_client",
+      "requiresReproBinary": false,
+      "source": "libs/repro_binary_cache_client/tests/t_cache_reads_are_bounded.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44629,8 +44648,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_output_cleanup_executor.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -46646,6 +46665,24 @@
       "source": "tests/integration/t_repro_certify_runs_the_required_set_in_workspace_mode.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_clean_removes_owned_outputs_and_keeps_caches",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -52390,14 +52427,15 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_attest",
+        "repro_hash",
         "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_closure_manifest.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

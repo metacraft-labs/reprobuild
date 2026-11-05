@@ -1048,6 +1048,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_binary_cache_client_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_binary_cache_client/tests/t_cache_reads_are_bounded.nim",
+    binary: "build/test-bin/t_cache_reads_are_bounded",
+    defines: @["ssl"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "no other source shares its compile options"),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim",
     binary: "build/test-bin/t_client_cli_prefix_substitute",
     defines: @[],
@@ -17116,7 +17127,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g02",
+    group: "t_group_tests_integration_g01",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
@@ -17820,7 +17831,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ci_plan_v2_binds_the_checked_out_content.nim",
@@ -18546,7 +18557,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_dev_env_artifact.nim",
@@ -19261,7 +19272,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim",
@@ -19921,7 +19932,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
@@ -20658,7 +20669,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_issuance_refuses_when_content_changes_during_the_run.nim",
@@ -21263,7 +21274,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_repin_clears_a_conflict_from_a_newly_declared_producer.nim",
@@ -21879,7 +21890,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
@@ -22572,7 +22583,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy.nim",
@@ -23265,7 +23276,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_old_reader_parses_fragment.nim",
@@ -23424,6 +23435,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_certify_runs_the_required_set_in_workspace_mode.nim",
     binary: "build/test-bin/t_repro_certify_runs_the_required_set_in_workspace_mode",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim",
+    binary: "build/test-bin/t_repro_clean_removes_owned_outputs_and_keeps_caches",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -26962,7 +26984,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "tests/unit/t_cmake_direct_tool_identity.nim",
     binary: "build/test-bin/t_cmake_direct_tool_identity",
