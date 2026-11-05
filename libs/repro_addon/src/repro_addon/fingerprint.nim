@@ -427,12 +427,38 @@ proc isVolatileMount*(mountPoint: string): bool =
       return true
   false
 
-proc parseMountinfo*(text: string): seq[tuple[key, value: string]] =
+proc tmpfsHalfRamSizeOption*(memTotalKb, pageSize: int): string =
+  ## The ``size=`` a tmpfs mounted with ``size=50%`` shows when the kernel
+  ## prints it: ``ceil(pages / 2)`` pages, in KiB. The kernel prints
+  ## ``size=`` only when the mount's block limit differs from the default,
+  ## ``totalram_pages() / 2`` rounded DOWN (Linux ``mm/shmem.c``,
+  ## ``shmem_default_max_blocks`` and ``shmem_show_options``), while
+  ## ``size=50%`` rounds UP (``DIV_ROUND_UP`` in ``shmem_parse_one``). So
+  ## the same mount reads ``rw,nr_inodes=...`` when the boot's page count is
+  ## even and ``rw,size=<half>k,nr_inodes=...`` when it is odd -- and that
+  ## count varies by a page from one boot to the next (Debian 13's
+  ## ``tmp.mount`` is ``size=50%%``; measured on debian-13-amd64 at
+  ## reprobuild 77b01874e6: ``Memory: 1992428K`` and ``1992432K`` on two
+  ## boots of one image, and ``size=1010776k`` = ceil(505387 / 2) pages read
+  ## on a boot whose ``MemTotal`` was one page under 2021552 kB). ""
+  ## when the page count is even (nothing is printed then).
+  let pages = memTotalKb * 1024 div pageSize
+  if pages mod 2 == 0: return ""
+  "size=" & $(((pages + 1) div 2) * (pageSize div 1024)) & "k"
+
+proc parseMountinfo*(text: string; memTotalKb = 0; pageSize = 4096):
+    seq[tuple[key, value: string]] =
   ## ``/proc/self/mountinfo``. Key: the mount point, with ``#<n>`` appended
   ## to the second and later mounts stacked on the same point (in table
   ## order, which is mount order). Value: filesystem type, source, the
   ## per-mount options and the superblock options. Mount and parent ids are
   ## left out: they are allocation order, not configuration.
+  ##
+  ## With ``memTotalKb``, a tmpfs's ``size=`` that is exactly the rendering
+  ## of a 50%-of-RAM limit on an odd page count (``tmpfsHalfRamSizeOption``)
+  ## is dropped: it is the same limit the kernel prints nothing for on an
+  ## even count, so the record does not change with the boot's page-count
+  ## parity. Every other ``size=`` is kept.
   var seen = initCountTable[string]()
   for line in text.splitLines():
     if line.len == 0: continue
@@ -449,7 +475,14 @@ proc parseMountinfo*(text: string): seq[tuple[key, value: string]] =
     let mountOpts = pre[5]
     let fstype = post[0]
     let source = unescapeMountField(post[1])
-    let superOpts = post[2]
+    var superOpts = post[2]
+    if fstype == "tmpfs" and memTotalKb > 0:
+      let half = tmpfsHalfRamSizeOption(memTotalKb, pageSize)
+      if half.len > 0:
+        var kept: seq[string]
+        for o in superOpts.split(','):
+          if o != half: kept.add(o)
+        superOpts = kept.join(",")
     seen.inc(mountPoint)
     let n = seen[mountPoint]
     let key = if n == 1: mountPoint else: mountPoint & "#" & $n
@@ -688,8 +721,17 @@ proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
   if opts.live:
     collectUnits(result)
     collectSysctl(result)
+    var memTotalKb = 0
+    try:
+      for l in readFile("/proc/meminfo").splitLines():
+        if l.startsWith("MemTotal:"):
+          memTotalKb = parseInt(l.splitWhitespace()[1])
+          break
+    except CatchableError:
+      discard                    # no normalisation without it
     collectFileComponent(result, fcMounts,
-                         parseMountinfo(readFile("/proc/self/mountinfo")))
+      parseMountinfo(readFile("/proc/self/mountinfo"), memTotalKb,
+                     int(sysconf(SC_PAGESIZE))))
     var ephLo, ephHi = 0
     try:
       let r = readFile("/proc/sys/net/ipv4/ip_local_port_range").splitWhitespace()
