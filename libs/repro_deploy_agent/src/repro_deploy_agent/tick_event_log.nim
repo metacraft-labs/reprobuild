@@ -30,6 +30,7 @@
 ##     123  aoUnsupportedBase   Error         exit 2  (operator must act)
 ##     124  aoStale             Error         exit 2  (operator must act)
 ##     125  aoRolledBack        Error         exit 2  (operator must act)
+##     126  aoOperatorAction    Error         exit 2  (operator must act)
 ##     190  tickRaised          Error         exit 1  (tick fell over)
 ##     199  <unrecognised>      Warning
 ##
@@ -92,6 +93,7 @@ const
   EventIdTickUnsupportedBase* = 123
   EventIdTickStale* = 124
   EventIdTickRolledBack* = 125
+  EventIdTickOperatorAction* = 126
   EventIdTickRaised* = 190
   EventIdTickUnknownOutcome* = 199
 
@@ -131,6 +133,7 @@ proc tickEventId*(outcome: string): int =
   of "aoUnsupportedBase": EventIdTickUnsupportedBase
   of "aoStale": EventIdTickStale
   of "aoRolledBack": EventIdTickRolledBack
+  of "aoOperatorAction": EventIdTickOperatorAction
   of "aoPaused": EventIdTickPaused
   of TickRaisedOutcome: EventIdTickRaised
   else: EventIdTickUnknownOutcome

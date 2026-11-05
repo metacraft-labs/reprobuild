@@ -101,6 +101,9 @@ required_sources=(
   source/libs/xxh3/src/xxh3/vendor/xxhash.c
   src/reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim
   src/test-certificates-tools/src/test_certificates.nim
+  # Beside src/, not in it: test_certificates/cli.nim reads its version from
+  # it at compile time. v0.2.19's archive lacked it and could not compile.
+  src/test-certificates-tools/test_certificates.nimble
   src/reprobuild-ct-test-runner/libs/ct_incremental_adapter/src/ct_incremental_adapter.nim
   src/io-mon/src/io_mon.nim
   src/nim-stackable-hooks/src/stackable_hooks.nim

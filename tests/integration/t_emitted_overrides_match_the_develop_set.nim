@@ -142,7 +142,7 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
 
 proc lockDep(name, url, sha: string): string =
   "{ name = \"" & name & "\", path = \"" & name & "\", coord_kind = \"vcs\"" &
-  ", url = \"" & url & "\", ref = \"main\", revision = \"" & sha &
+  ", url = \"" & url & "\", revision = \"" & sha &
   "\", integrity = \"git-sha1:" & sha &
   "\", version = \"\", visibility = \"public\", participation = \"\"" &
   ", depends = \"\", groups = \"\" }"
@@ -383,7 +383,7 @@ suite "NF-1: the emitted overrides are the develop set":
         "branch = \"main\"\n")
       writeFile(app / "repro.lock",
         committedLock(@["{ name = \"app\", path = \".\", coord_kind = \"vcs\"" &
-          ", url = \"\", ref = \"\", revision = \"\", integrity = \"\"" &
+          ", url = \"\", revision = \"\", integrity = \"\"" &
           ", version = \"\", visibility = \"public\", participation = \"\"" &
           ", depends = \"\", groups = \"\" }"]))
       let nested = emit("--all")

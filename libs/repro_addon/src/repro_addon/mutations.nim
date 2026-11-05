@@ -368,7 +368,20 @@
 ##                                            ``session-<n>.scope``,
 ##                                            ``user@.service`` and its
 ##                                            instances pass (decision 37,
-##                                            extended)
+##                                            extended; decision 38 adds
+##                                            systemd-user-sessions and
+##                                            user-runtime-dir@)
+## ``tmpfiles-scope-unchecked``               a tmpfiles fragment's lines are
+##                                            not parsed: any path, /etc
+##                                            included, is written by
+##                                            systemd-tmpfiles (spec §4.1)
+## ``agent-management-path-ignores-tmpfiles`` an agent apply's tmpfiles rule
+##                                            may act on /run/nologin and the
+##                                            other management paths under
+##                                            the tmpfiles class
+## ``agent-management-path-names-fail-open``  a unit whose names systemd
+##                                            cannot give is judged by its
+##                                            own name alone
 ## ``agent-repin-keeps-allow-list``           ``agent-repin`` rewrites the
 ##                                            hosts file but leaves the fetch
 ##                                            unit's ``IPAddressAllow=`` on
@@ -395,6 +408,101 @@
 ##                                            or the re-assert materialised
 ##                                            is try-restarted even when it
 ##                                            has failed (left failed)
+## ``state-units-not-checked``                a state backup or restore runs
+##                                            whatever its units' control
+##                                            groups say
+## ``state-units-not-held``                   a state backup holds none of
+##                                            its units (one can start again
+##                                            before the conversion)
+## ``state-archive-unchecked``                a restore reads an archive
+##                                            whose SHA-256 it did not check
+## ``state-restore-unverified``               a restore renames a staged
+##                                            tree into place unchecked
+## ``apply-ignores-carried-state``            an apply starts a unit whose
+##                                            carried state is not restored
+## ``import-writes-skeleton``                 the import keeps a copy of
+##                                            its skeleton under ``/etc``
+## ``pending-by-receipt-only``                carried state counts as
+##                                            restored by the receipt
+##                                            alone, whatever root it names
+## ``carried-reach-by-unit-name``             the carried-state wait matches
+##                                            units by name, not by what
+##                                            they can reach
+## ``owner-ids-unchecked``                    a carried tree's owner ids
+##                                            are not compared with the
+##                                            accounts the apply uses
+## ``apply-ignores-hold``                     an apply runs while a state
+##                                            backup holds the host
+## ``hold-runtime-only``                      the hold is written in /run
+##                                            (lost at a reboot)
+## ``hardlinks-unchecked``                    the tree digest passes a file
+##                                            with several hard links
+## ``restore-leaves-staging``                 a retried restore leaves an
+##                                            earlier staging directory
+## ``restore-writes-dense``                   a restore writes zero blocks
+##                                            (the file is not sparse)
+## ``keep-without-mount-requirement``         a unit with a kept directory
+##                                            gets no RequiresMountsFor=
+## ``restore-after-start``                    the switch restores preserved
+##                                            bytes after step 7 starts
+##                                            the units (the old order)
+## ``revert-refuses-restored``                a revert refuses a file the
+##                                            failed switch restored
+## ``import-copies-env-secret``               the import copies a secret
+##                                            Environment= value into the
+##                                            skeleton
+## ``sink-credential-has-read-scope``         the Evidence sink answers a
+##                                            list or a read from an
+##                                            appender's credential
+## ``ship-deletes-before-ack``                the shipping unit deletes an
+##                                            outbox entry before the sink
+##                                            acknowledged it
+## ``attestation-unsigned``                   the attestation signature
+##                                            covers other bytes than the
+##                                            statement
+## ``attestation-claims-host``                the statement's scope says
+##                                            host attestation and drops
+##                                            what it does not cover
+## ``check-silence-as-idle``                  the off-host check reports a
+##                                            silent detector as live-idle
+## ``check-skips-attestation``                the off-host check compares
+##                                            no attestation (DET-AO-9)
+## ``lag-detector-disabled``                  the off-host check raises no
+##                                            lag alert (DET-AO-10)
+## ``tick-records-no-detection``              a tick's outcome leaves no
+##                                            detection record
+## ``evidence-ship-unrestricted-egress``      the shipping unit has no
+##                                            egress allow-list
+## ``evidence-ship-sees-agent-keys``          the shipping unit can read
+##                                            the attestation and recipient
+##                                            keys
+## ``receipt-trusts-inode``                   the restore receipt counts a
+##                                            directory as restored on its
+##                                            device and inode alone
+## ``reach-ignores-privileged-commands``      a "+"/"!" Exec*= command and
+##                                            PermissionsStartOnly= do not
+##                                            widen a unit's reach
+## ``reach-dropin-judged-alone``              a collision="dropIn" unit is
+##                                            judged by its drop-in only
+## ``reach-trigger-units-reach-nothing``      what a unit activates (Wants=,
+##                                            a timer's Unit=, ...) is not
+##                                            followed
+## ``backup-without-host-lock``               the backup runs without the
+##                                            host apply lock and is not
+##                                            re-checked after the hold; an
+##                                            apply's carried check is not
+##                                            repeated under the lock
+## ``restore-not-required-by-units``          the carried units do not
+##                                            require the restore unit
+## ``engine-tick-unrecorded``                 the full engine's agent tick
+##                                            on an add-on host leaves no
+##                                            evidence record
+## ``egress-observer-not-installed``          the egress observer's unit
+##                                            never loads its nftables
+##                                            table
+## ``evidence-keys-adopted``                  creating the evidence keys
+##                                            does not refuse keys that
+##                                            are already there
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -516,6 +624,11 @@ const
                           "agent-management-path-dropin-ignores-unit-aliases",
                           "agent-management-path-allows-login-slices",
                           "agent-management-path-allows-session-units",
+                          # A8 round 5: tmpfiles lines held to the class and
+                          # the management path; unit names fail closed.
+                          "tmpfiles-scope-unchecked",
+                          "agent-management-path-ignores-tmpfiles",
+                          "agent-management-path-names-fail-open",
                           # A12 review finding 12: an add-on agent applies
                           # a pin compiled for no selection or for `full`.
                           "addon-agent-accepts-full-pin",
@@ -534,7 +647,142 @@ const
                           # A12 round-2 review: a consumer that failed for
                           # want of its secrets is try-restarted (left
                           # failed) once they are back.
-                          "failed-consumer-left-failed"]
+                          "failed-consumer-left-failed",
+                          # A9 (confinement): the apply unit without
+                          # ProtectSystem=strict (t_addon_units_meet_
+                          # confinement_floor); the store bind not read-only
+                          # and the flip not re-checking the store
+                          # (e2e_addon_store_is_read_only_to_everything_else);
+                          # CAP_NET_ADMIN in the apply unit's bounding set
+                          # (t_addon_agent_apply_unit_lacks_cap_net_admin);
+                          # the re-assert unit with a network
+                          # (e2e_addon_reassert_unit_has_no_network); the
+                          # serviceFloor without its exec confinement or
+                          # without MemoryDenyWriteExecute
+                          # (e2e_addon_service_cannot_exec_outside_closure).
+                          "apply-unit-without-protect-system",
+                          "store-mount-writable",
+                          "flip-skips-store-recheck",
+                          "agent-apply-has-cap-net-admin",
+                          "reassert-has-network",
+                          "floor-without-noexec",
+                          "floor-without-mdwe",
+                          # A9 review: memfd_create left allowed (the
+                          # exec gate's memfd step); stored generations
+                          # parsed under today's floor default (the
+                          # upgrade gate); drop-ins of floored units not
+                          # judged (t_addon_service_floor); the root units'
+                          # filter without @mount and @chown (the syscall
+                          # trace gate).
+                          "floor-allows-memfd",
+                          "stored-profile-floored",
+                          "floor-ignores-drop-ins",
+                          "privileged-filter-without-mount-chown",
+                          # A9 review round 2 (each the round-1 behaviour
+                          # its finding names):
+                          "floor-private-mounts-exec",
+                          "floor-allows-sysv-shm",
+                          "floor-proc-writable",
+                          "floor-paths-unnormalised",
+                          "floor-allows-images",
+                          "floor-ignores-prefix-dropins",
+                          "stored-floor-unversioned",
+                          "floor-change-by-ledger-bytes",
+                          "replay-forgets-stored-target",
+                          "recheck-skips-dropin-prefixes",
+                          "trace-attributes-by-window",
+                          # A9 review round 3: the static half off (the
+                          # effective-unit check alone), both halves off,
+                          # and each point fix's round-2 behaviour.
+                          "floor-static-r3-disabled",
+                          "floor-unchecked",
+                          "effective-check-skipped",
+                          "stored-floor-guess",
+                          "floor-change-ignores-exceptions",
+                          "store-objects-by-string",
+                          "trace-sampler-blind",
+                          "template-observed-by-name",
+                          # A9 review round 4.
+                          "exception-lifts-root",
+                          "instance-dropin-needs-provider",
+                          "dropins-from-the-distribution-trusted",
+                          "properties-not-default-denied",
+                          "unnamed-instances-unchecked",
+                          "floor-start-unheld",
+                          # A13: a state backup or restore runs while a
+                          # unit of the set may run.
+                          "state-units-not-checked",
+                          # A13: the backup does not hold the set's units,
+                          # so one can start again before the conversion.
+                          "state-units-not-held",
+                          # A13: a restore reads an archive whose SHA-256
+                          # it did not check against the manifest.
+                          "state-archive-unchecked",
+                          # A13: a restore renames a staged tree into place
+                          # without checking its digest.
+                          "state-restore-unverified",
+                          # A13: an apply starts a unit whose carried state
+                          # is not restored yet.
+                          "apply-ignores-carried-state",
+                          # A13: the import writes its skeleton on the host.
+                          "import-writes-skeleton",
+                          # A13 review: the falsifiers of the review's
+                          # fixes (see the table above).
+                          "pending-by-receipt-only",
+                          "carried-reach-by-unit-name",
+                          "owner-ids-unchecked",
+                          "apply-ignores-hold",
+                          "hold-runtime-only",
+                          "hardlinks-unchecked",
+                          "restore-leaves-staging",
+                          "restore-writes-dense",
+                          "keep-without-mount-requirement",
+                          "import-copies-env-secret",
+                          "restore-after-start",
+                          "revert-refuses-restored",
+                          # Milestone A11 (detection and capture). Read by
+                          # repro_peer_cache/evidence.nim, which cannot
+                          # import this module: the Evidence sink answers a
+                          # list or a read from an appender (G34's gate).
+                          "sink-credential-has-read-scope",
+                          # The shipping unit deletes outbox entries before
+                          # the sink acknowledged them (DET-6).
+                          "ship-deletes-before-ack",
+                          # The attestation is signed over other bytes than
+                          # its statement (spec §10.5).
+                          "attestation-unsigned",
+                          # The statement presents itself as host
+                          # attestation (spec §10.5's "never").
+                          "attestation-claims-host",
+                          # The off-host check: silence reported as idle
+                          # (DET-5), attestations not compared (DET-AO-9),
+                          # no lag alert (DET-AO-10).
+                          "check-silence-as-idle",
+                          "check-skips-attestation",
+                          "lag-detector-disabled",
+                          # A tick's outcome leaves no detection record.
+                          "tick-records-no-detection",
+                          # The shipping unit without its egress allow-list,
+                          # and with the attestation and recipient keys
+                          # visible to it.
+                          "evidence-ship-unrestricted-egress",
+                          "evidence-ship-sees-agent-keys",
+                          # A13 review round 2.
+                          "receipt-trusts-inode",
+                          "reach-ignores-privileged-commands",
+                          "reach-dropin-judged-alone",
+                          "reach-trigger-units-reach-nothing",
+                          "backup-without-host-lock",
+                          "restore-not-required-by-units",
+                          # A11 review: the full engine's deploy-agent tick
+                          # on an add-on host leaves no record.
+                          "engine-tick-unrecorded",
+                          # Owner decision 2026-11-04 (DET-AO-3): the egress
+                          # observer's table is never loaded.
+                          "egress-observer-not-installed",
+                          # Owner decision 2026-11-04 (evidence-enrol): keys
+                          # already on the host are not looked for.
+                          "evidence-keys-adopted"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -29,6 +29,8 @@ import std/[algorithm, json, nativesockets, net, os, posix, strutils, tables, ur
 
 import repro_core
 import repro_peer_cache/auth as peerAuth
+import repro_peer_cache/pki
+import repro_peer_cache/types
 
 import ./cross_prefix
 import ./fingerprint
@@ -38,6 +40,7 @@ export host_exec.systemdMajor
 import ./linux_fs
 import ./mutations
 import ./store_root
+import ./nft_tables
 
 type
   Verdict* = enum
@@ -57,6 +60,10 @@ type
     agentTarget*: string           ## "" => no deploy-agent units (A8)
     agentSources*: seq[string]     ## the manifest sources (HTTP(S) URLs)
     profileCompiler*: string       ## "" => source profiles are refused
+    agentPollSec*: int             ## 0 => the default fetch timer (A11)
+    evidenceSink*: string          ## "" => no Evidence sink (A11): local records only
+    evidenceSinkCaPath*: string    ## the sink's host CA certificate (PEM)
+    evidenceHeartbeatSec*: int     ## 0 => the default shipping heartbeat
 
   KeptFile* = object
     ## A file bootstrap keeps as found. A content-pinned input (the signers
@@ -675,6 +682,47 @@ proc resolveAgentInputs*(target: string; sources: seq[string];
   result.allowedAddresses.sort()
   result.hosts.sort()
 
+proc resolveEvidenceInputs*(sink, caPath: string;
+                            heartbeatSec: int): EvidenceUnitsInputs =
+  ## The Evidence sink's part of generation 0 (spec §10.4): ``sink`` is
+  ## ``<address>:<port>`` (``[<v6>]:<port>``) -- an address, because the
+  ## shipping unit's egress allow-list takes addresses and it has no DNS --
+  ## and ``caPath`` the sink's host CA, which is pinned: its host id is the
+  ## only sink the shipping unit will talk to.
+  let colon = sink.rfind(':')
+  if colon <= 0:
+    raise newException(ValueError, "--evidence-sink must be <address>:<port>: " &
+      sink)
+  var host = sink[0 ..< colon]
+  if host.startsWith("[") and host.endsWith("]"): host = host[1 .. ^2]
+  if not isAddressLiteral(host):
+    raise newException(ValueError, "--evidence-sink must name an IP address " &
+      "(the shipping unit resolves no names): " & sink)
+  try: result.sinkPort = parseInt(sink[colon + 1 .. ^1])
+  except ValueError:
+    raise newException(ValueError, "--evidence-sink has no valid port: " & sink)
+  if result.sinkPort <= 0 or result.sinkPort > 65535:
+    raise newException(ValueError, "--evidence-sink port out of range: " & sink)
+  result.sinkAddress = host
+  if caPath.len == 0:
+    raise newException(ValueError, "--evidence-sink needs --evidence-sink-ca " &
+      "(the sink's host CA certificate, pinned)")
+  let pem = try: readFile(caPath)
+            except IOError, OSError:
+              raise newException(ValueError, "cannot read " & caPath)
+  let der = try: certPemToDer(pem)
+            except CatchableError as e:
+              raise newException(ValueError, caPath & ": not a PEM " &
+                "certificate: " & e.msg)
+  if not findIsCa(der):
+    raise newException(ValueError, caPath & " is not a CA certificate (the " &
+      "sink's host-ca.crt)")
+  result.sinkCaPem = pem
+  result.sinkHostId = $derivePeerIdFromPublicKey(certPublicKey(der))
+  if heartbeatSec < 0:
+    raise newException(ValueError, "--heartbeat-interval must be positive")
+  result.heartbeatSec = heartbeatSec
+
 proc runPreflight*(inp: PreflightInputs): PreflightReport =
   ## Inventory the host and compute the plan. Writes nothing.
   when mutated("preflight-writes"):
@@ -815,13 +863,56 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       else: "target " & agentInputs.target & ", " &
             $agentInputs.sources.len & " manifest source(s); the fetch " &
             "unit may reach " & agentInputs.allowedAddresses.join(", "))
+  if inp.agentPollSec < 0:
+    agentError = "--poll-interval must be positive"
+    result.add("deploy-agent", false, agentError)
+  agentInputs.pollIntervalSec = inp.agentPollSec
+
+  # The Evidence sink (A11, spec §10.4). Without one the host keeps its
+  # records locally only, and the plan says so: DET-6 does not hold there.
+  var evidenceInputs: EvidenceUnitsInputs
+  var evidenceError = ""
+  if inp.evidenceSink.len > 0 or inp.evidenceSinkCaPath.len > 0:
+    try:
+      evidenceInputs = resolveEvidenceInputs(inp.evidenceSink,
+        inp.evidenceSinkCaPath, inp.evidenceHeartbeatSec)
+    except CatchableError as e:
+      evidenceError = e.msg
+    result.add("evidence-sink", evidenceError.len == 0,
+      if evidenceError.len > 0: evidenceError
+      else: "records ship to " & sinkEndpoint(evidenceInputs) & " (sink " &
+            evidenceInputs.sinkHostId[0 ..< 16] & "...), heartbeat every " &
+            $evidenceHeartbeatSec(evidenceInputs) & " s")
+  # The egress observer (owner decision 2026-11-04, DET-AO-3): a host with
+  # both the deploy agent and a sink carries it, and one whose base cannot
+  # (no nft, no socket cgroupv2 match) is refused here -- never bootstrapped
+  # without it.
+  var egressInputs: EgressObserverInputs
+  if evidenceInputs.sinkAddress.len > 0 and agentInputs.target.len > 0 and
+      agentError.len == 0:
+    let nft = nftBinary()
+    let problem = egressObserverProblem(nft)
+    result.add("egress-observer", problem.len == 0,
+      if problem.len > 0: problem
+      else: "the deploy agent's refused connects are counted in the " &
+            "add-on's own nftables table (" & nft & ")")
+    if problem.len == 0:
+      egressInputs = EgressObserverInputs(nft: nft,
+        allowedAddresses: agentInputs.allowedAddresses)
+  for p in [EvidenceStateDir, AttestationKeyPath, AttestationPubPath]:
+    if evidenceInputs.sinkAddress.len > 0 and pathPresent(p):
+      result.add("evidence-sink", false, p & " already exists; bootstrap " &
+        "creates it and never adopts one")
 
   # Generation 0 must find every one of its paths absent.
   let reproExe = reproExeFor(result.binarySha256)
   result.gen0Inputs = Gen0Inputs(reproExe: reproExe, deploySigners: signers,
     cacheUrl: (if anchorsError.len > 0: "" else: inp.cacheUrl),
     cachePublishers: publishers,
-    agent: (if agentError.len > 0: AgentUnitsInputs() else: agentInputs))
+    agent: (if agentError.len > 0: AgentUnitsInputs() else: agentInputs),
+    egress: egressInputs,
+    evidence: (if evidenceError.len > 0: EvidenceUnitsInputs()
+               else: evidenceInputs))
   result.gen0 = generation0Objects(result.gen0Inputs)
   var taken: seq[string]
   for o in result.gen0:
@@ -900,6 +991,17 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       "recipientPublicKey": result.preBootstrap.recipientPublicKey,
     },
   }
+  if evidenceInputs.sinkAddress.len > 0:
+    # Only on a host bootstrapped with a sink, so every other plan keeps
+    # its bytes.
+    plan["evidence"] = %*{
+      "sink": sinkEndpoint(evidenceInputs),
+      "sinkHost": evidenceInputs.sinkHostId,
+      "heartbeatSec": evidenceHeartbeatSec(evidenceInputs),
+      "egressObserver": egressInputs.nft,
+    }
+  if agentInputs.pollIntervalSec > 0:
+    plan["agent"]["pollSec"] = %agentInputs.pollIntervalSec
   result.planJson = canonical(plan)
   result.digest = sha256Hex(result.planJson)
 

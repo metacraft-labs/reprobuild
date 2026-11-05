@@ -15,7 +15,8 @@
 ##
 ## *The test network* is fully local: one execution client, one beacon node
 ## and one validator client with eight validators, post-merge from genesis
-## (Electra at epoch 0, two-second slots, six-slot epochs), no peers, no
+## (Electra at epoch 0, six-second slots, six-slot epochs: ``SecondsPerSlot``,
+## ``SlotsPerEpoch``, read from its ``config.yml``), no peers, no
 ## discovery, nothing reached outside the guest. Its genesis is generated on
 ## the test host with ``prysmctl testnet generate-genesis`` from the
 ## committed ``fixtures/reference_services/testnet/{config.yml,genesis.json}``
@@ -47,6 +48,19 @@ const
   ProfileSource* = FixtureDir / "system.nim"
   PinsModule* = "reference_pins.nim"
   TestnetChainId* = 32382
+
+proc testnetConfigInt(key: string): int {.compileTime.} =
+  ## ``key`` from the committed network definition: the gates' timing is
+  ## derived from the one place the network's timing is set.
+  for line in staticRead(FixtureDir / "testnet" / "config.yml").splitLines():
+    if line.startsWith(key & ":"):
+      return parseInt(line[key.len + 1 .. ^1].strip())
+  raiseAssert "testnet config.yml has no " & key
+
+const
+  SecondsPerSlot* = testnetConfigInt("SECONDS_PER_SLOT")
+  SlotsPerEpoch* = testnetConfigInt("SLOTS_PER_EPOCH")
+  SecondsPerEpoch* = SecondsPerSlot * SlotsPerEpoch
   WalletPasswordValue* = "a12-testnet-wallet"
     ## The test network's wallet password: a fixture value, delivered to
     ## the guest as a secret (`<validator service>/wallet-password`) the
@@ -161,6 +175,19 @@ proc checkPinned(tree, root, name: string) =
       raise newException(TestBedError, name & "'s " & bin & " is " & got &
         ", but the recipe pins " & want & " (rebuild it from the recipe in " &
         "REPRO_A12_PACKAGES)")
+
+proc vaultwardenBinary*(): string =
+  ## The static vaultwarden binary the reference recipe built under
+  ## ``REPRO_A12_PACKAGES`` (the A13 gates install it by hand, as an
+  ## operator would, and package it as a fixture ``.deb``).
+  let root = getEnv("REPRO_A12_PACKAGES")
+  if root.len == 0:
+    raise newException(TestBedError, "REPRO_A12_PACKAGES must name the " &
+      "reprobuild-packages checkout the reference packages were built in")
+  result = recipeOutput(root, "vaultwarden", "x86_64-unknown-linux-musl") /
+    "bin" / "vaultwarden"
+  if not fileExists(result):
+    raise newException(TestBedError, "missing package binary " & result)
 
 proc refPackages*(work: string): RefPackages =
   ## Stage the three packages from ``REPRO_A12_PACKAGES`` under ``work``.

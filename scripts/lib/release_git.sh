@@ -59,5 +59,14 @@ release_git_init() {
 }
 
 release_git() {
-  "$RELEASE_GIT_BIN" -c safe.directory='*' "$@"
+  # 3. A staging script run from a git hook of this checkout (pre-commit runs
+  #    `just lint`) inherits GIT_DIR, which git exports to the hooks of a
+  #    linked worktree, and GIT_DIR outranks `-C`: the read of the sibling
+  #    went to this repository instead. Every call here names its sibling
+  #    with `-C`, so the variables that locate a repository are dropped
+  #    (https://git-scm.com/docs/git#_the_git_repository).
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+    -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    -u GIT_PREFIX \
+    "$RELEASE_GIT_BIN" -c safe.directory='*' "$@"
 }

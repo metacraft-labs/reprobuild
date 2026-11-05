@@ -437,8 +437,10 @@ $ repro push --sync --rebase
 ```
 
 When repository dependencies form a cycle, `repro push` preflights the exact
-clean commits and publishes that component together in a deterministic order.
-Each hook still checks the lock pins and other publication policies. A raw
+clean commits and publishes that component together in a deterministic order:
+a member whose committed lock pins another member's new commit is pushed after
+that member, and otherwise the manifest's declaration order applies. Each hook
+still checks the lock pins and other publication policies. A raw
 `git push` cannot authorize the other unpublished members of the component.
 If a later member fails, the command reports the published prefix and the
 remaining work; fix the cause and retry.
@@ -516,18 +518,15 @@ brings it forward (`git -C <sibling> merge --ff-only …`, `repro ws sync
 line of the sibling's history, is spelled out:
 `repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
 (or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
-`pre-commit` re-pin honors). Each pin's `ref` is a published branch that
-contains the pinned commit — the branch of the repo's `unstable` role
-first, then the branch of its `mainline` role, as the workspace manifest
-and settings file declare them (no branch name is built into `repro`),
-then the checkout's branch, the remote's default, or any other published
-branch containing it — and is empty when no published branch contains it; a
-local-only branch name is never recorded. Neither is a branch the
-branching policy deletes after use: a stabilisation branch
-`agents-to-dev-<date>` is skipped, so a refresh run on one records the
-next durable branch containing the commit, or an empty `ref` when only
-the stabilisation branch contains it, and a lock that already records
-one has it replaced on the next refresh or commit.
+`pre-commit` re-pin honors). A pin records the commit and nothing about
+branches: no `ref`, so neither a local-only branch name nor which published
+branch contains the commit. Which branches a remote publishes is a fact
+about your clone's remote-tracking refs, and recording it made two clones
+write different bytes for the same pins and made publishing a sibling
+rewrite its dependents' locks. Whether a pinned commit is published is
+checked when you push. A lock written by an older `repro` may still carry a
+`ref` for each entry; it is ignored, and dropped the next time a pin in that
+lock is rewritten.
 
 Refresh also names every sibling pin it removes, including pins in HEAD's
 committed lock that a previous working-copy refresh already removed. The
@@ -1010,6 +1009,24 @@ make sense.
   makes **no claim** about the team, personal, or evidence backends —
   the server cannot read them. Their reproducibility is enforced entirely
   by the client `pre-push` gate and by each backend's own access control.
+
+  The integrity recompute covers only the lock entries that designate the
+  **pushed repository itself**: the entry marked `self = "true"`, and any
+  other entry whose URL names the same repository (as the self entry's URL
+  or the gateway's upstream does, compared the way `repro sync` compares
+  repository identities). Such an
+  entry's revision must be among the objects the gateway holds for this
+  repository, so a self pin at a commit the push never delivered is
+  refused. An entry that pins **another repository** (a sibling) is
+  outside what the server received: the push is not refused for it, and
+  the gateway names it in its output, for example
+
+  ```text
+  remote: reprobuild gateway: refs/heads/main: public-tier lock gate: 'lib-b' NOT verified server-side — it pins another repository, whose objects this push does not carry; the client pre-push gate verifies it
+  ```
+
+  Entries with no git-native integrity at a concrete revision are named the
+  same way. Verifying them is the client `pre-push` gate's job.
 
 ## Worked example: a mixed workspace
 

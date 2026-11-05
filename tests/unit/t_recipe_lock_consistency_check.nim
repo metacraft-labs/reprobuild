@@ -74,7 +74,7 @@ proc flakeLock(nodes: openArray[(string, string)]): string =
 
 proc dep(name, path, url, rev: string): string =
   "{ name = \"" & name & "\", path = \"" & path & "\", coord_kind = \"vcs\", " &
-    "url = \"" & url & "\", ref = \"agents\", revision = \"" & rev &
+    "url = \"" & url & "\", revision = \"" & rev &
     "\", integrity = \"git-sha1:" & rev & "\", version = \"\", " &
     "visibility = \"public\", participation = \"\", depends = \"\", " &
     "tags = \"\" }"

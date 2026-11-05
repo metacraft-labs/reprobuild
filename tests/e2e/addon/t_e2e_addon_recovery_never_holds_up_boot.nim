@@ -63,7 +63,7 @@ proc credentialUnit(gen: string): string =
   ## service, so whatever it is ordered after is on the base's boot path.
   ## It copies what it read to a file the gate checks (root-only /run).
   "secrets.secretFile {\n  service = \"" & CredService & "\"\n  name = \"token\"\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"" & CredService & ".service\"\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & CredService & ".service\"\n" &
     "  content = \"[Unit]\nDescription=credential boot-order fixture\n\n" &
     "[Service]\nEnvironment=GEN=" & gen & "\nExecStart=/bin/sh -c 'cat " &
     "$$CREDENTIALS_DIRECTORY/token > " & CredSeen & "; exec sleep infinity'\n\n" &
@@ -73,7 +73,7 @@ proc credentialUnit(gen: string): string =
 proc profile(gen: string): string =
   credentialUnit(gen) &
   "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"repro-fixture-boot.service\"\n  content = \"" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fixture-boot.service\"\n  content = \"" &
     unitText(gen) & "\"\n}\n\n" &
     "fs.systemFile {\n  path = \"/etc/repro-fixture/boot.conf\"\n  content = \"" &
     gen & "\n\"\n}\n"

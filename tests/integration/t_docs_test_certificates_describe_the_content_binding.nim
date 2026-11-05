@@ -30,6 +30,9 @@ const quotedInSource = [
   "is not this checkout's content",
   "no certificate note on the pushed tree",
   "content must be the content that was tested",
+  # A dependency cycle on the push path.
+  "at its pinned commit",
+  "in temporary worktrees",
   # The health row.
   "this build writes no notes",
   "pre-push hook ",

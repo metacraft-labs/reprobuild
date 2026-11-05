@@ -13,13 +13,14 @@
 ## generation an automatic revert may return to) belongs to the deploy
 ## agent's manifest format and is not part of this operator command.
 
-import std/os
+import std/[os, strutils]
 
 import repro_infra
 
 import ./addon_apply
 import ./agent_record
 import ./collision
+import ./evidence
 import ./static_tree
 
 type
@@ -75,7 +76,8 @@ proc runAddonRollback*(opts: AddonRollbackOptions): AddonRollbackResult =
       "apply --profile` instead")
   result.apply = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: opts.hostIdentity, ownProfileText: g.own,
-    userProfileText: g.user, reconcileDrift: opts.reconcileDrift,
+    userProfileText: g.user, storedTarget: true,
+    reconcileDrift: opts.reconcileDrift,
     driver: opts.driver, purpose: "rollback",
     # Its secrets come from the target generation's own envelope copy; a
     # copy that no longer opens refuses the rollback before anything is
@@ -87,3 +89,14 @@ proc runAddonRollback*(opts: AddonRollbackOptions): AddonRollbackResult =
   # system addon resume` clears them. Written only once the rollback
   # committed.
   result.pausedAgents = pauseAgents(stateDir, result.toGeneration)
+  # An operator rollback is a DET-AO-7 detection (spec §10.4): it moved the
+  # host off what the producer published, and paused its agents.
+  try:
+    discard recordEvidence(EvidenceEvent(detector: edRollback,
+      category: ecDetection, trigger: "operator-rollback",
+      fields: @[("previousGeneration", result.fromGeneration),
+                ("message", "paused: " & result.pausedAgents.join(", "))],
+      attest: true), defaultSite(stateDir))
+  except CatchableError as e:
+    stderr.write("repro-addon: cannot write the rollback's evidence record: " &
+      e.msg & "\n")

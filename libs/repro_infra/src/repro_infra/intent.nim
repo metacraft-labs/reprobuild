@@ -333,6 +333,17 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  healthCheck = " & renderScalar(r.suHealthCheck))
     if r.suCredentials.len > 0:
       result.add("  credentials = " & renderList(r.suCredentials))
+    if r.suHardening.len > 0:
+      result.add("  hardening = " & renderScalar(r.suHardening))
+      # The floor version it renders with (spec §10.1, *Stored generations
+      # and floor versions*): what a stored generation is re-rendered
+      # under, byte for byte, whatever floor a later engine has.
+      result.add("  floorVersion = " & renderScalar(
+        if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion))
+    if r.suFloorExceptions.len > 0:
+      result.add("  floorExceptions = " & renderList(r.suFloorExceptions))
+    if r.suStateDirectories.len > 0:
+      result.add("  stateDirectories = " & renderList(stateDirectoryEntries(r)))
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))

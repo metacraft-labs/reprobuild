@@ -113,6 +113,10 @@ type
                        ## deployment is quarantined and not retried
     aoPaused           ## an operator rolled the host back locally; the agent
                        ## does not re-converge until ``resume``
+    aoOperatorAction   ## the apply refused for an operator to act (ReproOS
+                       ## add-on spec §10.1: a running unit's first
+                       ## hardening floor is an operator's apply); a retry
+                       ## cannot fix it, and the sequence is not recorded
 
   AgentOutcome* = object
     kind*: AgentOutcomeKind
@@ -127,6 +131,12 @@ type
     ## confirmation (or any later step) and was reverted to the generation
     ## the host ran before. The agent quarantines the deployment
     ## (``aoRolledBack``) instead of retrying it on every tick.
+
+  EApplyNeedsOperator* = object of CatchableError
+    ## Raised by an apply hook whose apply refused before changing anything
+    ## because an operator must act first (``aoOperatorAction``). The
+    ## sequence is not recorded, so the same manifest applies once the
+    ## operator has.
 
   EApplyFailedAtFloor* = object of CatchableError
     ## Raised by an apply hook whose apply failed after its flip but was
@@ -814,6 +824,12 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
       message: "the host's base is outside the supported matrix at " &
         "sequence " & $selected.sequence & ": " & e.msg,
       errorCode: "unsupported_base")
+  except EApplyNeedsOperator as e:
+    return AgentOutcome(kind: aoOperatorAction, target: cfg.target,
+      sequence: selected.sequence, deploymentId: selected.deploymentId,
+      message: "sequence " & $selected.sequence & " needs an operator: " &
+        e.msg,
+      errorCode: "operator_action_required")
   except EApplyFailedAtFloor as e:
     writeLastAppliedSequence(cfg, selected.sequence)
     if selected.hasAttestations: writeLastIssuedAt(cfg, selected.issuedAt)

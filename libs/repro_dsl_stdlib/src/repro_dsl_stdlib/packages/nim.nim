@@ -74,15 +74,18 @@ package nim:
     # cpu/os = "any" (or omitted) match every target and act as a
     # catch-all. The Windows maintenance prefix is a qualified full source
     # build; other platform archives retain their upstream supplier pins.
-    tarball url = "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip",
-      sha256 = "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b",
+    # It carries `--compilerArgsFile`, which the compile runner needs for an
+    # argv over Windows' 32,767-unit command line (codetracer-pm
+    # spec/Nim-Compiler-Argument-Files.md; qualification run 41815608798).
+    tarball url = "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633-windows-x64.zip",
+      sha256 = "e6eaf87df71f83629a8877ac496bcd8cdb7755f9e860b982bb0b886e38eac1c3",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "bin/nim.exe",
       packageId = "nim@2.2.10",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:nim@2.2.10:sha256:92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b",
+      lockIdentity = "tarball:nim@2.2.10:sha256:e6eaf87df71f83629a8877ac496bcd8cdb7755f9e860b982bb0b886e38eac1c3",
       version = "2.2.10",
       extraExecutable = "bin\\atlas.exe",
       extraExecutable = "bin\\nimble.exe",
@@ -774,9 +777,18 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     else:
       relativePath(path, runDir, '/')
 
+  # Under a zig target the compile names the triple as a define, so the
+  # project's own configuration can tell a build for another machine from a
+  # native one: reprobuild's `config.nims` then compiles images that name
+  # no build-host path (Distribution-And-Packaging §5.3, the builder-path
+  # gate). A define, not a new flag, so the typed tool's interface is
+  # unchanged.
+  let effectiveDefines =
+    if threadZig: defines & @["reproZigTarget=" & zigTarget.triple]
+    else: defines
   result = c(pkg = pkg, source = fromRunDir(source),
     output = fromRunDir(outBinary),
-    defines = defines,
+    defines = effectiveDefines,
     cpu = (if threadZig: cross.cpu else: cpu),
     os = (if threadZig: cross.os else: ""),
     cc = (if threadZig: "clang" else: cc),
@@ -971,4 +983,4 @@ proc nimRepropathsConfig*(pkg: NimPackage;
     closeSearch = closeSearch,
     snippet = snippet,
     actionId = "ensure_snippet_config_nims_" & currentOwningPackage())
-  result.add(snippetAction)
+  result.add(snippetAction)

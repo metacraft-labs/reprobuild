@@ -30,6 +30,7 @@ import repro_profile
 import ./addon_apply
 import ./agent_checks
 import ./agent_record
+import ./attestation
 import ./static_tree
 from ./generation0 import StoreRoot
 
@@ -114,7 +115,12 @@ proc engineAgentRoute*(addonState, agentStateDir: string;
   earAddonSwitch
 
 proc agentRecordOf*(m: DeployManifest): AgentRecord =
-  AgentRecord(deploymentId: m.deploymentId, sequence: m.sequence)
+  ## What the generation an apply of ``m`` commits records of it, including
+  ## the producer-side digests its generation attestation names (spec
+  ## §10.5).
+  AgentRecord(deploymentId: m.deploymentId, sequence: m.sequence,
+    profileDigest: manifestProfileDigestOf(m),
+    closuresDigest: closureDigestsDigest(m.closureDigests))
 
 proc defaultAddonApply(): AddonApplyFn =
   result = proc(o: AddonApplyOptions): AddonApplyResult {.closure, gcsafe.} =
@@ -190,7 +196,7 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
           if c.actionsJson.len > 0:
             resolved = to(parseJson(c.actionsJson), seq[ProfileBuildAction])
         var prof: SystemProfile
-        try: prof = parseSystemProfile(text)
+        try: prof = parseAddOnUserProfile(text)
         except CatchableError as e:
           return (false, "the profile does not parse: " & e.msg)
         let refusal = agentProfileRefusal(m, prof, source, stateDir, unitNames)
@@ -239,6 +245,9 @@ proc addonAgentApplyHook*(stateDir, hostIdentity: string;
              "actionable drift" else: ""))
       except EAddOnUnsupportedBase, EApplyFailedAtFloor:
         raise
+      except AddonNeedsOperator as e:
+        # Refused for an operator to act (§10.1): not retried.
+        raise newException(EApplyNeedsOperator, e.msg)
       except AddonRolledBack as e:
         # Attempted, failed its confirmation, reverted (§7.5): the agent's
         # quarantine outcome, as in the apply unit's hook.

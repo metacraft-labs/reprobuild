@@ -48,22 +48,68 @@
 ##    open (`db <pid> <device>:<inode> <path>`).
 ##
 ##    *What the order cannot see, and how it is bounded* (A12 round-2
-##    review). The kernel drops inotify events when the descriptor's queue
-##    is full and says so once with `IN_Q_OVERFLOW`; the monitor logs that
-##    as `cg overflow`, and an overflow is itself reported as an overlap
-##    (`cgroupOverlaps`): with events missing the order decides nothing, so
-##    the check fails closed. An incarnation in which no validator process
-##    was seen is left out of the pairing: either the unit failed before
-##    its `ExecStart=` ran (a credential that did not load, a start limit),
-##    or the process lived less than one scan of `/proc`. The second is
-##    harmless only if a validator cannot sign within one scan, so the
-##    monitor logs the longest gap between the starts of two scans
-##    (`scan <seconds>`, each time it grows) and the gate requires it below
-##    ``MaxScanGapSec``: before its first signature a validator client
-##    decrypts its EIP-2335 keystores (scrypt, about a second for the
-##    test's keys), connects to its beacon node and waits for a duty in a
-##    slot. ``monitorStats`` gives the gate both numbers and the count of
-##    incarnations left out, and the record carries them.
+##    review; revised after round 2's measurement). The kernel drops
+##    inotify events when the descriptor's queue is full and says so once
+##    with `IN_Q_OVERFLOW`; the monitor logs that as `cg overflow`, and an
+##    overflow is itself reported as an overlap (`cgroupOverlaps`): with
+##    events missing the order decides nothing, so the check fails closed.
+##
+##    Every incarnation is paired, whether or not a validator process was
+##    seen in it. A unit's cgroup exists before any process is attached to
+##    it, and the kernel refuses to remove it while a process remains, so
+##    the create-to-delete span contains every lifetime in that
+##    incarnation. Two spans of different units that do not intersect
+##    therefore prove the processes in them did not coexist, whatever ran
+##    there and whether the monitor saw it. The overlap verdict needs no
+##    scan of `/proc` and nothing that depends on scheduling: the events
+##    wait in the queue until the monitor reads them. This is also what the
+##    switch promises for an exclusive unit (spec §7.3: the predecessor is
+##    stopped and confirmed exited before the successor starts; systemd
+##    removes an inactive unit's empty cgroup when it goes inactive), so a
+##    successor's span that begins inside a predecessor's is an overlap even
+##    if the predecessor's process was already gone.
+##
+##    The round-2 version left an incarnation with no seen validator out of
+##    the pairing and bounded the wall-clock gap between two scans (0.5 s)
+##    to argue that such an incarnation held nothing that could sign. That
+##    bound measured scheduling, not safety: the guest is a QEMU process,
+##    and when the host is loaded its vCPUs are descheduled, so the guest's
+##    clock advances while neither the monitor nor the validator runs. At
+##    877b33a825 ubuntu-24.04 recorded a 0.549 s gap at a host load average
+##    near 30 on 32 cores, with no overflow and a validator seen in every
+##    incarnation, and the gate went red.
+##
+##    The monitor never drops a creation. inotify names a created
+##    directory but not its inode, so the monitor reads the inode with
+##    `stat` when it drains the event. A monitor that drains late can find
+##    the directory already removed, and then logs `cg <unit> create -`.
+##    The span is kept and paired, and no process can be attributed to it,
+##    so it counts as an incarnation without a validator. A late drain can
+##    also read the inode of a later incarnation of the same unit. That
+##    changes only attribution, which fails closed: a seen process whose
+##    incarnation was never logged is reported. The A12 falsifier
+##    `monitor-sleeps` measured the drop at 58423f4a7e: the removed
+##    renamed unit's span went unlogged.
+##
+##    The `/proc` scan now serves coverage only: which process ran in which
+##    incarnation, and the slashing-protection database it held. That is
+##    decided fail-closed. When the gate stops it, the monitor drains its
+##    queue once more and writes `end`. The gate requires `end` and a
+##    validator seen in every incarnation of a validator unit
+##    (``monitorStats``). Each monitored step waits until its instance has
+##    signed (`waitSigning`), so each instance lives for several slots. A
+##    monitor that stalls for an instance's whole life leaves that
+##    incarnation without a `seen` line, and the gate fails rather than
+##    passes. The scan cannot see a second validator process that starts
+##    and exits between two scans inside an incarnation whose own validator
+##    was seen. systemd starts one `ExecStart=` process per incarnation of
+##    a `Type=simple` unit, so nothing in the gate can start one, and any
+##    signature it made would be in the unit's own database, which the
+##    conflict check reads. The monitor also runs at a real-time priority
+##    in the guest (`chrt -f`), so the guest's own load (geth, the beacon
+##    node, the validator's scrypt) never delays a scan. The longest gap
+##    between two scans is still logged (`scan <seconds>`) and recorded,
+##    but no verdict depends on it.
 
 import std/[json, sets, strutils, tables]
 
@@ -80,10 +126,6 @@ type
     goneAt*: float
     unit*: string          ## the validator unit it ran in, "" outside them
     cgroup*: string        ## that incarnation's cgroup inode
-
-const MaxScanGapSec* = 0.5
-  ## The longest the monitor may go between two scans of `/proc` for an
-  ## unseen validator instance to be harmless (module header).
 
 proc rootOf(n: JsonNode): string =
   if n.hasKey("signing_root"): n["signing_root"].getStr().toLowerAscii() else: ""
@@ -156,9 +198,10 @@ proc parseLifetimes*(log: string): seq[Instance] =
     let t = line.strip()
     if t.len == 0: continue
     let f = t.splitWhitespace()
-    if f[0] in ["db", "cg", "scan"]:
+    if f[0] in ["db", "cg", "scan", "end"]:
       continue          # the database (`databasesHeld`), the cgroups
-                        # (`cgroupOverlaps`), the scan gap (`monitorStats`)
+                        # (`cgroupOverlaps`), the scan gap and the end
+                        # (`monitorStats`)
     if f[0] == "seen" and f.len in [3, 5]:
       open[f[1]] = result.len
       var inst = Instance(pid: f[1], start: parseFloat(f[2]), lastSeen: -1,
@@ -201,10 +244,14 @@ proc overlaps*(ls: seq[Instance]): seq[string] =
           (if a.goneAt < 0: "still alive"
            else: "last seen at " & $a.lastSeen & ", gone by " & $a.goneAt))
 
+proc pidsText(pids: seq[string]): string =
+  if pids.len == 0: "no validator seen" else: "pid " & pids.join(", ")
+
 proc cgroupOverlaps*(log: string): seq[string] =
   ## The overlaps the kernel's ordering shows (module header, 2.): two
-  ## instances in one incarnation of a unit's cgroup, or instances in
-  ## incarnations of two units that existed at once. Instances outside the
+  ## instances in one incarnation of a unit's cgroup, or incarnations of two
+  ## units that existed at once, whether or not a validator was seen in
+  ## them (the span contains every lifetime in it). Instances outside the
   ## validator units are held to ``overlaps`` against every instance. A
   ## malformed ``cg`` line raises.
   type Incarnation = object
@@ -256,10 +303,10 @@ proc cgroupOverlaps*(log: string): seq[string] =
         a.unit)
     for j in i + 1 ..< incs.len:
       let b = incs[j]
-      if a.unit == b.unit or a.pids.len == 0 or b.pids.len == 0: continue
+      if a.unit == b.unit: continue
       if a.created < b.deleted and b.created < a.deleted:
-        result.add(a.unit & " (pid " & a.pids.join(", ") & ") and " & b.unit &
-          " (pid " & b.pids.join(", ") & ") existed at once" &
+        result.add(a.unit & " (" & pidsText(a.pids) & ") and " & b.unit &
+          " (" & pidsText(b.pids) & ") existed at once" &
           (if a.deleted == high(int) or b.deleted == high(int):
              " (one never ended)" else: ""))
   # An instance outside the units: the conservative clock check against
@@ -274,19 +321,24 @@ proc cgroupOverlaps*(log: string): seq[string] =
 type MonitorStats* = object
   ## What the monitor's log says about its own coverage (module header).
   overflows*: int            ## `cg overflow` lines (IN_Q_OVERFLOW)
-  longestScanGapSec*: float  ## the largest `scan` value, 0 when none
+  longestScanGapSec*: float  ## the largest `scan` value, 0 when none;
+                             ## recorded, never a verdict (module header)
   incarnations*: int         ## validator-unit cgroup incarnations created
   withoutValidator*: int     ## of those, the ones no validator was seen in
+  ended*: bool               ## the monitor drained its queue and wrote `end`
 
 proc monitorStats*(log: string): MonitorStats =
   ## The coverage numbers the gate requires and records. A malformed
-  ## `scan` line raises.
+  ## `scan` line raises, and so does anything after `end`.
   var seenIn: HashSet[string]
   var created: seq[string]
   for line in log.splitLines():
     let f = line.strip().splitWhitespace()
     if f.len == 0: continue
+    if result.ended:
+      raise newException(ValueError, "monitor line after end: " & line.strip())
     case f[0]
+    of "end": result.ended = true
     of "cg":
       if f.len == 2 and f[1] == "overflow": inc result.overflows
       elif f.len == 4 and f[2] == "create": created.add(f[1] & " " & f[3])
@@ -302,10 +354,23 @@ proc monitorStats*(log: string): MonitorStats =
     if c notin seenIn: inc result.withoutValidator
 
 const MonitorScript* = """
-import ctypes, os, struct, sys, time
+import ctypes, os, signal, struct, sys, time
 # The validator client's processes (an executable named `validator` under
 # the store) and the cgroups of the validator units named in argv[2:], in
 # the kernel's order (one inotify descriptor); see validator_safety.nim.
+# SIGTERM ends it: one last drain of the queue, then `end`. The handler
+# interrupts only the pause between two scans; during a drain or a scan it
+# just asks the loop to stop, so no event already read is lost.
+class Stop(Exception):
+    pass
+stopping = False
+sleeping = False
+def on_term(signum, frame):
+    global stopping
+    stopping = True
+    if sleeping:
+        raise Stop()
+signal.signal(signal.SIGTERM, on_term)
 tck = os.sysconf('SC_CLK_TCK')
 log = open(sys.argv[1], 'a', buffering=1)
 units = set(sys.argv[2:])
@@ -320,10 +385,14 @@ dbs = set()
 def now():
     return time.clock_gettime(time.CLOCK_BOOTTIME)
 def created(u):
+    # The event names the directory, not its inode, so the inode is read
+    # now. A directory already removed again (a monitor that drains late)
+    # is still logged, with `-`: its span is what the overlap check pairs,
+    # and dropping it would hide an overlap.
     try:
         log.write('cg %s create %d\n' % (u, os.stat(SLICE + '/' + u).st_ino))
     except OSError:
-        pass   # already removed again: its delete follows in the queue
+        log.write('cg %s create -\n' % u)
 def drain():
     while True:
         try:
@@ -352,71 +421,86 @@ def start_of(p):
     return int(st[st.rindex(')') + 2:].split()[19]) / tck
 last_scan = None
 max_gap = 0.0
-while True:
-    drain()
-    t0 = now()
-    if last_scan is not None and t0 - last_scan > max_gap:
-        # The longest gap between two scans: an instance that lived less
-        # than it may go unseen (validator_safety.nim, MaxScanGapSec).
-        max_gap = t0 - last_scan
-        log.write('scan %.6f\n' % max_gap)
-    last_scan = t0
-    seen = set()
-    pending = []
-    for p in os.listdir('/proc'):
-        if not p.isdigit():
-            continue
-        try:
-            exe = os.readlink('/proc/%s/exe' % p)
-        except OSError:
-            continue
-        if not (exe.startswith('/repro/store/') and exe.endswith('/bin/validator')):
-            continue
-        try:
-            start = start_of(p)
-        except OSError:
-            continue
-        key = (p, start)
-        seen.add(key)
-        if key not in alive:
-            unit, ino = '-', '-'
-            try:
-                for line in open('/proc/%s/cgroup' % p):
-                    path = line.strip().split(':', 2)[2]
-                    if path.startswith('/system.slice/') and path[14:] in units:
-                        unit = path[14:]
-                ino = '-'
-                if unit != '-':
-                    ino = str(os.stat(SLICE + '/' + unit).st_ino)
-                    # Alive after the stat: it is in that incarnation (one
-                    # removed before the stat held no process).
-                    if start_of(p) != start:
-                        raise OSError('gone')
-            except (OSError, IndexError):
-                seen.discard(key)
+PAUSE = 0.005
+def scan_forever():
+    global last_scan, max_gap, sleeping
+    while not stopping:
+        drain()
+        t0 = now()
+        if last_scan is not None and t0 - last_scan > max_gap:
+            # The longest gap between two scans, recorded for the record's
+            # reader; no verdict depends on it (validator_safety.nim).
+            max_gap = t0 - last_scan
+            log.write('scan %.6f\n' % max_gap)
+        last_scan = t0
+        seen = set()
+        pending = []
+        for p in os.listdir('/proc'):
+            if not p.isdigit():
                 continue
-            pending.append('seen %s %.3f %s %s\n' % (p, start, unit, ino))
-        alive[key] = t0
-        if key not in dbs:
-            # The slashing-protection database it holds open, once it has.
             try:
-                for fd in os.listdir('/proc/%s/fd' % p):
-                    t = os.readlink('/proc/%s/fd/%s' % (p, fd))
-                    if t.endswith('/validator.db'):
-                        st2 = os.stat(t)
-                        pending.append('db %s %d:%d %s\n' % (p, st2.st_dev, st2.st_ino, t))
-                        dbs.add(key)
-                        break
+                exe = os.readlink('/proc/%s/exe' % p)
             except OSError:
-                pass
-    # The creations a seen process's cgroup may come from are logged first.
-    drain()
-    for line in pending:
-        log.write(line)
-    t1 = now()
-    for key in list(alive):
-        if key not in seen:
-            log.write('gone %s %.3f %.3f\n' % (key[0], alive[key], t1))
-            del alive[key]
-    time.sleep(0.005)
+                continue
+            if not (exe.startswith('/repro/store/') and exe.endswith('/bin/validator')):
+                continue
+            try:
+                start = start_of(p)
+            except OSError:
+                continue
+            key = (p, start)
+            seen.add(key)
+            if key not in alive:
+                unit, ino = '-', '-'
+                try:
+                    for line in open('/proc/%s/cgroup' % p):
+                        path = line.strip().split(':', 2)[2]
+                        if path.startswith('/system.slice/') and path[14:] in units:
+                            unit = path[14:]
+                    ino = '-'
+                    if unit != '-':
+                        ino = str(os.stat(SLICE + '/' + unit).st_ino)
+                        # Alive after the stat: it is in that incarnation (one
+                        # removed before the stat held no process).
+                        if start_of(p) != start:
+                            raise OSError('gone')
+                except (OSError, IndexError):
+                    seen.discard(key)
+                    continue
+                pending.append('seen %s %.3f %s %s\n' % (p, start, unit, ino))
+            alive[key] = t0
+            if key not in dbs:
+                # The slashing-protection database it holds open, once it has.
+                try:
+                    for fd in os.listdir('/proc/%s/fd' % p):
+                        t = os.readlink('/proc/%s/fd/%s' % (p, fd))
+                        if t.endswith('/validator.db'):
+                            st2 = os.stat(t)
+                            pending.append('db %s %d:%d %s\n' % (p, st2.st_dev, st2.st_ino, t))
+                            dbs.add(key)
+                            break
+                except OSError:
+                    pass
+        # The creations a seen process's cgroup may come from are logged first.
+        drain()
+        for line in pending:
+            log.write(line)
+        t1 = now()
+        for key in list(alive):
+            if key not in seen:
+                log.write('gone %s %.3f %.3f\n' % (key[0], alive[key], t1))
+                del alive[key]
+        sleeping = True
+        if stopping:
+            raise Stop()
+        time.sleep(PAUSE)
+        sleeping = False
+try:
+    scan_forever()
+except Stop:
+    pass
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+drain()
+log.write('end\n')
+log.close()
 """

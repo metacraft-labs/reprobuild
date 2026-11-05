@@ -280,14 +280,12 @@ proc writeConsumerLock(consumerRoot, exeUrl, exeRev, libUrl, libRev: string) =
     inputsDigest: inputsDigestOf("sc6-fixture"))
   ld.deps.add(LockedDep(
     name: "exeprod", path: "",
-    coordinates: Coordinates(kind: ckVcs, url: exeUrl, gitRef: "main",
-      revision: exeRev),
+    coordinates: Coordinates(kind: ckVcs, url: exeUrl, revision: exeRev),
     integrity: gitObjectMultihash("sha1", exeRev),
     visibility: "public"))
   ld.deps.add(LockedDep(
     name: "libprod", path: "",
-    coordinates: Coordinates(kind: ckVcs, url: libUrl, gitRef: "main",
-      revision: libRev),
+    coordinates: Coordinates(kind: ckVcs, url: libUrl, revision: libRev),
     integrity: gitObjectMultihash("sha1", libRev),
     visibility: "public"))
   writeFile(consumerRoot / "repro.lock", serializeLockedDependencies(ld))
@@ -450,14 +448,12 @@ suite "SC-6: lock-pinned fetches and builds sibling from source":
           inputsDigest: inputsDigestOf("sc6-fixture-tamper"))
         ld.deps.add(LockedDep(
           name: "exeprod", path: "",
-          coordinates: Coordinates(kind: ckVcs, url: exeRemote, gitRef: "main",
-            revision: exeRev),
+          coordinates: Coordinates(kind: ckVcs, url: exeRemote, revision: exeRev),
           integrity: "git-sha1:0000000000000000000000000000000000000000",
           visibility: "public"))
         ld.deps.add(LockedDep(
           name: "libprod", path: "",
-          coordinates: Coordinates(kind: ckVcs, url: libRemote, gitRef: "main",
-            revision: libRev2),
+          coordinates: Coordinates(kind: ckVcs, url: libRemote, revision: libRev2),
           integrity: gitObjectMultihash("sha1", libRev2),
           visibility: "public"))
         writeFile(tamperRoot / "repro.lock", serializeLockedDependencies(ld))
@@ -493,8 +489,7 @@ suite "SC-6: lock-pinned fetches and builds sibling from source":
         # Only libprod is pinned; exeprod's LockedDep is intentionally absent.
         ld.deps.add(LockedDep(
           name: "libprod", path: "",
-          coordinates: Coordinates(kind: ckVcs, url: libRemote, gitRef: "main",
-            revision: libRev2),
+          coordinates: Coordinates(kind: ckVcs, url: libRemote, revision: libRev2),
           integrity: gitObjectMultihash("sha1", libRev2),
           visibility: "public"))
         writeFile(missRoot / "repro.lock", serializeLockedDependencies(ld))

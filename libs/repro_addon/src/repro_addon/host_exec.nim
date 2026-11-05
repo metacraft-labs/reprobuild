@@ -35,6 +35,9 @@ const
   DpkgDivertCandidates* = ["/usr/bin/dpkg-divert", "/usr/sbin/dpkg-divert"]
   DpkgQueryCandidates* = ["/usr/bin/dpkg-query"]
   SystemdRunCandidates* = ["/usr/bin/systemd-run", "/bin/systemd-run"]
+  SystemdAnalyzeCandidates* = ["/usr/bin/systemd-analyze",
+                               "/bin/systemd-analyze"]
+  GetentCandidates* = ["/usr/bin/getent", "/bin/getent"]
 
 const HostToolPath* = "/usr/sbin:/usr/bin:/sbin:/bin"
   ## The ``PATH`` a host tool sees by default: the distribution's own

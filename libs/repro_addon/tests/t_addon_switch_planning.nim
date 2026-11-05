@@ -343,6 +343,10 @@ suite "no-follow primitives":
     createDirsNoFollow(root / "etc" / "new" / "deep" / "dir")
 
   test "removeLeafNoFollow removes a dangling link and never a directory":
+    # Each case may run alone in its own process: plant the directory chain
+    # the last two checks remove, rather than inheriting it from the mkdir -p
+    # case.
+    createDirsNoFollow(root / "etc" / "new" / "deep" / "dir")
     let d = root / "etc" / "dangling"
     createSymlink(root / "nowhere", d)
     check symlinkExists(d) and not fileExists(d)
@@ -368,6 +372,10 @@ suite "no-follow primitives":
     removeFile(p)
 
   test "leafNoFollow reports what is there":
+    # Plant the link this case reads instead of inheriting it from the
+    # replace case; each case may run alone in its own process.
+    replaceWithLinkNoFollow(root / "etc" / "app" / "a.conf",
+      "/etc/repro/static/app/b.conf")
     check leafNoFollow(root / "etc" / "app" / "a.conf").kind == lkLink
     check leafNoFollow(root / "etc" / "app").kind == lkDir
     check leafNoFollow(root / "etc" / "app" / "none").kind == lkAbsent

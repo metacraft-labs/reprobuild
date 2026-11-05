@@ -40,8 +40,14 @@ const
   ## explicitly (the F1 example), but a hard fail for every migrated
   ## Phase A fixture exercised through the production `repro home apply`
   ## CLI. F2 surfaced and fixed the chain.
-  CompiledRepoRoot* = currentSourcePath().parentDir.parentDir.parentDir.
-    parentDir.parentDir
+  ##
+  ## Empty in an image built as an installed prefix for another machine
+  ## (`-d:reproInstalledPrefix`, Distribution-And-Packaging §5.3), which
+  ## resolves its sources through the installed layout instead.
+  CompiledRepoRoot* =
+    when defined(reproInstalledPrefix): ""
+    else: currentSourcePath().parentDir.parentDir.parentDir.
+      parentDir.parentDir
   RepoRootEnvVar* = "REPROBUILD_REPO_ROOT"
 
 const LibsDirName* = "libs"

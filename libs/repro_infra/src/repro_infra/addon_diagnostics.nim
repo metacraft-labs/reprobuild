@@ -36,6 +36,13 @@ type
     adBaseLayerOwned = "EAddOnBaseLayerOwned"
       ## A path, prefix or unit intersects what a configuration layer above
       ## the distribution writes.
+    adStoreChanged = "EAddOnStoreChanged"
+      ## A store path the generation runs from changed between the
+      ## switch's realise step and its flip (spec §10.2).
+    adFloorNotEffective = "EAddOnFloorNotEffective"
+      ## A floored unit's effective configuration, as systemd reads it
+      ## after the switch's daemon-reload, does not hold the floor it was
+      ## rendered under (spec §10.1): nothing was started.
     adNetworkGuard = "EAddOnNetworkGuard"
       ## A `network` generation failed one of the guard's invariants and was
       ## reverted.

@@ -84,6 +84,7 @@ import cbor
 import repro_core
 import repro_core/file_lock
 export file_lock.ReproFileLock
+import repro_interface_artifacts/compiler_args_transport
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -126,6 +127,13 @@ proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## leaving its dev shell; embedding the store paths also keeps those inputs
   ## in the installed closure. Runtime overrides and live sibling checkouts
   ## still take precedence at resolution time.
+  # An image built as an installed prefix for another machine
+  # (`-d:reproInstalledPrefix`, Distribution-And-Packaging §5.3) bakes in
+  # none of these: every one is a path of the build host. It seeds the same
+  # variables from its installed layout at start-up instead
+  # (`ensureInstalledSourcePackageEnvironment`).
+  when defined(reproInstalledPrefix):
+    return ""
   let root = getEnv(name)
   if root.len == 0 or root.isAbsolute:
     root
@@ -707,6 +715,18 @@ type
     tap*: string
     location*: SourceLocation
 
+  InterfaceEnvironmentPrefixProvisioning* = object
+    ## Package-Model.md §"Environment-provided library prefixes" (approved
+    ## 2026-11-02): the variable naming the prefix of a library already
+    ## installed for the build host, and the files the engine checks under it
+    ## and hashes into the realization's identity. Path mode only, never
+    ## under `--target`. Encoded from v30.
+    packageName*: string
+    variable*: string
+    libraries*: seq[string]
+    headers*: seq[string]
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -717,6 +737,8 @@ type
     nixProvisioning*: seq[InterfaceNixProvisioning]
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
+    environmentPrefixProvisioning*: seq[InterfaceEnvironmentPrefixProvisioning]
+      ## v30. See ``InterfaceEnvironmentPrefixProvisioning``.
     location*: SourceLocation
     provisioningPin*: ProvisioningPin
       ## Resolution-time contribution selection; see ``ProvisioningPin``.
@@ -1181,8 +1203,16 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 29'u16
-    ## v29 (current): retains ``InterfaceProvisioningContribution.imported``
+  EnvelopeVersion = 30'u16
+    ## v30 (current): ``InterfaceToolUse`` retains
+    ##                ``environmentPrefixProvisioning`` (Package-Model.md
+    ##                §"Environment-provided library prefixes"), a count and
+    ##                its records after ``scoopProvisioning``. Like every
+    ##                realization it is left out of the fingerprint
+    ##                projection, and the realization digest appends it only
+    ##                when non-empty, so an artifact without one keeps its
+    ##                v29 fingerprints to the byte.
+    ## v29: retains ``InterfaceProvisioningContribution.imported``
     ##                (one byte after ``developInterface``; ReproOS M7
     ##                deliverable 4). Introduced as "v18" on the campaign
     ##                line, it was renumbered at the landing on ``agents``
@@ -2100,6 +2130,23 @@ proc readHomebrewProvisioning(bytes: openArray[byte]; pos: var int):
   result.tap = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeEnvironmentPrefixProvisioning(outp: var seq[byte];
+    provisioning: InterfaceEnvironmentPrefixProvisioning;
+    forFingerprint = false) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.variable)
+  outp.writeStringSeq(provisioning.libraries)
+  outp.writeStringSeq(provisioning.headers)
+  outp.writeLocation(provisioning.location, forFingerprint)
+
+proc readEnvironmentPrefixProvisioning(bytes: openArray[byte]; pos: var int):
+    InterfaceEnvironmentPrefixProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.variable = readString(bytes, pos)
+  result.libraries = readStringSeq(bytes, pos)
+  result.headers = readStringSeq(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
                   version = EnvelopeVersion;
                   forFingerprint = false) =
@@ -2125,6 +2172,12 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
   if not omitRealizations:
     for provisioning in useDef.scoopProvisioning:
       outp.writeScoopProvisioning(provisioning, version, forFingerprint)
+  if version >= 30'u16:
+    outp.writeU32Le(uint32(if omitRealizations: 0 else:
+      useDef.environmentPrefixProvisioning.len))
+    if not omitRealizations:
+      for provisioning in useDef.environmentPrefixProvisioning:
+        outp.writeEnvironmentPrefixProvisioning(provisioning, forFingerprint)
   outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
@@ -2153,6 +2206,13 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
     result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
     for i in 0 ..< scoopCount:
       result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos, version)
+  if version >= 30'u16:
+    let envCount = readElementCount(bytes, pos, 4)
+    result.environmentPrefixProvisioning =
+      newSeq[InterfaceEnvironmentPrefixProvisioning](envCount)
+    for i in 0 ..< envCount:
+      result.environmentPrefixProvisioning[i] =
+        readEnvironmentPrefixProvisioning(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeProvisioningContribution(outp: var seq[byte];
@@ -2404,6 +2464,12 @@ proc toolUseRealizationDigest*(useDef: InterfaceToolUse): string =
   for provisioning in useDef.scoopProvisioning:
     payload.writeScoopProvisioning(provisioning, EnvelopeVersion,
       forFingerprint = true)
+  # Appended only when present, so a use without one keeps its digest.
+  if useDef.environmentPrefixProvisioning.len > 0:
+    payload.writeU32Le(uint32(useDef.environmentPrefixProvisioning.len))
+    for provisioning in useDef.environmentPrefixProvisioning:
+      payload.writeEnvironmentPrefixProvisioning(provisioning,
+        forFingerprint = true)
   toHex(blake3DomainDigest(payload, hdMetadataEnvelope).bytes).toLowerAscii()
 
 proc decodeInterfacePayload*(bytes: openArray[byte];
@@ -2869,6 +2935,15 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
       for provisioning in pkg.scoopProvisioning:
         result.scoopProvisioning.add(toInterfaceScoopProvisioning(
           pkg.packageName, provisioning))
+      for provisioning in pkg.environmentPrefixProvisioning:
+        result.environmentPrefixProvisioning.add(
+          InterfaceEnvironmentPrefixProvisioning(
+            packageName: pkg.packageName,
+            variable: provisioning.variable,
+            libraries: provisioning.libraries,
+            headers: provisioning.headers,
+            location: SourceLocation(file: provisioning.sourceFile,
+                                     line: provisioning.sourceLine)))
       # When the package declares an ``executable`` whose exportName
       # matches the use selector and renames the binary via ``name:``
       # (e.g. ``package foundry: executable foundry: name: "forge"``),
@@ -7299,13 +7374,12 @@ proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
   ## Release a lock taken by ``acquireExclusiveFileLock``. Idempotent.
   releaseProviderNimcacheLock(lock)
 
-proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
-    ProviderCompileExecutionResult =
-  ## Execute a compiler command whose nimcache the CALLER already holds
-  ## exclusively (`runSharedNimcacheCompilerCommand` takes the directory's
-  ## lock itself; the interface extraction holds a slot lock instead, see
-  ## `acquireInterfaceNimcacheSlot`).
-  result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+proc runLogicalCompilerCommand(command, physical: openArray[string];
+    cwd: string): ProviderCompileExecutionResult =
+  ## Launch `physical` (the logical `command` itself, or its argument-file
+  ## transport), retrying once on an abnormal compiler termination. Failures
+  ## are reported against the logical `command`.
+  result = runCommand(physical, cwd = cwd, raiseOnFailure = false)
   var priorNote = ""
   if compilerCrashIsRetryable(result.exitCode):
     # The compiler died instead of answering, so this run produced no
@@ -7327,9 +7401,40 @@ proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
     priorNote = "note: a first attempt terminated abnormally (" &
       firstCrash & ") and was retried once; the output below is the " &
       "SECOND attempt's.\n"
-    result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+    result = runCommand(physical, cwd = cwd, raiseOnFailure = false)
   if result.exitCode != 0:
     raise commandFailure(command, result, priorNote)
+
+proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  ## Execute a compiler command whose nimcache the CALLER already holds
+  ## exclusively (`runSharedNimcacheCompilerCommand` takes the directory's
+  ## lock itself; the interface extraction holds a slot lock instead, see
+  ## `acquireInterfaceNimcacheSlot`).
+  ##
+  ## `command` is the LOGICAL compiler argv; callers have already formed every
+  ## cache identity from it. When launching it directly would exceed the
+  ## platform's process argument limit (Windows' 32,767-unit command line), the
+  ## same vector is carried through `--compilerArgsFile`, staged in `cwd` -- the
+  ## invocation's own compiler scratch -- for the whole compile including its
+  ## retry, and removed afterwards (codetracer-pm
+  ## `spec/Nim-Compiler-Argument-Files.md`). Diagnostics keep naming the
+  ## logical argv.
+  if command.len == 0:
+    raise newException(OSError, "a compiler command needs a compiler")
+  var physical = @command
+  var argsFile = ""
+  if compilerArgvExceedsPlatformLimit(command):
+    if cwd.len == 0:
+      raise newException(OSError, "a compiler command over the platform " &
+        "argument limit needs an invocation-owned working directory for " &
+        "its argument file: " & command[0])
+    argsFile = stageCompilerArgsFile(cwd, command[1 .. ^1])
+    physical = physicalCompilerCommand(command[0], argsFile)
+  try:
+    result = runLogicalCompilerCommand(command, physical, cwd)
+  finally:
+    removeStagedCompilerArgsFile(argsFile)
 
 proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
     ProviderCompileExecutionResult =

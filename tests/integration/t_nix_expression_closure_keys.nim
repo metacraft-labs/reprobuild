@@ -27,7 +27,7 @@
 ##   * every key -- the tool-identity key in every provisioning mode, the
 ##     lowered-graph key and the Nix materialization key -- is uncacheable
 ##     and never equals itself recomputed, whatever the expression holds:
-##     the four stdlib expressions, and the adversarial shapes the scanner
+##     every stdlib expression, and the adversarial shapes the scanner
 ##     catalogued (search paths, impure builtins, computed paths, fetchers);
 ##   * the identity is re-resolved on every call, warm or cold, and nothing
 ##     is written or kept under a nonce;
@@ -270,11 +270,13 @@ suite "every workspace expressionFile is uncacheable":
   proc norm(path: string): string =
     absolutePath(path).replace('\\', '/').toLowerAscii
 
-  test "the four stdlib expressions are never served from a cache":
+  test "every stdlib expression is never served from a cache":
     let exprs = stdlibExpressionFiles()
+    # `rustc` and `cargo` declare the same expression, so it appears twice.
     check exprs.mapIt(it.parentDir.extractFilename) == @[
-      "appimage-runtime-20251108", "appimagetool-1.9.1",
-      "python3-with-modules-1.0.0", "stylus-0.64.0"]
+      "appimage-runtime-20251108", "appimagetool-1.9.1", "go-1.25.4",
+      "python3-with-modules-1.0.0", "rust-1.94.0", "rust-1.94.0",
+      "stylus-0.64.0"]
     for expr in exprs:
       checkpoint(expr)
       check fileExists(expr)

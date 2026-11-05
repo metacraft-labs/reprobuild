@@ -31,7 +31,8 @@
 # the defect this script exists to prevent. `verify_release.sh` re-checks the
 # result from the other side.
 #
-# Run from the reprobuild checkout root.
+# Run from the reprobuild checkout root. With $STAGE_RELEASE_SOURCES_MANIFEST
+# set, each staged input's `<ENV_VAR> <dest> <root>` is appended to that file.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -87,13 +88,14 @@ copy_tree() {
 # time (`staticRead` of recipe templates), so no extension filter here. The
 # filter loop uses only shell builtins, so it spawns nothing per file.
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git ls-files -z -- libs | while IFS= read -r -d '' f; do
+  git ls-files -z -- libs lints | while IFS= read -r -d '' f; do
     case "/$f/" in */tests/*) continue ;; esac
     [[ -f "$f" ]] || continue
     printf '%s\0' "$f"
   done | copy_listed . "$source_root"
 else
   copy_tree libs "$source_root/libs"
+  [[ -d lints ]] && copy_tree lints "$source_root/lints"
 fi
 # The root config.nims, beside libs/. The profile compile (`repro home apply`,
 # `repro infra apply`) includes `<source root>/config.nims` from a wrapper it
@@ -106,6 +108,8 @@ fi
 cp config.nims "$source_root/config.nims"
 
 # ---- source-only inputs ------------------------------------------------------
+# shellcheck source=scripts/lib/stage_package_nimble.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/stage_package_nimble.sh"
 # stage <ENV_VAR> <dest under share/repro/src> <marker> <candidate>...
 # The destination names are repro_interface_artifacts.InstalledSourcePackageTrees
 # (and the native packages' wrapper values); the marker is relative to the
@@ -126,6 +130,15 @@ stage() {
   fi
   echo "stage_release_sources: $dest <- $root"
   copy_tree "$root" "$src_root/$dest"
+  # A `<package>/src` destination also gets the package's nimble file beside
+  # it: a module may read it at compile time (scripts/lib/stage_package_nimble.sh).
+  stage_package_nimble "$root" "$src_root/$dest"
+  # Which tree each input came from, for a caller that records it (the
+  # installed prefix's `cross-build-info`, Distribution-And-Packaging
+  # §5.3): one `<ENV_VAR> <dest> <root>` line per staged input.
+  if [[ -n "${STAGE_RELEASE_SOURCES_MANIFEST:-}" ]]; then
+    printf '%s %s %s\n' "$env_name" "$dest" "$root" >> "$STAGE_RELEASE_SOURCES_MANIFEST"
+  fi
 }
 
 stage REPRO_TEST_ADAPTERS_SRC reprobuild-test-adapters/src \

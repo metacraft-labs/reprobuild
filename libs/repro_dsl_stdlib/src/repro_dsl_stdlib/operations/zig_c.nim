@@ -113,7 +113,8 @@ proc zigCompile*(opts: CompileOptions; ct: CrossTarget): BuildActionDef =
     defines = defs,
     standard = opts.standard,
     optimization = bt.optimization,
-    debug3 = bt.debugInfo)
+    debug3 = bt.debugInfo,
+    extra = opts.extra)
 
 proc zigArchive*(opts: ArchiveOptions): BuildActionDef =
   var objects: seq[string]
@@ -147,6 +148,7 @@ proc zigLink*(opts: LinkOptions; ct: CrossTarget): BuildActionDef =
     soname = (if opts.kind == lokShared: opts.soname else: ""),
     libs = libs,
     libDirs = libDirs,
+    extra = opts.extra,
     after = opts.objects)
 
 proc nimCpuOf*(triple: string): string =

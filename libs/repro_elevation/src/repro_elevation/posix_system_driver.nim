@@ -45,7 +45,7 @@
 ##     genuinely differs.
 ##   * `passwd.user`          wholly new — no home-scope analogue.
 
-import std/[os, strutils]
+import std/[algorithm, os, sequtils, strutils, tables]
 
 import blake3
 
@@ -845,6 +845,12 @@ proc systemdUnitTransition*(wasActive, fileChanged, dependencyChanged,
 proc systemdUnitIsActive*(name: string): bool =
   ## `systemctl is-active` exits 0 only for `active` (`activating` and
   ## `reloading` exit non-zero), which is the state a restart is for.
+  ## A template (``foo@.service``) is never active, and systemctl refuses
+  ## its name ("Failed to retrieve unit state"; A9 review round 4,
+  ## finding 8): it is not asked.
+  let at = name.find('@')
+  if at > 0 and at + 1 < name.len and name[at + 1] == '.':
+    return false
   when defined(linux):
     execCmd("systemctl is-active --quiet " & quoteShell(name)) == 0
   else:
@@ -3497,14 +3503,32 @@ const
     ## with only `OnBootSec=`, `OnStartupSec=` or `OnActiveSec=` fires once
     ## per activation. https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
 
+const TimerTriggerKeys = ["OnActiveSec", "OnBootSec", "OnStartupSec",
+                          "OnUnitActiveSec", "OnUnitInactiveSec",
+                          "OnCalendar"]
+  ## Every `[Timer]` trigger setting (systemd.timer(5)).
+
 proc timerRepeats*(content: string): bool =
-  ## Whether the timer unit ``content`` fires repeatedly.
+  ## Whether the timer unit ``content`` (with its drop-ins appended in the
+  ## order systemd applies them) fires repeatedly. An empty assignment to
+  ## any trigger setting (`OnCalendar=`, `OnBootSec=`, ...) resets the list
+  ## of ALL triggers, monotonic and calendar alike, as systemd.timer(5)
+  ## says: "If the empty string is assigned to any of these options, the
+  ## list of timers is reset (both monotonic timers and OnCalendar=
+  ## timers)". https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
+  var setKeys: seq[string]
   for raw in content.splitLines():
     let line = raw.strip()
     let eq = line.find('=')
-    if eq > 0 and line[0 ..< eq].strip() in TimerRepeatingKeys and
-        line[eq + 1 .. ^1].strip().len > 0:
-      return true
+    if eq <= 0: continue
+    let key = line[0 ..< eq].strip()
+    if key notin TimerTriggerKeys: continue
+    if line[eq + 1 .. ^1].strip().len == 0:
+      setKeys.setLen(0)
+    elif key notin setKeys:
+      setKeys.add(key)
+  for k in setKeys:
+    if k in TimerRepeatingKeys: return true
 
 proc timerObservedDigestHex*(content: string; wantEnabled, wantRunning: bool;
                              unitFileState, activeState,
@@ -3563,13 +3587,23 @@ proc observeSystemdSystemTimer*(op: PrivilegedOperation):
     if op.stDestroy: return
     # Its drop-ins may add triggers (`OnCalendar=` in a `.d/*.conf`), which
     # decide whether it repeats; the digest stays the file's own.
-    var withDropIns = content
-    for dir in [path & ".d", "/run/systemd/system/" & op.stName & ".d"]:
+    # systemd applies a unit's drop-ins sorted by file name across its
+    # directories, a name in a higher-priority directory (/etc over /run
+    # over /usr/lib) hiding the same name below it (systemd.unit(5)).
+    var dropIns = initTable[string, string]()
+    for dir in ["/usr/lib/systemd/system/" & op.stName & ".d",
+                "/lib/systemd/system/" & op.stName & ".d",
+                "/run/systemd/system/" & op.stName & ".d", path & ".d"]:
       if dirExists(dir):
         for kind, f in walkDir(dir):
           if kind in {pcFile, pcLinkToFile} and f.endsWith(".conf"):
-            try: withDropIns.add("\n" & readFile(f))
-            except IOError, OSError: discard
+            dropIns[extractFilename(f)] = f
+    var names = toSeq(dropIns.keys)
+    names.sort()
+    var withDropIns = content
+    for n in names:
+      try: withDropIns.add("\n" & readFile(dropIns[n]))
+      except IOError, OSError: discard
     # A disabled or inactive timer is a valid state, so the exit code is
     # not an error; an answer without the properties judges nothing.
     let (o, code) = execCmdEx("systemctl show " & quoteShell(op.stName) &

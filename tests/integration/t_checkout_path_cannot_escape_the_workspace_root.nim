@@ -1176,7 +1176,7 @@ suite "a declared checkout path cannot escape the workspace root":
           "variants = []\npackages = []\n" &
           "deps = [{ name = \"dep\", path = \"" & checkoutPath & "\", " &
           "coord_kind = \"vcs\", url = \"" & fileUrl(depOrigin) & "\", " &
-          "ref = \"main\", revision = \"" & depSha & "\", " &
+          "revision = \"" & depSha & "\", " &
           "integrity = \"git-sha1:" & depSha & "\", version = \"\", " &
           "visibility = \"public\", participation = \"\", " &
           "depends = \"\", groups = \"\" }]\n")
@@ -1346,7 +1346,7 @@ suite "a declared checkout path cannot escape the workspace root":
           "variants = []\npackages = []\n" &
           "deps = [{ name = \"dep\", path = \"../sib\", " &
           "coord_kind = \"vcs\", url = \"" & fileUrl(depOrigin) & "\", " &
-          "ref = \"main\", revision = \"" & revision & "\", " &
+          "revision = \"" & revision & "\", " &
           "integrity = \"git-sha1:" & depSha & "\", version = \"\", " &
           "visibility = \"public\", participation = \"\", " &
           "depends = \"\", groups = \"\" }]\n")
@@ -1845,7 +1845,7 @@ suite "a declared checkout path cannot escape the workspace root":
           "variants = []\npackages = []\n" &
           "deps = [{ name = \"dep\", path = \"" & checkoutPath & "\", " &
           "coord_kind = \"vcs\", url = \"" & fileUrl(depOrigin) & "\", " &
-          "ref = \"main\", revision = \"" & depSha & "\", " &
+          "revision = \"" & depSha & "\", " &
           "integrity = \"git-sha1:" & depSha & "\", version = \"\", " &
           "visibility = \"public\", participation = \"\", " &
           "depends = \"\", groups = \"\" }]\n")

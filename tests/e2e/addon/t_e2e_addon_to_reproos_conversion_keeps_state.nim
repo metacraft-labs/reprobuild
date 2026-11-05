@@ -1,0 +1,599 @@
+## Gate ``e2e_addon_to_reproos_conversion_keeps_state`` (milestone A13;
+## ReproOS Add-On Mode §11.1, §13 decisions 32 and 41).
+##
+## The conversion of an add-on host, rehearsed by reinstall (decision 41):
+## ReproOS Anywhere installs only its fixture payload until it is qualified,
+## so the gate converts the way Anywhere would have the host end up -- a
+## fresh install of the same stock base on a new root disk, the activities
+## realised in full by the engine (decision 32), the state carried over --
+## without exercising Anywhere's own protocol.
+##
+## The fixture host runs the reference activities (``reference_services``:
+## ``vaultwarden`` and ``ethereum_validator``, the converged forms of the
+## services A13 adopts) on an add-on guest, driven by the deploy agent,
+## with the state set the fixture profile declares:
+##
+## - ``keep:/var/lib/vaultwarden``: a second disk, mounted there by the
+##   operator's own ``/etc/fstab`` line; the conversion keeps the disk;
+## - ``carry:`` the execution client's, the beacon node's and the
+##   validator's directories (the validator's holds its slashing-protection
+##   database and its wallet).
+##
+## The rehearsal:
+##
+## 1. On the add-on guest, once the validators have signed (the chain
+##    justified, or its head moved four epochs), the operator stops the
+##    set's units and runs ``repro system addon state backup``. Every unit
+##    of the set is then held: an operator's ``systemctl start`` of the
+##    validator fails, the deploy agent's next tick is refused (nothing is
+##    applied under a hold), and after a reboot of the add-on guest the
+##    hold is still there. ``state verify --source`` against the manifest
+##    passes immediately before the "conversion" (it also checks every
+##    hold is loaded); the guest is powered off and its root disk
+##    discarded.
+## 2. A new guest boots a fresh overlay of the same stock image with the
+##    kept disk attached, mounts it as the old host did, gets the engine
+##    and the carried directory (``/var/lib/repro/system/carried``), and is
+##    re-identified as ReproOS for the engine's commands only (decision
+##    32). ``repro infra apply`` and ``repro system sync`` before the
+##    restore are each refused with ``ECarriedStatePending`` and write no
+##    unit (the validator cannot start on an empty directory).
+## 3. The first-boot unit (``repro system state unit``) is installed and
+##    the guest rebooted: the unit restores the carried directories before
+##    ``sysinit.target``, and ``state verify`` finds every directory --
+##    carried and kept -- at the manifest's digest.
+## 4. The full apply realises the activities; every unit passes its health
+##    check, and the beacon node resumes on the add-on host's chain (its
+##    carried database), not at genesis.
+## 5. The validator never ran between backup and restore: on the add-on
+##    guest no validator start after the backup; on the new guest its first
+##    start is after the restore unit finished (the same boot's monotonic
+##    clock). It signs again: its slashing-protection history, exported as
+##    EIP-3076, holds every key's history from the epochs it signed on the
+##    add-on host *and* attestations whose target is past the epoch the
+##    restore ran in, with no conflicting signature.
+## 6. The kept disk is required: with it missing (its fstab line naming a
+##    disk that does not exist, ``nofail``), vaultwarden does not start and
+##    writes nothing on the root file system (``RequiresMountsFor=``).
+##
+## Falsifying mutations:
+## - add-on build ``state-units-not-held`` (the backup holds nothing): the
+##   operator's start of the validator after the backup succeeds; red;
+## - add-on build ``hold-runtime-only`` (the hold in ``/run``): after the
+##   reboot the validator starts; red;
+## - engine build ``apply-ignores-carried-state``: the apply and the sync
+##   before the restore go ahead; red;
+## - engine build ``keep-without-mount-requirement``: vaultwarden starts
+##   with its kept disk missing; red;
+## - ``REPRO_A13_MUTATION=carried-archive-tampered`` (one byte of the
+##   validator's archive changed in transit): the restore unit refuses it;
+##   red;
+## - ``REPRO_A13_MUTATION=rev-execution-dropped`` (the restored execution
+##   client's directory emptied before the apply): the node cannot extend
+##   its carried chain and the validator signs nothing new; red at the
+##   post-conversion signing check;
+## - ``REPRO_A13_MUTATION=rev-beacon-dropped`` (the beacon directory
+##   emptied): the node starts at genesis; red;
+## - ``REPRO_A13_MUTATION=rev-slashing-db-reset`` (``validator.db``
+##   deleted): the carried history is gone; red (either at the history
+##   step, or earlier when prysm's doppelganger check finds the keys live
+##   and refuses to start);
+## - ``REPRO_A13_MUTATION=rev-slashing-db-reset-no-doppelganger`` (the same,
+##   with the doppelganger check off in the profile): the validator signs on
+##   an empty history; red at the history step, the history beginning after
+##   the add-on host's epoch on a chain that progressed
+##   (``historyEvidence``);
+## - ``REPRO_A13_MUTATION=rev-inode-reuse`` (the restored validator directory
+##   replaced in place by an empty one; ext4 usually hands it the freed
+##   inode): the apply refuses with ``ECarriedStatePending``; red there;
+## - engine build ``restore-not-required-by-units``: at the boot after the
+##   restored validator directory is replaced and the archives damaged, the
+##   validator starts although the restore failed; red.
+##
+## The last check (after the kept disk's): the boot path is governed by the
+## restore. The restore unit is installed with ``repro system state
+## install-unit``, which makes every carried unit require it; with the
+## validator's directory replaced and the archives damaged, the next boot's
+## restore fails and the validator does not start.
+##
+## Opt-in: ``REPRO_ADDON_VM_GATES=1``, ``REPRO_ADDON_ENGINE_CLOSURE`` (the
+## full engine built from this tree) and ``REPRO_A12_PACKAGES``. Bases:
+## ``REPRO_ADDON_BASES`` (amd64).
+##
+## *Mocking.* None: real images, real disks, real packages, a real chain,
+## the real agent and engine. What is not real is said above: the
+## conversion is a reinstall, and ReproOS is the engine's full realisation
+## on a re-identified guest.
+
+import std/[json, os, strutils, tables, times, unittest]
+
+import repro_test_support/reasoned_skip
+import repro_addon/generation0
+import repro_peer_cache/auth as peerAuth
+
+import ./addon_testbed
+import ./agent_e2e_support
+import ./cache_e2e_support
+import ./reference_services
+import ./validator_safety
+
+const
+  Gate = "e2e_addon_to_reproos_conversion_keeps_state"
+  ReidentifiedOsRelease = "/etc/repro-testbed/os-release-reproos"
+  ReidentifyPrefix = "unshare --mount -- sh -c 'mount --bind " &
+    ReidentifiedOsRelease & " /etc/os-release && exec \"$@\"' sh "
+    ## As the parity gate (decision 32): the engine is shown a ReproOS base
+    ## in its own mount namespace only.
+  RefDir = "/root/reference-services"
+  KeepDir = "/var/lib/vaultwarden"
+  KeepFstab = "LABEL=repro-keep " & KeepDir & " ext4 defaults,nofail 0 2"
+  CarriedDir = "/var/lib/repro/system/carried"
+  SetUnits = ["vaultwarden.service", "eth-execution.service",
+              "eth-beacon.service", DefaultValidatorUnit]
+  RestoreUnit = "repro-state-restore.service"
+  # The chain clients' lines that say where each resumed and whether they
+  # agree on the head: geth's loaded and repaired heads and its fork-choice
+  # refusals, prysm's start head and its errors.
+  ChainLogPattern = "Loaded most recent|repairing|Rewound|Rewinding|" &
+    "Ignoring beacon update|Skipping beacon update|Refusing too deep|" &
+    "Blockchain stopped|Persisted|Writing cached state|Using Head root|" &
+    "starting with justified|Synced new block|level=error|ERROR|WARN"
+
+type MutationStop = object of CatchableError
+  ## Raised by a gate's step under a mutation once a step is red.
+
+proc gateMutation(): string = getEnv("REPRO_A13_MUTATION")
+
+proc hexKey(k: openArray[byte]): string =
+  for b in k: result.add(toHex(int(b), 2).toLowerAscii())
+
+proc enginePath(engine: string): string = engine / "bin" / "reprobuild"
+
+proc mountKeep(g: Guest; format: bool) =
+  ## The operator's disk layout: the second disk, labelled, mounted where
+  ## vaultwarden keeps its data, by an fstab line.
+  if format:
+    discard g.run("mkfs.ext4 -q -L repro-keep /dev/vdb")
+  discard g.run("mkdir -p " & KeepDir & " && grep -q repro-keep /etc/fstab || " &
+    "echo '" & KeepFstab & "' >> /etc/fstab; systemctl daemon-reload; " &
+    "mount " & KeepDir)
+
+proc monotonicOf(g: Guest; unit, prop: string): int64 =
+  try: parseBiggestInt(g.run("systemctl show -P " & prop & " " & unit).strip())
+  except ValueError: -1
+
+proc runBase(b: BaseImage; record: JsonNode): seq[string] =
+  var old, nw: Guest
+  var dd: DataDisk
+  let steps = newJArray()
+  var fails: seq[string]
+  proc step(name: string; ok: bool; detail: string) =
+    steps.add(%*{"step": name, "ok": ok, "detail": detail})
+    if not ok:
+      fails.add(b.name & ": " & name & ": " & detail)
+      # Under a falsifying mutation the first red step is the verdict;
+      # the rest of the run would only spend a VM slot.
+      if mutation().len > 0 or gateMutation().len > 0:
+        raise newException(MutationStop, name)
+  try:
+    let engine = engineFromEnv()
+    record["engine"] = %engine
+    let eng = enginePath(engine)
+    dd = newDataDisk(4)
+    # ------------------------------------------------------------------
+    # The add-on host.
+    old = newGuest(b, diskGiB = 16, cpus = 4, memoryMB = 6144)
+    old.dataDisks = @[dd.path]
+    old.boot()
+    old.prepareBase()
+    old.mountKeep(format = true)
+    let (repro, sha) = old.installArtefact()
+    record["artefactSha256"] = %sha
+    let work = old.runDir.parentDir / (old.name & "-a13")
+    createDir(work)
+    defer: removeDir(work)
+    let pk = refPackages(work)
+    record["packages"] = packageSha256s(pk)
+    let cache = old.startCache()
+    defer: cache.stop()
+    let kp = peerAuth.generateKeypair()
+    let bs = old.bootstrapWithAgent(repro, step, cacheUrl = cache.guestUrl,
+      cachePublishers = @[hexKey(kp.publicKey)])
+    if not bs.ok: return fails
+    defer: bs.producer.stop()
+    let net = makeTestnet(pk, work)
+    record["genesisTime"] = %net.genesisTime
+    let pins = basePins(pk, net)
+    let addC = compileReference(engine, pins, "addOn", ReferenceActivities)
+    let digests = publishAll(cache, kp, pk, net, pins, addC.actions)
+    let jwt = jwtHex()
+    let adminToken = "a13-admin-" & jwtHex()[0 ..< 24]
+    putReferenceSecrets(old, repro & " system addon secret put", jwt,
+                        adminToken, [DefaultValidatorUnit], step)
+    provisionWallet(old, net)
+    discard bs.producer.publish(PublishSpec(sequence: 1,
+      profileText: addC.canonical, buildActions: addC.actions,
+      closureDigests: digests))
+    let t1 = old.tickUnits()
+    step("the add-on host applies the reference activities",
+         t1.outcome == "aoApplied", $t1 & "\n" & t1.fetchLog & t1.applyLog &
+         "\n" & old.serviceJournal(SetUnits))
+    if fails.len > 0: return fails
+    let guestNow = parseInt(old.run("date +%s").strip())
+    let startEpoch = max(guestNow - net.genesisTime, 0) div SecondsPerEpoch
+    # The validators must have signed before the backup, so there is a
+    # history to carry. Justification shows it directly, but on a loaded
+    # host a one-host network with short slots can run for long
+    # stretches without justifying (late attestations miss inclusion;
+    # measured at load 150 on the 32-core host, 2026-11-02). Every
+    # validator still attests once per epoch, so four epochs of head
+    # progress is accepted too; the decisive check is the carried history
+    # itself (step 5: every key's history begins on this host).
+    var justifiedOk = false
+    var headMoved = false
+    let deadline = epochTime() + 1800
+    while epochTime() < deadline:
+      if old.justifiedEpoch() >= startEpoch + 2: justifiedOk = true
+      if old.headSlot() >= (startEpoch + 4) * SlotsPerEpoch: headMoved = true
+      if justifiedOk or headMoved: break
+      discard old.exec("sleep 10")
+    record["signedBy"] = %(if justifiedOk: "justification" elif headMoved:
+                             "head progress" else: "none")
+    step("the validators sign on the add-on host (justified, or four " &
+         "epochs of head progress)", justifiedOk or headMoved,
+         "justified " & $old.justifiedEpoch() & ", head " & $old.headSlot() &
+         ", started at epoch " & $startEpoch)
+    # Let the validators attest in a few more epochs before the backup.
+    discard old.waitHeadSlot(old.headSlot() + 2 * SlotsPerEpoch,
+                         60 + 4 * SecondsPerEpoch)
+    let oldHead = old.headSlot()
+    let oldEpoch = oldHead div SlotsPerEpoch
+    record["addOnHead"] = %oldHead
+    step("vaultwarden is healthy on the add-on host, on the kept disk",
+         old.exec(repro & " system addon probe http://127.0.0.1:8000/alive").exitCode == 0 and
+         old.exec("findmnt -n -o SOURCE " & KeepDir).stdout.strip().len > 0 and
+         old.exec("test -f " & KeepDir & "/db.sqlite3").exitCode == 0, "")
+
+    # --- 1. Backup and hold.
+    writeFile(work / "ref.profile", addC.canonical)
+    old.copyTo(work / "ref.profile", "/root/ref.profile")
+    discard old.run("systemctl stop " & SetUnits.join(" "))
+    let backupAt = old.run("date +%s.%N").strip()
+    let bk = old.exec(repro & " system addon state backup --profile " &
+      "/root/ref.profile --out /root/carry")
+    step("the state set is backed up", bk.exitCode == 0, bk.stdout & bk.stderr)
+    record["backup"] = %bk.stdout
+    # How each chain client stopped for the backup (its last head and
+    # whether it shut down cleanly): what the converted host resumes from.
+    record["addOnStop"] = %old.exec("journalctl -b -q --no-pager " &
+      "-u eth-execution.service -u eth-beacon.service | grep -E " &
+      quoteShell(ChainLogPattern) & " | tail -n 40").stdout
+    let tryStart = old.exec("systemctl start " & DefaultValidatorUnit)
+    discard old.exec("sleep 5")
+    let started = old.exec("journalctl -u " & DefaultValidatorUnit &
+      " -o short-unix --no-pager --since @" & backupAt.split('.')[0] &
+      " | grep -c 'Started' || true").stdout.strip()
+    step("after the backup the validator is held: a start fails and none ran",
+         tryStart.exitCode != 0 and started == "0" and
+         old.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip() != "active",
+         "start exit " & $tryStart.exitCode & ", starts since backup " & started &
+         "\n" & tryStart.stderr)
+    # The hold survives a reboot of the source host.
+    old.rebootGuest()
+    let tryAgain = old.exec("systemctl start " & DefaultValidatorUnit)
+    step("after a reboot the validator is still held",
+         tryAgain.exitCode != 0 and
+         old.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip() != "active",
+         "start exit " & $tryAgain.exitCode & "\n" & tryAgain.stderr)
+    # Nothing is applied under the hold: the deploy agent's next tick is
+    # refused (the same profile, a new sequence).
+    discard bs.producer.publish(PublishSpec(sequence: 2,
+      profileText: addC.canonical, buildActions: addC.actions,
+      closureDigests: digests))
+    let t2 = old.tickUnits()
+    step("under the hold the deploy agent's tick is refused",
+         t2.outcome != "aoApplied" and "holds" in t2.applyLog & t2.fetchLog &
+           $t2, $t2 & "\n" & t2.applyLog)
+    let ver = old.exec(repro & " system addon state verify --source --from /root/carry")
+    step("immediately before the conversion the source matches the manifest " &
+         "and every unit is held", ver.exitCode == 0, ver.stdout & ver.stderr)
+    old.copyFrom("/root/carry", work / "carry")
+    let manifest = parseJson(readFile(work / "carry" / "state-set.json"))
+    record["manifest"] = manifest
+    if gateMutation() == "carried-archive-tampered":
+      for e in manifest["entries"]:
+        if e["path"].getStr() == "/var/lib/ethereum/validator":
+          let a = work / "carry" / e["archive"].getStr()
+          var bytes = readFile(a)
+          bytes[bytes.len div 2] = char((ord(bytes[bytes.len div 2]) + 1) mod 256)
+          writeFile(a, bytes)
+    # The "conversion": the add-on host is powered off and its root disk
+    # is never booted again (its run directory, which also holds the
+    # binary cache's store, is removed with the rest at the end).
+    old.shutdown()
+    if fails.len > 0: return fails
+
+    # ------------------------------------------------------------------
+    # --- 2. The reinstalled host.
+    nw = newGuest(b, diskGiB = 16, cpus = 4, memoryMB = 6144)
+    nw.dataDisks = @[dd.path]
+    nw.boot()
+    nw.prepareBase()
+    nw.mountKeep(format = false)
+    nw.installEngineClosure(engine)
+    discard nw.run("mkdir -p /etc/repro /etc/repro-testbed " & CarriedDir &
+      " " & RefDir & " && printf 'ID=reproos\\nNAME=\"ReproOS (re-identified " &
+      "by the test bed)\"\\nVERSION_ID=test\\nREPRO_TESTBED_REIDENTIFIED=1\\n' > " &
+      ReidentifiedOsRelease)
+    writeFile(work / "caches.conf", renderCachesConf(cache.guestUrl,
+                                                     @[hexKey(kp.publicKey)]))
+    nw.copyTo(work / "caches.conf", "/etc/repro/caches.conf")
+    for f in walkDir(work / "carry"):
+      nw.copyTo(f.path, CarriedDir / f.path.extractFilename)
+    discard nw.run("chmod -R go-rwx " & CarriedDir)
+    writeFile(work / "system.nim", readFile(ProfileSource))
+    writeFile(work / PinsModule, pinsSource(pins))
+    writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
+    for f in ["system.nim", PinsModule, "home.nim"]:
+      nw.copyTo(work / f, RefDir / f)
+    let env = ReidentifyPrefix
+    putReferenceSecrets(nw, env & eng & " system secret put", jwt, adminToken,
+                        [DefaultValidatorUnit], step)
+    let applyCmd = env & eng & " infra apply --profile " & RefDir &
+      "/system.nim --host " & AgentTarget & " --no-preview"
+    let early = nw.exec(applyCmd, timeoutSec = 3600)
+    step("an apply before the restore is refused (ECarriedStatePending)",
+         early.exitCode != 0 and "ECarriedStatePending" in
+           early.stdout & early.stderr,
+         early.stdout & early.stderr)
+    step("... and wrote no unit",
+         nw.exec("test -e /etc/systemd/system/" & DefaultValidatorUnit).exitCode != 0 and
+         nw.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip() != "active",
+         "")
+    let sync = nw.exec(env & eng & " system sync --profile " & RefDir &
+      "/system.nim --host " & AgentTarget, timeoutSec = 3600)
+    step("`repro system sync` before the restore is refused " &
+         "(ECarriedStatePending) and wrote no unit",
+         sync.exitCode != 0 and "ECarriedStatePending" in
+           sync.stdout & sync.stderr and
+         nw.exec("test -e /etc/systemd/system/" & DefaultValidatorUnit).exitCode != 0,
+         sync.stdout & sync.stderr)
+
+    # --- 3. The first-boot unit restores before anything starts.
+    # Installed as a conversion installs it: the unit, enabled, and the
+    # drop-in that makes every carried unit require it.
+    let inst = nw.exec(eng & " system state install-unit --from " & CarriedDir)
+    step("the restore unit is installed and the carried units require it",
+         inst.exitCode == 0 and DefaultValidatorUnit in inst.stdout,
+         inst.stdout & inst.stderr)
+    nw.rebootGuest()
+    let res = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
+    step("the first-boot unit restored the carried state",
+         "Result=success" in res and "ActiveState=active" in res,
+         res & "\n" & nw.serviceJournal([RestoreUnit]))
+    let ver2 = nw.exec(eng & " system state verify --from " & CarriedDir)
+    step("every carried and kept directory is at the manifest's digest",
+         ver2.exitCode == 0 and "DIFFERS" notin ver2.stdout and
+         ver2.stdout.count("ok ") == 4, ver2.stdout & ver2.stderr)
+    let restoredDone = nw.monotonicOf(RestoreUnit, "ExecMainExitTimestampMonotonic")
+    let restoreEpoch = max(parseInt(nw.run("date +%s").strip()) -
+                           net.genesisTime, 0) div SecondsPerEpoch
+    record["restoreEpoch"] = %restoreEpoch
+    # The falsifiers of the post-conversion checks: the carried state is
+    # broken after it was restored and verified, before the apply.
+    case gateMutation()
+    of "rev-execution-dropped":
+      discard nw.run("find /var/lib/ethereum/execution -mindepth 1 -delete")
+    of "rev-beacon-dropped":
+      discard nw.run("find /var/lib/ethereum/beacon -mindepth 1 -delete")
+    of "rev-slashing-db-reset":
+      discard nw.run("find /var/lib/ethereum/validator -name validator.db -delete")
+    of "rev-slashing-db-reset-no-doppelganger":
+      # The same reset, with the doppelganger check off in the profile the
+      # apply realises: the validator then signs on an empty history, and
+      # only the carried-history assertion can tell (review round 2).
+      discard nw.run("find /var/lib/ethereum/validator -name validator.db -delete")
+      discard nw.run("sed -i 's/enable-doppelganger: true/enable-doppelganger: false/' " &
+        RefDir & "/system.nim && grep -c 'enable-doppelganger: false' " &
+        RefDir & "/system.nim")
+    of "rev-inode-reuse":
+      # The restored validator directory replaced in place by an empty one
+      # of the same owner and mode; on ext4 the new directory usually gets
+      # the inode just freed (review round 2, finding 1). The apply must
+      # still see the carried state as pending.
+      let v = "/var/lib/ethereum/validator"
+      record["inodeReuse"] = %nw.run("own=$(stat -c %u:%g " & v & "); " &
+        "mode=$(stat -c %a " & v & "); b=$(stat -c %d:%i " & v & "); " &
+        "rm -rf " & v & "; sleep 40; mkdir " & v & " && chown $own " & v &
+        " && chmod $mode " & v & "; echo \"before $b after $(stat -c %d:%i " &
+        v & ")\"")
+    else: discard
+
+    # --- 4. The full realisation.
+    let applied = nw.exec(applyCmd, timeoutSec = 3600)
+    record["applyOutput"] = %((applied.stdout & applied.stderr)[0 ..< min(
+      4000, (applied.stdout & applied.stderr).len)])
+    step("the reinstalled host realises the activities in full",
+         applied.exitCode == 0, applied.stdout & applied.stderr & "\n" &
+         nw.serviceJournal(SetUnits))
+    for (u, check) in [("vaultwarden.service", "http://127.0.0.1:8000/alive"),
+                       ("eth-execution.service", "tcp:127.0.0.1:8545"),
+                       ("eth-beacon.service",
+                        "http://127.0.0.1:3500/eth/v1/node/version"),
+                       (DefaultValidatorUnit, "http://127.0.0.1:8081/healthz")]:
+      var ok = false
+      for i in 0 ..< 60:
+        if nw.exec(eng & " system addon probe " & check).exitCode == 0:
+          ok = true
+          break
+        discard nw.exec("sleep 2")
+      step(u & " passes its health check after the conversion", ok,
+           nw.serviceJournal([u]))
+    # The carried beacon database: the node resumes on the add-on host's
+    # chain, not at genesis. (Prysm restarts its fork choice from its last
+    # justified checkpoint, so the head it reports can be below the one the
+    # add-on host last reported; a node with an empty database has no
+    # block but genesis, slot 0.)
+    var resumed = -1
+    for i in 0 ..< 60:
+      resumed = nw.headSlot()
+      if resumed > 0: break
+      discard nw.exec("sleep 2")
+    step("the beacon node resumes from the carried chain, not from genesis",
+         resumed > 0 and oldHead > 0,
+         "head " & $resumed & ", add-on host had " & $oldHead)
+
+    # --- 5. The validator never ran between backup and restore, and never
+    # signed a conflicting message.
+    let firstStart = nw.monotonicOf(DefaultValidatorUnit,
+                                    "ExecMainStartTimestampMonotonic")
+    let starts = nw.exec("journalctl -b -u " & DefaultValidatorUnit &
+      " --no-pager | grep -c 'Started' || true").stdout.strip()
+    step("on the new host the validator first started after the restore",
+         restoredDone > 0 and firstStart > restoredDone and starts == "1",
+         "restore done " & $restoredDone & ", validator start " & $firstStart &
+         ", starts this boot " & starts)
+    # It signs again: the chain moves past the restore's epoch (the
+    # validators hold every key, so no epoch is justified without them).
+    var progressed = false
+    let deadline2 = epochTime() + 1500
+    while epochTime() < deadline2:
+      if nw.justifiedEpoch() > restoreEpoch or
+          nw.headSlot() >= (restoreEpoch + 4) * SlotsPerEpoch:
+        progressed = true
+        break
+      discard nw.exec("sleep 10")
+    discard nw.waitHeadSlot(nw.headSlot() + 2 * SlotsPerEpoch,
+                        60 + 4 * SecondsPerEpoch)
+    record["afterConversion"] = %*{"head": nw.headSlot(),
+      "justified": nw.justifiedEpoch(), "restoreEpoch": restoreEpoch}
+    discard nw.run("systemctl stop " & DefaultValidatorUnit)
+    let hist = block:
+      let r = nw.exec("rm -rf /var/tmp/a13-hist && mkdir -p /var/tmp/a13-hist && chown " &
+        "eth-validator: /var/tmp/a13-hist && runuser -u eth-validator -- " &
+        pins.validatorPrefix & "/bin/validator slashing-protection-history " &
+        "export --accept-terms-of-use --datadir " & pins.validatorStateDir &
+        " --slashing-protection-export-dir /var/tmp/a13-hist >/var/tmp/a13-hist.log 2>&1 " &
+        "&& cat /var/tmp/a13-hist/*.json")
+      if r.exitCode != 0: newJObject() else: parseJson(r.stdout)
+    if not hist.hasKey("data"):
+      step("the validator's slashing-protection history can be exported",
+           false, nw.exec("tail -c 2000 /var/tmp/a13-hist.log").stdout)
+    let cs = conflicts([hist])
+    let earliest = earliestTarget([hist])
+    var latest = 0
+    for rec in hist{"data"}.getElems():
+      for a in rec{"signed_attestations"}.getElems():
+        latest = max(latest, parseInt(a{"target_epoch"}.getStr("0")))
+    var carriedHistory = earliest.len == InteropValidators
+    var earliestMin = high(int)
+    for k, ep in earliest:
+      if ep > oldEpoch: carriedHistory = false
+      earliestMin = min(earliestMin, ep)
+    # What the history step decides on, recorded before it is decided: a
+    # history that is red because it begins after the add-on host's epoch on
+    # a chain that progressed is distinct from one that is merely empty.
+    record["historyEvidence"] = %*{"keys": earliest.len,
+      "earliestMin": (if earliest.len > 0: earliestMin else: -1),
+      "addOnEpoch": oldEpoch, "progressed": progressed,
+      "attestations": attestationCount([hist]), "conflicts": cs.len}
+    step("the slashing-protection history was carried: every key's history " &
+         "begins on the add-on host, and it holds no conflicting signature",
+         cs.len == 0 and carriedHistory and attestationCount([hist]) > 0,
+         "conflicts " & $cs.len & ", earliest " & $earliest & ", latest " &
+         $latest & ", add-on epoch " & $oldEpoch)
+    let chainStart = nw.exec("journalctl -b -q --no-pager " &
+      "-u eth-execution.service -u eth-beacon.service | grep -E " &
+      quoteShell(ChainLogPattern) & " | head -n 60").stdout
+    record["convertedStart"] = %chainStart
+    var latestPerKey = initTable[string, int]()
+    for rec in hist{"data"}.getElems():
+      for a in rec{"signed_attestations"}.getElems():
+        let k = rec{"pubkey"}.getStr()
+        latestPerKey[k] = max(latestPerKey.getOrDefault(k),
+                              parseInt(a{"target_epoch"}.getStr("0")))
+    var allSignedAfter = latestPerKey.len == InteropValidators
+    for k, ep in latestPerKey:
+      if ep <= restoreEpoch: allSignedAfter = false
+    step("the validator signs on the converted host: every key attested " &
+         "for an epoch past the one the restore ran in",
+         progressed and allSignedAfter,
+         "chain progressed " & $progressed & ", latest per key " &
+         $latestPerKey & ", restore epoch " & $restoreEpoch &
+         (if progressed: "" else: "\n" & chainStart))
+
+    # --- 6. The kept disk is required.
+    discard nw.run("systemctl stop vaultwarden.service; umount " & KeepDir &
+      "; sed -i 's#^LABEL=repro-keep .*#LABEL=repro-missing " & KeepDir &
+      " ext4 defaults,nofail,x-systemd.device-timeout=5s 0 2#' /etc/fstab; " &
+      "systemctl daemon-reload")
+    let vwStart = nw.exec("systemctl start vaultwarden.service", timeoutSec = 120)
+    discard nw.exec("sleep 5")
+    let vwState = nw.exec("systemctl is-active vaultwarden.service").stdout.strip()
+    let onRoot = nw.exec("ls -A " & KeepDir).stdout.strip()
+    step("with its kept disk missing vaultwarden does not start and writes " &
+         "nothing on the root file system",
+         vwStart.exitCode != 0 and vwState != "active" and onRoot.len == 0,
+         "start exit " & $vwStart.exitCode & ", state " & vwState &
+         ", on the root file system: " & onRoot)
+    # --- 7. The boot path is governed by the restore too: with the restored
+    # validator directory replaced and its archive damaged, the restore unit
+    # fails at the next boot, and the validator, which requires it, is not
+    # started (review round 2, finding 4).
+    discard nw.run("systemctl stop " & DefaultValidatorUnit & "; " &
+      "v=/var/lib/ethereum/validator; own=$(stat -c %u:%g $v); " &
+      "mode=$(stat -c %a $v); rm -rf $v && mkdir $v && chown $own $v && " &
+      "chmod $mode $v; for a in " & CarriedDir & "/carry-*.rsa; do " &
+      "printf x | dd of=$a bs=1 seek=4096 conv=notrunc 2>/dev/null; done")
+    nw.rebootGuest()
+    let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
+    let vState = nw.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip()
+    let vStarts = nw.exec("journalctl -b -u " & DefaultValidatorUnit &
+      " --no-pager | grep -c 'Started' || true").stdout.strip()
+    step("a carried unit does not start at boot while its restore fails",
+         "Result=success" notin rres and vState != "active" and vStarts == "0",
+         rres & "\nvalidator " & vState & ", starts this boot " & vStarts &
+         "\n" & nw.serviceJournal([RestoreUnit, DefaultValidatorUnit]))
+    record["history"] = %*{"keys": earliest.len, "latestTarget": latest,
+                           "addOnEpoch": oldEpoch, "restoreEpoch": restoreEpoch,
+                           "conflicts": cs.len}
+  except MutationStop as e:
+    steps.add(%*{"step": "stopped at the first red step under the mutation",
+                 "ok": false, "detail": e.msg})
+  except CatchableError as e:
+    fails.add(b.name & ": " & e.msg)
+    steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})
+  finally:
+    record["steps"] = steps
+    var logs: seq[string]
+    for g in [old, nw]:
+      if g != nil:
+        logs.add(g.log)
+        g.destroy()
+    record["log"] = %logs
+    try: dd.release()
+    except CatchableError: discard
+  fails
+
+suite Gate:
+  test "a converted add-on host keeps and carries its state and never " &
+       "runs the validator before the restore":
+    if not gatesEnabled():
+      skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1, " &
+           "REPRO_ADDON_ENGINE_CLOSURE and REPRO_A12_PACKAGES")
+    else:
+      var failures: seq[string]
+      for b in selectedBases():
+        let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
+          "backend": "qemu", "mutation": mutation(),
+          "gateMutation": gateMutation(), "reprobuild": gitHead(),
+          "gosti": gostiHead(), "started": $now().utc,
+          "conversion": "rehearsed by reinstall (decision 41); ReproOS " &
+            "Anywhere's protocol not exercised"}
+        let f = runBase(b, record)
+        record["verdict"] = %(if f.len == 0: "green" else: "red")
+        record["finished"] = %($now().utc)
+        echo "record: ", writeRecord(Gate, record)
+        failures.add(f)
+      for f in failures: echo "FAIL ", f
+      check failures.len == 0

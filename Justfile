@@ -138,6 +138,12 @@ e2e_addon_hostile_deb_cannot_escape_its_prefix:
 e2e_addon_closure_prefixes_survive_gc:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_closure_prefixes_survive_gc
 
+e2e_addon_adopt_hand_configured_service:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_adopt_hand_configured_service
+
+e2e_addon_to_reproos_conversion_keeps_state:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_to_reproos_conversion_keeps_state
+
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
 
@@ -219,6 +225,9 @@ e2e_addon_engine_agent_enforces_a8:
 
 e2e_addon_sequence_floor_survives_and_is_root_only:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_sequence_floor_survives_and_is_root_only
+
+e2e_addon_tick_observes_a_fresh_cycle:
+    bash ./scripts/run_addon_gate.sh t_e2e_addon_tick_observes_a_fresh_cycle
 
 e2e_addon_profile_compiles_unprivileged:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_profile_compiles_unprivileged
@@ -730,6 +739,13 @@ lint:
     # and --os:windows and refuses a Linux-only module in either closure;
     # no macOS runner, about a minute a target. See the script header.
     bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
+    # The other closure a green sweep says nothing about: what an INSTALLED
+    # reprobuild compiles against. The sweep reads the checkout; a release
+    # archive carries only what stage_release_sources.sh copies, and v0.2.19
+    # failed its release on a file the checkout had and the archive did not.
+    # Stages share/repro into a scratch directory and type-checks against it
+    # alone -- the release job's gate, without the build in front of it.
+    bash ./scripts/release/check_staged_release_sources.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
@@ -3163,6 +3179,12 @@ repomix *args:
 
 check-repo-requirements:
     bash ./scripts/check_repo_requirements.sh
+
+# Stage share/repro as a release archive does and prove it alone closes an
+# installed reprobuild's compiles. The release job's gate, with no build; run
+# it before tagging. Also part of `just lint`.
+release-source-closure:
+    bash ./scripts/release/check_staged_release_sources.sh
 
 # Verify the Nim toolchain can complete a compile while the io-monitor shim is
 # interposed. Requires a built shim (`just test` bootstraps one); this is the

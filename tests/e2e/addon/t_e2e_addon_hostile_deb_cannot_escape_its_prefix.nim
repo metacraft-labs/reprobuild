@@ -55,7 +55,7 @@ const
 proc profile(unit, lockText: string): string =
   ## One disabled unit bound to the closure: the switch realises the
   ## closure in step 1 and never starts the unit.
-  "systemd.systemUnit {\n  name = \"" & unit & "\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & unit & "\"\n" &
   "  content = \"[Unit]\nDescription=G37 fixture\n[Service]\n" &
     "Type=oneshot\nExecStart=/usr/bin/true\n\"\n" &
   "  enabled = false\n" &

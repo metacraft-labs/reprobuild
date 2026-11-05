@@ -66,13 +66,20 @@ suite "repro deploy-agent keygen":
     check lines[0].len == 130
 
   test "the `--secrets-key=` spelling reads the same key, exit 0":
-    let before = readFile(keyPath)
+    # Each case may run in a process of its own, so this one creates the key
+    # it reads back instead of relying on the previous case's.
+    let eqKey = root / "eq" / "recipient.key"
+    var made = -1
+    withStdoutTo(outPath, proc() =
+      made = runDeployAgentCommand(@["keygen", "--secrets-key", eqKey]))
+    check made == 0
+    let before = readFile(eqKey)
     var code = -1
     withStdoutTo(outPath, proc() =
-      code = runDeployAgentCommand(@["keygen", "--secrets-key=" & keyPath]))
+      code = runDeployAgentCommand(@["keygen", "--secrets-key=" & eqKey]))
     check code == 0
-    check readFile(keyPath) == before
-    let priv = peerAuth.loadPrivateKeyFile(keyPath)
+    check readFile(eqKey) == before
+    let priv = peerAuth.loadPrivateKeyFile(eqKey)
     check readFile(outPath).strip ==
       peerAuth.publicKeyHex(peerAuth.derivePublicKey(priv))
 

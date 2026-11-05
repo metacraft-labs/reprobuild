@@ -181,7 +181,7 @@ proc exclusiveUnit(id: string; script = "/usr/local/bin/repro-fixture-exclusive"
 
 proc profile(units: openArray[(string, string)]): string =
   for (name, content) in units:
-    result.add("systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" &
+    result.add("systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & name & "\"\n  content = \"" &
       content & "\"\n}\n\n")
   if result.len == 0: result = "addOn {\n  managedEtcPrefixes = []\n}\n"
 

@@ -114,6 +114,8 @@ type
     acceptPasswdDestroy*: bool
     reconcileDrift*: bool
     forceBroker*: bool
+    carriedStateDir*: string           ## test seams, as `ApplyOptions`'
+    carriedStateRoot*: string
 
   SystemRollbackOutcome* = object
     fromGenerationId*: string
@@ -216,6 +218,8 @@ proc runSystemRollback*(opts: SystemRollbackOptions): SystemRollbackOutcome =
   applyOpts.forceBroker = opts.forceBroker
   applyOpts.noPreview = true
   applyOpts.extraDestroyResources = reverted
+  applyOpts.carriedStateDir = opts.carriedStateDir
+  applyOpts.carriedStateRoot = opts.carriedStateRoot
   result.apply = runInfraApply(targetEnv.profileText, applyOpts)
   result.appliedCount = result.apply.appliedCount
   result.noOpCount = result.apply.noOpCount

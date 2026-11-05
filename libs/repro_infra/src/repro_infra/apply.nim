@@ -37,6 +37,8 @@ import ./plan_envelope
 import ./planner
 import ./profile
 import ./state_dir
+when defined(posix):
+  import ./carried_state
 
 export apply_lock
 
@@ -233,6 +235,17 @@ type
       ## non-nil enables the action-edge half of the apply.
     phases*: ApplyPhaseHooks
       ## See ``ApplyPhaseHooks``; all-nil (the default) applies as before.
+    carriedStateDir*: string
+      ## Where a conversion left carried state (ReproOS Add-On Mode
+      ## §11.1); "" is ``carried_state.CarriedStateDir``. A test seam,
+      ## like ``carriedStateRoot`` (the root the carried directories are
+      ## looked for under; "" is ``/``).
+    carriedStateRoot*: string
+    carriedStateChecked*: bool
+      ## The caller (the add-on's ``runAddonApply``) already refused this
+      ## apply's profile against carried state and holds, before its own
+      ## first write; the composed profile it hands over carries the
+      ## add-on's own objects as well, which are not the operator's.
     addOnDispatch*: AddOnDispatchPolicy
       ## The add-on switch's per-operation materialisation policy
       ## (`repro_elevation.AddOnDispatchPolicy`), carried to the drivers
@@ -583,6 +596,19 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       raise newException(EPendingSwitch, "an interrupted add-on switch " &
         "is pending on this host and recovery did not resolve it; " &
         "refusing to apply on top of it: " & g.why)
+  # Before any mutation: carried state a conversion brought must be
+  # restored before anything that can reach it is applied, nothing is
+  # applied while a state backup holds the host, and carried owners must
+  # keep their ids (ReproOS Add-On Mode §11.1). Here, in the library every
+  # apply path reaches (`repro infra apply`, `repro system sync`, `repro
+  # system rollback`, the engine's deploy agent), so no entry point skips
+  # it.
+  when defined(posix):
+    if not opts.carriedStateChecked:
+      requireCarriedStateReady(parseSystemProfile(profileText),
+        (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+         else: CarriedStateDir),
+        (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
   resetBrokerLaunchCount()
   refreshApplyLock(opts.stateDir)
 

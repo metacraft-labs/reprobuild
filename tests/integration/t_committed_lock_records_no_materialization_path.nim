@@ -140,7 +140,7 @@ proc v2Dep(name, path, url, sha: string): string =
   ## One v2 `deps` record exactly as the pre-v3 writer spelled it — `path`
   ## included, which is the field under test.
   "{ name = \"" & name & "\", path = \"" & path &
-    "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
+    "\", coord_kind = \"vcs\", url = \"" & url & "\"" &
     ", revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"\", tags = \"\" }"

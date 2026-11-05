@@ -49,6 +49,7 @@ import ./handback
 import ./host_exec
 import ./addon_secrets
 import ./ledger
+import ./nft_tables
 import ./mutations
 import ./static_tree
 import ./store_root
@@ -313,6 +314,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       result.undone.incl(entryKey(sl))
   removeEmptyDirs(byClass[lcDir])
   systemctlOrRecord(["daemon-reload"], result)
+  # A unit of the add-on's that ended failed stays listed, failed, after its
+  # file is gone; the base never had that record. Best effort: a unit that
+  # is not failed (or no longer loaded) has nothing to reset.
+  for u in byClass[lcUnit]:
+    if u.collision notin ["replace", "adopt", "reconcile", "closure-relocate"]:
+      discard runSystemctl(["reset-failed", "--", u.unit])
   for u in handBack:
     if entryKey(u) notin result.undone:
       continue                   # left as drift above: not ours to touch
@@ -330,6 +337,15 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       result.undone.incl(entryKey(sc))
     except CatchableError as ex:
       result.errors.add("sysctl " & sc.path & ": " & ex.msg)
+  # The add-on's nftables table: its unit's stop (step 1) deleted it; one
+  # still there is deleted now -- that table alone (``nft_tables``).
+  for t in byClass[lcNftTable]:
+    let why = deleteEgressTable()
+    if why.len > 0:
+      result.errors.add("nftables table " & t.path & ": " & why)
+    else:
+      result.removed.add("nftables table " & t.path)
+      result.undone.incl(entryKey(t))
   for a in byClass[lcAccount]:
     result.keptAccounts.add(a.path)
     result.undone.incl(entryKey(a))

@@ -47,7 +47,7 @@ proc writeLock(consumer, url, revision: string; integrity = "") =
     "[lock]\nplatform = \"x86_64-linux\"\npackages = []\n" &
     "deps = [{ name = \"reprobuild-packages\", path = \"../reprobuild-packages\", " &
     "coord_kind = \"vcs\", url = " & escape(url) &
-    ", ref = \"\", revision = " & escape(revision) &
+    ", revision = " & escape(revision) &
     ", integrity = " & escape(digest) &
     ", version = \"\", visibility = \"public\", participation = \"\", depends = \"\", tags = \"\" }]\n")
 

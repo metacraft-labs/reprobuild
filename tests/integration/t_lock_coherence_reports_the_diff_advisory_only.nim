@@ -129,7 +129,7 @@ proc repoToml(name, remote: string): string =
 
 proc depInline(name, path, revision: string): string =
   "{ name = \"" & name & "\", path = \"" & path & "\", coord_kind = \"vcs\"" &
-  ", url = \"\", ref = \"dev\", revision = \"" & revision & "\"" &
+  ", url = \"\", revision = \"" & revision & "\"" &
   ", integrity = \"\", version = \"\", visibility = \"public\"" &
   ", participation = \"\", depends = \"\", groups = \"\" }"
 

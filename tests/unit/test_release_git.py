@@ -161,6 +161,32 @@ class ReleaseGitTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_git_hook_environment_does_not_redirect_the_sibling_read(self):
+        # A staging script run from a git hook of the reprobuild checkout (the
+        # pre-commit `just lint` runs check_staged_release_sources.sh) inherits
+        # GIT_DIR, which git sets for hooks of a linked worktree. GIT_DIR
+        # outranks `-C`, so the read went to reprobuild's repository: the
+        # commit was absent there, and the partial clone's lazy fetch failed
+        # with "upload-pack: not our ref" (measured 2026-11-03).
+        other = self.work / "other"
+        other.mkdir()
+        _git(other, "init", "-q")
+        hook_env = {
+            "GIT_DIR": str(other / ".git"),
+            "GIT_INDEX_FILE": str(other / ".git" / "index"),
+        }
+        # Negative control: plain git under that environment misses the commit.
+        redirected = subprocess.run(
+            [GIT, "-C", str(self.repo), "cat-file", "-e", f"{self.rev}^{{commit}}"],
+            capture_output=True, text=True,
+            env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull,
+                     GIT_CONFIG_NOSYSTEM="1", **hook_env),
+        )
+        self.assertNotEqual(redirected.returncode, 0)
+
+        result = self._run(self._cat_file(), os.environ["PATH"], **hook_env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_staging_scripts_run_git_only_through_the_helper(self):
         # A bare `git` in a staging script is the defect this helper exists
         # to prevent; comments and quoted remedies ("run: git -C ...") are

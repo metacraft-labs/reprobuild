@@ -48,6 +48,7 @@ import ./collision
 import ./generation0
 import ./host_exec
 import ./etc_write
+import ./evidence
 import ./ledger
 import ./mutations
 import ./pending_plan
@@ -435,6 +436,39 @@ proc renderReassert*(r: ReassertReport): string =
   for f in r.findings: result.add("  " & f & "\n")
   for n in r.notes: result.add("  note: " & n & "\n")
 
+proc recordReassertEvidence*(r: ReassertReport; stateDir: string;
+                             atBoot: bool; site = defaultSite(DefaultStateDir);
+                             bootIdPath = "/proc/sys/kernel/random/boot_id") =
+  ## The re-assert's evidence record (DET-AO-4): one per run, a detection
+  ## when the result is ``drift`` or ``degraded``, with the boot id so the
+  ## off-host check can require one per boot (DET-AO-8). A missing store
+  ## object is also a store-integrity detection (DET-AO-5). Never raises.
+  var site = site
+  site.stateDir = stateDir
+  let boot = try: readFile(bootIdPath).strip()
+             except IOError, OSError: ""
+  let fields = @[("status", r.status), ("bootId", boot),
+                 ("purpose", if atBoot: "boot" else: "operator"),
+                 ("count", $r.findings.len),
+                 ("message", (r.recovery & r.findings).join("; "))]
+  try:
+    discard recordEvidence(EvidenceEvent(detector: edReassert,
+      category: (if r.status in ["drift", "degraded"]: ecDetection
+                 else: ecAudit),
+      trigger: r.status, kind: "reassert-" & r.status, fields: fields,
+      attest: true), site)
+    var missing: seq[string]
+    for f in r.findings:
+      if "store object" in f or ("the store " & StoreRoot) in f: missing.add(f)
+    if missing.len > 0:
+      discard recordEvidence(EvidenceEvent(detector: edStore,
+        category: ecDetection, trigger: "store-object-missing",
+        fields: @[("bootId", boot), ("message", missing.join("; "))],
+        attest: true), site)
+  except CatchableError as e:
+    stderr.write("repro-addon: cannot write the re-assert's evidence " &
+      "record: " & e.msg & "\n")
+
 proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
                        driver: CollisionDriver = nil): ReassertReport =
   ## Recover, check, report. Never raises: every failure is a finding.
@@ -480,3 +514,4 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
       "time\t" & $now().utc & "\n" & renderReassert(result), 0o600)
   except CatchableError:
     discard
+  recordReassertEvidence(result, stateDir, atBoot)

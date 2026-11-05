@@ -104,12 +104,23 @@ const GuestPlatform* = PlatformTriple(cpu: "x86_64", os: "linux", abi: "gnu",
   ## What an amd64 guest's apply keys its build-action entries by
   ## (``compat_check.detectLocalPlatform``).
 
+proc guestPlatformFor*(debArch: string): PlatformTriple =
+  ## What a guest of ``debArch`` keys its build-action entries by: the cpu
+  ## family ``compat_check.detectLocalPlatform`` names for the add-on
+  ## binary built for that architecture (``armv7`` for every armhf host).
+  let cpu = case debArch
+    of "amd64": "x86_64"
+    of "arm64": "aarch64"
+    of "armhf": "armv7"
+    else: raise newException(TestBedError, "no cache platform for " & debArch)
+  PlatformTriple(cpu: cpu, os: "linux", abi: "gnu", libcVariant: "")
+
 proc publishTree*(c: CacheServer; kp: PeerKeypair; action: ProfileBuildAction;
-                  tree: string): string =
+                  tree: string; platform = GuestPlatform): string =
   ## Publish ``tree`` (the action's declared outputs, relative to it) as
-  ## the action's entry, signed by ``kp``; returns the ``blake3:`` digest a
-  ## manifest pins for it.
-  let idy = buildActionCacheIdentity(action, GuestPlatform)
+  ## the action's entry for ``platform``, signed by ``kp``; returns the
+  ## ``blake3:`` digest a manifest pins for it.
+  let idy = buildActionCacheIdentity(action, platform)
   let r = publishInProcess(PublishInProcessRequest(
     entryKeyHex: cacheEntryKeyHex(deriveCacheEntryKey(idy)), prefixDir: tree,
     identity: idy, endpoint: c.hostUrl, keypair: kp))

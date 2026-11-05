@@ -22,6 +22,7 @@ import repro_core/nix_evaluation_policy
 # the merged stdout/stderr descriptor (see ``repro_core/process_close``).
 from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
+import repro_core/source_root
 from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
@@ -1125,6 +1126,9 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
                           pathValue = getEnv("PATH")): PathOnlyToolProfile =
   resolvePathOnlyTool(useDef, pathValue, nil)
 
+proc environmentPrefixSignature(useDef: InterfaceToolUse): string
+  ## Defined beside `resolveEnvironmentPrefixTool`.
+
 proc pathOnlyResolutionSignature(useDef: InterfaceToolUse; pathValue: string;
                                  lookup: SidecarPathLookup): string =
   ## WHERE path-mode resolution lands for ``useDef`` under ``pathValue`` —
@@ -1151,6 +1155,14 @@ proc pathOnlyResolutionSignature(useDef: InterfaceToolUse; pathValue: string;
   ## Keep this in lockstep with ``resolvePathOnlyTool``: if that resolver
   ## grows a new way to pick an executable out of ``$PATH``, this must
   ## grow the same branch or the key stops covering it.
+  ##
+  ## A library realized through an ``environmentPrefix`` arm has no
+  ## executable to look up: its answer IS the prefix and the bytes of the
+  ## files that make it the library (Package-Model.md §"Environment-provided
+  ## library prefixes"). Without that here, the tool-identity cache would
+  ## serve the first resolution's hashes after the library was replaced.
+  if useDef.environmentPrefixProvisioning.len > 0:
+    return "environmentPrefix\x1f" & environmentPrefixSignature(useDef)
   let searchList = splitPathList(pathValue)
   let sidecarPath =
     findToolProfileSidecarOnPath(useDef.executableName, searchList, lookup)
@@ -5438,10 +5450,14 @@ const
     "sha256-Wp5g3mKC+QIjiO39yuiXkSMxzvH4PO4TAuEjCvyWvcI="
   BootstrapNimPackageId = "nim@" & BootstrapNimVersion
   BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
+  # The Windows maintenance prefix, the same archive `packages/nim.nim`
+  # declares. It carries `--compilerArgsFile`, which the provider and
+  # interface compiles need once their argv exceeds the 32,767-unit Windows
+  # command line (qualification run 41815608798).
   BootstrapNimTarballUrl =
-    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip"
+    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633-windows-x64.zip"
   BootstrapNimTarballSha256 =
-    "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b"
+    "e6eaf87df71f83629a8877ac496bcd8cdb7755f9e860b982bb0b886e38eac1c3"
   # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
   # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
   # x86_64: unsigned), so the monitor shim loads into it like into any other
@@ -6227,6 +6243,85 @@ proc buildNimFromSourceThroughEdges*(version, url, sha256, storeRoot, cc,
   raise newException(OSError, "the Nim " & version & " source build " &
     "edge's receipt " & edges.rootReceipt & " names no existing bin/nim")
 
+proc versionSatisfiesRange(version, constraint: string): bool
+
+const
+  InstalledPrefixRecordPath = "share" / "repro" / "cross-build-info"
+    ## `packaging/producers/installed_prefix.PrefixRecordPath`, spelled here
+    ## so the engine does not import the DSL's packaging layer.
+  InstalledPrefixNimRevisionPath = "nim" / ".nim-fork-revision"
+    ## What the catalog's `nim-fork` recipe records beside the compiler.
+
+proc installedPrefixNimVersion(nimTree: string): string =
+  ## The Nim release `nimTree` is, from its `lib/system/compilation.nim`
+  ## (`NimMajor` / `NimMinor` / `NimPatch`), or "" when it says none. Read,
+  ## not run: a compiler built for another machine cannot answer
+  ## `--version` on the build host, and on its own host this costs no spawn.
+  let file = nimTree / "lib" / "system" / "compilation.nim"
+  if not fileExists(file):
+    return ""
+  var parts = ["", "", ""]
+  for line in readFile(file).splitLines:
+    for i, name in ["NimMajor", "NimMinor", "NimPatch"]:
+      let at = line.find(name & "*")
+      if at >= 0 and "=" in line:
+        parts[i] = line.rsplit('=', maxsplit = 1)[1].strip()
+  if parts.anyIt(it.len == 0 or not it.allCharsInSet(Digits)):
+    return ""
+  parts.join(".")
+
+proc installedPrefixNim*(prefixes: openArray[string];
+                         rawConstraint = "nim >=2.2 <3.0"): string =
+  ## The provider compiler an installed prefix ships, or "" when none of
+  ## `prefixes` (the running image's, `runningImagePrefixCandidates`) ships
+  ## `nim/bin/nim` (reprobuild-pm Distribution-And-Packaging.md §5.3,
+  ## amendment N3, approved by Zahary Karadjov, 2026-11-04: this route runs
+  ## before the per-host routes of the provider-toolchain rule 2).
+  ##
+  ## The prefix exists because the appliance compiles providers and profiles
+  ## itself, with the fork the images were built by. Without this route the
+  ## armv7 prefix on rpi2 built stock Nim 2.2.10 from source instead
+  ## (2026-11-04). The compiler is found by the image's own prefix, not by
+  ## `PATH` and not by a build-time path, and is used only when it is the
+  ## fork the prefix records: `nim/.nim-fork-revision` must equal the
+  ## `nim_fork=` line of `share/repro/cross-build-info`. A mismatch, a
+  ## missing record, or a release outside `rawConstraint` (the bootstrap's
+  ## own range) raises `BootstrapNimError`, naming what it found.
+  let range = rawConstraint.splitWhitespace()[1 .. ^1].join(",")
+  for prefix in prefixes:
+    let exe = prefix / "nim" / "bin" / addFileExt("nim", ExeExt)
+    if not fileExists(exe):
+      continue
+    let record = prefix / InstalledPrefixRecordPath
+    if not fileExists(record):
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships " & exe & " but no build record " & record &
+        " to check it against; reinstall the prefix")
+    var recorded = ""
+    for line in readFile(record).splitLines:
+      if line.startsWith("nim_fork="):
+        recorded = line["nim_fork=".len .. ^1].strip()
+    let revisionFile = prefix / InstalledPrefixNimRevisionPath
+    let shipped =
+      if fileExists(revisionFile): readFile(revisionFile).strip() else: ""
+    if recorded.len == 0 or shipped != recorded:
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships a Nim that is not the fork it was built with" &
+        "\n  " & InstalledPrefixNimRevisionPath & ": " &
+        (if shipped.len > 0: shipped else: "(missing)") &
+        "\n  " & InstalledPrefixRecordPath & " nim_fork: " &
+        (if recorded.len > 0: recorded else: "(missing)") &
+        "\n  remedy: reinstall the prefix; its nim/ was replaced or damaged")
+    let version = installedPrefixNimVersion(prefix / "nim")
+    if version.len == 0 or not versionSatisfiesRange(version, range):
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships Nim " &
+        (if version.len > 0: version else: "(unknown version)") &
+        ", outside the provider compiler's range " & rawConstraint &
+        "; pin the provider compiler in the project's lock")
+    return exe
+  ""
+
 proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
                             cc = ""): string =
   ## Provision the recipe-compile Nim by ``route`` and return its path, or
@@ -6335,7 +6430,13 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if provisioned.sdkRoot.len > 0:
       putEnv(bootstrapSdkRootEnv, provisioned.sdkRoot)
   if getEnv(bootstrapNimCompilerEnv).len == 0:
-    let nim = provisionBootstrapNim(effectiveStoreRoot, cc = cc)
+    # The installed-prefix route first (§5.3 amendment N3): the Nim the
+    # running image's prefix ships, then the per-host routes.
+    let shipped = installedPrefixNim(runningImagePrefixCandidates(),
+      bootstrapNimToolUse().rawConstraint)
+    let nim =
+      if shipped.len > 0: shipped
+      else: provisionBootstrapNim(effectiveStoreRoot, cc = cc)
     bumpWindowsNimStack(nim)
     putEnv(bootstrapNimCompilerEnv, nim)
   publishBootstrapCompilerEnv(cc, defined(windows))
@@ -7114,6 +7215,60 @@ proc runScoopInstall(scoopExecutable, scoopRoot, bucket, app: string;
     raise newException(EScoopInstallFailed,
       "EScoopInstallFailed: scoop install " & appRef &
       " (root=" & scoopRoot & ") exited " & $res.exitCode & "\n" & res.output)
+
+proc parseScoopProvenance*(provenance: string): tuple[
+    ok: bool, bucket, app, version: string] =
+  ## Parse a recorded Scoop provenance string `"scoop:<bucket>/<app>@<version>"`
+  ## (or `"scoop:<bucket>/<app>"`).
+  if not provenance.startsWith("scoop:"):
+    return (false, "", "", "")
+  let body = provenance["scoop:".len .. ^1]
+  let slash = body.find('/')
+  if slash <= 0 or slash + 1 >= body.len:
+    return (false, "", "", "")
+  let bucket = body[0 ..< slash]
+  let rest = body[slash + 1 .. ^1]
+  let at = rest.find('@')
+  if at < 0:
+    return (true, bucket, rest, "")
+  if at == 0:
+    return (false, "", "", "")
+  let app = rest[0 ..< at]
+  let version = if at + 1 < rest.len: rest[at + 1 .. ^1] else: ""
+  result = (true, bucket, app, version)
+
+proc uninstallScoopApp*(app: string; scoopOverride = "") =
+  ## Uninstall a Scoop-managed application when a generation transition
+  ## (apply or rollback) removes it from the active home profile or switches
+  ## its realization away from the Scoop adapter (Scoop-Catalog-Adapter.md
+  ## § Removal). Invokes `scoop uninstall <app>` when the Scoop CLI is
+  ## reachable, and ensures `<scoopRoot>/apps/<app>` is cleaned up.
+  if app.len == 0:
+    return
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  if scoopRoot.len == 0:
+    return
+  let appsDir = scoopAppsDir(scoopRoot, app)
+  if not dirExists(extendedPath(appsDir)):
+    return
+  if scoopExe.len > 0:
+    let isPowerShell = scoopExe.endsWith(".ps1")
+    let invocation: seq[string] =
+      if isPowerShell:
+        @["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+          scoopExe, "uninstall", app]
+      else:
+        @[scoopExe, "uninstall", app]
+    let command = invocation.mapIt(quoteShell(it)).join(" ")
+    putEnv("SCOOP", scoopRoot)
+    discard execCmdEx(command)
+  if dirExists(extendedPath(appsDir)):
+    deleteJunctionDir(appsDir / "current")
+    try:
+      removeDir(extendedPath(appsDir))
+    except OSError:
+      discard
 
 proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
                                  executionProfileCaptured: bool):
@@ -9429,6 +9584,158 @@ proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
     cachePortability: cpLocalOnly)
   refreshProfileIdentity(result)
 
+proc environmentPrefixIgnoredNote(useDef: InterfaceToolUse): string =
+  ## Appended to a `--target` refusal of a library whose environment arm's
+  ## variable is set: that prefix is the build host's and is never used for
+  ## a target (Package-Model.md §"Environment-provided library prefixes").
+  for arm in useDef.environmentPrefixProvisioning:
+    if getEnv(arm.variable).len > 0:
+      return " (" & arm.variable & " is set, but an environment prefix is " &
+        "the build host's library and is never used for --target.)"
+  ""
+
+proc elfMachineIsHost(path: string): tuple[elf: bool, host: bool,
+                                            machine: int] =
+  ## Whether `path` is an ELF object for the build host. A non-ELF file (a
+  ## macOS dylib, a static archive) is not judged here: `elf` is false.
+  var f: File
+  if not open(f, path, fmRead):
+    return (false, false, 0)
+  defer: close(f)
+  var head: array[20, byte]
+  if readBytes(f, head, 0, head.len) < head.len or head[0] != 0x7f'u8 or
+      head[1] != byte('E') or head[2] != byte('L') or head[3] != byte('F'):
+    return (false, false, 0)
+  let machine = int(head[18]) or (int(head[19]) shl 8)
+  let expected =
+    case hostCpuToken()
+    of "x86_64": 62
+    of "aarch64": 183
+    of "arm": 40
+    of "i386": 3
+    else: -1
+  (true, expected < 0 or machine == expected, machine)
+
+proc resolveEnvironmentPrefixTool*(useDef: InterfaceToolUse):
+    PathOnlyToolProfile  ## Defined below.
+
+proc environmentPrefixSignature(useDef: InterfaceToolUse): string =
+  ## What a cache of the resolved identity must key on for a use with an
+  ## `environmentPrefix` arm: under `--target` the arm is not taken, so the
+  ## target is the answer; otherwise the realization identity (prefix and the
+  ## hash of every declared file) or, when the prefix would be refused, the
+  ## refusal -- so a repaired prefix is a different key and the cache never
+  ## hides a refusal.
+  let triple = activeTargetTripleTag()
+  if triple.len > 0:
+    return "ignored-under-target\x1f" & triple
+  try:
+    result = "realized\x1f" & resolveEnvironmentPrefixTool(useDef).lockIdentity
+  except CatchableError as e:
+    result = "refused\x1f" & e.msg
+
+proc resolveEnvironmentPrefixTool*(useDef: InterfaceToolUse):
+    PathOnlyToolProfile =
+  ## Package-Model.md §"Environment-provided library prefixes" (approved by
+  ## Zahary Karadjov, 2026-11-02): the path-mode realization of a library
+  ## from the prefix its arm's variable names. The variable is read here, at
+  ## tool resolution -- never while a recipe is evaluated, where a value
+  ## would be snapshotted with the provider. Every declared library and
+  ## header must exist under the prefix, every ELF library must be the build
+  ## host's, and the BLAKE3 of each is folded into the realization identity,
+  ## recomputed at every resolution: a changed `libsqlite3.so` under an
+  ## unchanged prefix is a different identity. Consuming actions stay
+  ## monitored; this adds identity, it never replaces observation.
+  ## Refusals name the variable or the file, before any action runs.
+  let arm = useDef.environmentPrefixProvisioning[0]
+  let who = "'" & useDef.packageSelector & "'"
+  let prefix = getEnv(arm.variable)
+  if prefix.len == 0:
+    raise newException(OSError, "tool-resolution failed: " & who &
+      " is realized in path mode from the prefix " & arm.variable &
+      " names, and " & arm.variable & " is not set. Set it to the " &
+      "library's installed prefix, or use --tool-provisioning=nix " &
+      "(Package-Model.md, \"Environment-provided library prefixes\").")
+  if not dirExists(prefix):
+    raise newException(OSError, "tool-resolution failed: " & who & ": " &
+      arm.variable & "=" & prefix & " is not a directory")
+  var libDirs: seq[string]
+  var identity = "environment-prefix:" & arm.variable & "=" & prefix
+  for name in arm.libraries:
+    var found = ""
+    var foundRank = high(int)
+    for libDir in [prefix / "lib", prefix / "lib64"]:
+      if not dirExists(libDir):
+        continue
+      for kind, entry in walkDir(libDir):
+        if kind notin {pcFile, pcLinkToFile}:
+          continue
+        let base = extractFilename(entry)
+        # The file the linker would take for `-l<name>`: a shared library
+        # before a static archive, the unversioned name before a versioned
+        # one, then the shorter name.
+        let rank =
+          if base == name & ".so": 0
+          elif base.startsWith(name & ".so."): 1
+          elif base == name & ".dylib": 2
+          elif base.startsWith(name & ".") and base.endsWith(".dylib"): 3
+          elif base == name & ".a": 4
+          else: -1
+        if rank < 0:
+          continue
+        if found.len == 0 or rank < foundRank or
+            (rank == foundRank and base.len < extractFilename(found).len):
+          found = entry
+          foundRank = rank
+      if found.len > 0:
+        if libDir notin libDirs:
+          libDirs.add(libDir)
+        break
+    if found.len == 0:
+      raise newException(OSError, "tool-resolution failed: " & who & ": " &
+        arm.variable & "=" & prefix & " holds no " & name &
+        " (looked for lib/ and lib64/ " & name & ".so*, .dylib, .a)")
+    # Through any symlink to the real file, which is what is hashed and
+    # judged (`expandFilename` also accepts a regular file; `expandSymlink`
+    # does not).
+    let target = expandFilename(found)
+    let check = elfMachineIsHost(target)
+    if check.elf and not check.host:
+      raise newException(OSError, "tool-resolution failed: " & who & ": " &
+        target & " (from " & arm.variable & ") is an ELF object for " &
+        "machine " & $check.machine & ", not this build host (" &
+        hostCpuToken() & "); a library for another architecture is never " &
+        "linked into a native build")
+    identity.add(";" & name & "=" & resolvedExecutableContentDigest(target))
+  var includeDirs: seq[string]
+  for header in arm.headers:
+    let path = prefix / "include" / header
+    if not fileExists(path):
+      raise newException(OSError, "tool-resolution failed: " & who & ": " &
+        arm.variable & "=" & prefix & " holds no include/" & header)
+    if (prefix / "include") notin includeDirs:
+      includeDirs.add(prefix / "include")
+    identity.add(";" & header & "=" & resolvedExecutableContentDigest(path))
+  var pkgConfigDirs: seq[string]
+  for libDir in libDirs:
+    if dirExists(libDir / "pkgconfig"):
+      pkgConfigDirs.add(libDir / "pkgconfig")
+  result = PathOnlyToolProfile(
+    installMethod: "environment-prefix",
+    packageSelector: useDef.packageSelector,
+    packageId: useDef.packageSelector,
+    declaredExecutablePath: useDef.executableName,
+    executableName: useDef.executableName,
+    resolvedExecutablePath: "",
+    lockIdentity: identity,
+    cpathList: includeDirs,
+    libraryPathList: libDirs,
+    pkgConfigSearchList: pkgConfigDirs,
+    cmakePrefixList: @[prefix],
+    adapterStrength: asWeak,
+    cachePortability: cpLocalOnly)
+  refreshProfileIdentity(result)
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string;
                     producerExecutableSelectors:
@@ -9492,7 +9799,8 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
           "' (" & useDef.depKind & " dependency) has no build for --target '" &
           crossTriple & "': build its sibling recipe " & sibling.recipeDir &
           " with `repro build --target=" & crossTriple & "` first. A host " &
-          "build from PATH is not used for a cross build's link inputs.")
+          "build from PATH is not used for a cross build's link inputs." &
+          environmentPrefixIgnoredNote(useDef))
       of rrSiblingMissing:
         # No source recipe to build it for the target. PATH, the tarball
         # arm and the nix arm all realize it for the BUILD HOST (the tool
@@ -9507,7 +9815,13 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
           sibling.attemptedRecipeManifest & ", and PATH, the tarball arm " &
           "and the nix arm realize it for the build host only. Add a " &
           "source recipe that builds it for the target, or move it to " &
-          "`nativeBuildDeps:` if it is a tool that runs on the build host.")
+          "`nativeBuildDeps:` if it is a tool that runs on the build host." &
+          environmentPrefixIgnoredNote(useDef))
+    if useDef.environmentPrefixProvisioning.len > 0:
+      # The environment arm is the path-mode realization of a library
+      # (Package-Model.md §"Environment-provided library prefixes"). It is
+      # never reached under --target: the branch above has answered.
+      return resolveEnvironmentPrefixTool(useDef)
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:

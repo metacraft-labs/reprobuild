@@ -161,7 +161,7 @@ proc setupFixture(label: string): Fixture =
   ld.deps.add(LockedDep(
     name: "exeprod",
     coordinates: Coordinates(kind: ckVcs, url: "file://" & result.remote,
-      gitRef: "main", revision: result.pinnedRev),
+      revision: result.pinnedRev),
     integrity: gitObjectMultihash("sha1", result.pinnedRev),
     visibility: "public"))
   writeFile(result.consumer / "repro.lock", serializeLockedDependencies(ld))

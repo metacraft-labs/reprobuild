@@ -193,6 +193,12 @@ proc appFiles(fx: Nf2Fixture): AppFiles =
     flakeLock: readOr(lockPath(fx)), reproNim: readOr(fx.app / "repro.nim"),
     reproLock: readOr(fx.app / "repro.lock"), tree: indexTree(fx))
 
+proc depLineOf(lockText: string): string =
+  ## The ``deps = [...]`` line of a committed lock, or "".
+  for line in lockText.splitLines():
+    if line.startsWith("deps = ["): return line
+  ""
+
 proc asRewritten(lockText: string): string =
   ## ``lockText`` as a partial lock writer leaves it once it rewrites the
   ## ``deps`` line: the line re-rendered by the current writer (no checkout
@@ -674,15 +680,13 @@ suite "HL-11 M4: repro lock update":
       checkpoint("lock update (repro.lock only) -> " & $r3.code & "\n" &
         r3.output)
       check r3.code == 0
-      # The revision and integrity move, and `ref` is cleared: a `ref` names
-      # a published branch containing the revision, and none contains it yet
+      # The revision and integrity move, and nothing else: a pin records the
+      # commit and never a branch (Unified-Locking-And-Hooks.md §14.2), so an
+      # unpublished target is written exactly as a published one would be
       # (the commit-time re-pin records an unpublished HEAD the same way).
-      check readFile(fx.app / "repro.lock") ==
-        asRewritten(before3.reproLock.replace(local, local2).replace(
-          "ref = \"main\", revision = \"" & local2,
-          "ref = \"\", revision = \"" & local2))
-      check before3.reproLock.count("ref = \"main\", revision = \"" &
-        local) == 1
+      let rewritten3 = readFile(fx.app / "repro.lock")
+      check rewritten3 == asRewritten(before3.reproLock.replace(local, local2))
+      check "ref = " notin depLineOf(rewritten3)
       check (UpdateLabel & "note: the target " & local2 & " exists ONLY in " &
         "this local checkout: " & local2[0 ..< 12] & " is reachable from no " &
         "remote-tracking ref under refs/remotes/ in " & betaDir & ", so a " &

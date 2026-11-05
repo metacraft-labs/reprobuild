@@ -46,7 +46,7 @@ proc lockDepEntry*(fx: Nf2Fixture; name, path, origin, rev: string): string =
   ## One `deps` entry of a committed `repro.lock`, fetching ``origin``.
   "{ name = \"" & name & "\", path = \"" & path &
   "\", coord_kind = \"vcs\", url = \"" & originUrl(fx, origin) &
-  "\", ref = \"main\", revision = \"" & rev &
+  "\", revision = \"" & rev &
   "\", integrity = \"git-sha1:" & rev &
   "\", version = \"\", visibility = \"public\", participation = \"\"" &
   ", depends = \"\", groups = \"\" }"

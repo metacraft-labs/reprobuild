@@ -76,9 +76,13 @@ const
 
 proc service(page: string): string =
   # python3 ships in every base of the matrix; the page is the generation.
+  # Under the add-on's hardening floor (only its exec confinement waived,
+  # for the base's python3): a dynamic user, a read-only system, a runtime
+  # directory for its page.
   "[Unit]\nDescription=confirm fixture\n[Service]\n" &
-    "ExecStartPre=/bin/sh -c 'mkdir -p /run/repro-fixture-www && " &
-    "echo " & page & " > /run/repro-fixture-www/index.html'\n" &
+    "RuntimeDirectory=repro-fixture-www\n" &
+    "ExecStartPre=/bin/sh -c 'echo " & page &
+    " > /run/repro-fixture-www/index.html'\n" &
     "ExecStart=/usr/bin/python3 -m http.server " & $Port &
     " --bind 127.0.0.1 --directory /run/repro-fixture-www\n\n" &
     "[Install]\nWantedBy=multi-user.target\n"
@@ -86,7 +90,8 @@ proc service(page: string): string =
 proc profile(page, check: string; timeout = 0): string =
   "addOn {\n  managedEtcPrefixes = [\"/etc/repro-fixture/\"]\n" &
     (if timeout > 0: "  confirmTimeout = " & $timeout & "\n" else: "") & "}\n\n" &
-    "systemd.systemUnit {\n  name = \"repro-fixture-web.service\"\n" &
+    "systemd.systemUnit {\n  floorExceptions = [\"NoExecPaths: serves " &
+    "with the base's own python3\"]\n  name = \"repro-fixture-web.service\"\n" &
     "  content = \"" & service(page) & "\"\n  healthCheck = \"" & check &
     "\"\n}\n\n" &
     "fs.systemFile {\n  path = \"/etc/repro-fixture/page.conf\"\n" &

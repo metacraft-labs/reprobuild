@@ -738,7 +738,7 @@ suite "protocol v2 real-hook repro push closure":
     proc row(name, path, sha, depends, url: string): string =
       "{ name = \"" & name & "\", path = \"" & path &
         "\", coord_kind = \"vcs\", url = \"" & url &
-        "\", ref = \"main\", revision = \"" & sha &
+        "\", revision = \"" & sha &
         "\", integrity = \"git-sha1:" & sha &
         "\", version = \"\", visibility = \"public\", participation = \"\", " &
         "depends = \"" & depends & "\", groups = \"\" }"
@@ -824,7 +824,8 @@ suite "protocol v2 real-hook repro push closure":
     check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
       remoteHead(gitBin, fx.coreBare)] == before
 
-  test "component authority never proves an unpublished exact committed pin":
+  test "a member whose committed lock pins a peer's new commit is pushed " &
+      "after that peer, and never on component authority":
     let gitBin = findExe("git")
     check gitBin.len > 0
     for kind in ["repro", "flake"]:
@@ -834,34 +835,62 @@ suite "protocol v2 real-hook repro push closure":
       let before = [remoteHead(gitBin, fx.appBare),
         remoteHead(gitBin, fx.libBare), remoteHead(gitBin, fx.coreBare)]
       let libSha = commit(fx, gitBin, fx.lib, "pin-cycle-lib")
+      let coreSha = commit(fx, gitBin, fx.core, "pin-cycle-core")
+      # app's lock pins lib's new commit; a repro.lock records the whole develop
+      # set, so it pins core's too, and app is then pushed after both.
+      proc vcsPin(name, bare, sha: string): string =
+        "{name = \"" & name & "\", path = \"../" & name & "\", " &
+          "coord_kind = \"vcs\", url = \"" & fileUrl(bare) & "\", " &
+          "revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
+          "\", version = \"\", visibility = \"public\", participation = \"\", " &
+          "depends = \"\", groups = \"\"}"
       if kind == "repro":
         writeFile(fx.app / "repro.lock",
           "schema = \"reprobuild.solved-graph-lock.v2\"\n[lock]\n" &
           "platform = \"x86_64-linux\"\noptimal = true\n" &
           "inputs_digest = \"fixture\"\nvariants = []\npackages = []\n" &
-          "deps = [{name = \"lib\", path = \"../lib\", coord_kind = \"vcs\", " &
-          "url = \"" & fileUrl(fx.libBare) & "\", ref = \"main\", revision = \"" &
-          libSha & "\", integrity = \"git-sha1:" & libSha &
-          "\", version = \"\", visibility = \"public\", participation = \"\", " &
-          "depends = \"\", groups = \"\"}]\n")
+          "deps = [" & vcsPin("lib", fx.libBare, libSha) & ", " &
+          vcsPin("core", fx.coreBare, coreSha) & "]\n")
       else:
+        # The flake that lock belongs to: its input is what binds the pin to
+        # lib's checkout (by canonical URL), so the pin is lib's own.
+        writeFile(fx.app / "flake.nix", "{\n  inputs.lib = {\n    url = \"git+" &
+          fileUrl(fx.libBare) & "\";\n    flake = false;\n  };\n" &
+          "  outputs = _: { };\n}\n")
+        discard require(q(gitBin) & " -C " & q(fx.app) & " add flake.nix")
         writeFile(fx.app / "flake.lock", $(%*{
           "version": 7, "root": "root", "nodes": {
             "root": {"inputs": {"lib": "lib"}},
             "lib": {"locked": {"type": "git", "url": fileUrl(fx.libBare),
               "rev": libSha}, "original": {"type": "git", "url": fileUrl(fx.libBare)}}}}))
+      let order =
+        if kind == "repro": %*["lib", "core", "app"] else: %*["lib", "app", "core"]
       discard require(q(gitBin) & " -C " & q(fx.app) & " add " & kind & ".lock")
-      discard commit(fx, gitBin, fx.app, "pin-cycle-app")
-      discard commit(fx, gitBin, fx.core, "pin-cycle-core")
+      let appSha = commit(fx, gitBin, fx.app, "pin-cycle-app")
       installHooks(fx)
+      # The pinned peer's receive fails. The pinning member comes after it, so
+      # nothing publishes it while its pin names a commit no remote has.
+      executable(fx.libBare / "hooks" / "pre-receive", "#!/bin/sh\nexit 73\n")
       let stopped = invokePush(fx)
+      checkpoint(kind & ", lib refused:\n" & stopped.output)
       check stopped.code != 0
+      check report(fx)["order"] == order
+      check report(fx)["stoppedRepo"].getStr() == "lib"
+      check report(fx)["stoppedStage"].getStr() == "source-push"
       check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
         remoteHead(gitBin, fx.coreBare)] == before
-      let gate = parseFile(fx.workspace / ".repro" / "build" / "reports" /
-        "check-report.json")
-      check gate["failures"].anyIt(
-        it["property"].getStr() == "source-component-unpublished-pin")
+      checkSourceCapabilitiesEmpty(fx, gitBin)
+      # Once the peer can be published, the member that pins it follows, and
+      # its gate finds the pin obtainable.
+      removeFile(fx.libBare / "hooks" / "pre-receive")
+      let pushed = invokePush(fx)
+      checkpoint(kind & ", retry:\n" & pushed.output)
+      check pushed.code == 0
+      check report(fx)["order"] == order
+      check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
+        remoteHead(gitBin, fx.coreBare)] == [appSha, libSha, coreSha]
+      check "source-component-unpublished-pin" notin pushed.output
+      checkSourceCapabilitiesEmpty(fx, gitBin)
 
   test "a cyclic member publishes every configured push destination":
     let gitBin = findExe("git")

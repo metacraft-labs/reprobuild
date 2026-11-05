@@ -45,6 +45,12 @@
 ## attempt is recorded ``rolled-back`` (§7.2: a replay that fails reverts
 ## whenever a revert is possible).
 ##
+## A reset at ``step-6-restore`` (A13 review): the switch puts the bytes
+## of objects a removed resource preserved back before step 7 starts any
+## unit. A plus a file A reconciled over an operator's file is switched to
+## plain A and reset after the restore; recovery leaves one generation
+## whose ledger ``repro system addon verify`` finds on the host.
+##
 ## Then the write-time refusal (A4 review F7): a foreign symlink planted on
 ## one of B's target paths before the first write makes the switch roll
 ## itself back to A, with A's services active.
@@ -103,6 +109,10 @@ const
              "step-6", "step-7", "step-8", "commit-envelope", "step-9"]
   RevertPoints* = ["revert:step-3", "revert:mid-write", "revert:step-8"]
   MutationOnlyPoints* = ["commit-current-removed"]
+  RestorePoint* = "step-6-restore"
+    ## The switch's restore of preserved objects, before step 7 (A13
+    ## review): reset with an object to restore, in its own section.
+  Reconciled = "/etc/repro-fixture/reconciled.conf"
   Diverted = "/etc/repro-fixture/fixture.conf"
   StateCurrent = "/var/lib/repro/system/current"
 
@@ -120,7 +130,7 @@ proc unitText(gen, desc: string): string =
     "\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n"
 
 proc unit(name, content: string; extra = ""): string =
-  "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" & content &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & name & "\"\n  content = \"" & content &
     "\"\n" & extra & "}\n\n"
 
 proc file(path, content: string; extra = ""): string =
@@ -460,6 +470,52 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         step("refusal: no pending marker is left",
              g.exec("test ! -e " & SeamDir & "/pending").exitCode == 0, "")
         discard g.run("rm -f /etc/repro-fixture/only-b.conf")
+    # --- A reset between the restore of preserved bytes and the start
+    # (``step-6-restore``): A plus a file A reconciled over an operator's
+    # file is switched to plain A, whose switch puts the operator's
+    # bytes back before it starts anything. Recovery must leave one
+    # generation, consistent with its ledger: the add-on's bytes with R
+    # current, the operator's with A current.
+    let envPoints = getEnv("REPRO_ADDON_RESET_POINTS")
+    if envPoints.len == 0 or RestorePoint in envPoints.split(','):
+      toA("restore-step")
+      discard g.run("printf 'operator\\n' > " & Reconciled & " && sync")
+      let withR = profileA() & file(Reconciled, "reconciled by A\n")
+      let r1 = g.applyProfile(repro, "r", withR, " --reconcile-drift")
+      step("restore-step: A with the reconciled file applied",
+           r1.exitCode == 0, r1.stdout & r1.stderr)
+      let genR = g.exec("readlink " & StateCurrent).stdout.strip()
+      g.holdWriteback()
+      let pr = g.startSwitchPausedAt(repro, "a", profileA(), RestorePoint)
+      step("restore-step: the switch back to A paused after its restore",
+           pr.exitCode == 0, pr.stdout & pr.stderr)
+      if pr.exitCode == 0:
+        let content = g.exec("cat " & Reconciled).stdout
+        step("restore-step: at the pause the operator's bytes are back " &
+             "and nothing of A was started anew", content == "operator\n",
+             content)
+        g.hardResetAfterSettle()
+        g.boot()
+        let j = g.waitReasserted()
+        let cur = g.exec("readlink " & StateCurrent).stdout.strip()
+        let now = g.exec("cat " & Reconciled).stdout
+        let ver = g.exec(repro & " system addon verify")
+        step("restore-step: recovered to one generation, consistent " &
+             "with its ledger (verify ok, no pending marker)",
+             "repro-addon reassert:" in j and
+             g.exec("test ! -e " & SeamDir & "/pending").exitCode == 0 and
+             ver.exitCode == 0 and
+             ((cur == genR and now == "reconciled by A\n") or
+              (cur != genR and now == "operator\n")),
+             "current " & cur & " (R " & genR & "), file " & now &
+             "\nverify:\n" & ver.stdout & ver.stderr & "\nreassert:\n" & j)
+        let sv = servicesOf(g, "A")
+        step("restore-step: every service of A is active", sv.ok, sv.detail)
+      # Leave A without the reconciled file, as the sections below expect.
+      let back = g.applyProfile(repro, "a", profileA())
+      step("restore-step: plain A", back.exitCode == 0, back.stdout & back.stderr)
+      discard g.run("rm -f " & Reconciled)
+
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
   except CatchableError as e:

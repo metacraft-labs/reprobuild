@@ -115,7 +115,7 @@ suite "locked catalog revision is materialized and consulted":
       "[lock]\nplatform = \"x86_64-linux\"\npackages = []\n" &
       "deps = [{ name = \"reprobuild-packages\", path = \"../reprobuild-packages\", " &
       "coord_kind = \"vcs\", url = \"https://example.invalid/reprobuild-packages.git\", " &
-      "ref = \"\", revision = \"" & lockedSha & "\", " &
+      "revision = \"" & lockedSha & "\", " &
       "integrity = \"git-sha1:" & lockedSha & "\", " &
       "version = \"\", visibility = \"public\", participation = \"\", depends = \"\", tags = \"\" }]\n"
     writeFile(consumer / "repro.lock", lockBody)
@@ -156,7 +156,7 @@ suite "locked catalog revision is materialized and consulted":
       "[lock]\nplatform = \"x86_64-linux\"\npackages = []\n" &
       "deps = [{ name = \"reprobuild-packages\", path = \"../reprobuild-packages\", " &
       "coord_kind = \"vcs\", url = \"https://example.invalid/reprobuild-packages.git\", " &
-      "ref = \"\", revision = \"" & lockedSha & "\", " &
+      "revision = \"" & lockedSha & "\", " &
       "integrity = \"git-sha1:" & lockedSha & "\", " &
       "version = \"\", visibility = \"public\", participation = \"\", depends = \"\", tags = \"\" }]\n"
     writeFile(consumer / "repro.lock", lockBody)
@@ -218,8 +218,8 @@ suite "locked catalog revision is materialized and consulted":
       "inputs_digest = \"fnv1a64:0000000000000000\"\nvariants = []\n" &
       "packages = [{ name = \"consumer\", version = \"0.1.0\", source = \"consumer\", selection = \"selected\" }, " &
       "{ name = \"rplockedfixture\", version = \"1.0.0\", source = \"rplockedfixture\", selection = \"selected\" }]\n" &
-      "deps = [{ name = \"consumer\", path = \".\", coord_kind = \"vcs\", url = \"https://example.invalid/acme/consumer.git\", ref = \"\", revision = \"" & consumerCommit & "\", integrity = \"git-sha1:" & consumerCommit & "\", version = \"\", visibility = \"public\", participation = \"\", depends = \"reprobuild-packages\", tags = \"\" }, " &
-      "{ name = \"reprobuild-packages\", path = \"../reprobuild-packages\", coord_kind = \"vcs\", url = \"" & catalogRemote & "\", ref = \"\", revision = \"" & catalogCommit & "\", integrity = \"git-sha1:" & catalogCommit & "\", version = \"\", visibility = \"public\", participation = \"\", depends = \"\", tags = \"\" }]\n"
+      "deps = [{ name = \"consumer\", path = \".\", coord_kind = \"vcs\", url = \"https://example.invalid/acme/consumer.git\", revision = \"" & consumerCommit & "\", integrity = \"git-sha1:" & consumerCommit & "\", version = \"\", visibility = \"public\", participation = \"\", depends = \"reprobuild-packages\", tags = \"\" }, " &
+      "{ name = \"reprobuild-packages\", path = \"../reprobuild-packages\", coord_kind = \"vcs\", url = \"" & catalogRemote & "\", revision = \"" & catalogCommit & "\", integrity = \"git-sha1:" & catalogCommit & "\", version = \"\", visibility = \"public\", participation = \"\", depends = \"\", tags = \"\" }]\n"
     writeFile(consumer / "repro.lock", lockBody)
 
     # Confirm that .repro/cross-repo-producers does not exist yet

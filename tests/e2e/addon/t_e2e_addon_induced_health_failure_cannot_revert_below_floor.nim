@@ -34,7 +34,7 @@ const
 
 proc profile(version: string): string =
   "addOn {\n  managedEtcPrefixes = []\n  confirmTimeout = 15\n}\n\n" &
-    "systemd.systemUnit {\n  name = \"a8-floor.service\"\n  content = \"" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"a8-floor.service\"\n  content = \"" &
     "[Unit]\nDescription=A8 floor fixture " & version & "\n[Service]\n" &
     "ExecStart=/bin/sh -c 'test ! -e /run/a8-fail-" & version & " && exec /usr/bin/python3 " &
     "-m http.server " & $Port & " --bind 127.0.0.1 --directory /tmp'\n\n" &

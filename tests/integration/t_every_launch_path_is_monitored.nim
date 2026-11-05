@@ -1766,6 +1766,13 @@ proc evidenceShape(res: ActionResult;
     #     DA-1f and was, until this line, invisible to a comparison of the
     #     channels themselves.
     render("provisionerReportedInputs", ev.provisionerReportedInputs),
+    # `volatileScope` — VACUOUS here. It holds only the invocation's roots
+    # that lie under a volatile prefix (`/dev`, `/run`, ...), and this
+    # fixture runs in an ordinary scratch directory, so every path renders
+    # `[]`. Rendered so the field cannot leave the comparison silently; its
+    # coverage is `test_m9r73_narrow_invalidation` and
+    # `t_a_project_under_a_volatile_prefix_keeps_its_reads`.
+    render("volatileScope", ev.volatileScope.exemptRoots),
     render("evidenceProvenance", (block:
       var contributors: seq[string] = @[]
       for contributor in ev.evidenceProvenance:

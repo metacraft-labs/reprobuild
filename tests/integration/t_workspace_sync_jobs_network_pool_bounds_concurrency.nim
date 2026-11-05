@@ -94,8 +94,8 @@ proc writeGitShim(shimDir, realGit, markersDir, refreshDir: string;
   ## start/end marker pair under ``markersDir`` and sleeps (so the pool
   ## bound is observable). For a shared-bare refresh (``fetch --all
   ## --prune`` or ``clone --bare``) it appends a line to a per-destination
-  ## tally file under ``refreshDir`` keyed by the LAST argv element (the
-  ## bare path) so the test can assert one-refresh-per-URL. Everything
+  ## tally file under ``refreshDir`` keyed by a checksum of the LAST argv
+  ## element (the bare path) so the test can assert one-refresh-per-URL. Everything
   ## else passes straight through.
   createDir(shimDir)
   createDir(markersDir)
@@ -143,8 +143,11 @@ proc writeGitShim(shimDir, realGit, markersDir, refreshDir: string;
   lines.add("  if [ \"$is_bareclone\" = \"1\" ]; then")
   lines.add("    for a in \"$@\"; do dest=\"$a\"; done")  # clone dest = last arg
   lines.add("  fi")
-  lines.add("  slug=\"$(printf '%s' \"$dest\" | tr '/' '_')\"")
-  lines.add("  echo 1 >> \"$REFRESH/$slug\"")
+  # Keyed by a checksum of the bare path, not the path spelled out: under a
+  # deep TMPDIR the spelled-out path passes NAME_MAX, the append fails, and
+  # every refresh goes uncounted. The line records the path itself.
+  lines.add("  slug=\"$(printf '%s' \"$dest\" | cksum | cut -d' ' -f1)\"")
+  lines.add("  printf '%s\\n' \"$dest\" >> \"$REFRESH/$slug\"")
   lines.add("fi")
   lines.add("exec \"$REAL_GIT\" \"$@\"")
   writeFile(shim, lines.join("\n") & "\n")

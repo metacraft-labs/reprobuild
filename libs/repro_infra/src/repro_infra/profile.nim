@@ -32,6 +32,20 @@ import repro_elevation
 import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
+import ./service_floor
+from ./service_floor_v1 as floorV1 import nil
+from ./service_floor_v2 as floorV2 import nil
+from ./service_floor_v3 as floorV3 import nil
+
+export service_floor.EServiceFloor, service_floor.ServiceFloorHardening,
+  service_floor.FloorVersion, service_floor.WholeFloorException,
+  service_floor.commandStoreObjects, service_floor.referencedStoreObjects,
+  service_floor.storeObjectOf
+
+const InfraAddonMutation {.strdefine: "reproAddonMutation".} = ""
+  ## A falsifying build of the add-on's gates (``repro_addon/mutations``);
+  ## "" in every product build. Read here because the floor is rendered by
+  ## this module, below the add-on.
 
 type
   SystemResourceKind* = enum
@@ -69,6 +83,22 @@ type
     srkLinuxAddOnTool = "linux.addOnTool"
     srkSystemdSystemDropIn = "systemd.systemDropIn"
     srkLinuxSysusersEntry = "linux.sysusersEntry"
+
+  StateDisposition* = enum
+    ## What a conversion to ReproOS does with a declared state directory
+    ## (ReproOS-Add-On-Mode §11.1 step 2).
+    sdKeep = "keep"
+      ## The directory is on a disk the conversion keeps: it is not
+      ## copied, and is checked by digest before and after.
+    sdCarry = "carry"
+      ## Backed up before the conversion, restored before the service's
+      ## first start on the converted host, and verified by digest.
+
+  StateDirectoryDecl* = object
+    ## One `stateDirectories` entry of a `systemd.systemUnit`, written
+    ## `"<keep|carry>:<absolute path>"`.
+    disposition*: StateDisposition
+    path*: string
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -226,6 +256,31 @@ type
         ## the unit's `[Service]` section (`renderedSystemUnitContent`), so
         ## the service reads it from `$CREDENTIALS_DIRECTORY` and its
         ## account never gets access to the shared directory.
+      suHardening*: string
+        ## `hardening = "serviceFloor"` (ReproOS-Add-On-Mode §10.1): the
+        ## unit gets the hardening floor (`service_floor`). "" means the
+        ## realisation's default: the floor on an add-on host (the parse
+        ## with `addOnDefaults`, `applyAddOnServiceFloor`), none elsewhere.
+      suFloorVersion*: string
+        ## `floorVersion = "<n>"`: the floor version the unit was rendered
+        ## with (`service_floor.FloorVersion` today). Written into every
+        ## stored generation (`renderProfileText`); "" in a new profile and
+        ## in a generation an engine before version 3 stored (1 or 2, which
+        ## the add-on decides from the generation's ledger,
+        ## `addon_apply.parseStoredUserProfile`). A new add-on profile
+        ## cannot name an older version (spec §10.1, *Stored generations
+        ## and floor versions*).
+      suFloorExceptions*: seq[string]
+        ## `floorExceptions = ["<Setting>: <reason>", ...]`: the floor
+        ## settings this unit weakens, each with its reason (CONF-2);
+        ## printed in every plan (`floorExceptionPlanLines`).
+      suStateDirectories*: seq[StateDirectoryDecl]
+        ## `stateDirectories = ["keep:/var/lib/x", "carry:/var/lib/y"]`
+        ## (ReproOS-Add-On-Mode §11.1): the directories holding this
+        ## service's state, and for each what a conversion to ReproOS does
+        ## with it. Metadata only: nothing is rendered into the unit and
+        ## no apply writes the directory (`parseStateDirectory`,
+        ## `checkStateDirectories`).
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -786,8 +841,35 @@ proc credentialLines*(unitName: string; credentials: openArray[string]):
     result.add("LoadCredential=" & c & ":" & SecretsRunRoot & "/" & svc &
                "/" & c)
 
-proc renderedSystemUnitContent*(r: SystemResource): string =
-  ## The unit-file bytes a `systemd.systemUnit` resource installs. Without
+proc withKeepMounts(r: SystemResource; content: string): string =
+  ## A unit whose state directories include a *kept* one (on a disk a
+  ## conversion keeps, ReproOS-Add-On-Mode §11.1) gets
+  ## `RequiresMountsFor=` on each kept path in its `[Unit]` section, so it
+  ## does not start while the disk is not mounted: with the disk missing
+  ## (an fstab line with `nofail`), the service would otherwise start on an
+  ## empty directory of the root file system and write fresh state there
+  ## (https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#RequiresMountsFor=).
+  var kept: seq[string]
+  for d in r.suStateDirectories:
+    if d.disposition == sdKeep: kept.add(d.path)
+  if kept.len == 0: return content
+  when InfraAddonMutation == "keep-without-mount-requirement":
+    return content
+  let line = "RequiresMountsFor=" & kept.join(" ")
+  var outLines: seq[string]
+  var done = false
+  for l in content.split('\n'):
+    outLines.add(l)
+    if not done and l.strip() == "[Unit]":
+      outLines.add(line)
+      done = true
+  if not done:
+    outLines = @["[Unit]", line, ""] & outLines
+  outLines.join("\n")
+
+proc renderedUnitBeforeFloor*(r: SystemResource; keepMounts = true): string =
+  ## The unit-file bytes a `systemd.systemUnit` resource installs, before
+  ## the hardening floor (`renderedSystemUnitContent`). Without
   ## a closure lock that is `suContent` verbatim. With one, the unit's
   ## `[Service]` section gains the closure's `BindReadOnlyPaths=` /
   ## `InaccessiblePaths=` lines (Add-On spec §8.3 item 5), naming the
@@ -809,7 +891,7 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
       raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
         getCurrentExceptionMsg())
   if r.suCredentials.len == 0:
-    return content
+    return (if keepMounts: withKeepMounts(r, content) else: content)
   if credentialServiceOf(r.suName).len == 0:
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
       "' names credentials, but only a plain `<service>.service` unit " &
@@ -860,7 +942,220 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
   if not unitSeen:
     outLines = @["[Unit]", "Wants=" & SecretsOrderingUnit,
                  "After=" & SecretsOrderingUnit, ""] & outLines
-  outLines.join("\n")
+  (if keepMounts: withKeepMounts(r, outLines.join("\n"))
+   else: outLines.join("\n"))
+
+proc effectiveHardening*(r: SystemResource): string =
+  ## The hardening the unit is rendered with: its `hardening` field, which
+  ## the add-on's parse defaults to `serviceFloor` (`applyAddOnServiceFloor`).
+  r.suHardening
+
+proc renderedSystemUnitContent*(r: SystemResource): string =
+  ## The unit-file bytes a `systemd.systemUnit` resource installs: its
+  ## content with the closure binding and credential lines
+  ## (`renderedUnitBeforeFloor`), then, under `hardening = "serviceFloor"`,
+  ## the hardening floor appended to its `[Service]` section
+  ## (`service_floor`, ReproOS-Add-On-Mode §10.1). A unit the floor cannot
+  ## be applied to as written, and an exception that names no floor
+  ## setting or gives no reason, are `ESystemProfileInvalid`.
+  result = renderedUnitBeforeFloor(r)
+  case r.suHardening
+  of "":
+    return
+  of ServiceFloorHardening:
+    discard
+  else:
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+      "' hardening '" & r.suHardening & "' is not known (the one value is " &
+      "\"" & ServiceFloorHardening & "\")")
+  case r.suFloorVersion
+  of "", FloorVersion:
+    discard
+  of "3":
+    # 778e8207f2 to 221ac312b6: exactly their rendering (frozen v3).
+    try:
+      let ex = floorV3.parseFloorExceptions(r.suName, r.suFloorExceptions)
+      var whole = false
+      for e in ex:
+        if e.setting == floorV3.WholeFloorException: whole = true
+      if not floorV3.hasServiceSection(result):
+        if whole: return
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' (floor version 3) has no [Service] section")
+      return floorV3.appendToServiceSection(result,
+        floorV3.renderServiceFloorLines(r.suName, result, ex))
+    except floorV3.EServiceFloor as e:
+      raiseSystemProfileInvalid(e.msg)
+  of "2", "2-prekeep":
+    # A generation the engines from aa72782154 to d03bb6759e stored:
+    # exactly their rendering (the frozen `service_floor_v2`). Those
+    # before fca5ed3486 rendered no `RequiresMountsFor=` for a kept state
+    # directory (`2-prekeep`; A9 review round 3, finding 8).
+    if r.suFloorVersion == "2-prekeep":
+      result = renderedUnitBeforeFloor(r, keepMounts = false)
+    try:
+      let ex = floorV2.parseFloorExceptions(r.suName, r.suFloorExceptions)
+      var whole = false
+      for e in ex:
+        if e.setting == floorV2.WholeFloorException: whole = true
+      if not floorV2.hasServiceSection(result):
+        if whole: return
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' (floor version 2) has no [Service] section")
+      return floorV2.appendToServiceSection(result,
+        floorV2.renderServiceFloorLines(r.suName, result, ex))
+    except floorV2.EServiceFloor as e:
+      raiseSystemProfileInvalid(e.msg)
+  of "1":
+    # A generation the first floored engine (1a598170c0) stored; it
+    # predates kept state directories, so no `RequiresMountsFor=` either.
+    result = renderedUnitBeforeFloor(r, keepMounts = false)
+    try:
+      if not floorV1.hasServiceSection(result):
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' (floor version 1) has no [Service] section")
+      let ex = floorV1.parseFloorExceptions(r.suName, r.suFloorExceptions)
+      return floorV1.appendToServiceSection(result,
+        floorV1.renderServiceFloorLines(r.suName, result, ex))
+    except floorV1.EServiceFloor as e:
+      raiseSystemProfileInvalid(e.msg)
+  else:
+    raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+      "' floorVersion '" & r.suFloorVersion & "' is not known (versions 1 " &
+      "to " & FloorVersion & ")")
+  try:
+    let ex = parseFloorExceptions(r.suName, r.suFloorExceptions)
+    var wholeWaiver = false
+    for e in ex:
+      if e.setting == WholeFloorException: wholeWaiver = true
+    if not hasServiceSection(result):
+      # A `.socket` (or any other unit) with command lines runs them with
+      # no [Service] the floor could confine; without either there is
+      # nothing to harden, and asking for the floor is a mistake.
+      if wholeWaiver: return
+      if hasExecLines(result):
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' runs command lines outside a [Service] section, which the " &
+          "serviceFloor cannot confine; move them into a service, or name " &
+          "the exception \"serviceFloor: <why>\"")
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        "' asks for the serviceFloor but has no [Service] section")
+    let lines = renderServiceFloorLines(r.suName, result, ex,
+      dropExec = InfraAddonMutation == "floor-without-noexec",
+      dropMdwe = InfraAddonMutation == "floor-without-mdwe",
+      allowMemfd = InfraAddonMutation == "floor-allows-memfd")
+    result = appendToServiceSection(result, lines)
+  except EServiceFloor as e:
+    raiseSystemProfileInvalid(e.msg)
+
+proc floorAppliesByDefault*(r: SystemResource): bool =
+  ## Whether the add-on's default puts this unit under the floor: a unit
+  ## with no `hardening` of its own that has a `[Service]` section and is
+  ## the add-on's to define. A `collision = "dropIn"` unit is not: its
+  ## content is a drop-in over a distribution package's unit, whose
+  ## command lines are the package's (spec §10.1, amended with A9).
+  ## A unit without a `[Service]` section that carries command lines (a
+  ## `.socket`'s `ExecStartPre=`) is selected too, so the floor refuses it
+  ## rather than letting it run commands unconfined.
+  r.kind == srkSystemdSystemUnit and r.suHardening.len == 0 and
+    r.suCollision != "dropIn" and
+    (hasServiceSection(r.suContent) or hasExecLines(r.suContent))
+
+proc dropInApplies*(dropInUnit, unitName: string): bool =
+  ## Whether systemd reads the drop-ins of `dropInUnit` for `unitName`
+  ## (systemd.unit(5), "Description"): the unit's own `<name>.d/`, a
+  ## template's `<prefix>@.<type>.d/` for its instances, and the dashed
+  ## prefixes -- for `foo-bar-baz.service`, `foo-bar-.service.d/` and
+  ## `foo-.service.d/` -- of the name and, for an instance, of its
+  ## template's name. (The type-level `service.d/` is not a unit name the
+  ## profile can name.)
+  when InfraAddonMutation == "floor-ignores-prefix-dropins":
+    return dropInUnit == unitName
+  if dropInUnit == unitName: return true
+  let dot = unitName.rfind('.')
+  if dot <= 0: return false
+  let typ = unitName[dot .. ^1]
+  if not dropInUnit.endsWith(typ): return false
+  var stems = @[unitName[0 ..< dot]]
+  let at = stems[0].find('@')
+  if at >= 0:
+    stems.add(stems[0][0 .. at])     # `foo@` -- the template `foo@.type`
+  # A floored template's instances read the drop-ins of their instance
+  # names (`foo-bar@1.service.d/` for `foo-bar@.service`; A9 review round
+  # 3, finding 4).
+  when InfraAddonMutation notin ["floor-static-r3-disabled", "floor-unchecked"]:
+    if stems[0].endsWith("@"):
+      let dstem = dropInUnit[0 ..< dropInUnit.len - typ.len]
+      if dstem.startsWith(stems[0]) and dstem.len > stems[0].len:
+        return true
+  for stem in stems:
+    if dropInUnit == stem & typ: return true
+    # every dashed prefix: `a-b-c` -> `a-b-`, `a-`
+    var i = stem.len - 1
+    while i > 0:
+      if stem[i - 1] == '-' and i < stem.len:
+        if dropInUnit == stem[0 ..< i] & typ: return true
+      dec i
+  false
+
+proc checkFloorDropIns*(p: SystemProfile) =
+  ## A `systemd.systemDropIn` of a unit under the floor is judged by the
+  ## effective unit (spec §10.1): systemd reads it after the floor's lines,
+  ## so any floor setting it assigns, a command outside the unit's closure
+  ## or a guarded weakening needs the unit's named exception
+  ## (`service_floor.dropInFloorRefusal`). Refused as
+  ## `ESystemProfileInvalid`.
+  when InfraAddonMutation == "floor-ignores-drop-ins":
+    return
+  for d in p.resources:
+    # A `systemd.systemDropIn`, and a `systemUnit` with `collision =
+    # "dropIn"`, which the add-on installs as a drop-in of the unit it names
+    # (A9 review round 3, finding 5).
+    var target, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      target = d.diUnit
+      content = d.diContent
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      when InfraAddonMutation in ["floor-static-r3-disabled", "floor-unchecked"]:
+        continue
+      target = d.suName
+      content = d.suContent
+    else:
+      continue
+    for u in p.resources:
+      if u.kind != srkSystemdSystemUnit or u.suCollision == "dropIn" or
+          not dropInApplies(target, u.suName) or
+          u.suHardening != ServiceFloorHardening:
+        continue
+      try:
+        let ex = parseFloorExceptions(u.suName, u.suFloorExceptions)
+        let why = dropInFloorRefusal(u.suName, renderedUnitBeforeFloor(u),
+                                     content, ex)
+        if why.len > 0:
+          raiseSystemProfileInvalid("systemd.systemDropIn '" & d.address &
+            "' of the floored unit " & u.suName & ": " & why)
+      except EServiceFloor as e:
+        raiseSystemProfileInvalid(e.msg)
+
+proc applyAddOnServiceFloor*(p: var SystemProfile) =
+  ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
+  ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
+  ## Validates each such unit (`renderedSystemUnitContent`).
+  for r in p.resources.mitems:
+    if floorAppliesByDefault(r):
+      r.suHardening = ServiceFloorHardening
+      discard renderedSystemUnitContent(r)
+  checkFloorDropIns(p)
+
+proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
+  ## Every floor exception of the profile's units under the floor, one
+  ## `<unit>: <Setting>: <reason>` line each: what every plan prints
+  ## (CONF-2, "a named exception, shown in every plan").
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suHardening.len > 0 and
+        r.suFloorExceptions.len > 0:
+      try: result.add(floorExceptionLines(r.suName, r.suFloorExceptions))
+      except EServiceFloor as e: raiseSystemProfileInvalid(e.msg)
 
 
 proc legacyClosureRenderings*(r: SystemResource): seq[string] =
@@ -1220,6 +1515,108 @@ proc checkSecretDeclarations*(p: SystemProfile) =
           "no `" & SecretFileStanzaTag & " { service = \"" & svc &
           "\"  name = \"" & c & "\" }`")
 
+const
+  StateDirectoryRoots* = ["/var/lib/", "/var/cache/", "/var/spool/",
+                          "/var/log/", "/srv/"]
+    ## Where a declared state directory may live (the FHS's variable-state
+    ## locations). Everything else -- configuration, the store, packages'
+    ## files, volatile or kernel file systems -- is either declared as a
+    ## resource of its own or is not state a conversion moves.
+  StateDirectoryExcluded* = ["/var/lib/repro/", "/var/cache/repro/",
+                             "/var/lib/dpkg/", "/var/lib/apt/",
+                             "/var/cache/apt/", "/var/lib/ucf/",
+                             "/var/lib/systemd/"]
+    ## Below a permitted root but never a service's state: Reprobuild's
+    ## own state and the distribution's package and init databases.
+
+proc stateDirectoryError*(path: string): string =
+  ## Why `path` cannot be a declared state directory, or "" when it can.
+  let canon = nonCanonicalPathError("stateDirectories path", path)
+  if canon.len > 0:
+    return canon
+  for c in path:
+    if ord(c) < 32 or ord(c) == 127 or c in {'\\', '"'}:
+      return "stateDirectories path '" & path &
+        "' contains a control character, a backslash or a quote"
+  let asDir = path & "/"
+  var under = false
+  for root in StateDirectoryRoots:
+    if asDir.startsWith(root) and asDir != root:
+      under = true
+  if not under:
+    return "stateDirectories path '" & path & "' is not below one of " &
+      StateDirectoryRoots.join(", ") & " (a directory of its own, not " &
+      "the root itself)"
+  for ex in StateDirectoryExcluded:
+    if asDir.startsWith(ex) or ex.startsWith(asDir):
+      return "stateDirectories path '" & path & "' overlaps " & ex &
+        ", which is not a service's state"
+  ""
+
+proc parseStateDirectory*(unitName, entry: string): StateDirectoryDecl =
+  ## One `"<keep|carry>:<path>"` entry. The disposition is required: a
+  ## conversion destroys whatever is not kept or carried, so there is no
+  ## default to fall back on.
+  let colon = entry.find(':')
+  let what = "systemd.systemUnit '" & unitName & "' stateDirectories entry '" &
+    entry & "'"
+  if colon <= 0:
+    raiseSystemProfileInvalid(what & " must be written \"keep:<path>\" or " &
+      "\"carry:<path>\"")
+  case entry[0 ..< colon]
+  of $sdKeep: result.disposition = sdKeep
+  of $sdCarry: result.disposition = sdCarry
+  else:
+    raiseSystemProfileInvalid(what & ": '" & entry[0 ..< colon] &
+      "' is not one of keep / carry")
+  result.path = entry[colon + 1 .. ^1]
+  let err = stateDirectoryError(result.path)
+  if err.len > 0:
+    raiseSystemProfileInvalid(what & ": " & err)
+
+proc parseStateDirectories*(unitName: string;
+                            entries: seq[string]): seq[StateDirectoryDecl] =
+  for e in entries:
+    result.add(parseStateDirectory(unitName, e))
+
+proc renderStateDirectory*(d: StateDirectoryDecl): string =
+  $d.disposition & ":" & d.path
+
+proc stateDirectoryEntries*(r: SystemResource): seq[string] =
+  ## The `stateDirectories` list as written in canonical text.
+  if r.kind != srkSystemdSystemUnit: return
+  for d in r.suStateDirectories:
+    result.add(renderStateDirectory(d))
+
+proc checkStateDirectories*(p: SystemProfile) =
+  ## The profile-wide refusals of the state set (§11.1), shared by the text
+  ## parser and the DSL adapter. A directory may be named by more than one
+  ## unit (services sharing a database) only with the same disposition; a
+  ## directory inside another declared one is refused, because keeping the
+  ## outer and carrying the inner (or carrying both) has no single meaning.
+  ## Raises `ESystemProfileInvalid`.
+  var seen: seq[(string, StateDisposition, string)]
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit: continue
+    var own: seq[string]
+    for d in r.suStateDirectories:
+      if d.path in own:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' declares the state directory " & d.path & " twice")
+      own.add(d.path)
+      for (path, disp, unit) in seen:
+        if path == d.path:
+          if disp != d.disposition:
+            raiseSystemProfileInvalid("the state directory " & d.path &
+              " is `" & $disp & "` for " & unit & " and `" &
+              $d.disposition & "` for " & r.suName)
+        elif (d.path & "/").startsWith(path & "/") or
+             (path & "/").startsWith(d.path & "/"):
+          raiseSystemProfileInvalid("the state directory " & d.path &
+            " (" & r.suName & ") and " & path & " (" & unit &
+            ") are nested; declare one of them")
+      seen.add((d.path, d.disposition, r.suName))
+
 proc managedPrefixError*(prefix: string): string =
   ## Why `prefix` cannot be a managed `/etc` prefix, or "" when it can.
   ## A prefix is written as the add-on reads it: `/etc/name/` for a
@@ -1368,11 +1765,22 @@ proc systemProfileStanzaLineSpans*(text: string;
     let e = lineOf(span.close)
     result.add((startLine: s, endLine: e))
 
-proc parseSystemProfile*(text: string): SystemProfile =
+proc parseSystemProfile*(text: string; addOnDefaults = false;
+                         stored = false): SystemProfile =
   ## Parse the declarative `system.nim` text into a `SystemProfile`.
   ## Raises `ESystemProfileInvalid` on any structural error or an
   ## unknown / deferred resource kind. Brace-aware: a stanza body may
   ## be on one line (`kind { k = v }`) or spread across many.
+  ##
+  ## With `addOnDefaults` the add-on realisation's defaults are applied as
+  ## each resource is read (`applyAddOnServiceFloor`): what every add-on
+  ## path that reads a user profile parses with, so a unit is rendered the
+  ## same way wherever the add-on renders it.
+  ##
+  ## With `stored` the text is a generation the add-on stored, which the
+  ## engine that applied it already judged under its floor version: its
+  ## drop-ins are not judged again under today's (`checkFloorDropIns`),
+  ## which would wedge a host on a generation it installed (§10.1).
   # Strip comments globally (quote state carried across lines), then walk
   # by `{` / `}` braces. The bytes of a quoted value reach `unquote`
   # unchanged: no line splitting, so a `\r` inside a value survives too.
@@ -1758,7 +2166,20 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "healthCheck" in fields: fields["healthCheck"] else: "",
         suCredentials:
           if "credentials" in rawFields: parseListLiteral(rawFields["credentials"])
+          else: @[],
+        suHardening:
+          if "hardening" in fields: fields["hardening"] else: "",
+        suFloorVersion:
+          if "floorVersion" in fields: fields["floorVersion"] else: "",
+        suFloorExceptions:
+          if "floorExceptions" in rawFields:
+            parseListLiteral(rawFields["floorExceptions"])
           else: @[])
+      if addOnDefaults and floorAppliesByDefault(res):
+        res.suHardening = ServiceFloorHardening
+      if "stateDirectories" in rawFields:
+        res.suStateDirectories = parseStateDirectories(res.suName,
+          parseListLiteral(rawFields["stateDirectories"]))
       if res.suHealthCheck.len > 0:
         discard parseHealthCheck(res.suHealthCheck)
       if res.suDropInName.len > 0 and res.suCollision != "dropIn":
@@ -1769,8 +2190,11 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "' dropInName '" & res.suDropInName & "' must be one path " &
           "segment of letters, digits, '.', '-' or '_'")
       # Refuse an unbindable unit or a malformed lock at parse time, not
-      # at apply time on the host.
-      discard renderedSystemUnitContent(res)
+      # at apply time on the host. A stored generation's floor is rendered
+      # under the version it records, which its reader decides
+      # (`addon_apply.parseStoredUserProfile`), never under today's here.
+      if stored: discard renderedUnitBeforeFloor(res)
+      else: discard renderedSystemUnitContent(res)
     of srkLaunchdSystemDaemon:
       let programArgs =
         if "programArgs" in rawFields:
@@ -2226,6 +2650,9 @@ proc parseSystemProfile*(text: string): SystemProfile =
   checkUnitStateConflicts(result.resources)
   checkPasswdPrimaryGroups(result.resources)
   checkSecretDeclarations(result)
+  if not stored:
+    checkFloorDropIns(result)
+  checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------
 # SystemResource -> typed PrivilegedOperation. A `destroy` flag flips

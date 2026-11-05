@@ -216,20 +216,23 @@ proc compileHelper(f: Fixture; gen: int) =
     raise newException(OSError, "helper was not produced: " & res)
 
 proc isVolatilePrefix(path: string): bool =
-  ## Mirrors the engine's `isVolatileMonitorPath`. Kept here as a LOUD
+  ## The engine's volatile prefixes. Kept here as a LOUD
   ## precondition rather than a comment because getting it wrong makes this
   ## whole suite vacuous in the quietest possible way: every path the monitor
-  ## records under one of these prefixes is dropped before any arm sees it, so
-  ## the helper simply never appears in the input set and all four cases fail
-  ## (or, for a differently-shaped assertion, pass) for a reason that has
-  ## nothing to do with what they test. Measured: with `TMPDIR=/run/user/<uid>`
-  ## — a perfectly ordinary choice on a systemd host, and the one this repo's
-  ## own instructions suggest for short socket paths — the recorded input set
-  ## was thirteen `/nix/store` library loads and NOTHING under the fixture.
-  for prefix in ["/run", "/proc", "/sys", "/dev"]:
-    if path == prefix or path.startsWith(prefix & "/"):
-      return true
-  false
+  ## records under one of these prefixes may be dropped before any arm sees
+  ## it, so the helper simply never appears in the input set and all four
+  ## cases fail (or, for a differently-shaped assertion, pass) for a reason that has
+  ## nothing to do with what they test. Measured, before `/run/user/<uid>`
+  ## was classified as ordinary scratch: with `TMPDIR=/run/user/<uid>` the
+  ## recorded input set was thirteen `/nix/store` library loads and NOTHING
+  ## under the fixture.
+  ##
+  ## The engine's own prefix classification, not a copy of it
+  ## (`repro_core/paths.isVolatileRuntimeStatePath`). Whether a read under
+  ## one of these prefixes is dropped also depends on the invocation's roots
+  ## (`dropsAsVolatileRuntimeState`), which this fixture does not arrange, so
+  ## it stays out of all of them.
+  isVolatileRuntimeStatePath(path)
 
 proc nonVolatileTempBase(): string =
   ## `getTempDir()` first, because a suite that pins `TMPDIR` deserves to be

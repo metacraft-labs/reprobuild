@@ -143,7 +143,7 @@ proc commitFile(fx: Fixture; repo, file, content, message: string): string =
 proc lockDep(fx: Fixture; name, path, sha, depends: string): string =
   "{ name = \"" & name & "\", path = \"" & path &
     "\", coord_kind = \"vcs\", url = \"" & fx.url(name) &
-    "\", ref = \"main\", revision = \"" & sha & "\", integrity = \"git-sha1:" &
+    "\", revision = \"" & sha & "\", integrity = \"git-sha1:" &
     sha & "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"" & depends & "\", groups = \"\" }"
 

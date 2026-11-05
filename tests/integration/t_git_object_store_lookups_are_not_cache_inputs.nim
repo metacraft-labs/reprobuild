@@ -137,14 +137,17 @@ proc gitExe(): string =
       discard
 
 proc isVolatilePrefix(path: string): bool =
-  ## Mirrors the engine's `isVolatileMonitorPath`: anything the monitor records
-  ## under these prefixes is dropped before the key sees it, so a fixture
+  ## The engine's volatile prefixes: anything the monitor records under
+  ## them may be dropped before the key sees it, so a fixture
   ## there would make every assertion below vacuous. Same guard, same reason
   ## as `t_executed_binary_is_a_recorded_input.nim`.
-  for prefix in ["/run", "/proc", "/sys", "/dev"]:
-    if path == prefix or path.startsWith(prefix & "/"):
-      return true
-  false
+  ##
+  ## The engine's own prefix classification, not a copy of it
+  ## (`repro_core/paths.isVolatileRuntimeStatePath`). Whether a read under
+  ## one of these prefixes is dropped also depends on the invocation's roots
+  ## (`dropsAsVolatileRuntimeState`), which this fixture does not arrange, so
+  ## it stays out of all of them.
+  isVolatileRuntimeStatePath(path)
 
 proc nonVolatileTempBase(): string =
   result = getTempDir()

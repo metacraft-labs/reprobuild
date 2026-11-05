@@ -593,6 +593,11 @@ proc runInfraPlan(args: openArray[string]): int =
   if hostNote.len > 0:
     echo "  note    : " & hostNote
   echo "  plan-id : " & env.planId
+  # Every weakening of a unit's hardening floor, in every plan (ReproOS
+  # Add-On Mode §10.1, CONF-2); the add-on's own plan above lists its own.
+  # The text parsed for `producePlan` above, so it parses here too.
+  for l in floorExceptionPlanLines(parseSystemProfile(profileText)):
+    echo "  floor exception: " & l
   var changeCount = 0
   for op in env.operations:
     let marker = if op.action == "no-op": "  " else: "* "
@@ -787,6 +792,19 @@ proc runInfraCacheKeys(args: openArray[string]): int =
   stdout.write(renderCacheKeys(actions, platform))
   return 0
 
+proc prefixRecordDirtyLines*(prefix: string): seq[string] =
+  ## The lines of an installed prefix's build record
+  ## (`share/repro/cross-build-info`) that say it was built from a modified
+  ## tree (`-dirty`); empty when it has no record or none does. A prefix
+  ## built from uncommitted changes is fine to run and is not published
+  ## (Distribution-And-Packaging §5.3).
+  let record = prefix / "share" / "repro" / "cross-build-info"
+  if not fileExists(record):
+    return
+  for line in readFile(record).splitLines():
+    if "-dirty" in line:
+      result.add(line)
+
 proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
                                  stateDir: string): int =
   ## `repro build --publish=<profile>#<edge>` (CLI/build.md §"Publishing for
@@ -851,6 +869,13 @@ proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
     stderr.writeLine(who & ": the build's install mirror " & mirrorRoot &
       " does not hold edge '" & edgeId & "''s outputs (" & rels.join(", ") &
       ") at the mirror or under its usr/")
+    return 2
+  let dirty = prefixRecordDirtyLines(prefix)
+  if dirty.len > 0:
+    stderr.writeLine(who & ": the prefix at " & prefix & " was built from " &
+      "a modified tree, and is not published (Distribution-And-Packaging " &
+      "5.3); commit and build again. Its record says:\n  " &
+      dirty.join("\n  "))
     return 2
   let platform =
     if targetTriple.len > 0: consumerPlatformForTarget(targetTriple)
@@ -949,6 +974,21 @@ proc runInfraApply(args: openArray[string]): int =
   if not takeInfraApplyLock(stateDir, "repro infra apply", flags):
     return 1
   defer: releaseInfraApplyLock(stateDir)
+
+  when defined(linux):
+    # A host a conversion brought carried state to applies nothing that
+    # could reach it before the restore (ReproOS Add-On Mode §11.1). The
+    # library's apply refuses it too (every entry point reaches that); it
+    # is asked here as well because this command writes the full host's
+    # secrets before it calls the library.
+    try:
+      requireCarriedStateReady(parseSystemProfile(profileText))
+    except ECarriedStatePending as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
+    except ESystemProfileInvalid as e:
+      stderr.writeLine("repro infra apply: " & e.msg)
+      return 2
 
   when defined(linux):
     # ReproOS add-on mode: on a host the add-on was bootstrapped on, every
@@ -1718,6 +1758,16 @@ proc runSystemCommand*(args: seq[string]): int =
           return addon_cli.runAddonRollbackCli(rest)
       return runSystemRollbackCmd(rest)
     of "audit": return runSystemAudit(rest)
+    of "state":
+      # `repro system state <verb>`: the declared state set (ReproOS Add-On
+      # Mode §11.1). A restore runs on a host realised in full after a
+      # conversion, so the verbs answer on every Linux host, not only an
+      # add-on one.
+      when defined(linux):
+        return addon_cli.runAddonCli(@["state"] & rest)
+      else:
+        stderr.writeLine("repro system state: supported only on Linux")
+        return 2
     of "secret":
       # `repro system secret put --service S --name N [--target T]`: an
       # add-on host's verb is `repro system addon secret put`, which this

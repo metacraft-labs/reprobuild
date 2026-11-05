@@ -72,7 +72,7 @@ proc reader(unit, cred, extra: string; fields = ""): string =
   ## A unit that appends "start <pid> <value>" to /var/lib/a7-<unit>.log
   ## when it starts and "stop" when it stops, and keeps running.
   let log = "/var/lib/a7-" & unit & ".log"
-  "systemd.systemUnit {\n  name = \"" & unit & ".service\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & unit & ".service\"\n" &
     "  content = \"[Unit]\nDescription=a7 reader\n\n[Service]\n" &
     "ExecStart=/bin/sh -c 'echo start $$$$ $$(cat $$CREDENTIALS_DIRECTORY/" &
     cred & ") >> " & log & "; exec sleep infinity'\n" &
@@ -91,7 +91,7 @@ proc failingProfile(): string =
     decl("x-web", "token") & decl("h-web", "token") &
     reader("x-web", "token", "", "  exclusive = true\n") &
     reader("h-web", "token", "", "  restartIfChanged = false\n") &
-    "systemd.systemUnit {\n  name = \"a7-broken.service\"\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"a7-broken.service\"\n" &
     "  content = \"[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\n" &
     "WantedBy=multi-user.target\n\"\n  healthCheck = \"tcp:127.0.0.1:18999\"\n}\n"
 

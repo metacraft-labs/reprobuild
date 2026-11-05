@@ -159,8 +159,7 @@ proc publicLock(name, path, revision, integrity: string): string =
     schema: "reprobuild.solved-graph-lock.v2",
     deps: @[LockedDep(
       name: name, path: path,
-      coordinates: Coordinates(kind: ckVcs, url: "", gitRef: "main",
-        revision: revision),
+      coordinates: Coordinates(kind: ckVcs, url: "", revision: revision),
       integrity: integrity, visibility: "public")]))
 
 proc lockWithPrivateRef(objFmt, selfRev: string): string =
@@ -170,14 +169,12 @@ proc lockWithPrivateRef(objFmt, selfRev: string): string =
     schema: "reprobuild.solved-graph-lock.v2",
     deps: @[
       LockedDep(name: "self", path: ".",
-        coordinates: Coordinates(kind: ckVcs, gitRef: "main",
-          revision: selfRev),
+        coordinates: Coordinates(kind: ckVcs, revision: selfRev),
         integrity: gitObjectMultihash(objFmt, selfRev),
         visibility: "public"),
       LockedDep(name: "secret-internal", path: "secret-internal",
         coordinates: Coordinates(kind: ckVcs,
-          url: "https://example.invalid/secret-internal.git", gitRef: "main",
-          revision: selfRev),
+          url: "https://example.invalid/secret-internal.git", revision: selfRev),
         integrity: "", visibility: "personal")]))
 
 proc pushNoVerify(gitBin: string; fx: Fixture):

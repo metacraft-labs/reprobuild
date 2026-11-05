@@ -19,6 +19,43 @@ import std/[algorithm, os, strutils, compilesettings]
 # denote a location in THIS repository has to be anchored here instead.
 let reproRepoRoot = currentSourcePath().parentDir()
 
+# A compile for another machine. `nim.c` under a zig target defines
+# `reproZigTarget=<triple>` (repro_dsl_stdlib/packages/nim). Its image is
+# installed elsewhere, as a prefix (Distribution-And-Packaging §5.3), and
+# must name no path of this build host:
+# * `--filenames:canonical`: the file names Nim plants in messages and
+#   stack traces are package-relative, not absolute.
+# * `reproInstalledPrefix`: the compiled-in source anchors
+#   (`currentSourcePath()` constants such as
+#   `repro_core/source_root.CompiledSourceRoot`) are empty, and the image
+#   finds its sources through the installed layout beside it, which §5.1
+#   already ranks ahead of them.
+# * `reproBuiltCCompiler=` (empty): the C compiler this image was built with
+#   is a build-host path that means nothing on the target
+#   (`repro_core/c_compiler`).
+# * `--strip-debug` at link: debug info names every source directory, and
+#   zig compiles its own start-up objects with none of the cross wrapper's
+#   path maps, so a shipped image carries no DWARF at all.
+# * the vendored blake3 / xxhash (`useSystemHashLibs` below): the dev shell
+#   exports REPROBUILD_USE_SYSTEM_HASH_LIBS=1, and what a prefix image links
+#   must not depend on the shell it was built from. Under it the providers
+#   needed `libblake3.so.0` and `libxxhash.so.0`, which the prefix does not
+#   ship (measured 2026-11-03).
+# * `--typeHashPathMap`: the Nim fork hashes a type by the absolute path of
+#   the file defining it (metacraft-labs/nim 9a49ee3c), so two checkouts of
+#   one commit gave the armv7 images different bytes (measured 2026-11-04).
+#   The repository hashes as `/reprobuild/` and the workspace around it as
+#   `/workspace/`, the maps scripts/build_addon_static.sh uses; the first
+#   that matches applies, so the repository comes first. Both are uniform
+#   (every file under each root), so no two files collide.
+when defined(reproZigTarget):
+  switch("typeHashPathMap", reproRepoRoot & "/=/reprobuild/")
+  switch("typeHashPathMap", reproRepoRoot.parentDir & "/=/workspace/")
+  switch("filenames", "canonical")
+  switch("passL", "-Wl,--strip-debug")
+  switch("define", "reproInstalledPrefix")
+  switch("define", "reproBuiltCCompiler=")
+
 # Every existence probe below goes through these, never through a bare
 # `fileExists` / `dirExists`. Those resolve a relative path against the
 # compiler's WORKING DIRECTORY, while a relative `switch("path", ...)` is
@@ -519,6 +556,10 @@ for libName in [
   # opening SQLite. `repro_cli_support` imports it for `repro self`, and
   # `apps/repro-trampoline` is the launcher.
   "repro_selfhost",
+  # Workspace bundles: create, publish and restore a workspace selection's
+  # Nix closure, sources and native store (docs/workspace-bundles.md).
+  # ``repro_cli_support`` imports it for `repro bundle`.
+  "repro_bundle",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from
@@ -1221,7 +1262,7 @@ proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
   ""
 
 let useSystemHashLibs =
-  not defined(reproVendoredHash) and
+  not defined(reproVendoredHash) and not defined(reproZigTarget) and
   getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
     ["1", "true", "yes", "on"]
 
@@ -1258,7 +1299,8 @@ if not useSystemHashLibs:
 else:
   let blake3Prefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3", "/usr/local/opt/blake3"],
+      [getEnv("DEP_LIBBLAKE3_PREFIX"), getEnv("BLAKE3_PREFIX"),
+       "/opt/homebrew/opt/blake3", "/usr/local/opt/blake3"],
       "include/blake3.h",
       ["libblake3.dylib", "libblake3.so", "libblake3.a"])
     if direct.len > 0: direct
@@ -1279,7 +1321,8 @@ else:
 
   let xxhashPrefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash", "/usr/local/opt/xxhash"],
+      [getEnv("DEP_XXHASH_PREFIX"), getEnv("XXHASH_PREFIX"),
+       "/opt/homebrew/opt/xxhash", "/usr/local/opt/xxhash"],
       "include/xxhash.h",
       ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
     if direct.len > 0: direct
@@ -1319,7 +1362,12 @@ proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
   ""
 
 when not defined(windows) and not defined(macosx):
-  # SQLite link search path. Order: an explicit SQLITE_LIBDIR/SQLITE_PREFIX;
+  # SQLite link search path. Order: an explicit SQLITE_LIBDIR, then the
+  # prefix the engine realized for the `sqlite` dependency
+  # (`DEP_SQLITE_PREFIX`: the environment arm natively, the sibling's target
+  # mirror under `--target`; Package-Model.md §"Environment-provided library
+  # prefixes"), then the ambient SQLITE_PREFIX (a plain `nim c`, the Nix
+  # package build);
   # then, when a Nix toolchain is in play, the dev shell's own sqlite
   # (NIX_LDFLAGS) or a Nix store sqlite built for the target architecture
   # (`nixLibDir` filters the glob); only on a host with no Nix at all the
@@ -1337,7 +1385,8 @@ when not defined(windows) and not defined(macosx):
     getEnv("IN_NIX_SHELL").len > 0 or repoDirExists("/nix/store")
   let sqliteLibDir = block:
     let explicit = firstExistingLibDir(
-      [getEnv("SQLITE_LIBDIR"), getEnv("SQLITE_PREFIX")], sqliteNames)
+      [getEnv("SQLITE_LIBDIR"), getEnv("DEP_SQLITE_PREFIX"),
+       getEnv("SQLITE_PREFIX")], sqliteNames)
     if explicit.len > 0:
       explicit
     elif nixInPlay and nixLdflagsLibDir(sqliteNames).len > 0:
@@ -1357,9 +1406,16 @@ when not defined(windows) and not defined(macosx):
         ],
         sqliteNames)
 
+  # A compile for another machine (NimScript's `hostCPU`/`hostOS` name the
+  # target, `buildCPU`/`buildOS` the machine running the compiler) searches
+  # the prefix but does not remember it: under `--target` it is the sibling
+  # recipe's install mirror, a builder path, and the image takes the target
+  # system's `libsqlite3.so.0` by soname, as the images of
+  # `scripts/cross/build_linux_cross.sh` do.
+  let crossCompiling = hostCPU != buildCPU or hostOS != buildOS
   if sqliteLibDir.len > 0:
     switch("passL", "-L" & sqliteLibDir)
-    if not isHostSystemLibDir(sqliteLibDir):
+    if not isHostSystemLibDir(sqliteLibDir) and not crossCompiling:
       switch("passL", "-Wl,-rpath," & sqliteLibDir)
 
 # OpenSSL link search path for `-d:ssl` edges (POSIX).
@@ -1381,7 +1437,10 @@ when not defined(windows) and not defined(macosx):
 # We add only the search path — the graph still owns `-lssl -lcrypto` per edge —
 # so this is a no-op for non-ssl edges. Windows keeps its own graph-level path.
 #
-# Resolution order: an explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev
+# Resolution order: the prefix the engine realized for the `openssl`
+# dependency (`DEP_OPENSSL_PREFIX`: under `--target` the catalog's build for
+# the target; Package-Model.md §"Environment-provided library prefixes");
+# then an explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev
 # shell sets the former to its own `pkgs.openssl`); then the dev shell's own
 # `-L` link inputs (`nixLdflagsLibDir`); then the Homebrew prefixes; and only
 # then the `/nix/store` glob. The last two are filtered by target
@@ -1392,9 +1451,30 @@ when not defined(windows) and not defined(macosx):
 # Reprobuild compiles for itself; keep the two in step.
 when not defined(windows):
   let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
-  let opensslLibDir = block:
-    var dir = firstExistingLibDir(
-      [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
+  let depOpensslPrefix = getEnv("DEP_OPENSSL_PREFIX")
+  # A compile for another machine that the engine handed no OpenSSL needs
+  # none (it is not a `-d:ssl` edge), and every ambient OpenSSL below is the
+  # build host's: its `-L` and rpath would only plant a build-host path in
+  # the image (the armv7 DSL runtime carried the dev shell's openssl rpath,
+  # measured 2026-11-03).
+  let ambientOpensslOnly = depOpensslPrefix.len == 0 and
+    defined(reproZigTarget)
+  let opensslFound = block:
+    var dir = ""
+    if depOpensslPrefix.len > 0:
+      # Realized by the engine: the catalog's OpenSSL built for the target,
+      # a STATIC library (`no-shared`), so `libssl.a` counts. When the engine
+      # named a prefix and it holds no libssl, the build stops here: falling
+      # back to the ambient host OpenSSL below would link the build host's
+      # library into a target image.
+      dir = firstExistingLibDir([depOpensslPrefix],
+        @opensslNames & @["libssl.a"])
+      if dir.len == 0:
+        quit("config.nims: DEP_OPENSSL_PREFIX=" & depOpensslPrefix &
+          " holds no libssl (looked for lib/ and lib64/ libssl.so, .dylib, .a)")
+    else:
+      dir = firstExistingLibDir(
+        [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
     if dir.len == 0:
       dir = nixLdflagsLibDir(opensslNames)
     if dir.len == 0:
@@ -1409,10 +1489,14 @@ when not defined(windows):
     if dir.len == 0:
       dir = nixLibDir("*-openssl-*", opensslNames)
     dir
+  let opensslLibDir = if ambientOpensslOnly: "" else: opensslFound
 
   if opensslLibDir.len > 0:
     switch("passL", "-L" & opensslLibDir)
-    switch("passL", "-Wl,-rpath," & opensslLibDir)
+    # No rpath into a build tree for an engine-realized (static, target)
+    # OpenSSL: it would be a builder path inside an installed image.
+    if depOpensslPrefix.len == 0:
+      switch("passL", "-Wl,-rpath," & opensslLibDir)
 
 # macOS: reserve Mach-O header room so the release packaging step can rewrite
 # install names and add an LC_RPATH (@loader_path/../lib) with install_name_tool

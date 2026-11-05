@@ -2311,18 +2311,16 @@ proc observeEnumeratedDirectory*(path: string;
   ## existence-only answer for the same path.
   observeFileWithMetadata(path, policy, fingerprintDirectoryMembership(path))
 
-proc isVolatileDevicePath(path: string): bool =
-  ## Shared with the build engine's ``isVolatileMonitorPath`` — see
-  ## ``repro_core/paths.isVolatileRuntimeStatePath``. This used to be a
-  ## hand-copied duplicate of that prefix list; the two layers must admit
-  ## and drop exactly the same paths, because an input the engine puts in
-  ## the fingerprint and this layer silently leaves out of the record is a
-  ## cache entry keyed on something it does not carry.
-  isVolatileRuntimeStatePath(path)
-
 proc isRecordableInput(input: FileFingerprint): bool =
-  if input.path.isVolatileDevicePath():
-    return false
+  ## A FIFO, socket or device has no size or mtime a later run can compare.
+  ##
+  ## WHICH PATHS are runtime state and stay out of the record is decided once,
+  ## by the build engine, before the input list reaches this layer
+  ## (``isVolatileMonitorPath`` in ``cacheInputPaths``): only the engine knows
+  ## the invocation's own trees, without which a project under `/dev/shm` or
+  ## `/run` cannot be told from runtime state. This layer used to decide it a
+  ## second time, by prefix alone; a path the evidence kept and the record
+  ## dropped is an entry keyed on an input it does not carry.
   input.metadata.kind != ffkOther
 
 proc requireContentIdentity(input: FileFingerprint; location: string) =

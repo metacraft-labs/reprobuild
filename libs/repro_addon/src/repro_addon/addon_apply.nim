@@ -78,9 +78,11 @@ import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./tmpfiles_scope
 import ./addon_secrets
 import ./base_identity
 import ./etc_write
+import ./evidence
 import ./fingerprint
 import ./generation0
 import ./handback
@@ -94,6 +96,7 @@ import ./static_tree
 import ./store_root
 import ./switch
 import ./evidence
+import ./effective_floor
 import ./sysctl_precedence
 import ./transitions
 
@@ -112,6 +115,11 @@ type
     ## when the switch did not commit, its pending marker stays (a recovery
     ## finishes it forward, never reverts it) and ``floor-hold`` records why.
   AddonRolledBack* = object of AddonApplyError
+  AddonNeedsOperator* = object of AddonApplyError
+    ## Refused for an operator to act, not to be retried: an unattended
+    ## (agent) apply that would give a running unit its first hardening
+    ## floor (spec §10.1). The deploy agent reports it as
+    ## ``aoOperatorAction`` and does not retry the sequence.
   AddonStoreSpaceError* = object of AddonApplyError
     ## The profile's apt closures would not fit on the store's filesystem
     ## with ``StoreSpaceReserveBytes`` (or a quarter of what they need)
@@ -130,6 +138,10 @@ type
 
   AddonApplyOptions* = object
     stateDir*: string
+    carriedStateDir*: string
+      ## Test seams: where carried state is looked for and the root its
+      ## directories are under ("": ``CarriedStateDir`` and ``/``).
+    carriedStateRoot*: string
     probeArchives*: bool
       ## A plan (the migration plan) asks the archive for every closure
       ## member it would fetch (``httpDebProbe``) and refuses the ones not
@@ -189,6 +201,12 @@ type
     replayOf*: string
       ## A replay: the purpose of the switch it replays (a replayed revert
       ## is still a revert: it does not revert itself).
+    storedTarget*: bool
+      ## ``userProfileText`` is a stored generation's profile (a revert, a
+      ## rollback, a re-apply of the current generation), not a new one: it
+      ## is parsed under the rules it was installed with
+      ## (``parseStoredUserProfile``), so a generation from before the
+      ## hardening floor comes back byte for byte (spec §10.1).
     recordOnly*: bool
       ## Replay a failed switch's writes only to bring its ledger up to
       ## date with what it wrote, never starting or committing anything:
@@ -282,6 +300,15 @@ type
     baseIdentity*: BaseIdentity    ## the base observed at plan time (§7.4)
     previousBase*: BaseIdentity    ## the one the current generation recorded
     baseChanges*: seq[string]      ## what changed between the two (§7.9)
+    floorIntroduced*: seq[string]
+      ## Units whose floor this generation changes -- installed without it
+      ## or under an older floor version (``floorIntroducedUnits``): each
+      ## is a changed unit file and a restart, listed apart in the plan;
+      ## an agent apply refuses them (spec §10.1).
+    floorExceptions*: seq[string]
+      ## The target profile's hardening-floor exceptions (spec §10.1,
+      ## CONF-2): ``<unit>: <Setting>: <reason>`` each, printed in every
+      ## plan (``floorExceptionPlanLines``).
     failedAtFloor*: seq[string]
       ## Non-empty when the switch failed after its flip and the rollback
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
@@ -392,6 +419,225 @@ proc isAddonHost*(stateDir = DefaultStateDir): bool =
 proc readHostname*(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
+
+proc storeSignature*(dir: string): string =
+  ## A cheap signature of the store object at ``dir``: every entry below it
+  ## (links not followed) with its type, permissions, size, inode,
+  ## modification time and change time, in path order, hashed. No file
+  ## content is read. Any write, truncation, rename, mode or owner change
+  ## moves the change time (stat(2) ``st_ctime``), which no unprivileged
+  ## call sets and root sets only by moving the system clock; an object
+  ## replaced by another gets a new inode. Used between the switch's
+  ## realise step, which verified the object's content, and its start.
+  var lines: seq[string]
+  proc one(rel, path: string) =
+    let i = getFileInfo(path, followSymlink = false)
+    lines.add(rel & "\t" & $i.kind & "\t" & $i.permissions & "\t" & $i.size &
+      "\t" & $i.id.device & ":" & $i.id.file & "\t" &
+      $i.lastWriteTime.toUnix & "." & $i.lastWriteTime.nanosecond & "\t" &
+      $i.creationTime.toUnix & "." & $i.creationTime.nanosecond)
+  one(".", dir)
+  for rel in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+                                             pcLinkToDir},
+                        followFilter = {pcDir}, relative = true):
+    one(rel, dir / rel)
+  lines.sort()
+  sha256Hex(lines.join("\n"))
+
+proc storeChangedSince*(realised: openArray[tuple[path, signature: string]]):
+    seq[string] =
+  ## The store objects whose ``storeSignature`` differs from the one
+  ## recorded, or that are gone.
+  for (path, sig) in realised:
+    let now = if dirExists(path): storeSignature(path) else: "(gone)"
+    if now != sig: result.add(path)
+
+proc storeObjectFor*(path: string): string =
+  ## The store object a path lies in: a prefix
+  ## (``/repro/store/prefixes/<name>/<version>``) or another top-level
+  ## entry of the store; "" outside the store.
+  result = storeObjectOf(path)
+  if result.len == 0 and path.startsWith(StoreRoot & "/"):
+    let first = path[StoreRoot.len + 1 .. ^1].split('/')[0]
+    if first.len > 0 and first notin [".", ".."]:
+      result = StoreRoot & "/" & first
+
+proc knownUnitDigests(stateDir, path: string): HashSet[string] =
+  ## Every digest a ledger in ``stateDir`` -- the current copy and each
+  ## generation's -- records for the unit file ``path``: the bytes some
+  ## generation installed there.
+  if stateDir.len == 0: return
+  var ledgers: seq[string]
+  if fileExists(ledgerCopyPath(stateDir)): ledgers.add(ledgerCopyPath(stateDir))
+  let gens = stateDir / "generations"
+  if dirExists(gens):
+    for kind, d in walkDir(gens):
+      if kind == pcDir and fileExists(d / "addon-ledger"):
+        ledgers.add(d / "addon-ledger")
+  for lp in ledgers:
+    try:
+      for e in readLedger(lp).entries:
+        if e.class == lcUnit and e.path == path and e.sha256.len > 0:
+          result.incl(e.sha256)
+    except CatchableError:
+      discard   # an unreadable ledger records nothing to match
+
+proc unrecordedFloorVersion(r: SystemResource;
+                            known: HashSet[string]): string =
+  ## The floor version of a stored floored unit that names none: one of
+  ## the engines before version 3 stored it -- 1 (1a598170c0), 2 before
+  ## fca5ed3486 (no ``RequiresMountsFor=`` for a kept state directory:
+  ## ``2-prekeep``) or 2 after it (to d03bb6759e). It is the version whose
+  ## rendering a ledger records for the unit file: the bytes it was
+  ## installed with. None recording any is refused, never guessed (A9
+  ## review round 3, finding 8): a wrong version would re-render other
+  ## bytes than were installed.
+  when mutated("stored-floor-guess"):
+    # Falsifying build: round 2's fall-back to the newest version that
+    # renders the unit at all.
+    for v in ["2", "1"]:
+      var c = r
+      c.suFloorVersion = v
+      try:
+        discard renderedSystemUnitContent(c)
+        return v
+      except CatchableError: discard
+    return "2"
+  for v in ["2", "2-prekeep", "1"]:
+    var c = r
+    c.suFloorVersion = v
+    try:
+      if sha256Hex(renderedSystemUnitContent(c)) in known: return v
+    except CatchableError:
+      discard
+  raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': the " &
+    "stored generation names no floor version, and no ledger in the state " &
+    "directory records the bytes any earlier floor version renders for " &
+    "it; the add-on will not guess which floor it was installed with")
+
+proc parseStoredUserProfile*(text: string; stateDir = ""): SystemProfile =
+  ## A stored generation's user profile (``user.profile``, a generation's
+  ## ``addon-user.profile``, the write-ahead record's) as it was installed.
+  ## The add-on stores what it applied rendered (``renderProfileText``):
+  ## a unit the floor reached carries ``hardening = "serviceFloor"`` and,
+  ## from floor version 3, the ``floorVersion`` it was rendered with, and
+  ## every other unit carries neither. Parsing it WITHOUT the add-on
+  ## default and with the stored generation's own floor version renders
+  ## each unit exactly as it was installed: a generation an engine from
+  ## before the floor applied stays floor-off, and one an earlier floor
+  ## version applied keeps that floor (spec §10.1, *Stored generations and
+  ## floor versions*). A floored unit stored without a version gets the
+  ## one its ledger records (``unrecordedFloorVersion``; the ledgers of
+  ## ``stateDir``). Nothing the engine that stored it accepted is judged
+  ## again under today's rules (``parseSystemProfile(..., stored = true)``).
+  when mutated("stored-profile-floored"):
+    # Falsifying build: stored generations re-rendered under today's
+    # default, which wedges a host whose installed profile the floor
+    # refuses and keeps a revert from restoring the pre-floor unit.
+    return parseSystemProfile(text, addOnDefaults = true)
+  result = parseSystemProfile(text, stored = true)
+  when not mutated("stored-floor-unversioned"):
+    # (The falsifying build renders a stored floored unit without a
+    # version under today's floor, as versions 1 and 2 did not exist.)
+    for r in result.resources.mitems:
+      if r.kind == srkSystemdSystemUnit and
+          r.suHardening == ServiceFloorHardening and r.suFloorVersion.len == 0:
+        r.suFloorVersion = unrecordedFloorVersion(r,
+          knownUnitDigests(stateDir, unitPath(r.suName)))
+
+proc parseAddOnUserProfile*(text: string): SystemProfile =
+  ## A user profile as the add-on realises it: parsed with the add-on's
+  ## defaults (``parseSystemProfile(..., addOnDefaults = true)``), so every
+  ## unit with a ``[Service]`` section that is not a ``collision = dropIn``
+  ## gets the hardening floor unless it names an exception (spec §10.1).
+  ## Every add-on path that plans, applies or compares a user profile --
+  ## the target, the current and the previous generation's -- parses
+  ## through here, so a unit renders the same bytes wherever the add-on
+  ## renders it, and a unit a pre-floor generation installed without the
+  ## floor is planned as a change of its file (a restart in the transition
+  ## list), never applied silently. A new profile renders with today's
+  ## floor version: naming an older one would ask for a weaker floor, and
+  ## is refused (spec §10.1, *Stored generations and floor versions*).
+  result = parseSystemProfile(text, addOnDefaults = true)
+  for r in result.resources:
+    if r.kind == srkSystemdSystemUnit and r.suFloorVersion.len > 0 and
+        r.suFloorVersion != FloorVersion:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        "' names floorVersion " & r.suFloorVersion & ": a new profile " &
+        "renders with today's floor (version " & FloorVersion & "); only " &
+        "a stored generation keeps an older one")
+
+proc effectiveFloor*(r: SystemResource): string =
+  ## The floor a unit renders with: "" for none (no ``hardening``, or the
+  ## whole floor waived), else its floor version (``FloorVersion`` when the
+  ## unit names none: a new profile's).
+  if r.kind != srkSystemdSystemUnit or
+      r.suHardening != ServiceFloorHardening:
+    return ""
+  for e in r.suFloorExceptions:
+    if e.strip().startsWith(WholeFloorException & ":"): return ""
+  if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
+
+proc exceptionHeads(r: SystemResource): HashSet[string] =
+  ## A unit's exceptions by what they name (``Setting`` or
+  ## ``Setting+values``), reasons left out.
+  for e in r.suFloorExceptions:
+    result.incl(e.split(':', 1)[0].strip())
+
+proc floorIntroducedUnits*(previousUser: SystemProfile; previous: Ledger;
+                           units: openArray[SystemResource]): seq[string] =
+  ## The units whose floor this generation changes on a host that runs
+  ## them: a unit the previous generation installed without the floor, or
+  ## under an older floor version, that the target renders under today's
+  ## floor (spec §10.1). Decided from the two profiles' floors -- the
+  ## stored generation's (``parseStoredUserProfile``) against the target's
+  ## -- whatever else changes in the unit: a unit whose command line
+  ## changes in the same generation gets its first floor all the same.
+  ## Each entry reads ``<unit> (<from> -> floor version <n>)``. Every plan
+  ## lists them (``AddonApplyResult.floorIntroduced``) and an agent apply
+  ## refuses them (``runAddonApply``): a running service's floor changes
+  ## in an operator's reviewed apply, never in an unattended restart.
+  when mutated("floor-change-by-ledger-bytes"):
+    # Falsifying build: the round-1 rule -- a unit whose ledgered file
+    # holds exactly its floor-less rendering -- which misses a first floor
+    # that comes with any other change to the unit.
+    for r in units:
+      if r.kind != srkSystemdSystemUnit or
+          r.suHardening != ServiceFloorHardening: continue
+      for e in previous.entries:
+        if e.class != lcUnit or e.path != unitPath(r.suName) or
+            e.sha256.len == 0: continue
+        let before = sha256Hex(renderedUnitBeforeFloor(r))
+        if e.sha256 == before and
+            before != sha256Hex(renderedSystemUnitContent(r)):
+          result.add(r.suName)
+        break
+    return
+  var before = initTable[string, string]()
+  var beforeEx = initTable[string, HashSet[string]]()
+  for r in previousUser.resources:
+    if r.kind == srkSystemdSystemUnit:
+      before[r.suName] = effectiveFloor(r)
+      beforeEx[r.suName] = exceptionHeads(r)
+  for r in units:
+    let now = effectiveFloor(r)
+    if now.len == 0 or r.suName notin before: continue
+    let was = before[r.suName]
+    if was != now:
+      result.add(r.suName & " (" &
+        (if was.len == 0: "no floor" else: "floor version " & was) &
+        " -> floor version " & now & ")")
+      continue
+    # The same floor with an exception taken away is a stricter floor the
+    # running service has not run under (A9 review round 3, finding 9).
+    when not mutated("floor-change-ignores-exceptions"):
+      let gone = beforeEx.getOrDefault(r.suName) - exceptionHeads(r)
+      if gone.len > 0:
+        var g: seq[string]
+        for x in gone: g.add(x)
+        g.sort()
+        result.add(r.suName & " (floor version " & now & ", exception " &
+          g.join(", ") & " removed)")
 
 # ---------------------------------------------------------------------------
 # Scope (spec §4.1, §4.4; threat model G8).
@@ -597,6 +843,12 @@ proc checkScope*(user: SystemProfile;
         raise newAddOnOutOfScope($r.kind & ".name", "", r.address,
           "a tmpfiles fragment of the add-on is named repro-<name>.conf " &
           "(spec §4.1), got " & r.tmpfilesName)
+      # The lines decide what systemd-tmpfiles writes, as root, at once and
+      # at every boot: each path is held to the class's directories, never
+      # /etc, a class directory or another owner's tree (spec §4.1, §4.4).
+      let lines = tmpfilesScopeRefusal(r.tmpfilesContent)
+      if lines.len > 0:
+        raise newAddOnOutOfScope($r.kind & ".content", "", r.address, lines)
     of srkLinuxSysctl:
       # Spec §4.1: /etc/sysctl.d/90-repro-<name>.conf; a filename left
       # empty is derived to that form by the composition.
@@ -780,7 +1032,7 @@ proc targetFor(address: string; inp: DecisionInputs; path: string;
     verdict: dec.verdict, diversion: saved.plan.diversion, unitClass: cls,
     replay: true)
 
-proc alreadyRestored(e: LedgerEntry): bool =
+proc alreadyRestored*(e: LedgerEntry): bool =
   ## A replay finds the removals the interrupted switch already made:
   ## an object that had preserved bytes now carries exactly them (its
   ## restore ran), or is gone when it was the add-on's creation.
@@ -929,6 +1181,21 @@ proc desiredBytes*(r: SystemResource): string =
   of srkLinuxSysusersEntry: sysusersEntryContent(r)
   else: ""
 
+proc switchStoreObjects*(r: SystemResource): seq[string] =
+  ## The store prefixes a resource makes systemd run once the switch flips
+  ## (spec §10.2): every one a unit, a ``collision = "dropIn"`` unit's
+  ## drop-in or a ``systemDropIn`` names in the bytes it installs. The
+  ## switch re-checks each before the flip and before step 7.
+  when mutated("recheck-skips-dropin-prefixes"):
+    # Falsifying build: round 1's collection, which read a unit's rendered
+    # file and nothing a drop-in installs.
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+      return referencedStoreObjects(renderedSystemUnitContent(r))
+    return @[]
+  if r.kind in {srkSystemdSystemUnit, srkSystemdSystemDropIn}:
+    referencedStoreObjects(desiredBytes(r))
+  else: @[]
+
 proc targetPathOf*(r: SystemResource): string =
   ## The file a resource materialises, "" for a kind without one.
   case r.kind
@@ -940,6 +1207,199 @@ proc targetPathOf*(r: SystemResource): string =
   of srkLinuxSysusersEntry: sysusersFragmentPath(r.seName)
   of srkLinuxDpkgDiversion: r.ddPath
   else: ""
+
+
+proc declaredByProfile*(unit: string; declared: HashSet[string]): bool =
+  ## ``unit`` is a unit the profile declares, or an instance
+  ## (``foo@x.service``) of a template it declares (``foo@.service``): a
+  ## drop-in for it is checked through the profile's own unit (A9 review
+  ## round 4, finding 8: an instance drop-in over a template the same
+  ## generation installs was refused, "nothing provides foo@x.service").
+  if unit in declared: return true
+  when mutated("instance-dropin-needs-provider"):
+    return false
+  let at = unit.find('@')
+  let dot = unit.rfind('.')
+  if at > 0 and dot > at + 1:
+    return (unit[0 .. at] & unit[dot .. ^1]) in declared
+  false
+
+proc floorInstancesOf(tmpl: string; resources: openArray[SystemResource]):
+    seq[string] =
+  ## The instances of a floored template (``foo@.service``) the generation
+  ## names: a drop-in for one, a unit that depends on one, or a unit of
+  ## that name. systemd will not show the template itself.
+  let at = tmpl.find('@')
+  let typ = tmpl[tmpl.rfind('.') .. ^1]
+  let stem = tmpl[0 .. at]
+  proc consider(n: string; acc: var seq[string]) =
+    if n.startsWith(stem) and n.endsWith(typ) and n.len > stem.len + typ.len and
+        n != tmpl and n notin acc:
+      acc.add(n)
+  for r in resources:
+    case r.kind
+    of srkSystemdSystemDropIn: consider(r.diUnit, result)
+    of srkSystemdSystemUnit:
+      consider(r.suName, result)
+      for t in r.suContent.splitWhitespace():
+        for w in t.split({'=', ' '}):
+          consider(w, result)
+    else: discard
+
+proc floorTemplateOf(name: string): string =
+  ## ``foo@.service`` for an instance ``foo@x.service``, else "".
+  let at = name.find('@')
+  let dot = name.rfind('.')
+  if at > 0 and dot > at + 1: name[0 .. at] & name[dot .. ^1] else: ""
+
+proc startHoldPath*(unit: string): string =
+  ## Where the switch's start hold for ``unit`` (a template's, for an
+  ## instance: one hold covers every instance) is written.
+  let t = floorTemplateOf(unit)
+  "/run/systemd/system" / ((if t.len > 0: t else: unit) & ".d") / StartHoldName
+
+proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
+  for r in resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        effectiveFloor(r).len > 0:
+      result.add(r.suName)
+
+proc writeStartHolds*(resources: openArray[SystemResource]): seq[string] =
+  ## A start hold for every floored unit of the generation, written before
+  ## step 6's reload (spec §10.1, A9 review round 4, finding 7). Returns
+  ## the holds written.
+  when mutated("floor-start-unheld"):
+    return
+  for u in flooredUnitNames(resources):
+    let p = startHoldPath(u)
+    createDir(parentDir(p))
+    writeFile(p, StartHoldText)
+    result.add(p)
+
+proc removeStartHolds*(holds: openArray[string]) =
+  for p in holds:
+    if fileExists(p): removeFile(p)
+    try: removeDir(parentDir(p), checkDir = false)
+    except OSError: discard   # another drop-in is there: kept
+
+proc unitSearchPaths*(): seq[string] =
+  ## systemd's unit search path (``systemd-analyze unit-paths``): every
+  ## directory a drop-in may be read from, vendor ones included.
+  let exe = resolveHostTool(SystemdAnalyzeCandidates)
+  if exe.len == 0:
+    raise newException(HostToolMissing, "systemd-analyze not found")
+  let r = runHostTool([exe, "unit-paths"], mergeStderr = false)
+  if r.exitCode != 0:
+    raise newException(OSError, "systemd-analyze unit-paths: " & r.output.strip())
+  for l in r.output.splitLines():
+    if l.strip().startsWith("/"): result.add(l.strip())
+
+proc dropInDirApplies*(dir, unit: string): bool =
+  ## Whether systemd reads the drop-in directory ``dir`` (``<name>.d``'s
+  ## name, without ``.d``) for ``unit`` or -- for a template
+  ## ``foo@.service`` -- for any of its instances: the unit's own name, an
+  ## instance's name, the template's, a dashed prefix (``foo-.service``)
+  ## and the type-wide ``service`` (systemd.unit(5), "Description").
+  ## Independent of the profile's parse-time ``dropInApplies``.
+  let dot = unit.rfind('.')
+  if dot <= 0: return false
+  let typ = unit[dot .. ^1]
+  if dir == unit or dir == typ[1 .. ^1]: return true
+  if not dir.endsWith(typ): return false
+  let dstem = dir[0 ..< dir.len - typ.len]
+  let stem = unit[0 ..< dot]
+  let at = stem.find('@')
+  if at >= 0 and at == stem.len - 1:
+    # A template: every instance name, and the template's own.
+    if dstem.startsWith(stem): return true
+  if dstem.endsWith("-") and stem.startsWith(dstem): return true
+  if at >= 0 and dstem.endsWith("-") and stem[0 .. at].startsWith(dstem):
+    return true
+  false
+
+proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
+                        roots: openArray[string]): seq[string] =
+  ## Every drop-in file under ``roots`` that systemd would read for one of
+  ## ``units`` (or any instance of a template among them) and that is not
+  ## in ``own``: a host's, a package's, or a type-wide one (spec §10.1, A9
+  ## review round 4, findings 2 and 3).
+  for root in roots:
+    if not dirExists(root): continue
+    for kind, d in walkDir(root):
+      if kind notin {pcDir, pcLinkToDir} or not d.endsWith(".d"): continue
+      let name = extractFilename(d)[0 ..< extractFilename(d).len - 2]
+      var applies = false
+      for u in units:
+        if dropInDirApplies(name, u): applies = true
+      if not applies: continue
+      for k2, f in walkDir(d):
+        if f.endsWith(".conf") and f notin own:
+          result.add(f)
+
+proc readableByAll(path: string): bool =
+  try: fpOthersRead in getFilePermissions(path)
+  except OSError: true    # missing: systemd reads nothing (or fails the unit)
+
+proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
+  ## Every floored unit of the generation as systemd now reads it, against
+  ## the floor it is rendered under (``effective_floor``; spec §10.1, A9
+  ## review rounds 3 and 4): one problem line per difference. For a
+  ## template, its probe instance and each instance the generation names;
+  ## and for every floored unit, any drop-in on the unit search path the
+  ## generation did not write (a template's instances included, named or
+  ## not). Called after step 6's reload, while the start holds keep every
+  ## floored unit from starting, and before step 7.
+  var groups = initTable[string, seq[string]]()
+  var groupsRead = false
+  var own = initHashSet[string]()
+  for d in resources:
+    if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
+  for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
+  when not mutated("unnamed-instances-unchecked"):
+    try:
+      for f in foreignDropInsFor(flooredUnitNames(resources), own,
+                                 unitSearchPaths()):
+        result.add(f & ": a drop-in the add-on did not install, read for a " &
+                   "floored unit (or an instance of a floored template)")
+    except CatchableError as e:
+      result.add("the unit search path: " & e.msg)
+  for r in resources:
+    if effectiveFloor(r).len == 0 or r.suCollision == "dropIn": continue
+    let rendered = renderedSystemUnitContent(r)
+    if not groupsRead:
+      groups = baseSyscallGroups()
+      groupsRead = true
+    let denied = deniedCalls(rendered, groups)
+    var names: seq[string]
+    if r.suName.contains("@."):
+      when not mutated("unnamed-instances-unchecked"):
+        names.add(templateObservationName(r.suName))
+      names.add(floorInstancesOf(r.suName, resources))
+    else:
+      names = @[r.suName]
+    for name in names:
+      var e = EffectiveInput(unit: name, rendered: rendered,
+        version: r.suFloorVersion, exceptions: r.suFloorExceptions,
+        fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
+        groupsOf: systemGroups, readableByAll: readableByAll)
+      for d in resources:
+        if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
+          e.ownDropIns.add((path: targetPathOf(d), content: d.diContent))
+      e.ownDropIns.add((path: startHoldPath(name), content: StartHoldText))
+      try:
+        let text = showUnitText(name)
+        e.show = parseShow(text)
+        e.lines = parseShowLines(text)
+      except CatchableError as ex:
+        result.add(name & ": " & ex.msg)
+        continue
+      for f in @[e.show.getOrDefault("FragmentPath")] &
+               e.show.getOrDefault("DropInPaths").splitWhitespace():
+        if f.len == 0: continue
+        try: e.loaded.add((path: f, content: readFile(f)))
+        except IOError, OSError:
+          result.add(name & ": cannot read " & f & ", which systemd loaded")
+      result.add(effectiveFloorProblems(e))
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =
@@ -1617,7 +2077,8 @@ proc pinToBytes(r: var SystemResource; p: var ResourcePlan;
   p.content = bytes
 
 proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
-                         addresses: openArray[string]): SystemProfile =
+                         addresses: openArray[string];
+                         stateDir = ""): SystemProfile =
   ## The profile ``repro system adopt <address> --profile <file>`` applies
   ## (spec §11.2 step 3): the current generation's operator profile with
   ## the addressed resources taken from ``given`` -- added, or in place of
@@ -1629,7 +2090,8 @@ proc scopedAdoptProfile*(given: SystemProfile; currentText: string;
   ## 2026-10-30): an adopt widens the scope by exactly what the adopted
   ## object needs. Raises when ``given`` does not declare an addressed
   ## resource.
-  let current = if currentText.len > 0: parseSystemProfile(currentText)
+  let current = if currentText.len > 0:
+                  parseStoredUserProfile(currentText, stateDir)
                 else: SystemProfile()
   result.addOn = current.addOn
   # An adopt changes no secret: the current generation's declarations stay.
@@ -2325,7 +2787,36 @@ proc revertMayKeep*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     plannedSha.len > 0 and currentSha == plannedSha
 
-proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
+proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
+                               currentSha, preservedPath: string): bool =
+  ## Whether a revert writes over a ledger-owned file that holds exactly
+  ## the bytes the ledger preserved for it: what the failed switch's
+  ## restore (spec §7.2, before step 7) put there before it failed. Its
+  ## preserved file is named by the bytes' SHA-256.
+  when mutated("revert-refuses-restored"):
+    return false
+  purpose == "revert" and ledgerOwns and regularFile and
+    preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
+
+proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
+  ## The carried-state refusal for this apply (``carried_state``), "" when
+  ## it may go ahead. A stored generation (a revert, a rollback, a replay)
+  ## is read under the rules it was installed with, as the switch reads it
+  ## (§10.1): a pre-floor generation parsed with today's floor default
+  ## would throw here, and a revert to it could never start.
+  let carriedFrom =
+    if opts.storedTarget or opts.replay:
+      parseStoredUserProfile(opts.userProfileText, stateDir)
+    else: parseAddOnUserProfile(opts.userProfileText)
+  carriedStateRefusal(carriedFrom,
+    (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+     else: CarriedStateDir),
+    (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+
+proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
+  ## Defined below, after the switch it wraps with its evidence record.
+
+proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
   ## collision pass refuses, and ``AddonApplyError`` when the infra apply
@@ -2340,6 +2831,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       $opts.agentRecord.sequence & " is not the apply's sequence " &
       $opts.agentSequence)
   if not opts.planOnly:
+    # Carried state a conversion brought is restored before any apply
+    # reaches it, and nothing is applied under a state backup's hold
+    # (spec §11.1), whichever path asked for the apply (an operator, the
+    # deploy agent, an adopt, a rollback). Decided by the library both
+    # apply paths share (`carried_state`); first, before anything else is
+    # looked at or written, and again under the host lock below.
+    let why = carriedRefusalFor(opts, stateDir)
+    if why.len > 0:
+      raise newException(AddonApplyError, why)
     # The before-each-write re-check runs on the in-process apply path,
     # which is the one an add-on apply takes: as root, in this process. A
     # process that would hand the privileged set to a broker would apply
@@ -2360,6 +2860,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
       stateDir & ")")
   defer: hostLock.release()
+  if not opts.planOnly:
+    # Decided again under the host lock: a state backup takes the same
+    # lock, so a hold it wrote while this apply waited is seen here, not
+    # after the switch has started units.
+    when not mutated("backup-without-host-lock"):
+      let why = carriedRefusalFor(opts, stateDir)
+      if why.len > 0:
+        raise newException(AddonApplyError, why)
   if not opts.planOnly:
     enterWritableStoreView()
     createDir(addonDir(stateDir))
@@ -2441,11 +2949,24 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var decisions = initTable[string, CollisionDecision]()
 
   var own = parseSystemProfile(ownText)
+  # A stored generation (a revert, a rollback, the current generation
+  # re-applied, or the replay of a switch that was one) keeps the rules it
+  # was installed with; a new profile is held to the floor (§10.1).
+  # A replay parses the target as the interrupted switch did: the
+  # write-ahead plan records it; an older build's plan does not, and the
+  # switch's purpose decides.
+  let storedTarget =
+    if replaying and replayPlan.storedTargetRecorded: replayPlan.storedTarget
+    else: opts.storedTarget or (replaying and hasPendingMarker(stateDir) and
+      readPendingMarker(stateDir).purpose in ["revert", "rollback"])
+  let parseTarget = proc(t: string): SystemProfile =
+    if storedTarget: parseStoredUserProfile(t, stateDir)
+    else: parseAddOnUserProfile(t)
   var user =
     if adoptAddresses.len > 0:
-      scopedAdoptProfile(parseSystemProfile(targetUserText),
-                         previousUserText, adoptAddresses)
-    else: parseSystemProfile(targetUserText)
+      scopedAdoptProfile(parseTarget(targetUserText),
+                         previousUserText, adoptAddresses, stateDir)
+    else: parseTarget(targetUserText)
   when mutated("addon-unit-renders-differently"):
     # FALSIFYING MUTATION (e2e_addon_reproos_service_parity): the add-on
     # writes every unit with one line the full realisation does not.
@@ -2592,9 +3113,11 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var prevSha = initTable[string, string]()   # target path -> ledger digest
   var prevObs = initTable[string, string]()   # target path -> its observation
   var prevOwned = initHashSet[string]()
+  var prevPreserved = initTable[string, string]()  # path -> preserved bytes
   for e in previous.entries:
     if e.class in {lcEtcFile, lcUnit, lcDropIn} and e.resource.len > 0:
       prevSha[e.path] = e.sha256
+      if e.preserved.len > 0: prevPreserved[e.path] = e.preserved
       prevObs[e.path] = e.observation
       prevOwned.incl(e.path)
     elif e.class == lcDiversion:
@@ -2634,6 +3157,18 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     ## (the drift stays visible), and reported. Any other purpose refuses.
     let regular = fileExists(p.targetPath) and not symlinkExists(p.targetPath)
     let current = if regular: readFile(p.targetPath) else: ""
+    # Bytes the failed switch itself put back: it restored this object's
+    # preserved bytes before it failed (spec §7.2, the restore before step
+    # 7), and its ledger kept the entry because the switch did not commit.
+    # The revert writes its own generation's bytes over them, as the
+    # owner of the object; the preserved bytes stay recorded.
+    if revertOverwritesRestored(purpose, inp.ledgerOwns, regular,
+        sha256Hex(current), prevPreserved.getOrDefault(p.targetPath)):
+      let o = observeTarget(driver, p.targetPath, inp.unit)
+      return (CollisionDecision(verdict: cvUpdate,
+        observation: observationText(o, inp.kind), observedSha256: o.sha256,
+        reason: "the failed switch restored its preserved bytes; the " &
+          "revert writes its generation's bytes again"), o)
     # Only bytes the failed switch found there and left alone: the same
     # digest its plan observed before the flip. Anything else -- a file it
     # wrote, or one that changed since -- is refused as before.
@@ -2745,7 +3280,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                   else: (found: false, plan: SavedPlan())
       if saved.found: overlaySaved(p, saved.plan)
       if r.kind == srkSystemdSystemDropIn and not saved.found and
-          r.diUnit notin declaredUnits:
+          not declaredByProfile(r.diUnit, declaredUnits):
         # The unit a drop-in modifies must be provided by something; the
         # unit rows decide that (a package unit, or a hand-written one), the
         # file rows the drop-in file itself.
@@ -3117,7 +3652,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var removed: seq[SystemResource]
   var previousUser: SystemProfile
   if previousUserText.len > 0:
-    previousUser = parseSystemProfile(previousUserText)
+    previousUser = parseStoredUserProfile(previousUserText, stateDir)
     var prevDropIns = initHashSet[string]()
     let previousShaped = reshape(previousUser, prevDropIns)
     when not mutated("retargeted-address-accepted"):
@@ -3684,8 +4219,36 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       treeFiles.add(StaticFile(path: e.path, content: readFile(e.path)))
   result.staticTree = staticTreePath(treeFiles)
 
+  result.floorExceptions = floorExceptionPlanLines(user)
+  result.floorIntroduced = floorIntroducedUnits(previousUser, previous,
+                                                user.resources)
   if opts.planOnly:
     return
+  # An unattended (agent) apply never gives a running service its first
+  # floor: the change is reviewed in an operator's plan (spec §10.1). A
+  # replay or a revert of a switch already under way is not refused.
+  if opts.agentSequence > 0'u64 and purpose == "apply" and not replaying and
+      result.floorIntroduced.len > 0:
+    raise newException(AddonNeedsOperator, "operator action required: the " &
+      "hardening floor (serviceFloor) would change " &
+      result.floorIntroduced.join(", ") & "; an agent apply does not " &
+      "restart a running service into a floor it was not installed with. " &
+      "Review `repro system addon plan` and apply this profile once " &
+      "as an operator, or waive the unit's whole floor (floorExceptions = " &
+      "[\"serviceFloor: <why>\"]); a named exception still changes the " &
+      "unit and does not avoid this. Nothing was changed")
+
+  # Step 1 recomputes the store's hold from every unit, manifest and
+  # hand-back record on the host; the plan checked they can be read, but
+  # one can have become unreadable since. Checked again here, before the
+  # first byte this switch writes (the preserved bytes just below, the
+  # write-ahead plan, the pending marker), so the switch refuses with
+  # nothing written rather than failing in step 1.
+  block:
+    let why = liveReferenceRefusal(@[preservedDir(stateDir)])
+    if why.len > 0:
+      raise newException(AddonCollisionError, "refusing the switch: step 1 " &
+        "recomputes the store's hold, and " & why & "; nothing was written")
 
   # The invocation id every running managed unit has just before step 2
   # (taken in `beforeSet`, under the apply lock, after realise): one that
@@ -3756,6 +4319,43 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       st.close()
       holdOnPendingRoot(closurePrefixes)
 
+  # What the flip will make the host run, as realised: the static tree,
+  # each bound closure, every store prefix a unit names (its commands, a
+  # second command after `;`, an argument, a launcher started through a
+  # shell, a bind source) and the program of each `exec:` health check.
+  # Each was verified when it was realised (the tree against its files,
+  # a closure against its lock, a staged output against the manifest's
+  # pin). Step 1 records a cheap signature of each -- every entry's type,
+  # mode, size, inode and modification and change times, no content read
+  # (`storeSignature`) -- and the switch recomputes it before the flip
+  # and again before step 7 starts anything (spec §10.2, A9): a store path
+  # changed in between, by anything that got write access to the store,
+  # is never flipped to or started. A store object that is missing is a
+  # refusal, not a skip.
+  var realisedStore: seq[tuple[path, signature: string]]
+  block:
+    var objs = @[treePath]
+    for lock in closureLocks:
+      let p = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
+      if p notin objs: objs.add(p)
+    for p in plans:
+      for o in switchStoreObjects(p.r):
+        if o notin objs: objs.add(o)
+      if p.r.kind == srkSystemdSystemUnit:
+        if p.r.suHealthCheck.len > 0:
+          let hc = parseHealthCheck(p.r.suHealthCheck)
+          if hc.kind == hcExec:
+            let o = storeObjectFor(hc.argv[0])
+            if o.len > 0 and o notin objs: objs.add(o)
+    var missing: seq[string]
+    for o in objs:
+      if not dirExists(o): missing.add(o)
+      else: realisedStore.add((path: o, signature: storeSignature(o)))
+    if missing.len > 0:
+      raise newAddOnError(adStoreChanged, "the generation runs from store " &
+        "paths that do not exist after its realise step: " &
+        missing.join(", ") & "; nothing was switched")
+
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]
   for r in composed.resources:
@@ -3802,7 +4402,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       targetUserText: targetUserText, fromUserText: previousUserText,
       fromOwnText: previousOwnText,
       fromLedgerText: previous.render(), reconcileDrift: reconcileDrift,
-      adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved))
+      adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved,
+      storedTarget: storedTarget, storedTargetRecorded: true))
   var secretsFailure = ""
   if not opts.planOnly:
     writeSecretsSource(stateDir, secretsSource)
@@ -4003,6 +4604,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       marker.step = ssPreStop
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-2")
+      # Nothing the generation runs from changed since step 1 (§10.2).
+      when not mutated("flip-skips-store-recheck"):
+        let changed = storeChangedSince(realisedStore)
+        if changed.len > 0:
+          raise newAddOnError(adStoreChanged, "the store changed between " &
+            "the switch's realise step and its flip: " & changed.join(", ") &
+            " no longer hold" & (if changed.len == 1: "s" else: "") &
+            " what was realised; nothing was switched")
       # The flip is durable (its directory is synced) before the marker
       # says it happened; recovery never trusts the step anyway.
       flipStatic(treePath)
@@ -4017,6 +4626,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     {.cast(gcsafe).}:
       var problems: seq[string]
       var reloadedAt = 0.0
+      var startHolds: seq[string]   # spec §10.1: kept until the check passes
         ## CLOCK_MONOTONIC seconds just after step 6's daemon-reload; 0
         ## when there was none.
       hookGeneration = generationId
@@ -4035,6 +4645,12 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       # the kernel values a removed sysctl resource leaves behind.
       try:
         if anyUnitChange or replaying:
+          # The start holds go in before the reload: from it until the
+          # effective-unit check passes, no floored unit can start (a
+          # socket, a timer, D-Bus or a Wants= would otherwise start it on
+          # definitions nothing has checked yet; spec §10.1, round 4).
+          if not opts.recordOnly:
+            startHolds = writeStartHolds(composed.resources)
           daemonReload()
           # From here on every start runs the generation's definitions:
           # step 7 accepts an exclusive instance started after this point
@@ -4091,6 +4707,63 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       marker.step = ssFragmentTools
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-6")
+      proc restorePreservedObjects() =
+        ## Objects a removed resource adopted, replaced or reconciled go
+        ## back to what they were (the rest were destroyed by the infra
+        ## apply); a restored unit file is reloaded and its base state put
+        ## back. Before step 7 (spec §7.2): a unit of this generation may
+        ## read a restored object -- a rollback to a generation whose unit
+        ## reads a file the newer one reconciled -- so it starts on it.
+        var needReload = needReloadAfterRemoval
+        var unitsToRestore: seq[LedgerEntry]
+        for e in restore:
+          # Changed meanwhile: left, as drift. Not a change: the flip of
+          # step 3 moved the static tree from under a link-form object the
+          # new generation no longer carries, so the add-on's own link now
+          # dangles; that is the removal in progress, and the restore (or
+          # the deletion) replaces the link.
+          if replaying and alreadyRestored(e):
+            hookRestored.add(e.path)
+            continue
+          let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
+          if d.len > 0:
+            hookKept.incl(e.resource)
+            hookKeptDrift.add(e.path & ": " & d & " (changed after the " &
+              "plan; left in place, --reconcile-drift removes it)")
+            continue
+          try:
+            if restorePreserved(e):
+              hookRestored.add(e.path)
+            elif e.class == lcUnit and e.collision == "replace":
+              # Nothing to put back: the package's file is below /usr; the
+              # shadowing copy goes away.
+              if removeOwnedUnitFile(e):
+                hookRestored.add(e.path)
+            if e.class in {lcUnit, lcDropIn}:
+              needReload = true
+              if e.class == lcUnit:
+                unitsToRestore.add(e)
+                # The install links the add-on made for it go too (a
+                # package's own link was never ledgered, so it stays).
+                for li in previous.entries:
+                  if li.resource == e.resource and li.class == lcInstallLink:
+                    discard removeLeafNoFollow(li.path)
+          except CatchableError as ex:
+            problems.add("restoring " & e.path & ": " & ex.msg)
+        if needReload:
+          try: daemonReload()
+          except CatchableError as ex:
+            problems.add(ex.msg)
+        for e in unitsToRestore:
+          try: restoreUnitState(e, driver,
+                                othersChanged = e.unit in loudHandBack)
+          except CatchableError as ex:
+            problems.add(ex.msg)
+        # Directories the removed resources had created.
+        removeEmptyDirs(removedEntries)
+      when not mutated("restore-after-start"):
+        restorePreservedObjects()
+      seamPause(stateDir, seamPrefix & "step-6-restore")
       if opts.recordOnly:
         # Only the record of what the failed switch wrote is wanted: no
         # start, no confirm, no commit.
@@ -4098,7 +4771,44 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
         problems.add("replayed to record what the failed switch wrote; " &
           "not committed")
       # --- Step 7: start. Only after a clean step 4-6: a half-written
-      # generation is not started.
+      # generation is not started, and neither is one whose store objects
+      # changed since step 1 (§10.2): the flip's re-check left the window
+      # of steps 4-6, which this one closes up to the start itself.
+      when not mutated("flip-skips-store-recheck"):
+        if not opts.recordOnly:
+          let changedNow = storeChangedSince(realisedStore)
+          if changedNow.len > 0:
+            problems.add($adStoreChanged & ": the store changed after the " &
+              "flip, before step 7: " & changedNow.join(", ") & " no " &
+              "longer hold what was realised; nothing was started")
+      # Every floored unit as systemd reads it now, after step 6's
+      # daemon-reload (spec §10.1, A9 review round 3): a unit that does
+      # not hold the floor it was rendered under -- by its own lines, a
+      # drop-in or a default the parse-time checks did not predict -- is
+      # never started, and the switch reverts.
+      # The window the start holds close: reloaded, not yet checked (the
+      # gate e2e_addon_floor_held_until_checked pauses here).
+      seamPause(stateDir, seamPrefix & "floor-check")
+      when not mutated("effective-check-skipped") and
+          not mutated("floor-unchecked"):
+        if not opts.recordOnly and clean and problems.len == 0:
+          let notHeld = effectiveFloorCheck(composed.resources)
+          if notHeld.len > 0:
+            problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
+              "; nothing was started")
+          elif startHolds.len > 0:
+            # Checked: the holds go, and step 7 starts on these definitions.
+            removeStartHolds(startHolds)
+            startHolds.setLen(0)
+            try: daemonReload()
+            except CatchableError as ex: problems.add(ex.msg)
+      if startHolds.len > 0 and clean and problems.len == 0:
+        # The check did not run (a record-only replay, a falsifying build):
+        # the holds must not outlive the switch that wrote them.
+        removeStartHolds(startHolds)
+        startHolds.setLen(0)
+        try: daemonReload()
+        except CatchableError as ex: problems.add(ex.msg)
       if clean and problems.len == 0:
         try:
           runStart(stepTransitions, paused, notRunning,
@@ -4132,55 +4842,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
             failureSummary(hookConfirm, confirmTimeout))
       marker.step = ssConfirm
       writePendingMarker(stateDir, marker)
-      # Objects a removed resource adopted or replaced go back to what they
-      # were; the rest were destroyed by the infra apply.
-      var needReload = needReloadAfterRemoval
-      var unitsToRestore: seq[LedgerEntry]
-      for e in restore:
-        # Changed meanwhile: left, as drift. Not a change: the flip of
-        # step 3 moved the static tree from under a link-form object the
-        # new generation no longer carries, so the add-on's own link now
-        # dangles; that is the removal in progress, and the restore (or
-        # the deletion) replaces the link.
-        if replaying and alreadyRestored(e):
-          hookRestored.add(e.path)
-          continue
-        let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
-        if d.len > 0:
-          hookKept.incl(e.resource)
-          hookKeptDrift.add(e.path & ": " & d & " (changed after the " &
-            "plan; left in place, --reconcile-drift removes it)")
-          continue
-        try:
-          if restorePreserved(e):
-            hookRestored.add(e.path)
-          elif e.class == lcUnit and e.collision == "replace":
-            # Nothing to put back: the package's file is below /usr; the
-            # shadowing copy goes away.
-            if removeOwnedUnitFile(e):
-              hookRestored.add(e.path)
-          if e.class in {lcUnit, lcDropIn}:
-            needReload = true
-            if e.class == lcUnit:
-              unitsToRestore.add(e)
-              # The install links the add-on made for it go too (a
-              # package's own link was never ledgered, so it stays).
-              for li in previous.entries:
-                if li.resource == e.resource and li.class == lcInstallLink:
-                  discard removeLeafNoFollow(li.path)
-        except CatchableError as ex:
-          problems.add("restoring " & e.path & ": " & ex.msg)
-      if needReload:
-        try: daemonReload()
-        except CatchableError as ex:
-          problems.add(ex.msg)
-      for e in unitsToRestore:
-        try: restoreUnitState(e, driver,
-                              othersChanged = e.unit in loudHandBack)
-        except CatchableError as ex:
-          problems.add(ex.msg)
-      # Directories the removed resources had created.
-      removeEmptyDirs(removedEntries)
+      when mutated("restore-after-start"):
+        # FALSIFYING MUTATION: the order before the A13 review -- objects
+        # a removed resource preserved are put back after the start.
+        restorePreservedObjects()
       # The new ledger: what is on the host now, whether or not the
       # generation commits (an uncommitted attempt's objects are still the
       # add-on's to remove).
@@ -4249,7 +4914,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
           # ledger like drift found at plan time.
           put(e)
           continue
+        if e.path in hookRestored and clean and problems.len == 0:
+          continue
         if e.path in hookRestored:
+          # Restored, but the switch is not committing: the object stays
+          # in the ledger (its preserved bytes named), so the revert that
+          # follows recognises them as the failed switch's restore and
+          # writes its own generation's bytes over them
+          # (``revertOverwritesRestored``).
+          put(e)
           continue
         let stillOurs = case e.class
           of lcEtcFile, lcUnit, lcDropIn, lcInstallLink: observeDrift(e).len == 0
@@ -4317,6 +4990,7 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   try:
     result.infra = runInfraApply(composedText, ApplyOptions(
       stateDir: stateDir, hostIdentity: opts.hostIdentity,
+      carriedStateChecked: true,
       noPreview: true, elevationMode: emBroker,
       buildActions: opts.buildActions,
       buildActionDispatcher: opts.buildActionDispatcher,
@@ -4477,7 +5151,8 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
     try:
       reverted = runAddonApply(AddonApplyOptions(stateDir: stateDir,
         hostIdentity: opts.hostIdentity, ownProfileText: back.own,
-        userProfileText: back.user, driver: opts.driver, purpose: "revert",
+        userProfileText: back.user, storedTarget: true, driver: opts.driver,
+        purpose: "revert",
         assumeActive: assume, retention: opts.retention,
         reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
         nonBlockingStarts: opts.nonBlockingStarts,
@@ -4661,8 +5336,13 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
       recordError = e.msg
     tracked = ledgerRecordsAttempt(stateDir, fromGen)
     if not tracked and recordError.len > 0:
-      return FailedReplayRevert(why: "recording the interrupted switch's " &
-        "writes failed: " & recordError)
+      # Spec §7.2 (recovery), cause 3: the report names the cause, the
+      # write-ahead record (what it names could not be planned from), not
+      # only the error the record-only replay raised.
+      return FailedReplayRevert(why: "the write-ahead record cannot be " &
+        "planned from (recording the interrupted switch's writes failed: " &
+        recordError & ") and the switch had passed step 2 (" & $prior.step &
+        "); no revert can tell those writes apart")
   if not tracked:
     return FailedReplayRevert(why: "the write-ahead record is " &
       (if planUsable: "usable but its writes could not be recorded"
@@ -4677,7 +5357,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     " (reverted from " & backFrom & ")"
   let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: readHostname(), ownProfileText: back.own,
-    userProfileText: back.user, driver: driver, purpose: "revert",
+    userProfileText: back.user, storedTarget: true, driver: driver,
+    purpose: "revert",
     assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
     nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
   # Step 2 disabled the units the switch was removing, recording each
@@ -4714,3 +5395,58 @@ proc renderLedgerDiff*(r: AddonApplyResult): string =
                "does not list it; never removed\n")
   for d in r.drift:
     result.add("  drift\t" & d & "\n")
+
+# ---------------------------------------------------------------------------
+# Every apply's evidence record (spec §10.4, milestone A11).
+# ---------------------------------------------------------------------------
+
+var applyDepth {.threadvar.}: int
+  ## A revert, a replay and a record-only pass run inside an outer apply;
+  ## only the outermost one records.
+
+proc recordApplyEvidence(opts: AddonApplyOptions; stateDir: string;
+                         r: AddonApplyResult; failure: ref CatchableError) =
+  ## The record of one apply: ``addon-apply`` (audit) with the attestation
+  ## of the generation it committed, or, for an operator's apply that did
+  ## not commit, its refusal or rollback (DET-AO-2, -5, -7). The deploy
+  ## agent's own applies record their failures in the tick's record, and a
+  ## switch the rollback floor kept in place has its own record. Never
+  ## raises: the apply's outcome stands whatever happens here.
+  var site = defaultSite(stateDir)
+  let purpose = if opts.purpose.len > 0: opts.purpose else: "apply"
+  var fields = @[("purpose", purpose), ("sequence", $opts.agentSequence)]
+  try:
+    if failure.isNil:
+      fields.add(("previousGeneration", r.previousGenerationId))
+      discard recordEvidence(EvidenceEvent(detector: edApply,
+        category: ecAudit, trigger: "applied", kind: "apply",
+        fields: fields, attest: true, attestGeneration: r.generationId), site)
+      return
+    if opts.agentSequence > 0'u64 or failure of AddonFailedAtFloor: return
+    fields.add(("message", failure.msg))
+    let (det, trig) =
+      if failure of AddonRolledBack: (edRollback, "rolled-back")
+      elif $adStoreChanged in failure.msg: (edStore, "store-changed")
+      else: (edApplyRefusal, "apply-refused")
+    discard recordEvidence(EvidenceEvent(detector: det, category: ecDetection,
+      trigger: trig, fields: fields, attest: true), site)
+  except CatchableError as e:
+    stderr.write("repro-addon: cannot write the apply's evidence record: " &
+      e.msg & "\n")
+
+proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
+  ## ``applyGenerationUnrecorded`` with its evidence record (spec §10.4):
+  ## every apply that commits, and every operator apply that refuses or is
+  ## reverted, leaves one. A plan-only run and a record-only replay change
+  ## nothing and record nothing.
+  inc applyDepth
+  defer: dec applyDepth
+  if applyDepth > 1 or opts.planOnly or opts.recordOnly:
+    return applyGenerationUnrecorded(opts)
+  let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  try:
+    result = applyGenerationUnrecorded(opts)
+  except CatchableError as e:
+    recordApplyEvidence(opts, stateDir, AddonApplyResult(), e)
+    raise
+  recordApplyEvidence(opts, stateDir, result, nil)

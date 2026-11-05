@@ -138,7 +138,7 @@ proc writeLock(workspaceRoot: string; revision, integrity: string) =
     name: producerName,
     path: "../prod",
     coordinates: Coordinates(kind: ckVcs, url: siblingUrl,
-      gitRef: "main", revision: revision),
+      revision: revision),
     integrity: integrity,
     visibility: "public"))
   writeFile(committedLockPath(workspaceRoot), serializeLockedDependencies(ld))

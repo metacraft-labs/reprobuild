@@ -55,7 +55,7 @@ const
   NewUnit = "repro-g38-new.service"
 
 proc unitBlock(unit, description, lockText: string): string =
-  "systemd.systemUnit {\n  name = \"" & unit & "\"\n" &
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & unit & "\"\n" &
   "  content = \"[Unit]\nDescription=" & description & "\n[Service]\n" &
     "Type=oneshot\nExecStart=/usr/bin/true\n\"\n" &
   "  enabled = false\n" &

@@ -31,7 +31,8 @@ mutation="${2:?usage: run_addon_unit_mutation.sh <test-basename> <mutation>}"
 # deploy agent and its CLI; the first that has the test wins.
 src=""
 for dir in libs/repro_addon/tests libs/repro_dsl_stdlib/tests \
-           libs/repro_deploy_agent/tests libs/repro_cli_support/tests; do
+           libs/repro_deploy_agent/tests libs/repro_cli_support/tests \
+           libs/repro_infra/tests libs/repro_profile_compile/tests; do
   if [ -f "${dir}/${test}.nim" ]; then src="${dir}/${test}.nim"; break; fi
 done
 [ -n "$src" ] || src="libs/repro_addon/tests/${test}.nim"

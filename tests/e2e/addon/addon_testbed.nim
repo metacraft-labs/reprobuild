@@ -147,6 +147,14 @@ const
       note: "base-files 14ubuntu6.1; 6.2 (26.04.1) reached resolute-updates in August 2026"),
   ]
 
+  FixtureFloorWaiver* = "  floorExceptions = [\"serviceFloor: a test " &
+    "fixture that runs the base's own binaries\"]\n"
+    ## The canonical-text field that waives the add-on's hardening floor
+    ## (spec §10.1) for a fixture unit: the gates of the other milestones
+    ## run the base's own ``/bin/sleep``, ``/bin/sh`` or ``python3`` as
+    ## root, which the floor's exec confinement rightly refuses, and their
+    ## units must keep the bytes they were measured with. A waived unit is
+    ## rendered exactly as written; the waiver is printed in every plan.
   DefaultBases* = ["debian-12-amd64", "debian-13-amd64", "ubuntu-24.04-amd64"]
     ## The amd64 matrix run under KVM when ``REPRO_ADDON_BASES`` is unset.
 
@@ -178,6 +186,27 @@ proc reproRoot*(): string =
   ## The reprobuild checkout (tests run from it).
   result = getEnv("REPROBUILD_SOURCE_ROOT")
   if result.len == 0: result = getCurrentDir()
+
+proc staticCc*(debArch: string): string =
+  ## The static (musl) gcc for a guest of ``debArch``: the same nixpkgs
+  ## attribute ``scripts/build_addon_static.sh`` builds the add-on with, so a
+  ## fixture binary and the add-on target the same machine.
+  let attr = case debArch
+    of "amd64": "pkgsStatic"
+    of "arm64": "pkgsCross.aarch64-multiplatform.pkgsStatic"
+    of "armhf": "pkgsCross.armv7l-hf-multiplatform.pkgsStatic"
+    else: raise newException(TestBedError, "no static toolchain for " & debArch)
+  let (o, c) = execCmdEx("nix build --no-link --print-out-paths " &
+    "--inputs-from " & quoteShell(reproRoot()) & " nixpkgs#" & attr &
+    ".stdenv.cc")
+  if c != 0:
+    raise newException(TestBedError, "building the static toolchain for " &
+      debArch & " failed: " & o)
+  for p in o.splitLines():
+    if p.strip().len == 0: continue
+    for g in walkFiles(p.strip() / "bin" / "*-gcc"):
+      return g
+  raise newException(TestBedError, "no gcc in the static toolchain: " & o)
 
 proc cacheDir*(): string =
   result = getEnv("REPRO_ADDON_TESTBED_CACHE")
@@ -307,6 +336,10 @@ type
     serialLog*: string
     booted*: bool
     log*: seq[string]
+    dataDisks*: seq[string]
+      ## Extra writable disks attached after the boot disk (``/dev/vdb``,
+      ## ...), each a ``DataDisk`` the gate owns: destroying the guest does
+      ## not delete them (QEMU only).
     relayPort*: int
       ## > 0: the guest's network is restricted (QEMU ``restrict=on``) and
       ## its only reachable service is ``GuestProxyAddress:GuestProxyPort``,
@@ -317,6 +350,15 @@ type
       incus*: IncusBackend
       vm*: VmHandle
       incusNetwork*: string
+
+  DataDisk* = object
+    ## A disk that outlives the guests it is attached to: created in a run
+    ## directory of its own (claimed and token-owned like a guest's), so a
+    ## gate can shut one guest down and attach the same disk to the next --
+    ## the shape of a reinstall that keeps a data disk.
+    path*: string
+    dir*: string
+    token*: string
 
   ExecOut* = object
     exitCode*: int
@@ -351,6 +393,22 @@ proc releaseRunDir(dir, token: string) =
     raise newException(TestBedError, "refusing to remove " & dir &
       ": its owner token is not this run's")
   removeDir(dir)
+
+proc newDataDisk*(sizeGiB: int): DataDisk =
+  ## An empty qcow2 disk of ``sizeGiB`` in a run directory of its own.
+  let name = QemuNamePrefix & "data-" & $getCurrentProcessId() & "-" &
+    randomHex(6)
+  let (dir, token) = claimRunDir(name)
+  result = DataDisk(path: dir / "data.qcow2", dir: dir, token: token)
+  if execCmd("qemu-img create -q -f qcow2 " & quoteShell(result.path) & " " &
+             $sizeGiB & "G") != 0:
+    releaseRunDir(dir, token)
+    raise newException(TestBedError, "qemu-img create of a data disk failed")
+
+proc release*(d: DataDisk) =
+  ## Delete the disk and its directory (only when the token is still ours).
+  if d.dir.len > 0:
+    releaseRunDir(d.dir, d.token)
 
 proc freePort(): int =
   ## A loopback TCP port the kernel just handed out (bound to port 0 and
@@ -444,7 +502,8 @@ when defined(gostiAvailable):
       generation: (if g.base.debArch == "amd64": 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
-      diskReadonly: readonly, diskInPlace: true)
+      diskReadonly: readonly, diskInPlace: true,
+      dataDiskPaths: g.dataDisks)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & (if readonly: " (disk read-only)" else: "") &
            (if g.relayPort > 0: " (network restricted to the mirror)" else: ""))
@@ -540,6 +599,13 @@ proc copyTo*(g: Guest; hostPath, guestPath: string) =
       g.incus.copyToGuest(g.vm, hostPath, guestPath)
     else:
       g.qemu.copyToGuest(g.vm, hostPath, guestPath)
+
+proc copyFrom*(g: Guest; guestPath, hostPath: string) =
+  ## Copy a guest file or directory (recursively) to the host (QEMU only).
+  when defined(gostiAvailable):
+    if g.kind == gkIncus:
+      raise newException(TestBedError, "copyFrom is not supported on Incus")
+    g.qemu.copyFromGuest(g.vm, guestPath, hostPath)
 
 proc shutdown*(g: Guest) =
   ## Power the guest off and wait for QEMU to exit (the disk is then

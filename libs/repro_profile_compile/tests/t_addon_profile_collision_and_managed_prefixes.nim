@@ -25,7 +25,7 @@ proc intentWithAddOn(): ProfileIntent =
     managedEtcPrefixes: @["/etc/vaultwarden/", "/etc/issue.net",
                           "/etc/vaultwarden/"], confirmTimeoutSec: 45)
   systemdSystemUnit(result.resources, name = "vaultwarden.service",
-    content = "[Service]\nExecStart=/bin/true\n",
+    content = "[Service]\nExecStart=/repro/store/prefixes/vaultwarden/1/bin/vaultwarden\n",
     healthCheck = "http://127.0.0.1:8000/alive", address = "vw")
   systemdSystemUnit(result.resources, name = "cron.service",
     content = "[Service]\nNice=5\n", collision = "dropIn",

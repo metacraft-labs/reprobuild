@@ -264,7 +264,7 @@ proc baseLock(): LockedDependencies =
     deps: @[LockedDep(name: "reprobuild", path: ".",
       coordinates: Coordinates(kind: ckVcs,
         url: "https://github.com/metacraft-labs/reprobuild",
-        gitRef: "main", revision: NixRev),
+        revision: NixRev),
       integrity: "blake3:" & ProviderA, visibility: "public")])))
 
 proc documentWith(records: seq[LockedRealization]): string =
