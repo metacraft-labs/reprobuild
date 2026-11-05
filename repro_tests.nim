@@ -1719,6 +1719,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath("),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_peer_key_binds_builtin_payload.nim",
+    binary: "build/test-bin/t_peer_key_binds_builtin_payload",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim",
     binary: "build/test-bin/t_portable_fingerprint_engine",
     defines: @[],

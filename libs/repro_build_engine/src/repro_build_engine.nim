@@ -7480,6 +7480,38 @@ func builtinKindName*(kind: BuildActionKind): string =
   of bakSolveLock: "solve-lock"
   of bakLockUpdate: "lock-update"
 
+const BuiltinPayloadPeerKeyDomain* = "reprobuild/peer-builtin-payload/v1"
+  ## The domain `builtinPayloadPeerKey` frames a builtin's peer-cache key
+  ## under. Versioned so a change to what it binds re-keys exactly the
+  ## builtin entries and nothing else.
+
+proc builtinPayloadPeerKey*(action: BuildAction): ContentDigest =
+  ## The key LAN peers agree on for a BUILTIN action outside portable
+  ## caching: its weak fingerprint, bound to its kind and its whole payload
+  ## (`builtinText`, `builtinEntries`), length-framed and domain-separated.
+  ##
+  ## A builtin writes its payload; the payload is what it computes. Its weak
+  ## fingerprint covers the payload only when the constructor mixed it in:
+  ## the production one does (`reprobuild.localBuiltinAction.v1` folds the
+  ## node payload), while `builtinAction` keys on the action id alone unless
+  ## its caller passes more. The strong fingerprint covers inputs, not the
+  ## payload. So a builtin whose caller keyed it on its id published a record
+  ## that another host served for a DIFFERENT text under the same id (owner
+  ## decision 2026-10-31 admits `write-text` and `stamp` to the peer cache on
+  ## the premise that their payload is all they compute; Edge-Derived-
+  ## Identities.md §10 decision 23 rider, caveat 1). Binding the payload into
+  ## the cross-host key makes that impossible whatever the constructor did;
+  ## the portable key already binds it (`portableStaticFieldsOf`).
+  var framed = BuiltinPayloadPeerKeyDomain & "\x1e"
+  var parts = @[toHex(action.weakFingerprint.bytes),
+    builtinKindName(action.kind), action.builtinText,
+    $action.builtinEntries.len]
+  for entry in action.builtinEntries:
+    parts.add(entry)
+  for part in parts:
+    framed.add($part.len & "\x1f" & part & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 func evidenceSourceOf*(action: BuildAction): EvidenceSource =
   ## Where an execution of `action` gets its dependency evidence, as a
   ## published record states it (Edge-Derived-Identities.md §3.1; campaign M17
@@ -19529,6 +19561,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if hex.len == 64:
         for i in 0 ..< 32:
           result.peerKey[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
+    elif action.kind != bakProcess:
+      # A builtin's payload is part of what peers agree on, whatever its
+      # constructor keyed (`builtinPayloadPeerKey`).
+      result.peerKey = builtinPayloadPeerKey(action).bytes
 
   proc peerCacheQueryOf(action: BuildAction): PeerCacheActionQuery =
     ## The query for `action`: the one recorded when it was scheduled (see
