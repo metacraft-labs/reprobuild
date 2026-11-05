@@ -796,8 +796,12 @@
     # takes the absolute defining path again, as upstream does, and a build
     # that wants checkout-independent hashes asks for it with
     # `--typeHashPathMap:OLD=NEW` (scripts/build_addon_static.sh does).
+    #
+    # Advanced from 9a49ee3c to 197089cd (metacraft-labs/nim#16): the
+    # compiler records its own message origins relative to the Nim root, so
+    # a compiler built from a checkout names no path of it.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=9a49ee3ca32c9cd2fe467806e61d47c3a6a7ccc1";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=197089cda27f656f8010e2b31b40e0e12f3f209b";
       flake = false;
     };
     nim-csources-src = {

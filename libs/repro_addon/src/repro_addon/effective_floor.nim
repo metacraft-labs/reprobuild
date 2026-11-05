@@ -1,0 +1,745 @@
+## The effective-unit check of the hardening floor (ReproOS Add-On Mode
+## spec §10.1, amended by A9's review round 3).
+##
+## The floor's parse-time checks (``repro_infra/service_floor``) predict
+## how systemd will read a unit and its drop-ins. Three review rounds
+## found a spelling, a key, a drop-in rule or a default they predicted
+## wrong. This module makes systemd's own parser the authority: after the
+## switch's ``daemon-reload`` and before step 7 starts anything (at apply,
+## revert, rollback and replay alike), each floored unit's effective
+## properties are read with ``systemctl show`` and compared with the floor
+## the unit was rendered under -- the floor block the add-on wrote into its
+## unit file (``floorBlock``), minus the unit's named exceptions. A unit
+## that does not hold its floor, by its own lines, a drop-in, a host's
+## drop-in or a default, is a problem of the switch: nothing starts, and
+## the switch reverts (``EAddOnFloorNotEffective``).
+##
+## What is compared, per floor version (the floor the unit was stored
+## under, never today's):
+##
+## * every version: each setting of the floor block (``NoNewPrivileges``,
+##   ``ProtectSystem``, ``MemoryDenyWriteExecute`` ... as systemd shows
+##   them), its ``NoExecPaths`` entries present, its ``ExecPaths`` exactly,
+##   its ``ReadOnlyPaths`` present, an allow-list ``SystemCallFilter`` that
+##   holds none of the floor's denied calls (the caller expands the deny
+##   line with the base's own ``systemd-analyze syscall-filter``), its
+##   capability sets, address families and ``DynamicUser=yes``; and no
+##   drop-in the add-on did not install, outside the distribution's own
+##   ``/usr/lib/systemd`` (``DropInPaths``);
+## * from version 2 (which refused root): the service does not run as
+##   root -- ``DynamicUser=yes`` or a ``User=`` that resolves to a non-zero
+##   uid, ``Group=`` not root, no privileged supplementary group -- and no
+##   other root;
+## * from version 4: no ``PAMName=``, no image or extension mounted in,
+##   and every writable place the unit has (``ReadWritePaths=``,
+##   ``BindPaths=`` destinations, ``TemporaryFileSystem=``, each
+##   ``*Directory=``) named in ``NoExecPaths=`` and not over an
+##   ``ExecPaths=`` entry.
+##
+## The value forms are what ``systemctl show`` prints on systemd 252, 255,
+## 257 and 259 (measured identical: A9 review round 3's experiment), e.g.
+## ``BindPaths=/var/lib/x:/srv/y:rbind``, ``TemporaryFileSystem=/srv/t:mode=1777``,
+## ``User=`` (empty) with ``DynamicUser=no`` for a unit that runs as root.
+## systemd will not show a template (``foo@.service``); the caller checks
+## the instances the generation names.
+
+import std/[algorithm, sets, strutils, tables]
+
+import ./host_exec
+import ./mutations
+
+import repro_infra/service_floor
+
+type
+  ShowProps* = Table[string, string]
+    ## ``systemctl show`` as key -> value (the last line of a key).
+  ShowLines* = Table[string, seq[string]]
+    ## ``systemctl show`` as key -> every line of it, in order (a command
+    ## property has one line per command).
+
+const
+  StartHoldName* = "zz-repro-addon-floor-hold.conf"
+    ## The runtime drop-in the switch writes for every floored unit before
+    ## step 6's reload and removes once the unit passes this check (spec
+    ## §10.1, A9 review round 4, finding 7): an assertion that always
+    ## fails, so nothing -- a socket, a timer, a path unit, D-Bus or a
+    ## ``Wants=`` -- can start the unit in between.
+  StartHoldText* = "# Written by the ReproOS add-on switch: the unit may not " &
+    "start until its\n# effective configuration has been checked against " &
+    "its hardening floor.\n[Unit]\nAssertPathExists=/run/repro/floor-hold/never\n"
+  CredentialRoot* = "/run/repro/secrets"
+    ## Where the add-on stages a service's credentials (``profile``'s
+    ## ``SecretsRunRoot``): ``LoadCredential=`` may read only
+    ## ``<root>/<service>/``.
+  FloorMarker* = "# serviceFloor (ReproOS add-on hardening default)"
+  ScalarFloorKeys = ["NoNewPrivileges", "ProtectSystem", "ProtectHome",
+    "PrivateTmp", "PrivateDevices", "ProtectKernelTunables",
+    "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups",
+    "ProtectClock", "ProtectHostname", "ProtectProc", "RestrictNamespaces",
+    "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
+    "MemoryDenyWriteExecute", "SystemCallArchitectures", "UMask"]
+  DirectoryRoots = [("StateDirectory", "/var/lib"),
+                    ("RuntimeDirectory", "/run"),
+                    ("CacheDirectory", "/var/cache"),
+                    ("LogsDirectory", "/var/log"),
+                    ("ConfigurationDirectory", "/etc")]
+  ExecProps* = ["ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost",
+                "ExecReload", "ExecReloadPost", "ExecStop", "ExecStopPost"]
+    ## The command properties. Each is shown twice: ``<Key>`` and
+    ## ``<Key>Ex``, the second with the command's flags (``+`` is
+    ## ``privileged``, ``!`` ``no-setuid``, ``!!`` ``ambient``, ``-``
+    ## ``ignore-failure``, ``:`` ``no-env-expand``).
+  AllowedExecFlags = ["ignore-failure", "no-env-expand"]
+    ## The flags a floored unit's command may carry: neither changes the
+    ## credentials or the sandbox the command runs under.
+  AllowedStdin = ["null", "socket", "fd", "data"]
+  AllowedStdout = ["inherit", "null", "journal", "kmsg", "journal+console",
+                   "kmsg+console", "socket", "fd"]
+    ## ``StandardInput=`` / ``StandardOutput=`` / ``StandardError=`` that
+    ## open nothing by path: ``file:``, ``append:``, ``truncate:`` and
+    ## ``tty`` are opened by the service manager, as root, before the
+    ## sandbox (A9 review round 4, finding 3: ``StandardOutput=truncate:``
+    ## wrote into ``/etc``).
+
+  ComparedProps* = ["LoadState", "FragmentPath", "SourcePath", "DropInPaths",
+    "User", "Group", "DynamicUser", "SupplementaryGroups", "PAMName",
+    "NoNewPrivileges", "ProtectSystem", "ProtectHome", "PrivateTmp",
+    "PrivateDevices", "ProtectKernelTunables", "ProtectKernelModules",
+    "ProtectKernelLogs", "ProtectControlGroups", "ProtectClock",
+    "ProtectHostname", "ProtectProc", "RestrictNamespaces", "RestrictRealtime",
+    "RestrictSUIDSGID", "LockPersonality", "MemoryDenyWriteExecute",
+    "SystemCallArchitectures", "SystemCallFilter", "SystemCallErrorNumber",
+    "CapabilityBoundingSet", "AmbientCapabilities", "UMask",
+    "RestrictAddressFamilies", "NoExecPaths", "ExecPaths", "ReadOnlyPaths",
+    "ReadWritePaths", "BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem",
+    "StateDirectory", "RuntimeDirectory", "CacheDirectory", "LogsDirectory",
+    "ConfigurationDirectory", "RootDirectory", "RootImage", "RootEphemeral",
+    "RootHash", "RootHashSignature", "RootVerity", "RootImageOptions",
+    "MountImages", "ExtensionImages", "ExtensionDirectories", "OpenFile",
+    "StandardInput", "StandardOutput", "StandardError", "TTYPath",
+    "SecureBits", "KeyringMode", "Personality", "RootDirectoryStartOnly",
+    "JoinsNamespaceOf", "NetworkNamespacePath", "IPCNamespacePath",
+    "LoadCredential", "LoadCredentialEncrypted", "ImportCredential",
+    "EnvironmentFiles", "DeviceAllow", "Delegate", "CoredumpReceive",
+    "BPFProgram", "USBFunctionDescriptors", "USBFunctionStrings",
+    "ExecSearchPath", "Transient", "ImportCredentialEx", "NFTSet",
+    "SELinuxContext", "AccessSELinuxContext", "AppArmorProfile",
+    "SmackProcessLabel", "MountFlags", "RootHashPath", "RootHashSignaturePath",
+    "UserNamespacePath", "BPFDelegateCommands", "BPFDelegateMaps",
+    "BPFDelegatePrograms", "BPFDelegateAttachments", "StateDirectorySymlink",
+    "RuntimeDirectorySymlink", "CacheDirectorySymlink", "LogsDirectorySymlink",
+    "ConfigurationDirectorySymlink"]
+    ## The properties the check compares with the floor (each one's rule is
+    ## in ``effectiveFloorProblems``), together with ``ExecProps`` and their
+    ## ``Ex`` forms.
+
+  InertProps* = [
+    # Identity, documentation and the unit's runtime state.
+    "Id", "Names", "Description", "Documentation", "Following", "Perpetual",
+    "UnitFileState", "UnitFilePreset", "ActiveState", "SubState",
+    "FreezerState", "Result", "CleanResult", "ReloadResult", "LiveMountResult",
+    "InvocationID", "NeedDaemonReload", "StatusText", "StatusErrno",
+    "StatusBusError", "StatusVarlinkError", "NRestarts", "MainPID",
+    "ControlPID", "ControlGroup", "ControlGroupId", "ExecMainPID",
+    "ExecMainCode", "ExecMainStatus", "ConditionResult", "AssertResult",
+    "Conditions", "Asserts", "CanStart", "CanStop", "CanReload", "CanIsolate",
+    "CanClean", "CanFreeze", "CanLiveMount", "Markers", "Refs", "JobId",
+    "NFileDescriptorStore", "RestartUSecNext", "MemoryAvailable",
+    "EffectiveMemoryHigh", "EffectiveMemoryMax", "EffectiveTasksMax",
+    "EffectiveCPUs", "EffectiveMemoryNodes", "OOMKills", "ManagedOOMKills",
+    "UID", "GID", "DelegateControllers", "DelegateSubgroup",
+    "DelegateNamespaces", "ActivationDetails", "Job", "LoadError", "SliceOf",
+    "StateDirectoryQuotaUsage", "CacheDirectoryQuotaUsage",
+    "LogsDirectoryQuotaUsage", "DisableControllers", "BlockIODeviceWeight",
+    "BlockIOReadBandwidth", "BlockIOWriteBandwidth",
+    "ExtraFileDescriptorNames",
+    # Dependencies and ordering: which other units start with this one or
+    # after it, not what this one may do.
+    "Requires", "Requisite", "Wants", "BindsTo", "PartOf", "Upholds",
+    "RequiredBy", "RequisiteOf", "WantedBy", "BoundBy", "UpheldBy",
+    "ConsistsOf", "Conflicts", "ConflictedBy", "Before", "After",
+    "OnSuccess", "OnSuccessOf", "OnFailure", "OnFailureOf", "Triggers",
+    "TriggeredBy", "PropagatesReloadTo", "ReloadPropagatedFrom",
+    "PropagatesStopTo", "StopPropagatedFrom", "RequiresMountsFor",
+    "WantsMountsFor", "Slice", "Sockets", "OnSuccessJobMode",
+    "OnFailureJobMode", "DefaultDependencies", "StopWhenUnneeded",
+    "RefuseManualStart", "RefuseManualStop", "AllowIsolate",
+    "IgnoreOnIsolate", "CollectMode", "SurviveFinalKillSignal",
+    # Start, stop and restart policy, timeouts and signals.
+    "Type", "ExitType", "Restart", "RestartMode", "RestartUSec",
+    "RestartSteps", "RestartMaxDelayUSec", "RestartPreventExitStatus",
+    "RestartForceExitStatus", "SuccessExitStatus", "RemainAfterExit",
+    "GuessMainPID", "PIDFile", "BusName", "NotifyAccess", "TimeoutStartUSec",
+    "TimeoutStopUSec", "TimeoutAbortUSec", "TimeoutCleanUSec",
+    "TimeoutStartFailureMode", "TimeoutStopFailureMode", "RuntimeMaxUSec",
+    "RuntimeRandomizedExtraUSec", "WatchdogUSec", "WatchdogSignal",
+    "JobTimeoutUSec", "JobRunningTimeoutUSec", "JobTimeoutAction",
+    "JobTimeoutRebootArgument", "StartLimitIntervalUSec", "StartLimitBurst",
+    "StartLimitAction", "FailureAction", "SuccessAction",
+    "FailureActionExitStatus", "SuccessActionExitStatus", "RebootArgument",
+    "KillMode", "KillSignal", "RestartKillSignal", "FinalKillSignal",
+    "SendSIGKILL", "SendSIGHUP", "ReloadSignal", "OOMPolicy",
+    "OOMScoreAdjust", "FileDescriptorStoreMax", "FileDescriptorStorePreserve",
+    "SameProcessGroup", "IgnoreSIGPIPE", "NonBlocking", "UtmpIdentifier",
+    "UtmpMode", "TTYReset", "TTYVHangup", "TTYVTDisallocate", "TTYRows",
+    "TTYColumns", "SetLoginEnvironment", "DebugInvocation",
+    # Resource control: how much the service may use, not what it may do.
+    "CPUAccounting", "CPUWeight", "StartupCPUWeight", "CPUShares",
+    "StartupCPUShares", "CPUQuotaPerSecUSec", "CPUQuotaPeriodUSec",
+    "AllowedCPUs", "StartupAllowedCPUs", "AllowedMemoryNodes",
+    "StartupAllowedMemoryNodes", "CPUUsageNSec", "IOAccounting", "IOWeight",
+    "StartupIOWeight", "IODeviceWeight", "IOReadBandwidthMax",
+    "IOWriteBandwidthMax", "IOReadIOPSMax", "IOWriteIOPSMax",
+    "IODeviceLatencyTargetUSec", "IOReadBytes", "IOReadOperations",
+    "IOWriteBytes", "IOWriteOperations", "BlockIOAccounting", "BlockIOWeight",
+    "StartupBlockIOWeight", "MemoryAccounting", "DefaultMemoryLow",
+    "DefaultStartupMemoryLow", "DefaultMemoryMin", "MemoryMin", "MemoryLow",
+    "StartupMemoryLow", "MemoryHigh", "StartupMemoryHigh", "MemoryMax",
+    "StartupMemoryMax", "MemorySwapMax", "StartupMemorySwapMax",
+    "MemoryZSwapMax", "StartupMemoryZSwapMax", "MemoryZSwapWriteback",
+    "MemoryLimit", "MemoryCurrent", "MemoryPeak", "MemorySwapCurrent",
+    "MemorySwapPeak", "MemoryZSwapCurrent", "MemoryKSM",
+    "MemoryPressureWatch", "MemoryPressureThresholdUSec", "TasksAccounting",
+    "TasksCurrent", "TasksMax", "IPAccounting", "IPIngressBytes",
+    "IPIngressPackets", "IPEgressBytes", "IPEgressPackets",
+    "ManagedOOMSwap", "ManagedOOMMemoryPressure",
+    "ManagedOOMMemoryPressureLimit", "ManagedOOMMemoryPressureDurationUSec",
+    "ManagedOOMPreference", "CoredumpFilter", "TimerSlackNSec", "Nice",
+    "CPUSchedulingPolicy", "CPUSchedulingPriority",
+    "CPUSchedulingResetOnFork", "CPUAffinity", "CPUAffinityFromNUMA",
+    "NUMAPolicy", "NUMAMask", "IOSchedulingClass", "IOSchedulingPriority",
+    "StateDirectoryAccounting", "StateDirectoryQuota",
+    "CacheDirectoryAccounting", "CacheDirectoryQuota",
+    "LogsDirectoryAccounting", "LogsDirectoryQuota",
+    # Logging.
+    "SyslogPriority", "SyslogIdentifier", "SyslogLevelPrefix",
+    "SyslogLevel", "SyslogFacility", "LogLevelMax", "LogRateLimitIntervalUSec",
+    "LogRateLimitBurst", "LogExtraFields", "LogFilterPatterns",
+    "LogNamespace", "SystemCallLog", "StandardInputFileDescriptorName",
+    "StandardOutputFileDescriptorName", "StandardErrorFileDescriptorName",
+    "StandardInputData",
+    # Settings that only restrict the service further (the floor's own
+    # restrictions are compared; these add to them).
+    "InaccessiblePaths", "PrivateNetwork", "PrivateUsers", "PrivateUsersEx",
+    "PrivateIPC", "PrivateMounts", "PrivatePIDs", "PrivateBPF",
+    "PrivateTmpEx", "ProtectControlGroupsEx", "ProtectHostnameEx",
+    "RemoveIPC", "ProcSubset", "DevicePolicy", "IPAddressAllow",
+    "IPAddressDeny", "IPIngressFilterPath", "IPEgressFilterPath",
+    "SocketBindAllow", "SocketBindDeny", "RestrictNetworkInterfaces",
+    "RestrictFileSystems", "MountAPIVFS", "BindLogSockets",
+    "RootImagePolicy", "MountImagePolicy", "ExtensionImagePolicy",
+    "StateDirectoryMode", "RuntimeDirectoryMode", "CacheDirectoryMode",
+    "LogsDirectoryMode", "ConfigurationDirectoryMode",
+    "RuntimeDirectoryPreserve", "SetCredential", "SetCredentialEncrypted",
+    # The service's own environment and working directory. What a variable
+    # can make the service run is bounded by the exec confinement (every
+    # mount but the closure is noexec), and the directory is entered as
+    # the service's own user.
+    "Environment", "PassEnvironment", "UnsetEnvironment", "WorkingDirectory",
+    "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic",
+    "ExecMainHandoffTimestampMonotonic"]
+    ## The properties reviewed as unable to change the service's
+    ## credentials, its sandbox, the files it can reach or what it executes
+    ## (spec §10.1, A9 review round 4). A property ``systemctl show``
+    ## reports that is in neither this list, ``ComparedProps`` nor
+    ## ``ExecProps`` refuses the unit, so a setting a newer systemd adds is
+    ## refused until it is reviewed. Timestamps (``*Timestamp``,
+    ## ``*TimestampMonotonic``) and resource limits (``Limit*``: rlimits,
+    ## which only lower what the service may use) are reviewed as
+    ## families.
+
+proc isInertProp*(k: string): bool =
+  if k in InertProps: return true
+  if k.endsWith("Timestamp") or k.endsWith("TimestampMonotonic"): return true
+  if k.startsWith("Limit") and k.len > 5:
+    var r = k[5 .. ^1]
+    if r.endsWith("Soft"): r = r[0 ..< r.len - 4]
+    return r.len > 0 and r.allCharsInSet({'A'..'Z'})
+  false
+
+proc isExecProp*(k: string): bool =
+  k in ExecProps or (k.endsWith("Ex") and k[0 ..< k.len - 2] in ExecProps)
+
+proc parseShow*(text: string): ShowProps =
+  ## ``key=value`` lines (the order differs between systemd versions); the
+  ## last line of a key.
+  for l in text.splitLines():
+    let eq = l.find('=')
+    if eq > 0: result[l[0 ..< eq]] = l[eq + 1 .. ^1]
+
+proc parseShowLines*(text: string): ShowLines =
+  ## Every ``key=value`` line, per key in order.
+  for l in text.splitLines():
+    let eq = l.find('=')
+    if eq > 0: result.mgetOrPut(l[0 ..< eq], @[]).add(l[eq + 1 .. ^1])
+
+proc showUnitText*(unit: string): string =
+  ## Everything ``systemctl show`` reports for ``unit`` (every property
+  ## with a value; raises when systemd will not show it). Run through
+  ## ``host_exec`` (the distribution's systemctl by absolute path, a fixed
+  ## environment).
+  let r = runSystemctl(["show", "--no-pager", "--", unit])
+  if r.exitCode != 0:
+    raise newException(OSError, "systemctl show " & unit & ": " &
+                       r.output.strip())
+  r.output
+
+proc showUnit*(unit: string): ShowProps =
+  parseShow(showUnitText(unit))
+
+proc execEntries*(lines: ShowLines; key: string):
+    seq[tuple[path: string; flags: seq[string]]] =
+  ## The commands of ``<key>Ex`` (``{ path=... ; argv[]=... ; flags=... ;
+  ## ... }``), each with its executable and flags.
+  for l in lines.getOrDefault(key & "Ex"):
+    var path = ""
+    var flags: seq[string]
+    for part in l.strip(chars = {'{', '}', ' '}).split(" ; "):
+      let p = part.strip()
+      if p.startsWith("path="): path = p[5 .. ^1]
+      elif p.startsWith("flags="): flags = p[6 .. ^1].splitWhitespace()
+    result.add((path: path, flags: flags))
+
+proc floorBlock*(rendered: string): Table[string, seq[string]] =
+  ## The settings of the floor block the add-on rendered into a unit file:
+  ## every ``key=value`` line from ``FloorMarker`` to the end of its
+  ## ``[Service]`` section, comments skipped; a key's lines in order.
+  var inBlock = false
+  for raw in rendered.splitLines():
+    let l = raw.strip()
+    if l == FloorMarker:
+      inBlock = true
+      continue
+    if not inBlock: continue
+    if l.startsWith("[") and l.endsWith("]"): break
+    if l.len == 0 or l[0] in {'#', ';'}: continue
+    let eq = l.find('=')
+    if eq <= 0: continue
+    result.mgetOrPut(l[0 ..< eq], @[]).add(l[eq + 1 .. ^1])
+
+proc exceptionKeys*(exceptions: openArray[string]): HashSet[string] =
+  ## The settings ``floorExceptions`` names (``Setting: why`` /
+  ## ``Setting+values: why``).
+  for e in exceptions:
+    var k = e.split(':', 1)[0].strip()
+    let plus = k.find('+')
+    if plus > 0: k = k[0 ..< plus].strip()
+    result.incl(k)
+
+proc words(v: string): seq[string] = v.splitWhitespace()
+
+proc pathSet(v: string): HashSet[string] =
+  for t in words(v):
+    let q = t.strip(leading = true, trailing = false, chars = {'-', '+'})
+    if q.len > 0: result.incl(normalisedPath(q))
+
+proc versionNumber(version: string): int =
+  ## ``1``, ``2`` / ``2-prekeep``, ``3``, ``4``; "" is today's.
+  let v = if version.len == 0: FloorVersion else: version
+  try: parseInt(v.split('-')[0]) except ValueError: 0
+
+proc writablePlaces*(show: ShowProps): seq[string] =
+  ## Every place the unit can write that systemd sets up for it, as
+  ## systemd shows them: ``ReadWritePaths=``, each writable bind's
+  ## destination (``BindPaths=``; a ``BindReadOnlyPaths=`` one is not)
+  ## (``[-]src:dst:opts``), each tmpfs (``path:opts``), each
+  ## ``*Directory=`` under its root.
+  for t in words(show.getOrDefault("ReadWritePaths")):
+    result.add(t.strip(leading = true, trailing = false, chars = {'-', '+'}))
+  # BindReadOnlyPaths= destinations are read-only (an apt closure's /usr
+  # is one): not writable places (A9 review round 4, finding 5).
+  for k in ["BindPaths"]:
+    for t in words(show.getOrDefault(k)):
+      let parts = t.strip(leading = true, trailing = false,
+                          chars = {'-', '+'}).split(':')
+      result.add(if parts.len >= 2: parts[1] else: parts[0])
+  for t in words(show.getOrDefault("TemporaryFileSystem")):
+    result.add(t.split(':')[0])
+  for (k, root) in DirectoryRoots:
+    for t in words(show.getOrDefault(k)):
+      result.add(root & "/" & t.split(':')[0])
+
+type
+  EffectiveInput* = object
+    ## What the check compares: the unit as systemd reports it, and what
+    ## the generation installed for it.
+    unit*: string             ## the unit (an instance, for a template)
+    rendered*: string         ## the unit file the generation wrote
+    version*: string          ## the floor version it was rendered under
+    exceptions*: seq[string]  ## its ``floorExceptions``
+    show*: ShowProps          ## ``systemctl show``, last line per key
+    lines*: ShowLines         ## ``systemctl show``, every line per key
+    fragment*: string         ## the unit file systemd must load it from
+    ownDropIns*: seq[tuple[path, content: string]]
+      ## the drop-ins the generation installed for it (and the start
+      ## hold), with their bytes
+    loaded*: seq[tuple[path, content: string]]
+      ## the files systemd says it loaded (``FragmentPath``,
+      ## ``DropInPaths``), with their bytes as read now
+    denied*: HashSet[string]  ## the calls the floor's deny line names
+    uidOf*: proc (name: string): int
+    groupsOf*: proc (name: string): seq[string]
+    readableByAll*: proc (path: string): bool
+      ## whether every user can read ``path`` (an ``EnvironmentFile=``)
+
+proc expectedCommands*(files: openArray[string]; key: string): seq[string] =
+  ## The executables ``key`` runs when systemd reads ``files`` in order (a
+  ## unit file, then its drop-ins): each assignment adds its commands, an
+  ## empty one resets the list (systemd.service(5)).
+  for content in files:
+    for d in sectionDirectives(content, ["Service"]):
+      if d.key != key: continue
+      if d.value.strip().len == 0:
+        result.setLen(0)
+        continue
+      for c in commands(d.value): result.add(c.path)
+
+proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
+  ## Where ``unit``'s effective configuration (``show``) does not hold the
+  ## floor it was rendered under (``rendered``, ``version``, minus
+  ## ``exceptions``): one line each, empty when it holds. ``ownDropIns``
+  ## are the drop-ins the add-on installed for it, ``denied`` the calls the
+  ## floor's deny line names (expanded, add-backs removed), ``uidOf`` an
+  ## account's uid (-1 when unknown), ``groupsOf`` the names of every group
+  ## a static account is in (its primary group first; ``systemGroups``).
+  let (unit, rendered, version, show) = (e.unit, e.rendered, e.version, e.show)
+  let exceptions = e.exceptions
+  let denied = e.denied
+  let uidOf = e.uidOf
+  let groupsOf = e.groupsOf
+  let fb = floorBlock(rendered)
+  let ex = exceptionKeys(exceptions)
+  let v = versionNumber(version)
+  var ownDropIns: seq[string]
+  for d in e.ownDropIns: ownDropIns.add(d.path)
+  template problem(s: string) = result.add(unit & ": " & s)
+  if show.getOrDefault("LoadState") != "loaded":
+    problem("LoadState=" & show.getOrDefault("LoadState") & ", not loaded")
+  for k in ScalarFloorKeys:
+    if k in fb:
+      let want = fb[k][^1]
+      if show.getOrDefault(k) != want:
+        problem(k & "=" & show.getOrDefault(k) & ", the floor's is " & want)
+  for k in ["CapabilityBoundingSet", "AmbientCapabilities"]:
+    if k in fb:
+      var want, got: HashSet[string]
+      for t in words(fb[k][^1]): want.incl(t.toLowerAscii())
+      for t in words(show.getOrDefault(k)): got.incl(t.toLowerAscii())
+      if want != got:
+        problem(k & "=" & show.getOrDefault(k) & ", the floor's is " &
+                fb[k][^1])
+  if "RestrictAddressFamilies" in fb:
+    var want, got: HashSet[string]
+    for t in words(fb["RestrictAddressFamilies"][^1]): want.incl(t)
+    for t in words(show.getOrDefault("RestrictAddressFamilies")): got.incl(t)
+    if want != got:
+      problem("RestrictAddressFamilies=" &
+        show.getOrDefault("RestrictAddressFamilies") & ", the floor's is " &
+        fb["RestrictAddressFamilies"][^1])
+  if "DynamicUser" in fb and show.getOrDefault("DynamicUser") != "yes":
+    problem("DynamicUser=" & show.getOrDefault("DynamicUser") &
+            ", the floor's is yes")
+  let noExec = pathSet(show.getOrDefault("NoExecPaths"))
+  if "NoExecPaths" in fb:
+    for line in fb["NoExecPaths"]:
+      for p in pathSet(line):
+        if p notin noExec:
+          problem("NoExecPaths= lacks " & p & ", which the floor names")
+  let execPaths = pathSet(show.getOrDefault("ExecPaths"))
+  if "ExecPaths" in fb:
+    var want: HashSet[string]
+    for line in fb["ExecPaths"]:
+      for p in pathSet(line): want.incl(p)
+    if want != execPaths:
+      problem("ExecPaths=" & show.getOrDefault("ExecPaths") &
+              ", the floor's is " & fb["ExecPaths"].join(" "))
+  elif "NoExecPaths" in fb and execPaths.len > 0:
+    problem("ExecPaths=" & show.getOrDefault("ExecPaths") &
+            ", the floor renders none")
+  if "ReadOnlyPaths" in fb:
+    let ro = pathSet(show.getOrDefault("ReadOnlyPaths"))
+    for line in fb["ReadOnlyPaths"]:
+      for p in pathSet(line):
+        if p notin ro: problem("ReadOnlyPaths= lacks " & p)
+  if "SystemCallFilter" in fb:
+    let f = show.getOrDefault("SystemCallFilter")
+    if f.startsWith("~"):
+      problem("SystemCallFilter is a deny list, the floor's an allow list")
+    else:
+      var bad: seq[string]
+      for t in words(f):
+        if t in denied: bad.add(t)
+      if bad.len > 0:
+        bad.sort()
+        problem("SystemCallFilter allows " & bad.join(" ") &
+                ", which the floor denies")
+  # Provenance (A9 review round 4, finding 3): the unit is loaded from the
+  # file the generation wrote, with exactly the drop-ins it installed --
+  # a vendor drop-in under /usr/lib/systemd, a type-wide service.d/ or a
+  # prefix drop-in included -- so everything systemd reports below comes
+  # from bytes the generation wrote.
+  when not mutated("dropins-from-the-distribution-trusted"):
+    for d in words(show.getOrDefault("DropInPaths")):
+      if d notin ownDropIns:
+        problem("the drop-in " & d & " is not one the add-on installed")
+  else:
+    for d in words(show.getOrDefault("DropInPaths")):
+      if d notin ownDropIns and not d.startsWith("/usr/lib/systemd/") and
+          not d.startsWith("/lib/systemd/"):
+        problem("the drop-in " & d & " is not one the add-on installed")
+  if e.fragment.len > 0 and show.getOrDefault("FragmentPath") != e.fragment:
+    problem("FragmentPath=" & show.getOrDefault("FragmentPath") &
+            ", not the unit file the add-on wrote (" & e.fragment & ")")
+  if show.getOrDefault("SourcePath").len > 0:
+    problem("SourcePath=" & show.getOrDefault("SourcePath") &
+            ": generated from another file")
+  if v >= 2:
+    # Root is refused whatever the unit's exceptions (A9 review round 4,
+    # finding 4: a User= or DynamicUser= exception lifts the account's
+    # spelling rules, never uid 0).
+    if show.getOrDefault("DynamicUser") != "yes":
+      let u = show.getOrDefault("User")
+      if u.len == 0 or u in ["root", "0"] or uidOf(u) == 0:
+        problem("runs as root (User=" & u & ", DynamicUser=" &
+                show.getOrDefault("DynamicUser") & ")")
+    # Every group the service runs with (A9 review round 4, finding 1):
+    # Group=, SupplementaryGroups= and, for a static account, its primary
+    # group and every group /etc/group (or NSS) lists it in. A privileged
+    # one is refused whatever exception the unit names (only a whole-floor
+    # waiver lifts it, and a waived unit is not checked).
+    var held: seq[string]
+    if show.getOrDefault("Group").len > 0: held.add(show.getOrDefault("Group"))
+    held.add(words(show.getOrDefault("SupplementaryGroups")))
+    if show.getOrDefault("DynamicUser") != "yes":
+      held.add(groupsOf(show.getOrDefault("User")))
+    var seen: HashSet[string]
+    for g in held:
+      if g in seen: continue
+      seen.incl(g)
+      if g in PrivilegedGroups:
+        problem("runs with the privileged group " & g)
+    if "RootDirectory" notin ex:
+      for k in ["RootDirectory", "RootImage"]:
+        if show.getOrDefault(k).len > 0:
+          problem(k & "=" & show.getOrDefault(k))
+  if v >= 4:
+    if show.getOrDefault("PAMName").len > 0:
+      problem("PAMName=" & show.getOrDefault("PAMName"))
+    for k in ["MountImages", "ExtensionImages", "ExtensionDirectories"]:
+      if k notin ex and show.getOrDefault(k).len > 0:
+        problem(k & "=" & show.getOrDefault(k))
+    if ExecConfinementException notin ex:
+      for w in writablePlaces(show):
+        let p = normalisedPath(w)
+        for kt in KernelTrees:
+          if p == kt or p.startsWith(kt & "/") or kt.startsWith(p & "/"):
+            problem("the writable place " & p & " is in or over " & kt)
+        if p notin noExec:
+          problem("the writable place " & p & " is not in NoExecPaths=")
+        for x in execPaths:
+          if p == x or p.startsWith(x & "/") or x.startsWith(p & "/"):
+            problem("the writable place " & p & " overlaps ExecPaths= " & x)
+
+  # Default-deny over everything systemd reports (A9 review round 4,
+  # finding 3): each property is compared with the floor, is a command
+  # compared with the generation's own rendering, or is reviewed as inert.
+  when not mutated("properties-not-default-denied"):
+    for k, val in show:
+      if k in ComparedProps or isExecProp(k) or isInertProp(k): continue
+      problem("the property " & k & "=" & val & " is neither compared " &
+              "with the floor nor reviewed as inert; refused")
+    # The commands, from the Ex forms (which carry the flags).
+    var files = @[rendered]
+    for d in e.ownDropIns: files.add(d.content)
+    var execRoots: seq[string]
+    for line in fb.getOrDefault("ExecPaths"):
+      for q in pathSet(line): execRoots.add(q)
+    for k in ExecProps:
+      let got = execEntries(e.lines, k)
+      let want = expectedCommands(files, k)
+      if got.len != want.len:
+        problem(k & " runs " & $got.len & " command(s), the generation's " &
+                "rendering " & $want.len)
+      for i, c in got:
+        for f in c.flags:
+          if f notin AllowedExecFlags:
+            problem(k & " " & c.path & " carries the flag " & f &
+                    " (it runs outside the user or the sandbox)")
+        if i < want.len and want[i].startsWith("/") and
+            normalisedPath(want[i]) != normalisedPath(c.path):
+          problem(k & " runs " & c.path & ", the rendering " & want[i])
+        if "NoExecPaths" in fb and ExecConfinementException notin ex:
+          let cp = normalisedPath(c.path)
+          var inside = false
+          for r in execRoots:
+            if cp == r or cp.startsWith(r & "/"): inside = true
+          if not inside:
+            problem(k & " runs " & c.path & ", outside ExecPaths=")
+    # The files systemd opens for the service, as root, before the sandbox.
+    if show.getOrDefault("OpenFile").len > 0:
+      problem("OpenFile=" & show["OpenFile"] & " opens a file as root")
+    let sin = show.getOrDefault("StandardInput")
+    if sin.len > 0 and sin notin AllowedStdin:
+      problem("StandardInput=" & sin & " opens a file or terminal")
+    for k in ["StandardOutput", "StandardError"]:
+      let so = show.getOrDefault(k)
+      if so.len > 0 and so notin AllowedStdout:
+        problem(k & "=" & so & " opens a file or terminal")
+    if show.getOrDefault("TTYPath").len > 0:
+      problem("TTYPath=" & show["TTYPath"])
+    if show.getOrDefault("SecureBits") notin ["", "0"]:
+      problem("SecureBits=" & show["SecureBits"])
+    if show.getOrDefault("KeyringMode") notin ["", "private"]:
+      problem("KeyringMode=" & show["KeyringMode"] & ", not private")
+    for k in ["Personality", "JoinsNamespaceOf", "NetworkNamespacePath",
+              "IPCNamespacePath", "ImportCredential", "ImportCredentialEx",
+              "BPFProgram", "USBFunctionDescriptors", "USBFunctionStrings",
+              "ExecSearchPath", "RootHash", "RootHashSignature", "RootVerity",
+              "RootImageOptions", "RootHashPath", "RootHashSignaturePath",
+              "UserNamespacePath", "NFTSet", "SELinuxContext",
+              "AccessSELinuxContext", "AppArmorProfile", "SmackProcessLabel",
+              "BPFDelegateCommands", "BPFDelegateMaps", "BPFDelegatePrograms",
+              "BPFDelegateAttachments"]:
+      if show.getOrDefault(k).len > 0:
+        problem(k & "=" & show[k])
+    for k in ["RootDirectoryStartOnly", "Delegate", "CoredumpReceive",
+              "RootEphemeral", "Transient"]:
+      if show.getOrDefault(k) notin ["", "no"]:
+        problem(k & "=" & show[k])
+    if show.getOrDefault("MountFlags") notin ["", "0"]:
+      problem("MountFlags=" & show["MountFlags"] & " (mount propagation)")
+    # A ``*Directory=`` entry is shown again with its symlinks
+    # (``name:link``, systemd 254+): each link stays inside the directory
+    # root, under a name without ``/`` or ``..``.
+    for (k, _) in DirectoryRoots:
+      for t in words(show.getOrDefault(k & "Symlink")):
+        let c = t.find(':')
+        let link = if c >= 0: t[c + 1 .. ^1] else: ""
+        if link.len > 0 and (link.startsWith("/") or hasDotDot(link)):
+          problem(k & "Symlink=" & t & ": a link outside the directory root")
+    if show.getOrDefault("DeviceAllow").len > 0 and
+        show.getOrDefault("PrivateDevices") != "yes":
+      problem("DeviceAllow=" & show["DeviceAllow"] & " without PrivateDevices=yes")
+    let svc = unit[0 ..< max(0, unit.rfind('.'))]
+    for k in ["LoadCredential", "LoadCredentialEncrypted"]:
+      for t in words(show.getOrDefault(k)):
+        let c = t.find(':')
+        let src = if c >= 0: t[c + 1 .. ^1] else: ""
+        if src.startsWith("/") and
+            not normalisedPath(src).startsWith(CredentialRoot & "/" & svc & "/"):
+          problem(k & " reads " & src & ", outside the service's own " &
+                  "credentials (" & CredentialRoot & "/" & svc & ")")
+    for t in words(show.getOrDefault("EnvironmentFiles")):
+      if t.startsWith("/") and e.readableByAll != nil and
+          not e.readableByAll(t):
+        problem("EnvironmentFile " & t & " is read as root and is not " &
+                "readable by every user")
+    # The settings systemd does not report back (PermissionsStartOnly= is
+    # applied at exec time and has no property): the files it loaded may
+    # carry only keys the floor knows.
+    for (path, content) in e.loaded:
+      if path.endsWith("/" & StartHoldName): continue   # the switch's own hold
+      let dropIn = path != e.fragment
+      for d in sectionDirectives(content):
+        if not floorKnowsKey(d.section, d.key, dropIn):
+          problem(path & " sets " & d.key & "=, which the floor does not " &
+                  "know (it is refused as systemd would not report it)")
+
+# ---------------------------------------------------------------------------
+# The deny line, expanded with the base's own systemd.
+# ---------------------------------------------------------------------------
+
+proc withoutEscapes(s: string): string =
+  var i = 0
+  while i < s.len:
+    if s[i] == '\e' and i + 1 < s.len and s[i + 1] == '[':
+      var j = i + 2
+      while j < s.len and s[j] notin {'A'..'Z', 'a'..'z'}: inc j
+      i = j + 1
+    else:
+      result.add(s[i])
+      inc i
+
+proc parseSyscallGroups*(text: string): Table[string, seq[string]] =
+  ## ``systemd-analyze syscall-filter`` (escape sequences removed: systemd
+  ## 255 writes one before each nested group even with no terminal).
+  var cur = ""
+  for raw0 in text.splitLines():
+    let raw = withoutEscapes(raw0)
+    let l = raw.strip()
+    if l.len == 0 or l.startsWith("#"): continue
+    if not raw.startsWith(" ") and l.startsWith("@"):
+      cur = l
+      result[cur] = @[]
+    elif cur.len > 0:
+      result[cur].add(l)
+
+proc expandCalls*(groups: Table[string, seq[string]];
+                  items: openArray[string]): HashSet[string] =
+  proc go(item: string; acc: var HashSet[string]) =
+    if item.startsWith("@"):
+      if item in groups:
+        for m in groups[item]: go(m, acc)
+    else: acc.incl(item)
+  for i in items: go(i, result)
+
+proc deniedCalls*(rendered: string;
+                  groups: Table[string, seq[string]]): HashSet[string] =
+  ## The calls the floor block's ``~`` line denies, less what a later
+  ## ``SystemCallFilter=`` line (an exception's add-back) allows again.
+  let fb = floorBlock(rendered)
+  if "SystemCallFilter" notin fb: return
+  var deny, back: seq[string]
+  var seenDeny = false
+  for line in fb["SystemCallFilter"]:
+    if line.startsWith("~"):
+      seenDeny = true
+      deny.add(words(line[1 .. ^1]))
+    elif seenDeny:
+      back.add(words(line))
+  result = expandCalls(groups, deny) - expandCalls(groups, back)
+
+proc baseSyscallGroups*(): Table[string, seq[string]] =
+  ## The base's own syscall groups, from its ``systemd-analyze`` (by
+  ## absolute path; ``host_exec``).
+  let exe = resolveHostTool(SystemdAnalyzeCandidates)
+  if exe.len == 0:
+    raise newException(HostToolMissing, "systemd-analyze not found at " &
+                       SystemdAnalyzeCandidates.join(" or "))
+  let r = runHostTool([exe, "syscall-filter", "--no-pager"])
+  if r.exitCode != 0:
+    raise newException(OSError, "systemd-analyze syscall-filter: " &
+                       r.output.strip())
+  parseSyscallGroups(r.output)
+
+proc systemUid*(name: string): int =
+  ## The uid ``getent passwd`` gives ``name``, -1 when it gives none.
+  let exe = resolveHostTool(GetentCandidates)
+  if exe.len == 0: return -1
+  let r = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
+  if r.exitCode != 0: return -1
+  let f = r.output.strip().split(':')
+  if f.len < 3: return -1
+  try: parseInt(f[2]) except ValueError: -1
+
+proc systemGroups*(name: string): seq[string] =
+  ## The groups a static account is in: its primary group (``getent
+  ## passwd``'s gid, named by ``getent group``; the number when no group
+  ## has it, ``root`` for gid 0) and every group whose member list names it
+  ## (``getent group``: /etc/group and NSS). An account getent does not
+  ## know is reported in ``root``: refused rather than trusted.
+  let exe = resolveHostTool(GetentCandidates)
+  if exe.len == 0 or name.len == 0: return @["root"]
+  let pw = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
+  if pw.exitCode != 0: return @["root"]
+  let f = pw.output.strip().split(':')
+  if f.len < 4: return @["root"]
+  let all = runHostTool([exe, "group"], mergeStderr = false)
+  if all.exitCode != 0: return @["root"]
+  var primary = if f[3] == "0": "root" else: f[3]
+  for l in all.output.splitLines():
+    let g = l.split(':')
+    if g.len < 4: continue
+    if g[2] == f[3]: primary = g[0]
+    elif name in g[3].split(','): result.add(g[0])
+  result.insert(primary, 0)

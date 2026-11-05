@@ -30,6 +30,7 @@ import repro_profile
 import ./addon_apply
 import ./agent_checks
 import ./agent_record
+import ./attestation
 import ./static_tree
 from ./generation0 import StoreRoot
 
@@ -114,7 +115,12 @@ proc engineAgentRoute*(addonState, agentStateDir: string;
   earAddonSwitch
 
 proc agentRecordOf*(m: DeployManifest): AgentRecord =
-  AgentRecord(deploymentId: m.deploymentId, sequence: m.sequence)
+  ## What the generation an apply of ``m`` commits records of it, including
+  ## the producer-side digests its generation attestation names (spec
+  ## §10.5).
+  AgentRecord(deploymentId: m.deploymentId, sequence: m.sequence,
+    profileDigest: manifestProfileDigestOf(m),
+    closuresDigest: closureDigestsDigest(m.closureDigests))
 
 proc defaultAddonApply(): AddonApplyFn =
   result = proc(o: AddonApplyOptions): AddonApplyResult {.closure, gcsafe.} =

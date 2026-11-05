@@ -12,9 +12,14 @@ when defined(reproVendoredHash):
   {.passC: "-DREPRO_VENDORED_HASH".}
   {.passC: "-DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 -DBLAKE3_NO_SSE2 " &
            "-DBLAKE3_NO_SSE41 -DBLAKE3_USE_NEON=0".}
-  {.compile: blake3Root & "/blake3.c".}
-  {.compile: blake3Root & "/blake3_dispatch.c".}
-  {.compile: blake3Root & "/blake3_portable.c".}
+  # Optimized whatever the Nim build mode: these files are the store's
+  # content-hashing hot loop, and the default (debug) build otherwise
+  # compiles them at -O0, which measured 30x slower when verifying a
+  # 2.4 GB store bundle (docs/store-bundles.md §10). The output is the same
+  # digest either way.
+  {.compile(blake3Root & "/blake3.c", "-O3").}
+  {.compile(blake3Root & "/blake3_dispatch.c", "-O3").}
+  {.compile(blake3Root & "/blake3_portable.c", "-O3").}
 
 import std/strutils
 

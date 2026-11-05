@@ -50,6 +50,19 @@
 ##       (`cd ../runquota && just build`); an older `runquotad` on `PATH` fails
 ##       this case, by design, rather than passing it vacuously.
 ##
+## READINESS CASES (reprobuild-pm issue
+## `2026-10-31-repro-test-gives-its-runquotad-15-seconds-to-become-reachable`).
+## The wait for a daemon this invocation started is bounded by whether that
+## daemon is still alive, not by a short wall-clock count: on a full-suite
+## host at load ~200, a wait of 300 polls of 50 ms (~15 s) fails `repro test`
+## with "runquotad did not become reachable" against a healthy daemon. Here
+## `RUNQUOTAD_BIN` is a wrapper that sleeps `SlowDaemonDelaySeconds` -- longer
+## than such a bound -- before it becomes the real daemon, and the invocation
+## must still adopt it.
+## The paired control has the wrapper exit after its delay instead: the wait
+## must end on that exit, with the daemon's own stderr in the error, rather
+## than run on to its ceiling.
+##
 ## SIGNAL CONTROLS check that ignored SIGHUP leaves both processes alive,
 ## ordinary and SA_SIGINFO callbacks retain their exit behavior, and a
 ## one-shot handler retains SA_RESETHAND's default action on the next signal.
@@ -175,8 +188,23 @@ const
     ## and exits on its own -- a backstop, so a parent that died mid-case
     ## does not leave a child (and its daemon) sleeping forever.
   StartupBudgetMillis = 60_000
-    ## Child start, plus `startAutoRunQuotaIfNeeded`'s own readiness wait
-    ## (up to 300 x 50 ms), plus slack for a loaded host.
+    ## Child start, plus a healthy daemon's time to bind, plus slack for a
+    ## loaded host. Shorter than `startAutoRunQuotaIfNeeded`'s own readiness
+    ## ceiling on purpose: a daemon this slow on an idle test host is a
+    ## defect worth seeing, not one to wait out.
+  SlowDaemonDelaySeconds = 25
+    ## How long the slow-daemon wrapper sleeps before it becomes `runquotad`.
+    ## Comfortably past a 300 x 50 ms poll count (~15 s), so a wait bounded
+    ## that way fails the slow-daemon case, and well inside both
+    ## `StartupBudgetMillis` and the readiness ceiling.
+  ExitedDaemonVerdictMillis = 60_000
+    ## Upper bound on how long a readiness wait may run on after its daemon
+    ## has exited -- half the readiness ceiling, so a wait that ignored the
+    ## exit and ran to the ceiling is red even on a loaded host.
+  SlowDaemonDelayVar = "REPRO_TEST_SLOW_RUNQUOTAD_DELAY_SECONDS"
+  SlowDaemonExitsVar = "REPRO_TEST_SLOW_RUNQUOTAD_EXITS"
+  SlowDaemonExitNotice = "slow-runquotad: exiting before it ever listened"
+  ReadinessFailureMarker = "auto-runquota-child: readiness failed: "
   DaemonExitBudgetMillis = 90_000
     ## The daemon's orderly shutdown joins a worker pool and drains its
     ## SQLite writers; runquota's own SIGTERM tests allow 15 s on an idle
@@ -268,7 +296,31 @@ proc childArm() =
       echo "auto-reap refusal preserved SIGCHLD and spawned no daemon"
       flushFile(stdout)
       quit 0
-  var daemon = startAutoRunQuotaIfNeeded(false)
+  when defined(linux):
+    let slowDelay = getEnv(SlowDaemonDelayVar)
+    if slowDelay.len > 0:
+      # THE SLOW DAEMON: alive throughout, reachable only after the delay.
+      # `exec` keeps the pid, so the process the invocation spawned and
+      # watches is the daemon that eventually binds.
+      let realDaemon = getEnv("RUNQUOTAD_BIN")
+      doAssert realDaemon.len > 0
+      let wrapper = scratch / "slow-runquotad"
+      let afterDelay =
+        if getEnv(SlowDaemonExitsVar) == "1":
+          "echo " & quoteShell(SlowDaemonExitNotice) & " >&2\nexit 9\n"
+        else:
+          "exec " & quoteShell(realDaemon) & " \"$@\"\n"
+      writeFile(wrapper, "#!/bin/sh\nsleep " & $parseInt(slowDelay) & "\n" &
+        afterDelay)
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+  var daemon: owned(Process)
+  try:
+    daemon = startAutoRunQuotaIfNeeded(false)
+  except OSError as error:
+    echo ReadinessFailureMarker, error.msg
+    flushFile(stdout)
+    quit 4
   if daemon == nil:
     echo "auto-runquota-child: startAutoRunQuotaIfNeeded started no daemon"
     flushFile(stdout)
@@ -435,7 +487,9 @@ when defined(linux):
     if fileExists(sibling):
       result = sibling
 
-  proc startInvocation(result: var Invocation; tag: string; signalMode = 0) =
+  proc startInvocation(result: var Invocation; tag: string; signalMode = 0;
+                       extraEnv: openArray[(string, string)] = [];
+                       expectDaemon = true) =
     result.scratch = getTempDir() / ("repro-rq-owned-" & tag & "-" &
       $getCurrentProcessId())
     releaseDirAtProcessExit(result.scratch)
@@ -458,6 +512,8 @@ when defined(linux):
       env[key] = value
     env[AutoRunQuotaChildModeVar] = result.scratch
     env["REPRO_TEST_OWNED_SIGNAL_MODE"] = $signalMode
+    for (key, value) in extraEnv:
+      env[key] = value
     let runquotad = runquotadForChild()
     if runquotad.len > 0:
       env["RUNQUOTAD_BIN"] = runquotad
@@ -470,6 +526,8 @@ when defined(linux):
     result.daemonDir = runquotaEndpointPath(
       "reprobuild-runquota-" & $processID(result.child)).parentDir
     releaseDirAtProcessExit(result.daemonDir)
+    if not expectDaemon:
+      return
     result.daemonPid = readDaemonPid(result.child, result.childOutput)
     result.daemonStart = processStartTime(result.daemonPid)
     note(tag & ": child pid=" & $processID(result.child) &
@@ -576,6 +634,52 @@ suite "an auto-started runquotad ends with its invocation":
         child.close()
     else:
       skip("Linux child ownership observation uses POSIX waitpid")
+
+  test "a live daemon slower than 15 s to bind is still adopted":
+    when defined(linux):
+      doAssert runquotadAvailable()
+      var inv = Invocation(sentinelFd: -1)
+      try:
+        let started = getMonoTime()
+        startInvocation(inv, "slow", extraEnv = [
+          (SlowDaemonDelayVar, $SlowDaemonDelaySeconds)])
+        let waitedMillis = (getMonoTime() - started).inMilliseconds
+        note("daemon adopted after " & $waitedMillis & " ms")
+        # The delay was really served: the wrapper slept before it bound.
+        check waitedMillis >= SlowDaemonDelaySeconds * 1000
+        check inv.daemonStart.len > 0
+        check ReadinessFailureMarker notin inv.childOutput
+      finally:
+        cleanUp(inv)
+    else:
+      skip("Linux only: the verdicts read /proc")
+
+  test "a daemon that exits before it listens ends the wait at its exit":
+    when defined(linux):
+      doAssert runquotadAvailable()
+      var inv = Invocation(sentinelFd: -1)
+      try:
+        let started = getMonoTime()
+        startInvocation(inv, "exits", extraEnv = [
+          (SlowDaemonDelayVar, "2"), (SlowDaemonExitsVar, "1")],
+          expectDaemon = false)
+        let eof = drainsToEofWithin(inv.child, ExitedDaemonVerdictMillis,
+          inv.childOutput)
+        let waitedMillis = (getMonoTime() - started).inMilliseconds
+        note("invocation output closed=" & $eof & " after " & $waitedMillis &
+          " ms; it said:\n" & inv.childOutput)
+        check eof
+        if eof:
+          check inv.child.waitForExit() == 4
+        check ReadinessFailureMarker & "runquotad did not become reachable" in
+          inv.childOutput
+        # The daemon's own last words reach the error, so the wait saw ITS
+        # exit rather than giving up on a clock.
+        check SlowDaemonExitNotice in inv.childOutput
+      finally:
+        cleanUp(inv)
+    else:
+      skip("Linux only: the verdicts read /proc")
 
   test "(a) SIGTERM to the invocation stops its daemon and releases its stdout":
     when defined(linux):

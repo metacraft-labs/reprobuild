@@ -95,6 +95,27 @@ const
   vAppendBatch = 2'u8
   vAck = 3'u8
 
+  # NOT IN THE VOCABULARY. The numbers a sink that granted a credential more
+  # than append would use for each of the four operations EVID-2 and the
+  # ReproOS add-on threat model (G34) say an appender's credential must not
+  # have. They are named so that a credential probe
+  # (``probeForbiddenOperation``) can show each one refused, one by one,
+  # and so that the refusal entry the sink chains (``ekRefusedVerb``) says
+  # which operation was attempted. The sink answers none of them.
+  vList* = 16'u8
+  vRead* = 17'u8
+  vOverwrite* = 18'u8
+  vDelete* = 19'u8
+  vListing = 20'u8
+    ## Only the falsifying build below ever sends it.
+
+  SinkMutation {.strdefine: "reproAddonMutation".} = ""
+    ## The ReproOS add-on's falsifying builds (``repro_addon/mutations``)
+    ## share this switch. ``sink-credential-has-read-scope``: the sink
+    ## answers a list or a read from any appender -- what a sink whose
+    ## write credential also carried read scope would do -- so the
+    ## append-only gate must go red. Never set in a product build.
+
 type
   EntryKind* = enum
     ekRecord = "record"
@@ -847,7 +868,20 @@ proc handleSinkConnection(sink: EvidenceSinkServer;
         ack.add(receipt.signature)
         await sendSinkFrame(conn, vAck, ack)
       else:
-        # Read / list / delete / anything else: not in the vocabulary.
+        when SinkMutation == "sink-credential-has-read-scope":
+          # FALSIFYING BUILD (see ``SinkMutation``): a list or a read is
+          # answered with the store's entries.
+          if frame.verb in {vList, vRead}:
+            var listing: seq[byte] = @[]
+            let entries = readEvidenceStore(sink.store.dir)
+            listing.putU32(uint32(entries.len))
+            for e in entries:
+              listing.putU64(e.seq)
+              listing.add(e.entryHash)
+            await sendSinkFrame(conn, vListing, listing)
+            continue
+        # Read / list / overwrite / delete / anything else: not in the
+        # vocabulary.
         inc sink.refusedVerbCount
         sink.recordRefusal(who, frame.verb)
         break
@@ -1239,6 +1273,32 @@ proc close*(a: EvidenceAppender) =
   a.conn = nil
   try: waitFor tls.close(conn) except CatchableError: discard
 
+type
+  ForbiddenOperation* = enum
+    foList = "list"
+    foRead = "read"
+    foOverwrite = "overwrite"
+    foDelete = "delete"
+
+proc verbOf*(op: ForbiddenOperation): uint8 =
+  case op
+  of foList: vList
+  of foRead: vRead
+  of foOverwrite: vOverwrite
+  of foDelete: vDelete
+
+proc forbiddenOperationBody*(op: ForbiddenOperation): seq[byte] =
+  ## The request a sink that had the operation would take: the entry it
+  ## names is the first one (sequence 0), and an overwrite carries a
+  ## replacement record. The sink must refuse each without reading it.
+  case op
+  of foList: result = @[]
+  of foRead, foDelete: result.putU64(0'u64)
+  of foOverwrite:
+    result.putU64(0'u64)
+    result.add(encodeEvidenceRecord(newEvidenceRecord(ecAudit,
+      "credential-probe", "overwrite")))
+
 proc sendRawVerbForTesting*(a: EvidenceAppender; verb: uint8;
                             body: seq[byte]): Future[bool] {.async.} =
   ## Test seam for the write-only property: sends an arbitrary verb (a
@@ -1257,3 +1317,14 @@ proc sendRawVerbForTesting*(a: EvidenceAppender; verb: uint8;
   try: await tls.close(a.conn) except CatchableError: discard
   a.conn = nil
   a.markDown()
+
+proc probeForbiddenOperation*(a: EvidenceAppender;
+                              op: ForbiddenOperation): Future[bool]
+                              {.async.} =
+  ## Attempts ``op`` with the appender's real credential and reports
+  ## whether the sink ANSWERED it (true: the credential can do more than
+  ## append, which EVID-2 forbids). The sink's contract is to answer
+  ## nothing, record the attempt and close the connection. Used by a host's
+  ## own self-test of its credential (the ReproOS add-on's
+  ## ``evidence-credential-check``) and by the tests.
+  result = await a.sendRawVerbForTesting(verbOf(op), forbiddenOperationBody(op))

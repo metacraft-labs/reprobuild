@@ -35,6 +35,7 @@ import ./errors
 import ./service_floor
 from ./service_floor_v1 as floorV1 import nil
 from ./service_floor_v2 as floorV2 import nil
+from ./service_floor_v3 as floorV3 import nil
 
 export service_floor.EServiceFloor, service_floor.ServiceFloorHardening,
   service_floor.FloorVersion, service_floor.WholeFloorException,
@@ -866,7 +867,7 @@ proc withKeepMounts(r: SystemResource; content: string): string =
     outLines = @["[Unit]", line, ""] & outLines
   outLines.join("\n")
 
-proc renderedUnitBeforeFloor*(r: SystemResource): string =
+proc renderedUnitBeforeFloor*(r: SystemResource; keepMounts = true): string =
   ## The unit-file bytes a `systemd.systemUnit` resource installs, before
   ## the hardening floor (`renderedSystemUnitContent`). Without
   ## a closure lock that is `suContent` verbatim. With one, the unit's
@@ -890,7 +891,7 @@ proc renderedUnitBeforeFloor*(r: SystemResource): string =
       raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "': " &
         getCurrentExceptionMsg())
   if r.suCredentials.len == 0:
-    return withKeepMounts(r, content)
+    return (if keepMounts: withKeepMounts(r, content) else: content)
   if credentialServiceOf(r.suName).len == 0:
     raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
       "' names credentials, but only a plain `<service>.service` unit " &
@@ -941,7 +942,8 @@ proc renderedUnitBeforeFloor*(r: SystemResource): string =
   if not unitSeen:
     outLines = @["[Unit]", "Wants=" & SecretsOrderingUnit,
                  "After=" & SecretsOrderingUnit, ""] & outLines
-  withKeepMounts(r, outLines.join("\n"))
+  (if keepMounts: withKeepMounts(r, outLines.join("\n"))
+   else: outLines.join("\n"))
 
 proc effectiveHardening*(r: SystemResource): string =
   ## The hardening the unit is rendered with: its `hardening` field, which
@@ -969,9 +971,28 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
   case r.suFloorVersion
   of "", FloorVersion:
     discard
-  of "2":
+  of "3":
+    # 778e8207f2 to 221ac312b6: exactly their rendering (frozen v3).
+    try:
+      let ex = floorV3.parseFloorExceptions(r.suName, r.suFloorExceptions)
+      var whole = false
+      for e in ex:
+        if e.setting == floorV3.WholeFloorException: whole = true
+      if not floorV3.hasServiceSection(result):
+        if whole: return
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' (floor version 3) has no [Service] section")
+      return floorV3.appendToServiceSection(result,
+        floorV3.renderServiceFloorLines(r.suName, result, ex))
+    except floorV3.EServiceFloor as e:
+      raiseSystemProfileInvalid(e.msg)
+  of "2", "2-prekeep":
     # A generation the engines from aa72782154 to d03bb6759e stored:
-    # exactly their rendering (the frozen `service_floor_v2`).
+    # exactly their rendering (the frozen `service_floor_v2`). Those
+    # before fca5ed3486 rendered no `RequiresMountsFor=` for a kept state
+    # directory (`2-prekeep`; A9 review round 3, finding 8).
+    if r.suFloorVersion == "2-prekeep":
+      result = renderedUnitBeforeFloor(r, keepMounts = false)
     try:
       let ex = floorV2.parseFloorExceptions(r.suName, r.suFloorExceptions)
       var whole = false
@@ -986,7 +1007,9 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
     except floorV2.EServiceFloor as e:
       raiseSystemProfileInvalid(e.msg)
   of "1":
-    # A generation the first floored engine (1a598170c0) stored.
+    # A generation the first floored engine (1a598170c0) stored; it
+    # predates kept state directories, so no `RequiresMountsFor=` either.
+    result = renderedUnitBeforeFloor(r, keepMounts = false)
     try:
       if not floorV1.hasServiceSection(result):
         raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
@@ -1057,6 +1080,14 @@ proc dropInApplies*(dropInUnit, unitName: string): bool =
   let at = stems[0].find('@')
   if at >= 0:
     stems.add(stems[0][0 .. at])     # `foo@` -- the template `foo@.type`
+  # A floored template's instances read the drop-ins of their instance
+  # names (`foo-bar@1.service.d/` for `foo-bar@.service`; A9 review round
+  # 3, finding 4).
+  when InfraAddonMutation notin ["floor-static-r3-disabled", "floor-unchecked"]:
+    if stems[0].endsWith("@"):
+      let dstem = dropInUnit[0 ..< dropInUnit.len - typ.len]
+      if dstem.startsWith(stems[0]) and dstem.len > stems[0].len:
+        return true
   for stem in stems:
     if dropInUnit == stem & typ: return true
     # every dashed prefix: `a-b-c` -> `a-b-`, `a-`
@@ -1077,16 +1108,29 @@ proc checkFloorDropIns*(p: SystemProfile) =
   when InfraAddonMutation == "floor-ignores-drop-ins":
     return
   for d in p.resources:
-    if d.kind != srkSystemdSystemDropIn: continue
+    # A `systemd.systemDropIn`, and a `systemUnit` with `collision =
+    # "dropIn"`, which the add-on installs as a drop-in of the unit it names
+    # (A9 review round 3, finding 5).
+    var target, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      target = d.diUnit
+      content = d.diContent
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      when InfraAddonMutation in ["floor-static-r3-disabled", "floor-unchecked"]:
+        continue
+      target = d.suName
+      content = d.suContent
+    else:
+      continue
     for u in p.resources:
-      if u.kind != srkSystemdSystemUnit or
-          not dropInApplies(d.diUnit, u.suName) or
+      if u.kind != srkSystemdSystemUnit or u.suCollision == "dropIn" or
+          not dropInApplies(target, u.suName) or
           u.suHardening != ServiceFloorHardening:
         continue
       try:
         let ex = parseFloorExceptions(u.suName, u.suFloorExceptions)
         let why = dropInFloorRefusal(u.suName, renderedUnitBeforeFloor(u),
-                                     d.diContent, ex)
+                                     content, ex)
         if why.len > 0:
           raiseSystemProfileInvalid("systemd.systemDropIn '" & d.address &
             "' of the floored unit " & u.suName & ": " & why)

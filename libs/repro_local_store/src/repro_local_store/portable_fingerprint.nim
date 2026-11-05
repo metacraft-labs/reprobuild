@@ -46,7 +46,7 @@
 import std/[algorithm, options, os, strutils]
 
 from repro_core/link_target import readSymlinkTarget
-from repro_core/paths import extendedPath, isOrdinaryFileUnderRuntimeMount
+from repro_core/paths import extendedPath
 import ./pattern_scoped_enumeration
 when defined(posix):
   from std/posix import Stat, stat, S_ISREG
@@ -226,6 +226,13 @@ proc sortedByLength(roots: openArray[LogicalRoot]): seq[LogicalRoot] =
 proc toLogicalPath*(roots: openArray[LogicalRoot]; physical: string):
     LogicalPath =
   ## Rewrite an absolute physical path against the longest matching root.
+  ##
+  ## LONGEST, which is what keeps a project under a system root tracked: a
+  ## project at `/dev/shm/<name>` is a tracked root inside the untracked
+  ## `/dev`, and its files take the project's label. The build engine's
+  ## volatile-path fold keeps a path under `/dev` for the same reason, that it
+  ## is under one of these declared roots (`actionVolatileScope`), so such an
+  ## input is named in the portable key rather than left out as untracked.
   let target = normalizeForCompare(physical)
   let original = physical.replace('\\', '/')
   for root in sortedByLength(roots):
@@ -233,12 +240,6 @@ proc toLogicalPath*(roots: openArray[LogicalRoot]; physical: string):
     if base.len == 0:
       continue
     if target == base or target.startsWith(base & "/"):
-      # The `/dev` system root is not an answer for the ordinary files under
-      # `/dev/shm`: an untracked path is left out of the key, and these are real
-      # inputs. They are named as any path under no root is.
-      if root.kind == lrkUntracked and
-          original.isOrdinaryFileUnderRuntimeMount():
-        continue
       let kind = if root.kind == lrkUntracked: lpkUntracked else: lpkTracked
       # Keep the ORIGINAL spelling of the relative part: case matters for
       # content on case-sensitive hosts and is merely cosmetic elsewhere.

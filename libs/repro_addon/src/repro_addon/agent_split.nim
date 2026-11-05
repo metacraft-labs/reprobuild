@@ -30,7 +30,7 @@
 ## unit: the fetch unit is the network-facing half, and a compromise of it
 ## must yield at most what the signed manifest already allows.
 
-import std/[json, os, posix, strutils, times]
+import std/[algorithm, json, os, posix, strutils, times]
 
 import repro_core/host_apply_lock
 import repro_infra
@@ -54,6 +54,8 @@ import ./agent_record
 import ./agent_switch
 import ./apt_hook
 import ./evidence
+import ./evidence_ship
+import ./tick_evidence
 import ./fingerprint
 import ./generation0
 import ./host_exec
@@ -61,7 +63,7 @@ import ./ledger
 import ./mutations
 import ./verified_compile
 
-export agent_checks, verified_compile
+export agent_checks, verified_compile, tick_evidence
 import ./preflight
 import ./seams
 import ./secrets_ops
@@ -645,6 +647,26 @@ type AgentApplyContext* = object
   ## outcome.
   copyDir*: string
   drift*: seq[string]
+  refusal*: string
+    ## Why the apply refused what the fetch unit staged (DET-AO-2), "" when
+    ## it did not; the tick's evidence record carries it with the staged
+    ## bytes (EVID-1), and the staged copy is preserved for investigation.
+  refusalPayload*: string
+  refusalRecorded*: bool
+    ## The refusal already left its own record (the compiled-profile pin).
+
+proc refuse(ctx: ptr AgentApplyContext; why: string; payload = "";
+            recorded = false): tuple[ok: bool; message: string] =
+  ## A refusal of staged input, noted for the tick's evidence record.
+  ctx.refusal = why
+  ctx.refusalPayload = payload
+  ctx.refusalRecorded = recorded
+  (false, why)
+
+proc stagedText(copyDir, name: string): string =
+  if copyDir.len > 0 and fileExists(copyDir / name):
+    try: readFile(copyDir / name) except IOError: ""
+  else: ""
 
 proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHook =
   ## The apply of one selected, verified manifest on an add-on host.
@@ -688,7 +710,7 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
             if copyDir.len > 0 and fileExists(copyDir / StagedNotesName):
               why.add(" (fetch unit: " &
                 readFile(copyDir / StagedNotesName).strip() & ")")
-            return (false, why)
+            return ctx.refuse(why)
           text = readFile(copyDir / StagedCanonicalName)
           let actionsJson = if fileExists(copyDir / StagedActionsName):
                               readFile(copyDir / StagedActionsName) else: ""
@@ -699,18 +721,19 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
                          else: ""
           let pin = compiledProfileCheck(m, text, actionsJson, revision)
           if pin.len > 0:
-            recordCompiledProfileRefusal(m, pin)
-            return (false, pin)
+            # The tick's record carries the refusal and the compiled text
+            # (EVID-1), under the A8 record's kind.
+            return ctx.refuse(pin, text)
           if actions.len == 0 and actionsJson.len > 0:
             actions = actionsFromJson(actionsJson)
       var prof: SystemProfile
       try: prof = parseAddOnUserProfile(text)
       except CatchableError as e:
-        return (false, "the profile does not parse: " & e.msg)
+        return ctx.refuse("the profile does not parse: " & e.msg, text)
       let refusal = agentProfileRefusal(m, prof, not canonical,
                                         DefaultStateDir)
       if refusal.len > 0:
-        return (false, refusal)
+        return ctx.refuse(refusal, text)
       if actions.len > 0:
         if copyDir.len == 0:
           return (false, "the manifest carries build actions, which only " &
@@ -718,7 +741,7 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
         try:
           installStagedOutputs(m, actions, copyDir)
         except CatchableError as e:
-          return (false, e.msg)
+          return ctx.refuse(e.msg, stagedText(copyDir, StagedActionsName))
       var failedAtFloor: seq[string]
       let r = tickApply(DefaultStateDir, layout, m, proc(o: AddonApplyOptions):
           AddonApplyResult =
@@ -743,16 +766,53 @@ proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHo
         raise newException(EApplyFailedAtFloor, failedAtFloor.join("; "))
       r
 
-proc recordStale(o: AgentOutcome) =
-  ## ``aoStale`` leaves an evidence record (spec §9.2, threat model G32).
-  if o.kind == aoStale:
-    try:
-      discard writeEvidenceRecord("stale-manifest", %*{
-        "target": o.target, "sequence": o.sequence,
-        "deploymentId": o.deploymentId, "message": o.message})
-    except CatchableError as e:
-      stderr.write("repro-addon: cannot write the stale-manifest evidence " &
-        "record: " & e.msg & "\n")
+# ---------------------------------------------------------------------------
+# The tick's evidence (spec §10.4, threat model §9, milestone A11).
+# ---------------------------------------------------------------------------
+
+const RefusedStagingKeep* = 4
+  ## Preserved copies of refused staging (EVID-5: the staged bytes a refusal
+  ## names stay on the host for investigation); older ones are removed.
+
+proc refusedStagingRoot*(): string = AgentDir / "refused"
+
+proc preserveRefusedStaging*(copyDir: string): string =
+  ## Move the apply unit's copy of a refused staging area under
+  ## ``refusedStagingRoot`` and return where it went ("" when it could not
+  ## be kept).
+  if copyDir.len == 0 or not dirExists(copyDir): return ""
+  try:
+    let root = refusedStagingRoot()
+    createDir(root)
+    setFilePermissions(root, {fpUserRead, fpUserWrite, fpUserExec})
+    result = root / (format(getTime(), "yyyyMMdd'T'HHmmss") & "-" &
+                     $getTime().nanosecond)
+    moveDir(copyDir, result)
+    var kept: seq[string]
+    for kind, p in walkDir(root):
+      if kind == pcDir: kept.add(p)
+    kept.sort()
+    while kept.len > RefusedStagingKeep:
+      try: removeDir(kept[0]) except CatchableError: discard
+      kept.delete(0)
+  except CatchableError:
+    result = ""
+
+proc refusalOf(ctx: AgentApplyContext): TickRefusal =
+  TickRefusal(refusal: ctx.refusal, payload: ctx.refusalPayload,
+    recorded: ctx.refusalRecorded,
+    manifestPayload: stagedText(ctx.copyDir, StagedManifestName))
+
+proc tickDetection*(t: RecordedTick; ctx: AgentApplyContext):
+    tuple[found: bool; detector: AddonDetector; trigger: string;
+          offHostOnly: bool] =
+  tickDetection(t, refusalOf(ctx))
+
+proc recordTickEvidence*(t: RecordedTick; ctx: AgentApplyContext;
+                         site = defaultSite()) =
+  ## ``tick_evidence.recordTickEvidence`` for one of the add-on agent's own
+  ## ticks, with what its apply refused.
+  recordTickEvidence(t, refusalOf(ctx), site)
 
 proc runAddonAgentTick*(cfg: AgentConfig; ctx: var AgentApplyContext;
                         what: string): RecordedTick =
@@ -794,10 +854,10 @@ proc runAddonAgentTick*(cfg: AgentConfig; ctx: var AgentApplyContext;
           message: "migrating agent generation " & legacyGen & " into " &
             "the add-on switch failed; nothing was applied: " & e.msg))
   result = runAgentTickRecorded(cfg, deps)
-  if not result.raised: recordStale(result.outcome)
   recordAgentDrift((if result.raised: "tickRaised" else: $result.outcome.kind),
                    (if result.raised: 0'u64 else: result.outcome.sequence),
                    result.addOnDrift)
+  recordTickEvidence(result, ctx)
 
 proc printTick(t: RecordedTick) =
   if t.raised:
@@ -875,6 +935,7 @@ proc runAgentApplyCli*(args: seq[string]): int =
     let o = stagedResult(ctx.copyDir, conf.target)
     let t = RecordedTick(outcome: o, exitCode: deployAgentExitCode(o.kind))
     recordTick(AgentStateDir, conf.target, tickStatusFor(o))
+    recordTickEvidence(t, ctx)
     printTick(t)
     return t.exitCode
   let cfg = AgentConfig(target: conf.target,
@@ -884,7 +945,9 @@ proc runAgentApplyCli*(args: seq[string]): int =
   let t = runAddonAgentTick(cfg, ctx, "repro system addon agent-apply")
   # The copy has served this apply (its archives are realised or refused);
   # keeping it would hold a second copy of every staged archive until the
-  # next tick.
+  # next tick -- unless the apply refused it, when it is what an
+  # investigation needs (EVID-5) and is kept, bounded.
+  if ctx.refusal.len > 0: discard preserveRefusedStaging(ctx.copyDir)
   try: removeDir(ctx.copyDir) except CatchableError: discard
   when mutated("agent-floor-in-fetch-state"):
     # The floor belongs to the fetch unit there, as anything in its state

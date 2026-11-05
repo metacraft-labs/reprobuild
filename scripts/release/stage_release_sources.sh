@@ -83,28 +83,38 @@ copy_tree() {
   chmod -R u+w "$to"
 }
 
-# ---- reprobuild's own libs ---------------------------------------------------
-# Every tracked file outside tests/: some lib modules read data files at compile
-# time (`staticRead` of recipe templates), so no extension filter here. The
-# filter loop uses only shell builtins, so it spawns nothing per file.
+# ---- reprobuild's own source root ------------------------------------------
+# What it carries -- trees and root-level files -- is the list in
+# scripts/lib/stage_source_root.sh, shared with the native-package payload
+# stagers so an entry added for one format reaches every format. This stager
+# keeps its own copy: every tracked file of each tree outside tests/ (some lib
+# modules read data files at compile time, `staticRead` of recipe templates, so
+# no extension filter here), in one tar pipe. The filter loop uses only shell
+# builtins, so it spawns nothing per file.
+# shellcheck source=scripts/lib/stage_source_root.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/stage_source_root.sh"
+# shellcheck disable=SC2086 # the lists are deliberately word-split
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git ls-files -z -- libs | while IFS= read -r -d '' f; do
+  git ls-files -z -- $REPRO_SOURCE_ROOT_TREES | while IFS= read -r -d '' f; do
     case "/$f/" in */tests/*) continue ;; esac
     [[ -f "$f" ]] || continue
     printf '%s\0' "$f"
   done | copy_listed . "$source_root"
 else
-  copy_tree libs "$source_root/libs"
+  for tree in $REPRO_SOURCE_ROOT_TREES; do
+    copy_tree "$tree" "$source_root/$tree"
+  done
 fi
-# The root config.nims, beside libs/. The profile compile (`repro home apply`,
-# `repro infra apply`) includes `<source root>/config.nims` from a wrapper it
-# stages next to the profile; that file turns the `*_SRC` roots into search
-# paths (nimcrypto, bearssl, io-mon, ...) and points the C compiler at the
-# vendored hash headers. Without it the archive's profile compile saw only
-# `libs/*/src` and failed with `cannot open file: nimcrypto/sha2`
-# (Gradual-Nix-To-Reprobuild-Migration GM1w, measured 2026-10-13). The Nix
-# package's source root is the whole tree and has always carried it.
-cp config.nims "$source_root/config.nims"
+# The root-level files beside the trees. The profile compile (`repro home
+# apply`, `repro infra apply`) includes `<source root>/config.nims` from a
+# wrapper it stages next to the profile; that file turns the `*_SRC` roots into
+# search paths (nimcrypto, bearssl, io-mon, ...) and points the C compiler at
+# the vendored hash headers. Without it the archive's profile compile saw only
+# `libs/*/src` and failed with `cannot open file: nimcrypto/sha2`.
+# shellcheck disable=SC2086 # the list is deliberately word-split
+for file in $REPRO_SOURCE_ROOT_FILES; do
+  cp "$file" "$source_root/$file"
+done
 
 # ---- source-only inputs ------------------------------------------------------
 # shellcheck source=scripts/lib/stage_package_nimble.sh

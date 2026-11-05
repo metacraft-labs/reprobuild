@@ -11,6 +11,7 @@
 ##   repro system addon state restore [--from <dir>] [--root R] [--boot]
 ##   repro system addon state digest <path>
 ##   repro system addon state unit
+##   repro system addon state install-unit [--from <dir>] [--root R]
 ##
 ## Exit status: 0 success; 1 a failure, or a verify that found a
 ## difference; 2 a usage error or a refusal decided before anything was
@@ -23,6 +24,8 @@ import repro_infra
 
 import ./addon_import
 import ./collision
+import ./host_exec
+import ./mutations
 import ./state_sets
 
 const
@@ -47,6 +50,10 @@ const
       Print a directory's state digest.
   unit
       Print the first-boot restore unit for this binary.
+  install-unit [--from <dir>] [--root R]
+      Install and enable the first-boot restore unit, and make every unit
+      of the carried state in <dir> require it: none of them starts at
+      boot unless the restore succeeded.
 """
   RestoreUnitName* = "repro-state-restore.service"
 
@@ -71,6 +78,39 @@ proc stateRestoreUnitText*(repro: string): string =
     "ExecStart=" & repro & " system state restore --boot\n" &
     "\n[Install]\n" &
     "WantedBy=sysinit.target\n"
+
+proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
+  ## Install the first-boot restore unit under ``root``, enabled (a link
+  ## in ``sysinit.target.wants``), and make each unit of the carried
+  ## directories in ``dir``'s manifest require it: a link to it in
+  ## ``<unit>.requires/``, which systemd reads as ``Requires=`` on the
+  ## restore unit (systemd.unit(5), "<unit>.requires/"). Returns those
+  ## units. A failed restore then fails their start jobs ("dependency
+  ## failed"), so a carried unit already installed (a conversion that
+  ## brings the generation along) does not start on an empty or
+  ## unverified directory: the boot path is governed by the restore as the
+  ## apply path is by ``carried_state``. The ordering needs no line of its
+  ## own: the restore unit runs before ``sysinit.target``, which every
+  ## service with default dependencies starts after. A link, not a drop-in:
+  ## a unit's drop-ins are the generation's (the add-on's effective-unit
+  ## check refuses one it did not write, spec §10.1).
+  let m = readStateManifest(dir)
+  let unitDir = root / "etc/systemd/system"
+  createDir(unitDir)
+  writeFile(unitDir / RestoreUnitName, stateRestoreUnitText(repro))
+  proc linkInto(d: string) =
+    createDir(d)
+    let link = d / RestoreUnitName
+    if symlinkExists(link) or fileExists(link): removeFile(link)
+    createSymlink("/etc/systemd/system/" & RestoreUnitName, link)
+  linkInto(unitDir / "sysinit.target.wants")
+  for e in m.entries:
+    if e.disposition != sdCarry: continue
+    for u in e.units:
+      if u in result: continue
+      when not mutated("restore-not-required-by-units"):
+        linkInto(unitDir / (u & ".requires"))
+      result.add(u)
 
 proc takeArg(args: seq[string]; i: var int; flag: string): string =
   let a = args[i]
@@ -218,6 +258,17 @@ proc runStateCli*(args: seq[string]): int =
       # The path that re-enters this binary (a launcher's, when the engine
       # runs under one), not the loader `getAppFilename` may name.
       stdout.write(stateRestoreUnitText(publicCliImagePath()))
+      0
+    of "install-unit":
+      let dir = if fromDir.len > 0: fromDir else: CarriedStateDir
+      let units = installRestoreUnit(dir, publicCliImagePath(), root)
+      stdout.write("installed " & RestoreUnitName & "; required by: " &
+        units.join(", ") & "\n")
+      if root == "/":
+        let r = runSystemctl(["daemon-reload"])
+        if r.exitCode != 0:
+          raise newException(StateSetError, "systemctl daemon-reload " &
+            "failed: " & r.output)
       0
     else:
       raise newException(ValueError, "unknown state command " & verb)

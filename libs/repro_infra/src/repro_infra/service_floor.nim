@@ -99,14 +99,28 @@
 ## frozen ``service_floor_v1`` and ``service_floor_v2`` render the units
 ## the engines of those versions stored, byte for byte.
 
-import std/[algorithm, strutils, tables]
+import std/[algorithm, sequtils, strutils, tables]
 
 const FloorMutation {.strdefine: "reproAddonMutation".} = ""
   ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
   ## never set in a product build.
 
+const ExceptionsLiftRoot = FloorMutation == "exception-lifts-root"
+  ## Falsifying build (A9 review round 4, finding 4): round 3's rule, under
+  ## which a ``User``, ``DynamicUser`` or ``SupplementaryGroups`` exception
+  ## let a floored unit run as root or with a privileged group, and any
+  ## systemd key could be named as an exception.
+
+const StaticRound3Off = FloorMutation in ["floor-static-r3-disabled",
+                                          "floor-unchecked"]
+  ## The falsifying builds of review round 3's structural requirement: the
+  ## static half (the allowlist and the round-3 parse-time refusals and
+  ## noexec mounts) off, so the effective-unit check alone has to catch a
+  ## weakened unit (``floor-static-r3-disabled``), or both off
+  ## (``floor-unchecked``).
+
 const
-  FloorVersion* = "3"
+  FloorVersion* = "4"
     ## The floor version this module renders (see the header). A stored
     ## generation records the version it was rendered with; 1 and 2 are
     ## the frozen ``service_floor_v1`` / ``service_floor_v2``.
@@ -192,6 +206,9 @@ const
     ## for the unit, and where each lives.
 
   ProcReadOnly* = "/proc"
+  KernelTrees* = ["/proc", "/sys"]
+    ## No writable path or bind destination may lie in either: they hold the
+    ## process's own memory and the kernel's knobs.
     ## The floor's ``ReadOnlyPaths=`` (``/proc/self/mem`` writes; header).
 
   MergedUsrAliases* = [("/bin", "/usr/bin"), ("/sbin", "/usr/sbin"),
@@ -277,9 +294,16 @@ proc parseFloorExceptions*(unitName: string;
         if not validAdd(k, v):
           raiseFloor(unitName, "floor exception '" & head & "': '" & v &
             "' is not a value " & k & " can be added")
-    if k notin keys:
+    if k == "PAMName":
+      raiseFloor(unitName, "floor exception 'PAMName': PAMName= is refused " &
+        "under the floor, with or without an exception")
+    let systemdKey = k.len > 0 and k[0] in {'A'..'Z'} and
+      k.allCharsInSet({'A'..'Z', 'a'..'z', '0'..'9'})
+    if k notin keys and (not ExceptionsLiftRoot or StaticRound3Off or
+                         not systemdKey):
       raiseFloor(unitName, "floor exception '" & k & "' names no " &
-        "serviceFloor setting (one of " & keys.join(", ") & ")")
+        "serviceFloor setting (one of " & keys.join(", ") & ") or systemd " &
+        "unit setting")
     if why.len == 0:
       raiseFloor(unitName, "floor exception '" & k & "' gives no reason; " &
         "an exception to the floor must say why")
@@ -407,37 +431,6 @@ proc commands*(value: string): seq[tuple[path, prefixes: string]] =
       continue
     result.add((path: path, prefixes: prefixes))
 
-proc storeObjectOf*(path: string): string =
-  ## The store prefix directory ``/repro/store/prefixes/<name>/<version>``
-  ## that ``path`` lies in, or "" when it is not inside one.
-  if not path.startsWith(FloorStorePrefixRoot): return ""
-  let rest = path[FloorStorePrefixRoot.len .. ^1].split('/')
-  if rest.len < 2 or rest[0].len == 0 or rest[1].len == 0: return ""
-  if rest[0] in [".", ".."] or rest[1] in [".", ".."]: return ""
-  FloorStorePrefixRoot & rest[0] & "/" & rest[1]
-
-proc referencedStoreObjects*(content: string): seq[string] =
-  ## Every store prefix any directive of ``content`` names, anywhere in its
-  ## value: a command, an argument, a launcher started through a shell, an
-  ## environment value, a bind source. The unit's closure as far as its
-  ## text says. Sorted.
-  for d in sectionDirectives(content):
-    var i = d.value.find(FloorStorePrefixRoot)
-    while i >= 0:
-      var j = i
-      while j < d.value.len and d.value[j] notin {' ', '\t', '\'', '"', ';',
-                                                  ':', '=', ','}:
-        inc j
-      let obj = storeObjectOf(d.value[i ..< j])
-      if obj.len > 0 and obj notin result: result.add(obj)
-      i = d.value.find(FloorStorePrefixRoot, j)
-  result.sort()
-
-proc commandStoreObjects*(content: string): seq[string] =
-  ## The store prefixes ``content`` names (``referencedStoreObjects``): what
-  ## the switch re-verifies before its flip.
-  referencedStoreObjects(content)
-
 proc hasDotDot*(path: string): bool =
   ## Whether ``path`` has a ``..`` component: systemd resolves it against
   ## the file system at run time, so its lexical form says nothing about
@@ -468,6 +461,45 @@ proc normalisedPath*(path: string): string =
     if result == alias or result.startsWith(alias & "/"):
       result = real & result[alias.len .. ^1]
       break
+
+proc storeObjectOf*(path: string): string =
+  ## The store prefix directory ``/repro/store/prefixes/<name>/<version>``
+  ## that ``path`` lies in, or "" when it is not inside one.
+  if not path.startsWith(FloorStorePrefixRoot): return ""
+  let rest = path[FloorStorePrefixRoot.len .. ^1].split('/')
+  if rest.len < 2 or rest[0].len == 0 or rest[1].len == 0: return ""
+  if rest[0] in [".", ".."] or rest[1] in [".", ".."]: return ""
+  FloorStorePrefixRoot & rest[0] & "/" & rest[1]
+
+proc referencedStoreObjects*(content: string): seq[string] =
+  ## Every store prefix any directive of ``content`` names, anywhere in its
+  ## value: a command, an argument, a launcher started through a shell, an
+  ## environment value, a bind source. The unit's closure as far as its
+  ## text says. Each path is read the way systemd reads it
+  ## (``normalisedPath``: ``/repro//store`` and ``/repro/./store`` are the
+  ## store too; A9 review round 3, finding 7). Sorted.
+  for d in sectionDirectives(content):
+    var tok = ""
+    proc take(tok: var string; acc: var seq[string]) =
+      let i = tok.find("/repro")
+      if i >= 0:
+        let p = tok[i .. ^1]
+        let obj = storeObjectOf(
+          when FloorMutation == "store-objects-by-string": p
+          else: normalisedPath(p))
+        if obj.len > 0 and obj notin acc: acc.add(obj)
+      tok = ""
+    for c in d.value & " ":
+      if c in {' ', '\t', '\'', '"', ';', ':', '=', ','}:
+        take(tok, result)
+      else:
+        tok.add(c)
+  result.sort()
+
+proc commandStoreObjects*(content: string): seq[string] =
+  ## The store prefixes ``content`` names (``referencedStoreObjects``): what
+  ## the switch re-verifies before its flip.
+  referencedStoreObjects(content)
 
 proc bindEntries(value: string): seq[tuple[optional: bool; src, dst: string]] =
   for tok in value.splitWhitespace():
@@ -554,6 +586,288 @@ proc floorExecPaths*(unitName, content: string;
           "aptClosureLock), or name the exception \"" &
           ExecConfinementException & ": <why>\"")
 
+# ---------------------------------------------------------------------------
+# The allowlist (floor version 4; A9 review round 3's structural answer).
+# Three rounds found a weakening the refusals above did not predict: a
+# spelling, a key, a drop-in rule, a default. Under the floor a unit may
+# carry only the keys below, each in the value form its validator accepts;
+# anything else is refused unless the unit names the key in
+# ``floorExceptions`` (the effective-unit check at the switch,
+# ``repro_addon/effective_floor``, is the other half: systemd's own reading
+# of the unit is compared with the floor before anything starts).
+# ---------------------------------------------------------------------------
+
+type ValueForm = enum
+  vfAny          ## free text (a description, an environment assignment)
+  vfUnitNames    ## unit names, space-separated
+  vfPaths        ## absolute literal paths; ``-`` / ``+`` prefixes
+  vfBinds        ## ``[-]src[:dst[:opts]]`` literal paths
+  vfTmpfs        ## ``path[:mode=NNNN]`` literal
+  vfDirNames     ## relative literal directory names (``a``, ``a/b``)
+  vfAccount      ## one account name, never root
+  vfGroups       ## account group names
+  vfBool         ## ``yes`` / ``no``
+  vfYes          ## ``yes`` only
+  vfPrivate      ## ``private`` only
+  vfToken        ## one word of letters, digits, ``-_.:+``
+  vfTokens       ## words of letters, digits, ``-_.:+@%~``
+  vfNumber       ## a number, a size, a duration, ``infinity``
+  vfCommand      ## a command line (judged by ``floorExecPaths`` / refusals)
+  vfFloor        ## a floor setting (judged by ``floorRefusal``)
+
+const
+  QuoteOrSpecifier = {'\'', '"', '%', '$', '\\', '`'}
+    ## No path the floor judges may be quoted, escaped or carry a
+    ## specifier or a variable: systemd would read it otherwise than the
+    ## floor does (A9 review round 3, finding 3).
+
+  UnitSectionKeys = [
+    ("Description", vfAny), ("Documentation", vfAny),
+    ("After", vfUnitNames), ("Before", vfUnitNames),
+    ("Wants", vfUnitNames), ("Requires", vfUnitNames),
+    ("Requisite", vfUnitNames), ("BindsTo", vfUnitNames),
+    ("PartOf", vfUnitNames), ("Upholds", vfUnitNames),
+    ("Conflicts", vfUnitNames), ("OnFailure", vfUnitNames),
+    ("OnSuccess", vfUnitNames), ("PropagatesReloadTo", vfUnitNames),
+    ("ReloadPropagatedFrom", vfUnitNames), ("RequiresMountsFor", vfPaths),
+    ("WantsMountsFor", vfPaths), ("StopWhenUnneeded", vfBool),
+    ("RefuseManualStart", vfBool), ("RefuseManualStop", vfBool),
+    ("DefaultDependencies", vfBool), ("IgnoreOnIsolate", vfBool),
+    ("CollectMode", vfToken), ("StartLimitIntervalSec", vfNumber),
+    ("StartLimitBurst", vfNumber), ("JobTimeoutSec", vfNumber),
+    ("ConditionPathExists", vfPaths), ("ConditionPathIsDirectory", vfPaths),
+    ("ConditionFileNotEmpty", vfPaths), ("ConditionVirtualization", vfToken),
+    ("ConditionArchitecture", vfToken), ("ConditionHost", vfToken),
+    ("AssertPathExists", vfPaths)]
+    ## Ordering, dependencies on units the profile or the base defines,
+    ## and the conditions that read paths. Not here: ``JoinsNamespaceOf=``
+    ## (another unit's /tmp and network), ``StartLimitAction=`` /
+    ## ``FailureAction=`` / ``SuccessAction=`` (reboot), ``AllowIsolate=``.
+
+  InstallSectionKeys = [("WantedBy", vfUnitNames), ("RequiredBy", vfUnitNames),
+                        ("UpheldBy", vfUnitNames), ("Alias", vfUnitNames)]
+
+  ServiceSectionKeys = [
+    ("Type", vfToken), ("ExitType", vfToken),
+    ("ExecCondition", vfCommand), ("ExecStartPre", vfCommand),
+    ("ExecStart", vfCommand), ("ExecStartPost", vfCommand),
+    ("ExecReload", vfCommand), ("ExecStop", vfCommand),
+    ("ExecStopPost", vfCommand),
+    ("Restart", vfToken), ("RestartSec", vfNumber), ("RestartSteps", vfNumber),
+    ("RestartMaxDelaySec", vfNumber), ("RestartPreventExitStatus", vfTokens),
+    ("RestartForceExitStatus", vfTokens), ("SuccessExitStatus", vfTokens),
+    ("TimeoutSec", vfNumber), ("TimeoutStartSec", vfNumber),
+    ("TimeoutStopSec", vfNumber), ("TimeoutAbortSec", vfNumber),
+    ("RuntimeMaxSec", vfNumber), ("WatchdogSec", vfNumber),
+    ("RemainAfterExit", vfBool), ("GuessMainPID", vfBool),
+    ("PIDFile", vfPaths), ("BusName", vfToken), ("NotifyAccess", vfToken),
+    ("KillMode", vfToken), ("KillSignal", vfToken), ("SendSIGKILL", vfBool),
+    ("SendSIGHUP", vfBool), ("FinalKillSignal", vfToken),
+    ("RestartKillSignal", vfToken), ("OOMPolicy", vfToken),
+    ("FileDescriptorStoreMax", vfNumber), ("Sockets", vfUnitNames),
+    ("Environment", vfAny), ("EnvironmentFile", vfPaths),
+    ("PassEnvironment", vfTokens), ("UnsetEnvironment", vfTokens),
+    ("WorkingDirectory", vfPaths),
+    ("User", vfAccount), ("Group", vfAccount), ("DynamicUser", vfFloor),
+    ("SupplementaryGroups", vfGroups),
+    ("StateDirectory", vfDirNames), ("RuntimeDirectory", vfDirNames),
+    ("CacheDirectory", vfDirNames), ("LogsDirectory", vfDirNames),
+    ("ConfigurationDirectory", vfDirNames),
+    ("StateDirectoryMode", vfNumber), ("RuntimeDirectoryMode", vfNumber),
+    ("CacheDirectoryMode", vfNumber), ("LogsDirectoryMode", vfNumber),
+    ("ConfigurationDirectoryMode", vfNumber),
+    ("RuntimeDirectoryPreserve", vfToken),
+    ("ReadWritePaths", vfFloor), ("ReadOnlyPaths", vfPaths),
+    ("InaccessiblePaths", vfPaths), ("BindPaths", vfFloor),
+    ("BindReadOnlyPaths", vfFloor), ("TemporaryFileSystem", vfFloor),
+    ("LoadCredential", vfTokens),
+    ("StandardInput", vfToken), ("StandardOutput", vfToken),
+    ("StandardError", vfToken), ("SyslogIdentifier", vfToken),
+    ("SyslogFacility", vfToken), ("SyslogLevel", vfToken),
+    ("SyslogLevelPrefix", vfBool), ("LogLevelMax", vfToken),
+    ("LogRateLimitIntervalSec", vfNumber), ("LogRateLimitBurst", vfNumber),
+    ("Nice", vfNumber), ("OOMScoreAdjust", vfNumber),
+    ("IOSchedulingClass", vfToken), ("IOSchedulingPriority", vfNumber),
+    ("CPUSchedulingPolicy", vfToken), ("CPUSchedulingPriority", vfNumber),
+    ("MemoryMax", vfNumber), ("MemoryHigh", vfNumber), ("MemoryLow", vfNumber),
+    ("MemoryMin", vfNumber), ("MemorySwapMax", vfNumber),
+    ("MemoryAccounting", vfBool), ("CPUQuota", vfToken),
+    ("CPUWeight", vfNumber), ("IOWeight", vfNumber), ("TasksMax", vfNumber),
+    ("CPUAccounting", vfBool), ("IOAccounting", vfBool),
+    ("TasksAccounting", vfBool), ("IPAccounting", vfBool),
+    ("IPAddressDeny", vfTokens), ("IPAddressAllow", vfTokens),
+    ("Slice", vfUnitNames),
+    ("PrivateNetwork", vfYes), ("PrivateUsers", vfYes), ("PrivateIPC", vfYes),
+    ("RemoveIPC", vfYes), ("KeyringMode", vfPrivate), ("ProcSubset", vfToken),
+    ("DevicePolicy", vfToken), ("RestrictFileSystems", vfTokens),
+    ("RestrictNetworkInterfaces", vfTokens), ("SocketBindAllow", vfTokens),
+    ("SocketBindDeny", vfTokens), ("SystemCallErrorNumber", vfToken),
+    ("SystemCallLog", vfTokens), ("RestrictAddressFamilies", vfFloor),
+    ("ExecPaths", vfFloor), ("NoExecPaths", vfFloor)]
+    ## Plus every floor setting (``FloorFixed``), judged by ``floorRefusal``.
+
+  DropInKeys = ["Description", "Documentation", "After", "Before", "Wants",
+    "Requires", "PartOf", "Environment", "UnsetEnvironment", "Restart",
+    "RestartSec", "TimeoutSec", "TimeoutStartSec", "TimeoutStopSec",
+    "WatchdogSec", "RuntimeMaxSec", "Nice", "OOMScoreAdjust", "MemoryMax",
+    "MemoryHigh", "MemoryLow", "MemorySwapMax", "CPUQuota", "CPUWeight",
+    "IOWeight", "TasksMax", "SyslogIdentifier", "StandardOutput",
+    "StandardError", "LogLevelMax", "ExecCondition", "ExecStartPre",
+    "ExecStart", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost"]
+    ## What a drop-in of a floored unit may set: no account, no directory,
+    ## no mount, no path (each needs the unit's own floor to cover it).
+    ## Its command lines are judged against the unit's closure.
+
+const FloorJudgedKeys = ["NoExecPaths", "ExecPaths", "RestrictAddressFamilies",
+  "DynamicUser", "User", "Group", "SupplementaryGroups", "ReadWritePaths",
+  "TemporaryFileSystem", "BindPaths", "BindReadOnlyPaths", "RootDirectory",
+  "RootImage", "RootEphemeral", "RootImageOptions", "MountImages",
+  "ExtensionImages", "ExtensionDirectories", "ReadOnlyPaths"]
+  ## Keys ``floorRefusal`` judges itself, with its own message and
+  ## exception, in a unit and in a drop-in.
+
+proc allowedForm(section, key: string; dropIn: bool): (bool, ValueForm) =
+  ## Whether ``key`` may appear in ``section`` of a floored unit (or of a
+  ## drop-in of one), and the value form it takes.
+  for (k, _) in FloorFixed:
+    if k == key: return (section == "Service", vfFloor)
+  if key in FloorJudgedKeys and section == "Service":
+    return (true, vfFloor)
+  if dropIn and key notin DropInKeys: return (false, vfAny)
+  case section
+  of "Unit":
+    for (k, f) in UnitSectionKeys:
+      if k == key: return (true, f)
+  of "Install":
+    for (k, f) in InstallSectionKeys:
+      if k == key: return (true, f)
+  of "Service":
+    for (k, f) in ServiceSectionKeys:
+      if k == key: return (true, f)
+  else: discard
+  (false, vfAny)
+
+proc floorKnowsKey*(section, key: string; dropIn: bool): bool =
+  ## Whether a floored unit (or a drop-in of one) may carry ``key`` in
+  ## ``section`` at all: the allowlist's keys, independent of the value
+  ## forms. The effective-unit check holds the files systemd loaded to it
+  ## (``repro_addon/effective_floor``), for the settings systemd does not
+  ## report back (``PermissionsStartOnly=``).
+  allowedForm(section, key, dropIn)[0]
+
+proc isAccountName*(v: string): bool =
+  ## A literal account name systemd resolves as written: lower-case
+  ## letters, digits, ``_``, ``-``, not starting with a digit or ``-``.
+  v.len in 1 .. 32 and v[0] in {'a'..'z', '_'} and
+    v.allCharsInSet({'a'..'z', '0'..'9', '_', '-'})
+
+proc safeUnitName(v: string): bool =
+  v.len > 0 and v.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9', ':', '-', '_',
+                                 '.', '@'})
+
+proc formRefusal(key, value: string; f: ValueForm): string =
+  ## Why ``value`` is not in form ``f``, or "".
+  proc literalPath(p: string): bool =
+    let q = p.strip(leading = true, trailing = false, chars = {'-', '+'})
+    q.startsWith("/") and not q.anyIt(it in QuoteOrSpecifier) and
+      not hasDotDot(q) and not q.anyIt(it in {' ', '\t'})
+  case f
+  of vfAny, vfCommand, vfFloor:
+    ""
+  of vfUnitNames:
+    for t in value.splitWhitespace():
+      if not safeUnitName(t): return "'" & t & "' is not a unit name"
+    ""
+  of vfPaths:
+    for t in value.splitWhitespace():
+      if not literalPath(t):
+        return "'" & t & "' is not a literal absolute path (no quote, " &
+          "escape, specifier, variable or '..')"
+    ""
+  of vfBinds, vfTmpfs:
+    ""   # judged with the floor's mounts (``floorRefusal``)
+  of vfDirNames:
+    # `name` or, from systemd 254, `name:link` (a link to it).
+    for t in value.splitWhitespace():
+      let parts = t.split(':')
+      if parts.len > 2: return "'" & t & "' is not a literal directory name"
+      for q in parts:
+        if q.len == 0 or q.startsWith("/") or hasDotDot(q) or
+            not q.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9', '.', '_', '-',
+                                  '/'}):
+          return "'" & t & "' is not a literal directory name"
+    ""
+  of vfAccount:
+    if not isAccountName(value):
+      return "'" & value & "' is not a literal account name (an empty " &
+        "value, a number or a specifier makes systemd run the service as " &
+        "root or not at all)"
+    ""
+  of vfGroups:
+    for t in value.splitWhitespace():
+      if not isAccountName(t): return "'" & t & "' is not a group name"
+    ""
+  of vfBool:
+    if value notin ["yes", "no"]: return "'" & value & "' is not yes or no"
+    ""
+  of vfYes:
+    if value != "yes": return "'" & value & "' is not yes"
+    ""
+  of vfPrivate:
+    if value != "private": return "'" & value & "' is not private"
+    ""
+  of vfToken:
+    if value.len == 0 or not value.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9',
+                                                  '-', '_', '.', ':', '+'}):
+      return "'" & value & "' is not one plain word"
+    ""
+  of vfTokens:
+    for t in value.splitWhitespace():
+      if not t.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9', '-', '_', '.',
+                              ':', '+', '@', '~', '/', '='}):
+        return "'" & t & "' is not a plain word"
+    ""
+  of vfNumber:
+    if value.len == 0 or not value.allCharsInSet({'0'..'9', 'a'..'z',
+                                                  'A'..'Z', '.', '%', ' '}):
+      return "'" & value & "' is not a number, size or duration"
+    ""
+
+proc allowlistRefusal*(unitName, content: string;
+                       ex: openArray[FloorException]; dropIn: bool): string =
+  ## The first line of ``content`` (a floored unit, or a drop-in of one)
+  ## outside the floor's allowlist that no exception names, or "". A key
+  ## named in ``floorExceptions`` is accepted as written (and still held
+  ## to the floor by the effective-unit check). ``PAMName=`` is refused
+  ## with or without an exception: it opens a login session, starts the
+  ## account's user manager outside the floor and can move the process out
+  ## of the unit's control group (A9 review round 3, finding 6).
+  when StaticRound3Off:
+    return ""
+  for d in sectionDirectives(content):
+    let what = (if dropIn: "a drop-in's " else: "") & "[" & d.section &
+               "] " & d.key & "=" & d.value
+    if d.key == "PAMName":
+      return what & " opens a login session outside the floor; it is " &
+        "refused under the floor, with or without an exception"
+    if d.section notin ["Unit", "Service", "Install"]:
+      if ExceptionsLiftRoot and waived(ex, d.key): continue
+      return what & ": the section is not one a floored unit may carry " &
+        "(only \"serviceFloor: <why>\" allows it)"
+    let (ok, form) = allowedForm(d.section, d.key, dropIn)
+    if not ok:
+      # Only the keys floorExceptionKeys lists can be waived (round 4,
+      # finding 4); a key off the allowlist is not one of them.
+      if (ExceptionsLiftRoot or d.key in floorExceptionKeys()) and
+          waived(ex, d.key): continue
+      return what & " is not on the floor's allowlist" &
+        (if dropIn: " for a drop-in" else: "") & "; it is refused under " &
+        "the floor (only \"serviceFloor: <why>\" allows it)"
+    if waived(ex, d.key): continue
+    let why = formRefusal(d.key, d.value, form)
+    if why.len > 0: return what & ": " & why
+  ""
+
 proc pathCannotBeJudged(path: string): bool =
   ## A path whose place the floor cannot decide from its text: a ``..``
   ## component, a specifier (``%``) or a variable (``$``).
@@ -570,6 +884,24 @@ proc floorNoExecMounts*(directives: openArray[tuple[key, value: string]]):
   ## ``name`` or, from systemd 254, ``name:link``; the first part is the
   ## directory.
   for m in FloorPrivateMounts: result.add("-" & m)
+  # Every writable place the unit sets up itself is noexec too (round 3,
+  # finding 2): a ReadWritePaths= entry, a bind's destination, a tmpfs.
+  when not StaticRound3Off:
+    for (k, v) in directives:
+      case k
+      of "ReadWritePaths":
+        for tok in v.splitWhitespace():
+          let q = tok.strip(leading = true, trailing = false, chars = {'-', '+'})
+          if q.startsWith("/") and ("-" & q) notin result: result.add("-" & q)
+      of "BindPaths", "BindReadOnlyPaths":
+        for b in bindEntries(v):
+          if isClosureUsrBind(b): continue
+          if ("-" & b.dst) notin result: result.add("-" & b.dst)
+      of "TemporaryFileSystem":
+        for tok in v.splitWhitespace():
+          let q = tok.split(':')[0]
+          if q.startsWith("/") and ("-" & q) notin result: result.add("-" & q)
+      else: discard
   for (k, v) in directives:
     for (dk, root) in FloorDirectoryKeys:
       if k != dk: continue
@@ -589,9 +921,13 @@ proc floorRefusal*(unitName: string;
   ## so every floor setting it assigns -- even empty -- is a change.
   var floorValues = initTable[string, seq[string]]()
   for (k, v) in FloorFixed: floorValues.mgetOrPut(k, @[]).add(v)
-  var hasAccount = false
+  # systemd keeps the last assignment of a scalar: `User=a` then `User=`
+  # is no account at all (A9 review round 3, finding 1).
+  var lastUser = ""
   for (k, v) in directives:
-    if k == "User" and v.len > 0 and v notin ["root", "0"]: hasAccount = true
+    if k == "User":
+      lastUser = v
+  let hasAccount = isAccountName(lastUser) and lastUser notin ["root"]
   for (k, v) in directives:
     let what = (if dropIn: "a drop-in's " else: "") & k & "=" & v
     case k
@@ -607,29 +943,76 @@ proc floorRefusal*(unitName: string;
           "wants the families the service uses (or name the exception " &
           "\"RestrictAddressFamilies: <why>\")"
     of "User", "Group":
-      if v in ["root", "0"] and not waived(ex, "User"):
-        return what & " runs the service as root; name the exception " &
-          "\"User: <why>\""
+      # Root, and a privileged group, are refused under the floor whatever
+      # it names (round 4, finding 4): only the whole-floor waiver, under
+      # which the unit has no floor, lets a service run as root.
+      if v in ["root", "0"] and (not ExceptionsLiftRoot or not waived(ex, "User")):
+        return what & " runs the service as root; a floored unit may not " &
+          "(only the whole-floor waiver \"serviceFloor: <why>\" allows it)"
+      if k == "Group" and v in PrivilegedGroups and not ExceptionsLiftRoot and
+          not StaticRound3Off:
+        return what & " runs the service in the privileged group " & v &
+          "; a floored unit may not (only \"serviceFloor: <why>\" allows it)"
+      when not StaticRound3Off:
+        if not isAccountName(v) and not waived(ex, "User"):
+          return what & ": an empty value, a number or a specifier is not " &
+            "a literal account, and systemd may run the service as root; " &
+            "name the exception \"User: <why>\""
+        if dropIn and not waived(ex, "User"):
+          return what & " changes the account of a floored unit; a " &
+            "drop-in may not (name the exception \"User: <why>\")"
     of "DynamicUser":
-      if v.toLowerAscii() in ["no", "false", "0", "off"] and
-          not hasAccount and not waived(ex, "DynamicUser"):
-        return what & " without a User= runs the service as root; name " &
-          "the exception \"DynamicUser: <why>\""
+      when StaticRound3Off:
+        if v.toLowerAscii() in ["no", "false", "0", "off"] and
+            not hasAccount and not waived(ex, "DynamicUser"):
+          return what & " without a User= runs the service as root; name " &
+            "the exception \"DynamicUser: <why>\""
+      else:
+        if not waived(ex, "DynamicUser"):
+          if v notin ["yes", "no"]:
+            return what & ": the floor reads only yes or no here; name " &
+              "the exception \"DynamicUser: <why>\""
+          if v == "no" and not hasAccount:
+            return what & " without a literal User= runs the service as " &
+              "root; a floored unit may not (only \"serviceFloor: <why>\" " &
+              "allows it)"
+          if dropIn:
+            return what & " changes the account of a floored unit; a " &
+              "drop-in may not (name the exception \"DynamicUser: <why>\")"
+        elif v.toLowerAscii() in ["no", "false", "0", "off"] and
+            not hasAccount and not ExceptionsLiftRoot:
+          # Round 4, finding 4: a DynamicUser exception lifts the spelling
+          # rules, never root.
+          return what & " without a literal User= runs the service as " &
+            "root, which a DynamicUser exception does not allow (only " &
+            "\"serviceFloor: <why>\" does)"
     of "SupplementaryGroups":
       for gname in v.splitWhitespace():
-        if gname in PrivilegedGroups and not waived(ex, k):
+        if gname in PrivilegedGroups and
+            (not ExceptionsLiftRoot or not waived(ex, k)):
           return what & " adds the privileged group " & gname &
-            "; name the exception \"SupplementaryGroups: <why>\""
+            "; a floored unit may not (only \"serviceFloor: <why>\" allows it)"
     of "ReadWritePaths":
+      when not StaticRound3Off:
+        if dropIn and v.len > 0 and not waived(ex, k):
+          return what & " makes a path writable that the unit's own noexec " &
+            "line does not cover; a drop-in may not (name the exception " &
+            "\"ReadWritePaths: <why>\")"
       if not waived(ex, k):
         for tok in v.splitWhitespace():
           let p = tok.strip(leading = true, trailing = false,
                             chars = {'-', '+'})
           if p.len == 0: continue
-          if pathCannotBeJudged(p):
+          if pathCannotBeJudged(p) or
+              (not StaticRound3Off and p.anyIt(it in QuoteOrSpecifier)):
             return what & " names " & p & ", which the floor cannot place " &
               "(a '..' component or a specifier); name the exception " &
               "\"ReadWritePaths: <why>\""
+          when not StaticRound3Off:
+            for kt in KernelTrees:
+              if under(p, kt) or under(kt, p):
+                return what & " makes " & p & " writable, in or over the " &
+                  "kernel's " & kt & "; name the exception \"ReadWritePaths: <why>\""
           for root in @ProtectedRoots & execPaths:
             if under(root, p) or (root in execPaths and under(p, root)):
               return what & " makes " & p & " writable, which " &
@@ -637,6 +1020,11 @@ proc floorRefusal*(unitName: string;
                  else: "contains " & root) &
                 "; name the exception \"ReadWritePaths: <why>\""
     of "TemporaryFileSystem", "BindPaths", "BindReadOnlyPaths":
+      when not StaticRound3Off:
+        if dropIn and v.len > 0 and not waived(ex, ExecConfinementException):
+          return what & " sets up a writable place the unit's own noexec " &
+            "line does not cover; a drop-in may not (name the exception \"" &
+            ExecConfinementException & ": <why>\")"
       if not waived(ex, ExecConfinementException):
         if v.len == 0 and k != "TemporaryFileSystem":
           continue   # an empty bind list is apt_closure's refusal to make
@@ -648,8 +1036,33 @@ proc floorRefusal*(unitName: string;
                             s.add((optional: false, src: p, dst: p))
                           s)
                       else: bindEntries(v)
+        when not StaticRound3Off:
+          if k == "TemporaryFileSystem":
+            # Only a mode may be set: `exec`, `suid`, `dev` and the rest
+            # undo what the floor's noexec line does (round 3, finding 2).
+            for tok in v.splitWhitespace():
+              let c = tok.find(':')
+              if c >= 0:
+                for o in tok[c + 1 .. ^1].split(','):
+                  if not (o.startsWith("mode=") and
+                          o[5 .. ^1].allCharsInSet({'0'..'7'})):
+                    return what & ": the floor allows only mode= as a " &
+                      "TemporaryFileSystem= option; name the exception \"" &
+                      ExecConfinementException & ": <why>\""
+          for tok in v.splitWhitespace():
+            if tok.anyIt(it in QuoteOrSpecifier):
+              return what & ": a quoted, escaped or specifier path is not " &
+                "one the floor can place; name the exception \"" &
+                ExecConfinementException & ": <why>\""
         for b in entries:
           if k == "BindReadOnlyPaths" and isClosureUsrBind(b): continue
+          when not StaticRound3Off:
+            if k != "BindReadOnlyPaths":
+              for kt in KernelTrees:
+                if under(b.dst, kt) or under(kt, b.dst):
+                  return what & " mounts over " & b.dst & ", in or over the " &
+                    "kernel's " & kt & "; name the exception \"" &
+                    ExecConfinementException & ": <why>\""
           if pathCannotBeJudged(b.dst):
             return what & " mounts over " & b.dst & ", which the floor " &
               "cannot place (a '..' component or a specifier); name the " &
@@ -666,6 +1079,16 @@ proc floorRefusal*(unitName: string;
             "unit's namespace, which the floor's paths do not describe; " &
             "name the exception \"" & k & ": <why>\""
     of "ReadOnlyPaths":
+      when not StaticRound3Off:
+        if not waived(ex, k) and v.anyIt(it in QuoteOrSpecifier):
+          return what & ": a quoted, escaped or specifier path is not one " &
+            "the floor can place; name the exception \"ReadOnlyPaths: <why>\""
+        if not waived(ex, k):
+          for tok in v.splitWhitespace():
+            let q = tok.strip(leading = true, trailing = false, chars = {'-', '+'})
+            if not q.startsWith("/"):
+              return what & ": '" & tok & "' is not an absolute path; name " &
+                "the exception \"ReadOnlyPaths: <why>\""
       if dropIn and v.len == 0 and not waived(ex, k):
         return what & " (empty) resets ReadOnlyPaths=, dropping the " &
           "floor's read-only " & ProcReadOnly & "; name the exception " &
@@ -690,9 +1113,11 @@ proc floorRefusal*(unitName: string;
           if '+' in c.prefixes and not waived(ex, WholeFloorException):
             return what & " runs with the '+' prefix, outside every " &
               "sandboxing setting (name the exception \"serviceFloor: <why>\")"
-          if '!' in c.prefixes and not waived(ex, "User"):
+          if '!' in c.prefixes and
+              (not ExceptionsLiftRoot or not waived(ex, "User")):
             return what & " runs with the '!' prefix, without the user " &
-              "change; name the exception \"User: <why>\""
+              "change (as root); a floored unit may not (only " &
+              "\"serviceFloor: <why>\" allows it)"
           if dropIn and not waived(ex, ExecConfinementException) and
               c.path.len > 0:
             if pathCannotBeJudged(c.path):
@@ -720,12 +1145,25 @@ proc renderServiceFloorLines*(unitName, content: string;
   if waived(ex, WholeFloorException): return @[]
   let directives = serviceDirectives(content)
   let execPaths = floorExecPaths(unitName, content, ex)
+  let allowed = allowlistRefusal(unitName, content, ex, dropIn = false)
+  if allowed.len > 0: raiseFloor(unitName, allowed)
   let why = floorRefusal(unitName, directives, ex, execPaths, dropIn = false)
   if why.len > 0: raiseFloor(unitName, why)
   var hasUser, hasFamilies = false
+  var lastUser, lastDyn = ""
   for (k, v) in directives:
-    if k in ["User", "DynamicUser"]: hasUser = true
+    if k == "User": lastUser = v
+    if k == "DynamicUser": lastDyn = v
     if k == "RestrictAddressFamilies": hasFamilies = true
+  when StaticRound3Off:
+    for (k, v) in directives:
+      if k in ["User", "DynamicUser"]: hasUser = true
+  else:
+    # An account systemd will use, by the last assignment: a literal
+    # User= (DynamicUser=no) or DynamicUser=yes. Anything else gets a
+    # dynamic user (round 3, finding 1).
+    hasUser = (isAccountName(lastUser) and lastDyn != "yes") or
+              lastDyn == "yes"
   result.add("# serviceFloor (ReproOS add-on hardening default)")
   for (k, v) in FloorFixed:
     if waived(ex, k): continue
@@ -746,6 +1184,11 @@ proc renderServiceFloorLines*(unitName, content: string;
     result.add("RestrictAddressFamilies=" & FloorDefaultAddressFamilies)
   if not hasUser and not waived(ex, "DynamicUser"):
     result.add("DynamicUser=yes")
+  elif not hasUser and not ExceptionsLiftRoot:
+    # A DynamicUser exception and no account: systemd runs it as root.
+    raiseFloor(unitName, "the exception \"DynamicUser\" with no literal " &
+      "User= runs the service as root, which a floored unit may not (name " &
+      "an account, or \"serviceFloor: <why>\")")
   if not waived(ex, ExecConfinementException) and not dropExec:
     result.add("NoExecPaths=/")
     when FloorMutation != "floor-private-mounts-exec":
@@ -773,6 +1216,8 @@ proc dropInFloorRefusal*(unitName, unitContent, dropInContent: string;
                                    d.key.startsWith("Exec")):
       return "a drop-in's [" & d.section & "] " & d.key & "= runs a " &
         "command outside the floored [Service] section"
+  let allowed = allowlistRefusal(unitName, dropInContent, ex, dropIn = true)
+  if allowed.len > 0: return allowed
   let execPaths = floorExecPaths(unitName, unitContent, ex)
   floorRefusal(unitName, serviceDirectives(dropInContent), ex, execPaths,
                dropIn = true)

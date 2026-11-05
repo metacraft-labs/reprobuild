@@ -428,6 +428,30 @@ proc explainUnsat*(coreAtoms: seq[string];
       result.add(UnsatCoreEntry(kind: "unknown", source: atom,
                                 atom: atom))
 
+proc renderUnsatCore*(entries: seq[UnsatCoreEntry];
+                      bestEffort: seq[string]): string =
+  ## Text rendering of an unsat explanation: one line per minimal-core entry
+  ## (``explainUnsat``'s output), naming each constraint in the vocabulary the
+  ## recipe declared it in. When the assumption re-solve produced no core,
+  ## the best-effort participant list (``EUnsatisfiable.unsatCore``) is
+  ## rendered instead, so the reader is never handed an explanation that
+  ## names nothing it could have.
+  ##
+  ## One renderer for both consumers — ``solve`` appends it to the
+  ## ``EUnsatisfiable`` message, ``repro lock explain`` prints it — so the
+  ## core a failing build reports and the core the explain verb reports
+  ## cannot drift apart.
+  result = "UNSAT — minimal core:\n"
+  if entries.len > 0:
+    for e in entries:
+      result.add("  - [" & e.kind & "] " & e.source & "\n")
+  elif bestEffort.len > 0:
+    result.add("  (no minimal core produced; best-effort participants: " &
+               bestEffort.join(", ") & ")\n")
+  else:
+    result.add("  (no minimal core produced and no participants " &
+               "identified)\n")
+
 # ---------------------------------------------------------------------------
 # Encoder — annotated variant + version program for the assumption
 # interface

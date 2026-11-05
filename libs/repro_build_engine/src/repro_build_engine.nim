@@ -1567,6 +1567,14 @@ type
   PathSetEvidence* = object
     declaredInputs*: seq[string]
     declaredOutputs*: seq[string]
+    volatileScope*: VolatileScope
+      ## The invocation's own trees, against which every channel's reads under
+      ## a volatile runtime prefix are judged (`isVolatileMonitorPath`). Set by
+      ## `collectEvidence` before anything is folded, from the declared
+      ## filesystem roots or, when the invocation declares none, the action's
+      ## working directory (`actionVolatileScope`). The default exempts
+      ## nothing, which is the prefix-only fold a test driving the fold
+      ## directly gets.
     depfileInputs*: ObservedPathChannel
     monitorReads*: ObservedPathChannel
     monitorWrites*: ObservedPathChannel
@@ -5053,20 +5061,21 @@ proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
     if declared and materialized notin result:
       result.add(materialized)
 
-proc isVolatileMonitorPath(path: string): bool =
+proc isVolatileMonitorPath(path: string; scope: VolatileScope): bool =
   ## Runtime pseudo-filesystems describe the monitored process or host at one
   ## instant. They cannot be reopened reliably when the action is fingerprinted
-  ## and must never become cache inputs.
+  ## and must never become cache inputs, unless they are inside the
+  ## invocation's own trees (`PathSetEvidence.volatileScope`); see
+  ## ``repro_core/paths.dropsAsVolatileRuntimeState``.
   ##
-  ## The predicate itself lives in ``repro_core/paths`` and is SHARED with
-  ## ``repro_local_store``'s ``isRecordableInput``, which used to carry a
-  ## hand-copied duplicate under a "keep this aligned" comment. The two
-  ## have to agree exactly: this one decides what reaches the evidence, the
-  ## other decides what reaches the cache RECORD, and a path the first
-  ## admits and the second drops is fingerprinted as an input the entry
-  ## does not carry — the same stale serve, one layer down. A comment
-  ## cannot enforce that; one function can.
-  isVolatileRuntimeStatePath(path)
+  ## THE ONLY PLACE THE DROP IS DECIDED. The monitor fold calls it for every
+  ## observed channel, and ``cacheInputPaths`` for the declared and the
+  ## tool-reported ones, with the same scope, so what reaches the evidence and
+  ## what reaches the cache RECORD cannot disagree. ``repro_local_store`` used
+  ## to make the decision a second time when recording, on the prefix alone;
+  ## a path the evidence kept and the record dropped is fingerprinted as an
+  ## input the entry does not carry, the same stale serve one layer down.
+  dropsAsVolatileRuntimeState(path, scope)
 
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
@@ -7836,7 +7845,7 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   if unprefixed.isNtDevicePath():
     return
   let materialized = materialPath(cwd, unprefixed)
-  if materialized.isVolatileMonitorPath() or materialized.isNtDevicePath():
+  if materialized.isVolatileMonitorPath(evidence.volatileScope) or materialized.isNtDevicePath():
     return
   case record.kind
   of mrFileRead:
@@ -9531,6 +9540,80 @@ proc refuseForeignTargetOutputs(action: BuildAction; triple: string;
     try: removePathNoFollow(extendedPath(path))
     except CatchableError: discard
 
+proc trackedFilesystemRootPaths*(roots: openArray[LogicalRoot]): seq[string]
+
+proc actionVolatileScope*(action: BuildAction;
+                          filesystemRoots: openArray[LogicalRoot]):
+                          VolatileScope =
+  ## The trees whose reads are this action's own even under a volatile
+  ## runtime prefix (`repro_core/paths.dropsAsVolatileRuntimeState`).
+  ##
+  ## The DECLARED roots when the invocation declares any: the project, its
+  ## repository, the work, store and output roots, in both of their spellings
+  ## (`trackedFilesystemRootPaths`). They are the roots the portable
+  ## fingerprint names paths against, so a path kept here is a tracked path
+  ## there too and is never left out of the portable key as untracked.
+  ##
+  ## The action's WORKING DIRECTORY otherwise. Not every engine configuration
+  ## declares roots (`wireFilesystemRoots` lists the ones that do not), and
+  ## each of those still runs its actions in the project it works on; with
+  ## no scope at all, a project under `/dev/shm/<name>` would lose every read
+  ## on those edges, silently.
+  ##
+  ## A refused root (`volatileRootRefusal`) is left out of the scope; the
+  ## build has already been refused for it (`volatileRootRefusals`).
+  let tracked = trackedFilesystemRootPaths(filesystemRoots)
+  if tracked.len > 0:
+    volatileScope(tracked)
+  elif action.cwd.len > 0:
+    volatileScope([absolutePath(action.cwd)])
+  else:
+    VolatileScope()
+
+proc volatileRootRefusals*(g: BuildGraph;
+                           filesystemRoots: openArray[LogicalRoot]):
+                           seq[string] =
+  ## One diagnostic per root this build would have to read as its own while
+  ## the volatile-path fold drops it (`volatileRootRefusal`): a project at
+  ## `/dev/shm` itself, at `/run`, on `/proc`. Non-empty refuses the build
+  ## before anything runs or is served from the cache, because a cached
+  ## result for such a project was keyed on none of its files.
+  ##
+  ## The roots judged are the ones `actionVolatileScope` would use: the
+  ## declared ones, or each action's working directory when none are
+  ## declared. A working directory is judged only when it is under a
+  ## volatile prefix, so an action run from `/` is not refused for
+  ## containing `/dev`; a DECLARED root of `/` is.
+  var declared = false
+  for root in filesystemRoots:
+    if root.kind != lrkTracked or root.path.len == 0:
+      continue
+    declared = true
+    for spelling in trackedFilesystemRootPaths([root]):
+      let reason = volatileRootRefusal(spelling)
+      if reason.len > 0:
+        let named =
+          if spelling == root.path: spelling
+          else: spelling & " (" & root.path & ")"
+        let message = "refusing to build: the " & root.label & " root " &
+          named & " is not a place a project's files can be fingerprinted: " &
+          reason
+        if message notin result:
+          result.add(message)
+  if declared:
+    return
+  for action in g.actions:
+    if action.cwd.len == 0:
+      continue
+    let cwd = absolutePath(action.cwd)
+    if not cwd.isVolatileRuntimeStatePath():
+      continue
+    let reason = volatileRootRefusal(cwd)
+    if reason.len > 0:
+      result.add("refusing to build: action " & action.id &
+        " runs in " & cwd & ", which is not a place a project's files can " &
+        "be fingerprinted: " & reason)
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil):
@@ -9548,6 +9631,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
   result.publishable = true
   result.evidence.declaredInputs = action.inputs
   result.evidence.declaredOutputs = action.outputs
+  # Before anything is folded: every channel below is judged against it.
+  result.evidence.volatileScope =
+    if config != nil: actionVolatileScope(action, config[].filesystemRoots)
+    else: actionVolatileScope(action, [])
   # S5 — an action that declares the same path as BOTH an input and an
   # output consumes its own output: an incremental tool reading the state
   # a previous run left behind. That action is not hermetic, and the one
@@ -9630,7 +9717,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
   if action.dependencyPolicy.kind in MonitorPolicyKinds and
       action.kind == bakProcess:
     let rootImage = executedToolImagePath(action, config)
-    if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
+    if rootImage.len > 0 and not rootImage.isVolatileMonitorPath(result.evidence.volatileScope):
       result.evidence.monitorReads.observe(
         result.evidence.evidenceProvenance, evcRootImageReconstruction,
         seen.monitorReads, rootImage)
@@ -11245,7 +11332,15 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   EXISTENCE of a directory a declared output sits in (a probe of
   ##   ``build/`` before ``mkdir -p build`` created it) is the action's own
   ##   side effect, not an input — see ``outputAncestorDirectoryKeys``.
+  ## * the volatile-runtime filter (``isVolatileMonitorPath``) drops a path
+  ##   under `/dev`, `/proc`, `/sys` or `/run` outside the invocation's own
+  ##   trees, on EVERY channel and a declaration included: a declared
+  ##   `/proc/cpuinfo` cannot be fingerprinted any better than an observed
+  ##   one. The monitor fold has already applied it to the observed channels
+  ##   with the same scope; here it reaches the declared and tool-reported
+  ##   ones, which the cache record used to drop on its own, by prefix.
   let toolRoots = action.toolInputRoots()
+  let volatile = evidence.volatileScope
   # The EXPLICIT prefix set, deliberately not the derived one. The derived
   # self-written set applies to the ENUMERATION channel only — see
   # `enumerationIgnoredRoots` for the whole argument, and for the shipped
@@ -11265,11 +11360,15 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     let path = materialContainmentPath(action.cwd, input)
+    if path.isVolatileMonitorPath(volatile):
+      continue
     declaredMaterialized.incl(path.replace('\\', '/'))
     result.addUnique(seen, path)
   for input in evidence.depfileInputs:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
+    if path.isVolatileMonitorPath(volatile):
+      continue
     if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
@@ -11284,6 +11383,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.monitorReads:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
+    if path.isVolatileMonitorPath(volatile):
+      continue
     if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
@@ -11297,6 +11398,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
     let path = materialContainmentPath(action.cwd, probe)
+    if path.isVolatileMonitorPath(volatile):
+      continue
     let key = path.replace('\\', '/')
     if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
@@ -18040,6 +18143,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # declared no roots, which exempts nothing — see
   # `untrackedEnumerationScope`.
   let membershipTrackedRoots = trackedFilesystemRootPaths(config.filesystemRoots)
+  # A root the volatile-path fold cannot tell from runtime state (a project
+  # at `/dev/shm` itself, at `/run`, on `/proc`) would have every read of the
+  # project dropped: a stale result served, a certificate for content nobody
+  # tested. Refused here, before any action runs or is served from the
+  # cache, naming the root and the reason. See `volatileRootRefusals`.
+  let volatileRefusals = volatileRootRefusals(g, config.filesystemRoots)
+  if volatileRefusals.len > 0:
+    raiseEngine(volatileRefusals.join("\n"))
   var stats: BuildStats
   proc statStart(): float =
     if config.statsEnabled:
@@ -19294,6 +19405,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
       reads, probes, enumerations, portableStaticFieldsOf(action),
       observedEnv, graphViewIdentifier(action))
+    if fp.portable:
+      # An input the volatile-path fold KEPT under `/dev` (the project's own
+      # file, or one in a directory under `/dev/shm`) that the untracked
+      # `/dev` system root claims would be left out of the portable key, and
+      # a record keyed without it would be served after it changed. A
+      # tracked root claims a project at `/dev/shm/<name>` (longest root
+      # wins); this is what no tracked root claims, such as the project
+      # reached through a symlink whose resolved spelling is under `/dev/shm`
+      # (portable roots carry the declared spelling only), or a dependency
+      # checkout there. Such a record is not portable, as an input outside
+      # every root is not.
+      let scope = actionVolatileScope(action, config.filesystemRoots)
+      let roots = portableRecordRoots()
+      for path in reads & probes & enumerations:
+        if path.isVolatileRuntimeStatePath() and
+            not path.dropsAsVolatileRuntimeState(scope) and
+            toLogicalPath(roots, path).kind == lpkUntracked:
+          fp.portable = false
+          fp.reason = "input " & path & " is under a volatile runtime " &
+            "prefix that no tracked root names, so it cannot be named " &
+            "portably"
+          fp.strongHex = ""
+          break
     if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
       let outs = portableOutputs(config.portableRoots,

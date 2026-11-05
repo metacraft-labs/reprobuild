@@ -311,6 +311,24 @@ proc unitProvisionFromShow*(text: string): UnitProvision =
   result.activeState = kv.getOrDefault("ActiveState")
   result.needDaemonReload = kv.getOrDefault("NeedDaemonReload") != "no"
 
+const TemplateProbeInstance* = "repro-addon-observe"
+  ## The instance a template is observed through (``readUnitProvision``).
+
+proc templateObservationName*(unit: string): string =
+  ## ``unit`` itself, or for a template ``foo@.service`` its probe instance
+  ## ``foo@repro-addon-observe.service``.
+  when mutated("template-observed-by-name"):
+    # Falsifying build: the template shown by its own name, which systemd
+    # refuses -- no floored template can be applied (finding 4's vector
+    # never reaches the switch, so nothing about it is tested).
+    return unit
+  let at = unit.find('@')
+  let dot = unit.rfind('.')
+  if at > 0 and dot == at + 1:
+    unit[0 .. at] & TemplateProbeInstance & unit[dot .. ^1]
+  else:
+    unit
+
 proc readUnitProvision*(unit: string): UnitProvision =
   ## ``systemctl show`` for one unit. Fails closed: a missing systemctl,
   ## a non-zero exit (no bus, systemd not answering) or an answer without
@@ -319,12 +337,19 @@ proc readUnitProvision*(unit: string): UnitProvision =
   ## permission to create an /etc unit over whatever really provides it.
   ## (A unit that does not exist is not an error: systemctl answers 0
   ## with ``LoadState=not-found``.)
+  ##
+  ## A template (``foo@.service``) cannot be shown: systemctl refuses the
+  ## name ("neither a valid invocation ID nor unit name"). It is observed
+  ## through an instance nothing else names (``TemplateProbeInstance``),
+  ## which systemd loads from the template's own fragment, with the
+  ## template's drop-ins and its mask: what provides the template is what
+  ## provides that instance.
   var r: HostToolResult
   try:
     r = runSystemctl(["show", "-p",
       "LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState," &
         "NeedDaemonReload",
-      "--", unit])
+      "--", templateObservationName(unit)])
   except HostToolMissing as e:
     raise newException(AddonCollisionError, "cannot observe unit " & unit &
       ": " & e.msg)

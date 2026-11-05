@@ -85,10 +85,15 @@ type
       ## type-check of the shipped sources, say); `$O` is the prefix
     gateTools*: seq[string]
       ## the tools `gateChecks` run
+    buildRoots*: seq[string]
+      ## directories the edges built in besides the project root (a
+      ## catalog checkout, say). The gate refuses an image naming any of
+      ## them, as it refuses the project root; `prefixBuildRoots` adds the
+      ## recipe directory of every entry and library source.
     debugStripCommand*: string
       ## `<command> <in> <out>` that copies an object without its debug
-      ## info (`zig objcopy --strip-debug` for a zig target, whose own
-      ## binutils read every architecture). Applied to a bundled library
+      ## info (`llvm-objcopy --strip-debug` for a zig target: it reads
+      ## every architecture). Applied to a bundled library
       ## that carries debug sections -- a source build's, whose debug info
       ## names build-host directories -- and to none that carries none, so
       ## a distribution's stripped library keeps its signed bytes. "" = keep.
@@ -265,9 +270,29 @@ proc gateStamp*(prefix: string): string =
   ## The file the gate writes beside the prefix when it passes.
   prefix & PrefixGateStampName
 
-proc gateScript*(prefix: string; checks: seq[string] = @[]): string =
-  ## The builder-path gate's shell program, then `checks`. Exposed for the
-  ## tests.
+proc prefixBuildRoots*(spec: InstalledPrefixSpec): seq[string] =
+  ## Every build root the prefix's inputs came from, beyond the project
+  ## root: `spec.buildRoots`, and the recipe directory (the part before
+  ## `/.repro/`) of each entry and library source. A source build names its
+  ## own tree in what it compiles -- the catalog's `nim-fork` put 47 lines of
+  ## `<catalog>/nim-fork/.repro/build/...` into `nim/bin/nim`, outside every
+  ## other needle (measured 2026-11-04).
+  proc addRoot(r: var seq[string]; dir: string) =
+    let d = dir.strip(leading = false, chars = {'/'})
+    if d.len > 1 and d notin r: r.add(d)
+  for root in spec.buildRoots: result.addRoot(root)
+  var dirs: seq[string]
+  for e in spec.entries: dirs.add(e.source)
+  for src in spec.librarySources: dirs.add(src.dir)
+  for d in dirs:
+    let at = d.find("/.repro/")
+    if at > 0: result.addRoot(d[0 ..< at])
+
+proc gateScript*(prefix: string; checks: seq[string] = @[];
+                 roots: seq[string] = @[]): string =
+  ## The builder-path gate's shell program, then `checks`. `roots` are
+  ## searched for as the project root (`$PWD`) and `$HOME` are. Exposed for
+  ## the tests.
   var s = "set -e; O=" & q(prefix) & "; hits=$(mktemp); "
   s.add("""
 for f in $(find "$O/bin" "$O/lib" "$O/nim/bin" -type f 2>/dev/null); do
@@ -278,7 +303,7 @@ for f in $(find "$O/bin" "$O/lib" "$O/nim/bin" -type f 2>/dev/null); do
       "[ \"$n\" = 0 ] || echo \"${f#$O/}: $n line(s) match " & pattern &
       "\" >> \"$hits\"\n")
   s.add("""
-  for needle in "$PWD" "${HOME:-/nonexistent}"; do
+  for needle in "$PWD" "${HOME:-/nonexistent}" """ & roots.mapIt(q(it)).join(" ") & """; do
     n=$(LC_ALL=C grep -a -c -F -- "$needle" "$f" || true)
     [ "$n" = 0 ] || echo "${f#$O/}: $n line(s) carry $needle" >> "$hits"
   done
@@ -329,7 +354,7 @@ proc installedPrefix*(spec: InstalledPrefixSpec; projectRoot: string):
   result.gate = buildAction(
     id = "installed-prefix-gate-" & idPart(spec.name) & "@" & idPart(spec.triple),
     call = inlineExecCall(@["sh", "-c", gateScript(spec.output,
-      spec.gateChecks)], projectRoot),
+      spec.gateChecks, prefixBuildRoots(spec))], projectRoot),
     deps = @[result.assemble.id],
     inputs = @[spec.output],
     outputs = @[gateStamp(spec.output)],

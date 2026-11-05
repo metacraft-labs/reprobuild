@@ -235,6 +235,16 @@ echo "=== repro exec smoke test PASSED (sources: the archive copy at $pkg) ==="
 # REPRO_NIM_COMPILER and REPRO_BOOTSTRAP_CC name the toolchain this leg already
 # has, when the caller has not; without them `tarball` would download the
 # pinned Nim and C compiler, which is not what this checks.
+#
+# Except the Nim compiler on Windows. There the archive's own-source interface
+# compile carries more SDK path and exclusion flags than the 32,767-unit
+# CreateProcessW command line holds, so the engine passes them through
+# `--compilerArgsFile`, which only the pinned Windows maintenance prefix
+# understands. The leg's ambient `nim` is the cold-start bootstrap compiler
+# (an official release that refuses the option: run 41823092373), so naming it
+# would make this check measure a compiler no installed prefix uses. The
+# engine's bootstrap provisions the pinned prefix instead, as it does for the
+# `repro exec` smoke above.
 build_project="$work/build-project"
 mkdir -p "$build_project"
 cat > "$build_project/repro.nim" <<EOF
@@ -255,7 +265,7 @@ exe=""
   exit 1
 }
 
-if [[ -z "${REPRO_NIM_COMPILER:-}" ]] && nim_exe=$(command -v nim); then
+if [[ -z "$exe" && -z "${REPRO_NIM_COMPILER:-}" ]] && nim_exe=$(command -v nim); then
   REPRO_NIM_COMPILER=$(native "$nim_exe")
   export REPRO_NIM_COMPILER
 fi

@@ -107,7 +107,10 @@ suite "serviceFloor":
   test "an exception must name a floor setting and give a reason":
     check "names no serviceFloor setting" in refused(unitStanza("a.service",
       "ExecStart=" & Prefix & "/bin/svc\n",
-      "  floorExceptions = [\"Bogus: why\"]\n"))
+      "  floorExceptions = [\"bogus key: why\"]\n"))
+    check "with or without an exception" in refused(unitStanza("a.service",
+      "ExecStart=" & Prefix & "/bin/svc\n",
+      "  floorExceptions = [\"PAMName: why\"]\n"))
     check "gives no reason" in refused(unitStanza("a.service",
       "ExecStart=" & Prefix & "/bin/svc\n",
       "  floorExceptions = [\"UMask: \"]\n"))
@@ -418,12 +421,26 @@ suite "A9 review round 2: stored generations keep their floor version":
         check renderedSystemUnitContent(r) ==
           readFile(Fixtures / version / r.suName)
 
-  test "without a ledger, a unit only version 1 accepted is still version 1":
-    for r in storedWith("v1", "").resources:
-      if r.suName == "root.service":
-        check r.suFloorVersion == "1"
+  test "version 2 before and after fca5ed3486 is told apart by the ledger":
+    # 3966d36ff4 (before fca5ed3486) and d03bb6759e stored the same text
+    # for a unit with a kept state directory and installed different
+    # bytes (the later one adds RequiresMountsFor=). Red under
+    # stored-floor-guess.
+    for (dir, want) in [("kept-v2-prekeep", "2-prekeep"), ("kept-v2", "2")]:
+      checkpoint dir
+      let sd = ledgerDir(dir)
+      for r in storedWith(dir, sd).resources:
+        if r.suName != "kept.service": continue
+        check r.suFloorVersion == want
         check renderedSystemUnitContent(r) ==
-          readFile(Fixtures / "v1" / "root.service")
+          readFile(Fixtures / dir / "kept.service")
+
+  test "without a ledger the stored floor version is refused, not guessed":
+    # Red under stored-floor-guess (round 2's fall-back to a version).
+    var why = ""
+    try: discard storedWith("v1", "")
+    except ESystemProfileInvalid as e: why = e.msg
+    check "will not guess" in why
 
   test "a generation stored today records its version and renders the same":
     let src = unitStanza("a.service", "User=a\nExecStart=" & Prefix &

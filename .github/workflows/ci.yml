@@ -281,6 +281,18 @@ jobs:
             throw "Windows release DLL staging boundary failed with exit code $LASTEXITCODE"
           }
 
+      # A real >32,767-unit compiler argv: launched directly it must fail with
+      # CreateProcessW 206, and through the production provider-compile runner
+      # (the --compilerArgsFile transport) the canonical bootstrap Nim must
+      # compile and link it.
+      - name: Verify the Windows compiler argument transport
+        shell: pwsh
+        run: |
+          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/compiler-args-transport --out:build/test-bin/t_compiler_args_transport.exe tests/integration/t_compiler_args_transport.nim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows compiler argument transport failed with exit code $LASTEXITCODE"
+          }
+
       - name: Verify Windows Python provisioning
         shell: pwsh
         run: ./scripts/check_windows_python_provisioning.ps1

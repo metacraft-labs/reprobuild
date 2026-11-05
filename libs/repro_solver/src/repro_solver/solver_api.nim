@@ -536,6 +536,14 @@ proc solve*(variants: openArray[VariantDecl];
         clingo_control_free(control)
         control = nil
       e.coreAtoms = solveForUnsatCore(variants, packages)
+      # The message is the part of the exception every route prints — an
+      # uncaught raise out of a recipe's module-init solve shows it and
+      # nothing else — so the constraints that cannot hold together are
+      # rendered INTO it rather than left in fields only a caller that knows
+      # to decode them would read.
+      e.msg.add("\n" & renderUnsatCore(
+        explainUnsat(e.coreAtoms, variants, packages),
+        e.unsatCore).strip(leading = false))
       raise e
 
     result.optimal = (solveResult and clingoSolveResultExhausted) != 0

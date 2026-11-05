@@ -186,6 +186,34 @@ proc enterWritableStoreView*() =
 # Realising the add-on's prefixes and registering generation roots.
 # ---------------------------------------------------------------------------
 
+proc realiseFilesInto(s: var Store; files: openArray[tuple[name, content: string]]):
+    tuple[id: PrefixIdBytes; path: string] =
+  ## One files prefix holding ``files`` (named by their content digest), at
+  ## the path its manifest names.
+  let ftmp = StoreRoot / "tmp" / ("addon-files-" & $getCurrentProcessId())
+  removeDir(ftmp)
+  createDir(ftmp)
+  defer: removeDir(ftmp)
+  var names: seq[string]
+  for f in files:
+    if f.name notin names:
+      writeFile(ftmp / f.name, f.content)
+      names.add(f.name)
+  let filesRes = s.realizeDirectoryAsPrefix(ftmp,
+    StoreReceiptHint(adapter: "addon-bootstrap", packageName: FilesPackage,
+      version: ReprobuildVersion,
+      provenanceChecksum: "manifest:" & filesManifest(names)))
+  (filesRes.prefixId, filesRes.absolutePath)
+
+proc realiseFilesPrefix*(files: openArray[tuple[name, content: string]]):
+    tuple[id: PrefixIdBytes; path: string] =
+  ## A files prefix of generation-0 bodies on its own (an operator verb that
+  ## adds objects to generation 0 after bootstrap: ``evidence-enrol``).
+  enterWritableStoreView()
+  var s = openStore(StoreRoot)
+  defer: s.close()
+  realiseFilesInto(s, files)
+
 proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
                            files: seq[tuple[name, content: string]]):
     RealisedPrefixes =
@@ -216,21 +244,9 @@ proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
     raise newException(StoreRootError, "store placed the add-on binary at " &
       result.binaryPrefixPath & ", not at the planned " &
       binaryPrefixPath(binarySha256))
-  let ftmp = StoreRoot / "tmp" / ("addon-files-" & $getCurrentProcessId())
-  removeDir(ftmp)
-  createDir(ftmp)
-  defer: removeDir(ftmp)
-  var names: seq[string]
-  for f in files:
-    if f.name notin names:
-      writeFile(ftmp / f.name, f.content)
-      names.add(f.name)
-  let filesRes = s.realizeDirectoryAsPrefix(ftmp,
-    StoreReceiptHint(adapter: "addon-bootstrap", packageName: FilesPackage,
-      version: ReprobuildVersion,
-      provenanceChecksum: "manifest:" & filesManifest(names)))
-  result.filesPrefixId = filesRes.prefixId
-  result.filesPrefixPath = filesRes.absolutePath
+  let f = realiseFilesInto(s, files)
+  result.filesPrefixId = f.id
+  result.filesPrefixPath = f.path
 
 proc registerGenerationRoot*(generationId: string;
                              prefixIds: openArray[PrefixIdBytes]) =

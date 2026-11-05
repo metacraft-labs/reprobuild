@@ -284,3 +284,41 @@ suite "cross_zig: a link finds the libraries LIBRARY_PATH names":
       checkpoint(link.output)
       check link.code == 0
       check fileExists(dir / "m")
+
+suite "cross_zig: `-o -` writes to stdout, not to a file named `-`":
+  ## zig 0.13's driver takes `-o -` as a file name: `zig cc -E x.c -o -`
+  ## writes `./-` and prints nothing (measured). CMake's standard-library
+  ## probe preprocesses that way, and the armv7 clingo and libblake3 builds
+  ## left a file named `-` in their source trees (2026-11-04). The wrappers
+  ## drop `-o -` from a preprocessing run, whose output then goes to stdout,
+  ## and refuse it for anything else, which zig cannot write to stdout.
+
+  for triple in [Glibc, "aarch64-unknown-linux-musl"]:
+    test "a preprocessing run prints and leaves no file (" & triple & ")":
+      requireTools:
+        let dir = createTempDir("zig-stdout-", "")
+        defer: removeDir(dir)
+        writeWrappers(dir / "w", triple)
+        writeFile(dir / "x.c", "#define A 1\nint x = A;\n")
+        let cc = quoteShell(dir / "w" / "cc")
+        for spelling in [" -E x.c -o -", " -E x.c -o-", " -o - -E x.c"]:
+          let r = run(cc & spelling, dir)
+          checkpoint(spelling & ": " & r.output)
+          check r.code == 0
+          check "int x = 1;" in r.output
+          check not fileExists(dir / "-")
+        # An ordinary -o still names its file.
+        check run(cc & " -E x.c -o x.i", dir).code == 0
+        check fileExists(dir / "x.i")
+
+    test "anything else written to `-o -` is refused (" & triple & ")":
+      requireTools:
+        let dir = createTempDir("zig-stdout-", "")
+        defer: removeDir(dir)
+        writeWrappers(dir / "w", triple)
+        writeFile(dir / "x.c", "int x = 1;\n")
+        let r = run(quoteShell(dir / "w" / "cc") & " -S x.c -o -", dir)
+        checkpoint(r.output)
+        check r.code != 0
+        check "-o -" in r.output
+        check not fileExists(dir / "-")

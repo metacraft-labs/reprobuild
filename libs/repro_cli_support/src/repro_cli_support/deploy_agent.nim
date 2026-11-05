@@ -60,6 +60,8 @@ import ./infra
 when defined(linux):
   import repro_addon/addon_apply
   import repro_addon/agent_switch
+  import repro_addon/evidence as addonEvidence
+  import repro_addon/tick_evidence
   import repro_addon/verified_compile
   from repro_core/source_root import publicCliImagePath
 # Portable (constants and a template): the engine agent's pin check uses it on
@@ -549,6 +551,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # pull the whole add-on closure back into a macOS or Windows engine.
   var deps: AgentDeps
   var throughAddonSwitch = false
+  var addonStateForEvidence = ""
   when defined(linux):
     let (addonState, pointerUntrusted) = hostAddonStateDirChecked()
     let route = engineAgentRoute(addonState, flags.stateDir, pointerUntrusted)
@@ -617,6 +620,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
           compiler, mkBuildActionDispatcher(flags.cacheRoot, ctx),
           legacySecretsDir = flags.secretsDir))
       throughAddonSwitch = true
+      addonStateForEvidence = addonState
   if not throughAddonSwitch:
     let infraApply = mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
       hostIdentity = host, profileResolver = resolver)
@@ -635,7 +639,19 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # on the path where the tick RAISED and this command used to return 1 having
   # written nothing anywhere. Writing the record is best-effort inside, so it
   # can neither change the code returned here nor mask the error below.
-  let tick = runAgentTickRecorded(cfg, deps)
+  # On an add-on host the tick is recorded as the add-on agent's are
+  # (spec §10.4): its heartbeat and, for an outcome threat model §9 names,
+  # its detection -- otherwise a host this agent runs is silent to the
+  # off-host checks (DET-AO-8, DET-AO-10).
+  var tick: RecordedTick
+  when defined(linux):
+    if throughAddonSwitch:
+      tick = engineAgentTick(cfg, deps,
+        addonEvidence.defaultSite(addonStateForEvidence))
+    else:
+      tick = runAgentTickRecorded(cfg, deps)
+  else:
+    tick = runAgentTickRecorded(cfg, deps)
   if tick.raised:
     stderr.writeLine("repro deploy-agent: tick failed: " & tick.error)
     return tick.exitCode

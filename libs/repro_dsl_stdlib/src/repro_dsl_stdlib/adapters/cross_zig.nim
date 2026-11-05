@@ -249,6 +249,13 @@ const PrefixMapPrelude = """
 # ours, so a build that ships its images links them without debug info.
 compiling=0
 maps=
+# `-o -` is standard output to gcc and clang, and a file named `-` to zig
+# 0.13 (`zig cc -E x.c -o -` writes ./-; `-o /dev/stdout` fails with
+# AccessDenied). CMake's standard-library probe preprocesses that way. A
+# preprocessing run drops it and prints; anything else is refused below.
+pendo=0
+tostdout=0
+preprocess=0
 addmap() {
   case " $maps " in *" $1 "*) ;; *) maps="$maps $1";; esac
 }
@@ -260,6 +267,16 @@ storemap() {
 """
 
 const PrefixMapScan =
+  "  if [ $pendo = 1 ]; then\n" &
+  "    pendo=0\n" &
+  "    if [ \"$a\" = - ]; then tostdout=1; continue; fi\n" &
+  "    set -- \"$@\" -o\n" &
+  "  fi\n" &
+  "  case \"$a\" in\n" &
+  "    -o) pendo=1; continue;;\n" &
+  "    -o-) tostdout=1; continue;;\n" &
+  "    -E) preprocess=1;;\n" &
+  "  esac\n" &
   "  case \"$a\" in\n" &
   "    -c|-S|-E) compiling=1;;\n" &
   "    /nix/store/*) storemap \"$a\";;\n" &
@@ -270,6 +287,11 @@ const PrefixMapScan =
   "  esac\n"
 
 const PrefixMapApply = """
+[ $pendo = 1 ] && set -- "$@" -o
+if [ $tostdout = 1 ] && [ $preprocess = 0 ]; then
+  echo "zig cc: zig cannot write this output to standard output (-o -); name a file" >&2
+  exit 1
+fi
 if [ $compiling = 1 ]; then
   z=$(command -v zig)
   set -- "$@" "-ffile-prefix-map=$PWD=." "-ffile-prefix-map=${z%/bin/zig}=zig" $maps

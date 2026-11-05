@@ -237,16 +237,68 @@ type TickResult* = object
   fetchLog*: string
   applyLog*: string
 
+proc fetchStartMonotonic(g: Guest): string =
+  ## When the fetch unit's main process last started, in the guest's
+  ## CLOCK_MONOTONIC microseconds (systemd's ``ExecMainStartTimestampMonotonic``;
+  ## it outlives the oneshot's exit). "0" before its first start.
+  g.run("systemctl show -p ExecMainStartTimestampMonotonic --value " &
+        "repro-agent-fetch.service").strip()
+
+proc guestMonotonic(g: Guest): string =
+  ## The guest's CLOCK_MONOTONIC now, in microseconds, on the same clock as
+  ## systemd's ``*TimestampMonotonic`` properties: the kernel's own
+  ## ``now at <ns> nsecs`` line of ``/proc/timer_list`` (read as root; no
+  ## interpreter in the guest is needed). "" when it cannot be read.
+  let r = g.exec("awk '/^now at [0-9]+ nsecs/ {print int($3 / 1000); exit}' " &
+                 "/proc/timer_list")
+  if r.exitCode == 0: r.stdout.strip() else: ""
+
 proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   ## One cycle of the real units: start the fetch (a oneshot, so this
   ## waits for it), let ``OnSuccess=`` start the apply, wait for the apply
   ## to finish, and read the tick status record it wrote.
+  ##
+  ## The cycle it observes is proven to be a new one, started by this call
+  ## after everything the caller published. A cycle the agent's own timer
+  ## started (``OnBootSec=``, so soon after a reboot) may be running or
+  ## queued: `systemctl start` would join that job instead of starting a
+  ## fresh fetch, and the cycle observed would be one that fetched before
+  ## the caller's latest publish. So the helper first waits for both units
+  ## to settle (neither running nor queued), then checks after the start
+  ## that the fetch's main process started after the moment it took just
+  ## before the start. A cycle that did not (a timer firing in the window
+  ## between the two) is reported as ``stale-cycle``, never passed on.
+  ## The positive control, ``e2e_addon_tick_observes_a_fresh_cycle``, has
+  ## two gate-level variants: ``REPRO_A13_MUTATION=tick-joins-in-flight``
+  ## restores the old helper (no wait, no proof), and
+  ## ``tick-skips-idle-wait`` keeps the proof but not the wait, so the proof
+  ## alone must catch the joined cycle.
+  let variant = getEnv("REPRO_A13_MUTATION")
+  let oldHelper = variant == "tick-joins-in-flight"
+  if not oldHelper and variant != "tick-skips-idle-wait":
+    discard g.exec("for i in $(seq 1 " & $timeoutSec & "); do " &
+      "busy=0; for u in repro-agent-fetch.service repro-agent-apply.service; do " &
+      "case \"$(systemctl show -p ActiveState --value $u)\" in " &
+      "activating|active|deactivating|reloading) busy=1;; esac; done; " &
+      # A job OnSuccess= queued is not active yet, but it is in flight.
+      "systemctl list-jobs --no-legend 2>/dev/null | grep -q 'repro-agent-' " &
+      "&& busy=1; " &
+      "[ $busy = 0 ] && break; sleep 1; done", timeoutSec + 30)
   discard g.exec("rm -f " & TickStatus)
   let since = g.run("date +%s").strip()
   # The apply unit's invocation before this tick, so a failure left over
   # from the previous tick is not taken for this tick's.
   let before = g.run("systemctl show -p InvocationID --value " &
                      "repro-agent-apply.service").strip()
+  let fetchBefore = g.fetchStartMonotonic()
+  let startedAfter = g.guestMonotonic()
+  if not oldHelper and startedAfter.len == 0:
+    # Without the guest's monotonic clock the proof cannot be made; that is
+    # a named failure, not a pass and not a stale cycle.
+    result.outcome = "tick-clock-unavailable"
+    result.message = "cannot read the guest's CLOCK_MONOTONIC from " &
+      "/proc/timer_list, so this tick cannot prove its cycle is new"
+    return
   let f = g.exec("systemctl start repro-agent-fetch.service", timeoutSec)
   result.fetchLog = g.exec("journalctl -q -o cat --since @" & since &
     " -u repro-agent-fetch.service").stdout
@@ -254,6 +306,22 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
     result.outcome = "fetch-failed"
     result.message = f.stdout & f.stderr & result.fetchLog
     return
+  if not oldHelper:
+    let fetchAfter = g.fetchStartMonotonic()
+    var fresh = false
+    try:
+      fresh = fetchAfter != fetchBefore and
+        parseBiggestInt(fetchAfter) >= parseBiggestInt(startedAfter)
+    except ValueError:
+      fresh = false
+    if not fresh:
+      result.outcome = "stale-cycle"
+      result.message = "the fetch this tick observed did not start after " &
+        "the tick began (main process started at " & fetchAfter &
+        " us monotonic, before the start it was " & fetchBefore &
+        ", the tick began at " & startedAfter & "): it joined a cycle " &
+        "already in flight\n" & result.fetchLog
+      return
   # The apply job OnSuccess queued: wait until the unit is inactive again
   # and the record exists -- or until this tick's apply has ended failed
   # without one (killed by its syscall filter, say), which no amount of

@@ -40,6 +40,67 @@ Both activities declare the same kinds of things:
   store prefix.
 - **A health check** that an add-on switch waits for before it commits.
 
+## When an upgrade changes the hardening floor
+
+The floor is versioned. A newer Reprobuild can tighten it, and an add-on
+host records with each installed unit the floor version it was written
+under. Upgrading the engine therefore changes the bytes of every floored
+unit, and each such unit restarts. A host upgraded from an engine that
+wrote version 2 to one that writes version 3 or later is one example.
+The add-on handles this in four ways:
+
+- **Every plan lists the units whose floor changes**, under `service floor
+  changed`, and lists each one as a restart in the transition list too.
+  Removing a floor exception from a unit counts as a floor change, because
+  the unit loses something it ran with.
+- **The deploy agent refuses such a generation** and reports it as an
+  operator action. A running service's floor changes only in an apply an
+  operator has reviewed, never in an unattended tick. Run
+  `repro system addon plan` with the new engine, read the list, and apply
+  from the operator's shell. Later generations that change no floor go
+  back to the agent.
+- **A stored generation keeps the floor it was installed with.** A revert
+  or a rollback to an older generation renders that generation's units
+  under their own floor version. If the add-on cannot tell which version
+  a stored unit was written under, it refuses the switch. It does not
+  guess, because a wrong guess would rewrite the unit with other bytes than
+  were installed.
+- **Before anything starts, systemd's own view is checked.** From just
+  before the switch reloads systemd until this check passes, the switch
+  holds every floored unit, so no socket, timer or other start request can
+  run it. The add-on then reads everything `systemctl show` reports for
+  each floored unit and compares it with the floor the unit was written
+  under, minus its named exceptions. A property the floor neither checks
+  nor lists as harmless is refused, so a setting from a newer systemd is
+  refused until it is reviewed. If anything differs, the switch starts
+  nothing and reverts. The check also refuses:
+  - any drop-in the add-on did not write, wherever systemd would read it
+    for the unit or for any instance of a templated unit. This includes a
+    package's drop-in under `/usr/lib/systemd` and a type-wide
+    `service.d/` drop-in;
+  - a command flag that leaves the sandbox (`+`, `!`, `!!`);
+  - a file the service manager would open as root (`OpenFile=`,
+    `StandardOutput=file:`);
+  - a privileged group, including one the service's account belongs to in
+    `/etc/group`.
+
+  This check runs on every switch: an apply, an agent tick, a revert, a
+  rollback and a crash recovery. It does not run between switches. A
+  drop-in that someone with root, or a package, installs later takes
+  effect at the next reload or boot without the check. The next switch
+  then refuses it.
+
+Each newer floor version can refuse settings an older one accepted. For
+example, it may forbid a writable or executable path the unit relied on,
+quoting or `%` specifiers in a path, `PAMName=`, or a key outside the
+floor's list of known keys. The plan names each refusal and the exception
+that would waive it, where one exists. An exception can name only the
+floor's own settings. A service that must run as root, or in a privileged
+group such as `adm` or `shadow`, needs the whole-floor waiver
+`serviceFloor`: no narrower exception allows it. `PAMName=` cannot be
+waived, because a PAM session can run code as root outside the unit's
+sandbox.
+
 ## Running a validator safely
 
 The validator client is declared `exclusive = true`. On an add-on host,

@@ -64,6 +64,32 @@ type
     cachePublishers*: seq[string] ## the only producer keys trusted for it
     agent*: AgentUnitsInputs    ## the deploy agent's units (A8); none when
                                 ## ``agent.target`` is empty
+    egress*: EgressObserverInputs
+      ## The egress observer; none when ``egress.nft`` is empty.
+    evidence*: EvidenceUnitsInputs
+      ## The Evidence sink and the units that ship to it (A11, spec §10.4);
+      ## none when ``evidence.sinkAddress`` is empty, so a host bootstrapped
+      ## without a sink keeps the generation 0 it had.
+
+  EgressObserverInputs* = object
+    ## The deploy agent's egress observer (owner decision 2026-11-04, threat
+    ## model G40, DET-AO-3): the add-on's own nftables table, counting and
+    ## logging every packet from the fetch unit's slice to an address the
+    ## unit may not reach. Present on a host with both the deploy agent and
+    ## an Evidence sink; bootstrap refuses one whose base cannot carry it.
+    nft*: string                     ## the base's ``nft`` ("" = none)
+    allowedAddresses*: seq[string]   ## the fetch unit's, as its allow-list
+
+  EvidenceUnitsInputs* = object
+    ## Where this host's evidence records go (spec §10.4): one Evidence sink
+    ## (reprobuild's ``repro-evidence-sink``), named by address -- the
+    ## shipping unit has no DNS -- and pinned by its own CA certificate, the
+    ## only certificate the shipping unit trusts for it.
+    sinkAddress*: string        ## an IPv4 or IPv6 literal
+    sinkPort*: int
+    sinkCaPem*: string          ## the sink's host CA (PEM)
+    sinkHostId*: string         ## its host id (64 hex), derived from the CA
+    heartbeatSec*: int          ## the shipping unit's timer (0: the default)
 
   AgentUnitsInputs* = object
     ## What generation 0 needs to carry the deploy agent's two units (spec
@@ -75,6 +101,10 @@ type
     allowedAddresses*: seq[string]   ## sorted, for ``IPAddressAllow=``
     hosts*: seq[tuple[address, name: string]]  ## sorted
     profileCompiler*: string         ## "" when none is configured
+    pollIntervalSec*: int
+      ## The fetch timer's ``OnUnitActiveSec=`` in seconds; 0 is the default
+      ## (``DefaultAgentPollSec``). A tick's evidence record carries it, so
+      ## the off-host silence check knows when a tick is overdue (DET-AO-8).
 
 const
   SystemdUnitDir* = "/etc/systemd/system"
@@ -117,6 +147,47 @@ const
     ## /caches_config``): the cache list every substitution on the host reads,
     ## each cache with the only producer keys trusted for it.
   StoreRoot* = "/repro/store"
+  # --- Milestone A11: evidence (spec §10.4, §10.5). ----------------------
+  EvidenceConfPath* = "/etc/repro/evidence.conf"
+    ## The Evidence sink this host ships to and the intervals the off-host
+    ## silence check expects records at (``renderEvidenceConf``).
+  EvidenceSinkCaPath* = "/etc/repro/evidence-sink.crt"
+    ## The sink's host CA: the one certificate the shipping unit trusts for
+    ## the sink (never the peer-cache anchors, threat model G28's rule).
+  EvidenceStateDir* = "/var/lib/repro/evidence"
+    ## ``0700 root``: the host's sink write credential (``host-ca.key``,
+    ## ``host-ca.crt``), the shipping cursor and the sink's last receipt.
+    ## Nothing else can read the credential; the shipping unit cannot read
+    ## the attestation key or the recipient key (they are under
+    ## ``/var/lib/repro/agent``, hidden from it).
+  EvidenceCredentialCertPath* = EvidenceStateDir & "/host-ca.crt"
+  EvidenceCredentialKeyPath* = EvidenceStateDir & "/host-ca.key"
+  AttestationKeyPath* = "/var/lib/repro/agent/attestation.key"
+    ## The host's generation-attestation key (``0400 root``, beside the
+    ## recipient key), generated at bootstrap; its public half is in the
+    ## first evidence record. Readable by the root units that write records
+    ## (apply, re-assert, apt hook), never by the shipping unit.
+  AttestationPubPath* = "/var/lib/repro/agent/attestation.pub"
+  EvidenceDirPath* = "/var/lib/repro/system/addon/evidence"
+    ## The local records (one JSON document per event, spec §10.4).
+  EvidenceOutboxPath* = EvidenceDirPath & "/outbox"
+    ## Each record as the sink receives it, until the sink acknowledges it.
+  EvidenceShipUnit* = "repro-addon-evidence.service"
+  EvidenceShipPathUnit* = "repro-addon-evidence.path"
+  EvidenceShipTimer* = "repro-addon-evidence.timer"
+  AgentSlice* = "system-reproagent.slice"
+    ## The fetch unit's slice when the egress observer is present: a slice
+    ## of its own, active for as long as the observer is, so the table's
+    ## ``socket cgroupv2`` match (resolved when the rule is loaded) names a
+    ## cgroup that exists. Under ``system.slice``, so it adds no parent.
+  AgentSliceCgroup* = "system.slice/" & AgentSlice
+  EgressNftPath* = "/etc/repro/egress.nft"
+  EgressUnit* = "repro-addon-egress.service"
+  EgressCheckUnit* = "repro-addon-egress-check.service"
+  EgressCheckTimer* = "repro-addon-egress-check.timer"
+  DefaultEvidenceHeartbeatSec* = 300
+  DefaultAgentPollSec* = 300
+  AgentPollRandomDelaySec* = 30
   AgentConfPath* = "/etc/repro/agent.conf"
     ## The deploy agent's configuration on an add-on host (A8): ``target``,
     ## one ``source`` line per manifest source, ``profile-compiler``.
@@ -619,7 +690,141 @@ proc agentCompileBounds*(): string =
   "IOWeight=" & $AgentCompileWeight & "\n" &
   "OOMScoreAdjust=" & $AgentCompileOomScoreAdjust & "\n"
 
-proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
+proc renderEgressNft*(allowed: seq[string]): string =
+  ## ``/etc/repro/egress.nft``: the add-on's table, replaced as a whole on
+  ## every load (declare, delete, define: one transaction), so loading it
+  ## twice never duplicates a rule and nothing outside it is touched. It
+  ## drops nothing -- the unit's ``IPAddressDeny=`` does that, after the
+  ## netfilter output hook -- it counts each refused destination (a dynamic
+  ## set with per-element counters), counts all of them, and logs them,
+  ## rate-limited, to the kernel log.
+  var v4, v6: seq[string]
+  for a in allowed:
+    if ':' in a: v6.add(a) else: v4.add(a)
+  proc elements(xs: seq[string]): string =
+    if xs.len == 0: "" else: "\t\telements = { " & xs.join(", ") & " }\n"
+  let match = "socket cgroupv2 level 2 \"" & AgentSliceCgroup & "\""
+  "# Reprobuild add-on: the deploy agent's egress observer. The add-on's\n" &
+  "# only table; it never touches another.\n" &
+  "table inet repro_addon_egress\n" &
+  "delete table inet repro_addon_egress\n" &
+  "table inet repro_addon_egress {\n" &
+  "\tset allowed4 {\n\t\ttype ipv4_addr\n" & elements(v4) & "\t}\n" &
+  "\tset allowed6 {\n\t\ttype ipv6_addr\n" & elements(v6) & "\t}\n" &
+  "\tset refused4 {\n\t\ttype ipv4_addr\n\t\tsize 4096\n" &
+    "\t\tflags dynamic\n\t\tcounter\n\t}\n" &
+  "\tset refused6 {\n\t\ttype ipv6_addr\n\t\tsize 4096\n" &
+    "\t\tflags dynamic\n\t\tcounter\n\t}\n" &
+  "\tcounter refused {\n\t}\n" &
+  "\tchain output {\n" &
+  "\t\ttype filter hook output priority filter - 10; policy accept;\n" &
+  "\t\t" & match & " meta nfproto ipv4 ip daddr != @allowed4 " &
+    "update @refused4 { ip daddr } counter name \"refused\"\n" &
+  "\t\t" & match & " meta nfproto ipv6 ip6 daddr != @allowed6 " &
+    "update @refused6 { ip6 daddr } counter name \"refused\"\n" &
+  "\t\t" & match & " meta nfproto ipv4 ip daddr != @allowed4 " &
+    "limit rate 10/second log prefix \"repro-addon-egress-refused \" level warn\n" &
+  "\t\t" & match & " meta nfproto ipv6 ip6 daddr != @allowed6 " &
+    "limit rate 10/second log prefix \"repro-addon-egress-refused \" level warn\n" &
+  "\t}\n}\n"
+
+proc agentSliceUnit*(): string =
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: the deploy agent's fetch slice (egress observer)\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc egressUnit*(nft: string): string =
+  ## ``repro-addon-egress.service``: loads the table and deletes it when
+  ## stopped (uninstall stops it). Root with ``CAP_NET_ADMIN`` alone and no
+  ## IP socket; ordered before the fetch unit, which requires it, and the
+  ## re-assert unit, which checks the table.
+  let load = when mutated("egress-observer-not-installed"): "/bin/true"
+             else: nft & " -f " & EgressNftPath
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: egress observer (its own nftables table)\n" &
+  "Requires=" & AgentSlice & "\n" &
+  "After=" & AgentSlice & "\n" &
+  "Before=" & AgentFetchUnit & " " & ReassertUnit & "\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "RemainAfterExit=yes\n" &
+  "ExecStart=" & load & "\n" &
+  "ExecStop=" & nft & " delete table inet repro_addon_egress\n" &
+  "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
+  "AmbientCapabilities=\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectSystem=strict\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  "ProtectKernelTunables=yes\n" &
+  "ProtectControlGroups=yes\n" &
+  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "IPAddressDeny=any\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc egressCheckUnit*(reproExe: string): string =
+  ## ``repro-addon-egress-check.service``: reads the table's counters and
+  ## records every refused destination (DET-AO-3), and heartbeats. Started
+  ## after every fetch, whatever its result, and by its timer.
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: egress observer check (DET-AO-3)\n" &
+  "After=" & EgressUnit & "\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "ExecStart=" & reproExe & " system addon egress-check\n" &
+  "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
+  "AmbientCapabilities=\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectSystem=strict\n" &
+  "ReadWritePaths=" & EvidenceDirPath & "\n" &
+  "InaccessiblePaths=-/var/lib/repro/agent -/run/repro\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  "PrivateDevices=yes\n" &
+  "ProtectKernelTunables=yes\n" &
+  "ProtectKernelModules=yes\n" &
+  "ProtectControlGroups=yes\n" &
+  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "IPAddressDeny=any\n"
+
+proc egressCheckTimer*(heartbeatSec: int): string =
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: egress observer heartbeat\n" &
+  "\n" &
+  "[Timer]\n" &
+  "OnBootSec=1min\n" &
+  "OnUnitActiveSec=" & $heartbeatSec & "s\n" &
+  "Unit=" & EgressCheckUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc observeFetchUnit*(content: string): string =
+  ## The fetch unit under the egress observer: in its own slice, which the
+  ## table matches; not run without the table; and every run, whatever its
+  ## result, followed by the check that reads the table. A transformation of
+  ## the unobserved unit, so bootstrap and ``evidence-enrol`` (which has only
+  ## the unit as installed) render the same bytes.
+  for line in content.splitLines(keepEol = true):
+    if line.startsWith("After=network-online.target") and EgressUnit notin line:
+      result.add(line.strip(leading = false) & " " & EgressUnit & "\n")
+      result.add("Requires=" & EgressUnit & "\n")
+    elif line == "OnSuccess=" & AgentApplyUnit & "\n":
+      result.add("OnSuccess=" & AgentApplyUnit & " " & EgressCheckUnit & "\n")
+      result.add("OnFailure=" & EgressCheckUnit & "\n")
+    elif line.startsWith("ExecStart=") and "agent-fetch" in line:
+      result.add(line)
+      result.add("Slice=" & AgentSlice & "\n")
+    else:
+      result.add(line)
+
+proc unobservedFetchUnit(reproExe: string; a: AgentUnitsInputs): string =
   ## ``repro-agent-fetch.service`` (spec §9.1): a dynamic user with no
   ## capabilities, a read-only system, no access to the add-on's state
   ## (the recipient key, the sequence floor), and egress to the pinned
@@ -696,14 +901,27 @@ proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs): string =
   "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
   stateHidden & noResolver & compileExec & egress & hostsBind
 
-proc agentFetchTimer*(): string =
+proc agentPollSec*(a: AgentUnitsInputs): int =
+  if a.pollIntervalSec > 0: a.pollIntervalSec else: DefaultAgentPollSec
+
+proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs;
+                     observed = false): string =
+  ## ``repro-agent-fetch.service``; ``observed``: under the egress observer
+  ## (``observeFetchUnit``).
+  let u = unobservedFetchUnit(reproExe, a)
+  if observed: observeFetchUnit(u) else: u
+
+proc agentFetchTimer*(a: AgentUnitsInputs = AgentUnitsInputs()): string =
+  # The default renders as it always did (``5min``), so a host bootstrapped
+  # without an interval keeps the bytes of its generation 0.
+  let every = if a.pollIntervalSec <= 0: "5min" else: $a.pollIntervalSec & "s"
   "[Unit]\n" &
   "Description=Reprobuild add-on deploy agent: poll for desired state\n" &
   "\n" &
   "[Timer]\n" &
   "OnBootSec=2min\n" &
-  "OnUnitActiveSec=5min\n" &
-  "RandomizedDelaySec=30s\n" &
+  "OnUnitActiveSec=" & every & "\n" &
+  "RandomizedDelaySec=" & $AgentPollRandomDelaySec & "s\n" &
   "Unit=" & AgentFetchUnit & "\n" &
   "\n" &
   "[Install]\n" &
@@ -740,6 +958,111 @@ proc agentApplyUnit*(reproExe: string): string =
   privilegedConfinement(network = mutated("agent-apply-has-network")) &
   "MemoryMax=" & AgentApplyMemoryMax & "\n" &
   net & NoSwapLine
+
+proc evidenceHeartbeatSec*(e: EvidenceUnitsInputs): int =
+  if e.heartbeatSec > 0: e.heartbeatSec else: DefaultEvidenceHeartbeatSec
+
+proc sinkEndpoint*(e: EvidenceUnitsInputs): string =
+  ## ``address:port``, IPv6 in brackets.
+  (if ':' in e.sinkAddress: "[" & e.sinkAddress & "]" else: e.sinkAddress) &
+    ":" & $e.sinkPort
+
+proc renderEvidenceConf*(e: EvidenceUnitsInputs; agent: AgentUnitsInputs): string =
+  ## ``/etc/repro/evidence.conf``: ``key = value`` lines, ``#`` comments.
+  ## ``tick-interval`` is the longest a deploy agent's tick may take to
+  ## follow the previous one (its timer plus the timer's random delay); 0
+  ## when the host has no agent, so no tick is expected.
+  let tick = if agent.target.len > 0:
+               agentPollSec(agent) + AgentPollRandomDelaySec
+             else: 0
+  "# Reprobuild add-on: the Evidence sink this host ships its records to\n" &
+  "# (spec §10.4) and the intervals the off-host silence check expects.\n" &
+  "sink = " & sinkEndpoint(e) & "\n" &
+  "sink-host = " & e.sinkHostId & "\n" &
+  "heartbeat-interval = " & $evidenceHeartbeatSec(e) & "\n" &
+  "tick-interval = " & $tick & "\n"
+
+proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
+  ## ``repro-addon-evidence.service`` (spec §10.4): ships the outbox to the
+  ## Evidence sink and heartbeats. Root -- the records and the credential
+  ## are root's files -- but with NO capability, a read-only system apart
+  ## from its own two directories, the attestation and recipient keys and
+  ## the secrets hidden, and egress to the sink's address only. It is the
+  ## only add-on unit that talks to the sink; the units that write records
+  ## (apply, re-assert, the apt hook) have no network and cannot sign as
+  ## the sink credential, and this one cannot sign attestations.
+  let egress = when mutated("evidence-ship-unrestricted-egress"): ""
+               else: "IPAddressDeny=any\nIPAddressAllow=" & e.sinkAddress & "\n"
+  # The store stays visible (read-only, as everywhere): the unit's own
+  # binary is in it.
+  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro"
+               else: "-/var/lib/repro/agent -/run/repro"
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: ship evidence records to the Evidence sink\n" &
+  "After=network-online.target\n" &
+  "Wants=network-online.target\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "ExecStart=" & reproExe & " system addon evidence-ship\n" &
+  "TimeoutStartSec=5min\n" &
+  "CapabilityBoundingSet=\n" &
+  "AmbientCapabilities=\n" &
+  "NoNewPrivileges=yes\n" &
+  "ProtectSystem=strict\n" &
+  "ReadWritePaths=" & EvidenceStateDir & " " & EvidenceOutboxPath & "\n" &
+  "InaccessiblePaths=" & hidden & "\n" &
+  "ProtectHome=yes\n" &
+  "PrivateTmp=yes\n" &
+  "PrivateDevices=yes\n" &
+  "ProtectKernelTunables=yes\n" &
+  "ProtectKernelModules=yes\n" &
+  "ProtectKernelLogs=yes\n" &
+  "ProtectControlGroups=yes\n" &
+  "ProtectClock=yes\n" &
+  "ProtectHostname=yes\n" &
+  "ProtectProc=invisible\n" &
+  "RestrictNamespaces=yes\n" &
+  "RestrictRealtime=yes\n" &
+  "RestrictSUIDSGID=yes\n" &
+  "LockPersonality=yes\n" &
+  "MemoryDenyWriteExecute=yes\n" &
+  "SystemCallArchitectures=native\n" &
+  FetchSyscallFilter &
+  "SystemCallErrorNumber=EPERM\n" &
+  "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
+  ResolverSocketsHidden &
+  "InaccessiblePaths=-/run/dbus -/var/run/dbus\n" &
+  egress
+
+proc evidenceShipPathUnit*(): string =
+  ## Starts the shipping unit whenever a record lands in the outbox (DET-6:
+  ## it leaves at once, not at the next timer).
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: ship each evidence record as it is written\n" &
+  "\n" &
+  "[Path]\n" &
+  "PathChanged=" & EvidenceOutboxPath & "\n" &
+  "MakeDirectory=yes\n" &
+  "DirectoryMode=0700\n" &
+  "Unit=" & EvidenceShipUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
+proc evidenceShipTimer*(e: EvidenceUnitsInputs): string =
+  ## The shipping unit's heartbeat (DET-5) and its retry while the sink is
+  ## unreachable.
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: evidence heartbeat\n" &
+  "\n" &
+  "[Timer]\n" &
+  "OnBootSec=1min\n" &
+  "OnUnitActiveSec=" & $evidenceHeartbeatSec(e) & "s\n" &
+  "Unit=" & EvidenceShipUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
 
 proc profileD(reproExe: string): string =
   let bindir = reproExe[0 ..< reproExe.rfind('/')]
@@ -798,6 +1121,26 @@ proc renderCachesConf*(url: string; keys: seq[string]): string =
   result.add("url = \"" & url & "\"\n")
   result.add("trusted-public-keys = \"" & keys.join(", ") & "\"\n")
 
+proc egressObjects*(inp: Gen0Inputs): seq[OwnObject] =
+  ## The egress observer's objects, in apply order (the slice before the
+  ## unit that requires it, the table's unit before the check).
+  @[OwnObject(kind: ookEtcFile, path: EgressNftPath,
+              content: renderEgressNft(inp.egress.allowedAddresses)),
+    OwnObject(kind: ookUnit, unit: AgentSlice, path: unitPath(AgentSlice),
+              content: agentSliceUnit(), enabled: true),
+    OwnObject(kind: ookUnit, unit: EgressUnit, path: unitPath(EgressUnit),
+              content: egressUnit(inp.egress.nft), enabled: true),
+    OwnObject(kind: ookUnit, unit: EgressCheckUnit,
+              path: unitPath(EgressCheckUnit),
+              content: egressCheckUnit(inp.reproExe), enabled: false),
+    OwnObject(kind: ookUnit, unit: EgressCheckTimer,
+              path: unitPath(EgressCheckTimer),
+              content: egressCheckTimer(evidenceHeartbeatSec(inp.evidence)),
+              enabled: true)]
+
+proc evidenceObjects*(inp: Gen0Inputs): seq[OwnObject]
+  ## Below.
+
 proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
   ## The add-on's own objects, in apply order: the target first (the other
   ## units are wanted by it), the mount before the unit that is ordered
@@ -837,12 +1180,38 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
     result.add(OwnObject(kind: ookUnit, unit: AgentApplyUnit,
       path: unitPath(AgentApplyUnit), content: agentApplyUnit(inp.reproExe),
       enabled: false))
+    let observed = inp.egress.nft.len > 0
+    if observed:
+      result.add(egressObjects(inp))
     result.add(OwnObject(kind: ookUnit, unit: AgentFetchUnit,
       path: unitPath(AgentFetchUnit),
-      content: agentFetchUnit(inp.reproExe, inp.agent), enabled: false))
+      content: agentFetchUnit(inp.reproExe, inp.agent, observed),
+      enabled: false))
     result.add(OwnObject(kind: ookUnit, unit: AgentFetchTimer,
-      path: unitPath(AgentFetchTimer), content: agentFetchTimer(),
+      path: unitPath(AgentFetchTimer), content: agentFetchTimer(inp.agent),
       enabled: true))
+  if inp.evidence.sinkAddress.len > 0:
+    # The Evidence sink (A11): present only on a host bootstrapped with
+    # one, so a host without it keeps the generation 0 it had.
+    result.add(evidenceObjects(inp))
+
+proc evidenceObjects*(inp: Gen0Inputs): seq[OwnObject] =
+  ## Generation 0's evidence objects (the sink's configuration and CA, the
+  ## shipping unit, its path unit and timer).
+  if true:
+    result.add(OwnObject(kind: ookEtcFile, path: EvidenceConfPath,
+                         content: renderEvidenceConf(inp.evidence, inp.agent)))
+    result.add(OwnObject(kind: ookEtcFile, path: EvidenceSinkCaPath,
+                         content: inp.evidence.sinkCaPem))
+    result.add(OwnObject(kind: ookUnit, unit: EvidenceShipUnit,
+      path: unitPath(EvidenceShipUnit),
+      content: evidenceShipUnit(inp.reproExe, inp.evidence), enabled: false))
+    result.add(OwnObject(kind: ookUnit, unit: EvidenceShipPathUnit,
+      path: unitPath(EvidenceShipPathUnit), content: evidenceShipPathUnit(),
+      enabled: true))
+    result.add(OwnObject(kind: ookUnit, unit: EvidenceShipTimer,
+      path: unitPath(EvidenceShipTimer),
+      content: evidenceShipTimer(inp.evidence), enabled: true))
 
 proc contentFileName*(o: OwnObject): string =
   ## The file under the generation's files prefix that holds ``o``'s body.

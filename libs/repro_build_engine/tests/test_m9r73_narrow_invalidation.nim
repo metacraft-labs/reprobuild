@@ -29,6 +29,8 @@
 import std/[os, sets, strutils, unittest]
 
 import repro_build_engine
+import repro_core/paths
+import repro_local_store/portable_fingerprint
 import io_mon/[types, writer]
 from repro_test_support import testCaseScratchSlug
 
@@ -254,41 +256,105 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     check evidence.monitorWrites == @[outputPath]
     check evidence.monitorProbes == @[probedPath]
 
-  test "a file in a directory under /dev/shm is an input, a shm object is not":
-    ## A build tree moved to /dev/shm had its reads dropped, so an edited input
-    ## was a cache hit: the same silent drop as /run/user above.
+  test "under a volatile prefix, the project's own reads and listings and ordinary-file places are kept, runtime state is dropped":
+    ## A project's tree can sit under a prefix that otherwise holds runtime
+    ## state: moved to `/dev/shm` for speed, or on a disk an administrator
+    ## mounted at `/run/<dir>`. Dropping its reads made an edited input a
+    ## cache hit and certified content that fails. What decides is the
+    ## invocation's own trees (`PathSetEvidence.volatileScope`), not a list
+    ## of mounts: the listing of the project ROOT itself is kept, which no
+    ## path-only carve-out could tell from a shared-memory object.
     resetTmp()
-    let rmdfPath = TmpDir / "dev-shm-paths.iomon"
-    let inputPath = "/dev/shm/build-scratch/src/input.txt"
-    let outputPath = "/dev/shm/build-scratch/output.txt"
-    let mediaPath = "/run/media/someone/disk/project/input.txt"
+    let rmdfPath = TmpDir / "volatile-scope-paths.iomon"
+    let project = "/dev/shm/build-scratch"
+    let mounted = "/run/admin-mount/project"
+    let inputPath = project / "input.txt"
+    let outputPath = project / "build" / "output.txt"
+    let mountedInput = mounted / "src" / "input.txt"
+    let siblingInput = "/dev/shm/workspace/sibling/src/lib.txt"
+    let mediaInput = "/run/media/someone/disk/dep/input.txt"
     let records = @[
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: inputPath),
+      MonitorRecord(kind: mrDirectoryEnumerate,
+        observationKind: moDirectoryEnumerate,
+        osPid: 1, threadId: 1, path: project),
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
-        osPid: 1, threadId: 1, path: mediaPath),
+        osPid: 1, threadId: 1, path: mountedInput),
       MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
         osPid: 1, threadId: 1, path: outputPath),
-      # Still volatile: POSIX objects are flat entries, and the rest of /dev is
-      # not files at all.
+      # Outside both trees, so still runtime state: a POSIX semaphore, the
+      # listing of `/dev/shm` itself, a device, and the rest of `/run`.
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/dev/shm/sem.mp-1234"),
-      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
-        osPid: 1, threadId: 1, path: "/dev/shm/"),
-      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
-        osPid: 1, threadId: 1, path: "/dev/shmem/state"),
+      MonitorRecord(kind: mrDirectoryEnumerate,
+        observationKind: moDirectoryEnumerate,
+        osPid: 1, threadId: 1, path: "/dev/shm"),
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/dev/urandom"),
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
-        osPid: 1, threadId: 1, path: "/run/mediator/state"),
+        osPid: 1, threadId: 1, path: "/run/admin-mount/state"),
+      # Outside both trees too, but in places that hold only ordinary files:
+      # a directory under `/dev/shm` (a sibling repository, a dependency
+      # checkout) and an automounted disk. Kept whatever the scope.
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: siblingInput),
+      MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
+        osPid: 1, threadId: 1, path: mediaInput),
     ]
     writeFile(rmdfPath, encodeCanonical(records))
 
     var evidence: PathSetEvidence
+    evidence.volatileScope = volatileScope([project, mounted])
     var seen: EvidenceSeenSets
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
 
     check status == mesComplete
-    check evidence.monitorReads == @[inputPath, mediaPath]
+    check evidence.monitorReads ==
+      @[inputPath, siblingInput, mountedInput, mediaInput]
     check evidence.monitorWrites == @[outputPath]
-    check evidence.monitorProbes.len == 0
+    check evidence.monitorProbes == @[project]
+    check evidence.monitorDirectoryEnumerations == @[project]
+
+    # With no scope (an invocation that has none) the same records keep
+    # only what is in a directory under `/dev/shm` or on `/run/media` (the
+    # project's files among them). The listing of the project root and the
+    # mount at `/run/<dir>` need the scope.
+    var bare: PathSetEvidence
+    var bareSeen: EvidenceSeenSets
+    check foldMonitorDepFileEvidence(rmdfPath, "", bare, bareSeen) ==
+      mesComplete
+    check bare.monitorReads == @[inputPath, siblingInput, mediaInput]
+    check bare.monitorDirectoryEnumerations.len == 0
+
+  test "a root the fold cannot tell from runtime state is refused, naming it and why":
+    ## `/dev/shm` itself, `/run` itself: a project file there and a runtime
+    ## object are the same shape of path, so keeping and dropping are both
+    ## wrong. The build is refused before anything runs.
+    let graph = BuildGraph(actions: @[action("edge", ["true"],
+      cwd = "/dev/shm",
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())])
+    for root in ["/dev/shm", "/dev/shm/", "/run", "/dev", "/sys/kernel", "/"]:
+      let refusals = volatileRootRefusals(graph, @[LogicalRoot(
+        label: "project", path: root, kind: lrkTracked)])
+      checkpoint(root & " -> " & $refusals)
+      check refusals.len == 1
+      if refusals.len == 1:
+        check "the project root " & (if root.len > 1: root.strip(leading = false, chars = {'/'}) else: root) in refusals[0]
+        check "refusing to build" in refusals[0]
+      check volatileScope([root]).exemptRoots.len == 0
+    # A directory of its own under the prefix is a project like any other,
+    # and an ordinary root needs no exemption at all.
+    for root in ["/dev/shm/build-scratch", "/run/admin-mount", "/home/me/p"]:
+      check volatileRootRefusals(graph, @[LogicalRoot(label: "project",
+        path: root, kind: lrkTracked)]).len == 0
+    check volatileScope(["/dev/shm/build-scratch/", "/home/me/p"]).exemptRoots ==
+      @["/dev/shm/build-scratch"]
+    # Declaring no roots judges each action's working directory instead.
+    let refused = volatileRootRefusals(graph, [])
+    check refused.len == 1
+    if refused.len == 1:
+      check "action edge runs in /dev/shm" in refused[0]
+    check volatileRootRefusals(BuildGraph(actions: @[action("edge", ["true"],
+      cwd = "/", governingLockIdentity = lockIdentityOutsideSolvedGraph())]),
+      []).len == 0

@@ -22,6 +22,7 @@ import repro_core/nix_evaluation_policy
 # the merged stdout/stderr descriptor (see ``repro_core/process_close``).
 from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
+import repro_core/source_root
 from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
@@ -131,6 +132,18 @@ type
     kind*: ToolProbeKind
     name*: string
     args*: seq[string]
+    scratchStateEnv*: seq[string]
+      ## Environment variables naming where the tool keeps writable state.
+      ## Each is pointed at a private directory created for this one probe
+      ## and removed after it, so a tool whose identity query rewrites its
+      ## state (``nimble --version`` rewrites ``nimbledata2.json`` under
+      ## ``NIMBLE_DIR``) changes nothing outside the probe's own scratch.
+      ## How the probe is run, not what it asks: kept out of every
+      ## fingerprint and envelope, like ``probeTimeoutSeconds``. The
+      ## directory's path is fresh on every run, so where the probe's output
+      ## names it (nimble prints ``Using the environment variable:
+      ## NIMBLE_DIR='<dir>'``), ``runProbe`` records ``probeStateToken``
+      ## instead: the output is fingerprinted and must not move per run.
 
   ToolProbeResult* = object
     spec*: ToolProbeSpec
@@ -496,6 +509,13 @@ proc configuredProbes*(packageSelector, executableName: string): seq[
     return @[ToolProbeSpec(kind: tpkCapability, name: "help", args: @["--help"])]
   if executableName == "xvfb-run":
     return @[ToolProbeSpec(kind: tpkVersion, name: "help", args: @["--help"])]
+  if executableName.toLowerAscii() in ["nimble", "nimble.exe"]:
+    # `nimble --version` loads and rewrites `$NIMBLE_DIR/nimbledata2.json`
+    # (default `~/.nimble`), truncating it first. Other nimbles on the host
+    # read that file concurrently, and one that reads it mid-rewrite fails
+    # on an empty ledger. Give the probe a ledger of its own.
+    return @[ToolProbeSpec(kind: tpkVersion, name: "version",
+      args: @["--version"], scratchStateEnv: @["NIMBLE_DIR"])]
   @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["--version"])]
 
 proc shellCommand(args: openArray[string]): string =
@@ -513,6 +533,9 @@ proc shellCommand(args: openArray[string]): string =
 # GPU / renderer processes — that outlive a bare parent-kill), and the
 # probe result is recorded as a structured `timedOut` outcome.
 const
+  probeStateToken* = "<probe-state>"
+    ## Stands for a probe's private state directory in its recorded
+    ## output; see ``ToolProbeSpec.scratchStateEnv``.
   probeTimeoutSeconds* = 10
     ## Hard wall-clock bound on every executable probe. 10s is generous
     ## for an `--version` print by a legitimate console tool yet short
@@ -565,12 +588,35 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
   # `args` form hands `cmd`/`sh` one quoted blob it parses itself —
   # redirection and all.
   let inner = (@[executablePath] & spec.args).mapIt(quoteShell(it)).join(" ")
+  # A probe of a tool that keeps writable state gets that state in a
+  # directory of its own (see ``ToolProbeSpec.scratchStateEnv``). The rest of
+  # the environment is inherited unchanged; a nil table inherits all of it.
+  var probeEnv: StringTableRef = nil
+  var stateDir = ""
+  if spec.scratchStateEnv.len > 0:
+    try:
+      stateDir = createTempDir("repro-probe-state-", "")
+    except OSError as err:
+      result.exitCode = -1
+      result.output = "probe failed to start: cannot create its state " &
+        "directory: " & err.msg
+      return
+    probeEnv = newStringTable(
+      when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
+    for key, value in envPairs():
+      probeEnv[key] = value
+    for name in spec.scratchStateEnv:
+      probeEnv[name] = stateDir
+  defer:
+    if stateDir.len > 0:
+      try: removeDir(extendedPath(stateDir))
+      except CatchableError: discard
   var process: Process
   try:
     when defined(windows):
       let cmdLine = inner & " > " & quoteShell(outPath) & " 2>&1"
       process = startProcess("cmd.exe", args = @["/c", cmdLine],
-        options = {})
+        env = probeEnv, options = {})
     else:
       # `poDaemon` asks Nim's POSIX process launcher to put the child in
       # its own process group. That gives `killProcessTree` a portable
@@ -578,7 +624,7 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
       # being present (macOS does not ship one by default).
       let cmdLine = inner & " > " & quoteShell(outPath) & " 2>&1"
       process = startProcess("/bin/sh", args = @["-c", cmdLine],
-        options = {poDaemon})
+        env = probeEnv, options = {poDaemon})
   except OSError as err:
     result.exitCode = -1
     result.output = "probe failed to start: " & err.msg
@@ -620,6 +666,16 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
     except CatchableError: discard
     try: removeFile(extendedPath(outPath))
     except CatchableError: discard
+  if stateDir.len > 0:
+    # The resolved spelling first: it can be longer than the created one
+    # (macOS `/var` -> `/private/var`) and contain it.
+    var spellings = @[stateDir]
+    try:
+      let resolved = expandFilename(stateDir)
+      if resolved != stateDir: spellings.insert(resolved, 0)
+    except CatchableError: discard
+    for spelling in spellings:
+      captured = captured.replace(spelling, probeStateToken)
 
   if timedOut:
     result.timedOut = true
@@ -5449,10 +5505,14 @@ const
     "sha256-Wp5g3mKC+QIjiO39yuiXkSMxzvH4PO4TAuEjCvyWvcI="
   BootstrapNimPackageId = "nim@" & BootstrapNimVersion
   BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
+  # The Windows maintenance prefix, the same archive `packages/nim.nim`
+  # declares. It carries `--compilerArgsFile`, which the provider and
+  # interface compiles need once their argv exceeds the 32,767-unit Windows
+  # command line (qualification run 41815608798).
   BootstrapNimTarballUrl =
-    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0/nim-2.2.10-vccexe-9bd1e7afec4d751a51cbe64da5c694f37fa93ee0-windows-x64.zip"
+    "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633-windows-x64.zip"
   BootstrapNimTarballSha256 =
-    "92cf929488c1ce9a139c72b9224fe6115c85259ad139a0478e76ab6c5b6a5d2b"
+    "e6eaf87df71f83629a8877ac496bcd8cdb7755f9e860b982bb0b886e38eac1c3"
   # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
   # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
   # x86_64: unsigned), so the monitor shim loads into it like into any other
@@ -6238,6 +6298,85 @@ proc buildNimFromSourceThroughEdges*(version, url, sha256, storeRoot, cc,
   raise newException(OSError, "the Nim " & version & " source build " &
     "edge's receipt " & edges.rootReceipt & " names no existing bin/nim")
 
+proc versionSatisfiesRange(version, constraint: string): bool
+
+const
+  InstalledPrefixRecordPath = "share" / "repro" / "cross-build-info"
+    ## `packaging/producers/installed_prefix.PrefixRecordPath`, spelled here
+    ## so the engine does not import the DSL's packaging layer.
+  InstalledPrefixNimRevisionPath = "nim" / ".nim-fork-revision"
+    ## What the catalog's `nim-fork` recipe records beside the compiler.
+
+proc installedPrefixNimVersion(nimTree: string): string =
+  ## The Nim release `nimTree` is, from its `lib/system/compilation.nim`
+  ## (`NimMajor` / `NimMinor` / `NimPatch`), or "" when it says none. Read,
+  ## not run: a compiler built for another machine cannot answer
+  ## `--version` on the build host, and on its own host this costs no spawn.
+  let file = nimTree / "lib" / "system" / "compilation.nim"
+  if not fileExists(file):
+    return ""
+  var parts = ["", "", ""]
+  for line in readFile(file).splitLines:
+    for i, name in ["NimMajor", "NimMinor", "NimPatch"]:
+      let at = line.find(name & "*")
+      if at >= 0 and "=" in line:
+        parts[i] = line.rsplit('=', maxsplit = 1)[1].strip()
+  if parts.anyIt(it.len == 0 or not it.allCharsInSet(Digits)):
+    return ""
+  parts.join(".")
+
+proc installedPrefixNim*(prefixes: openArray[string];
+                         rawConstraint = "nim >=2.2 <3.0"): string =
+  ## The provider compiler an installed prefix ships, or "" when none of
+  ## `prefixes` (the running image's, `runningImagePrefixCandidates`) ships
+  ## `nim/bin/nim` (reprobuild-pm Distribution-And-Packaging.md §5.3,
+  ## amendment N3, approved by Zahary Karadjov, 2026-11-04: this route runs
+  ## before the per-host routes of the provider-toolchain rule 2).
+  ##
+  ## The prefix exists because the appliance compiles providers and profiles
+  ## itself, with the fork the images were built by. Without this route the
+  ## armv7 prefix on rpi2 built stock Nim 2.2.10 from source instead
+  ## (2026-11-04). The compiler is found by the image's own prefix, not by
+  ## `PATH` and not by a build-time path, and is used only when it is the
+  ## fork the prefix records: `nim/.nim-fork-revision` must equal the
+  ## `nim_fork=` line of `share/repro/cross-build-info`. A mismatch, a
+  ## missing record, or a release outside `rawConstraint` (the bootstrap's
+  ## own range) raises `BootstrapNimError`, naming what it found.
+  let range = rawConstraint.splitWhitespace()[1 .. ^1].join(",")
+  for prefix in prefixes:
+    let exe = prefix / "nim" / "bin" / addFileExt("nim", ExeExt)
+    if not fileExists(exe):
+      continue
+    let record = prefix / InstalledPrefixRecordPath
+    if not fileExists(record):
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships " & exe & " but no build record " & record &
+        " to check it against; reinstall the prefix")
+    var recorded = ""
+    for line in readFile(record).splitLines:
+      if line.startsWith("nim_fork="):
+        recorded = line["nim_fork=".len .. ^1].strip()
+    let revisionFile = prefix / InstalledPrefixNimRevisionPath
+    let shipped =
+      if fileExists(revisionFile): readFile(revisionFile).strip() else: ""
+    if recorded.len == 0 or shipped != recorded:
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships a Nim that is not the fork it was built with" &
+        "\n  " & InstalledPrefixNimRevisionPath & ": " &
+        (if shipped.len > 0: shipped else: "(missing)") &
+        "\n  " & InstalledPrefixRecordPath & " nim_fork: " &
+        (if recorded.len > 0: recorded else: "(missing)") &
+        "\n  remedy: reinstall the prefix; its nim/ was replaced or damaged")
+    let version = installedPrefixNimVersion(prefix / "nim")
+    if version.len == 0 or not versionSatisfiesRange(version, range):
+      raise newException(BootstrapNimError, "the installed prefix " &
+        prefix & " ships Nim " &
+        (if version.len > 0: version else: "(unknown version)") &
+        ", outside the provider compiler's range " & rawConstraint &
+        "; pin the provider compiler in the project's lock")
+    return exe
+  ""
+
 proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
                             cc = ""): string =
   ## Provision the recipe-compile Nim by ``route`` and return its path, or
@@ -6346,7 +6485,13 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if provisioned.sdkRoot.len > 0:
       putEnv(bootstrapSdkRootEnv, provisioned.sdkRoot)
   if getEnv(bootstrapNimCompilerEnv).len == 0:
-    let nim = provisionBootstrapNim(effectiveStoreRoot, cc = cc)
+    # The installed-prefix route first (§5.3 amendment N3): the Nim the
+    # running image's prefix ships, then the per-host routes.
+    let shipped = installedPrefixNim(runningImagePrefixCandidates(),
+      bootstrapNimToolUse().rawConstraint)
+    let nim =
+      if shipped.len > 0: shipped
+      else: provisionBootstrapNim(effectiveStoreRoot, cc = cc)
     bumpWindowsNimStack(nim)
     putEnv(bootstrapNimCompilerEnv, nim)
   publishBootstrapCompilerEnv(cc, defined(windows))
@@ -7125,6 +7270,60 @@ proc runScoopInstall(scoopExecutable, scoopRoot, bucket, app: string;
     raise newException(EScoopInstallFailed,
       "EScoopInstallFailed: scoop install " & appRef &
       " (root=" & scoopRoot & ") exited " & $res.exitCode & "\n" & res.output)
+
+proc parseScoopProvenance*(provenance: string): tuple[
+    ok: bool, bucket, app, version: string] =
+  ## Parse a recorded Scoop provenance string `"scoop:<bucket>/<app>@<version>"`
+  ## (or `"scoop:<bucket>/<app>"`).
+  if not provenance.startsWith("scoop:"):
+    return (false, "", "", "")
+  let body = provenance["scoop:".len .. ^1]
+  let slash = body.find('/')
+  if slash <= 0 or slash + 1 >= body.len:
+    return (false, "", "", "")
+  let bucket = body[0 ..< slash]
+  let rest = body[slash + 1 .. ^1]
+  let at = rest.find('@')
+  if at < 0:
+    return (true, bucket, rest, "")
+  if at == 0:
+    return (false, "", "", "")
+  let app = rest[0 ..< at]
+  let version = if at + 1 < rest.len: rest[at + 1 .. ^1] else: ""
+  result = (true, bucket, app, version)
+
+proc uninstallScoopApp*(app: string; scoopOverride = "") =
+  ## Uninstall a Scoop-managed application when a generation transition
+  ## (apply or rollback) removes it from the active home profile or switches
+  ## its realization away from the Scoop adapter (Scoop-Catalog-Adapter.md
+  ## § Removal). Invokes `scoop uninstall <app>` when the Scoop CLI is
+  ## reachable, and ensures `<scoopRoot>/apps/<app>` is cleaned up.
+  if app.len == 0:
+    return
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  if scoopRoot.len == 0:
+    return
+  let appsDir = scoopAppsDir(scoopRoot, app)
+  if not dirExists(extendedPath(appsDir)):
+    return
+  if scoopExe.len > 0:
+    let isPowerShell = scoopExe.endsWith(".ps1")
+    let invocation: seq[string] =
+      if isPowerShell:
+        @["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+          scoopExe, "uninstall", app]
+      else:
+        @[scoopExe, "uninstall", app]
+    let command = invocation.mapIt(quoteShell(it)).join(" ")
+    putEnv("SCOOP", scoopRoot)
+    discard execCmdEx(command)
+  if dirExists(extendedPath(appsDir)):
+    deleteJunctionDir(appsDir / "current")
+    try:
+      removeDir(extendedPath(appsDir))
+    except OSError:
+      discard
 
 proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
                                  executionProfileCaptured: bool):

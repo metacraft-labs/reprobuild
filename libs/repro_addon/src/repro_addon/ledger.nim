@@ -30,6 +30,7 @@ import std/[algorithm, os, posix, sets, strutils, tables]
 import ./etc_write
 import ./fingerprint
 import ./host_exec
+import ./nft_tables
 
 type
   LedgerClass* = enum
@@ -92,6 +93,11 @@ type
       ## ``baseUnitState`` / ``baseActiveState`` what it reported before).
       ## A removed requirement changes nothing on the host (spec §4.1), so
       ## the entry then stays, resource-less, accounting for the state.
+    lcNftTable = "nftTable"
+      ## The add-on's own nftables table (``inet repro_addon_egress``, the
+      ## egress observer; owner decision 2026-11-04): ``path`` is
+      ## ``<family> <name>``. Created by generation 0's observer unit,
+      ## removed by uninstall; no other table is ever the add-on's.
 
   LedgerEntry* = object
     class*: LedgerClass
@@ -364,6 +370,11 @@ proc observeDrift*(e: LedgerEntry): string =
     # Content unpinned by definition: the agent owns the bytes. Even a
     # missing record is not drift -- the agent may rotate its files.
     ""
+  of lcNftTable:
+    let l = listTableNames()
+    if not l.ok: return "unreadable: " & l.why
+    if e.path notin l.tables: return "missing"
+    ""
   of lcMount, lcDiversion, lcStorePrefix, lcAccount, lcUnitState:
     ""
 
@@ -450,6 +461,13 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
     of lcUnit:
       result.add(ExpectedRecord(component: fcEtc, key: e.path,
         value: fileValue(e), baseValue: e.replaced))
+      # A slice (the egress observer's) is a runtime unit type the
+      # fingerprint does not record (``VolatileUnitSuffixes``): its file is
+      # the whole of what it accounts for.
+      var volatile = false
+      for suffix in VolatileUnitSuffixes:
+        if e.unit.endsWith(suffix): volatile = true
+      if volatile: continue
       # Unit states are what systemd reported after the apply, when the
       # apply recorded them; a ledger written without that observation
       # (generation 0 of an older binary) derives them from the flags.
@@ -520,6 +538,15 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
         if k != sysctlFingerprintKey(e.path):
           result.add(ExpectedRecord(component: fcSysctl, key: k, value: "*",
                                     coupled: true))
+    of lcNftTable:
+      result.add(ExpectedRecord(component: fcNftables, key: e.path,
+        value: "table"))
+      # The table's ``log`` statement binds the kernel's packet loggers
+      # (``nf_log_syslog``) to their families: ``net.netfilter.nf_log.<n>``
+      # change from NONE when the table is loaded, and the binding (a module
+      # load) is not undone when it is deleted.
+      result.add(ExpectedRecord(component: fcSysctl,
+        key: "net.netfilter.nf_log.*", value: "*", coupled: true))
     of lcKey, lcStorePrefix, lcKept:
       discard  # under /var/lib/repro and /repro: not fingerprinted
 
