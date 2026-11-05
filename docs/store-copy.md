@@ -27,7 +27,10 @@ The source store is the one `--store-root` names (otherwise
   (`repro store roots` lists them).
 
 A prefix produced as one output of a multi-output package brings its sibling
-outputs along, because its receipt names them.
+outputs along, because its receipt names them. A prefix with a symbolic link
+into another prefix of the store brings that prefix along too, so no copied
+link dangles. A link into the store that does not land inside a known prefix
+cannot be carried, and the copy is refused.
 
 ## What is checked
 
@@ -36,8 +39,8 @@ source: its directory and sealed `.repro-receipt` exist, the receipt agrees
 with the index row, the directory name is the one the receipt derives, and
 the directory's content digest is the one the receipt records. The
 destination is checked too: a prefix it indexes at another path or holds
-with different content, or a directory it does not index where a prefix
-would land, is a conflict. Any failure stops the copy with the prefix and the reason, and the
+with different content, a prefix path that is a symbolic link, or a
+directory it does not index where a prefix would land, is a conflict. Any failure stops the copy with the prefix and the reason, and the
 destination is left as it was.
 
 Each prefix is then copied into the destination's staging area, its digest

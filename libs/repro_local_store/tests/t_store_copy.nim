@@ -23,9 +23,13 @@
 ##     intact;
 ##   * a re-copy that fails part-way keeps every earlier copy held, so a GC
 ##     after it reaps nothing it copied before;
-##   * a prefix with a link leaving the store is reported external.
+##   * a prefix with a link leaving the store is reported external;
+##   * a link into another prefix brings that prefix along (in either
+##     spelling of a symlinked store root), a link into the store outside
+##     any prefix is refused, and a destination prefix that is a link to the
+##     source's is refused.
 
-import std/[os, sequtils, tempfiles, unittest]
+import std/[os, sequtils, strutils, tempfiles, unittest]
 
 import repro_local_store/store
 import repro_local_store/sqlite3_binding
@@ -265,8 +269,25 @@ suite "repro store copy":
       # receipt sealed at another time by another process.
       var d = openStore(f.dst)
       let own = d.realize(f.top / "worker", "tool")
-      d.close()
       check own.prefixId == f.tool.prefixId
+      # Realized in this process within the same second, the seal would
+      # match the source's byte for byte; reseal it as another process at
+      # another time would have, and index that receipt.
+      let ownReceiptPath = f.dst / own.relativePath / ReceiptFileName
+      var ownReceipt = readReceiptFile(ownReceiptPath)
+      ownReceipt.createdAtUnix -= 3600
+      ownReceipt.writerProcessId += 1
+      writeReceiptFile(ownReceiptPath, ownReceipt)
+      var ownRow = d.lookupPrefix(own.prefixId).row
+      ownRow.receiptDigest = receiptDigest(ownReceipt)
+      ownRow.createdAtUnix = ownReceipt.createdAtUnix
+      d.db.exec("BEGIN IMMEDIATE")
+      d.db.exec("DELETE FROM prefixes")
+      discard d.insertPrefixOrIgnore(ownRow)
+      d.db.exec("COMMIT")
+      d.close()
+      check readFile(ownReceiptPath) !=
+        readFile(f.src / f.tool.relativePath / ReceiptFileName)
       let report = f.copyOf(@[f.tool.relativePath])
       check report.copied.len == 0
       check report.alreadyPresent == @[f.tool.relativePath]
@@ -351,3 +372,78 @@ suite "repro store copy":
       let report = f.copyOf(@[ext.relativePath, f.tool.relativePath])
       check report.external == @[ext.relativePath]
       check expandSymlink(f.dst / ext.relativePath / "bin" / "sh") == "/bin/sh"
+
+proc realizeLinking(f: Fixture; name, linkRel, target: string): RealizeResult =
+  ## A prefix whose only content is one symbolic link `linkRel` -> `target`.
+  let staging = f.top / ("staging-" & name)
+  createDir((staging / linkRel).parentDir)
+  createSymlink(target, staging / linkRel)
+  var s = openStore(f.src)
+  defer: s.close()
+  result = s.realizeDirectoryAsPrefix(staging, StoreReceiptHint(
+    adapter: "path", packageName: name, version: "1.0",
+    lockIdentity: "test-" & name))
+  doAssert symlinkExists(f.src / result.relativePath / linkRel),
+    "realization did not keep the link"
+
+suite "repro store copy: link edges":
+  test "a link into another prefix brings that prefix along":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      # prefixes/dep/<dir>/lib/tool -> ../../../tool/<dir>/bin/tool
+      let toolDir = f.tool.relativePath.split('/')[2]
+      let dep = f.realizeLinking("dep", "lib" / "tool",
+        "../../../tool/" & toolDir & "/bin/tool")
+      let report = f.copyOf(@[dep.relativePath])
+      check report.closure == @[dep.relativePath, f.tool.relativePath]
+      check report.external.len == 0
+      # The link resolves at the destination, to the copied prefix.
+      check fileExists(f.dst / dep.relativePath / "lib" / "tool")
+      check expandFilename(f.dst / dep.relativePath / "lib" / "tool") ==
+        expandFilename(f.dst / f.tool.relativePath / "bin" / "tool")
+
+  test "a link into the store outside any prefix is refused":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let bad = f.realizeLinking("bad", "index", f.src / "index.db")
+      expect StoreCopyError:
+        discard f.copyOf(@[bad.relativePath])
+      check indexedPaths(f.dst).len == 0
+
+  test "a symlinked source root: absolute links in either spelling are internal":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let alias = f.top / "src-alias"
+      createSymlink(f.src, alias)
+      let abs = f.realizeLinking("abs", "bin" / "tool",
+        f.src / f.tool.relativePath / "bin" / "tool")
+      let report = copyClosure(StoreCopyRequest(sourceRoot: alias,
+        destinationRoot: f.dst, prefixes: @[abs.relativePath]))
+      check report.external.len == 0
+      check f.tool.relativePath in report.closure
+
+  test "a destination prefix that links to the source prefix is refused":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var src = openStore(f.src)
+      let row = src.lookupPrefix(f.tool.prefixId).row
+      src.close()
+      var d = openStore(f.dst)
+      createDir((f.dst / f.tool.relativePath).parentDir)
+      createSymlink(f.src / f.tool.relativePath, f.dst / f.tool.relativePath)
+      discard d.insertPrefixOrIgnore(row)
+      d.close()
+      expect StoreCopyError:
+        discard f.copyOf(@[f.tool.relativePath])

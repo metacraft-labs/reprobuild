@@ -110,20 +110,69 @@ proc canonicalPath(path: string): string =
   result = try: expandFilename(head) except OSError: head
   for part in tail: result = result / part
 
-proc linksLeave*(prefixDir, storeRoot: string): bool =
-  ## Whether a symbolic link in `prefixDir` names a target outside
-  ## `storeRoot` (resolved lexically against the link's own directory).
-  ## Such a prefix holds pinned import metadata for content the copy cannot
-  ## carry: an external imported node.
-  let root = normalizedPath(storeRoot)
+iterator linkTargets(prefixDir: string): string =
+  ## The target of every symbolic link in `prefixDir`, resolved lexically
+  ## against the link's own directory and normalized. Links are never
+  ## followed: what is classified is where the link POINTS.
   for rel in walkDirRec(prefixDir, yieldFilter = {pcLinkToFile, pcLinkToDir},
       relative = true, followFilter = {pcDir}):
     let link = prefixDir / rel
     var target = expandSymlink(link)
     if not target.isAbsolute: target = link.parentDir / target
-    if not normalizedPath(target).within(root):
+    yield normalizedPath(target)
+
+proc storeRelative(target: string; storeRoots: openArray[string];
+                   rel: var string): bool =
+  ## Whether `target` lies in the store under any of its spellings (the root
+  ## as given and as resolved), and if so its store-relative,
+  ## `/`-separated path.
+  for root in storeRoots:
+    if target.within(root):
+      rel = (if target == root: "" else: target[root.len + 1 .. ^1]).replace(
+        DirSep, '/')
       return true
   false
+
+proc storeSpellings(storeRoot: string): seq[string] =
+  result.add(normalizedPath(absolutePath(storeRoot)))
+  let canon = canonicalPath(storeRoot)
+  if canon != result[0]: result.add(canon)
+
+proc linksLeave*(prefixDir, storeRoot: string): bool =
+  ## Whether a symbolic link in `prefixDir` names a target outside the store
+  ## (`storeRoot` under either spelling). Such a prefix holds pinned import
+  ## metadata for content the copy cannot carry: an external imported node.
+  let roots = storeSpellings(storeRoot)
+  var rel: string
+  for target in linkTargets(prefixDir):
+    if not target.storeRelative(roots, rel):
+      return true
+  false
+
+proc linkedPrefixes(s: Store; row: PrefixRow): seq[PrefixRow] =
+  ## The OTHER prefixes of the source store that a link in `row`'s prefix
+  ## points into. A link is an edge of the closure just as a multi-output
+  ## sibling is: copying the prefix without its target would leave the link
+  ## dangling at the destination, a silently incomplete closure. A link into
+  ## the store that does not land in an indexed prefix cannot be carried
+  ## faithfully and is refused.
+  let roots = storeSpellings(s.root)
+  let own = row.realizedPath
+  var rel: string
+  for target in linkTargets(s.absolutePrefixPath(own)):
+    if not target.storeRelative(roots, rel):
+      continue                      # external: reported, not walked
+    if rel == own or rel.startsWith(own & "/"):
+      continue                      # inside the prefix itself
+    let parts = rel.split('/')
+    if parts.len < 3 or parts[0] != "prefixes":
+      fail("prefix " & own & " links into the store outside any prefix (" &
+        rel & "); it cannot be copied without it")
+    let hit = s.lookupPrefixByRealizedPath(parts[0 .. 2].join("/"))
+    if not hit.found:
+      fail("prefix " & own & " links into " & rel &
+        ", which no prefix of the source index holds")
+    result.add(hit.row)
 
 proc closureRootId*(prefixIds: openArray[PrefixIdBytes]): string =
   ## `copy:` and the first 32 hex digits of BLAKE3 over the sorted prefix
@@ -183,8 +232,8 @@ proc verifySource(s: Store; row: PrefixRow): PlannedPrefix =
 
 proc closureOf(s: Store; req: StoreCopyRequest): seq[PrefixRow] =
   ## The selected prefixes plus, transitively, the sibling outputs a
-  ## multi-output receipt names. The index records no other edge between
-  ## prefixes.
+  ## multi-output receipt names and the prefixes their symbolic links point
+  ## into. The index records no other edge between prefixes.
   var pending: seq[PrefixRow]
   for arg in req.prefixes:
     pending.add(s.resolvePrefixArg(arg))
@@ -207,6 +256,9 @@ proc closureOf(s: Store; req: StoreCopyRequest): seq[PrefixRow] =
       continue
     seen.incl(row.realizedPath)
     result.add(row)
+    if dirExists(s.absolutePrefixPath(row.realizedPath)):
+      for linked in s.linkedPrefixes(row):
+        pending.add(linked)
     let receiptPath = s.absolutePrefixPath(row.realizedPath) / ReceiptFileName
     if not fileExists(receiptPath):
       continue   # verifySource reports it
@@ -233,6 +285,10 @@ proc destinationHolds(d: Store; plan: PlannedPrefix): bool =
   ## one. Raises `StoreCopyError` when the directory is something else.
   let where = plan.row.realizedPath
   let dir = d.absolutePrefixPath(where)
+  if symlinkExists(dir):
+    # A link to another store's prefix is not a copy of it: the destination
+    # must be an independent store (rule 4).
+    fail("destination prefix is a symbolic link, not a prefix: " & where)
   if not dirExists(dir):
     return false
   var receipt: RealizationReceipt
@@ -316,6 +372,24 @@ proc indexAndHold(d: var Store; row: PrefixRow; rootId: string) =
     if not committed:
       try: d.db.exec("ROLLBACK") except CatchableError: discard
 
+proc holdIndexed(d: var Store; plan: PlannedPrefix; rootId: string) =
+  ## Hold a prefix found present, re-checking under the write lock that it
+  ## is still indexed: a destination GC running since the check may have
+  ## collected it, and attaching a hold to a row that is gone is a silent
+  ## no-op that would report a prefix present that is not.
+  d.db.exec("BEGIN IMMEDIATE")
+  var committed = false
+  try:
+    if not d.lookupPrefix(plan.row.prefixId).found:
+      fail("destination prefix " & plan.row.realizedPath & " was removed " &
+        "during the copy (a concurrent gc?); copy again")
+    d.attachPrefixToRoot(rootId, plan.row.prefixId)
+    d.db.exec("COMMIT")
+    committed = true
+  finally:
+    if not committed:
+      try: d.db.exec("ROLLBACK") except CatchableError: discard
+
 proc publish(d: var Store; plan: PlannedPrefix; rootId: string;
              bytes: var int64): bool =
   ## Rule 2: stage, re-verify, rename, index — the realization protocol,
@@ -349,7 +423,7 @@ proc publish(d: var Store; plan: PlannedPrefix; rootId: string;
       if not d.lookupPrefix(plan.row.prefixId).found:
         fail("destination gained an unindexed entry at " & where &
           " during the copy; run `repro store recover` on " & d.root)
-      d.attachPrefixToRoot(rootId, plan.row.prefixId)
+      d.holdIndexed(plan, rootId)
       return false
     d.indexAndHold(plan.row, rootId)
     bytes += staged
@@ -417,7 +491,7 @@ proc copyClosure*(req: StoreCopyRequest): StoreCopyReport =
     dst.registerRoot(result.rootId, rkWorkspace)
   for plan in plans:
     if plan.present:
-      dst.attachPrefixToRoot(result.rootId, plan.row.prefixId)
+      dst.holdIndexed(plan, result.rootId)
       result.alreadyPresent.add(plan.row.realizedPath)
   for plan in plans:
     if plan.present:
