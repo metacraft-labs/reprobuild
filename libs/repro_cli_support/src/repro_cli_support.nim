@@ -68435,18 +68435,33 @@ proc undeclaredDependEdges(repos: seq[ResolvedRepo];
         pending.add(dep)
 
 type
+  DanglingDependGap = object
+    ## One ``depends`` edge whose name a workspace fragment declares but the
+    ## project being checked does not include.
+    label: string
+      ## ``owner -> dep``.
+    fragments: seq[string]
+      ## The basenames of the fragments declaring that name, which is what a
+      ## ``member_repos`` entry names. More than one means alternatives (one
+      ## name, several upstreams), of which a project includes one.
+
   DanglingDependEdges = object
-    ## The closure's dangling ``depends`` edges, split by cause, each as an
-    ## ``owner -> dep`` label in first-seen order.
+    ## The closure's dangling ``depends`` edges, split by cause, in
+    ## first-seen order.
     undeclared: seq[string]
-      ## No ``repos/*.toml`` fragment in the workspace declares the name:
-      ## a typo, or a fragment nobody has written yet.
-    outsideProject: seq[string]
-      ## A fragment declares the name, but the project being checked does
-      ## not include it.
-    outsideFragments: seq[string]
-      ## The basenames of the fragments behind ``outsideProject``, which is
-      ## what a ``member_repos`` entry names.
+      ## ``owner -> dep`` edges no readable ``repos/*.toml`` fragment in any
+      ## composed manifest layer declares: a typo, or a fragment nobody has
+      ## written yet.
+    outsideProject: seq[DanglingDependGap]
+      ## Edges a fragment declares but the project does not include.
+    unreadableFragments: seq[string]
+      ## Fragments the strict reader refused. Their names are unknown, so an
+      ## ``undeclared`` verdict holds only for the fragments that were read.
+
+  DeclaredFragments = object
+    byName: Table[string, seq[string]]
+      ## Declared repo name -> basenames of the fragments declaring it.
+    unreadable: seq[string]
 
 proc fragmentDeclaredName(text: string): string =
   ## The repo NAME a ``repos/<file>.toml`` fragment declares (its
@@ -68461,43 +68476,56 @@ proc fragmentDeclaredName(text: string): string =
       if unquoted.len > 0:
         return unquoted
 
-proc declaredFragmentBasenames(membershipRoot: string):
-    Table[string, seq[string]] =
-  ## Every repo name a ``repos/*.toml`` fragment under ``membershipRoot``
-  ## declares, mapped to the basenames of the fragments that declare it
-  ## (sorted). Two fragments may share one name, and a basename need not
-  ## equal the name it declares.
-  let dir = membershipRoot / reposDirName
-  if not dirExists(dir):
-    return
+proc declaredFragments(manifestRoots: openArray[string]): DeclaredFragments =
+  ## Every repo name a ``repos/*.toml`` fragment under any of
+  ## ``manifestRoots`` declares, mapped to the basenames of the fragments that
+  ## declare it (sorted, de-duplicated). Two fragments may share one name, and
+  ## a basename need not equal the name it declares. Each fragment is read
+  ## with the strict reader; one it refuses is listed in ``unreadable``
+  ## rather than guessed at.
   var paths: seq[string]
-  for kind, path in walkDir(dir):
-    if kind in {pcFile, pcLinkToFile} and path.endsWith(".toml") and
-        fileExists(path):
-      paths.add(path)
+  var seenDirs = initHashSet[string]()
+  for root in manifestRoots:
+    let dir = absolutePath(root / reposDirName)
+    if dir in seenDirs or not dirExists(dir):
+      continue
+    seenDirs.incl(dir)
+    for kind, path in walkDir(dir):
+      if kind in {pcFile, pcLinkToFile} and path.endsWith(".toml"):
+        paths.add(path)
   paths.sort()
   for path in paths:
-    let name = fragmentDeclaredName(readFile(path))
-    if name.len > 0:
-      result.mgetOrPut(name, @[]).add(path.extractFilename.changeFileExt(""))
+    var name = ""
+    try:
+      name = readRepoFragment(path).repo.name
+    except WorkspaceManifestParseError:
+      result.unreadable.add(path)
+      continue
+    let basename = path.extractFilename.changeFileExt("")
+    if name notin result.byName:
+      result.byName[name] = @[]
+    if basename notin result.byName[name]:
+      result.byName[name].add(basename)
+  for basenames in result.byName.mvalues:
+    basenames.sort()
 
 proc danglingDependsInClosure(repos: seq[ResolvedRepo];
-    pushedRepoName, membershipRoot: string): DanglingDependEdges =
+    pushedRepoName: string; manifestRoots: openArray[string]):
+      DanglingDependEdges =
   ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
-  ## repo in the resolved project, classified by whether the workspace
-  ## declares that name at all.
+  ## repo in the resolved project, classified by whether a fragment in one
+  ## of the workspace's composed manifest layers declares that name.
   ##
-  ## Such an edge used to be dropped in silence. The effect was that the gate
-  ## verified a SMALLER set than the manifests declare while still reporting
-  ## success: one typo in a ``depends`` list removed a real dependency from the
-  ## cleanliness / publication / lock stages, and nothing said so. That is the
-  ## same shape as a check that passes having verified nothing, just at the
-  ## granularity of one edge — so the gate refuses on it and names the edge.
+  ## The gate refuses on such an edge rather than skipping it. A skipped edge
+  ## would let the gate verify a SMALLER set than the manifests declare while
+  ## still reporting success: one typo in a ``depends`` list would remove a
+  ## real dependency from the cleanliness / publication / lock stages, and
+  ## nothing would say so.
   ##
-  ## The resolver already refuses a fragment that references an undeclared
-  ## remote for exactly this reason ("turning a typo into a silent success is a
-  ## worse failure mode than the transitional convenience is worth"); this is
-  ## the same rule applied to the other cross-reference a fragment can make.
+  ## The resolver refuses a fragment that references an undeclared remote for
+  ## the same reason ("turning a typo into a silent success is a worse failure
+  ## mode than the transitional convenience is worth"); this is the same rule
+  ## applied to the other cross-reference a fragment can make.
   ##
   ## The two causes need different fixes. A name no fragment declares is fixed
   ## in the ``depends`` list or by writing the fragment. A name a fragment
@@ -68506,16 +68534,39 @@ proc danglingDependsInClosure(repos: seq[ResolvedRepo];
   let edges = undeclaredDependEdges(repos, pushedRepoName)
   if edges.len == 0:
     return
-  let declared = declaredFragmentBasenames(membershipRoot)
+  let declared = declaredFragments(manifestRoots)
+  result.unreadableFragments = declared.unreadable
   for edge in edges:
     let label = edge.owner & " -> " & edge.dep
-    if edge.dep in declared:
-      result.outsideProject.add(label)
-      for basename in declared[edge.dep]:
-        if basename notin result.outsideFragments:
-          result.outsideFragments.add(basename)
+    if edge.dep in declared.byName:
+      result.outsideProject.add(DanglingDependGap(label: label,
+        fragments: declared.byName[edge.dep]))
     else:
       result.undeclared.add(label)
+
+proc projectMembershipTarget(projectFile: string;
+    manifestRoots: openArray[string]): string =
+  ## Where an operator adds a ``member_repos`` entry for the project resolved
+  ## from ``projectFile``, as a path relative to the manifest layer holding
+  ## it. A variant's own extra membership is not yet composed by name, so for
+  ## a variant this names its base project manifest.
+  if projectFile.len == 0:
+    return "the project manifest"
+  var display = projectFile
+  for root in manifestRoots:
+    let absRoot = absolutePath(root)
+    let absFile = absolutePath(projectFile)
+    if absFile.startsWith(absRoot & DirSep):
+      display = relativePath(absFile, absRoot).replace(DirSep, '/')
+      break
+  if display.startsWith("variants/"):
+    try:
+      let base = readVariantManifest(projectFile).variant.base
+      if base.len > 0:
+        return base & " (the base project of variant " & display & ")"
+    except WorkspaceManifestParseError:
+      discard
+  display
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
     membershipRoot: string; ranges: openArray[PushedCommitRange]):
@@ -69490,8 +69541,18 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # success over a dependency it could not resolve. The offending edge is
   # named, with the fix for its cause, so the manifest can be fixed rather
   # than guessed at.
+  var manifestRoots = @[membershipRoot]
+  for layer in layerLocations:
+    if layer.absPath.len > 0:
+      manifestRoots.add(layer.absPath)
   let dangling = danglingDependsInClosure(resolved.repos, currentRepoName,
-    manifestsRoot(parsed.workspaceRoot))
+    manifestRoots)
+  let unreadableNote =
+    if dangling.unreadableFragments.len == 0: ""
+    else:
+      "; the strict reader refused " & $dangling.unreadableFragments.len &
+        " fragment(s), whose names are unknown: " &
+        dangling.unreadableFragments.join(", ")
   if dangling.undeclared.len > 0:
     result.failures.add(CheckFailure(
       repo: currentRepoPath,
@@ -69502,30 +69563,33 @@ proc executeCheckPrePush(parsed: CheckArgs;
         dangling.undeclared.join(", "),
       evidence: $dangling.undeclared.len &
         " `depends` edge(s) in the pushed repo's closure name a repo no " &
-        "fragment in this workspace declares: " &
-        dangling.undeclared.join(", ")))
+        "readable fragment in this workspace's manifest layers declares: " &
+        dangling.undeclared.join(", ") & unreadableNote))
   if dangling.outsideProject.len > 0:
-    let projectManifest =
-      if resolved.projectFile.len > 0:
-        "projects/" & resolved.projectFile.extractFilename
-      else:
-        "the project manifest"
-    var entries: seq[string]
-    for basename in dangling.outsideFragments:
-      entries.add("\"" & basename & "\"")
+    let target = projectMembershipTarget(resolved.projectFile, manifestRoots)
+    var additions, labels, fragmentLists: seq[string]
+    for gap in dangling.outsideProject:
+      var quoted: seq[string]
+      for basename in gap.fragments:
+        quoted.add("\"" & basename & "\"")
+      let choice =
+        if quoted.len == 1: quoted[0]
+        else: "one of " & quoted.join(", ")
+      additions.add(choice & " (for " & gap.label & ")")
+      labels.add(gap.label)
+      fragmentLists.add(gap.label & ": " & gap.fragments.join(" | "))
     result.failures.add(CheckFailure(
       repo: currentRepoPath,
       property: "dependency-not-declared",
-      remediation: "add " & entries.join(", ") & " to `member_repos` in " &
-        projectManifest & ", or activate a project that includes it — " &
-        "the workspace declares the repo but the project being pushed " &
-        "does not include it, so the gate cannot check it; edges: " &
-        dangling.outsideProject.join(", "),
+      remediation: "add " & additions.join("; ") & " to `member_repos` in " &
+        target & ", or make active a project that includes it — the " &
+        "workspace declares the repo but the project being pushed does not " &
+        "include it, so the gate cannot check it; edges: " &
+        labels.join(", "),
       evidence: $dangling.outsideProject.len &
         " `depends` edge(s) in the pushed repo's closure name a repo the " &
-        "workspace declares (" & dangling.outsideFragments.join(", ") &
-        ") but project '" & resolved.projectName &
-        "' does not include: " & dangling.outsideProject.join(", ")))
+        "workspace declares but project '" & resolved.projectName &
+        "' does not include: " & fragmentLists.join(", ")))
   if dangling.undeclared.len > 0 or dangling.outsideProject.len > 0:
     result.exitCode = 2
     return

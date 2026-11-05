@@ -269,3 +269,97 @@ suite "pre-push refuses a `depends` edge naming no declared repo":
         remediations.add(f["remediation"].getStr())
       check remediations.join("\n").contains("lib-a -> lib-bee")
       check remediations.join("\n").contains("lib-c-fork")
+
+proc gapRemediation(fx: Fixture): string =
+  ## The single `dependency-not-declared` refusal's remediation, or "" (with
+  ## a failed check) when the gate did not refuse exactly once.
+  let res = runGate(fx)
+  check res.code == 2
+  check res.report["failures"].len == 1
+  if res.report["failures"].len != 1:
+    return ""
+  let failure = res.report["failures"][0]
+  check failure["property"].getStr() == "dependency-not-declared"
+  checkpoint("remediation: " & failure["remediation"].getStr())
+  checkpoint("evidence: " & failure["evidence"].getStr())
+  failure["remediation"].getStr()
+
+suite "a depends edge outside the project names the right membership fix":
+
+  test "t_pre_push_offers_one_of_the_fragments_sharing_a_name":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      # Two fragments, one name: alternative upstreams, of which a project
+      # includes one. Asking for both would put two `lib-c` repos in it.
+      writeFile(fx.workspaceRoot / "repos" / "lib-c.toml", libCFragmentToml)
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      let remediation = gapRemediation(fx)
+      check remediation.contains("one of \"lib-c\", \"lib-c-fork\"")
+      check remediation.contains("member_repos")
+
+  test "t_pre_push_reads_a_fragment_name_with_a_trailing_comment":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      # Valid TOML: the declared name is `lib-c`, not the rest of the line.
+      writeFile(fx.workspaceRoot / "repos" / "lib-c-fork.toml",
+        libCFragmentToml.replace("name = \"lib-c\"",
+          "name = \"lib-c\"  # the C library"))
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      let remediation = gapRemediation(fx)
+      check remediation.contains("\"lib-c-fork\"")
+      check remediation.contains("member_repos")
+      check not remediation.contains("does not declare")
+
+  test "t_pre_push_finds_a_fragment_declared_in_a_settings_layer":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      # The only fragment declaring `lib-c` lives in a `local_path` manifest
+      # layer, not under the workspace's own `repos/`.
+      removeFile(fx.workspaceRoot / "repos" / "lib-c-fork.toml")
+      let layer = fx.scratch / "personal-manifests"
+      createDir(layer / "projects")
+      createDir(layer / "repos")
+      writeFile(layer / "repos" / "lib-c-layer.toml", libCFragmentToml)
+      writeFile(fx.workspaceRoot / "repro-workspace.local.toml",
+        "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+        "[[manifest]]\nlocal_path = \"" & layer & "\"\n" &
+        "visibility = \"private\"\n")
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      let remediation = gapRemediation(fx)
+      check remediation.contains("\"lib-c-layer\"")
+      check remediation.contains("member_repos")
+      check not remediation.contains("does not declare")
+
+  test "t_pre_push_names_the_base_project_of_an_active_variant":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      createDir(fx.workspaceRoot / "variants")
+      writeFile(fx.workspaceRoot / "variants" / "lib-a-dev.toml",
+        "schema = \"reprobuild.workspace.variant.v1\"\n\n" &
+        "[variant]\nname = \"lib-a-dev\"\nbase = \"projects/lib-a.toml\"\n")
+      writeFile(fx.workspaceRoot / ".repro" / "workspace-state.toml",
+        workspaceLocalToml.replace("project = \"lib-a\"",
+          "project = \"lib-a-dev\""))
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      let remediation = gapRemediation(fx)
+      # `variants/lib-a-dev.toml` cannot carry `member_repos` yet, and
+      # `projects/lib-a-dev.toml` does not exist: name the base project.
+      check remediation.contains("`member_repos` in projects/lib-a.toml")
+      check remediation.contains("variants/lib-a-dev.toml")
+      check not remediation.contains("projects/lib-a-dev.toml")
