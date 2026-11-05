@@ -9947,6 +9947,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_tool_profiles_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_a_tool_probe_writes_no_state_outside_its_scratch.nim",
+    binary: "build/test-bin/t_a_tool_probe_writes_no_state_outside_its_scratch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var root, home, binDir, savedHome, savedNimbleDir: string"),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim",
     binary: "build/test-bin/t_bootstrap_cc_override_is_honoured_and_scoped",
     defines: @[],

@@ -132,6 +132,18 @@ type
     kind*: ToolProbeKind
     name*: string
     args*: seq[string]
+    scratchStateEnv*: seq[string]
+      ## Environment variables naming where the tool keeps writable state.
+      ## Each is pointed at a private directory created for this one probe
+      ## and removed after it, so a tool whose identity query rewrites its
+      ## state (``nimble --version`` rewrites ``nimbledata2.json`` under
+      ## ``NIMBLE_DIR``) changes nothing outside the probe's own scratch.
+      ## How the probe is run, not what it asks: kept out of every
+      ## fingerprint and envelope, like ``probeTimeoutSeconds``. The
+      ## directory's path is fresh on every run, so where the probe's output
+      ## names it (nimble prints ``Using the environment variable:
+      ## NIMBLE_DIR='<dir>'``), ``runProbe`` records ``probeStateToken``
+      ## instead: the output is fingerprinted and must not move per run.
 
   ToolProbeResult* = object
     spec*: ToolProbeSpec
@@ -497,6 +509,13 @@ proc configuredProbes*(packageSelector, executableName: string): seq[
     return @[ToolProbeSpec(kind: tpkCapability, name: "help", args: @["--help"])]
   if executableName == "xvfb-run":
     return @[ToolProbeSpec(kind: tpkVersion, name: "help", args: @["--help"])]
+  if executableName.toLowerAscii() in ["nimble", "nimble.exe"]:
+    # `nimble --version` loads and rewrites `$NIMBLE_DIR/nimbledata2.json`
+    # (default `~/.nimble`), truncating it first. Other nimbles on the host
+    # read that file concurrently, and one that reads it mid-rewrite fails
+    # on an empty ledger. Give the probe a ledger of its own.
+    return @[ToolProbeSpec(kind: tpkVersion, name: "version",
+      args: @["--version"], scratchStateEnv: @["NIMBLE_DIR"])]
   @[ToolProbeSpec(kind: tpkVersion, name: "version", args: @["--version"])]
 
 proc shellCommand(args: openArray[string]): string =
@@ -514,6 +533,9 @@ proc shellCommand(args: openArray[string]): string =
 # GPU / renderer processes — that outlive a bare parent-kill), and the
 # probe result is recorded as a structured `timedOut` outcome.
 const
+  probeStateToken* = "<probe-state>"
+    ## Stands for a probe's private state directory in its recorded
+    ## output; see ``ToolProbeSpec.scratchStateEnv``.
   probeTimeoutSeconds* = 10
     ## Hard wall-clock bound on every executable probe. 10s is generous
     ## for an `--version` print by a legitimate console tool yet short
@@ -566,12 +588,35 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
   # `args` form hands `cmd`/`sh` one quoted blob it parses itself —
   # redirection and all.
   let inner = (@[executablePath] & spec.args).mapIt(quoteShell(it)).join(" ")
+  # A probe of a tool that keeps writable state gets that state in a
+  # directory of its own (see ``ToolProbeSpec.scratchStateEnv``). The rest of
+  # the environment is inherited unchanged; a nil table inherits all of it.
+  var probeEnv: StringTableRef = nil
+  var stateDir = ""
+  if spec.scratchStateEnv.len > 0:
+    try:
+      stateDir = createTempDir("repro-probe-state-", "")
+    except OSError as err:
+      result.exitCode = -1
+      result.output = "probe failed to start: cannot create its state " &
+        "directory: " & err.msg
+      return
+    probeEnv = newStringTable(
+      when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
+    for key, value in envPairs():
+      probeEnv[key] = value
+    for name in spec.scratchStateEnv:
+      probeEnv[name] = stateDir
+  defer:
+    if stateDir.len > 0:
+      try: removeDir(extendedPath(stateDir))
+      except CatchableError: discard
   var process: Process
   try:
     when defined(windows):
       let cmdLine = inner & " > " & quoteShell(outPath) & " 2>&1"
       process = startProcess("cmd.exe", args = @["/c", cmdLine],
-        options = {})
+        env = probeEnv, options = {})
     else:
       # `poDaemon` asks Nim's POSIX process launcher to put the child in
       # its own process group. That gives `killProcessTree` a portable
@@ -579,7 +624,7 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
       # being present (macOS does not ship one by default).
       let cmdLine = inner & " > " & quoteShell(outPath) & " 2>&1"
       process = startProcess("/bin/sh", args = @["-c", cmdLine],
-        options = {poDaemon})
+        env = probeEnv, options = {poDaemon})
   except OSError as err:
     result.exitCode = -1
     result.output = "probe failed to start: " & err.msg
@@ -621,6 +666,16 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
     except CatchableError: discard
     try: removeFile(extendedPath(outPath))
     except CatchableError: discard
+  if stateDir.len > 0:
+    # The resolved spelling first: it can be longer than the created one
+    # (macOS `/var` -> `/private/var`) and contain it.
+    var spellings = @[stateDir]
+    try:
+      let resolved = expandFilename(stateDir)
+      if resolved != stateDir: spellings.insert(resolved, 0)
+    except CatchableError: discard
+    for spelling in spellings:
+      captured = captured.replace(spelling, probeStateToken)
 
   if timedOut:
     result.timedOut = true

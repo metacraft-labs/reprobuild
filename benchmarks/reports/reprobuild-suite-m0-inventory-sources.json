@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2648,
+    "nimTestBinaries": 2649,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 734,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2688
+    "testEntries": 2689
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1559,7 +1559,7 @@
       "integration": 1466,
       "platform/destructive": 168,
       "pure unit": 734,
-      "unclassified": 301
+      "unclassified": 302
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1767,9 +1767,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2648,
+    "nimTestBinaryCount": 2649,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2688
+    "testEntryCount": 2689
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24860,6 +24860,25 @@
       "source": "libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_tool_probe_writes_no_state_outside_its_scratch",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_a_tool_probe_writes_no_state_outside_its_scratch.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
