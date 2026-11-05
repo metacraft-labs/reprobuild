@@ -53,7 +53,10 @@
 ##                synthetic source tree on the real filesystem: calling a
 ##                helper that resolves the CLI is ``true``; merely
 ##                IMPORTING the module that defines that helper, without
-##                calling it, stays ``false``.
+##                calling it, stays ``false``. ``include`` is followed as
+##                pasting: an included fixture's PRIVATE helper is the
+##                includer's own, while importing the includer still sees
+##                only what it exports.
 ##
 ## No mocks. The engine arms shell out to the real ``build/bin/repro``
 ## and read the real build report; the analysis arm runs the real
@@ -312,3 +315,86 @@ discard unrelatedHelper(3, 4)
     checkpoint("mentioner reached through: " &
       reach.taintedSymbolsFor(mentioner).join(", "))
     check not reach.needsReproBinary(mentioner)
+
+  test "analysis: an included file's private helper is the includer's own":
+    # ``include`` pastes a file into the including module, so a symbol the
+    # included file does not export is still visible to the includer. A
+    # fixture that keeps its CLI-resolving helper private must not hide
+    # the binary from the tests that include it and call that helper.
+    let root = createTempDir("repro-reachability-include-", "")
+    defer: removeDir(root)
+
+    createDir(root / "tests" / "integration")
+    writeFile(root / "tests" / "integration" / "cli_fixture.nim", """
+import std/os
+
+proc fixtureReproPath(repoRoot: string): string =
+  repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
+
+proc setupCliFixture(repoRoot: string): string =
+  fixtureReproPath(repoRoot)
+
+proc fixtureArithmetic(a, b: int): int =
+  a + b
+""")
+    # A fixture that only re-includes the first: include is transitive.
+    writeFile(root / "tests" / "integration" / "outer_fixture.nim", """
+include cli_fixture
+
+proc setupOuterFixture(repoRoot: string): string =
+  setupCliFixture(repoRoot)
+""")
+    let caller = "tests/integration/t_includer_calls_private_helper.nim"
+    writeFile(root / caller, """
+include cli_fixture
+
+discard setupCliFixture("/somewhere")
+""")
+
+    let nested = "tests/integration/t_includer_calls_through_nested_include.nim"
+    writeFile(root / nested, """
+include outer_fixture
+
+discard setupOuterFixture("/somewhere")
+""")
+
+    let bystander = "tests/integration/t_includer_calls_nothing_tainted.nim"
+    writeFile(root / bystander, """
+include cli_fixture
+
+discard fixtureArithmetic(1, 2)
+""")
+
+    let importer = "tests/integration/t_imports_an_includer.nim"
+    writeFile(root / importer, """
+import outer_fixture
+
+when false:
+  discard setupOuterFixture("/somewhere")
+""")
+
+    let reach = analyze(root,
+      @[caller, nested, bystander, importer])
+
+    checkpoint("caller reached through: " &
+      reach.taintedSymbolsFor(caller).join(", "))
+    check reach.needsReproBinary(caller)
+    check "setupCliFixture" in reach.taintedSymbolsFor(caller)
+
+    checkpoint("nested reached through: " &
+      reach.taintedSymbolsFor(nested).join(", "))
+    check reach.needsReproBinary(nested)
+    check "setupOuterFixture" in reach.taintedSymbolsFor(nested)
+
+    # Including the fixture is not calling it: the action cache stays
+    # selective for includers that use only its untainted helpers.
+    checkpoint("bystander reached through: " &
+      reach.taintedSymbolsFor(bystander).join(", "))
+    check not reach.needsReproBinary(bystander)
+
+    # Private symbols of an included file are the includer's own, so they
+    # stay private to anything that IMPORTS the includer: naming one there
+    # does not resolve to it.
+    checkpoint("importer reached through: " &
+      reach.taintedSymbolsFor(importer).join(", "))
+    check not reach.needsReproBinary(importer)
