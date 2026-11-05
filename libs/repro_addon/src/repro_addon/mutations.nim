@@ -484,6 +484,15 @@
 ##                                            no static account under
 ##                                            DynamicUser=yes, no uid
 ##                                            alias, no memberships)
+## ``reach-host-dropins-ignored``             reach reads the profile's
+##                                            drop-ins only, not the host's
+## ``reach-timer-dropins-unread``             a profile timer is read
+##                                            without its drop-ins
+## ``reach-path-unit-paths-ignored``          a path unit's watched paths
+##                                            reach nothing
+## ``restore-requirement-by-manifest-only``   no apply adds the restore
+##                                            requirement; only install-
+##                                            unit's manifest units have it
 ## ``receipt-no-fsync``                       the restore receipt is
 ##                                            renamed into place with
 ##                                            neither its file nor its
@@ -862,6 +871,11 @@ const
                           # service-account resolver (repro_infra/
                           # service_account) takes the account as written.
                           "account-as-written",
+                          # A13 review round 4, findings 2-5.
+                          "reach-host-dropins-ignored",
+                          "reach-timer-dropins-unread",
+                          "reach-path-unit-paths-ignored",
+                          "restore-requirement-by-manifest-only",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",

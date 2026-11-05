@@ -159,6 +159,8 @@ profile "pathReach":
         floorExceptions = @["NoExecPaths: the conversion gate's path-reach " &
           "probe runs /bin/true"],
         address = "pathReachRenamed")
+      linuxSysusersEntry(name = "eth-validator", kind = "user", id = "924",
+        address = "pathReachUser")
 """
     ## The profile of the path-reach step: the host's two activities, and in
     ## the validator's one unit that touches the carried directory by path
@@ -175,6 +177,81 @@ type MutationStop = object of CatchableError
   ## Raised by a gate's step under a mutation once a step is red.
 
 proc gateMutation(): string = getEnv("REPRO_A13_MUTATION")
+
+proc stopAtRed(): bool =
+  ## A falsifier cell of an engine build (its mutation is in the engine,
+  ## not in ``REPRO_ADDON_MUTATION``): its first red step is the verdict.
+  getEnv("REPRO_A13_STOP_AT_RED") == "1"
+
+proc probeProfile(name, resources: string): string =
+  ## A profile of the host's two activities whose validator activity is
+  ## ``resources`` (lines indented for it): one reach case of A13's
+  ## review round 4, applied while the carried directory is pending.
+  "import repro_profile\n\nprofile \"" & name & "\":\n" &
+    "  activity vaultwarden:\n    resources:\n" &
+    "      fsSystemFile(path = \"/etc/a13-path-reach/marker\", content = \"x\\n\",\n" &
+    "        address = \"" & name & "Marker\")\n" &
+    "  activity ethereum_validator:\n    resources:\n" &
+    "      linuxSysusersEntry(name = \"eth-validator\", kind = \"user\", id = \"924\",\n" &
+    "        address = \"" & name & "User\")\n" & resources
+
+const
+  R4Confined = "[Unit]\\nDescription=A13 round-4 probe\\n\\n[Service]\\n" &
+    "User=eth-validator\\nGroup=eth-validator\\n" &
+    "ReadWritePaths=/var/lib/a13-r4\\nExecStart=/bin/true\\n"
+    ## A confined, non-root service elsewhere (with the floor's
+    ## ProtectSystem=strict): let in while the directory is pending.
+  R4Floor = "        hardening = \"serviceFloor\",\n" &
+    "        floorExceptions = @[\"NoExecPaths: the conversion gate's " &
+    "round-4 probe runs /bin/true\"],\n"
+  R4Probes = [
+    ("account", "r4Account",
+     "      systemdSystemUnit(name = \"eth-r4-account.service\",\n" &
+     "        content = \"[Unit]\\nDescription=A13 round-4 account probe\\n\\n" &
+     "[Service]\\nDynamicUser=yes\\nUser=root\\nReadWritePaths=/var/lib/a13-r4\\n" &
+     "ExecStart=/bin/true\\n\",\n        address = \"r4Account\")\n",
+     "runs as root"),
+    ("timer", "r4Timer",
+     "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
+     "        content = \"" & R4Confined & "\",\n" & R4Floor &
+     "        address = \"r4Timed\")\n" &
+     "      systemdSystemTimer(name = \"eth-r4.timer\",\n" &
+     "        content = \"[Timer]\\nOnActiveSec=1d\\nUnit=eth-r4-timed.service\\n\",\n" &
+     "        address = \"r4Timer\")\n" &
+     "      systemdSystemDropIn(unit = \"eth-r4.timer\", name = \"retarget\",\n" &
+     "        content = \"[Timer]\\nUnit=apt-daily.service\\n\",\n" &
+     "        address = \"r4TimerDropIn\")\n",
+     "apt-daily.service"),
+    ("path", "r4Path",
+     "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
+     "        content = \"" & R4Confined & "\",\n" & R4Floor &
+     "        address = \"r4Timed\")\n" &
+     "      systemdSystemUnit(name = \"eth-r4-watch.path\",\n" &
+     "        content = \"[Path]\\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\\n" &
+     "MakeDirectory=yes\\nUnit=eth-r4-timed.service\\n\",\n" &
+     "        address = \"r4Path\")\n",
+     "/var/lib/ethereum/validator (r4Path)")]
+    ## (case, the resource the refusal must name, its lines, a fragment of
+    ## the reason). Each is let in by the engine build of its finding:
+    ## ``account-as-written``, ``reach-timer-dropins-unread``,
+    ## ``reach-path-unit-paths-ignored``.
+  R4Host = "      systemdSystemUnit(name = \"eth-r4-host.service\",\n" &
+    "        content = \"" & R4Confined & "\",\n" & R4Floor &
+    "        address = \"r4Host\")\n"
+  R4HostDropIn = "/run/systemd/system/eth-r4-host.service.d/10-foreign.conf"
+  ShadowUnit = "eth-validator-shadow.service"
+  ShadowResource = """
+      # A13 review round 4, finding 4: on the converted host only, a unit
+      # the manifest does not name that reaches the carried directory.
+      systemdSystemUnit(name = "eth-validator-shadow.service",
+        content = unitText("A13 round-4 probe: a unit the manifest does not name",
+          "User=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/ethereum/validator\n" &
+          "ExecStart=/bin/sleep infinity\n"),
+        hardening = "serviceFloor",
+        floorExceptions = @["NoExecPaths: the conversion gate's round-4 " &
+          "probe runs /bin/sleep"],
+        address = "validatorShadow")"""
 
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
@@ -205,7 +282,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       fails.add(b.name & ": " & name & ": " & detail)
       # Under a falsifying mutation the first red step is the verdict;
       # the rest of the run would only spend a VM slot.
-      if mutation().len > 0 or gateMutation().len > 0:
+      if mutation().len > 0 or gateMutation().len > 0 or stopAtRed():
         raise newException(MutationStop, name)
   try:
     let engine = engineFromEnv()
@@ -363,7 +440,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     for f in walkDir(work / "carry"):
       nw.copyTo(f.path, CarriedDir / f.path.extractFilename)
     discard nw.run("chmod -R go-rwx " & CarriedDir)
-    writeFile(work / "system.nim", readFile(ProfileSource))
+    let anchor = "address = \"ethValidatorUser\")"
+    let src0 = readFile(ProfileSource)
+    if src0.count(anchor) != 1:
+      raise newException(CatchableError, "the reference profile's " &
+        "validator account is not where the gate adds the shadow unit")
+    writeFile(work / "system.nim", src0.replace(anchor, anchor & ShadowResource))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", PinsModule, "home.nim"]:
@@ -409,6 +491,79 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "/var/lib/ethereum/validator (pathReachRenamed)" in prOut and
          nw.exec("test -e /etc/systemd/system/eth-validator-renamed.service").exitCode != 0,
          prOut)
+
+    # --- Review round 4, while the directory is pending. First the
+    # premises, measured on this systemd: the accounts the resolver says
+    # are root are root here (systemd.exec(5) DynamicUser=, systemd.unit(5)
+    # specifiers).
+    let idOf = proc (unit, body: string): string =
+      discard nw.run("printf '" & body & "' > /etc/systemd/system/" & unit &
+        " && systemctl daemon-reload")
+      let u = if unit.endsWith("@.service"): unit.replace("@.service", "@root.service")
+              else: unit
+      discard nw.exec("systemctl start " & u)
+      result = nw.exec("journalctl -b -u " & u & " -o cat --no-pager | " &
+        "grep -E '^[0-9]+$' | tail -1").stdout.strip()
+      discard nw.run("rm -f /etc/systemd/system/" & unit &
+        " && systemctl daemon-reload")
+    let premises = %*{
+      "DynamicUser=yes User=root": nw.exec("systemd-run --wait --pipe " &
+        "--quiet -p DynamicUser=yes -p User=root /usr/bin/id -u").stdout.strip(),
+      "DynamicUser=yes User=nosuchr4": nw.exec("systemd-run --wait --pipe " &
+        "--quiet -p DynamicUser=yes -p User=nosuchr4 /usr/bin/id -u").stdout.strip(),
+      "User=%i on a13r4id@root": idOf("a13r4id@.service",
+        "[Service]\\nType=oneshot\\nUser=%%i\\nExecStart=/usr/bin/id -u\\n"),
+      "User=%U": idOf("a13r4idu.service",
+        "[Service]\\nType=oneshot\\nUser=%%U\\nExecStart=/usr/bin/id -u\\n")}
+    record["accountPremises"] = premises
+    var dynId = -1
+    try: dynId = parseInt(premises["DynamicUser=yes User=nosuchr4"].getStr())
+    except ValueError: discard
+    step("systemd runs DynamicUser=yes with User=root, User=%i of the " &
+         "instance root and User=%U as uid 0, and a missing name as a " &
+         "dynamic user (the resolver's premises)",
+         premises["DynamicUser=yes User=root"].getStr() == "0" and
+         premises["User=%i on a13r4id@root"].getStr() == "0" and
+         premises["User=%U"].getStr() == "0" and dynId >= 61184,
+         $premises)
+    # Each reach case of the review's round 4, refused while the directory
+    # is pending, naming the resource: a unit that runs as root under
+    # DynamicUser=yes; a profile drop-in that retargets a profile timer at
+    # a distribution unit; a path unit that creates a directory inside the
+    # carried one.
+    for (label, address, resources, reason) in R4Probes:
+      writeFile(work / ("r4-" & label & ".nim"), probeProfile("r4" & label, resources))
+      nw.copyTo(work / ("r4-" & label & ".nim"), RefDir / ("r4-" & label & ".nim"))
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/r4-" &
+        label & ".nim --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      step("round 4, " & label & ": refused while the directory is pending, " &
+           "naming " & address,
+           r.exitCode != 0 and "ECarriedStatePending" in o and
+             ("(" & address) in o and reason in o, o)
+    # A host drop-in the profile does not have (here in /run): read as
+    # systemd reads it. Without it the confined unit is let in (control);
+    # with it, ProtectSystem=no from the host unconfines the unit and the
+    # apply is refused.
+    writeFile(work / "r4-host.nim", probeProfile("r4host", R4Host))
+    nw.copyTo(work / "r4-host.nim", RefDir / "r4-host.nim")
+    let hostApply = env & eng & " infra apply --profile " & RefDir &
+      "/r4-host.nim --host " & AgentTarget & " --no-preview"
+    let ctl = nw.exec(hostApply, timeoutSec = 3600)
+    step("round 4, host drop-in (control): without it the confined unit is " &
+         "let in while the directory is pending",
+         ctl.exitCode == 0, ctl.stdout & ctl.stderr)
+    discard nw.run("mkdir -p " & R4HostDropIn.parentDir & " && printf " &
+      "'[Service]\\nProtectSystem=no\\n' > " & R4HostDropIn &
+      " && systemctl daemon-reload")
+    let hr = nw.exec(hostApply, timeoutSec = 3600)
+    let ho = hr.stdout & hr.stderr
+    step("round 4, host drop-in: a drop-in in /run the profile does not " &
+         "have makes the unit reach everything, and the apply is refused",
+         hr.exitCode != 0 and "ECarriedStatePending" in ho and "(r4Host" in ho,
+         ho)
+    discard nw.run("rm -rf " & R4HostDropIn.parentDir &
+      " && systemctl daemon-reload")
 
     # --- 3. The first-boot unit restores before anything starts.
     # Installed as a conversion installs it: the unit, enabled, and the
@@ -467,6 +622,18 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("the reinstalled host realises the activities in full",
          applied.exitCode == 0, applied.stdout & applied.stderr & "\n" &
          nw.serviceJournal(SetUnits))
+    # Review round 4, finding 4: the requirement follows reach, at every
+    # apply, written by the generation -- here for a unit the manifest does
+    # not name. Red under the engine build
+    # ``restore-requirement-by-manifest-only``.
+    let shadowDropIn = "/etc/systemd/system/" & ShadowUnit &
+      ".d/50-repro-state-restore.conf"
+    let shadowDeps = nw.run("systemctl show -p Requires -p After " & ShadowUnit)
+    step("a unit the manifest does not name that reaches the carried " &
+         "directory requires the restore, through the generation's drop-in",
+         nw.exec("test -f " & shadowDropIn).exitCode == 0 and
+         shadowDeps.count(RestoreUnit) >= 2,
+         shadowDeps & "\n" & nw.exec("cat " & shadowDropIn).stdout)
     for (u, check) in [("vaultwarden.service", "http://127.0.0.1:8000/alive"),
                        ("eth-execution.service", "tcp:127.0.0.1:8545"),
                        ("eth-beacon.service",
@@ -616,7 +783,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     nw.rebootGuest()
     let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
     var bad: seq[string]
-    for u in [DefaultValidatorUnit, Exe]:
+    for u in [DefaultValidatorUnit, Exe, ShadowUnit]:
       let st = nw.exec("systemctl is-active " & u).stdout.strip()
       let n = nw.exec("journalctl -b -u " & u &
         " --no-pager | grep -c 'Started' || true").stdout.strip()

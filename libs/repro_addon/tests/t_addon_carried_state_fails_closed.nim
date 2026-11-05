@@ -28,7 +28,11 @@
 ## ``receipt-trusts-inode``, ``reach-ignores-privileged-commands``,
 ## ``reach-dropin-judged-alone``, ``reach-trigger-units-reach-nothing``,
 ## ``restore-not-required-by-units``, ``backup-without-host-lock``,
-## ``apply-ignores-hold`` (the floored unit under a hold).
+## ``apply-ignores-hold`` (the floored unit under a hold); round 4:
+## ``account-as-written`` (F1-F2b), ``reach-timer-dropins-unread`` (F3,
+## F3b), ``reach-host-dropins-ignored`` (each host source),
+## ``reach-path-unit-paths-ignored`` (F4) and
+## ``restore-requirement-by-manifest-only`` (F6).
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
@@ -64,9 +68,16 @@ var scratch = getTempDir() / ("t_addon_carried_state_fails_closed" &
                               testCaseScratchSlug())
 
 proc fresh(name: string): string =
+  ## A scratch root with the accounts the fixtures' units name: since the
+  ## reach analysis resolves a unit's account (``service_account``), an
+  ## account the host does not have reaches everything.
   result = scratch / name
   removeDir(result)
-  createDir(result)
+  createDir(result / "etc")
+  writeFile(result / "etc/passwd", "root:x:0:0::/root:/bin/sh\n" &
+    "app:x:1001:1001::/:/usr/sbin/nologin\n" &
+    "validator:x:1002:1002::/:/usr/sbin/nologin\n")
+  writeFile(result / "etc/group", "root:x:0:\napp:x:1001:\nvalidator:x:1002:\n")
 
 proc unit(name, body: string; extra = ""): string =
   "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" & body &
@@ -314,7 +325,9 @@ suite "carried state fails closed":
     check why.startsWith("ECarriedStatePending")
     check "EAddOnFloorNotEffective" notin why
     var written = 0
-    for _ in walkDirRec(state): inc written
+    for f in walkDirRec(state):
+      # The scratch root's account files (``fresh``) are the fixture's.
+      if f notin [state / "etc/passwd", state / "etc/group"]: inc written
     check written == 0
 
   test "a backup takes the host apply lock and checks the units again":
@@ -472,5 +485,181 @@ suite "reach is default-deny":
     discard holder.waitForExit()
     holder.close()
     check why.startsWith("ECarriedStatePending")
+
+
+# ---------------------------------------------------------------------------
+# A13 review round 4: the account systemd will use, every drop-in systemd
+# reads, a path unit's paths, and the restore requirement derived from
+# reach at every apply. Ported from the reviewer's probe
+# (t_rev_a13r5_probe.nim, F1-F6), plus each host drop-in source.
+# ---------------------------------------------------------------------------
+
+proc pendingRefused(text: string; prepare: proc (root: string) = nil): bool =
+  ## Whether an apply of ``text`` is refused while the validator's carried
+  ## directory is pending, on a scratch host ``prepare`` may add files to.
+  let root = fresh("dst-r4")
+  if prepare != nil: prepare(root)
+  var why = ""
+  try: why = refusal(text, root)
+  except CatchableError as e: why = "PARSE: " & e.msg
+  checkpoint "refusal: " & why
+  why.startsWith("ECarriedStatePending") or why.startsWith("PARSE")
+
+proc confinedR(name, extra: string): string =
+  unit(name, "[Service]\nProtectSystem=strict\nUser=app\n" & extra &
+    "ExecStart=/bin/true\n")
+
+proc hostFile(root, path, content: string) =
+  createDir((root & path).parentDir)
+  writeFile(root & path, content)
+
+suite "reach judges the account systemd will use (round 4)":
+  test "control: a confined unit of a non-root account elsewhere is let in":
+    check not pendingRefused(confinedR("c0.service",
+      "ReadWritePaths=/var/lib/other\n"))
+
+  test "F1: DynamicUser=yes with User=root runs as root":
+    check pendingRefused(unit("f1.service",
+      "[Service]\nDynamicUser=yes\nUser=root\nExecStart=/bin/true\n"))
+
+  test "F1b: DynamicUser=yes with Group=root holds gid 0":
+    check pendingRefused(unit("f1b.service",
+      "[Service]\nDynamicUser=yes\nUser=app\nGroup=root\nExecStart=/bin/true\n"))
+
+  test "F2: User=%U is the system manager's uid, 0":
+    check pendingRefused(unit("f2.service",
+      "[Service]\nProtectSystem=strict\nUser=%U\nExecStart=/bin/true\n"))
+
+  test "F2b: a template's User=%i names no account (DefaultInstance=root)":
+    check pendingRefused(unit("f2b@.service",
+      "[Service]\nProtectSystem=strict\nUser=%i\nExecStart=/bin/true\n" &
+      "[Install]\nWantedBy=multi-user.target\nDefaultInstance=root\n"))
+
+  test "a uid alias of root, and an account the host does not have, reach everything":
+    check pendingRefused(confinedR("al.service", "ReadWritePaths=/var/lib/other\n"),
+      proc (root: string) =
+        writeFile(root / "etc/passwd", "root:x:0:0::/root:/bin/sh\n" &
+          "app:x:0:0::/:/bin/sh\n"))
+    check pendingRefused(unit("gh.service", "[Service]\nProtectSystem=strict\n" &
+      "User=ghost\nExecStart=/bin/true\n"))
+
+  test "a dynamic user is confined without ProtectSystem=":
+    check not pendingRefused(unit("dyn.service",
+      "[Service]\nDynamicUser=yes\nUser=nosuchdyn\nExecStart=/bin/true\n"))
+
+suite "reach reads every drop-in systemd applies (round 4)":
+  test "F3: a profile drop-in retargets a profile timer at a distribution unit":
+    check pendingRefused("systemd.systemTimer {\n  name = \"t3.timer\"\n" &
+      "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
+      confinedR("c0.service", "") &
+      "systemd.systemDropIn {\n  unit = \"t3.timer\"\n  name = \"20-retarget\"\n" &
+      "  content = \"[Timer]\nUnit=apt-daily.service\n\"\n}\n")
+
+  test "F3b: a profile timer's drop-in with a section not understood":
+    check pendingRefused("systemd.systemTimer {\n  name = \"t4.timer\"\n" &
+      "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
+      confinedR("c0.service", "") &
+      "systemd.systemDropIn {\n  unit = \"t4.timer\"\n  name = \"20-x\"\n" &
+      "  content = \"[X-Unknown]\nFoo=bar\n\"\n}\n")
+
+  test "control: a profile timer on a confined profile service is let in":
+    check not pendingRefused("systemd.systemTimer {\n  name = \"t5.timer\"\n" &
+      "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
+      confinedR("c0.service", ""))
+
+  const C0 = "[Service]\nProtectSystem=strict\nUser=app\nExecStart=/bin/true\n"
+  for (label, path, content) in [
+      ("a type-wide service.d drop-in in /usr/lib",
+       "/usr/lib/systemd/system/service.d/50-x.conf", "[Service]\nProtectSystem=no\n"),
+      ("a dashed-prefix drop-in in /run",
+       "/run/systemd/system/c0-.service.d/10-x.conf", "[Service]\nUser=root\n"),
+      ("a host drop-in of the unit's own in /etc",
+       "/etc/systemd/system/c0-x.service.d/10-foreign.conf",
+       "[Service]\nExecStartPre=+/bin/true\n"),
+      ("a generator's drop-in",
+       "/run/systemd/generator/c0-x.service.d/x.conf", "[Service]\nProtectSystem=no\n"),
+      ("a unit file in /run/systemd/transient, read before the generation's",
+       "/run/systemd/transient/c0-x.service", C0)]:
+    test "a host source is read: " & label:
+      check not pendingRefused(confinedR("c0-x.service", ""))
+      check pendingRefused(confinedR("c0-x.service", ""),
+        proc (root: string) = hostFile(root, path, content))
+
+  test "a host drop-in that keeps the unit confined is read and let in":
+    check not pendingRefused(confinedR("c0-x.service", ""),
+      proc (root: string) = hostFile(root,
+        "/usr/lib/systemd/system/service.d/10-timeout-abort.conf",
+        "[Service]\nTimeoutStopFailureMode=abort\n"))
+
+  test "drop-ins of all sources apply in one file-name order":
+    # The host's 90- unconfines; the profile's 50- confines: systemd reads
+    # 50 then 90, so the unit is not confined.
+    check pendingRefused(unit("o.service", "[Service]\nUser=app\nExecStart=/bin/true\n") &
+      "systemd.systemDropIn {\n  unit = \"o.service\"\n  name = \"confine\"\n" &
+      "  content = \"[Service]\nProtectSystem=strict\n\"\n}\n",
+      proc (root: string) = hostFile(root,
+        "/etc/systemd/system/o.service.d/90-unconfine.conf",
+        "[Service]\nProtectSystem=no\n"))
+
+  test "the generation's own drop-ins on the host are the profile's to decide":
+    check not pendingRefused(confinedR("c0-x.service", ""),
+      proc (root: string) = hostFile(root,
+        "/etc/systemd/system/c0-x.service.d/50-repro-old.conf",
+        "[Service]\nProtectSystem=no\n"))
+
+suite "a path unit reaches the paths it watches (round 4)":
+  test "F4: MakeDirectory= creates inside the carried directory":
+    check pendingRefused(unit("f4.path",
+      "[Path]\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\n" &
+      "MakeDirectory=yes\nUnit=c0.service\n") & confinedR("c0.service", ""))
+
+  test "a glob reaches the directory it is anchored in":
+    check pendingRefused(unit("g.path",
+      "[Path]\nPathExistsGlob=/var/lib/ethereum/validator/*.lock\n" &
+      "Unit=c0.service\n") & confinedR("c0.service", ""))
+
+  test "control: a path unit watching elsewhere is let in":
+    check not pendingRefused(unit("e.path",
+      "[Path]\nPathChanged=/var/lib/other/x\nUnit=c0.service\n") &
+      confinedR("c0.service", ""))
+
+suite "the restore requirement follows reach at every apply (round 4)":
+  test "F6: a renamed unit reaching the restored directory requires the restore":
+    let root = fresh("boot-r4")
+    let d2 = scratch / "carried-r4"
+    removeDir(d2)
+    copyDir(carriedDir(), d2)
+    discard restoreStateSet(d2, stopped(), root = root)
+    let renamed = confinedR("validator2.service",
+      "ReadWritePaths=/var/lib/ethereum/validator\n")
+    let elsewhere = confinedR("other.service", "ReadWritePaths=/var/lib/other\n")
+    # Restored: the apply lets it in.
+    check refusal(renamed & elsewhere, root) == ""
+    # Not installed (no install-unit marker): no requirement is added.
+    check carriedRequirementUnits(parseSystemProfile(renamed), d2, root).len == 0
+    writeFile(installedMarkerPath(d2), d2 & "\n")
+    let units = carriedRequirementUnits(parseSystemProfile(renamed & elsewhere),
+                                        d2, root)
+    check units == @["validator2.service"]
+    let text = withCarriedRequirements(renamed & elsewhere, d2, root)
+    let p = parseSystemProfile(text)
+    var found = false
+    for r in p.resources:
+      if r.kind == srkSystemdSystemDropIn and r.diUnit == "validator2.service":
+        found = r.diName == RequirementDropInName and
+          r.diContent == restoreRequirementText()
+      check not (r.kind == srkSystemdSystemDropIn and r.diUnit == "other.service")
+    check found
+    check "Requires=repro-state-restore.service" in restoreRequirementText()
+    check "After=repro-state-restore.service" in restoreRequirementText()
+    # A unit reaching everything requires it too.
+    check carriedRequirementUnits(parseSystemProfile(unit("r.service",
+      "[Service]\nExecStart=/bin/true\n")), d2, root) == @["r.service"]
+    # The generation's drop-in, once written, does not make the unit reach
+    # everything at the next apply (it is the generation's own).
+    hostFile(root, "/etc/systemd/system/validator2.service.d/50-repro-" &
+      RequirementDropInName & ".conf", restoreRequirementText())
+    check carriedRequirementUnits(parseSystemProfile(renamed & elsewhere),
+                                  d2, root) == @["validator2.service"]
 
 removeDir(scratch)

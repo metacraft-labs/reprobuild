@@ -3081,6 +3081,23 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   ## collision pass refuses, and ``AddonApplyError`` when the infra apply
   ## reports an error -- after recording, in the ledger, every object that
   ## apply did create, so uninstall still finds them.
+  # While carried state is installed, every unit of the generation that
+  # reaches it requires the first-boot restore, through a drop-in the
+  # generation itself writes (spec §11.1; A13 review round 4, finding 4):
+  # added to the user profile, so the scope and collision passes, the
+  # ledger and the effective-unit check see it like any other drop-in. A
+  # stored generation (a revert, a rollback, a replay) is applied as it was
+  # installed, with the requirements it was given then.
+  var opts = opts
+  let carriedAt = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                  else: CarriedStateDir
+  if not opts.storedTarget and not opts.replay and
+      carriedStateInstalled(carriedAt):
+    # Parsed as an add-on user profile (the floor's defaults included),
+    # as the reach analysis of the refusal below reads it.
+    opts.userProfileText &= carriedRequirementText(
+      parseAddOnUserProfile(opts.userProfileText), carriedAt,
+      (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   if opts.agentRecord.present and opts.agentSequence > 0'u64 and
       opts.agentRecord.sequence != opts.agentSequence:
