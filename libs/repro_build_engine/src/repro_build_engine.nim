@@ -413,6 +413,25 @@ type
     cacheable*: bool
     weakFingerprint*: ContentDigest
     actionCachePolicy*: FileFingerprintPolicy
+    unsafePreserveOutputs*: bool
+      ## UNSAFE preserve-outputs mode for this step (owner decision
+      ## 2026-11-03; Incremental-Invalidation.md §"Minimum check set" Step
+      ## 3.3, "Unsafe preserve-outputs mode"; in the spirit of BuildXL's
+      ## `/unsafe_preserveOutputs`). When a record's inputs match and a
+      ## declared output on disk is not the one it describes, the engine
+      ## neither restores the recorded output over it nor reports it up to
+      ## date: it re-executes the step with the modified output left in
+      ## place (a tool with its own incrementality, an incremental linker,
+      ## works from it). The step's weak fingerprint is domain-separated
+      ## (`preserveOutputsWeakFingerprint`), so its records never mix with
+      ## the normal mode's, and none of its records leaves this host.
+      ##
+      ## `runBuild` sets it for every action `BuildEngineConfig.
+      ## unsafePreserveOutputs` selects (and keeps a `true` an in-process
+      ## graph producer set), then derives the weak fingerprint. The
+      ## lowered-graph envelope does NOT carry it: a persisted graph opts a
+      ## step in through the selector (`repro build
+      ## --unsafe-preserve-outputs=PATTERN`), never through this field.
     relocatable*: bool
       ## The action computes the same thing wherever its working directory
       ## is, given the same content at the same cwd-relative places. Its
@@ -828,6 +847,18 @@ type
       ## which selects every edge — so ``rebuildClass`` alone behaves exactly
       ## as §4.1 describes it unqualified. Matched against ``action.id`` and
       ## ``action.targetNames`` by ``matchesOnlySelector``.
+    unsafePreserveOutputs*: seq[string]
+      ## The steps that run in UNSAFE preserve-outputs mode
+      ## (`BuildAction.unsafePreserveOutputs`), as ``--only``-style patterns
+      ## matched against ``action.id`` and ``action.targetNames``
+      ## (``matchesOnlySelector``: plain text is a substring, a pattern with
+      ## ``*`` or ``?`` an anchored glob). EMPTY selects NOTHING -- unlike
+      ## ``rebuildOnly``, whose empty list selects everything: the mode is
+      ## opt-in per step, and ``*`` is how an operator says "every step".
+      ## Per step rather than one global switch because the mode changes the
+      ## step's fingerprint: a switch for the whole graph would re-key every
+      ## record in it, and BuildXL's own global flag only ENABLES the per-pip
+      ## opt-ins.
     nowUnix*: int64
       ## Injected wall clock for retention decisions. 0 means read the real
       ## one. Exists so ``t_volatile_retention_expiry_is_a_miss`` can assert
@@ -1924,6 +1955,27 @@ type
       ## ("no cache record for weak fingerprint", "input changed: <path>",
       ## …). Empty when there is nothing to say; stored as SQL NULL so
       ## "no reason recorded" stays distinguishable from an empty reason.
+    outputOverwrites*: seq[OutputOverwrite]
+      ## Every declared output a cache restore wrote OVER for this action: a
+      ## path that held something other than what the serving record
+      ## describes, each with the identity it had and the one restored
+      ## (`repro_local_store.OutputOverwrite`). Owner decision 2026-11-03
+      ## (Incremental-Invalidation.md §"Minimum check set" Step 3.3): every
+      ## overwrite is reported at user-visible level. The engine only
+      ## RECORDS it, here and as a `cache-restore-overwrote` trace event; a
+      ## front end prints it (`repro build` as a `WARNING` status line). It
+      ## is never written to the action's own `stdout` / `stderr`, which are
+      ## the action's observable output and may be compared, replayed or
+      ## captured by whatever runs the build.
+    preservedModifiedOutputs*: seq[string]
+      ## UNSAFE preserve-outputs mode (`BuildAction.unsafePreserveOutputs`):
+      ## the reason a record was not restored over a modified output, which
+      ## the engine kept in place and re-executed the step over. Reported
+      ## like `outputOverwrites`.
+    droppedCorruptPayloads*: seq[string]
+      ## The content-store blobs (hex digests) the lookup for this action
+      ## found present and failing verification, and removed so the next
+      ## tier can restore them (`aclRejectedCorruptPayload`).
     cachePublishSkipReason*: string
       ## WHY THIS ACTION PUBLISHED NO CACHE RECORD, although it is
       ## `cacheable`, ran and exited 0. Empty on every action that either
@@ -2639,15 +2691,32 @@ proc contentHashForActionBlob(blob: CasBlobRef): ContentHash =
 
 proc materializeActionCacheOutputs*(cas: CasStore;
                                     record: ActionResultRecord;
-                                    outputRoot = "") =
+                                    outputRoot = "";
+                                    containerOutputs: openArray[string] = []) =
   ## R11 action-cache restore helper shared by normal hits and hybrid-cutoff
   ## hits. It translates stable RBAR output records into Layer-1
   ## ``CasMaterialization`` requests; ``casMaterialize`` verifies every blob
   ## before touching destinations, so missing/corrupt later blobs cannot leave
   ## earlier outputs partially restored.
+  ##
+  ## A CONTAINER directory output (``containerOutputs``, the action's
+  ## ``containerDirectoryOutputs``) is restored by creating the directory
+  ## when it is absent, NEVER from its stored tree snapshot. The action's
+  ## claim about a container is only that it exists (Incremental-
+  ## Invalidation.md §"Non-regular outputs", "Container directory outputs");
+  ## its other entries are other writers' outputs or files nobody declared,
+  ## and the snapshot holds whatever was in it when the action last ran. A
+  ## snapshot restore replaces the whole directory: it deleted every other
+  ## writer's entry and every user file in a ``preserveTree`` root whose own
+  ## entry was being restored, and filled an ``ensureDir`` directory with
+  ## stale files from an earlier build.
   if record.outputPayloadKind != opkCasBlobs:
     raise newException(CacheIntegrityError,
       "cache record does not contain output payloads")
+  for output in record.outputs:
+    if output.metadata.kind == ffkDirectory and
+        isContainerOutput(outputRoot, output.path, containerOutputs):
+      createDir(extendedPath(actionOutputPath(outputRoot, output.path)))
   # Local-CAS-Hardlink-Materialization M2. Only a DIRECTORY output's payload
   # is needed in memory — ``materializeDirectorySnapshotPayload`` parses a
   # snapshot envelope rather than writing bytes to a path. Every other
@@ -2665,7 +2734,8 @@ proc materializeActionCacheOutputs*(cas: CasStore;
   # and hash-verifies each staged result before committing any rename.
   var payloads = newSeq[seq[byte]](record.outputs.len)
   for i, output in record.outputs:
-    if output.metadata.kind == ffkDirectory:
+    if output.metadata.kind == ffkDirectory and
+        not isContainerOutput(outputRoot, output.path, containerOutputs):
       payloads[i] = cas.casGet(contentHashForActionBlob(output.blob))
   var entries: seq[CasMaterialization] = @[]
   for output in record.outputs:
@@ -2678,7 +2748,8 @@ proc materializeActionCacheOutputs*(cas: CasStore;
       permissions: output.permissions))
   cas.casMaterialize(entries)
   for i, output in record.outputs:
-    if output.metadata.kind != ffkDirectory:
+    if output.metadata.kind != ffkDirectory or
+        isContainerOutput(outputRoot, output.path, containerOutputs):
       continue
     materializeDirectorySnapshotPayload(payloads[i],
       actionOutputPath(outputRoot, output.path), output.permissions)
@@ -3007,6 +3078,48 @@ proc keyedOnGoverningLock*(fingerprint: ContentDigest;
   let lock = string(governingLockIdentity)
   framed.add($lock.len & "\x1f" & lock & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
+const UnsafePreserveOutputsDomain* = "reprobuild/unsafe-preserve-outputs/v1"
+  ## The domain `preserveOutputsWeakFingerprint` frames a step's weak
+  ## fingerprint under. Versioned so a change to the mode's semantics can
+  ## re-key exactly its records and nothing else.
+
+proc preserveOutputsWeakFingerprint*(fingerprint: ContentDigest): ContentDigest =
+  ## The weak fingerprint of a step that runs in UNSAFE preserve-outputs mode
+  ## (`BuildAction.unsafePreserveOutputs`), from its normal one: a
+  ## length-framed, domain-separated mix, so no normal-mode fingerprint can
+  ## equal a preserve-mode one and the two modes' records never mix in
+  ## either direction (owner decision 2026-11-03: the mode is "part of the
+  ## fingerprint"). BuildXL also keys the mode into the pip's fingerprint;
+  ## unlike BuildXL this does not let a preserve-mode lookup hit a
+  ## normal-mode record, because nothing in a record says which mode made it
+  ## and a mix that is one-way would need exactly that.
+  var framed = UnsafePreserveOutputsDomain & "\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
+proc applyUnsafePreserveOutputs*(action: var BuildAction;
+                                 selectors: openArray[string]) =
+  ## Mark `action` as running in UNSAFE preserve-outputs mode when the
+  ## configuration selects it (`BuildEngineConfig.unsafePreserveOutputs`, an
+  ## EMPTY list selecting nothing) or a graph producer already marked it, and
+  ## derive its weak fingerprint for that mode. Applied once per action, at
+  ## `runBuild` entry, before any lookup, publication or whole-graph scan
+  ## reads the fingerprint.
+  if not action.unsafePreserveOutputs:
+    if selectors.len == 0 or
+        not matchesOnlySelector(selectors, action.id, action.targetNames):
+      return
+    action.unsafePreserveOutputs = true
+  action.weakFingerprint = preserveOutputsWeakFingerprint(action.weakFingerprint)
+
+const UnsafePreserveOutputsCrossHostRefusal* =
+  "the step runs in UNSAFE preserve-outputs mode " &
+  "(--unsafe-preserve-outputs): it may have executed over a modified output " &
+  "it kept in place, so its result is not a function of its inputs alone " &
+  "and it does not leave this host (owner decision 2026-11-03, " &
+  "Incremental-Invalidation.md §\"Minimum check set\" Step 3.3)"
 
 proc actionEnvironmentKeyText*(env: openArray[string];
                                envPassthrough: openArray[string]): string =
@@ -4733,6 +4846,30 @@ proc containerDirectoryOutputs*(action: BuildAction): seq[string] =
       result.add(lines[1])
   else:
     discard
+
+type RestoreOutcome = object
+  ## What `runBuild`'s `restoreRecordedOutputs` did for one hit.
+  ok: bool
+    ## The recorded outputs are in place: restored, or already there.
+  detail: string
+    ## On `ok`, the settle detail: `restored` or `outputs-present`.
+  inputChanged: string
+    ## Not restored: this input's content is no longer the recorded one.
+  declined: string
+    ## Not restored for another reason (unsafe preserve-outputs, or the
+    ## store could not materialize).
+
+proc overwriteDetail*(overwrite: OutputOverwrite): string =
+  ## One overwrite as text: the path, what it held, what was restored.
+  overwrite.path & ": on disk " & overwrite.onDisk & ", restored " &
+    overwrite.restored
+
+proc restoreOverwriteWarning*(actionId: string;
+                              overwrite: OutputOverwrite): string =
+  ## The user-visible line for one overwrite (owner decision 2026-11-03):
+  ## a front end prints it at its default level, not behind a verbose flag.
+  "WARNING restored the cached output of " & actionId & " over a modified " &
+    "file: " & overwriteDetail(overwrite)
 
 proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
                                           record: ActionResultRecord): bool =
@@ -7320,6 +7457,61 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
+func builtinKindName*(kind: BuildActionKind): string =
+  ## The stable name a record states for a builtin's kind
+  ## (`EvidenceSource.builtinKind`, `builtin:<name>`), and the name the
+  ## publication rule's allowlist uses (`PublishableBuiltinKinds`). The case
+  ## is exhaustive on purpose: a new kind does not compile until it is named
+  ## here, and a name the allowlist does not carry is refused across hosts
+  ## by default (owner decision 2026-10-31).
+  case kind
+  of bakProcess: "process"
+  of bakCopyFile: "copy-file"
+  of bakEnsureDir: "ensure-dir"
+  of bakWriteText: "write-text"
+  of bakStamp: "stamp"
+  of bakPreserveTree: "preserve-tree"
+  of bakEnsureLine: "ensure-line"
+  of bakEnsureSnippet: "ensure-snippet"
+  of bakWorkspaceVcs: "workspace-vcs"
+  of bakBinaryCacheSubstitute: "binary-cache-substitute"
+  of bakForeignProvision: "foreign-provision"
+  of bakMetadataFetch: "metadata-fetch"
+  of bakSolveLock: "solve-lock"
+  of bakLockUpdate: "lock-update"
+
+const BuiltinPayloadPeerKeyDomain* = "reprobuild/peer-builtin-payload/v1"
+  ## The domain `builtinPayloadPeerKey` frames a builtin's peer-cache key
+  ## under. Versioned so a change to what it binds re-keys exactly the
+  ## builtin entries and nothing else.
+
+proc builtinPayloadPeerKey*(action: BuildAction): ContentDigest =
+  ## The key LAN peers agree on for a BUILTIN action outside portable
+  ## caching: its weak fingerprint, bound to its kind and its whole payload
+  ## (`builtinText`, `builtinEntries`), length-framed and domain-separated.
+  ##
+  ## A builtin writes its payload; the payload is what it computes. Its weak
+  ## fingerprint covers the payload only when the constructor mixed it in:
+  ## the production one does (`reprobuild.localBuiltinAction.v1` folds the
+  ## node payload), while `builtinAction` keys on the action id alone unless
+  ## its caller passes more. The strong fingerprint covers inputs, not the
+  ## payload. So a builtin whose caller keyed it on its id published a record
+  ## that another host served for a DIFFERENT text under the same id (owner
+  ## decision 2026-10-31 admits `write-text` and `stamp` to the peer cache on
+  ## the premise that their payload is all they compute; Edge-Derived-
+  ## Identities.md §10 decision 23 rider, caveat 1). Binding the payload into
+  ## the cross-host key makes that impossible whatever the constructor did;
+  ## the portable key already binds it (`portableStaticFieldsOf`).
+  var framed = BuiltinPayloadPeerKeyDomain & "\x1e"
+  var parts = @[toHex(action.weakFingerprint.bytes),
+    builtinKindName(action.kind), action.builtinText,
+    $action.builtinEntries.len]
+  for entry in action.builtinEntries:
+    parts.add(entry)
+  for part in parts:
+    framed.add($part.len & "\x1f" & part & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 func evidenceSourceOf*(action: BuildAction): EvidenceSource =
   ## Where an execution of `action` gets its dependency evidence, as a
   ## published record states it (Edge-Derived-Identities.md §3.1; campaign M17
@@ -7333,7 +7525,10 @@ func evidenceSourceOf*(action: BuildAction): EvidenceSource =
   ##   kind whose caller prewired one (`monitorDepfile`; the condition
   ##   `monitorEvidenceRequired` folds under);
   ## * any other built-in (`kind != bakProcess`) runs in-process: there is no
-  ##   child to monitor, and its evidence is its declared inputs and outputs;
+  ##   child to monitor, and its evidence is its declared inputs and outputs,
+  ##   stated with its KIND (`builtin:<kind>`, `builtinKindName`), because
+  ##   only some kinds read exactly their declared inputs and the
+  ##   publication rule decides by kind (owner decision 2026-10-31);
   ## * a process under a recognized-format policy is evidenced by the
   ##   report(s) it produces, named by registry name (`make-depfile`, `iomon`
   ##   for an edge that produces its own io-mon capture);
@@ -7344,7 +7539,7 @@ func evidenceSourceOf*(action: BuildAction): EvidenceSource =
       (action.kind == bakProcess or action.monitorDepfile.len > 0):
     return MonitoredEvidence
   if action.kind != bakProcess:
-    return BuiltinEvidence
+    return builtinEvidence(builtinKindName(action.kind))
   var names: seq[string] = @[]
   if policy.kind in RecognizedPolicyKinds:
     for report in policy.recognizedReports:
@@ -18398,8 +18593,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # the loop alive.
   var buildGraph = inferDeclaredActionDeps(
     withProvisioningReceiptInputs(g, config.toolIdentityResolver))
+  # UNSAFE preserve-outputs (owner decision 2026-11-03): mark the selected
+  # steps and derive their weak fingerprints HERE, before anything reads a
+  # fingerprint -- the whole-graph scan, the portable pre-pass, the lookups,
+  # the publishers -- so no reader can see the normal-mode key of a step
+  # that runs in the unsafe mode. `preservingIds` is what the cross-host
+  # gates below consult.
+  var preservingIds = initHashSet[string]()
   for i in 0 ..< buildGraph.actions.len:
     buildGraph.actions[i] = withOptionalOutputIdentity(buildGraph.actions[i])
+    buildGraph.actions[i].applyUnsafePreserveOutputs(
+      config.unsafePreserveOutputs)
+    if buildGraph.actions[i].unsafePreserveOutputs:
+      preservingIds.incl(buildGraph.actions[i].id)
   # NOTE: an earlier ``REPRO_MACOS_DISABLE_ACTION_MONITOR`` opt-in lived here and
   # downgraded every monitored action to a declared-only (unmonitored) policy
   # on macOS. That was an unapproved soundness hole — it marked actions
@@ -18753,6 +18959,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## a trace event naming the policy or the level, never a failure: the
     ## record is already stored and keeps serving this host.
     if config.peerCacheActionPublisher == nil:
+      return
+    if actionId in preservingIds:
+      runResult.trace(actionId, "peer-cache-publish-refused",
+        UnsafePreserveOutputsCrossHostRefusal)
       return
     if record.outputPayloadKind != opkCasBlobs:
       return
@@ -19283,6 +19493,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## What the argv does not say about the action: its kind, a builtin's
     ## payload, and the outputs it declares (sorted: a set).
     result.add("kind=" & $action.kind)
+    if action.unsafePreserveOutputs:
+      # Domain-separates the portable key as `preserveOutputsWeakFingerprint`
+      # does the local one; nothing in this mode is published anyway.
+      result.add("unsafe-preserve-outputs=v1")
     result.add("builtinText=" & action.builtinText)
     for entry in action.builtinEntries:
       result.add("builtinEntry=" & entry)
@@ -19347,6 +19561,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if hex.len == 64:
         for i in 0 ..< 32:
           result.peerKey[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
+    elif action.kind != bakProcess:
+      # A builtin's payload is part of what peers agree on, whatever its
+      # constructor keyed (`builtinPayloadPeerKey`).
+      result.peerKey = builtinPayloadPeerKey(action).bytes
 
   proc peerCacheQueryOf(action: BuildAction): PeerCacheActionQuery =
     ## The query for `action`: the one recorded when it was scheduled (see
@@ -19401,6 +19619,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## RunQuota rewrite with per-launch paths (the first gemini-cli run with
     ## fixed-output fetches recorded a new weak fingerprint every build).
     let action = declaredActions.getOrDefault(launched.id, launched)
+    if action.id in preservingIds:
+      # UNSAFE preserve-outputs: no portable record, so nothing is published
+      # and no other checkout or host can be served from one.
+      runResult.results[idx].portable = false
+      runResult.results[idx].portableReason =
+        UnsafePreserveOutputsCrossHostRefusal
+      if config.portableMemoPublisher != nil:
+        runResult.trace(action.id, "portable-memo-publish-refused",
+          UnsafePreserveOutputsCrossHostRefusal)
+      return
     var fp = computePortableFingerprint(portableRecordRoots(), action.argv,
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
       reads, probes, enumerations, portableStaticFieldsOf(action),
@@ -19691,6 +19919,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ##     The binary-cache publisher packages declared filesystem outputs;
     ##     unlike the peer-cache publisher it does not read local CAS blobs.
     if config.binaryCachePublisher == nil:
+      return
+    if action.id in preservingIds:
+      runResult.trace(action.id, "binary-cache-publish-refused",
+        UnsafePreserveOutputsCrossHostRefusal)
       return
     # L3 PUBLISH-SCOPE — per-(action, cache) publish decision:
     #   publish IF (cache scope == intermediate)
@@ -20166,6 +20398,143 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var poolRunning = initTable[string, uint32]()
   var ready: seq[string] = @[]
   var dynamicDepsLoaded = initHashSet[string]()
+
+  proc dropUnservablePayloads(id: string; lookup: var ActionCacheLookup;
+                              rejectedOutput: var bool) =
+    ## `aclRejectedCorruptPayload` -> drop every corrupt blob it names from
+    ## the local content store and turn the lookup into the payload MISS the
+    ## next tier answers (`aclMissNoOutputPayload`). Owner decision
+    ## 2026-11-03 (Incremental-Invalidation.md §"Minimum check set" Step
+    ## 3.3): a stored payload that fails verification is separated from "an
+    ## output differs from the record", is dropped, falls through to the next
+    ## tier or re-runs, and never fails the build. `rejectedOutput` is set
+    ## for the same reason the output-mismatch arm sets it: the
+    ## outputs-present shortcut must not declare up to date an action whose
+    ## recorded result could not be served.
+    if lookup.status != aclRejectedCorruptPayload:
+      return
+    let dropped = cas.inner.dropCorruptPayloads(lookup.corruptPayloads)
+    var message = "stored payload cannot be served: " & lookup.message
+    if dropped.len > 0:
+      message.add("; dropped the corrupt blob(s) " & dropped.join(", ") &
+        " from the local content store")
+    message.add("; the next tier may restore it, otherwise the action re-runs")
+    let idx = idToIndex.resultIndex(id)
+    for digest in dropped:
+      runResult.results[idx].droppedCorruptPayloads.add(digest)
+    runResult.trace(id, "cache-payload-unservable", message)
+    rejectedOutput = true
+    lookup = ActionCacheLookup(status: aclMissNoOutputPayload,
+      record: lookup.record, message: message)
+
+  proc restoreRecordedOutputs(id: string; action: BuildAction;
+                              record: var ActionResultRecord): RestoreOutcome =
+    ## Put a payload-backed `record`'s outputs in place for a hit, the one
+    ## seam every restore arm goes through (a local record, one a LAN peer
+    ## just installed, a record served in `--restore-cached-outputs` mode).
+    ##
+    ## * Nothing is written when every output is already the recorded one
+    ##   (`restoreWouldOverwriteMatchingOutputs`).
+    ## * Owner decision 2026-11-03 (Incremental-Invalidation.md §"Minimum
+    ##   check set" Step 3.3): when the restore would write OVER a present
+    ##   output that is not the recorded one (`outputOverwrites`),
+    ##   - under UNSAFE preserve-outputs it does not: the output is kept and
+    ##     the action re-executes over it (`declined`);
+    ##   - otherwise every input the record carries a content hash for is
+    ##     re-read first (`hashedInputContentChanged`; in the warm in-place
+    ##     mode before ANY restore, missing outputs included): an `ffpHybrid` lookup
+    ##     trusts an input whose metadata is unchanged, and overwriting a file
+    ##     is the one place that trade-off is not taken. A changed input is a
+    ##     miss (`inputChanged`), never a restore of the previous result;
+    ##   - and every overwrite is REPORTED, path and both identities, as a
+    ##     `cache-restore-overwrote` trace event and in
+    ##     `ActionResult.outputOverwrites`, which `repro build` prints as a
+    ##     WARNING status line. Never into the action's stdout/stderr.
+    ## * Every payload was verified by the lookup that served `record`, and
+    ##   `materializeActionCacheOutputs` verifies each one again as it stages
+    ##   it, committing nothing until all have; a payload that fails there is
+    ##   dropped and the action re-executes (`declined`), never a failed
+    ##   build.
+    ## * The record's output state is then refreshed to the restored files
+    ##   (Step 3.3), so the next in-place consultation reuses them.
+    ##
+    ## The restore happens before the action completes, and its dependents
+    ## become ready only on completion: no consumer reads the modified bytes,
+    ## and the hashes the hit reports downstream are the record's.
+    let idx = idToIndex.resultIndex(id)
+    if restoreWouldOverwriteMatchingOutputs(action, record):
+      return RestoreOutcome(ok: true, detail: "outputs-present")
+    let containers = action.containerDirectoryOutputs()
+    let overwrites = cas.inner.outputOverwrites(record, action.cwd, containers)
+    proc decline(reason: string; inputChanged = ""): RestoreOutcome =
+      runResult.results[idx].cacheDecision =
+        if inputChanged.len > 0: cdMiss else: cdRejected
+      runResult.results[idx].reason = reason
+      runResult.results[idx].cacheMissReason = reason
+      runResult.results[idx].computationOutputDir = ""
+      runResult.trace(id, "cache-restore-declined", reason)
+      if inputChanged.len > 0:
+        RestoreOutcome(inputChanged: inputChanged)
+      else:
+        RestoreOutcome(declined: reason)
+    if overwrites.len > 0 and action.unsafePreserveOutputs:
+      let note = overwrites[0].path & " was modified (on disk " &
+        overwrites[0].onDisk & ", recorded " & overwrites[0].restored &
+        "); kept in place (unsafe preserve-outputs): not restored over, " &
+        "the step re-runs with it present"
+      runResult.results[idx].preservedModifiedOutputs.add(note)
+      runResult.trace(id, "cache-preserve-modified-output", note)
+      return decline(note)
+    # Every hashed input is re-read before a restore writes over a present
+    # output, and before ANY restore of the warm in-place mode (which, until
+    # the owner's decision, re-executed instead; a missing output restored
+    # there must be the output of the inputs now on disk, not of the ones an
+    # `ffpHybrid` lookup trusted on their metadata).
+    if overwrites.len > 0 or config.rebuildMissingOutputsOnCacheHit:
+      let changed = hashedInputContentChanged(record, action.cwd)
+      if changed.len > 0:
+        return decline("input changed: " & changed & " (its content was " &
+          "re-read before restoring the recorded outputs, and is not the " &
+          "recorded one)", changed)
+    if config.dryRun:
+      # CLI/build.md §"Dry Run": "no declared output is written". Everything
+      # above only READ (the inputs, the outputs on disk), so the decision is
+      # the real build's -- a hit served by a restore -- and only the writes
+      # are withheld: nothing is materialized, the record is not refreshed,
+      # and an overwrite is traced as one that WOULD happen, never reported as
+      # done (`outputOverwrites` is what `repro build` prints as "restored ...
+      # over a modified file").
+      for overwrite in overwrites:
+        runResult.trace(id, "cache-restore-would-overwrite",
+          overwriteDetail(overwrite))
+      return RestoreOutcome(ok: true, detail: "would-restore")
+    let restoreStart = statStart()
+    try:
+      cas.materializeActionCacheOutputs(record, action.cwd, containers)
+    except CatchableError as err:
+      fileMetadataCache.clear()
+      finishStat("repro cache restore", restoreStart)
+      var digests: seq[ContentDigest] = @[]
+      for output in record.outputs:
+        digests.add(output.blob.digest)
+      let dropped = cas.inner.dropCorruptPayloads(digests)
+      for digest in dropped:
+        runResult.results[idx].droppedCorruptPayloads.add(digest)
+      return decline("the recorded outputs could not be restored (" &
+        err.msg & (if dropped.len > 0: "; dropped the corrupt blob(s) " &
+          dropped.join(", ") else: "") & "); re-running")
+    fileMetadataCache.clear()
+    finishStat("repro cache restore", restoreStart)
+    for overwrite in overwrites:
+      runResult.results[idx].outputOverwrites.add(overwrite)
+      runResult.trace(id, "cache-restore-overwrote", overwriteDetail(overwrite))
+    # The record now describes the producer's inodes, not the files the
+    # restore wrote; refresh it so the next in-place consultation on this
+    # host reuses them (a record installed from a peer was otherwise
+    # rejected on every warm build).
+    record = cache.refreshRestoredOutputs(record, action.cwd)
+    RestoreOutcome(ok: true, detail: "restored")
+
   # `fileMetadataCache` used to be allocated HERE, empty, immediately after the
   # whole-graph prefix had warmed and discarded one of its own. It is declared
   # above the prefix now and carries the prefix's observations across the
@@ -20865,7 +21234,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## before threading the new action through every scheduler bookkeeping
     ## structure. The producer id participates only in the trace message
     ## so the materialisation can be attributed back to its source.
-    let newAction = withOptionalOutputIdentity(incomingAction)
+    var newAction = withOptionalOutputIdentity(incomingAction)
+    # A dynamically created step is selected by the preserve-outputs
+    # selector exactly as a declared one (see `preservingIds`).
+    newAction.applyUnsafePreserveOutputs(config.unsafePreserveOutputs)
+    if newAction.unsafePreserveOutputs:
+      preservingIds.incl(newAction.id)
     if newAction.id.len == 0:
       raiseEngine("dynamic action-create record from " & producerId &
         ": id must be non-empty")
@@ -21232,6 +21606,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if not (action.cacheable or action.fixedOutput) or
           action.dynamicDepsFile.len > 0:
         continue
+      if id in preservingIds:
+        # UNSAFE preserve-outputs: never served from another host (nor
+        # restored over a modified output); the ordinary scheduler decides.
+        runResult.trace(id, "portable-record-refused",
+          UnsafePreserveOutputsCrossHostRefusal)
+        continue
       var depsResolved = true
       for dep in action.deps:
         if dep notin resolved:
@@ -21336,6 +21716,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if outputsOnDiskReason(roots, record).len == 0:
           materialized[id] = "portable-outputs-present"
           continue
+        # Owner decision 2026-11-03: every output a restore writes OVER is
+        # reported (`ActionResult.outputOverwrites`). Taken before the
+        # restorer runs, in the record's own (published-domain) terms.
+        var overwrites: seq[OutputOverwrite] = @[]
+        for output in record.outputs:
+          let physical = toPhysicalPath(roots, output.path)
+          if physical.isNone:
+            continue
+          let p = physical.get()
+          let onDisk =
+            if output.directory:
+              (if dirExists(extendedPath(p)): treeContentHex(p) else: "")
+            else:
+              (if fileExists(extendedPath(p)): fileContentHex(p) else: "")
+          if onDisk.len > 0 and onDisk != output.digest:
+            overwrites.add(OutputOverwrite(path: p,
+              onDisk: "content:" & onDisk, restored: "content:" & output.digest))
         let why =
           if config.portableMemoRestorer == nil:
             "no portable restorer configured"
@@ -21345,6 +21742,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         fileMetadataCache.clear()
         if why.len == 0:
           materialized[id] = "portable-restored"
+          let idx = idToIndex.resultIndex(id)
+          for overwrite in overwrites:
+            runResult.results[idx].outputOverwrites.add(overwrite)
+            runResult.trace(id, "cache-restore-overwrote",
+              overwriteDetail(overwrite))
           continue
         runResult.trace(id, "portable-restore-failed", why)
         failed = id
@@ -21620,6 +22022,93 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             buildEpoch = config.buildEpoch,
             containerOutputs = action.containerDirectoryOutputs())
           finishStat("repro cache lookup", lookupStart)
+          # OWNER DECISION 2026-11-03 (Incremental-Invalidation.md §"Minimum
+          # check set" Step 3.3; Peer-Cache.md §"Lookup (consumer)"; it
+          # reverses agents 5427fcd2f8 / specs 55b39ef1, which made this a
+          # terminal rejection). The in-place consultation found a record
+          # whose inputs all still match and rejected it only because a
+          # declared output on disk is not the one it describes (in this
+          # mode `verifyOutputBlobs` is off, so that is the only way it
+          # returns `aclRejectedCorruptOutput`). The record still describes
+          # the right computation, so the result is the RECORDED one, as in
+          # BuildXL (a hit is "inputs match and the bytes are available in
+          # some tier"; a changed output just gets the recorded bytes back)
+          # and Bazel (the local action cache rejects, the disk/remote cache
+          # restores):
+          #
+          #   * the record is consulted again from scratch in restore mode:
+          #     every input revalidated under its policy, every payload
+          #     verified before anything is written;
+          #   * a payload-backed hit is restored from the local CAS by the
+          #     arms below, which re-read every hashed input's content first
+          #     and report every overwrite (`restoreRecordedOutputs`);
+          #   * a payload the local CAS cannot serve falls through to the
+          #     next tier (the LAN peer cache) exactly as a miss does, and a
+          #     metadata-only record (no stored payload) does too: a peer may
+          #     hold a payload-backed record for the same computation;
+          #   * only when no tier can restore does the edge execute.
+          #
+          # `cacheRejectedOutput` keeps the outputs-present shortcut from
+          # declaring the modified outputs up to date whatever happens below.
+          # Under UNSAFE preserve-outputs (`BuildAction.unsafePreserveOutputs`)
+          # none of this: the modified output is kept and the step re-runs
+          # over it.
+          if lookup.status == aclRejectedCorruptOutput and
+              config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
+            cacheRejectedOutput = true
+            let modified = lookup.message
+            if action.unsafePreserveOutputs:
+              let note = modified & "; kept in place (unsafe " &
+                "preserve-outputs): not restored over, the step re-runs " &
+                "with it present"
+              runResult.results[idToIndex.resultIndex(id)].
+                preservedModifiedOutputs.add(note)
+              runResult.trace(id, "cache-preserve-modified-output", note)
+            else:
+              let restoreStart = statStart()
+              let again = cache.lookupActionResult(cas.inner,
+                action.weakFingerprint, action.actionCachePolicy,
+                verifyOutputBlobs = true,
+                allowMetadataOnlyHit = false,
+                metadataCache = addr fileMetadataCache,
+                envResolver = action.actionEnvResolver(unsafeAddr config),
+                outputRoot = action.cwd,
+                retention = action.effectiveRetention,
+                nowUnix = config.nowUnix,
+                buildEpoch = config.buildEpoch,
+                containerOutputs = action.containerDirectoryOutputs())
+              finishStat("repro cache lookup-restore-mode", restoreStart)
+              # The outputs are not reusable where they are; whatever serves
+              # this action from here on restores them.
+              reusableInPlace = false
+              case again.status
+              of aclHit, aclHybridCutoff:
+                # Payload-backed and verified: a record without payloads
+                # cannot hit in restore mode while its outputs are not in
+                # place (`payloadlessOutputsInPlace`).
+                lookup = again
+                runResult.trace(id, "cache-restore-modified-outputs",
+                  modified & "; every input still matches and the record " &
+                  "is payload-backed: restoring the recorded outputs")
+              of aclMissNoOutputPayload:
+                lookup = ActionCacheLookup(status: aclMissNoOutputPayload,
+                  record: again.record,
+                  message: modified & "; the record is metadata-only (no " &
+                    "stored payload), so this host cannot restore it")
+                runResult.trace(id, "cache-rejected", lookup.message)
+              else:
+                # An input moved (a miss, re-executed below), or a payload
+                # cannot be served (dropped and passed to the next tier).
+                lookup = again
+          # A stored payload that fails verification (or is missing) is a
+          # fact about this host's content store, separated from "an output
+          # differs from the record" (owner decision 2026-11-03). The
+          # corrupt blobs are DROPPED -- a corrupt blob left in place would
+          # survive every later store of the right bytes, which keeps an
+          # existing blob without reading it -- and the lookup falls through
+          # to the next tier as for a missing payload; with none, the edge
+          # re-executes. Never a build failure.
+          dropUnservablePayloads(id, lookup, cacheRejectedOutput)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
           # not passed, so the legacy local-only flow is byte-for-byte
@@ -21634,8 +22123,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # payloads were deferred, and whose in-place revalidation compares
           # against whatever an earlier local run left at the output paths.
           var peerInstalled = false
+          # Not for an UNSAFE preserve-outputs step: none of its records
+          # leaves a host, and its weak fingerprint is local to that mode, so
+          # no conforming peer could answer (`preservingIds`).
           if lookup.status in {aclMissNoRecord, aclMissInputChanged,
               aclMissNoOutputPayload} and
+              id notin preservingIds and
               config.peerCacheActionFetcher != nil and
               config.peerCacheActionInstaller != nil:
             let peerFetchStart = statStart()
@@ -21664,6 +22157,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   containerOutputs = action.containerDirectoryOutputs())
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
+                # The installer verified every blob it wrote, but a blob of
+                # the same digest already in the store is kept as it is;
+                # one that fails now is dropped and the edge re-executes.
+                dropUnservablePayloads(id, lookup, cacheRejectedOutput)
               else:
                 runResult.trace(id, "peer-cache-install-failed",
                   install.reason)
@@ -21729,45 +22226,48 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               inc completed
               launchedAny = true
               continue
-            if config.rebuildMissingOutputsOnCacheHit and not peerInstalled:
+            # A METADATA-ONLY record cannot restore: its missing output is
+            # rebuilt. A payload-backed one restores below whether its
+            # output is missing or modified (owner decision 2026-11-03;
+            # this closes the 2026-10-30 issue "in-place build rebuilds a
+            # payload-backed record whose output is missing").
+            if config.rebuildMissingOutputsOnCacheHit and not peerInstalled and
+                lookup.record.outputPayloadKind != opkCasBlobs:
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
               runResult.results[idToIndex.resultIndex(id)].reason =
                 "missing-output"
               runResult.results[idToIndex.resultIndex(id)].computationOutputDir = ""
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
-              # Nothing to restore when the outputs are already the recorded
-              # ones — see `restoreWouldOverwriteMatchingOutputs`. Restoring
-              # them anyway gives every one a new mtime and re-runs every
-              # consumer of them on every warm build.
-              let alreadyInPlace =
-                restoreWouldOverwriteMatchingOutputs(action, lookup.record)
-              if not alreadyInPlace:
-                let restoreStart = statStart()
-                cas.materializeActionCacheOutputs(lookup.record, action.cwd)
-                fileMetadataCache.clear()
-                finishStat("repro cache restore", restoreStart)
-                # The record now describes the producer's inodes, not the
-                # files the restore wrote; refresh it so the next in-place
-                # consultation on this host reuses them (a record installed
-                # from a peer was otherwise rejected on every warm build).
-                lookup.record = cache.refreshRestoredOutputs(lookup.record,
-                  action.cwd)
-              assignCacheHitEvidence(
-                runResult.results[idToIndex.resultIndex(id)], action,
-                lookup.record)
-              noteCacheRecordProvenance(
-                runResult.results[idToIndex.resultIndex(id)], action, lookup.record)
-              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
-                lookup.record)
-              if config.publishCachedResults:
-                publishBinaryCacheBundle(action, lookup.record,
-                  allowMaterializedOutputs = true)
-              completeSuccess(id, asCacheHit, cdHit, false,
-                if alreadyInPlace: "outputs-present" else: "restored")
-              inc completed
-              launchedAny = true
-              continue
+              # Nothing is written when the outputs are already the recorded
+              # ones (restoring them anyway gives every one a new mtime and
+              # re-runs every consumer of them on every warm build); a
+              # restore over a modified output re-reads the inputs first and
+              # is reported. See `restoreRecordedOutputs`.
+              let restore = restoreRecordedOutputs(id, action, lookup.record)
+              if restore.ok:
+                assignCacheHitEvidence(
+                  runResult.results[idToIndex.resultIndex(id)], action,
+                  lookup.record)
+                noteCacheRecordProvenance(
+                  runResult.results[idToIndex.resultIndex(id)], action,
+                  lookup.record)
+                recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
+                  lookup.record)
+                if config.publishCachedResults:
+                  publishBinaryCacheBundle(action, lookup.record,
+                    allowMaterializedOutputs = true)
+                completeSuccess(id, asCacheHit, cdHit, false, restore.detail)
+                inc completed
+                launchedAny = true
+                continue
+              # Not restored: the action executes. A changed input is a miss
+              # like any other; otherwise the outputs on disk are not the
+              # recorded ones and must not be reported up to date.
+              if restore.inputChanged.len > 0:
+                cacheMissInputChanged = true
+              else:
+                cacheRejectedOutput = true
           of aclHybridCutoff:
             var recordedPaths: seq[string] = @[]
             for output in lookup.record.outputs:
@@ -21792,7 +22292,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               inc completed
               launchedAny = true
               continue
-            if config.rebuildMissingOutputsOnCacheHit and not peerInstalled:
+            # A METADATA-ONLY record cannot restore: its missing output is
+            # rebuilt. A payload-backed one restores below whether its
+            # output is missing or modified (owner decision 2026-11-03;
+            # this closes the 2026-10-30 issue "in-place build rebuilds a
+            # payload-backed record whose output is missing").
+            if config.rebuildMissingOutputsOnCacheHit and not peerInstalled and
+                lookup.record.outputPayloadKind != opkCasBlobs:
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
               runResult.results[idToIndex.resultIndex(id)].reason =
                 "missing-output"
@@ -21800,35 +22306,35 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               # Same reasoning as the `aclHit` arm above.
-              let alreadyInPlace =
-                restoreWouldOverwriteMatchingOutputs(action, lookup.record)
-              if not alreadyInPlace:
-                let restoreStart = statStart()
-                cas.materializeActionCacheOutputs(lookup.record, action.cwd)
-                fileMetadataCache.clear()
-                finishStat("repro cache restore", restoreStart)
-                # The record now describes the producer's inodes, not the
-                # files the restore wrote; refresh it so the next in-place
-                # consultation on this host reuses them (a record installed
-                # from a peer was otherwise rejected on every warm build).
-                lookup.record = cache.refreshRestoredOutputs(lookup.record,
-                  action.cwd)
-              assignCacheHitEvidence(
-                runResult.results[idToIndex.resultIndex(id)], action,
-                lookup.record)
-              noteCacheRecordProvenance(
-                runResult.results[idToIndex.resultIndex(id)], action, lookup.record)
-              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
-                lookup.record)
-              if config.publishCachedResults:
-                publishBinaryCacheBundle(action, lookup.record,
-                  allowMaterializedOutputs = true)
-              completeSuccess(id, asCacheHit, cdHybridCutoff, false,
-                if alreadyInPlace: "outputs-present" else: "restored")
-              inc completed
-              launchedAny = true
-              continue
+              let restore = restoreRecordedOutputs(id, action, lookup.record)
+              if restore.ok:
+                assignCacheHitEvidence(
+                  runResult.results[idToIndex.resultIndex(id)], action,
+                  lookup.record)
+                noteCacheRecordProvenance(
+                  runResult.results[idToIndex.resultIndex(id)], action,
+                  lookup.record)
+                recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
+                  lookup.record)
+                if config.publishCachedResults:
+                  publishBinaryCacheBundle(action, lookup.record,
+                    allowMaterializedOutputs = true)
+                completeSuccess(id, asCacheHit, cdHybridCutoff, false,
+                  restore.detail)
+                inc completed
+                launchedAny = true
+                continue
+              if restore.inputChanged.len > 0:
+                cacheMissInputChanged = true
+              else:
+                cacheRejectedOutput = true
           of aclRejectedCorruptOutput:
+            # Reached only when nothing restored the result: an output on
+            # disk is not the one the record describes and the record could
+            # not be (or, under unsafe preserve-outputs, may not be) restored
+            # over it. A stored payload that fails verification never
+            # arrives here (`aclRejectedCorruptPayload`,
+            # `dropUnservablePayloads`).
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdRejected
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: "corrupt-output"
@@ -22216,8 +22722,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let previousMissReason = runResult.results[idx].cacheMissReason
           let previousStrongFingerprint =
             runResult.results[idx].strongFingerprintHex
+          let previousPreserved =
+            runResult.results[idx].preservedModifiedOutputs
+          let previousDropped = runResult.results[idx].droppedCorruptPayloads
           runResult.results[idx] = finished
           runResult.results[idx].cacheMissReason = previousMissReason
+          runResult.results[idx].preservedModifiedOutputs = previousPreserved
+          runResult.results[idx].droppedCorruptPayloads = previousDropped
           runResult.results[idx].strongFingerprintHex =
             previousStrongFingerprint
           runResult.results[idx].dependencyPolicyKind =
@@ -22807,8 +23318,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let previousMissReason = runResult.results[idx].cacheMissReason
       let previousStrongFingerprint =
         runResult.results[idx].strongFingerprintHex
+      # Lookup-time facts, carried like `cacheMissReason`: a step re-run over
+      # a preserved modified output, or after a corrupt payload was dropped,
+      # still reports why.
+      let previousPreserved = runResult.results[idx].preservedModifiedOutputs
+      let previousDropped = runResult.results[idx].droppedCorruptPayloads
       runResult.results[idx] = finished
       runResult.results[idx].cacheMissReason = previousMissReason
+      runResult.results[idx].preservedModifiedOutputs = previousPreserved
+      runResult.results[idx].droppedCorruptPayloads = previousDropped
       runResult.results[idx].strongFingerprintHex = previousStrongFingerprint
       runResult.results[idx].dependencyPolicyKind =
         runningItem.action.dependencyPolicy.kind

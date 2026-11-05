@@ -383,7 +383,8 @@ suite "M17 chunk 2: the published-trace record rbpm-v2":
 
   test "evidence source: carried, and the publication rule refuses an unstated one":
     var record = everyFieldRecord()
-    for source in [MonitoredEvidence, BuiltinEvidence,
+    for source in [MonitoredEvidence, builtinEvidence("write-text"),
+                   BuiltinEvidence,
                    formatEvidence("make-depfile"),
                    convertedEvidence("repro-path-set")]:
       record.evidenceSource = source
@@ -416,11 +417,19 @@ suite "M17 chunk 2: the published-trace record rbpm-v2":
     # `nonMonitoredSourceRefusal` pass a `format:` source publishes the
     # depfile record; refusing every non-monitored source refuses the
     # builtin.
-    for source in [MonitoredEvidence, BuiltinEvidence,
+    # Owner decision 2026-10-31 narrows the builtin half to the kinds whose
+    # reads are exactly their declared inputs (`PublishableBuiltinKinds`);
+    # a builtin of another or an unstated kind is refused, naming it
+    # (t_builtin_kinds_with_undeclared_reads_do_not_publish has every kind).
+    for source in [MonitoredEvidence, builtinEvidence("write-text"),
                    formatEvidence("nix-pure-flake")]:
       record.evidenceSource = source
       checkpoint($source)
       check portableRecordRefusal(record) == ""
+    for source in [BuiltinEvidence, builtinEvidence("copy-file")]:
+      record.evidenceSource = source
+      checkpoint($source)
+      check "builtin" in portableRecordRefusal(record)
     for source in [formatEvidence("make-depfile"),
                    formatEvidence("msvc-includes"),
                    formatEvidence("iomon"),
@@ -440,6 +449,9 @@ suite "M17 chunk 2: the published-trace record rbpm-v2":
     check not parseEvidenceSource("format:", parsed)
     check not parseEvidenceSource("monitored:x", parsed)
     check not parseEvidenceSource("guessed", parsed)
+    check parseEvidenceSource("builtin:stamp", parsed)
+    check parsed == builtinEvidence("stamp")
+    check not parseEvidenceSource("builtin:", parsed)
 
   test "tamper: every new field is in the signed bytes; altered identities are inconsistent":
     let record = everyFieldRecord()

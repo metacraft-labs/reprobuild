@@ -435,7 +435,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--target=TRIPLE] [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--target=TRIPLE] [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--unsafe-preserve-outputs=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -811,6 +811,20 @@ proc setRebuildSelection*(cls: RebuildClass; only: seq[string] = @[]) =
 
 proc activeRebuildClass*(): RebuildClass = rebuildClassOverride
 proc activeRebuildOnly*(): seq[string] = rebuildOnlyOverride
+
+# ``--unsafe-preserve-outputs=PATTERN`` (owner decision 2026-11-03;
+# Incremental-Invalidation.md §"Minimum check set" Step 3.3, "Unsafe
+# preserve-outputs mode"): the steps that keep a modified output instead of
+# having the recorded one restored over it. Process-wide for the reason the
+# rebuild selection above is, and re-established per invocation by
+# ``runBuildCommand`` (empty when the flag is absent).
+var unsafePreserveOutputsOverride: seq[string] = @[]
+
+proc setUnsafePreserveOutputs*(patterns: seq[string]) =
+  unsafePreserveOutputsOverride = patterns
+
+proc activeUnsafePreserveOutputs*(): seq[string] =
+  unsafePreserveOutputsOverride
 
 proc currentBuildEpoch*(): string =
   ## Identifies this ``repro build`` invocation for §2.2's ``this-build``
@@ -11964,6 +11978,29 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       " (no quotas/leases enforced). Start `runquotad` and rerun to " &
       "use the real lease coordinator.")
 
+  proc warnRestoreOverwrites(runResult: BuildRunResult) =
+    ## Owner decision 2026-11-03 (Incremental-Invalidation.md §"Minimum
+    ## check set" Step 3.3): every cached output a restore wrote OVER a
+    ## modified file is reported at the default level, naming the path, the
+    ## hash that was there and the hash restored -- through `logSummary`,
+    ## the channel every other `repro build` WARNING takes (stdout, or the
+    ## daemon's diagnostic event; silent only under `--log=quiet`), and
+    ## never through an action's own stdout/stderr, which the engine
+    ## captures as that action's observable output. A step kept over a
+    ## modified output under `--unsafe-preserve-outputs`, and a corrupt
+    ## cached payload that was dropped, are reported the same way.
+    for item in runResult.results:
+      for overwrite in item.outputOverwrites:
+        logSummary("repro build: " & restoreOverwriteWarning(item.id,
+          overwrite))
+      for note in item.preservedModifiedOutputs:
+        logSummary("repro build: WARNING unsafe preserve-outputs kept a " &
+          "modified output of " & item.id & ": " & note)
+      for digest in item.droppedCorruptPayloads:
+        logSummary("repro build: WARNING dropped a cached payload of " &
+          item.id & " that failed verification (" & digest & "); it was " &
+          "restored from another tier or the action re-ran")
+
   # M9.N Batch B: late-bound holder for the tool-identity resolver
   # closure. The closure is built once the build identity is resolved
   # (further below) and attached to the engine config inside
@@ -12111,6 +12148,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # path the graph happened to take.
       rebuildClass: activeRebuildClass(),
       rebuildOnly: activeRebuildOnly(),
+      unsafePreserveOutputs: activeUnsafePreserveOutputs(),
       buildEpoch: currentBuildEpoch(),
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
@@ -12256,6 +12294,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     benchmarkExecutedActions = invocationActionTally.launched
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
+    warnRestoreOverwrites(buildResult)
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -12406,6 +12445,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # path the graph happened to take.
         rebuildClass: activeRebuildClass(),
         rebuildOnly: activeRebuildOnly(),
+      unsafePreserveOutputs: activeUnsafePreserveOutputs(),
         buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
@@ -13521,6 +13561,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # path the graph happened to take.
         rebuildClass: activeRebuildClass(),
         rebuildOnly: activeRebuildOnly(),
+      unsafePreserveOutputs: activeUnsafePreserveOutputs(),
         buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
@@ -13813,6 +13854,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # path the graph happened to take.
       rebuildClass: activeRebuildClass(),
       rebuildOnly: activeRebuildOnly(),
+      unsafePreserveOutputs: activeUnsafePreserveOutputs(),
       buildEpoch: currentBuildEpoch(),
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
@@ -13973,6 +14015,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     benchmarkExecutedActions = invocationActionTally.launched
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
+    warnRestoreOverwrites(buildResult)
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
@@ -29808,6 +29851,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var rebuildClass = rbNone
   var rebuildClassFlag = ""
   var rebuildOnly: seq[string] = @[]
+  var unsafePreserveOutputs: seq[string] = @[]
   var noOutputCleanup = false
   var publishCacheHits = false
   var publishMaterialized = false
@@ -30026,6 +30070,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       if raw.len == 0:
         raise newException(ValueError, "--only requires a pattern")
       rebuildOnly.add(raw)
+    elif arg == "--unsafe-preserve-outputs" or
+        arg.startsWith("--unsafe-preserve-outputs="):
+      # Owner decision 2026-11-03: the steps (by action id or target name,
+      # `--only`'s pattern rules; `*` for every step) that run in UNSAFE
+      # preserve-outputs mode. Repeatable. See `setUnsafePreserveOutputs`.
+      let raw = valueFromFlag(args, i, "--unsafe-preserve-outputs")
+      if raw.len == 0:
+        raise newException(ValueError,
+          "--unsafe-preserve-outputs requires a pattern (`*` for every step)")
+      unsafePreserveOutputs.add(raw)
     elif arg == "--no-output-cleanup":
       noOutputCleanup = true
     elif arg == "--publish-cache-hits":
@@ -30219,6 +30273,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       "--soft-rebuild, --rebuild-host-bound or --hard-rebuild")
     return 2
   setRebuildSelection(rebuildClass, rebuildOnly)
+  setUnsafePreserveOutputs(unsafePreserveOutputs)
 
   # A DRY RUN IMPLIES `--no-runquota` (`reprobuild-pm/spec/CLI/build.md`
   # §"Dry Run").

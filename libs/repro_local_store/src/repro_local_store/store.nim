@@ -1107,6 +1107,14 @@ proc streamHashPath(path: string): tuple[digest: PrefixIdBytes;
     try: hasher.close() except CatchableError: discard
     try: f.close() except CatchableError: discard
 
+proc casFileHash*(path: string): PrefixIdBytes =
+  ## The name this store gives the bytes of the file at ``path``: raw
+  ## BLAKE3-256 of its content, streamed (``streamHashPath``). For a caller
+  ## that must say what a file on disk IS in the same terms a stored blob
+  ## is named -- the engine's report of a restore that overwrites a
+  ## modified output names both. Raises ``IOError`` when it cannot be read.
+  streamHashPath(path).digest
+
 proc allocateCasStagePath(s: var Store): string =
   ## A stage name under the store's own ``tmp/``.
   ##

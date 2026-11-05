@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2656,
+    "nimTestBinaries": 2661,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 735,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2696
+    "testEntries": 2701
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1556,7 +1556,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1470,
+      "integration": 1475,
       "platform/destructive": 168,
       "pure unit": 735,
       "unclassified": 304
@@ -1767,9 +1767,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2656,
+    "nimTestBinaryCount": 2661,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2696
+    "testEntryCount": 2701
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2211,7 +2211,7 @@
             "wsA",
             "wsB"
           ],
-          "line": 196,
+          "line": 211,
           "path": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
           "patterns": [
             "cc"
@@ -10082,6 +10082,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_builtin_kinds_with_undeclared_reads_do_not_publish",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_core",
+        "repro_local_store",
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_builtin_kinds_with_undeclared_reads_do_not_publish.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cache_hit_evidence_paths_are_built_on_demand",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -10154,6 +10176,25 @@
       "source": "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_container_output_is_not_restored_from_a_snapshot",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10316,6 +10357,25 @@
       "source": "libs/repro_build_engine/tests/t_directory_listing_above_outputs_is_the_graph_view.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dry_run_restores_no_cached_output",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_dry_run_restores_no_cached_output.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10688,6 +10748,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_modified_output_restores_the_recorded_result",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_modified_output_restores_the_recorded_result.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_monitor_capture_at_long_path",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -10908,6 +10989,27 @@
       "source": "libs/repro_build_engine/tests/t_pattern_scoped_enumeration_keys_only_matching_entries.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_peer_key_binds_builtin_payload",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_peer_key_binds_builtin_payload.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
