@@ -185,7 +185,14 @@ proc runGate(fx: Fixture): tuple[code: int; report: JsonNode] =
     "--pushed-refs=" & refsFile,
     "--json",
   ]))
-  let start = res.output.find('{')
+  checkpoint("gate exit " & $res.code & ", output:\n" & res.output)
+  # The report is the JSON object that starts a line; a warning printed
+  # ahead of it may itself contain a brace.
+  let start =
+    if res.output.startsWith("{"): 0
+    else:
+      let nl = res.output.find("\n{")
+      if nl < 0: -1 else: nl + 1
   check start >= 0
   (res.code, parseJson(res.output[start .. ^1]))
 
@@ -382,3 +389,36 @@ suite "a depends edge outside the project names the right membership fix":
       check remediation.contains("`member_repos` in projects/lib-a.toml")
       check remediation.contains("variants/lib-a-dev.toml")
       check not remediation.contains("projects/lib-a-dev.toml")
+
+  test "t_pre_push_names_the_manifest_from_the_workspace_root":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      # Membership materialised under `.repro/manifests` (an
+      # `init --manifest-url` checkout): the workspace root has no
+      # `projects/` or `repos/` of its own.
+      let manifests = fx.workspaceRoot / ".repro" / "manifests"
+      createDir(manifests)
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      moveDir(fx.workspaceRoot / "projects", manifests / "projects")
+      moveDir(fx.workspaceRoot / "repos", manifests / "repos")
+      let remediation = gapRemediation(fx)
+      # Written from the workspace root, so following it literally edits
+      # the file the resolver reads rather than creating a root
+      # `projects/` that would shadow the real manifests.
+      check remediation.contains(
+        "`member_repos` in .repro/manifests/projects/lib-a.toml")
+      check not remediation.contains("`member_repos` in projects/lib-a.toml")
+
+      let projectFile = manifests / "projects" / "lib-a.toml"
+      writeFile(projectFile, readFile(projectFile).replace(
+        "schema = \"reprobuild.workspace.project.v1\"\n",
+        "schema = \"reprobuild.workspace.project.v1\"\n" &
+          "member_repos = [\"lib-c-fork\"]\n"))
+      let followed = runGate(fx)
+      checkpoint("after following: " & $followed.report)
+      for f in followed.report["failures"]:
+        check f["property"].getStr() != "dependency-not-declared"

@@ -45519,7 +45519,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

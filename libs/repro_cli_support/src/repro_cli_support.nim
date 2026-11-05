@@ -68680,54 +68680,65 @@ proc danglingDependsInClosure(repos: seq[ResolvedRepo];
     else:
       result.undeclared.add(label)
 
-proc displayManifestPath(path: string; manifestRoots: openArray[string]):
-    string =
-  ## ``path`` relative to the first of ``manifestRoots`` holding it, with
-  ## forward slashes; ``path`` itself when none does.
+proc workspaceRelativeDir(dir, workspaceRoot: string): string =
+  ## ``dir`` as an operator at ``workspaceRoot`` would type it, with forward
+  ## slashes and a trailing ``/``: empty for the workspace root itself,
+  ## relative below it, absolute elsewhere. Every path a remediation names
+  ## starts from here, so the operator never has to guess the base.
+  let absDir = absolutePath(dir)
+  let absWorkspace = absolutePath(workspaceRoot)
+  if sameFilesystemPath(absDir, absWorkspace):
+    return ""
+  if absDir.startsWith(absWorkspace & DirSep):
+    return relativePath(absDir, absWorkspace).replace(DirSep, '/') & "/"
+  absDir.replace(DirSep, '/') & "/"
+
+proc manifestLayerOf(path: string; manifestRoots: openArray[string]):
+    tuple[root, rel: string] =
+  ## The first of ``manifestRoots`` holding ``path``, and ``path`` relative
+  ## to it with forward slashes; ``("", path)`` when none does.
   let absFile = absolutePath(path)
   for root in manifestRoots:
     let absRoot = absolutePath(root)
     if absFile.startsWith(absRoot & DirSep):
-      return relativePath(absFile, absRoot).replace(DirSep, '/')
-  path
+      return (root, relativePath(absFile, absRoot).replace(DirSep, '/'))
+  ("", path)
 
 proc projectMembershipTarget(projectFile: string;
-    manifestRoots: openArray[string]): tuple[path, note: string] =
+    manifestRoots: openArray[string]; workspaceRoot: string):
+      tuple[manifestRel, note: string] =
   ## The project manifest an operator adds a ``member_repos`` entry to, for
-  ## the project resolved from ``projectFile``, relative to its manifest
-  ## layer. A variant's own extra membership is not yet composed by name, so
-  ## for a variant this is its base project, and ``note`` says so.
+  ## the project resolved from ``projectFile``, relative to the root of the
+  ## manifest layer that will hold the entry (``layerMembershipTarget``
+  ## prefixes the layer). A variant's own extra membership is not yet
+  ## composed by name, so for a variant this is its base project, and
+  ## ``note`` names the variant.
   if projectFile.len == 0:
-    return ("the project manifest", "")
-  let display = displayManifestPath(projectFile, manifestRoots)
-  if display.startsWith("variants/"):
+    return ("projects/<project>.toml", "")
+  let (layerRoot, rel) = manifestLayerOf(projectFile, manifestRoots)
+  if rel.startsWith("variants/"):
     try:
       let base = readVariantManifest(projectFile).variant.base
       if base.len > 0:
-        return (base, " (the base project of variant " & display & ")")
+        let variantDisplay =
+          (if layerRoot.len > 0: workspaceRelativeDir(layerRoot, workspaceRoot)
+           else: "") & rel
+        return (base, " (the base project of variant " & variantDisplay & ")")
     except WorkspaceManifestParseError:
       discard
-  (display, "")
+  (rel, "")
 
-proc layerMembershipTarget(site: FragmentSite; rootTarget: string;
+proc layerMembershipTarget(site: FragmentSite; manifestRel: string;
     membershipRoot, workspaceRoot: string): string =
-  ## Where ``site``'s ``member_repos`` entry goes: ``rootTarget`` when the
-  ## fragment is in the workspace's own manifests, else the same project
-  ## manifest inside the fragment's layer, which resolves members against
-  ## its own ``repos/`` only.
-  if sameFilesystemPath(absolutePath(site.layerRoot),
+  ## Where ``site``'s ``member_repos`` entry goes, as a path from
+  ## ``workspaceRoot``: ``manifestRel`` inside the manifest layer holding the
+  ## fragment, since a layer resolves members against its own ``repos/``
+  ## only. Outside the workspace's own manifests that file may not exist yet.
+  result = workspaceRelativeDir(site.layerRoot, workspaceRoot) & manifestRel
+  if not sameFilesystemPath(absolutePath(site.layerRoot),
       absolutePath(membershipRoot)):
-    return rootTarget
-  let absLayer = absolutePath(site.layerRoot)
-  let absWorkspace = absolutePath(workspaceRoot)
-  let layerDisplay =
-    if absLayer.startsWith(absWorkspace & DirSep):
-      relativePath(absLayer, absWorkspace).replace(DirSep, '/')
-    else:
-      absLayer.replace(DirSep, '/')
-  layerDisplay & "/" & rootTarget &
-    " (in the manifest layer holding the fragment; create it there if " &
-    "absent, with any [[remote]] the fragment uses)"
+    result.add(" (in the manifest layer holding the fragment; create it " &
+      "there if absent, with any [[remote]] the fragment uses)")
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
     membershipRoot: string; ranges: openArray[PushedCommitRange]):
@@ -69728,13 +69739,14 @@ proc executeCheckPrePush(parsed: CheckArgs;
         dangling.undeclared.join(", ") & unreadableNote))
   if dangling.outsideProject.len > 0:
     let rootTarget = projectMembershipTarget(resolved.projectFile,
-      manifestRoots)
+      manifestRoots, parsed.workspaceRoot)
     var additions, labels, fragmentLists: seq[string]
     for gap in dangling.outsideProject:
-      var targets: seq[string]
+      var siteTargets, targets: seq[string]
       for site in gap.sites:
-        let target = layerMembershipTarget(site, rootTarget.path,
+        let target = layerMembershipTarget(site, rootTarget.manifestRel,
           membershipRoot, parsed.workspaceRoot)
+        siteTargets.add(target)
         if target notin targets:
           targets.add(target)
       var choice = ""
@@ -69747,10 +69759,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
           " to `member_repos` in " & targets[0]
       else:
         var options: seq[string]
-        for site in gap.sites:
+        for idx, site in gap.sites:
           options.add("\"" & site.basename & "\" to `member_repos` in " &
-            layerMembershipTarget(site, rootTarget.path, membershipRoot,
-              parsed.workspaceRoot))
+            siteTargets[idx])
         choice = "one of: " & options.join("; or ")
       additions.add(choice & rootTarget.note & " (for " & gap.label & ")")
       labels.add(gap.label)
