@@ -52,6 +52,7 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15
+libs/repro_addon/tests/t_addon_floor_round6.nim	nim	23
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9

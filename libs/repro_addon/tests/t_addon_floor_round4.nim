@@ -84,7 +84,7 @@ proc goodShow(): ShowProps =
 proc goodInput(): EffectiveInput =
   result = EffectiveInput(unit: "a.service", rendered: ru,
     version: FloorVersion, show: goodShow(), fragment: fragment,
-    denied: toHashSet(["memfd_create", "mount"]))
+    denied: toHashSet(["memfd_create", "mount"]), partialShow: true)
   result.uidOf = proc (n: string): int = (if n == "root": 0 else: 1000)
   result.groupsOf = proc (n: string): seq[string] = @[n]
   result.inspectFile = proc (p: string): string =
@@ -125,6 +125,7 @@ suite "round 4: the effective-unit check is the authority":
     # A dynamic user is in no group /etc/group names.
     e = goodInput()
     e.show["DynamicUser"] = "yes"
+    e.uidOf = proc (n: string): int = -1   # "a" is not a static account here
     e.groupsOf = proc (n: string): seq[string] = @["shadow"]
     check problemsOf(e) == ""
 
@@ -167,11 +168,14 @@ suite "round 4: the effective-unit check is the authority":
     e = goodInput()
     e.show["EnvironmentFiles"] = "/etc/shadow (ignore_errors=no)"
     check "EnvironmentFile /etc/shadow: it is not readable by every user" in problemsOf(e)
+    # LoadCredential= is [unprintable] in systemctl show: judged from the
+    # files systemd loaded (round 6).
     e = goodInput()
-    e.show["LoadCredential"] = "x:/etc/shadow"
+    e.loaded = @[(path: fragment, content: ru.replace("[Install]", "LoadCredential=x:/etc/shadow\n\n[Install]"))]
     check "outside the service's own credentials" in problemsOf(e)
     e = goodInput()
-    e.show["LoadCredential"] = "x:" & CredentialRoot & "/a/x"
+    e.loaded = @[(path: fragment, content: ru.replace("[Install]",
+                  "LoadCredential=x:" & CredentialRoot & "/a/x\n\n[Install]"))]
     check problemsOf(e) == ""
 
   test "finding 3: a setting systemd does not report (PermissionsStartOnly=)":
@@ -221,8 +225,8 @@ suite "round 4: every property systemd reports is classified":
                    "systemd_properties" / "service-unit-properties.tsv"):
       if l.len == 0 or l[0] == '#': continue
       let k = l.split('\t')[0]
-      if k notin ComparedProps and k notin LimitProps and not isExecProp(k) and
-          not isInertProp(k):
+      if k notin ComparedProps and k notin LimitProps and
+          k notin FileJudgedProps and not isExecProp(k) and not isInertProp(k):
         unclassified.add(k)
     check unclassified.len == 0
     checkpoint unclassified.join(" ")

@@ -784,6 +784,16 @@ const
                           "activators-unchecked",
                           "start-hold-removes-directory",
                           "stale-start-holds-kept",
+                          # A9 review round 6.
+                          "dynamic-user-trusted",
+                          "show-last-line-only",
+                          "absent-property-passes",
+                          "file-only-settings-unread",
+                          "read-only-binds-unjudged",
+                          "state-targets-allowed",
+                          "activator-options-unchecked",
+                          "environment-file-links-unchecked",
+                          "environment-file-links-refused",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

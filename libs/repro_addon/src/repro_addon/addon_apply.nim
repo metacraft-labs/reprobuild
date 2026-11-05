@@ -73,7 +73,8 @@ import repro_elevation/posix_system_driver
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
-from repro_infra/service_floor import floorWritablePlaces, serviceDirectives
+from repro_infra/service_floor import floorWritablePlaces, serviceDirectives,
+  PrivilegedGroups
 from repro_profile import ProfileBuildAction
 import repro_local_store/store
 
@@ -527,6 +528,93 @@ proc parseStoredUserProfile*(text: string; stateDir = ""): SystemProfile =
         r.suFloorVersion = unrecordedFloorVersion(r,
           knownUnitDigests(stateDir, unitPath(r.suName)))
 
+proc effectiveFloor*(r: SystemResource): string =
+  ## The floor a unit renders with: "" for none (no ``hardening``, or the
+  ## whole floor waived), else its floor version (``FloorVersion`` when the
+  ## unit names none: a new profile's).
+  if r.kind != srkSystemdSystemUnit or
+      r.suHardening != ServiceFloorHardening:
+    return ""
+  for e in r.suFloorExceptions:
+    if e.strip().startsWith(WholeFloorException & ":"): return ""
+  if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
+
+const NoHostRoot = "/nonexistent"
+  ## A root with no account databases (the conventional home of a system
+  ## account that has none): ``hostAccountLookup(NoHostRoot, p)`` knows only
+  ## the accounts the profile ``p`` creates, so a profile parses the same on
+  ## every host.
+
+proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
+  ## Why the account the floored unit ``r`` of ``p`` runs as breaks the
+  ## floor, as far as the profile alone says (A9 review round 6, finding
+  ## 1), or "". The values are the last ``User=``, ``Group=`` and
+  ## ``DynamicUser=`` and the accumulated ``SupplementaryGroups=`` of the
+  ## unit and the profile's drop-ins onto it, resolved the way systemd
+  ## resolves them (``resolveServiceAccount``): a specifier that names root
+  ## (``%U``, ``%u``, ``%G``, ``%g``) or an instance whose name is root is
+  ## root; a specifier that does not resolve (``%i`` in a template's own
+  ## file, which any instance may start) is refused, since it may be root.
+  ## Exceptions lift the spelling rules (``service_floor``), never these. An
+  ## account neither root nor the profile's is left to the effective-unit
+  ## check, which reads the host's databases.
+  when mutated("floor-static-r3-disabled") or mutated("floor-unchecked"):
+    return ""
+  # The unit as the floor renders it: a unit without an account gets the
+  # floor's DynamicUser=yes.
+  var files = @[renderedSystemUnitContent(r)]
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, r.suName):
+      files.add(d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
+        dropInApplies(d.suName, r.suName):
+      files.add(d.suContent)
+  var user, group, dynamic = ""
+  var supplementary: seq[string]
+  for f in files:
+    for (k, v) in serviceDirectives(f):
+      case k
+      of "User": user = v.strip()
+      of "Group": group = v.strip()
+      of "DynamicUser": dynamic = v.strip().toLowerAscii()
+      of "SupplementaryGroups":
+        if v.strip().len == 0: supplementary.setLen(0)
+        else: supplementary.add(v.splitWhitespace())
+      else: discard
+  for (k, v) in [("User", user), ("Group", group)]:
+    var ok: bool
+    discard expandSpecifiers(v, r.suName, ok)
+    if not ok:
+      return k & "=" & v & " names a specifier systemd cannot resolve " &
+        "for " & r.suName & " (in a template's own file an instance " &
+        "specifier names whichever instance is started), so the service " &
+        "may run as root; a floored unit may not"
+  for w in supplementary:
+    var ok: bool
+    discard expandSpecifiers(w, r.suName, ok)
+    if not ok:
+      return "SupplementaryGroups=" & w & " names a specifier systemd " &
+        "cannot resolve for " & r.suName & "; a floored unit may not"
+  let a = resolveServiceAccount(user, group, supplementary.join(" "),
+    dynamic in ["yes", "true", "1", "on"], r.suName,
+    hostAccountLookup(NoHostRoot, p))
+  if a.uid == 0:
+    return "User=" & user & " runs the service as root (uid 0, the " &
+      "account systemd resolves it to); a floored unit may not (only " &
+      "\"serviceFloor: <why>\" allows it)"
+  if 0 in a.allGids:
+    return "the service runs with gid 0 (Group=" & group & "); a floored " &
+      "unit may not (only \"serviceFloor: <why>\" allows it)"
+  var names = @[a.group]
+  for w in supplementary:
+    var ok: bool
+    names.add(expandSpecifiers(w, r.suName, ok))
+  for n in names:
+    if n in PrivilegedGroups and not (n == a.group and a.dynamicGroup):
+      return "the service runs in the privileged group " & n & "; a " &
+        "floored unit may not (only \"serviceFloor: <why>\" allows it)"
+  ""
+
 proc parseAddOnUserProfile*(text: string): SystemProfile =
   ## A user profile as the add-on realises it: parsed with the add-on's
   ## defaults (``parseSystemProfile(..., addOnDefaults = true)``), so every
@@ -548,17 +636,13 @@ proc parseAddOnUserProfile*(text: string): SystemProfile =
         "' names floorVersion " & r.suFloorVersion & ": a new profile " &
         "renders with today's floor (version " & FloorVersion & "); only " &
         "a stored generation keeps an older one")
-
-proc effectiveFloor*(r: SystemResource): string =
-  ## The floor a unit renders with: "" for none (no ``hardening``, or the
-  ## whole floor waived), else its floor version (``FloorVersion`` when the
-  ## unit names none: a new profile's).
-  if r.kind != srkSystemdSystemUnit or
-      r.suHardening != ServiceFloorHardening:
-    return ""
-  for e in r.suFloorExceptions:
-    if e.strip().startsWith(WholeFloorException & ":"): return ""
-  if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
+  for r in result.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        effectiveFloor(r).len > 0:
+      let why = floorAccountRefusal(result, r)
+      if why.len > 0:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "': " & why)
 
 proc exceptionHeads(r: SystemResource): HashSet[string] =
   ## A unit's exceptions by what they name (``Setting`` or
