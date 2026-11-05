@@ -63182,6 +63182,28 @@ type
     schemaSeen*: string   ## the raw ``schema`` value, even when unreadable
     detail*: string       ## human-facing reason, including the remedy
 
+proc verifiedCertificateShape*(): string =
+  ## Which certificate records THIS build verifies, as one clause for the
+  ## ``certificate-policy`` health row (PG-16's remaining deliverable).
+  ##
+  ## WHY THE ROW CARRIES IT AT ALL. The policy a push is judged against and the
+  ## records a build will accept are two different facts, and only the first was
+  ## reported. Two builds can resolve the identical policy and still disagree
+  ## about every certificate in front of them — one requiring ``vcs.content``,
+  ## an earlier one accepting a commit binding — and an operator reading
+  ## ``repro health`` could not tell which build answered. That is the shape
+  ## §1.6 names for binaries: the answer depends on which build you reached, so
+  ## the report has to say which one it reached.
+  ##
+  ## DERIVED FROM THE CONSTANTS THE READER ENFORCES rather than written out as
+  ## prose. A sentence maintained by hand drifts from the verifier it describes,
+  ## and a line whose whole purpose is to be trustworthy about the running build
+  ## is the worst place to keep a hand-maintained claim.
+  "verifies " & testCertificateSchemaV1 &
+    " bound to content (vcs.content required); the earlier-draft commit-bound " &
+    "shape and the retired " & retiredReprobuildCertificateSchema &
+    " schema are refused for re-issue, never translated"
+
 proc certificateStructuralDefect*(cert: TestCertificate): string =
   ## "" when every REQUIRED v1 field that a ``TestCertificate`` can be missing
   ## is present (Standard §3.1/§3.2/§3.3), otherwise the name of the first
@@ -77401,7 +77423,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsWarn,
         detail: "certificate policy UNKNOWN: the participating repos could " &
           "not be enumerated (" & err.msg & "), so the policy each push " &
-          "would be judged against could not be read",
+          "would be judged against could not be read. This build " &
+          verifiedCertificateShape(),
         remedy: self & " sync --workspace-root=" & parsed.workspaceRoot,
         fixKind: hfNone))
       break certificatePolicyCheck
@@ -77443,7 +77466,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         name: "certificate-policy",
         status: hsWarn,
         detail: "every gate refuses on a certificate policy it cannot read: " &
-          malformed.join("; "),
+          malformed.join("; ") & ". This build " & verifiedCertificateShape(),
         remedy: self & " lock refresh <repo>",
         fixKind: hfNone))
     elif empty.len > 0:
@@ -77452,7 +77475,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsWarn,
         detail: "the rule for the checked-out branch gates pushes and " &
           "requires coverage of nothing, so it reads as enforcement and " &
-          "enforces nothing: " & empty.join("; "),
+          "enforces nothing: " & empty.join("; ") &
+          ". This build " & verifiedCertificateShape(),
         remedy: "add `requires` to the rule in the shared policy package, " &
           "then `" & self & " lock refresh <repo>`",
         fixKind: hfNone))
@@ -77469,7 +77493,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
                "its current branch: " & enactedOff.join("; ")) &
           withoutNote &
           ". Pushes are not cert-gated — the RA-32 default-off state, " &
-          "read from each repo's repro.lock rather than assumed",
+          "read from each repo's repro.lock rather than assumed. This build " &
+          verifiedCertificateShape(),
         remedy: "", fixKind: hfNone))
     else:
       checks.add(HealthCheck(
@@ -77477,7 +77502,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsOk,
         detail: (gating & enactedOff).join("; ") & withoutNote &
           ". Whether a push actually REACHES the gate that applies this " &
-          "policy is the push-gateway row, not this one",
+          "policy is the push-gateway row, not this one. This build " &
+          verifiedCertificateShape(),
         remedy: "", fixKind: hfNone))
 
   # 12. Workspace projects list and ignore/agents configuration (RA-30).
