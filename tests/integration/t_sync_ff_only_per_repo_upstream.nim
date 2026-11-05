@@ -1,7 +1,6 @@
 ## RA-3 — ``repro workspace sync`` is keyed to each repo's OWN upstream.
 ##
-## repo-workspaces rebuilt sync around per-repo upstream tracking
-## (commit ``c467c1a``): fetch + ``merge --ff-only @{u}`` on whatever
+## Sync is built around per-repo upstream tracking: fetch + ``merge --ff-only @{u}`` on whatever
 ## branch each repo currently has checked out, rather than aligning
 ## every repo to one workspace-wide branch name.
 ##

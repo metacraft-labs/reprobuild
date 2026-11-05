@@ -1,7 +1,6 @@
 ## PS-3 — ``repro workspace enable <p>`` MATERIALIZES what it records.
 ##
-## The pilot command this replaces (the ``repo-workspaces``
-## ``workspace`` CLI) layered the project's manifest AND checked its repos
+## Enabling a project layers the project's manifest AND checks its repos
 ## out. Recording membership without working trees leaves the workspace in a
 ## state no other command can act on, so recording and materializing are one
 ## operation (CLI/workspace.md §``repro workspace enable``).

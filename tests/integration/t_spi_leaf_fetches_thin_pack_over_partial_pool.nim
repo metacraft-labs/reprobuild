@@ -305,9 +305,8 @@ suite "SPI: leaves of a partial-clone pool fetch thin packs":
       defer:
         tearDown()
         removeDir(root)
-      # Outside any reprobuild cache root, like the observed
-      # ``~/.cache/repo-workspaces/clones/...`` pool.
-      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+      # Outside any reprobuild cache root: a pool another tool created.
+      let f = setUp(root, root / "foreign-pool" / "clones" / "up.git",
         owned = false, leafCount = 2)
       # Positive control: the fixture reproduces the issue with plain git.
       let plain = gitIn(f.leaves[0], "fetch", "origin")
@@ -383,7 +382,7 @@ suite "SPI: leaves of a partial-clone pool fetch thin packs":
         tearDown()
         removeDir(root)
       let relay = root / "relay" / "up.git"
-      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+      let f = setUp(root, root / "foreign-pool" / "clones" / "up.git",
         owned = false, leafCount = 2, relay = relay)
       # Premise: the leaves borrow from a FULL repository, and reach the
       # partial pool only through that repository's own alternates.
@@ -504,7 +503,7 @@ suite "SPI: leaves of a partial-clone pool fetch thin packs":
       defer:
         tearDown()
         removeDir(root)
-      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+      let f = setUp(root, root / "foreign-pool" / "clones" / "up.git",
         owned = false, leafCount = 0)
       # Move commit three onto a side branch and give main a commit four
       # without big.txt. The clone checks out main, so its tip must not need

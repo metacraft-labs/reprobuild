@@ -74,7 +74,7 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-# The project manifest is shaped exactly like the pilot's
+# The project manifest is shaped exactly like a real
 # `projects/reprobuild.toml`: an org remote, a bare-host remote, and a second
 # alias (`origin`) pointing at the SAME org base — so the reuse rule has to
 # pick deterministically between two equally valid matches.
