@@ -33,7 +33,7 @@ libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	8
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	9
 libs/repro_addon/tests/t_addon_collision.nim	nim	35
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5

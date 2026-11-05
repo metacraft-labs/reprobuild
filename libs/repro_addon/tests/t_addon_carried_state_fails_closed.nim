@@ -15,8 +15,9 @@
 ##   have; a unit (a timer, a target, a path, a service) that activates one
 ##   the profile does not define reaches what that one reaches. Each counts
 ##   as reaching the carried directory.
-## - **The boot path requires the restore.** ``installRestoreUnit`` gives
-##   every carried unit a drop-in that requires the restore unit, and a
+## - **The boot path requires the restore.** ``installRestoreUnit`` links
+##   the restore unit into every carried unit's ``.requires/`` (not a
+##   drop-in: those are the generation's), and a
 ##   restore at a later boot leaves alone a directory its receipt still
 ##   identifies (the service has changed it since).
 ## - **A backup excludes applies.** It takes the host apply lock, and checks
@@ -26,7 +27,8 @@
 ## t_addon_carried_state_fails_closed <mutation>``), each red here:
 ## ``receipt-trusts-inode``, ``reach-ignores-privileged-commands``,
 ## ``reach-dropin-judged-alone``, ``reach-trigger-units-reach-nothing``,
-## ``restore-not-required-by-units``, ``backup-without-host-lock``.
+## ``restore-not-required-by-units``, ``backup-without-host-lock``,
+## ``apply-ignores-hold`` (the floored unit under a hold).
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
@@ -39,7 +41,7 @@ import std/[json, os, osproc, strutils, tables, unittest]
 
 import repro_infra
 from repro_test_support import testCaseScratchSlug
-import repro_addon/[adoption_cli, state_sets, transitions]
+import repro_addon/[addon_apply, adoption_cli, state_sets, transitions]
 
 const
   Validator = """systemd.systemUnit {
@@ -216,10 +218,44 @@ suite "carried state fails closed":
     check fileExists(d / RestoreUnitName)
     check expandSymlink(d / "sysinit.target.wants" / RestoreUnitName) ==
       "/etc/systemd/system/" & RestoreUnitName
-    let dropIn = d / "eth-validator.service.d" / RestoreRequiredDropIn
-    check fileExists(dropIn)
-    check ("Requires=" & RestoreUnitName) in readFile(dropIn)
-    check ("After=" & RestoreUnitName) in readFile(dropIn)
+    check expandSymlink(d / "eth-validator.service.requires" /
+      RestoreUnitName) == "/etc/systemd/system/" & RestoreUnitName
+    # Nothing in the unit's drop-in directory: its drop-ins are the
+    # generation's own (the add-on's effective-unit check, spec §10.1).
+    check not dirExists(d / "eth-validator.service.d")
+    # Ordered by the restore unit itself: before sysinit.target, which a
+    # service with default dependencies starts after.
+    check "Before=sysinit.target" in readFile(d / RestoreUnitName)
+
+  test "under a hold a floored unit is refused for the carried state first":
+    # A floored unit (one named exception, not a waiver: the rest of the
+    # floor applies): the add-on's effective-unit check
+    # (spec §10.1) refuses any drop-in the generation did not write, the
+    # hold among them, but only at the switch's step 6. The carried-state
+    # refusal comes before anything is looked at or written, so a host
+    # under a backup's hold always answers ECarriedStatePending.
+    let r = fresh("held-floored")
+    createDir(r / "etc/systemd/system/eth-validator.service.d")
+    writeFile(r / "etc/systemd/system/eth-validator.service.d" /
+              HoldDropInName, "x")
+    let state = fresh("held-floored-state")
+    var why = ""
+    try:
+      discard runAddonApply(AddonApplyOptions(stateDir: state,
+        hostIdentity: "h", userProfileText: Validator.replace(
+          "  stateDirectories", "  floorExceptions = [\"NoExecPaths: the " &
+          "test runs /bin/true\"]\n  stateDirectories"),
+        carriedStateDir: fresh("held-floored-none"), carriedStateRoot: r))
+    except AddonApplyError as e:
+      why = e.msg
+    except CatchableError as e:
+      why = "other: " & e.msg
+    checkpoint "refusal: " & why
+    check why.startsWith("ECarriedStatePending")
+    check "EAddOnFloorNotEffective" notin why
+    var written = 0
+    for _ in walkDirRec(state): inc written
+    check written == 0
 
   test "a backup takes the host apply lock and checks the units again":
     let src = fresh("src-lock")
